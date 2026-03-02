@@ -78,3 +78,6 @@ deploy/scripts/backups/
 CLAUDE.md
 amid
 .claude/
+
+# Docs (papers, decks, diagrams — not for GitHub)
+docs/
