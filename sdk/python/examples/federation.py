@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SAGE SDK Example: Cross-Organization Federation.
+"""(S)AGE SDK Example: Cross-Organization Federation.
 
 Demonstrates how two separate organizations can establish a federation
 agreement to share knowledge across organizational boundaries:
@@ -189,5 +189,5 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception as e:
         print(f"\nConnection error: {e}", file=sys.stderr)
-        print("Is the SAGE network running? Try: make up", file=sys.stderr)
+        print("Is the (S)AGE network running? Try: make up", file=sys.stderr)
         sys.exit(1)

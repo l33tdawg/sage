@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""SAGE SDK Complete Walkthrough.
+"""(S)AGE SDK Complete Walkthrough.
 
-This is the "everything SAGE can do" reference. It walks through every
+This is the "everything (S)AGE can do" reference. It walks through every
 SDK operation with explanations of what's happening on-chain.
 
-== What is SAGE? ==
+== What is (S)AGE? ==
 
-SAGE is a shared memory layer for AI agents, backed by a blockchain.
+(S)AGE is a shared memory layer for AI agents, backed by a blockchain.
+The (S) stands for Sovereign -- the governance layer (orgs, depts, RBAC,
+federation) is optional. The core is AGE: Agent Governed Experience.
 Think of it like a database that multiple agents can write to, but:
   - Every write goes through BFT consensus (4 validator nodes vote)
   - Memories have confidence scores that decay over time
@@ -14,16 +16,16 @@ Think of it like a database that multiple agents can write to, but:
   - Access is controlled by on-chain RBAC (orgs, depts, clearance levels)
   - Everything is cryptographically signed (Ed25519)
 
-You don't need to understand blockchain to use SAGE. The SDK handles
+You don't need to understand blockchain to use (S)AGE. The SDK handles
 all the signing, transaction encoding, and consensus interaction.
 You just call Python methods.
 
 == What's running under the hood? ==
 
-When you run `make up`, SAGE starts 11 Docker containers:
+When you run `make up`, (S)AGE starts 11 Docker containers:
 
   4 x CometBFT nodes   -- BFT consensus (like a replicated log)
-  4 x ABCI app nodes    -- SAGE state machine (processes transactions)
+  4 x ABCI app nodes    -- (S)AGE state machine (processes transactions)
   1 x PostgreSQL        -- Stores actual memory content + embeddings
   1 x Ollama            -- Generates 768-dim embeddings locally
   1 x Ollama init       -- Pulls the embedding model, then exits
@@ -44,7 +46,7 @@ to a block, the state machine updates PostgreSQL and BadgerDB.
   7. Access Control     -- RBAC grants and requests
   8. Federation         -- cross-org knowledge sharing
   9. Agent Profile      -- PoE reputation and weight
-  10. Embeddings        -- generate vectors via the SAGE network
+  10. Embeddings        -- generate vectors via the (S)AGE network
 
 Usage:
     python examples/complete_walkthrough.py
@@ -68,7 +70,7 @@ def main() -> None:
     # Every agent needs an Ed25519 keypair. The public key IS your
     # agent ID. The private key signs every request you make.
     #
-    # This is NOT a wallet or cryptocurrency key. It's just how SAGE
+    # This is NOT a wallet or cryptocurrency key. It's just how (S)AGE
     # knows which agent is making a request, and prevents tampering.
 
     print("=" * 60)
@@ -96,7 +98,7 @@ def main() -> None:
     # ================================================================
     # 2. MEMORY OPERATIONS
     # ================================================================
-    # Memories are the core data type in SAGE. An agent proposes a
+    # Memories are the core data type in (S)AGE. An agent proposes a
     # memory, validators vote on it, and if it reaches quorum (2/3
     # weighted vote), it becomes "committed" -- permanent, replicated
     # consensus-validated knowledge.
@@ -586,8 +588,8 @@ def main() -> None:
     # ================================================================
     # 10. EMBEDDINGS
     # ================================================================
-    # SAGE generates 768-dimensional embeddings locally using Ollama
-    # (nomic-embed-text model). You can use the SAGE network as your
+    # (S)AGE generates 768-dimensional embeddings locally using Ollama
+    # (nomic-embed-text model). You can use the (S)AGE network as your
     # embedding service -- no external API calls, fully sovereign.
 
     print("=" * 60)
@@ -607,7 +609,7 @@ def main() -> None:
     print("WALKTHROUGH COMPLETE")
     print("=" * 60)
     print()
-    print("You've seen every SAGE SDK operation:")
+    print("You've seen every (S)AGE SDK operation:")
     print("  - Agent identity (Ed25519 keypairs)")
     print("  - Memory lifecycle (propose, query, corroborate, challenge)")
     print("  - Validation (voting on proposals)")
@@ -635,5 +637,5 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception as e:
         print(f"\nConnection error: {e}", file=sys.stderr)
-        print("Is the SAGE network running? Try: make up", file=sys.stderr)
+        print("Is the (S)AGE network running? Try: make up", file=sys.stderr)
         sys.exit(1)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SAGE SDK Example: Organization, Departments, and RBAC.
+"""(S)AGE SDK Example: Organization, Departments, and RBAC.
 
 Demonstrates setting up a complete organizational hierarchy on-chain:
   1. Create an organization
@@ -248,5 +248,5 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception as e:
         print(f"\nConnection error: {e}", file=sys.stderr)
-        print("Is the SAGE network running? Try: make up", file=sys.stderr)
+        print("Is the (S)AGE network running? Try: make up", file=sys.stderr)
         sys.exit(1)

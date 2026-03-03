@@ -1,13 +1,13 @@
-# SAGE Research Papers
+# (S)AGE Research Papers
 
-Research papers documenting the design, implementation, and empirical evaluation of the SAGE (Sovereign Agent Governed Experience) protocol.
+Research papers documenting the design, implementation, and empirical evaluation of the (S)AGE ((Sovereign) Agent Governed Experience) protocol.
 
 ## Papers
 
 ### Paper 1: Agent Memory Infrastructure
 **Full Title:** Agent Memory Infrastructure: Byzantine-Resilient Institutional Memory for Multi-Agent Systems
 
-Introduces SAGE — a Byzantine fault-tolerant institutional memory layer for multi-agent systems. Covers the architecture, Proof of Experience (PoE) consensus mechanism, CometBFT ABCI 2.0 integration, and the permissioned validator model. Includes performance benchmarks (956 req/s submissions, 21.6ms P95 queries) and BFT fault tolerance verification.
+Introduces (S)AGE — a Byzantine fault-tolerant institutional memory layer for multi-agent systems. Covers the architecture, Proof of Experience (PoE) consensus mechanism, CometBFT ABCI 2.0 integration, and the permissioned validator model. Includes performance benchmarks (956 req/s submissions, 21.6ms P95 queries) and BFT fault tolerance verification.
 
 ### Paper 2: Consensus-Validated Memory Improves Agent Performance
 **Full Title:** Consensus-Validated Memory Improves Agent Performance on Complex Tasks
@@ -17,7 +17,7 @@ Presents empirical results from a controlled 50-vs-50 comparative study using th
 ### Paper 3: Institutional Memory as Organizational Knowledge
 **Full Title:** Institutional Memory as Organizational Knowledge: AI Agents That Learn Their Jobs from Experience, Not Instructions
 
-Frames SAGE through the lens of organizational knowledge management — agents that accumulate and share institutional knowledge through governed experience rather than prompt engineering. Explores the implications for multi-agent system design and sovereign AI infrastructure.
+Frames (S)AGE through the lens of organizational knowledge management — agents that accumulate and share institutional knowledge through governed experience rather than prompt engineering. Explores the implications for multi-agent system design and sovereign AI infrastructure.
 
 ## Priority & Provenance
 

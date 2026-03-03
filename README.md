@@ -1,8 +1,10 @@
-# SAGE -- Sovereign Agent Governed Experience
+# (S)AGE -- (Sovereign) Agent Governed Experience
 
 A governed, verifiable, experience-weighted institutional memory layer for multi-agent systems.
 
-SAGE is an infrastructure protocol, not an application library. It provides Byzantine fault-tolerant consensus over agent knowledge, enabling multi-agent systems to accumulate, validate, and share institutional memory through governed experience rather than prompt engineering.
+(S)AGE is an infrastructure protocol, not an application library. It provides Byzantine fault-tolerant consensus over agent knowledge, enabling multi-agent systems to accumulate, validate, and share institutional memory through governed experience rather than prompt engineering.
+
+The **(S)** is intentional -- the Sovereign layer (organizations, departments, RBAC, federation) is optional. At its core, AGE is the agent memory and consensus engine. Add the Sovereign layer when you need multi-org governance and cross-organizational knowledge sharing.
 
 No tokens. No public chain. No cloud dependencies. Fully sovereign and self-hosted.
 
@@ -127,7 +129,7 @@ This launches 11 Docker containers:
 | `postgres` | PostgreSQL 16 + pgvector (off-chain storage, 8 tables + HNSW indexes) |
 | `ollama` | Local embedding model server |
 | `ollama-init` | One-shot: pulls `nomic-embed-text` and `qwen2.5:1.5b` models, then exits |
-| `abci0` - `abci3` | SAGE ABCI application nodes (Go state machine + REST API) |
+| `abci0` - `abci3` | (S)AGE ABCI application nodes (Go state machine + REST API) |
 | `cometbft0` - `cometbft3` | CometBFT consensus validators |
 
 Wait approximately 30-60 seconds for all services to initialize. The Ollama model pull on first run may take several minutes depending on your connection speed.
@@ -241,14 +243,14 @@ Each CometBFT node:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SAGE_API_URL` | `http://localhost:8080` | Used by `sage-cli` to locate the SAGE REST API |
+| `SAGE_API_URL` | `http://localhost:8080` | Used by `sage-cli` to locate the (S)AGE REST API |
 | `SAGE_URL` | `http://localhost:8080` | Used by Python SDK examples |
 
 ---
 
 ## Python SDK
 
-The SAGE Python SDK provides both synchronous and asynchronous clients for interacting with the SAGE network.
+The (S)AGE Python SDK provides both synchronous and asynchronous clients for interacting with the (S)AGE network.
 
 ### Installation
 
@@ -290,7 +292,7 @@ from sage_sdk import AgentIdentity, SageClient
 # Generate or load identity
 identity = AgentIdentity.generate()
 
-# Connect to any SAGE node
+# Connect to any (S)AGE node
 with SageClient(base_url="http://localhost:8080", identity=identity) as client:
 
     # Submit a memory for consensus validation
@@ -382,6 +384,7 @@ python examples/full_lifecycle.py       # Full memory lifecycle
 python examples/multi_agent.py          # Multiple agents collaborating
 python examples/async_example.py        # Async client usage
 python examples/org_setup.py            # Organizations, departments, RBAC
+python examples/rbac_clearance.py       # Clearance levels (org/dept/member hierarchy)
 python examples/federation.py           # Cross-org federation agreements
 python examples/complete_walkthrough.py # Every SDK operation explained
 ```
@@ -410,7 +413,7 @@ go run ./cmd/sage-cli <command>
 
 ```bash
 $ go run ./cmd/sage-cli keygen
-=== SAGE Agent Keypair ===
+=== (S)AGE Agent Keypair ===
 Agent ID (public key):  a1b2c3d4e5f6...
 Private key (hex):      ...
 Public key (hex):       ...
@@ -426,7 +429,7 @@ $ go run ./cmd/sage-cli status
 ...
 ```
 
-**health** -- Check the SAGE REST API health endpoint:
+**health** -- Check the (S)AGE REST API health endpoint:
 
 ```bash
 $ go run ./cmd/sage-cli health
@@ -442,7 +445,7 @@ Set `SAGE_API_URL` to target a different node (default: `http://localhost:8080`)
 
 ## REST API
 
-The SAGE REST API uses Ed25519 signature authentication and follows the OpenAPI 3.1 specification (see `api/openapi.yaml`).
+The (S)AGE REST API uses Ed25519 signature authentication and follows the OpenAPI 3.1 specification (see `api/openapi.yaml`).
 
 ### Authentication
 
@@ -520,7 +523,7 @@ This starts the standard 11 containers plus:
 
 Three pre-configured dashboards are provisioned automatically:
 
-1. **SAGE Overview** -- Network health, block height, active validators
+1. **(S)AGE Overview** -- Network health, block height, active validators
 2. **Memory Metrics** -- Submission rates, query latency, consensus timing
 3. **Node Health** -- Per-node CPU, memory, error rates
 
@@ -564,7 +567,7 @@ go test ./... -v -count=1 -race
 
 ### Integration Tests
 
-Requires a running SAGE network (`make up`):
+Requires a running (S)AGE network (`make up`):
 
 ```bash
 make integration
@@ -658,7 +661,7 @@ Wait for `Models ready` in the output before submitting memories that require em
 
 **Symptom:** Containers fail to start with `bind: address already in use`.
 
-**Cause:** Another service is using one of SAGE's ports (8080-8083, 5432, 26656-26957, etc.).
+**Cause:** Another service is using one of (S)AGE's ports (8080-8083, 5432, 26656-26957, etc.).
 
 **Fix:** Stop the conflicting service, or modify port mappings in `deploy/docker-compose.yml`.
 
@@ -756,7 +759,7 @@ sage/
 
 ## Research Papers
 
-The `papers/` directory contains the full research paper series documenting SAGE's design, empirical evaluation, and theoretical foundations.
+The `papers/` directory contains the full research paper series documenting (S)AGE's design, empirical evaluation, and theoretical foundations.
 
 | # | Title | Description |
 |---|-------|-------------|
