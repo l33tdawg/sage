@@ -5,7 +5,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sage-sdk"
 version = "0.1.0"
-description = "Python SDK for SAGE (Sovereign Agent Governed Experience)"
+description = "Python SDK for (S)AGE ((Sovereign) Agent Governed Experience)"
+authors = [{name = "Dhillon Andrew Kannabhiran", email = "dhillon@levelupctf.com"}]
+license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.25.0",

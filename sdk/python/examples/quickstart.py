@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""SAGE SDK Quickstart Example.
+"""(S)AGE SDK Quickstart Example.
 
 Demonstrates the minimal flow: generate an agent identity, submit a memory,
-and retrieve it back. This is the simplest possible SAGE interaction.
+and retrieve it back. This is the simplest possible (S)AGE interaction.
 
 Usage:
     python examples/quickstart.py

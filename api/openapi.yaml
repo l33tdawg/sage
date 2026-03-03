@@ -1,10 +1,13 @@
 openapi: 3.1.0
 info:
-  title: SAGE API
+  title: (S)AGE API
   version: 1.0.0
   description: >-
-    Sovereign Agent Governed Experience — REST API for memory submission,
+    (Sovereign) Agent Governed Experience — REST API for memory submission,
     validation, and query.
+  contact:
+    name: Dhillon Andrew Kannabhiran
+    email: dhillon@levelupctf.com
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0

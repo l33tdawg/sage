@@ -55,21 +55,21 @@ If you reference this work, please cite the relevant paper(s) using the Zenodo D
 ```bibtex
 @misc{sage2026infrastructure,
   title={Agent Memory Infrastructure: Byzantine-Resilient Institutional Memory for Multi-Agent Systems},
-  author={Kannabhiran, Dhillon},
+  author={Kannabhiran, Dhillon Andrew},
   year={2026},
   note={Available at: https://github.com/l33tdawg/sage}
 }
 
 @misc{sage2026consensus,
   title={Consensus-Validated Memory Improves Agent Performance on Complex Tasks},
-  author={Kannabhiran, Dhillon},
+  author={Kannabhiran, Dhillon Andrew},
   year={2026},
   note={Available at: https://github.com/l33tdawg/sage}
 }
 
 @misc{sage2026institutional,
   title={Institutional Memory as Organizational Knowledge: AI Agents That Learn Their Jobs from Experience, Not Instructions},
-  author={Kannabhiran, Dhillon},
+  author={Kannabhiran, Dhillon Andrew},
   year={2026},
   note={Available at: https://github.com/l33tdawg/sage}
 }

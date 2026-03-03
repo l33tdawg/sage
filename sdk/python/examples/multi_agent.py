@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SAGE SDK Multi-Agent Collaboration Example.
+"""(S)AGE SDK Multi-Agent Collaboration Example.
 
 Demonstrates two agents collaborating on shared institutional memory:
   - Agent A submits a memory

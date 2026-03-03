@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SAGE SDK Async Example.
+"""(S)AGE SDK Async Example.
 
 Demonstrates using the AsyncSageClient for non-blocking operations.
 This is ideal for agents that need to interact with SAGE alongside

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SAGE SDK Full Lifecycle Example.
+"""(S)AGE SDK Full Lifecycle Example.
 
 Demonstrates the complete memory lifecycle:
   submit -> get -> vote -> corroborate -> challenge -> query

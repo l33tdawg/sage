@@ -798,10 +798,14 @@ Papers are licensed under CC BY 4.0. Code is licensed under MIT.
 
 ---
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, PR guidelines, and code style.
+
 ## License
 
-Code: MIT | Papers: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
+Code: [Apache License 2.0](LICENSE) | Papers: [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)
 
 ## Author
 
-Dhillon Kannabhiran ([@l33tdawg](https://github.com/l33tdawg))
+Dhillon Andrew Kannabhiran ([@l33tdawg](https://github.com/l33tdawg)) -- dhillon@levelupctf.com
