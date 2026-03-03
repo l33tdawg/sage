@@ -79,6 +79,8 @@ CLAUDE.md
 amid
 .claude/
 
-# Docs (papers, decks, diagrams — not for GitHub)
+# Docs (decks, diagrams, LaTeX source — not for GitHub)
 docs/
+
+# Papers PDFs are tracked in papers/ (not gitignored)
 PHASE1_IMPLEMENTATION_PLAN.md
