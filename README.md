@@ -377,10 +377,13 @@ The SDK ships with ready-to-run examples in `sdk/python/examples/`:
 
 ```bash
 cd sdk/python
-python examples/quickstart.py         # Minimal propose + retrieve
-python examples/full_lifecycle.py     # Full memory lifecycle
-python examples/multi_agent.py        # Multiple agents collaborating
-python examples/async_example.py      # Async client usage
+python examples/quickstart.py           # Minimal propose + retrieve
+python examples/full_lifecycle.py       # Full memory lifecycle
+python examples/multi_agent.py          # Multiple agents collaborating
+python examples/async_example.py        # Async client usage
+python examples/org_setup.py            # Organizations, departments, RBAC
+python examples/federation.py           # Cross-org federation agreements
+python examples/complete_walkthrough.py # Every SDK operation explained
 ```
 
 ---
