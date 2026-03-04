@@ -1,4 +1,4 @@
-# (S)AGE -- (Sovereign) Agent Governed Experience
+# (S)AGE - (Sovereign) Agent Governed Experience
 
 A governed, verifiable, experience-weighted institutional memory layer for multi-agent systems.
 
