@@ -863,6 +863,7 @@ The `papers/` directory contains the full research paper series documenting (S)A
 | 1 | [Agent Memory Infrastructure](papers/Paper1%20-%20Agent%20Memory%20Infrastructure%20-%20Byzantine-Resilient%20Institutional%20Memory%20for%20Multi-Agent%20Systems.pdf) | Architecture, PoE consensus mechanism, BFT verification |
 | 2 | [Consensus-Validated Memory Improves Agent Performance](papers/Paper2%20-%20Consensus-Validated%20Memory%20Improves%20Agent%20Performance%20on%20Complex%20Tasks.pdf) | 50-vs-50 controlled empirical study |
 | 3 | [Institutional Memory as Organizational Knowledge](papers/Paper3%20-%20Institutional%20Memory%20as%20Organizational%20Knowledge%20-%20AI%20Agents%20That%20Learn%20Their%20Jobs%20from%20Experience%20Not%20Instructions.pdf) | Organizational knowledge framing, sovereign AI implications |
+| 4 | [Longitudinal Learning in Governed Multi-Agent Systems](papers/Paper4%20-%20Longitudinal%20Learning%20in%20Governed%20Multi-Agent%20Systems%20-%20How%20Institutional%20Memory%20Improves%20Agent%20Performance%20Over%20Time.pdf) | Longitudinal study: cumulative learning across sequential runs |
 
 Papers are licensed under CC BY 4.0. Code is licensed under Apache 2.0.
 
