@@ -62,7 +62,7 @@ func runSetup() error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	port := listener.Addr().(*net.TCPAddr).Port //nolint:errcheck
 	url := fmt.Sprintf("http://localhost:%d", port)
 
 	fmt.Printf("\n  SAGE Setup Wizard\n")
@@ -71,7 +71,7 @@ func runSetup() error {
 	// Try to open browser
 	go openBrowser(url)
 
-	server := &http.Server{Handler: mux}
+	server := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second} //nolint:gosec
 	go func() {
 		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "Setup server error: %v\n", err)
@@ -90,7 +90,7 @@ func runSetup() error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	server.Shutdown(ctx)
+	_ = server.Shutdown(ctx)
 
 	fmt.Println("\n  Setup complete! Run 'sage-lite serve' to start SAGE.")
 	return nil
@@ -98,7 +98,7 @@ func runSetup() error {
 
 func handleWizardPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(wizardHTML))
+	_, _ = w.Write([]byte(wizardHTML))
 }
 
 func handleTestProvider(w http.ResponseWriter, r *http.Request) {
@@ -119,7 +119,7 @@ func handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	case "hash":
 		provider = embedding.NewHashProvider(768)
 	default:
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "unknown provider"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "unknown provider"})
 		return
 	}
 
@@ -129,9 +129,9 @@ func handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	_, err := provider.Embed(ctx, "test connection")
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
 	} else {
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "dimension": provider.Dimension()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "dimension": provider.Dimension()})
 	}
 }
 
@@ -155,15 +155,15 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request, cfg *Config, home 
 	cfg.Embedding.BaseURL = req.BaseURL
 
 	if err := SaveConfig(cfg); err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
 	// Signal setup is done
-	os.WriteFile(filepath.Join(home, ".setup-done"), []byte("done"), 0600)
+	_ = os.WriteFile(filepath.Join(home, ".setup-done"), []byte("done"), 0600)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
 func handleMCPConfig(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +188,7 @@ func handleMCPConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	enc.Encode(mcpConfig)
+	_ = enc.Encode(mcpConfig)
 }
 
 func handleUploadHistory(w http.ResponseWriter, r *http.Request, home string) {
@@ -198,17 +198,17 @@ func handleUploadHistory(w http.ResponseWriter, r *http.Request, home string) {
 	}
 
 	// 50MB max
-	r.ParseMultipartForm(50 << 20)
+	_ = r.ParseMultipartForm(50 << 20)
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no file uploaded"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no file uploaded"})
 		return
 	}
 	defer file.Close()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "failed to read file"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "failed to read file"})
 		return
 	}
 
@@ -229,12 +229,12 @@ func handleUploadHistory(w http.ResponseWriter, r *http.Request, home string) {
 	}
 
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 
 	if len(memories) == 0 {
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no memories found in file"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "no memories found in file"})
 		return
 	}
 
@@ -242,7 +242,7 @@ func handleUploadHistory(w http.ResponseWriter, r *http.Request, home string) {
 	importData, _ := json.MarshalIndent(memories, "", "  ")
 	importPath := filepath.Join(home, "pending-import.json")
 	if err := os.WriteFile(importPath, importData, 0600); err != nil {
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "failed to save import"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "failed to save import"})
 		return
 	}
 
@@ -263,7 +263,7 @@ func handleUploadHistory(w http.ResponseWriter, r *http.Request, home string) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"ok":       true,
 		"total":    len(memories),
 		"previews": previews,
@@ -426,7 +426,7 @@ func handleCheckOllama(w http.ResponseWriter, r *http.Request) {
 	ollamaReq, _ := http.NewRequestWithContext(r.Context(), "GET", baseURL+"/api/tags", nil)
 	resp, err := client.Do(ollamaReq)
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"installed":     false,
 			"running":       false,
 			"model_ready":   false,
@@ -441,7 +441,7 @@ func handleCheckOllama(w http.ResponseWriter, r *http.Request) {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-	json.NewDecoder(resp.Body).Decode(&tagsResp)
+	_ = json.NewDecoder(resp.Body).Decode(&tagsResp)
 
 	hasModel := false
 	for _, m := range tagsResp.Models {
@@ -451,7 +451,7 @@ func handleCheckOllama(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]any{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"installed":   true,
 		"running":     true,
 		"model_ready": hasModel,
@@ -514,7 +514,7 @@ func openBrowser(url string) {
 	default:
 		cmd = exec.Command("xdg-open", url)
 	}
-	cmd.Run()
+	_ = cmd.Run()
 }
 
 const wizardHTML = `<!DOCTYPE html>

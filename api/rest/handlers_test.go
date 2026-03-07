@@ -103,7 +103,7 @@ func (m *mockMemoryStore) GetPendingByDomain(_ context.Context, domainTag string
 }
 
 func (m *mockMemoryStore) ListMemories(_ context.Context, opts store.ListOptions) ([]*memory.MemoryRecord, int, error) {
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0, len(m.memories))
 	for _, rec := range m.memories {
 		results = append(results, rec)
 	}

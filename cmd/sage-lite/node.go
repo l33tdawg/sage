@@ -54,8 +54,8 @@ func runServe() error {
 	sqlitePath := filepath.Join(cfg.DataDir, "sage.db")
 
 	for _, dir := range []string{cfg.DataDir, cometHome, badgerPath} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return fmt.Errorf("create dir %s: %w", dir, err)
+		if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
+			return fmt.Errorf("create dir %s: %w", dir, mkErr)
 		}
 	}
 
@@ -77,7 +77,7 @@ func runServe() error {
 	if err != nil {
 		return fmt.Errorf("open BadgerDB: %w", err)
 	}
-	defer badgerStore.CloseBadger()
+	defer badgerStore.CloseBadger() //nolint:errcheck
 
 	// Create SAGE ABCI app with SQLite backend
 	app, err := sageabci.NewSageAppWithStores(badgerStore, sqliteStore, logger)
@@ -322,7 +322,7 @@ func handleEmbedPersonal(provider embedding.Provider) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"embedding": emb,
 			"dimension": provider.Dimension(),
 		})
@@ -396,7 +396,7 @@ func autoImport(cfg *Config, embedProvider embedding.Provider, logger zerolog.Lo
 		return
 	}
 	priv := ed25519.NewKeyFromSeed(keyData)
-	pub := priv.Public().(ed25519.PublicKey)
+	pub, _ := priv.Public().(ed25519.PublicKey) //nolint:errcheck
 	agentID := hex.EncodeToString(pub)
 
 	success := 0
@@ -439,7 +439,7 @@ func autoImport(cfg *Config, embedProvider embedding.Provider, logger zerolog.Lo
 
 	// Write a marker so we don't re-import
 	doneMsg := fmt.Sprintf("Imported %d/%d memories on %s", success, len(memories), time.Now().Format(time.RFC3339))
-	os.WriteFile(filepath.Join(home, "import-done.txt"), []byte(doneMsg), 0600)
+	_ = os.WriteFile(filepath.Join(home, "import-done.txt"), []byte(doneMsg), 0600)
 }
 
 func runStatus() error {

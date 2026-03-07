@@ -68,7 +68,7 @@ func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("save key file: %w", err)
 	}
 
-	pub := priv.Public().(ed25519.PublicKey)
+	pub, _ := priv.Public().(ed25519.PublicKey) //nolint:errcheck
 	fmt.Fprintf(os.Stderr, "Generated new agent key: %x\n", pub)
 	fmt.Fprintf(os.Stderr, "Saved to: %s\n", path)
 

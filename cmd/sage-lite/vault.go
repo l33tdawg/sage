@@ -79,18 +79,18 @@ func runExport() error {
 	for {
 		listURL := fmt.Sprintf("%s/v1/dashboard/memory/list?limit=%d&offset=%d&sort=oldest", baseURL, limit, offset)
 		listReq, _ := http.NewRequestWithContext(context.Background(), "GET", listURL, nil)
-		resp, err := http.DefaultClient.Do(listReq)
-		if err != nil {
-			return fmt.Errorf("fetch memories (is sage-lite serve running?): %w", err)
+		resp, doErr := http.DefaultClient.Do(listReq)
+		if doErr != nil {
+			return fmt.Errorf("fetch memories (is sage-lite serve running?): %w", doErr)
 		}
 
 		var listResp struct {
 			Memories []VaultMemory `json:"memories"`
 			Total    int           `json:"total"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		if decodeErr := json.NewDecoder(resp.Body).Decode(&listResp); decodeErr != nil {
 			resp.Body.Close()
-			return fmt.Errorf("decode response: %w", err)
+			return fmt.Errorf("decode response: %w", decodeErr)
 		}
 		resp.Body.Close()
 
@@ -112,7 +112,7 @@ func runExport() error {
 	keyData, err := os.ReadFile(cfg.AgentKey)
 	if err == nil && len(keyData) == ed25519.SeedSize {
 		privKey := ed25519.NewKeyFromSeed(keyData)
-		pubKey := privKey.Public().(ed25519.PublicKey)
+		pubKey, _ := privKey.Public().(ed25519.PublicKey) //nolint:errcheck
 		agentID = fmt.Sprintf("%x", pubKey[:8])
 	}
 
@@ -191,15 +191,15 @@ func runImport() error {
 
 	// Try to parse as JSON first (unencrypted).
 	var vault VaultFile
-	if err := json.Unmarshal(data, &vault); err != nil {
+	if unmarshalErr := json.Unmarshal(data, &vault); unmarshalErr != nil {
 		// Might be encrypted — try decrypting.
 		fmt.Println("Vault appears encrypted, decrypting with agent key...")
 		decrypted, decErr := decryptVault(data, keyPath)
 		if decErr != nil {
 			return fmt.Errorf("decrypt vault (wrong key?): %w", decErr)
 		}
-		if err := json.Unmarshal(decrypted, &vault); err != nil {
-			return fmt.Errorf("parse decrypted vault: %w", err)
+		if parseErr := json.Unmarshal(decrypted, &vault); parseErr != nil {
+			return fmt.Errorf("parse decrypted vault: %w", parseErr)
 		}
 	}
 
@@ -236,7 +236,7 @@ func runImport() error {
 		var embedResult struct {
 			Embedding []float32 `json:"embedding"`
 		}
-		json.Unmarshal(embedResp, &embedResult)
+		_ = json.Unmarshal(embedResp, &embedResult)
 
 		// Submit memory.
 		submitReq, _ := json.Marshal(map[string]any{
@@ -274,7 +274,7 @@ func doSignedRequest(baseURL string, key ed25519.PrivateKey, method, path string
 	msg[39] = byte(timestamp)
 
 	sig := ed25519.Sign(key, msg)
-	pub := key.Public().(ed25519.PublicKey)
+	pub, _ := key.Public().(ed25519.PublicKey) //nolint:errcheck
 
 	req, err := http.NewRequestWithContext(context.Background(), method, baseURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -375,13 +375,13 @@ func runBackup() error {
 
 	home := SageHome()
 	backupDir := filepath.Join(home, "backups")
-	if err := os.MkdirAll(backupDir, 0700); err != nil {
-		return fmt.Errorf("create backup dir: %w", err)
+	if mkdirErr := os.MkdirAll(backupDir, 0700); mkdirErr != nil {
+		return fmt.Errorf("create backup dir: %w", mkdirErr)
 	}
 
 	// Find the SQLite database.
 	dbPath := filepath.Join(cfg.DataDir, "sage.db")
-	if _, err := os.Stat(dbPath); err != nil {
+	if _, statErr := os.Stat(dbPath); statErr != nil {
 		return fmt.Errorf("database not found at %s (is SAGE initialized?)", dbPath)
 	}
 
@@ -389,13 +389,13 @@ func runBackup() error {
 	timestamp := time.Now().UTC().Format("2006-01-02T15-04-05")
 	backupPath := filepath.Join(backupDir, fmt.Sprintf("sage-%s.db", timestamp))
 
-	src, err := os.ReadFile(dbPath)
-	if err != nil {
-		return fmt.Errorf("read database: %w", err)
+	src, readErr := os.ReadFile(dbPath)
+	if readErr != nil {
+		return fmt.Errorf("read database: %w", readErr)
 	}
 
-	if err := os.WriteFile(backupPath, src, 0600); err != nil {
-		return fmt.Errorf("write backup: %w", err)
+	if writeErr := os.WriteFile(backupPath, src, 0600); writeErr != nil {
+		return fmt.Errorf("write backup: %w", writeErr)
 	}
 
 	fmt.Printf("Backup saved: %s (%d bytes)\n", backupPath, len(src))

@@ -68,7 +68,7 @@ Examples:
 		return fmt.Errorf("read agent key (run 'sage-lite mcp' once to generate): %w", err)
 	}
 	priv := ed25519.NewKeyFromSeed(keyData)
-	pub := priv.Public().(ed25519.PublicKey)
+	pub, _ := priv.Public().(ed25519.PublicKey) //nolint:errcheck
 	agentID := hex.EncodeToString(pub)
 
 	// Read file
@@ -242,7 +242,7 @@ func doSignedHTTP(method, url string, body []byte, agentID string, priv ed25519.
 	ts := time.Now().Unix()
 	h := sha256.Sum256(body)
 	var tsBuf [8]byte
-	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts))
+	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts)) //nolint:gosec // ts is always positive (Unix timestamp)
 	msg := append(h[:], tsBuf[:]...)
 	sig := ed25519.Sign(priv, msg)
 
