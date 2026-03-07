@@ -240,7 +240,18 @@ func submitSigned(url string, body []byte, agentID string, priv ed25519.PrivateK
 
 func doSignedHTTP(method, url string, body []byte, agentID string, priv ed25519.PrivateKey) (*http.Response, error) {
 	ts := time.Now().Unix()
-	h := sha256.Sum256(body)
+	// Extract path from URL for canonical signing.
+	path := url
+	if idx := strings.Index(url, "://"); idx >= 0 {
+		rest := url[idx+3:]
+		if pathIdx := strings.Index(rest, "/"); pathIdx >= 0 {
+			path = rest[pathIdx:]
+		}
+	}
+	// Build canonical request: "METHOD /path\n<body>"
+	canonical := []byte(method + " " + path + "\n")
+	canonical = append(canonical, body...)
+	h := sha256.Sum256(canonical)
 	var tsBuf [8]byte
 	binary.BigEndian.PutUint64(tsBuf[:], uint64(ts)) //nolint:gosec // ts is always positive (Unix timestamp)
 	msg := append(h[:], tsBuf[:]...)

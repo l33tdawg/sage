@@ -29,7 +29,7 @@ func signedRequest(t *testing.T, method, path string, body []byte) (*http.Reques
 	require.NoError(t, err)
 
 	ts := time.Now().Unix()
-	sig := auth.SignRequest(priv, body, ts)
+	sig := auth.SignRequest(priv, method, path, body, ts)
 
 	agentID := auth.PublicKeyToAgentID(pub)
 
@@ -96,7 +96,7 @@ func TestAuthMiddleware_ExpiredTimestamp(t *testing.T) {
 	// Timestamp 10 minutes ago — outside the 5-minute window.
 	ts := time.Now().Add(-10 * time.Minute).Unix()
 	body := []byte(`{}`)
-	sig := auth.SignRequest(priv, body, ts)
+	sig := auth.SignRequest(priv, http.MethodPost, "/v1/memory/submit", body, ts)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/memory/submit", bytes.NewReader(body))
 	req.Header.Set("X-Agent-ID", auth.PublicKeyToAgentID(pub))

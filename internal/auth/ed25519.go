@@ -46,21 +46,28 @@ func AgentIDToPublicKey(agentID string) (ed25519.PublicKey, error) {
 }
 
 // SignRequest creates a signature for an API request.
-// The signed message is SHA-256(body) + timestamp (big-endian int64).
-func SignRequest(privateKey ed25519.PrivateKey, body []byte, timestamp int64) []byte {
-	message := buildRequestMessage(body, timestamp)
+// The signed message is SHA-256(method + " " + path + "\n" + body) + timestamp (big-endian int64).
+// This binds the signature to the specific HTTP method and path, preventing
+// cross-endpoint replay attacks (e.g., a POST /submit sig replayed against POST /query).
+func SignRequest(privateKey ed25519.PrivateKey, method, path string, body []byte, timestamp int64) []byte {
+	message := buildRequestMessage(method, path, body, timestamp)
 	return Sign(privateKey, message)
 }
 
 // VerifyRequest verifies an API request signature.
-func VerifyRequest(publicKey ed25519.PublicKey, body []byte, timestamp int64, signature []byte) bool {
-	message := buildRequestMessage(body, timestamp)
+func VerifyRequest(publicKey ed25519.PublicKey, method, path string, body []byte, timestamp int64, signature []byte) bool {
+	message := buildRequestMessage(method, path, body, timestamp)
 	return Verify(publicKey, message, signature)
 }
 
 // buildRequestMessage constructs the message to sign for API requests.
-func buildRequestMessage(body []byte, timestamp int64) []byte {
-	bodyHash := sha256.Sum256(body)
+// Format: SHA-256(method + " " + path + "\n" + body) || BigEndian(timestamp)
+func buildRequestMessage(method, path string, body []byte, timestamp int64) []byte {
+	// Build canonical request: "POST /v1/memory/submit\n<body>"
+	canonical := []byte(method + " " + path + "\n")
+	canonical = append(canonical, body...)
+	bodyHash := sha256.Sum256(canonical)
+
 	tsBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(tsBytes, uint64(timestamp)) // #nosec G115 -- timestamp from trusted int64
 	message := make([]byte, 0, len(bodyHash)+8)

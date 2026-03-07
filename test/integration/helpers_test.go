@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"testing"
 	"time"
 
@@ -74,7 +75,8 @@ func (a *testAgent) signedRequest(t *testing.T, method, url string, body []byte)
 	}
 
 	ts := time.Now().Unix()
-	sig := auth.SignRequest(a.privateKey, body, ts)
+	parsedURL, _ := neturl.Parse(url)
+	sig := auth.SignRequest(a.privateKey, method, parsedURL.Path, body, ts)
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Agent-ID", a.agentID)

@@ -267,11 +267,14 @@ func (s *Server) turnNudge(currentTool string) string {
 }
 
 // signedRequest makes an authenticated HTTP request to the SAGE REST API.
-// Signs using SHA-256(body) + big-endian int64(timestamp) as per auth protocol.
+// Signs method + path + body + timestamp as per auth protocol v2.
 func (s *Server) signedRequest(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	timestamp := time.Now().Unix()
 
-	hash := sha256.Sum256(body)
+	// Build canonical request: "METHOD /path\n<body>"
+	canonical := []byte(method + " " + path + "\n")
+	canonical = append(canonical, body...)
+	hash := sha256.Sum256(canonical)
 	msg := make([]byte, 32+8)
 	copy(msg[:32], hash[:])
 	binary.BigEndian.PutUint64(msg[32:], uint64(timestamp)) // #nosec G115 -- timestamp from trusted int64

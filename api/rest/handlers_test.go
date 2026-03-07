@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -191,8 +192,14 @@ func signedRequest(t *testing.T, method, path string, body []byte) (*http.Reques
 	pub, priv, err := auth.GenerateKeypair()
 	require.NoError(t, err)
 
+	// Extract just the URL path (no query string) for signing — matches r.URL.Path in middleware.
+	signPath := path
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		signPath = path[:idx]
+	}
+
 	ts := time.Now().Unix()
-	sig := auth.SignRequest(priv, body, ts)
+	sig := auth.SignRequest(priv, method, signPath, body, ts)
 	agentID := auth.PublicKeyToAgentID(pub)
 
 	var req *http.Request
@@ -454,7 +461,7 @@ func TestGetAgent(t *testing.T) {
 	}
 
 	ts := time.Now().Unix()
-	sig := auth.SignRequest(priv, nil, ts)
+	sig := auth.SignRequest(priv, http.MethodGet, "/v1/agent/me", nil, ts)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/agent/me", nil)
 	req.Header.Set("X-Agent-ID", agentID)

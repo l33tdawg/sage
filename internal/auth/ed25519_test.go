@@ -54,8 +54,8 @@ func TestSignRequestVerifyRequest(t *testing.T) {
 	body := []byte(`{"content":"test memory","domain_tag":"crypto"}`)
 	ts := time.Now().Unix()
 
-	sig := SignRequest(priv, body, ts)
-	assert.True(t, VerifyRequest(pub, body, ts, sig))
+	sig := SignRequest(priv, "POST", "/v1/memory/submit", body, ts)
+	assert.True(t, VerifyRequest(pub, "POST", "/v1/memory/submit", body, ts, sig))
 }
 
 func TestVerifyRequestWrongKey(t *testing.T) {
@@ -66,9 +66,9 @@ func TestVerifyRequestWrongKey(t *testing.T) {
 
 	body := []byte(`{"content":"test"}`)
 	ts := time.Now().Unix()
-	sig := SignRequest(priv, body, ts)
+	sig := SignRequest(priv, "POST", "/v1/memory/submit", body, ts)
 
-	assert.False(t, VerifyRequest(otherPub, body, ts, sig))
+	assert.False(t, VerifyRequest(otherPub, "POST", "/v1/memory/submit", body, ts, sig))
 }
 
 func TestVerifyRequestTamperedBody(t *testing.T) {
@@ -77,10 +77,10 @@ func TestVerifyRequestTamperedBody(t *testing.T) {
 
 	body := []byte(`{"content":"original"}`)
 	ts := time.Now().Unix()
-	sig := SignRequest(priv, body, ts)
+	sig := SignRequest(priv, "POST", "/v1/memory/submit", body, ts)
 
 	tampered := []byte(`{"content":"tampered"}`)
-	assert.False(t, VerifyRequest(pub, tampered, ts, sig))
+	assert.False(t, VerifyRequest(pub, "POST", "/v1/memory/submit", tampered, ts, sig))
 }
 
 func TestSignRequestEmptyBody(t *testing.T) {
@@ -88,7 +88,21 @@ func TestSignRequestEmptyBody(t *testing.T) {
 	require.NoError(t, err)
 
 	ts := time.Now().Unix()
-	sig := SignRequest(priv, nil, ts)
-	assert.True(t, VerifyRequest(pub, nil, ts, sig))
-	assert.True(t, VerifyRequest(pub, []byte{}, ts, sig))
+	sig := SignRequest(priv, "GET", "/v1/memory/query", nil, ts)
+	assert.True(t, VerifyRequest(pub, "GET", "/v1/memory/query", nil, ts, sig))
+	assert.True(t, VerifyRequest(pub, "GET", "/v1/memory/query", []byte{}, ts, sig))
+}
+
+func TestVerifyRequestCrossEndpointReplay(t *testing.T) {
+	pub, priv, err := GenerateKeypair()
+	require.NoError(t, err)
+
+	body := []byte(`{"content":"test"}`)
+	ts := time.Now().Unix()
+	sig := SignRequest(priv, "POST", "/v1/memory/submit", body, ts)
+
+	// Same body + timestamp but different path — must fail
+	assert.False(t, VerifyRequest(pub, "POST", "/v1/memory/query", body, ts, sig))
+	// Same body + timestamp but different method — must fail
+	assert.False(t, VerifyRequest(pub, "GET", "/v1/memory/submit", body, ts, sig))
 }

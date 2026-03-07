@@ -82,7 +82,8 @@ const maxTimestampSkew = 5 * time.Minute
 //   - X-Signature: hex-encoded Ed25519 signature
 //   - X-Timestamp: unix epoch seconds
 //
-// The signed message is SHA-256(body) + timestamp (big-endian int64).
+// The signed message is SHA-256(method + " " + path + "\n" + body) + timestamp (big-endian int64).
+// This binds signatures to specific endpoints, preventing cross-endpoint replay.
 func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip auth for health/readiness probes.
@@ -151,8 +152,8 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 			r.Body = io.NopCloser(bytes.NewReader(body))
 		}
 
-		// Verify Ed25519 signature.
-		if !auth.VerifyRequest(pubKey, body, tsUnix, sig) {
+		// Verify Ed25519 signature (covers method + path + body + timestamp).
+		if !auth.VerifyRequest(pubKey, r.Method, r.URL.Path, body, tsUnix, sig) {
 			writeProblem(w, http.StatusUnauthorized, "Invalid signature",
 				"Ed25519 signature verification failed.")
 			return

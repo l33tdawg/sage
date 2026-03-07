@@ -259,9 +259,13 @@ func runImport() error {
 }
 
 // doSignedRequest makes an Ed25519-signed HTTP request (shared with seed.go pattern).
+// Signs method + path + body + timestamp to prevent cross-endpoint replay.
 func doSignedRequest(baseURL string, key ed25519.PrivateKey, method, path string, body []byte) ([]byte, error) {
 	timestamp := time.Now().Unix()
-	hash := sha256.Sum256(body)
+	// Build canonical request: "METHOD /path\n<body>"
+	canonical := []byte(method + " " + path + "\n")
+	canonical = append(canonical, body...)
+	hash := sha256.Sum256(canonical)
 	msg := make([]byte, 40)
 	copy(msg[:32], hash[:])
 	msg[32] = byte(timestamp >> 56)
