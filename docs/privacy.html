@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>(S)AGE — Privacy Policy</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --void: #06020e;
+  --surface: #110b22;
+  --border: #2a1d4a;
+  --muted: #6b5a8e;
+  --text: #c8bfe0;
+  --bright: #ede8f7;
+  --accent: #a78bfa;
+}
+body {
+  font-family: 'DM Sans', system-ui, sans-serif;
+  background: var(--void);
+  color: var(--text);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+.container { max-width: 720px; margin: 0 auto; padding: 60px 24px 80px; }
+h1 { color: var(--bright); font-size: 2rem; margin-bottom: 8px; }
+.updated { color: var(--muted); font-size: 0.85rem; margin-bottom: 40px; }
+h2 { color: var(--bright); font-size: 1.2rem; margin-top: 36px; margin-bottom: 12px; }
+p, li { font-size: 0.95rem; margin-bottom: 12px; }
+ul { margin-left: 24px; margin-bottom: 16px; }
+li { margin-bottom: 6px; }
+strong { color: var(--bright); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; color: var(--accent); }
+.footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--border); text-align: center; color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: March 7, 2026</p>
+
+  <p><strong>(S)AGE — (S)overeign Agent Governed Experience</strong> is an open-source, local-first AI memory system. This policy covers both the (S)AGE desktop application and the (S)AGE Memory browser extension.</p>
+
+  <h2>The short version</h2>
+  <p><strong>Your data never leaves your machine.</strong> (S)AGE runs entirely on your computer. There are no cloud servers, no accounts, no tracking, and no telemetry. Everything stays local.</p>
+
+  <h2>What data is stored</h2>
+  <ul>
+    <li><strong>AI memories</strong> — stored in a local SQLite database at <code>~/.sage/</code> on your computer</li>
+    <li><strong>Encryption keys</strong> — Ed25519 signing keys generated locally, stored locally</li>
+    <li><strong>Extension settings</strong> — your (S)AGE server URL (default: localhost:8080), stored in browser local storage</li>
+  </ul>
+  <p>If you enabled encryption during setup, all memories are AES-256-GCM encrypted at rest.</p>
+
+  <h2>What data is NOT collected</h2>
+  <ul>
+    <li>No personal information</li>
+    <li>No browsing history</li>
+    <li>No conversation content sent to external servers</li>
+    <li>No analytics or telemetry</li>
+    <li>No cookies (except a local session cookie for the dashboard)</li>
+    <li>No third-party services</li>
+  </ul>
+
+  <h2>Browser extension permissions</h2>
+  <ul>
+    <li><strong>activeTab</strong> — to inject the (S)AGE sidebar into AI chat pages</li>
+    <li><strong>storage</strong> — to save your server URL and cryptographic keys locally in the browser</li>
+    <li><strong>scripting</strong> — to inject the content script that provides the sidebar and tool integration</li>
+    <li><strong>Host access to localhost:8080</strong> — to communicate with your local (S)AGE server</li>
+    <li><strong>Host access to chatgpt.com</strong> — to inject the content script on ChatGPT pages</li>
+  </ul>
+
+  <h2>Network requests</h2>
+  <p>The only network requests made by (S)AGE are to <strong>your own local server</strong> at <code>localhost:8080</code> (or whatever URL you configure). No data is ever transmitted to any external server, cloud service, or third party.</p>
+
+  <h2>Open source</h2>
+  <p>All source code is publicly available at <a href="https://github.com/l33tdawg/sage">github.com/l33tdawg/sage</a> under the Apache 2.0 license. You can audit every line of code.</p>
+
+  <h2>Contact</h2>
+  <p>For questions about this privacy policy, open an issue at <a href="https://github.com/l33tdawg/sage/issues">github.com/l33tdawg/sage/issues</a> or email <a href="mailto:l33tdawg@hackinthebox.org">l33tdawg@hackinthebox.org</a>.</p>
+
+  <div class="footer">
+    <a href="./">(S)AGE</a> &middot; <a href="https://github.com/l33tdawg/sage">GitHub</a> &middot; Apache 2.0 License
+  </div>
+</div>
+</body>
+</html>

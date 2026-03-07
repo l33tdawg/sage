@@ -101,6 +101,7 @@ docs/*
 !docs/connect.html
 !docs/og-image.png
 !docs/sage-brain.svg
+!docs/privacy.html
 
 # Extension build output
 extension/dist/
