@@ -90,7 +90,7 @@ type memClassificationData struct {
 // SageApp implements the CometBFT ABCI 2.0 Application interface.
 type SageApp struct {
 	badgerStore   *store.BadgerStore
-	postgresStore *store.PostgresStore
+	offchainStore store.OffchainStore
 	validators    *validator.ValidatorSet
 	poeEngine     *poe.DomainRegistry
 	phiTracker    *poe.PhiTracker
@@ -126,7 +126,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 
 	app := &SageApp{
 		badgerStore:   bs,
-		postgresStore: ps,
+		offchainStore: ps,
 		validators:    validator.NewValidatorSet(),
 		poeEngine:     domainReg,
 		phiTracker:    poe.NewPhiTracker(50),
@@ -135,6 +135,43 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	}
 
 	// Reload persisted validators from BadgerDB (survives restart)
+	persistedVals, err := bs.LoadValidators()
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to load persisted validators")
+	} else if len(persistedVals) > 0 {
+		for id, power := range persistedVals {
+			info := &validator.ValidatorInfo{ID: id, Power: power}
+			if addErr := app.validators.AddValidator(info); addErr != nil {
+				logger.Warn().Err(addErr).Str("validator", id).Msg("failed to restore validator")
+			}
+		}
+		logger.Info().Int("validators", app.validators.Size()).Msg("validators restored from state")
+	}
+
+	return app, nil
+}
+
+// NewSageAppWithStores creates a SAGE ABCI application with pre-created stores.
+// This allows plugging in any OffchainStore implementation (PostgresStore, SQLiteStore, etc.).
+func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, logger zerolog.Logger) (*SageApp, error) {
+	state, err := LoadState(bs)
+	if err != nil {
+		return nil, fmt.Errorf("load state: %w", err)
+	}
+
+	domains := []string{"crypto", "vuln_intel", "challenge_generation", "solver_feedback", "calibration", "infrastructure"}
+	domainReg := poe.NewDomainRegistry(domains)
+
+	app := &SageApp{
+		badgerStore:   bs,
+		offchainStore: offchain,
+		validators:    validator.NewValidatorSet(),
+		poeEngine:     domainReg,
+		phiTracker:    poe.NewPhiTracker(50),
+		state:         state,
+		logger:        logger.With().Str("component", "abci").Logger(),
+	}
+
 	persistedVals, err := bs.LoadValidators()
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to load persisted validators")
@@ -761,7 +798,7 @@ func (app *SageApp) processAccessQuery(parsedTx *tx.ParsedTx, height int64, bloc
 	}
 
 	ctx := context.Background()
-	records, err := app.postgresStore.QuerySimilar(ctx, query.Embedding, opts)
+	records, err := app.offchainStore.QuerySimilar(ctx, query.Embedding, opts)
 	if err != nil {
 		return &abcitypes.ExecTxResult{Code: 42, Log: fmt.Sprintf("query error: %v", err)}
 	}
@@ -1474,25 +1511,25 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 		switch pw.writeType {
 		case "memory":
 			if record, ok := pw.data.(*memory.MemoryRecord); ok {
-				if err := app.postgresStore.InsertMemory(ctx, record); err != nil {
+				if err := app.offchainStore.InsertMemory(ctx, record); err != nil {
 					app.logger.Error().Err(err).Str("memory_id", record.MemoryID).Msg("failed to insert memory")
 				}
 			}
 		case "vote":
 			if vote, ok := pw.data.(*store.ValidationVote); ok {
-				if err := app.postgresStore.InsertVote(ctx, vote); err != nil {
+				if err := app.offchainStore.InsertVote(ctx, vote); err != nil {
 					app.logger.Error().Err(err).Str("memory_id", vote.MemoryID).Msg("failed to insert vote")
 				}
 			}
 		case "corroborate":
 			if corr, ok := pw.data.(*store.Corroboration); ok {
-				if err := app.postgresStore.InsertCorroboration(ctx, corr); err != nil {
+				if err := app.offchainStore.InsertCorroboration(ctx, corr); err != nil {
 					app.logger.Error().Err(err).Str("memory_id", corr.MemoryID).Msg("failed to insert corroboration")
 				}
 			}
 		case "epoch_score":
 			if epoch, ok := pw.data.(*store.EpochScore); ok {
-				if err := app.postgresStore.InsertEpochScore(ctx, epoch); err != nil {
+				if err := app.offchainStore.InsertEpochScore(ctx, epoch); err != nil {
 					app.logger.Error().Err(err).
 						Int64("epoch", epoch.EpochNum).
 						Str("validator", epoch.ValidatorID).
@@ -1501,7 +1538,7 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			}
 		case "validator_score":
 			if score, ok := pw.data.(*store.ValidatorScore); ok {
-				if err := app.postgresStore.UpdateScore(ctx, score); err != nil {
+				if err := app.offchainStore.UpdateScore(ctx, score); err != nil {
 					app.logger.Error().Err(err).
 						Str("validator", score.ValidatorID).
 						Msg("failed to update validator score")
@@ -1509,7 +1546,7 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			}
 		case "status_update":
 			if su, ok := pw.data.(*statusUpdate); ok {
-				if err := app.postgresStore.UpdateStatus(ctx, su.MemoryID, su.Status, su.At); err != nil {
+				if err := app.offchainStore.UpdateStatus(ctx, su.MemoryID, su.Status, su.At); err != nil {
 					app.logger.Error().Err(err).
 						Str("memory_id", su.MemoryID).
 						Str("status", string(su.Status)).
@@ -1523,103 +1560,103 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			}
 		case "access_grant":
 			if grant, ok := pw.data.(*store.AccessGrantEntry); ok {
-				if err := app.postgresStore.InsertAccessGrant(ctx, grant); err != nil {
+				if err := app.offchainStore.InsertAccessGrant(ctx, grant); err != nil {
 					app.logger.Error().Err(err).Str("domain", grant.Domain).Msg("failed to insert access grant")
 				}
 			}
 		case "access_request":
 			if req, ok := pw.data.(*store.AccessRequestEntry); ok {
-				if err := app.postgresStore.InsertAccessRequest(ctx, req); err != nil {
+				if err := app.offchainStore.InsertAccessRequest(ctx, req); err != nil {
 					app.logger.Error().Err(err).Str("request_id", req.RequestID).Msg("failed to insert access request")
 				}
 			}
 		case "access_revoke":
 			if revoke, ok := pw.data.(*accessRevokeData); ok {
-				if err := app.postgresStore.RevokeGrant(ctx, revoke.Domain, revoke.GranteeID, revoke.Height); err != nil {
+				if err := app.offchainStore.RevokeGrant(ctx, revoke.Domain, revoke.GranteeID, revoke.Height); err != nil {
 					app.logger.Error().Err(err).Str("domain", revoke.Domain).Msg("failed to revoke grant")
 				}
 			}
 		case "access_log":
 			if log, ok := pw.data.(*store.AccessLogEntry); ok {
-				if err := app.postgresStore.InsertAccessLog(ctx, log); err != nil {
+				if err := app.offchainStore.InsertAccessLog(ctx, log); err != nil {
 					app.logger.Error().Err(err).Str("agent", log.AgentID).Msg("failed to insert access log")
 				}
 			}
 		case "domain_register":
 			if domain, ok := pw.data.(*store.DomainEntry); ok {
-				if err := app.postgresStore.InsertDomain(ctx, domain); err != nil {
+				if err := app.offchainStore.InsertDomain(ctx, domain); err != nil {
 					app.logger.Error().Err(err).Str("domain", domain.DomainName).Msg("failed to insert domain")
 				}
 			}
 		case "access_request_status":
 			if ars, ok := pw.data.(*accessRequestStatusUpdate); ok {
-				if err := app.postgresStore.UpdateAccessRequestStatus(ctx, ars.RequestID, ars.Status, ars.Height); err != nil {
+				if err := app.offchainStore.UpdateAccessRequestStatus(ctx, ars.RequestID, ars.Status, ars.Height); err != nil {
 					app.logger.Error().Err(err).Str("request_id", ars.RequestID).Msg("failed to update access request status")
 				}
 			}
 		case "org_register":
 			if org, ok := pw.data.(*store.OrgEntry); ok {
-				if err := app.postgresStore.InsertOrg(ctx, org); err != nil {
+				if err := app.offchainStore.InsertOrg(ctx, org); err != nil {
 					app.logger.Error().Err(err).Str("org_id", org.OrgID).Msg("failed to insert org")
 				}
 			}
 		case "org_member":
 			if member, ok := pw.data.(*store.OrgMemberEntry); ok {
-				if err := app.postgresStore.InsertOrgMember(ctx, member); err != nil {
+				if err := app.offchainStore.InsertOrgMember(ctx, member); err != nil {
 					app.logger.Error().Err(err).Str("org_id", member.OrgID).Str("agent", member.AgentID).Msg("failed to insert org member")
 				}
 			}
 		case "org_member_remove":
 			if d, ok := pw.data.(*orgMemberRemoveData); ok {
-				if err := app.postgresStore.RemoveOrgMember(ctx, d.OrgID, d.AgentID, d.Height); err != nil {
+				if err := app.offchainStore.RemoveOrgMember(ctx, d.OrgID, d.AgentID, d.Height); err != nil {
 					app.logger.Error().Err(err).Str("org_id", d.OrgID).Str("agent", d.AgentID).Msg("failed to remove org member")
 				}
 			}
 		case "org_member_clearance":
 			if d, ok := pw.data.(*orgClearanceData); ok {
-				if err := app.postgresStore.UpdateMemberClearance(ctx, d.OrgID, d.AgentID, d.Clearance); err != nil {
+				if err := app.offchainStore.UpdateMemberClearance(ctx, d.OrgID, d.AgentID, d.Clearance); err != nil {
 					app.logger.Error().Err(err).Str("org_id", d.OrgID).Str("agent", d.AgentID).Msg("failed to update member clearance")
 				}
 			}
 		case "federation":
 			if fed, ok := pw.data.(*store.FederationEntry); ok {
-				if err := app.postgresStore.InsertFederation(ctx, fed); err != nil {
+				if err := app.offchainStore.InsertFederation(ctx, fed); err != nil {
 					app.logger.Error().Err(err).Str("federation_id", fed.FederationID).Msg("failed to insert federation")
 				}
 			}
 		case "federation_approve":
 			if d, ok := pw.data.(*federationApproveData); ok {
-				if err := app.postgresStore.ApproveFederation(ctx, d.FederationID, d.Height); err != nil {
+				if err := app.offchainStore.ApproveFederation(ctx, d.FederationID, d.Height); err != nil {
 					app.logger.Error().Err(err).Str("federation_id", d.FederationID).Msg("failed to approve federation")
 				}
 			}
 		case "federation_revoke":
 			if d, ok := pw.data.(*federationRevokeData); ok {
-				if err := app.postgresStore.RevokeFederation(ctx, d.FederationID, d.Height); err != nil {
+				if err := app.offchainStore.RevokeFederation(ctx, d.FederationID, d.Height); err != nil {
 					app.logger.Error().Err(err).Str("federation_id", d.FederationID).Msg("failed to revoke federation")
 				}
 			}
 		case "mem_classification":
 			if d, ok := pw.data.(*memClassificationData); ok {
-				if err := app.postgresStore.UpdateMemoryClassification(ctx, d.MemoryID, d.Classification); err != nil {
+				if err := app.offchainStore.UpdateMemoryClassification(ctx, d.MemoryID, d.Classification); err != nil {
 					app.logger.Error().Err(err).Str("memory_id", d.MemoryID).Msg("failed to update memory classification")
 				}
 			}
 		case "dept_register":
 			if dept, ok := pw.data.(*store.DeptEntry); ok {
-				if err := app.postgresStore.InsertDept(ctx, dept); err != nil {
+				if err := app.offchainStore.InsertDept(ctx, dept); err != nil {
 					app.logger.Error().Err(err).Str("dept_id", dept.DeptID).Msg("failed to insert dept")
 				}
 			}
 		case "dept_member":
 			if member, ok := pw.data.(*store.DeptMemberEntry); ok {
-				if err := app.postgresStore.InsertDeptMember(ctx, member); err != nil {
+				if err := app.offchainStore.InsertDeptMember(ctx, member); err != nil {
 					app.logger.Error().Err(err).Str("dept_id", member.DeptID).Str("agent", member.AgentID).Msg("failed to insert dept member")
 				}
 			}
 		case "dept_member_remove":
 			if d, ok := pw.data.(*deptMemberRemoveData); ok {
-				if err := app.postgresStore.RemoveDeptMember(ctx, d.OrgID, d.DeptID, d.AgentID, d.Height); err != nil {
+				if err := app.offchainStore.RemoveDeptMember(ctx, d.OrgID, d.DeptID, d.AgentID, d.Height); err != nil {
 					app.logger.Error().Err(err).Str("dept_id", d.DeptID).Str("agent", d.AgentID).Msg("failed to remove dept member")
 				}
 			}
@@ -1688,12 +1725,19 @@ func (app *SageApp) Close() error {
 	if err := app.badgerStore.CloseBadger(); err != nil {
 		return err
 	}
-	return app.postgresStore.Close()
+	return app.offchainStore.Close()
 }
 
-// GetPostgresStore returns the postgres store for REST handlers.
+// GetOffchainStore returns the off-chain store for REST handlers.
+func (app *SageApp) GetOffchainStore() store.OffchainStore {
+	return app.offchainStore
+}
+
+// GetPostgresStore returns the postgres store for backward compatibility.
+// Returns nil if the off-chain store is not a PostgresStore.
 func (app *SageApp) GetPostgresStore() *store.PostgresStore {
-	return app.postgresStore
+	ps, _ := app.offchainStore.(*store.PostgresStore)
+	return ps
 }
 
 // GetBadgerStore returns the badger store for REST handlers.

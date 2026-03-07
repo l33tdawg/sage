@@ -111,6 +111,11 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	return result, nil
 }
 
+// Dimension returns the output dimension of this provider.
+func (c *Client) Dimension() int {
+	return Dimension
+}
+
 // Ready returns true if at least one successful embedding has been generated.
 func (c *Client) Ready() bool {
 	c.mu.RLock()

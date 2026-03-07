@@ -823,6 +823,195 @@ func (s *PostgresStore) UpdateMemoryClassification(ctx context.Context, memoryID
 	return nil
 }
 
+// ListMemories returns memories matching the given filters with pagination.
+func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*memory.MemoryRecord, int, error) {
+	if opts.Limit <= 0 {
+		opts.Limit = 50
+	}
+
+	countQuery := `SELECT COUNT(*) FROM memories WHERE 1=1`
+	query := `SELECT memory_id, submitting_agent, content, content_hash,
+		memory_type, domain_tag, confidence_score, status, parent_hash, created_at,
+		committed_at, deprecated_at FROM memories WHERE 1=1`
+	var args []any
+	argIdx := 1
+
+	if opts.DomainTag != "" {
+		filter := fmt.Sprintf(" AND domain_tag = $%d", argIdx)
+		query += filter
+		countQuery += filter
+		args = append(args, opts.DomainTag)
+		argIdx++
+	}
+	if opts.Status != "" {
+		filter := fmt.Sprintf(" AND status = $%d", argIdx)
+		query += filter
+		countQuery += filter
+		args = append(args, opts.Status)
+		argIdx++
+	}
+
+	switch opts.Sort {
+	case "oldest":
+		query += " ORDER BY created_at ASC"
+	case "confidence":
+		query += " ORDER BY confidence_score DESC"
+	default:
+		query += " ORDER BY created_at DESC"
+	}
+
+	query += fmt.Sprintf(" LIMIT $%d OFFSET $%d", argIdx, argIdx+1)
+	queryArgs := append(args, opts.Limit, opts.Offset)
+
+	var total int
+	if err := s.pool.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count memories: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list memories: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*memory.MemoryRecord
+	for rows.Next() {
+		var r memory.MemoryRecord
+		var mt, st string
+		var parentHash *string
+		if scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
+			&mt, &r.DomainTag, &r.ConfidenceScore, &st, &parentHash,
+			&r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt); scanErr != nil {
+			return nil, 0, fmt.Errorf("scan memory: %w", scanErr)
+		}
+		r.MemoryType = memory.MemoryType(mt)
+		r.Status = memory.MemoryStatus(st)
+		if parentHash != nil {
+			r.ParentHash = *parentHash
+		}
+		results = append(results, &r)
+	}
+	return results, total, nil
+}
+
+// GetStats returns aggregate statistics about stored memories.
+func (s *PostgresStore) GetStats(ctx context.Context) (*StoreStats, error) {
+	stats := &StoreStats{
+		ByDomain: make(map[string]int),
+		ByStatus: make(map[string]int),
+	}
+
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM memories`).Scan(&stats.TotalMemories); err != nil {
+		return nil, fmt.Errorf("count total: %w", err)
+	}
+
+	rows, err := s.pool.Query(ctx, `SELECT domain_tag, COUNT(*) FROM memories GROUP BY domain_tag`)
+	if err != nil {
+		return nil, fmt.Errorf("count by domain: %w", err)
+	}
+	for rows.Next() {
+		var domain string
+		var count int
+		if scanErr := rows.Scan(&domain, &count); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan domain count: %w", scanErr)
+		}
+		stats.ByDomain[domain] = count
+	}
+	rows.Close()
+
+	rows, err = s.pool.Query(ctx, `SELECT status, COUNT(*) FROM memories GROUP BY status`)
+	if err != nil {
+		return nil, fmt.Errorf("count by status: %w", err)
+	}
+	for rows.Next() {
+		var status string
+		var count int
+		if scanErr := rows.Scan(&status, &count); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan status count: %w", scanErr)
+		}
+		stats.ByStatus[status] = count
+	}
+	rows.Close()
+
+	row := s.pool.QueryRow(ctx, `SELECT MAX(created_at) FROM memories`)
+	var lastActivity *time.Time
+	if scanErr := row.Scan(&lastActivity); scanErr == nil {
+		stats.LastActivity = lastActivity
+	}
+
+	return stats, nil
+}
+
+// GetTimeline returns memory counts aggregated by time periods.
+func (s *PostgresStore) GetTimeline(ctx context.Context, from, to time.Time, domain string, bucket string) ([]TimelineBucket, error) {
+	trunc := "day"
+	switch bucket {
+	case "hour":
+		trunc = "hour"
+	case "week":
+		trunc = "week"
+	case "month":
+		trunc = "month"
+	}
+
+	query := fmt.Sprintf(`SELECT date_trunc('%s', created_at) AS period, COUNT(*)
+		FROM memories WHERE created_at >= $1 AND created_at <= $2`, trunc)
+	args := []any{from, to}
+	argIdx := 3
+
+	if domain != "" {
+		query += fmt.Sprintf(" AND domain_tag = $%d", argIdx)
+		args = append(args, domain)
+	}
+
+	query += fmt.Sprintf(` GROUP BY period ORDER BY period`)
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get timeline: %w", err)
+	}
+	defer rows.Close()
+
+	var buckets []TimelineBucket
+	for rows.Next() {
+		var period time.Time
+		var count int
+		if scanErr := rows.Scan(&period, &count); scanErr != nil {
+			return nil, fmt.Errorf("scan timeline: %w", scanErr)
+		}
+		buckets = append(buckets, TimelineBucket{
+			Period: period.Format(time.RFC3339),
+			Count:  count,
+			Domain: domain,
+		})
+	}
+	return buckets, nil
+}
+
+// DeleteMemory soft-deletes a memory by setting status to deprecated.
+func (s *PostgresStore) DeleteMemory(ctx context.Context, memoryID string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE memories SET status = 'deprecated', deprecated_at = NOW() WHERE memory_id = $1`,
+		memoryID)
+	if err != nil {
+		return fmt.Errorf("delete memory: %w", err)
+	}
+	return nil
+}
+
+// UpdateDomainTag updates the domain tag of a memory.
+func (s *PostgresStore) UpdateDomainTag(ctx context.Context, memoryID string, domain string) error {
+	_, err := s.pool.Exec(ctx,
+		`UPDATE memories SET domain_tag = $2 WHERE memory_id = $1`,
+		memoryID, domain)
+	if err != nil {
+		return fmt.Errorf("update domain tag: %w", err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) Close() error {
 	s.pool.Close()
 	return nil

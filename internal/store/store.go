@@ -63,6 +63,31 @@ type QueryOptions struct {
 	Cursor        string  `json:"cursor,omitempty"`
 }
 
+// ListOptions defines parameters for listing memories.
+type ListOptions struct {
+	DomainTag string
+	Status    string
+	Limit     int
+	Offset    int
+	Sort      string // "newest", "oldest", "confidence"
+}
+
+// StoreStats holds aggregate statistics.
+type StoreStats struct {
+	TotalMemories int            `json:"total_memories"`
+	ByDomain      map[string]int `json:"by_domain"`
+	ByStatus      map[string]int `json:"by_status"`
+	DBSizeBytes   int64          `json:"db_size_bytes"`
+	LastActivity  *time.Time     `json:"last_activity,omitempty"`
+}
+
+// TimelineBucket holds aggregated counts for a time period.
+type TimelineBucket struct {
+	Period string `json:"period"` // ISO date string
+	Count  int    `json:"count"`
+	Domain string `json:"domain,omitempty"`
+}
+
 // MemoryStore defines the interface for memory storage operations.
 type MemoryStore interface {
 	InsertMemory(ctx context.Context, record *memory.MemoryRecord) error
@@ -75,6 +100,11 @@ type MemoryStore interface {
 	InsertCorroboration(ctx context.Context, corr *Corroboration) error
 	GetCorroborations(ctx context.Context, memoryID string) ([]*Corroboration, error)
 	GetPendingByDomain(ctx context.Context, domainTag string, limit int) ([]*memory.MemoryRecord, error)
+	ListMemories(ctx context.Context, opts ListOptions) ([]*memory.MemoryRecord, int, error)
+	GetStats(ctx context.Context) (*StoreStats, error)
+	GetTimeline(ctx context.Context, from, to time.Time, domain string, bucket string) ([]TimelineBucket, error)
+	DeleteMemory(ctx context.Context, memoryID string) error
+	UpdateDomainTag(ctx context.Context, memoryID string, domain string) error
 	Close() error
 }
 
@@ -212,6 +242,17 @@ type DeptMemberEntry struct {
 	CreatedHeight int64          `json:"created_height"`
 	CreatedAt     time.Time      `json:"created_at"`
 	RemovedAt     *time.Time     `json:"removed_at,omitempty"`
+}
+
+// OffchainStore is the combined interface for all off-chain storage operations.
+// Both PostgresStore and SQLiteStore implement this interface, allowing the ABCI
+// app to work with either backend.
+type OffchainStore interface {
+	MemoryStore
+	ValidatorScoreStore
+	AccessStore
+	OrgStore
+	Ping(ctx context.Context) error
 }
 
 // OrgStore defines the interface for organization, department, and federation storage.

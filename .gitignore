@@ -1,10 +1,22 @@
 # Binaries
 bin/
+# Built binaries in repo root (not the cmd/ source dirs)
+/sage-lite
+/amid
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# SAGE Personal data (agent keys, memories, config)
+.sage/
+*.key
+pending-import.json
+import-done.txt
+
+# MCP config (contains local paths)
+.mcp.json
 
 # Test binary
 *.test
@@ -79,11 +91,12 @@ deploy/scripts/backups/
 
 # Claude
 CLAUDE.md
-amid
 .claude/
 
-# Docs (decks, diagrams, LaTeX source — not for GitHub)
-docs/
+# Docs — ignore internal stuff but allow public-facing docs
+docs/*
+!docs/ARCHITECTURE.md
+!docs/GETTING_STARTED.md
 
 # Papers PDFs are tracked in papers/ (not gitignored)
 PHASE1_IMPLEMENTATION_PLAN.md

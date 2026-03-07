@@ -1,0 +1,2 @@
+// Confidence badge is implemented inline in app.js
+// This file exists for directory structure completeness

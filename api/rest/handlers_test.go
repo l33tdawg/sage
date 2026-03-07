@@ -98,6 +98,36 @@ func (m *mockMemoryStore) GetPendingByDomain(_ context.Context, domainTag string
 	return m.pendingRecords, nil
 }
 
+func (m *mockMemoryStore) ListMemories(_ context.Context, opts store.ListOptions) ([]*memory.MemoryRecord, int, error) {
+	var results []*memory.MemoryRecord
+	for _, rec := range m.memories {
+		results = append(results, rec)
+	}
+	return results, len(results), nil
+}
+
+func (m *mockMemoryStore) GetStats(_ context.Context) (*store.StoreStats, error) {
+	return &store.StoreStats{TotalMemories: len(m.memories)}, nil
+}
+
+func (m *mockMemoryStore) GetTimeline(_ context.Context, from, to time.Time, domain string, bucket string) ([]store.TimelineBucket, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStore) DeleteMemory(_ context.Context, memoryID string) error {
+	if rec, ok := m.memories[memoryID]; ok {
+		rec.Status = memory.StatusDeprecated
+	}
+	return nil
+}
+
+func (m *mockMemoryStore) UpdateDomainTag(_ context.Context, memoryID string, domain string) error {
+	if rec, ok := m.memories[memoryID]; ok {
+		rec.DomainTag = domain
+	}
+	return nil
+}
+
 func (m *mockMemoryStore) Close() error { return nil }
 
 type mockScoreStore struct {

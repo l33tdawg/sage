@@ -174,7 +174,7 @@ func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC string
 	}()
 
 	// REST API server
-	pgStore := app.GetPostgresStore()
+	pgStore := app.GetOffchainStore()
 	badgerStore := app.GetBadgerStore()
 	restServer := rest.NewServer(cometRPC, pgStore, pgStore, badgerStore, health, logger)
 	go func() {
@@ -186,7 +186,7 @@ func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC string
 }
 
 func healthLoop(app *sageabci.SageApp, cometNode *node.Node, health *metrics.HealthChecker) {
-	pgStore := app.GetPostgresStore()
+	pgStore := app.GetOffchainStore()
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
