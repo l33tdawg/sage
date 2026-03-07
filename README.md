@@ -108,7 +108,7 @@ See the **[Architecture & Deployment Guide](docs/ARCHITECTURE.md)** for the full
 
 ## Requirements
 
-- **Go 1.22+** to build from source
+- **Go 1.24+** to build from source
 - That's it. No Docker, no databases, no cloud accounts.
 
 ---

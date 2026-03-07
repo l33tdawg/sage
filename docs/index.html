@@ -3,19 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SAGE — Free Your AI Model's Mind</title>
-<meta name="description" content="Persistent, private memory for AI agents. Everything stays on your machine. No cloud. No data leaving. Ever.">
+<title>SAGE — Give Your AI a Memory</title>
+<meta name="description" content="Your AI forgets everything between conversations. SAGE fixes that. Private, persistent memory that runs on your laptop. No cloud. No data leaving.">
 <meta name="theme-color" content="#0a0614">
-<meta property="og:title" content="SAGE — Free Your AI Model's Mind">
-<meta property="og:description" content="Your AI forgets everything between conversations. SAGE fixes that. Privacy-first persistent memory that runs on your laptop.">
+<meta property="og:title" content="SAGE — Give Your AI a Memory">
+<meta property="og:description" content="Your AI forgets everything between conversations. SAGE fixes that. Private, persistent memory that runs entirely on your laptop.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/">
 <meta property="og:image" content="https://l33tdawg.github.io/sage/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="SAGE — Free Your AI Model's Mind">
-<meta name="twitter:description" content="Your AI forgets everything between conversations. SAGE fixes that. Privacy-first persistent memory that runs on your laptop.">
+<meta name="twitter:title" content="SAGE — Give Your AI a Memory">
+<meta name="twitter:description" content="Your AI forgets everything between conversations. SAGE fixes that. Private, persistent memory that runs entirely on your laptop.">
 <meta name="twitter:image" content="https://l33tdawg.github.io/sage/og-image.png">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -631,6 +631,62 @@ footer a:hover { text-decoration: underline; }
 }
 .migrate-note strong { color: var(--teal); }
 
+/* ─── Developer Section ─── */
+.dev-install {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  margin-top: 48px;
+  max-width: 700px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.dev-install-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(26,17,51,0.8);
+  border-bottom: 1px solid var(--border);
+}
+.dev-install-bar span {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+.dev-install-body {
+  padding: 24px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 2;
+}
+.dev-install-body .comment { color: var(--muted); font-style: italic; }
+.dev-install-body .prompt { color: var(--teal); }
+.dev-install-body .cmd { color: var(--bright); }
+.dev-install-body .output { color: var(--accent); }
+.dev-badges {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 32px;
+  flex-wrap: wrap;
+}
+.dev-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: rgba(167,139,250,0.06);
+  border: 1px solid rgba(167,139,250,0.12);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+.dev-badge strong { color: var(--bright); }
+
 /* ─── Scroll Reveal ─── */
 .reveal {
   opacity: 0;
@@ -668,6 +724,8 @@ footer a:hover { text-decoration: underline; }
   .container { padding: 0 16px; }
   h2 { font-size: 1.8rem; }
   .terminal-body { font-size: 0.75rem; padding: 14px; }
+  .dev-install-body { font-size: 0.75rem; padding: 14px; }
+  .dev-badges { gap: 8px; }
 }
 </style>
 </head>
@@ -691,6 +749,7 @@ footer a:hover { text-decoration: underline; }
       <a href="#features">Features</a>
       <a href="#research">Research</a>
       <a href="#switch">Switch</a>
+      <a href="#developers">Developers</a>
       <a href="https://github.com/l33tdawg/sage" class="nav-cta">GitHub</a>
     </div>
   </div>
@@ -701,8 +760,8 @@ footer a:hover { text-decoration: underline; }
   <div class="container">
     <div class="hero-inner">
       <div class="hero-badge">Open Source &middot; Privacy First</div>
-      <h1>Free Your AI<br>Model's <em>Mind</em></h1>
-      <p class="hero-sub">Your AI forgets everything between conversations. Every project, every preference, every lesson learned — gone. SAGE fixes that. Entirely on your machine.</p>
+      <h1>Give Your AI<br>a <em>Memory</em></h1>
+      <p class="hero-sub">Every time you close a conversation, your AI forgets everything — your projects, your preferences, every lesson it learned. SAGE fixes that. It runs on your laptop. Your data never leaves.</p>
       <div class="hero-actions">
         <a href="https://github.com/l33tdawg/sage" class="btn-primary">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
@@ -720,12 +779,13 @@ footer a:hover { text-decoration: underline; }
             <span>terminal</span>
           </div>
           <div class="terminal-body">
-            <div><span class="prompt">$</span> <span class="cmd">git clone https://github.com/l33tdawg/sage.git && cd sage</span></div>
-            <div><span class="prompt">$</span> <span class="cmd">go build -o sage-lite ./cmd/sage-lite/</span></div>
             <div><span class="prompt">$</span> <span class="cmd">./sage-lite setup</span></div>
-            <div><span class="comment"># Pick your AI, get MCP config, done.</span></div>
+            <div><span class="output">&#127758; Opening setup wizard in your browser...</span></div>
+            <div><span class="output">&#9989; Pick your AI (Claude, ChatGPT, Claude Code)</span></div>
+            <div><span class="output">&#9989; MCP config generated — paste it into your AI</span></div>
             <div><span class="prompt">$</span> <span class="cmd">./sage-lite serve</span></div>
             <div><span class="output">&#10024; SAGE is running — Brain Dashboard at localhost:8080/ui/</span></div>
+            <div><span class="comment"># That's it. Your AI now remembers everything.</span></div>
           </div>
         </div>
       </div>
@@ -769,8 +829,8 @@ footer a:hover { text-decoration: underline; }
         <div class="privacy-point">
           <div class="privacy-icon">&#128272;</div>
           <div>
-            <h3>Cryptographically Signed</h3>
-            <p>Every memory is Ed25519-signed with your local key. Full audit trail, tamper-evident, no trust required.</p>
+            <h3>Tamper-Proof</h3>
+            <p>Every memory is digitally signed with your local key. Full audit trail — you can verify nothing has been changed or injected.</p>
           </div>
         </div>
       </div>
@@ -793,8 +853,8 @@ footer a:hover { text-decoration: underline; }
         <div class="step-icon">
           <svg viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
         </div>
-        <h3>Install &amp; Build</h3>
-        <p>Clone the repo, build the binary. One command. No Docker, no databases, no cloud accounts.</p>
+        <h3>Download SAGE</h3>
+        <p>Grab the binary from GitHub. No accounts to create, no cloud services, nothing to sign up for.</p>
       </div>
       <div class="step">
         <div class="step-num">02</div>
@@ -836,8 +896,8 @@ footer a:hover { text-decoration: underline; }
       <div class="feature-card">
         <div class="feature-icon teal">&#9878;&#65039;</div>
         <div>
-          <h3>BFT Consensus</h3>
-          <p>Every memory goes through Byzantine Fault Tolerant validation. Not a flat file — governed knowledge with integrity guarantees.</p>
+          <h3>Governed Knowledge</h3>
+          <p>Memories aren't just dumped in a file — they're validated before being committed. Bad data gets filtered out, good data gets reinforced.</p>
         </div>
       </div>
       <div class="feature-card">
@@ -857,8 +917,8 @@ footer a:hover { text-decoration: underline; }
       <div class="feature-card">
         <div class="feature-icon teal">&#128257;</div>
         <div>
-          <h3>Reflection Loop</h3>
-          <p>Stores what worked AND what failed. Both make the AI better. Paper 4 proved it: ρ=0.716 with memory vs ρ=0.040 without.</p>
+          <h3>Learns From Mistakes</h3>
+          <p>Stores what worked AND what failed after every task. Research shows AI agents with this feedback loop improve measurably over time — without it, they don't learn at all.</p>
         </div>
       </div>
       <div class="feature-card">
@@ -892,11 +952,11 @@ footer a:hover { text-decoration: underline; }
     <div class="reveal" style="text-align:center;">
       <div class="section-tag">Research</div>
       <h2>Agents that learn from<br>experience, not instructions</h2>
-      <p class="section-desc" style="margin:0 auto;">The key finding: AI agents given governed institutional memory don't need to be told what to do — they figure it out from accumulated experience. Agents with memory show a Spearman correlation of ρ=0.716 with cumulative improvement over time. Without memory? ρ=0.040 — essentially no learning at all.</p>
+      <p class="section-desc" style="margin:0 auto;">The key finding: AI agents with persistent memory get measurably better over time — they learn from experience instead of starting from scratch every conversation. Without memory, they show essentially zero improvement no matter how many sessions you run.</p>
     </div>
 
     <div class="migrate-note reveal" style="margin-top:40px;margin-bottom:40px;">
-      <strong>Why SAGE Personal is enough.</strong> The full SAGE architecture (Paper I) is infrastructure for teams — multi-validator BFT consensus, RBAC, federation. SAGE Personal is a single-node implementation that gives you the thing that actually matters: governed institutional memory that makes your AI measurably better over time (Paper IV). You don't need a 4-node cluster to prove that memory works. You just need the memory.
+      <strong>Built on real research, not vibes.</strong> SAGE started as an infrastructure project for teams and enterprises. SAGE Personal takes the core technology that actually matters — governed memory that makes your AI better over time — and packages it for individuals. Five published papers, real experiments, real data.
     </div>
 
     <div class="papers-grid reveal">
@@ -904,7 +964,7 @@ footer a:hover { text-decoration: underline; }
         <span class="paper-num" style="background:rgba(167,139,250,0.2);">IV</span>
         <div class="paper-info">
           <h3>Longitudinal Learning &mdash; the core finding</h3>
-          <p>Agents with institutional memory show cumulative improvement across sessions (ρ=0.716, p=0.020). Without memory, no learning occurs. This is what SAGE Personal gives you.</p>
+          <p>AI agents with memory get better over time. Without memory, they don't learn at all — no matter how many sessions you run.</p>
         </div>
         <span class="paper-arrow">&rarr;</span>
       </a>
@@ -984,12 +1044,61 @@ footer a:hover { text-decoration: underline; }
   </div>
 </section>
 
+<!-- For Developers -->
+<section id="developers">
+  <div class="container">
+    <div class="reveal" style="text-align:center;">
+      <div class="section-tag">For Developers</div>
+      <h2>Infrastructure,<br>not a library</h2>
+      <p class="section-desc" style="margin:0 auto;">SAGE isn't an API you call or a package you import. It's memory infrastructure for AI agents — a local server your AI connects to via MCP. Build from source or use the Python SDK to integrate programmatically.</p>
+    </div>
+
+    <div class="dev-install reveal">
+      <div class="dev-install-bar">
+        <div class="terminal-dot"></div>
+        <div class="terminal-dot"></div>
+        <div class="terminal-dot"></div>
+        <span>terminal</span>
+      </div>
+      <div class="dev-install-body">
+        <div><span class="comment"># Clone and build</span></div>
+        <div><span class="prompt">$</span> <span class="cmd">git clone https://github.com/l33tdawg/sage.git && cd sage</span></div>
+        <div><span class="prompt">$</span> <span class="cmd">go build -o sage-lite ./cmd/sage-lite/</span></div>
+        <div>&nbsp;</div>
+        <div><span class="comment"># Setup wizard (opens browser, generates MCP config)</span></div>
+        <div><span class="prompt">$</span> <span class="cmd">./sage-lite setup</span></div>
+        <div>&nbsp;</div>
+        <div><span class="comment"># Start SAGE</span></div>
+        <div><span class="prompt">$</span> <span class="cmd">./sage-lite serve</span></div>
+        <div><span class="output">&#10024; SAGE Personal ready</span></div>
+        <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
+        <div>&nbsp;</div>
+        <div><span class="comment"># Or use the Python SDK</span></div>
+        <div><span class="prompt">$</span> <span class="cmd">pip install sage-sdk</span></div>
+      </div>
+    </div>
+
+    <div class="dev-badges reveal">
+      <div class="dev-badge"><strong>Go 1.24+</strong></div>
+      <div class="dev-badge"><strong>Python SDK</strong></div>
+      <div class="dev-badge"><strong>SQLite</strong> embedded</div>
+      <div class="dev-badge"><strong>MCP</strong> protocol</div>
+      <div class="dev-badge"><strong>REST API</strong></div>
+      <div class="dev-badge"><strong>Apache 2.0</strong></div>
+    </div>
+
+    <div class="migrate-note reveal" style="margin-top:32px;">
+      <strong>Scales to enterprise.</strong> SAGE Personal is the single-node edition. The full architecture supports multi-validator BFT consensus, RBAC, federation, departments, clearance levels, and cross-org knowledge sharing. Same codebase, same API — just add validators. See the <a href="https://github.com/l33tdawg/sage/blob/main/docs/ARCHITECTURE.md">Architecture Guide</a>.
+    </div>
+  </div>
+</section>
+
 <!-- CTA -->
 <section class="cta-section">
   <div class="container reveal">
     <div class="section-tag">Open Source &middot; Apache 2.0</div>
     <h2>Free your agent</h2>
-    <p class="section-desc" style="margin:0 auto 40px;">Every conversation your AI forgets is a lesson wasted. Give it a memory. Give it continuity. Give it a chance to actually get better at helping you.</p>
+    <p class="section-desc" style="margin:0 auto 40px;">Every conversation your AI forgets is a lesson wasted. Give it memory. Give it continuity. Watch it actually get better at helping you over time.</p>
     <a href="https://github.com/l33tdawg/sage" class="btn-primary" style="font-size:1.1rem;padding:16px 40px;">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>
       Get SAGE on GitHub
@@ -1001,7 +1110,7 @@ footer a:hover { text-decoration: underline; }
 <footer>
   <div class="container">
     <p>
-      <strong>SAGE</strong> &mdash; Sovereign Agent Governed Experience<br>
+      <strong>SAGE</strong> &mdash; Persistent Memory for AI<br>
       Created by <a href="https://github.com/l33tdawg">Dhillon Andrew Kannabhiran</a><br>
       Code: <a href="https://github.com/l33tdawg/sage/blob/main/LICENSE">Apache License 2.0</a> &middot; Papers: <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>
     </p>
