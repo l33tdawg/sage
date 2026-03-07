@@ -1535,171 +1535,139 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 		app.logger.Error().Err(err).Msg("failed to save state")
 	}
 
-	// Flush pending writes to PostgreSQL
-	for _, pw := range app.pendingWrites {
-		switch pw.writeType {
-		case "memory":
-			if record, ok := pw.data.(*memory.MemoryRecord); ok {
-				if err := app.offchainStore.InsertMemory(ctx, record); err != nil {
-					app.logger.Error().Err(err).Str("memory_id", record.MemoryID).Msg("failed to insert memory")
-				}
-			}
-		case "challenge":
-			if ch, ok := pw.data.(*store.ChallengeEntry); ok {
-				if err := app.offchainStore.InsertChallenge(ctx, ch); err != nil {
-					app.logger.Error().Err(err).Str("memory_id", ch.MemoryID).Msg("failed to insert challenge")
-				}
-			}
-		case "vote":
-			if vote, ok := pw.data.(*store.ValidationVote); ok {
-				if err := app.offchainStore.InsertVote(ctx, vote); err != nil {
-					app.logger.Error().Err(err).Str("memory_id", vote.MemoryID).Msg("failed to insert vote")
-				}
-			}
-		case "corroborate":
-			if corr, ok := pw.data.(*store.Corroboration); ok {
-				if err := app.offchainStore.InsertCorroboration(ctx, corr); err != nil {
-					app.logger.Error().Err(err).Str("memory_id", corr.MemoryID).Msg("failed to insert corroboration")
-				}
-			}
-		case "epoch_score":
-			if epoch, ok := pw.data.(*store.EpochScore); ok {
-				if err := app.offchainStore.InsertEpochScore(ctx, epoch); err != nil {
-					app.logger.Error().Err(err).
-						Int64("epoch", epoch.EpochNum).
-						Str("validator", epoch.ValidatorID).
-						Msg("failed to insert epoch score")
-				}
-			}
-		case "validator_score":
-			if score, ok := pw.data.(*store.ValidatorScore); ok {
-				if err := app.offchainStore.UpdateScore(ctx, score); err != nil {
-					app.logger.Error().Err(err).
-						Str("validator", score.ValidatorID).
-						Msg("failed to update validator score")
-				}
-			}
-		case "status_update":
-			if su, ok := pw.data.(*statusUpdate); ok {
-				if err := app.offchainStore.UpdateStatus(ctx, su.MemoryID, su.Status, su.At); err != nil {
-					app.logger.Error().Err(err).
-						Str("memory_id", su.MemoryID).
-						Str("status", string(su.Status)).
-						Msg("failed to update memory status")
-				} else {
-					app.logger.Info().
-						Str("memory_id", su.MemoryID).
-						Str("status", string(su.Status)).
-						Msg("memory status updated in PostgreSQL")
-				}
-			}
-		case "access_grant":
-			if grant, ok := pw.data.(*store.AccessGrantEntry); ok {
-				if err := app.offchainStore.InsertAccessGrant(ctx, grant); err != nil {
-					app.logger.Error().Err(err).Str("domain", grant.Domain).Msg("failed to insert access grant")
-				}
-			}
-		case "access_request":
-			if req, ok := pw.data.(*store.AccessRequestEntry); ok {
-				if err := app.offchainStore.InsertAccessRequest(ctx, req); err != nil {
-					app.logger.Error().Err(err).Str("request_id", req.RequestID).Msg("failed to insert access request")
-				}
-			}
-		case "access_revoke":
-			if revoke, ok := pw.data.(*accessRevokeData); ok {
-				if err := app.offchainStore.RevokeGrant(ctx, revoke.Domain, revoke.GranteeID, revoke.Height); err != nil {
-					app.logger.Error().Err(err).Str("domain", revoke.Domain).Msg("failed to revoke grant")
-				}
-			}
-		case "access_log":
-			if log, ok := pw.data.(*store.AccessLogEntry); ok {
-				if err := app.offchainStore.InsertAccessLog(ctx, log); err != nil {
-					app.logger.Error().Err(err).Str("agent", log.AgentID).Msg("failed to insert access log")
-				}
-			}
-		case "domain_register":
-			if domain, ok := pw.data.(*store.DomainEntry); ok {
-				if err := app.offchainStore.InsertDomain(ctx, domain); err != nil {
-					app.logger.Error().Err(err).Str("domain", domain.DomainName).Msg("failed to insert domain")
-				}
-			}
-		case "access_request_status":
-			if ars, ok := pw.data.(*accessRequestStatusUpdate); ok {
-				if err := app.offchainStore.UpdateAccessRequestStatus(ctx, ars.RequestID, ars.Status, ars.Height); err != nil {
-					app.logger.Error().Err(err).Str("request_id", ars.RequestID).Msg("failed to update access request status")
-				}
-			}
-		case "org_register":
-			if org, ok := pw.data.(*store.OrgEntry); ok {
-				if err := app.offchainStore.InsertOrg(ctx, org); err != nil {
-					app.logger.Error().Err(err).Str("org_id", org.OrgID).Msg("failed to insert org")
-				}
-			}
-		case "org_member":
-			if member, ok := pw.data.(*store.OrgMemberEntry); ok {
-				if err := app.offchainStore.InsertOrgMember(ctx, member); err != nil {
-					app.logger.Error().Err(err).Str("org_id", member.OrgID).Str("agent", member.AgentID).Msg("failed to insert org member")
-				}
-			}
-		case "org_member_remove":
-			if d, ok := pw.data.(*orgMemberRemoveData); ok {
-				if err := app.offchainStore.RemoveOrgMember(ctx, d.OrgID, d.AgentID, d.Height); err != nil {
-					app.logger.Error().Err(err).Str("org_id", d.OrgID).Str("agent", d.AgentID).Msg("failed to remove org member")
-				}
-			}
-		case "org_member_clearance":
-			if d, ok := pw.data.(*orgClearanceData); ok {
-				if err := app.offchainStore.UpdateMemberClearance(ctx, d.OrgID, d.AgentID, d.Clearance); err != nil {
-					app.logger.Error().Err(err).Str("org_id", d.OrgID).Str("agent", d.AgentID).Msg("failed to update member clearance")
-				}
-			}
-		case "federation":
-			if fed, ok := pw.data.(*store.FederationEntry); ok {
-				if err := app.offchainStore.InsertFederation(ctx, fed); err != nil {
-					app.logger.Error().Err(err).Str("federation_id", fed.FederationID).Msg("failed to insert federation")
-				}
-			}
-		case "federation_approve":
-			if d, ok := pw.data.(*federationApproveData); ok {
-				if err := app.offchainStore.ApproveFederation(ctx, d.FederationID, d.Height); err != nil {
-					app.logger.Error().Err(err).Str("federation_id", d.FederationID).Msg("failed to approve federation")
-				}
-			}
-		case "federation_revoke":
-			if d, ok := pw.data.(*federationRevokeData); ok {
-				if err := app.offchainStore.RevokeFederation(ctx, d.FederationID, d.Height); err != nil {
-					app.logger.Error().Err(err).Str("federation_id", d.FederationID).Msg("failed to revoke federation")
-				}
-			}
-		case "mem_classification":
-			if d, ok := pw.data.(*memClassificationData); ok {
-				if err := app.offchainStore.UpdateMemoryClassification(ctx, d.MemoryID, d.Classification); err != nil {
-					app.logger.Error().Err(err).Str("memory_id", d.MemoryID).Msg("failed to update memory classification")
-				}
-			}
-		case "dept_register":
-			if dept, ok := pw.data.(*store.DeptEntry); ok {
-				if err := app.offchainStore.InsertDept(ctx, dept); err != nil {
-					app.logger.Error().Err(err).Str("dept_id", dept.DeptID).Msg("failed to insert dept")
-				}
-			}
-		case "dept_member":
-			if member, ok := pw.data.(*store.DeptMemberEntry); ok {
-				if err := app.offchainStore.InsertDeptMember(ctx, member); err != nil {
-					app.logger.Error().Err(err).Str("dept_id", member.DeptID).Str("agent", member.AgentID).Msg("failed to insert dept member")
-				}
-			}
-		case "dept_member_remove":
-			if d, ok := pw.data.(*deptMemberRemoveData); ok {
-				if err := app.offchainStore.RemoveDeptMember(ctx, d.OrgID, d.DeptID, d.AgentID, d.Height); err != nil {
-					app.logger.Error().Err(err).Str("dept_id", d.DeptID).Str("agent", d.AgentID).Msg("failed to remove dept member")
-				}
-			}
+	// Flush pending writes to the offchain store atomically within a single
+	// database transaction. If any write fails, the entire batch rolls back,
+	// preventing partial state divergence between BadgerDB and the query layer.
+	if len(app.pendingWrites) > 0 {
+		writes := app.pendingWrites
+		if err := app.offchainStore.RunInTx(ctx, func(tx store.OffchainStore) error {
+			return app.flushPendingWrites(ctx, tx, writes)
+		}); err != nil {
+			app.logger.Error().Err(err).Int("count", len(writes)).
+				Msg("CRITICAL: atomic flush of pending writes failed — offchain store may be behind on-chain state")
 		}
 	}
 	app.pendingWrites = nil
 
 	return &abcitypes.ResponseCommit{}, nil
+}
+
+// flushPendingWrites executes all buffered writes against the given store (which
+// may be a transaction-scoped store). Returns the first error encountered,
+// causing the wrapping transaction to roll back.
+func (app *SageApp) flushPendingWrites(ctx context.Context, s store.OffchainStore, writes []pendingWrite) error {
+	for _, pw := range writes {
+		var err error
+		switch pw.writeType {
+		case "memory":
+			if record, ok := pw.data.(*memory.MemoryRecord); ok {
+				err = s.InsertMemory(ctx, record)
+			}
+		case "challenge":
+			if ch, ok := pw.data.(*store.ChallengeEntry); ok {
+				err = s.InsertChallenge(ctx, ch)
+			}
+		case "vote":
+			if vote, ok := pw.data.(*store.ValidationVote); ok {
+				err = s.InsertVote(ctx, vote)
+			}
+		case "corroborate":
+			if corr, ok := pw.data.(*store.Corroboration); ok {
+				err = s.InsertCorroboration(ctx, corr)
+			}
+		case "epoch_score":
+			if epoch, ok := pw.data.(*store.EpochScore); ok {
+				err = s.InsertEpochScore(ctx, epoch)
+			}
+		case "validator_score":
+			if score, ok := pw.data.(*store.ValidatorScore); ok {
+				err = s.UpdateScore(ctx, score)
+			}
+		case "status_update":
+			if su, ok := pw.data.(*statusUpdate); ok {
+				if writeErr := s.UpdateStatus(ctx, su.MemoryID, su.Status, su.At); writeErr != nil {
+					err = writeErr
+				} else {
+					app.logger.Info().
+						Str("memory_id", su.MemoryID).
+						Str("status", string(su.Status)).
+						Msg("memory status updated")
+				}
+			}
+		case "access_grant":
+			if grant, ok := pw.data.(*store.AccessGrantEntry); ok {
+				err = s.InsertAccessGrant(ctx, grant)
+			}
+		case "access_request":
+			if req, ok := pw.data.(*store.AccessRequestEntry); ok {
+				err = s.InsertAccessRequest(ctx, req)
+			}
+		case "access_revoke":
+			if revoke, ok := pw.data.(*accessRevokeData); ok {
+				err = s.RevokeGrant(ctx, revoke.Domain, revoke.GranteeID, revoke.Height)
+			}
+		case "access_log":
+			if logEntry, ok := pw.data.(*store.AccessLogEntry); ok {
+				err = s.InsertAccessLog(ctx, logEntry)
+			}
+		case "domain_register":
+			if domain, ok := pw.data.(*store.DomainEntry); ok {
+				err = s.InsertDomain(ctx, domain)
+			}
+		case "access_request_status":
+			if ars, ok := pw.data.(*accessRequestStatusUpdate); ok {
+				err = s.UpdateAccessRequestStatus(ctx, ars.RequestID, ars.Status, ars.Height)
+			}
+		case "org_register":
+			if org, ok := pw.data.(*store.OrgEntry); ok {
+				err = s.InsertOrg(ctx, org)
+			}
+		case "org_member":
+			if member, ok := pw.data.(*store.OrgMemberEntry); ok {
+				err = s.InsertOrgMember(ctx, member)
+			}
+		case "org_member_remove":
+			if d, ok := pw.data.(*orgMemberRemoveData); ok {
+				err = s.RemoveOrgMember(ctx, d.OrgID, d.AgentID, d.Height)
+			}
+		case "org_member_clearance":
+			if d, ok := pw.data.(*orgClearanceData); ok {
+				err = s.UpdateMemberClearance(ctx, d.OrgID, d.AgentID, d.Clearance)
+			}
+		case "federation":
+			if fed, ok := pw.data.(*store.FederationEntry); ok {
+				err = s.InsertFederation(ctx, fed)
+			}
+		case "federation_approve":
+			if d, ok := pw.data.(*federationApproveData); ok {
+				err = s.ApproveFederation(ctx, d.FederationID, d.Height)
+			}
+		case "federation_revoke":
+			if d, ok := pw.data.(*federationRevokeData); ok {
+				err = s.RevokeFederation(ctx, d.FederationID, d.Height)
+			}
+		case "mem_classification":
+			if d, ok := pw.data.(*memClassificationData); ok {
+				err = s.UpdateMemoryClassification(ctx, d.MemoryID, d.Classification)
+			}
+		case "dept_register":
+			if dept, ok := pw.data.(*store.DeptEntry); ok {
+				err = s.InsertDept(ctx, dept)
+			}
+		case "dept_member":
+			if member, ok := pw.data.(*store.DeptMemberEntry); ok {
+				err = s.InsertDeptMember(ctx, member)
+			}
+		case "dept_member_remove":
+			if d, ok := pw.data.(*deptMemberRemoveData); ok {
+				err = s.RemoveDeptMember(ctx, d.OrgID, d.DeptID, d.AgentID, d.Height)
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("flush %s: %w", pw.writeType, err)
+		}
+	}
+	return nil
 }
 
 // PrepareProposal prepares a block proposal (pass-through in Phase 1).

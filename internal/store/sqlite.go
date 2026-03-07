@@ -15,9 +15,18 @@ import (
 	"github.com/l33tdawg/sage/internal/memory"
 )
 
+// sqlQuerier is satisfied by both *sql.DB and *sql.Tx, allowing
+// SQLiteStore methods to work inside or outside a transaction.
+type sqlQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // SQLiteStore implements MemoryStore, ValidatorScoreStore, AccessStore, and OrgStore using SQLite.
 type SQLiteStore struct {
-	db     *sql.DB
+	conn   sqlQuerier // either *sql.DB or *sql.Tx
+	db     *sql.DB    // nil for tx-scoped stores
 	dbPath string
 }
 
@@ -34,7 +43,7 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 
-	s := &SQLiteStore{db: db, dbPath: dbPath}
+	s := &SQLiteStore{conn: db, db: db, dbPath: dbPath}
 	if err := s.initSchema(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -258,7 +267,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_dept_members_dept ON dept_members(org_id, dept_id) WHERE removed_at IS NULL;
 	`
 
-	if _, err := s.db.ExecContext(ctx, schema); err != nil {
+	if _, err := s.conn.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
 
@@ -275,7 +284,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		{"infrastructure", 0.005},
 	}
 	for _, seed := range seeds {
-		_, err := s.db.ExecContext(ctx,
+		_, err := s.conn.ExecContext(ctx,
 			`INSERT INTO domains (domain_tag, decay_rate) VALUES (?, ?) ON CONFLICT DO NOTHING`,
 			seed.tag, seed.rate)
 		if err != nil {
@@ -393,7 +402,7 @@ func cosineSimilarity(a, b []float32) float64 {
 // --- MemoryStore implementation ---
 
 func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRecord) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
 			memory_type, domain_tag, confidence_score, status, parent_hash, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -412,7 +421,7 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 }
 
 func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.conn.QueryRowContext(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
 			memory_type, domain_tag, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at
 		FROM memories WHERE memory_id = ?`, memoryID)
@@ -450,15 +459,15 @@ func (s *SQLiteStore) UpdateStatus(ctx context.Context, memoryID string, status 
 	var err error
 	switch status {
 	case memory.StatusCommitted:
-		_, err = s.db.ExecContext(ctx,
+		_, err = s.conn.ExecContext(ctx,
 			`UPDATE memories SET status = ?, committed_at = ? WHERE memory_id = ?`,
 			string(status), nowStr, memoryID)
 	case memory.StatusDeprecated:
-		_, err = s.db.ExecContext(ctx,
+		_, err = s.conn.ExecContext(ctx,
 			`UPDATE memories SET status = ?, deprecated_at = ? WHERE memory_id = ?`,
 			string(status), nowStr, memoryID)
 	default:
-		_, err = s.db.ExecContext(ctx,
+		_, err = s.conn.ExecContext(ctx,
 			`UPDATE memories SET status = ? WHERE memory_id = ?`,
 			string(status), memoryID)
 	}
@@ -495,7 +504,7 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		args = append(args, opts.StatusFilter)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query similar: %w", err)
 	}
@@ -551,29 +560,41 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 }
 
 func (s *SQLiteStore) InsertTriples(ctx context.Context, memoryID string, triples []memory.KnowledgeTriple) error {
+	if len(triples) == 0 {
+		return nil
+	}
+
+	insertAll := func(q sqlQuerier) error {
+		for _, t := range triples {
+			if _, err := q.ExecContext(ctx,
+				`INSERT INTO knowledge_triples (memory_id, subject, predicate, object) VALUES (?, ?, ?, ?)`,
+				memoryID, t.Subject, t.Predicate, t.Object); err != nil {
+				return fmt.Errorf("insert triple: %w", err)
+			}
+		}
+		return nil
+	}
+
+	// If already in a transaction (tx-scoped store), execute directly.
+	if s.db == nil {
+		return insertAll(s.conn)
+	}
+
+	// Otherwise, wrap in a local transaction for atomicity.
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO knowledge_triples (memory_id, subject, predicate, object) VALUES (?, ?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("prepare insert triple: %w", err)
-	}
-	defer stmt.Close()
-
-	for _, t := range triples {
-		if _, err := stmt.ExecContext(ctx, memoryID, t.Subject, t.Predicate, t.Object); err != nil {
-			return fmt.Errorf("insert triple: %w", err)
-		}
+	if err := insertAll(tx); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
 
 func (s *SQLiteStore) InsertVote(ctx context.Context, vote *ValidationVote) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO validation_votes (memory_id, validator_id, decision, rationale, weight_at_vote, block_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (memory_id, validator_id) DO UPDATE SET decision = excluded.decision, rationale = excluded.rationale, weight_at_vote = excluded.weight_at_vote`,
@@ -585,7 +606,7 @@ func (s *SQLiteStore) InsertVote(ctx context.Context, vote *ValidationVote) erro
 }
 
 func (s *SQLiteStore) GetVotes(ctx context.Context, memoryID string) ([]*ValidationVote, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT id, memory_id, validator_id, decision, rationale, weight_at_vote, block_height, created_at
 		FROM validation_votes WHERE memory_id = ? ORDER BY created_at`, memoryID)
 	if err != nil {
@@ -608,7 +629,7 @@ func (s *SQLiteStore) GetVotes(ctx context.Context, memoryID string) ([]*Validat
 }
 
 func (s *SQLiteStore) InsertChallenge(ctx context.Context, challenge *ChallengeEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO challenges (memory_id, challenger_id, reason, evidence, block_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		challenge.MemoryID, challenge.ChallengerID, challenge.Reason, challenge.Evidence, challenge.BlockHeight, formatTime(challenge.CreatedAt))
@@ -619,7 +640,7 @@ func (s *SQLiteStore) InsertChallenge(ctx context.Context, challenge *ChallengeE
 }
 
 func (s *SQLiteStore) InsertCorroboration(ctx context.Context, corr *Corroboration) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO corroborations (memory_id, agent_id, evidence, created_at)
 		VALUES (?, ?, ?, ?)`,
 		corr.MemoryID, corr.AgentID, corr.Evidence, formatTime(corr.CreatedAt))
@@ -630,7 +651,7 @@ func (s *SQLiteStore) InsertCorroboration(ctx context.Context, corr *Corroborati
 }
 
 func (s *SQLiteStore) GetCorroborations(ctx context.Context, memoryID string) ([]*Corroboration, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT id, memory_id, agent_id, evidence, created_at
 		FROM corroborations WHERE memory_id = ? ORDER BY created_at`, memoryID)
 	if err != nil {
@@ -655,7 +676,7 @@ func (s *SQLiteStore) GetPendingByDomain(ctx context.Context, domainTag string, 
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash,
 			memory_type, domain_tag, confidence_score, status, created_at
 		FROM memories WHERE status = 'proposed' AND domain_tag LIKE ?
@@ -720,11 +741,11 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 	queryArgs = append(queryArgs, opts.Limit, opts.Offset)
 
 	var total int
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.conn.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count memories: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	rows, err := s.conn.QueryContext(ctx, query, queryArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("list memories: %w", err)
 	}
@@ -759,11 +780,11 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 		ByStatus: make(map[string]int),
 	}
 
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&stats.TotalMemories); err != nil {
+	if err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&stats.TotalMemories); err != nil {
 		return nil, fmt.Errorf("count total: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `SELECT domain_tag, COUNT(*) FROM memories GROUP BY domain_tag`)
+	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag, COUNT(*) FROM memories GROUP BY domain_tag`)
 	if err != nil {
 		return nil, fmt.Errorf("count by domain: %w", err)
 	}
@@ -778,7 +799,7 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 	}
 	rows.Close()
 
-	rows, err = s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM memories GROUP BY status`)
+	rows, err = s.conn.QueryContext(ctx, `SELECT status, COUNT(*) FROM memories GROUP BY status`)
 	if err != nil {
 		return nil, fmt.Errorf("count by status: %w", err)
 	}
@@ -794,7 +815,7 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 	rows.Close()
 
 	var lastActivity *string
-	if scanErr := s.db.QueryRowContext(ctx, `SELECT MAX(created_at) FROM memories`).Scan(&lastActivity); scanErr == nil {
+	if scanErr := s.conn.QueryRowContext(ctx, `SELECT MAX(created_at) FROM memories`).Scan(&lastActivity); scanErr == nil {
 		stats.LastActivity = parseTimePtr(lastActivity)
 	}
 
@@ -831,7 +852,7 @@ func (s *SQLiteStore) GetTimeline(ctx context.Context, from, to time.Time, domai
 
 	query += " GROUP BY period ORDER BY period"
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get timeline: %w", err)
 	}
@@ -854,7 +875,7 @@ func (s *SQLiteStore) GetTimeline(ctx context.Context, from, to time.Time, domai
 }
 
 func (s *SQLiteStore) DeleteMemory(ctx context.Context, memoryID string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE memory_id = ?`,
 		memoryID)
 	if err != nil {
@@ -864,7 +885,7 @@ func (s *SQLiteStore) DeleteMemory(ctx context.Context, memoryID string) error {
 }
 
 func (s *SQLiteStore) UpdateDomainTag(ctx context.Context, memoryID string, domain string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE memories SET domain_tag = ? WHERE memory_id = ?`,
 		domain, memoryID)
 	if err != nil {
@@ -876,7 +897,7 @@ func (s *SQLiteStore) UpdateDomainTag(ctx context.Context, memoryID string, doma
 // --- ValidatorScoreStore implementation ---
 
 func (s *SQLiteStore) GetScore(ctx context.Context, validatorID string) (*ValidatorScore, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.conn.QueryRowContext(ctx,
 		`SELECT validator_id, weighted_sum, weight_denom, vote_count, expertise_vec,
 			last_active_ts, current_weight, updated_at
 		FROM validator_scores WHERE validator_id = ?`, validatorID)
@@ -899,7 +920,7 @@ func (s *SQLiteStore) GetScore(ctx context.Context, validatorID string) (*Valida
 }
 
 func (s *SQLiteStore) UpdateScore(ctx context.Context, score *ValidatorScore) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO validator_scores (validator_id, weighted_sum, weight_denom, vote_count, expertise_vec,
 			last_active_ts, current_weight, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -918,7 +939,7 @@ func (s *SQLiteStore) UpdateScore(ctx context.Context, score *ValidatorScore) er
 }
 
 func (s *SQLiteStore) GetAllScores(ctx context.Context) ([]*ValidatorScore, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT validator_id, weighted_sum, weight_denom, vote_count, expertise_vec,
 			last_active_ts, current_weight, updated_at
 		FROM validator_scores ORDER BY validator_id`)
@@ -945,7 +966,7 @@ func (s *SQLiteStore) GetAllScores(ctx context.Context) ([]*ValidatorScore, erro
 }
 
 func (s *SQLiteStore) InsertEpochScore(ctx context.Context, epoch *EpochScore) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO epoch_scores (epoch_num, block_height, validator_id, accuracy, domain_score,
 			recency_score, corr_score, raw_weight, capped_weight, normalized_weight)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -961,7 +982,7 @@ func (s *SQLiteStore) InsertEpochScore(ctx context.Context, epoch *EpochScore) e
 // --- AccessStore implementation ---
 
 func (s *SQLiteStore) InsertAccessGrant(ctx context.Context, grant *AccessGrantEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO access_grants (domain, grantee_id, granter_id, access_level, expires_at, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (domain, grantee_id, created_height) DO NOTHING`,
@@ -974,7 +995,7 @@ func (s *SQLiteStore) InsertAccessGrant(ctx context.Context, grant *AccessGrantE
 }
 
 func (s *SQLiteStore) GetActiveGrants(ctx context.Context, agentID string) ([]*AccessGrantEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT domain, grantee_id, granter_id, access_level, expires_at, created_height, created_at
 		FROM access_grants WHERE grantee_id = ? AND revoked_at IS NULL
 		ORDER BY created_at`, agentID)
@@ -1000,7 +1021,7 @@ func (s *SQLiteStore) GetActiveGrants(ctx context.Context, agentID string) ([]*A
 }
 
 func (s *SQLiteStore) RevokeGrant(ctx context.Context, domain, granteeID string, height int64) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE access_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE domain = ? AND grantee_id = ? AND revoked_at IS NULL`,
 		domain, granteeID)
@@ -1011,7 +1032,7 @@ func (s *SQLiteStore) RevokeGrant(ctx context.Context, domain, granteeID string,
 }
 
 func (s *SQLiteStore) InsertAccessRequest(ctx context.Context, req *AccessRequestEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO access_requests (request_id, requester_id, target_domain, justification, status, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (request_id) DO NOTHING`,
@@ -1023,7 +1044,7 @@ func (s *SQLiteStore) InsertAccessRequest(ctx context.Context, req *AccessReques
 }
 
 func (s *SQLiteStore) UpdateAccessRequestStatus(ctx context.Context, requestID, status string, height int64) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE access_requests SET status = ?, resolved_height = ? WHERE request_id = ?`,
 		status, height, requestID)
 	if err != nil {
@@ -1034,7 +1055,7 @@ func (s *SQLiteStore) UpdateAccessRequestStatus(ctx context.Context, requestID, 
 
 func (s *SQLiteStore) InsertAccessLog(ctx context.Context, log *AccessLogEntry) error {
 	memoryIDsJSON := encodeStringSlice(log.MemoryIDs)
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO access_logs (agent_id, domain, action, memory_ids, block_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		log.AgentID, log.Domain, log.Action, memoryIDsJSON, log.BlockHeight, formatTime(log.CreatedAt))
@@ -1045,7 +1066,7 @@ func (s *SQLiteStore) InsertAccessLog(ctx context.Context, log *AccessLogEntry) 
 }
 
 func (s *SQLiteStore) InsertDomain(ctx context.Context, domain *DomainEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO domain_registry (domain_name, owner_agent_id, parent_domain, description, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (domain_name) DO NOTHING`,
@@ -1057,7 +1078,7 @@ func (s *SQLiteStore) InsertDomain(ctx context.Context, domain *DomainEntry) err
 }
 
 func (s *SQLiteStore) GetDomain(ctx context.Context, name string) (*DomainEntry, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.conn.QueryRowContext(ctx,
 		`SELECT domain_name, owner_agent_id, parent_domain, description, created_height, created_at
 		FROM domain_registry WHERE domain_name = ?`, name)
 
@@ -1084,7 +1105,7 @@ func (s *SQLiteStore) GetDomain(ctx context.Context, name string) (*DomainEntry,
 // --- OrgStore implementation ---
 
 func (s *SQLiteStore) InsertOrg(ctx context.Context, org *OrgEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO organizations (org_id, name, description, admin_agent_id, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (org_id) DO NOTHING`,
@@ -1096,7 +1117,7 @@ func (s *SQLiteStore) InsertOrg(ctx context.Context, org *OrgEntry) error {
 }
 
 func (s *SQLiteStore) GetOrg(ctx context.Context, orgID string) (*OrgEntry, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.conn.QueryRowContext(ctx,
 		`SELECT org_id, name, description, admin_agent_id, created_height, created_at
 		FROM organizations WHERE org_id = ?`, orgID)
 
@@ -1118,7 +1139,7 @@ func (s *SQLiteStore) GetOrg(ctx context.Context, orgID string) (*OrgEntry, erro
 }
 
 func (s *SQLiteStore) InsertOrgMember(ctx context.Context, member *OrgMemberEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO org_members (org_id, agent_id, clearance, role, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (org_id, agent_id) DO NOTHING`,
@@ -1130,7 +1151,7 @@ func (s *SQLiteStore) InsertOrgMember(ctx context.Context, member *OrgMemberEntr
 }
 
 func (s *SQLiteStore) RemoveOrgMember(ctx context.Context, orgID, agentID string, height int64) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE org_members SET removed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE org_id = ? AND agent_id = ? AND removed_at IS NULL`,
 		orgID, agentID)
@@ -1141,7 +1162,7 @@ func (s *SQLiteStore) RemoveOrgMember(ctx context.Context, orgID, agentID string
 }
 
 func (s *SQLiteStore) UpdateMemberClearance(ctx context.Context, orgID, agentID string, clearance ClearanceLevel) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE org_members SET clearance = ?
 		WHERE org_id = ? AND agent_id = ? AND removed_at IS NULL`,
 		int(clearance), orgID, agentID)
@@ -1152,7 +1173,7 @@ func (s *SQLiteStore) UpdateMemberClearance(ctx context.Context, orgID, agentID 
 }
 
 func (s *SQLiteStore) GetOrgMembers(ctx context.Context, orgID string) ([]*OrgMemberEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT org_id, agent_id, clearance, role, created_height, created_at
 		FROM org_members WHERE org_id = ? AND removed_at IS NULL
 		ORDER BY created_at`, orgID)
@@ -1177,7 +1198,7 @@ func (s *SQLiteStore) GetOrgMembers(ctx context.Context, orgID string) ([]*OrgMe
 }
 
 func (s *SQLiteStore) InsertFederation(ctx context.Context, fed *FederationEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO federations (federation_id, proposer_org_id, target_org_id, allowed_domains, allowed_depts,
 			max_clearance, expires_at, requires_approval, status, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1201,7 +1222,7 @@ func boolToInt(b bool) int {
 }
 
 func (s *SQLiteStore) GetFederation(ctx context.Context, federationID string) (*FederationEntry, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.conn.QueryRowContext(ctx,
 		`SELECT federation_id, proposer_org_id, target_org_id, allowed_domains, allowed_depts,
 			max_clearance, expires_at, requires_approval, status, created_height,
 			approved_height, created_at, revoked_at
@@ -1236,7 +1257,7 @@ func (s *SQLiteStore) GetFederation(ctx context.Context, federationID string) (*
 }
 
 func (s *SQLiteStore) ApproveFederation(ctx context.Context, federationID string, height int64) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE federations SET status = 'active', approved_height = ?
 		WHERE federation_id = ? AND status = 'proposed'`,
 		height, federationID)
@@ -1247,7 +1268,7 @@ func (s *SQLiteStore) ApproveFederation(ctx context.Context, federationID string
 }
 
 func (s *SQLiteStore) RevokeFederation(ctx context.Context, federationID string, height int64) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE federations SET status = 'revoked', revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE federation_id = ? AND status = 'active'`,
 		federationID)
@@ -1258,7 +1279,7 @@ func (s *SQLiteStore) RevokeFederation(ctx context.Context, federationID string,
 }
 
 func (s *SQLiteStore) GetActiveFederations(ctx context.Context, orgID string) ([]*FederationEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT federation_id, proposer_org_id, target_org_id, allowed_domains, allowed_depts,
 			max_clearance, expires_at, requires_approval, status, created_height,
 			approved_height, created_at, revoked_at
@@ -1298,7 +1319,7 @@ func (s *SQLiteStore) GetActiveFederations(ctx context.Context, orgID string) ([
 }
 
 func (s *SQLiteStore) UpdateMemoryClassification(ctx context.Context, memoryID string, classification ClearanceLevel) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE memories SET classification = ? WHERE memory_id = ?`,
 		int(classification), memoryID)
 	if err != nil {
@@ -1310,7 +1331,7 @@ func (s *SQLiteStore) UpdateMemoryClassification(ctx context.Context, memoryID s
 // --- Department methods ---
 
 func (s *SQLiteStore) InsertDept(ctx context.Context, dept *DeptEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO departments (dept_id, org_id, dept_name, description, parent_dept, created_height)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING`,
@@ -1322,7 +1343,7 @@ func (s *SQLiteStore) InsertDept(ctx context.Context, dept *DeptEntry) error {
 }
 
 func (s *SQLiteStore) GetDept(ctx context.Context, orgID, deptID string) (*DeptEntry, error) {
-	row := s.db.QueryRowContext(ctx,
+	row := s.conn.QueryRowContext(ctx,
 		`SELECT dept_id, org_id, dept_name, description, parent_dept, created_height, created_at
 		FROM departments WHERE org_id = ? AND dept_id = ?`, orgID, deptID)
 
@@ -1347,7 +1368,7 @@ func (s *SQLiteStore) GetDept(ctx context.Context, orgID, deptID string) (*DeptE
 }
 
 func (s *SQLiteStore) GetOrgDepts(ctx context.Context, orgID string) ([]*DeptEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT dept_id, org_id, dept_name, description, parent_dept, created_height, created_at
 		FROM departments WHERE org_id = ? ORDER BY dept_name`, orgID)
 	if err != nil {
@@ -1376,7 +1397,7 @@ func (s *SQLiteStore) GetOrgDepts(ctx context.Context, orgID string) ([]*DeptEnt
 }
 
 func (s *SQLiteStore) InsertDeptMember(ctx context.Context, member *DeptMemberEntry) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO dept_members (org_id, dept_id, agent_id, clearance, role, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING`,
@@ -1388,7 +1409,7 @@ func (s *SQLiteStore) InsertDeptMember(ctx context.Context, member *DeptMemberEn
 }
 
 func (s *SQLiteStore) RemoveDeptMember(ctx context.Context, orgID, deptID, agentID string, height int64) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE dept_members SET removed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE org_id = ? AND dept_id = ? AND agent_id = ? AND removed_at IS NULL`,
 		orgID, deptID, agentID)
@@ -1399,7 +1420,7 @@ func (s *SQLiteStore) RemoveDeptMember(ctx context.Context, orgID, deptID, agent
 }
 
 func (s *SQLiteStore) GetDeptMembers(ctx context.Context, orgID, deptID string) ([]*DeptMemberEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.conn.QueryContext(ctx,
 		`SELECT org_id, dept_id, agent_id, clearance, role, created_height, created_at
 		FROM dept_members WHERE org_id = ? AND dept_id = ? AND removed_at IS NULL
 		ORDER BY created_at`, orgID, deptID)
@@ -1424,7 +1445,7 @@ func (s *SQLiteStore) GetDeptMembers(ctx context.Context, orgID, deptID string) 
 }
 
 func (s *SQLiteStore) UpdateDeptMemberClearance(ctx context.Context, orgID, deptID, agentID string, clearance ClearanceLevel) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.conn.ExecContext(ctx,
 		`UPDATE dept_members SET clearance = ?
 		WHERE org_id = ? AND dept_id = ? AND agent_id = ? AND removed_at IS NULL`,
 		int(clearance), orgID, deptID, agentID)
@@ -1437,9 +1458,35 @@ func (s *SQLiteStore) UpdateDeptMemberClearance(ctx context.Context, orgID, dept
 // --- Close & Ping ---
 
 func (s *SQLiteStore) Close() error {
-	return s.db.Close()
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
 }
 
 func (s *SQLiteStore) Ping(ctx context.Context) error {
-	return s.db.PingContext(ctx)
+	if s.db != nil {
+		return s.db.PingContext(ctx)
+	}
+	return nil
+}
+
+// RunInTx executes fn within a SQLite transaction. All writes through
+// the tx-scoped OffchainStore are atomic — either all succeed or all roll back.
+func (s *SQLiteStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) error) error {
+	if s.db == nil {
+		// Already in a transaction — execute directly.
+		return fn(s)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	txStore := &SQLiteStore{conn: tx, dbPath: s.dbPath}
+	if err := fn(txStore); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

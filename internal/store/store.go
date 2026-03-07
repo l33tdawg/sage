@@ -265,6 +265,10 @@ type OffchainStore interface {
 	AccessStore
 	OrgStore
 	Ping(ctx context.Context) error
+	// RunInTx executes fn within a database transaction. If fn returns an error,
+	// the transaction is rolled back; otherwise it is committed. The OffchainStore
+	// passed to fn is scoped to the transaction — all writes through it are atomic.
+	RunInTx(ctx context.Context, fn func(tx OffchainStore) error) error
 }
 
 // OrgStore defines the interface for organization, department, and federation storage.
