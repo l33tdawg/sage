@@ -136,9 +136,33 @@ nav .container { display: flex; align-items: center; justify-content: space-betw
   display: flex;
   align-items: center;
   padding-top: 80px;
-  text-align: center;
 }
-.hero-inner { max-width: 800px; margin: 0 auto; }
+.hero-inner { max-width: 960px; margin: 0 auto; }
+.hero-split {
+  display: flex;
+  align-items: center;
+  gap: 56px;
+  margin-bottom: 40px;
+}
+.hero-icon {
+  flex: 0 0 260px;
+  animation: fadeUp 0.8s ease-out both;
+}
+.hero-icon img {
+  width: 260px;
+  height: auto;
+  border-radius: 20px;
+  filter: drop-shadow(0 0 40px rgba(167,139,250,0.3));
+}
+.hero-text {
+  flex: 1;
+  text-align: left;
+}
+.hero-text h1 { text-align: left; }
+.hero-text .hero-sub { margin: 0 0 32px; text-align: left; }
+.hero-text .hero-actions { justify-content: flex-start; }
+.hero-text .download-badges { justify-content: flex-start; }
+.hero-below { text-align: center; }
 .hero-badge {
   display: inline-flex;
   align-items: center;
@@ -184,8 +208,8 @@ h1 em {
 
 .hero-sub {
   font-size: clamp(1.05rem, 2vw, 1.25rem);
-  color: var(--muted);
-  max-width: 580px;
+  color: var(--text);
+  max-width: 720px;
   margin: 0 auto 40px;
   line-height: 1.7;
   animation: fadeUp 0.8s ease-out 0.2s both;
@@ -856,6 +880,14 @@ footer a:hover { text-decoration: underline; }
   .nav-links { gap: 16px; }
   .nav-links a:not(.nav-cta) { display: none; }
   h1 { font-size: 2.4rem; }
+  .hero-split { flex-direction: column; gap: 32px; text-align: center; }
+  .hero-icon { flex: none; }
+  .hero-icon img { width: 180px; }
+  .hero-text { text-align: center; }
+  .hero-text h1 { text-align: center; }
+  .hero-text .hero-sub { text-align: center; }
+  .hero-text .hero-actions { justify-content: center; }
+  .hero-text .download-badges { justify-content: center; }
   .hero-actions { flex-direction: column; align-items: center; }
 }
 
@@ -901,18 +933,24 @@ footer a:hover { text-decoration: underline; }
 <section class="hero">
   <div class="container">
     <div class="hero-inner">
-      <div class="hero-badge">Open Source &middot; AES-256 Encrypted &middot; Any AI, Any Model</div>
-      <h1>Give Your AI<br>a <em>Memory</em></h1>
-      <p class="hero-sub">Every time you close a conversation, your AI forgets everything — your projects, your preferences, every lesson it learned. SAGE fixes that. It runs on your laptop. Your data never leaves. Works with any AI &mdash; cloud or local.</p>
-      <div class="hero-actions">
-        <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          Download SAGE
-        </a>
-        <a href="#how" class="btn-secondary">See How It Works</a>
-      </div>
 
-      <div class="download-badges" style="display:flex;gap:12px;justify-content:center;margin-top:16px;flex-wrap:wrap;">
+      <div class="hero-split">
+        <div class="hero-icon">
+          <img src="sage-brain.svg" alt="SAGE Brain">
+        </div>
+        <div class="hero-text">
+          <div class="hero-badge">Open Source &middot; AES-256 Encrypted &middot; Any AI, Any Model</div>
+          <h1>Give Your AI<br>a <em>Secure Memory</em></h1>
+          <p class="hero-sub">Every time you close a conversation, your AI forgets everything — your projects, your preferences, every lesson it learned. SAGE fixes that — securely. AES-256 encrypted, locally stored, consensus-validated. Your data never leaves your machine. Works with any AI &mdash; cloud or local.</p>
+          <div class="hero-actions">
+            <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Download SAGE
+            </a>
+            <a href="#how" class="btn-secondary">See How It Works</a>
+          </div>
+
+          <div class="download-badges" style="display:flex;gap:12px;margin-top:16px;flex-wrap:wrap;">
         <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-macOS-arm64.dmg" class="badge-link" style="display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:8px;background:rgba(139,92,246,0.12);border:1px solid rgba(139,92,246,0.25);color:var(--accent);font-size:0.85rem;text-decoration:none;transition:all 0.2s;">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
           macOS (.dmg)
@@ -927,6 +965,10 @@ footer a:hover { text-decoration: underline; }
         </a>
       </div>
 
+        </div><!-- /hero-text -->
+      </div><!-- /hero-split -->
+
+      <div class="hero-below">
       <div class="free-prompt">
         <div class="free-prompt-label">Or just tell your AI</div>
         <div class="free-prompt-box" onclick="copyPrompt(this)" title="Click to copy">
@@ -946,6 +988,7 @@ footer a:hover { text-decoration: underline; }
           AI Minds Freed: <strong id="download-count">0</strong>
         </span>
       </div>
+      </div><!-- /hero-below -->
 
     </div>
   </div>

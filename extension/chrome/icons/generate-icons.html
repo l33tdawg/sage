@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head><title>SAGE Icon Generator</title></head>
+<body style="background:#1a1a2e;color:#fff;font-family:sans-serif;padding:40px">
+  <h2>SAGE Extension Icon Generator</h2>
+  <p>Right-click each canvas and "Save image as..." with the filename shown.</p>
+  <div id="icons" style="display:flex;gap:40px;margin-top:20px;align-items:end"></div>
+  <script>
+    const sizes = [16, 48, 128];
+
+    function drawIcon(size) {
+      const canvas = document.createElement("canvas");
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext("2d");
+      const s = size;
+      const cx = s / 2, cy = s / 2;
+
+      // Background circle
+      const bg = ctx.createRadialGradient(cx, cy, 0, cx, cy, s / 2);
+      bg.addColorStop(0, "#1a0f30");
+      bg.addColorStop(1, "#0d0818");
+      ctx.beginPath();
+      ctx.arc(cx, cy, s / 2, 0, Math.PI * 2);
+      ctx.fillStyle = bg;
+      ctx.fill();
+
+      // Outer ring
+      ctx.beginPath();
+      ctx.arc(cx, cy, s / 2 - 1, 0, Math.PI * 2);
+      ctx.strokeStyle = "#a78bfa";
+      ctx.lineWidth = Math.max(1, s / 24);
+      ctx.stroke();
+
+      // Brain-like neural pattern (simplified)
+      ctx.strokeStyle = "#a78bfa";
+      ctx.lineWidth = Math.max(1, s / 32);
+
+      // Center node
+      const r = s * 0.08;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.fillStyle = "#a78bfa";
+      ctx.fill();
+
+      // Nodes in a pattern
+      const nodes = [
+        [cx - s * 0.2, cy - s * 0.15],
+        [cx + s * 0.2, cy - s * 0.15],
+        [cx - s * 0.25, cy + s * 0.1],
+        [cx + s * 0.25, cy + s * 0.1],
+        [cx, cy - s * 0.28],
+        [cx, cy + s * 0.25],
+      ];
+
+      // Draw connections
+      ctx.globalAlpha = 0.6;
+      for (const [nx, ny] of nodes) {
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(nx, ny);
+        ctx.stroke();
+      }
+
+      // Cross connections
+      ctx.globalAlpha = 0.3;
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          if (Math.random() > 0.5) {
+            ctx.beginPath();
+            ctx.moveTo(nodes[i][0], nodes[i][1]);
+            ctx.lineTo(nodes[j][0], nodes[j][1]);
+            ctx.stroke();
+          }
+        }
+      }
+      ctx.globalAlpha = 1;
+
+      // Draw outer nodes
+      for (const [nx, ny] of nodes) {
+        ctx.beginPath();
+        ctx.arc(nx, ny, r * 0.7, 0, Math.PI * 2);
+        ctx.fillStyle = "#7c5cbf";
+        ctx.fill();
+      }
+
+      // Glow effect on center
+      const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, s * 0.15);
+      glow.addColorStop(0, "rgba(167, 139, 250, 0.4)");
+      glow.addColorStop(1, "rgba(167, 139, 250, 0)");
+      ctx.beginPath();
+      ctx.arc(cx, cy, s * 0.15, 0, Math.PI * 2);
+      ctx.fillStyle = glow;
+      ctx.fill();
+
+      return canvas;
+    }
+
+    const container = document.getElementById("icons");
+    for (const size of sizes) {
+      const wrap = document.createElement("div");
+      wrap.style.textAlign = "center";
+      const canvas = drawIcon(size);
+      canvas.style.border = "1px solid #333";
+      canvas.style.display = "block";
+      canvas.style.marginBottom = "8px";
+      wrap.appendChild(canvas);
+
+      const label = document.createElement("div");
+      label.textContent = `icon${size}.png`;
+      label.style.fontSize = "12px";
+      label.style.color = "#a78bfa";
+      wrap.appendChild(label);
+
+      // Auto-download link
+      const link = document.createElement("a");
+      link.textContent = "Download";
+      link.href = canvas.toDataURL("image/png");
+      link.download = `icon${size}.png`;
+      link.style.color = "#7c5cbf";
+      link.style.fontSize = "11px";
+      wrap.appendChild(link);
+
+      container.appendChild(wrap);
+    }
+  </script>
+</body>
+</html>

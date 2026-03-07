@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a0a2e"/>
+      <stop offset="50%" style="stop-color:#16082b"/>
+      <stop offset="100%" style="stop-color:#0d0520"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#a78bfa"/>
+      <stop offset="50%" style="stop-color:#7c3aed"/>
+      <stop offset="100%" style="stop-color:#6d28d9"/>
+    </linearGradient>
+    <linearGradient id="innerGlow" x1="30%" y1="0%" x2="70%" y2="100%">
+      <stop offset="0%" style="stop-color:#c4b5fd"/>
+      <stop offset="100%" style="stop-color:#8b5cf6"/>
+    </linearGradient>
+    <filter id="softGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="outerGlow">
+      <feGaussianBlur stdDeviation="20" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background: rounded square -->
+  <rect width="1024" height="1024" rx="220" ry="220" fill="url(#bg)"/>
+
+  <!-- Subtle radial glow behind the brain -->
+  <circle cx="512" cy="480" r="280" fill="#7c3aed" opacity="0.08"/>
+  <circle cx="512" cy="480" r="200" fill="#a78bfa" opacity="0.06"/>
+
+  <!-- Brain outline — stylized, symmetric, clean -->
+  <g transform="translate(512, 460)" filter="url(#outerGlow)">
+    <!-- Left hemisphere -->
+    <path d="M-20,-180 C-80,-180 -160,-160 -190,-100 C-220,-40 -210,20 -180,70
+             C-160,100 -170,130 -160,160 C-150,190 -120,200 -80,200
+             C-50,200 -30,190 -20,170"
+          fill="none" stroke="url(#glow)" stroke-width="12" stroke-linecap="round"/>
+
+    <!-- Left inner fold 1 -->
+    <path d="M-20,-140 C-60,-140 -120,-120 -150,-80 C-170,-50 -160,-10 -140,20"
+          fill="none" stroke="url(#innerGlow)" stroke-width="8" stroke-linecap="round" opacity="0.7"/>
+
+    <!-- Left inner fold 2 -->
+    <path d="M-20,-60 C-50,-60 -100,-40 -120,0 C-140,40 -120,80 -80,100"
+          fill="none" stroke="url(#innerGlow)" stroke-width="8" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- Right hemisphere -->
+    <path d="M20,-180 C80,-180 160,-160 190,-100 C220,-40 210,20 180,70
+             C160,100 170,130 160,160 C150,190 120,200 80,200
+             C50,200 30,190 20,170"
+          fill="none" stroke="url(#glow)" stroke-width="12" stroke-linecap="round"/>
+
+    <!-- Right inner fold 1 -->
+    <path d="M20,-140 C60,-140 120,-120 150,-80 C170,-50 160,-10 140,20"
+          fill="none" stroke="url(#innerGlow)" stroke-width="8" stroke-linecap="round" opacity="0.7"/>
+
+    <!-- Right inner fold 2 -->
+    <path d="M20,-60 C50,-60 100,-40 120,0 C140,40 120,80 80,100"
+          fill="none" stroke="url(#innerGlow)" stroke-width="8" stroke-linecap="round" opacity="0.6"/>
+
+    <!-- Brain stem / center line -->
+    <line x1="0" y1="-180" x2="0" y2="200" stroke="url(#glow)" stroke-width="6" opacity="0.3"/>
+
+    <!-- Neural nodes — memory points -->
+    <circle cx="-140" cy="-80" r="8" fill="#c4b5fd" filter="url(#softGlow)"/>
+    <circle cx="-120" cy="30" r="6" fill="#a78bfa" filter="url(#softGlow)"/>
+    <circle cx="-70" cy="-130" r="5" fill="#ddd6fe" filter="url(#softGlow)"/>
+    <circle cx="140" cy="-80" r="8" fill="#c4b5fd" filter="url(#softGlow)"/>
+    <circle cx="120" cy="30" r="6" fill="#a78bfa" filter="url(#softGlow)"/>
+    <circle cx="70" cy="-130" r="5" fill="#ddd6fe" filter="url(#softGlow)"/>
+
+    <!-- Center consciousness dot -->
+    <circle cx="0" cy="0" r="12" fill="#e9d5ff" filter="url(#softGlow)"/>
+    <circle cx="0" cy="0" r="6" fill="#ffffff" opacity="0.9"/>
+  </g>
+
+  <!-- SAGE text -->
+  <text x="512" y="780" text-anchor="middle"
+        font-family="'SF Pro Display', 'Helvetica Neue', 'Segoe UI', sans-serif"
+        font-weight="700" font-size="120" letter-spacing="16"
+        fill="url(#glow)" filter="url(#softGlow)">SAGE</text>
+
+  <!-- Subtle tagline -->
+  <text x="512" y="840" text-anchor="middle"
+        font-family="'SF Pro Text', 'Helvetica Neue', 'Segoe UI', sans-serif"
+        font-weight="400" font-size="44" letter-spacing="6"
+        fill="#a78bfa" opacity="0.6">AI MEMORY</text>
+</svg>

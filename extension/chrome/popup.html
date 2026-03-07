@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="sage-popup">
+    <div class="sage-header">
+      <div>
+        <div class="sage-logo">SAGE</div>
+        <div class="sage-subtitle">Sovereign Agent Governed Experience</div>
+      </div>
+    </div>
+
+    <div class="sage-status-row">
+      <div class="sage-status-dot" id="statusDot"></div>
+      <div class="sage-status-text" id="statusText">Checking connection...</div>
+    </div>
+
+    <div class="sage-stats" id="statsGrid" style="display: none;">
+      <div class="sage-stat-card">
+        <div class="sage-stat-value" id="memoryCount">0</div>
+        <div class="sage-stat-label">Memories</div>
+      </div>
+      <div class="sage-stat-card">
+        <div class="sage-stat-value" id="domainCount">0</div>
+        <div class="sage-stat-label">Domains</div>
+      </div>
+    </div>
+
+    <div class="sage-field">
+      <label>SAGE Server URL</label>
+      <input type="text" id="serverUrl" placeholder="http://localhost:8080">
+    </div>
+
+    <button class="sage-btn" id="testBtn">Test Connection</button>
+
+    <div class="sage-msg" id="message"></div>
+
+    <div class="sage-footer">
+      SAGE v2 &mdash; Persistent AI Memory
+    </div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

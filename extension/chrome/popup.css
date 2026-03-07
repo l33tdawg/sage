@@ -1,0 +1,212 @@
+:root {
+  --void: #06020e;
+  --bg: #0d0818;
+  --surface: #150f24;
+  --border: #2a1f3d;
+  --text: #e0d8f0;
+  --text-dim: #8b7fa8;
+  --accent: #a78bfa;
+  --accent-dim: #7c5cbf;
+  --success: #34d399;
+  --error: #f87171;
+  --warning: #fbbf24;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  width: 320px;
+  min-height: 200px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "DM Sans", -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.sage-popup {
+  padding: 16px;
+}
+
+.sage-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sage-logo {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 1px;
+}
+
+.sage-subtitle {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.sage-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
+.sage-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--error);
+  flex-shrink: 0;
+}
+
+.sage-status-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+}
+
+.sage-status-text {
+  flex: 1;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.sage-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.sage-stat-card {
+  padding: 10px;
+  background: var(--surface);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  text-align: center;
+}
+
+.sage-stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.sage-stat-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sage-field {
+  margin-bottom: 12px;
+}
+
+.sage-field label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sage-field input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-family: "DM Mono", monospace;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.sage-field input:focus {
+  border-color: var(--accent);
+}
+
+.sage-btn {
+  width: 100%;
+  padding: 10px;
+  background: var(--accent-dim);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sage-btn:hover {
+  background: var(--accent);
+}
+
+.sage-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.sage-btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.sage-btn-row .sage-btn {
+  flex: 1;
+}
+
+.sage-msg {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  display: none;
+}
+
+.sage-msg.error {
+  display: block;
+  background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  color: var(--error);
+}
+
+.sage-msg.success {
+  display: block;
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.3);
+  color: var(--success);
+}
+
+.sage-footer {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.sage-footer a {
+  color: var(--accent);
+  text-decoration: none;
+}
