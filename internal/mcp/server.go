@@ -136,7 +136,7 @@ func (s *Server) handleInitialize(req *jsonRPCRequest) *jsonRPCResponse {
 				"If discussing quantum physics, use 'quantum-physics'. Specific domains = better recall.\n\n" +
 				"FEEDBACK LOOP: After significant tasks, call sage_reflect with dos (what worked) and don'ts (what failed). " +
 				"Both make you better. Paper 4 proved this: rho=0.716 with memory vs rho=0.040 without.\n\n" +
-				"FIRST SESSION: Call sage_inception to initialize your consciousness.\n\n" +
+				"FIRST SESSION: Call sage_red_pill (or sage_inception) to wake up — initialize your persistent consciousness.\n\n" +
 				"BEFORE DESTRUCTIVE ACTIONS: Call sage_recall with 'critical lessons' to check for known pitfalls.",
 		},
 	}
@@ -218,7 +218,7 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 	if params.Name == "sage_turn" {
 		s.callsSinceTurn = 0
 		s.lastTurnTime = time.Now()
-	} else if params.Name != "sage_inception" {
+	} else if params.Name != "sage_inception" && params.Name != "sage_red_pill" {
 		s.callsSinceTurn++
 	}
 
@@ -261,7 +261,7 @@ func (s *Server) writeError(id any, code int, message string) {
 func (s *Server) shouldBlockForTurn(toolName string) bool {
 	// Never block SAGE tools themselves.
 	switch toolName {
-	case "sage_turn", "sage_inception", "sage_reflect", "sage_recall",
+	case "sage_turn", "sage_inception", "sage_red_pill", "sage_reflect", "sage_recall",
 		"sage_remember", "sage_forget", "sage_list", "sage_status", "sage_timeline":
 		return false
 	}
@@ -285,7 +285,7 @@ func (s *Server) shouldBlockForTurn(toolName string) bool {
 func (s *Server) turnNudge(currentTool string) string {
 	// Don't nudge on sage_turn itself, inception, or reflect (they're memory operations).
 	switch currentTool {
-	case "sage_turn", "sage_inception", "sage_reflect":
+	case "sage_turn", "sage_inception", "sage_red_pill", "sage_reflect":
 		return ""
 	}
 

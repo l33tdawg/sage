@@ -924,7 +924,7 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
 
   <div class="prompt-box">
     <button class="btn copy-btn btn-sm" onclick="copyPrompt()">Copy</button>
-    Call sage_inception to initialize your memory. From now on, call sage_turn at the start of every conversation with the current topic so you can recall relevant memories and build experience over time.
+    Call sage_red_pill to wake up. From now on, call sage_turn at the start of every conversation with the current topic so you can recall relevant memories and build experience over time.
   </div>
 
   <p style="color:#9ca3af; font-size:0.9rem; margin-top:1rem; line-height:1.6">
