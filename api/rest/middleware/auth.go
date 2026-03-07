@@ -136,9 +136,10 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Read and buffer the request body for signature verification.
+		// Read and buffer the request body for signature verification (capped at 1 MB).
 		var body []byte
 		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 			body, err = io.ReadAll(r.Body)
 			if err != nil {
 				log.Error().Err(err).Msg("failed to read request body for auth")

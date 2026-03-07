@@ -9,7 +9,7 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-sage}
       POSTGRES_USER: ${POSTGRES_USER:-sage}
@@ -37,8 +37,8 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"
-      - "2112:2112"
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:2112:2112"
     environment:
       POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=disable"
       NODE_ID: node0
@@ -63,8 +63,8 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8081:8080"
-      - "2113:2112"
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:2113:2112"
     environment:
       POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=disable"
       NODE_ID: node1
@@ -89,8 +89,8 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8082:8080"
-      - "2114:2112"
+      - "127.0.0.1:8082:8080"
+      - "127.0.0.1:2114:2112"
     environment:
       POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=disable"
       NODE_ID: node2
@@ -115,8 +115,8 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8083:8080"
-      - "2115:2112"
+      - "127.0.0.1:8083:8080"
+      - "127.0.0.1:2115:2112"
     environment:
       POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=disable"
       NODE_ID: node3

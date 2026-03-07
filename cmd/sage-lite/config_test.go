@@ -15,7 +15,7 @@ func TestDefaultConfig(t *testing.T) {
 
 	assert.Equal(t, "hash", cfg.Embedding.Provider)
 	assert.Equal(t, 768, cfg.Embedding.Dimension)
-	assert.Equal(t, ":8080", cfg.RESTAddr)
+	assert.Equal(t, "127.0.0.1:8080", cfg.RESTAddr)
 	assert.Equal(t, filepath.Join(home, "data"), cfg.DataDir)
 	assert.Equal(t, filepath.Join(home, "agent.key"), cfg.AgentKey)
 }
@@ -28,7 +28,7 @@ func TestLoadConfig_Missing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hash", cfg.Embedding.Provider)
 	assert.Equal(t, 768, cfg.Embedding.Dimension)
-	assert.Equal(t, ":8080", cfg.RESTAddr)
+	assert.Equal(t, "127.0.0.1:8080", cfg.RESTAddr)
 }
 
 func TestSaveAndLoadConfig(t *testing.T) {

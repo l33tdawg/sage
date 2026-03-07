@@ -34,7 +34,7 @@ func DefaultConfig(home string) *Config {
 			Dimension: 768,
 		},
 		DataDir:  filepath.Join(home, "data"),
-		RESTAddr: ":8080",
+		RESTAddr: "127.0.0.1:8080",
 		AgentKey: filepath.Join(home, "agent.key"),
 	}
 }

@@ -27,8 +27,12 @@ func writeProblem(w http.ResponseWriter, status int, title, detail string) {
 	})
 }
 
+// maxBodySize is the maximum allowed request body size (1 MB).
+const maxBodySize = 1 << 20
+
 // decodeJSON reads and unmarshals the request body as JSON.
 func decodeJSON(r *http.Request, v interface{}) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxBodySize)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		return fmt.Errorf("read body: %w", err)

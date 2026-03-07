@@ -303,6 +303,7 @@ func createEmbeddingProvider(cfg *Config, logger zerolog.Logger) embedding.Provi
 // handleEmbedPersonal returns an HTTP handler for the personal embedding endpoint.
 func handleEmbedPersonal(provider embedding.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 		var req struct {
 			Text string `json:"text"`
 		}
@@ -317,7 +318,7 @@ func handleEmbedPersonal(provider embedding.Provider) http.HandlerFunc {
 
 		emb, err := provider.Embed(r.Context(), req.Text)
 		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusInternalServerError)
+			http.Error(w, `{"error":"embedding failed"}`, http.StatusInternalServerError)
 			return
 		}
 

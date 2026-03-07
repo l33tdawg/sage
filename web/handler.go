@@ -256,6 +256,7 @@ func (h *DashboardHandler) handleUpdateMemory(w http.ResponseWriter, r *http.Req
 	var body struct {
 		Domain string `json:"domain"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
