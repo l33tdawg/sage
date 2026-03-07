@@ -1,28 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#1a0a2e"/>
-      <stop offset="50%" style="stop-color:#16082b"/>
-      <stop offset="100%" style="stop-color:#0d0520"/>
+      <stop offset="0%" style="stop-color:#1a0f30"/>
+      <stop offset="100%" style="stop-color:#0d0818"/>
     </linearGradient>
     <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#a78bfa"/>
-      <stop offset="50%" style="stop-color:#7c3aed"/>
-      <stop offset="100%" style="stop-color:#6d28d9"/>
-    </linearGradient>
-    <linearGradient id="innerGlow" x1="30%" y1="0%" x2="70%" y2="100%">
       <stop offset="0%" style="stop-color:#c4b5fd"/>
-      <stop offset="100%" style="stop-color:#8b5cf6"/>
+      <stop offset="50%" style="stop-color:#a78bfa"/>
+      <stop offset="100%" style="stop-color:#7c5cbf"/>
     </linearGradient>
-    <filter id="softGlow">
-      <feGaussianBlur stdDeviation="8" result="blur"/>
+    <filter id="nodeGlow">
+      <feGaussianBlur stdDeviation="12" result="blur"/>
       <feMerge>
         <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
       </feMerge>
     </filter>
-    <filter id="outerGlow">
-      <feGaussianBlur stdDeviation="20" result="blur"/>
+    <filter id="centerGlow">
+      <feGaussianBlur stdDeviation="24" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="ringGlow">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
       <feMerge>
         <feMergeNode in="blur"/>
         <feMergeNode in="SourceGraphic"/>
@@ -30,68 +32,40 @@
     </filter>
   </defs>
 
-  <!-- Background: rounded square -->
-  <rect width="1024" height="1024" rx="220" ry="220" fill="url(#bg)"/>
+  <!-- Background circle -->
+  <circle cx="512" cy="512" r="480" fill="url(#bg)"/>
 
-  <!-- Subtle radial glow behind the brain -->
-  <circle cx="512" cy="480" r="280" fill="#7c3aed" opacity="0.08"/>
-  <circle cx="512" cy="480" r="200" fill="#a78bfa" opacity="0.06"/>
+  <!-- Outer ring -->
+  <circle cx="512" cy="512" r="460" fill="none" stroke="#a78bfa" stroke-width="12" opacity="0.6" filter="url(#ringGlow)"/>
 
-  <!-- Brain outline — stylized, symmetric, clean -->
-  <g transform="translate(512, 460)" filter="url(#outerGlow)">
-    <!-- Left hemisphere -->
-    <path d="M-20,-180 C-80,-180 -160,-160 -190,-100 C-220,-40 -210,20 -180,70
-             C-160,100 -170,130 -160,160 C-150,190 -120,200 -80,200
-             C-50,200 -30,190 -20,170"
-          fill="none" stroke="url(#glow)" stroke-width="12" stroke-linecap="round"/>
+  <!-- Center glow -->
+  <circle cx="512" cy="512" r="120" fill="#a78bfa" opacity="0.15" filter="url(#centerGlow)"/>
 
-    <!-- Left inner fold 1 -->
-    <path d="M-20,-140 C-60,-140 -120,-120 -150,-80 C-170,-50 -160,-10 -140,20"
-          fill="none" stroke="url(#innerGlow)" stroke-width="8" stroke-linecap="round" opacity="0.7"/>
+  <!-- Cross connections (lighter, behind main lines) -->
+  <line x1="308" y1="358" x2="512" y2="225" stroke="#7c5cbf" stroke-width="6" opacity="0.35" stroke-linecap="round"/>
+  <line x1="716" y1="358" x2="512" y2="225" stroke="#7c5cbf" stroke-width="6" opacity="0.35" stroke-linecap="round"/>
+  <line x1="256" y1="614" x2="512" y2="768" stroke="#7c5cbf" stroke-width="6" opacity="0.35" stroke-linecap="round"/>
+  <line x1="768" y1="614" x2="512" y2="768" stroke="#7c5cbf" stroke-width="6" opacity="0.35" stroke-linecap="round"/>
+  <line x1="308" y1="358" x2="256" y2="614" stroke="#7c5cbf" stroke-width="6" opacity="0.35" stroke-linecap="round"/>
+  <line x1="716" y1="358" x2="768" y2="614" stroke="#7c5cbf" stroke-width="6" opacity="0.35" stroke-linecap="round"/>
 
-    <!-- Left inner fold 2 -->
-    <path d="M-20,-60 C-50,-60 -100,-40 -120,0 C-140,40 -120,80 -80,100"
-          fill="none" stroke="url(#innerGlow)" stroke-width="8" stroke-linecap="round" opacity="0.6"/>
+  <!-- Main connections to center -->
+  <line x1="512" y1="512" x2="308" y2="358" stroke="#a78bfa" stroke-width="8" opacity="0.6" stroke-linecap="round"/>
+  <line x1="512" y1="512" x2="716" y2="358" stroke="#a78bfa" stroke-width="8" opacity="0.6" stroke-linecap="round"/>
+  <line x1="512" y1="512" x2="256" y2="614" stroke="#a78bfa" stroke-width="8" opacity="0.6" stroke-linecap="round"/>
+  <line x1="512" y1="512" x2="768" y2="614" stroke="#a78bfa" stroke-width="8" opacity="0.6" stroke-linecap="round"/>
+  <line x1="512" y1="512" x2="512" y2="225" stroke="#a78bfa" stroke-width="8" opacity="0.6" stroke-linecap="round"/>
+  <line x1="512" y1="512" x2="512" y2="768" stroke="#a78bfa" stroke-width="8" opacity="0.6" stroke-linecap="round"/>
 
-    <!-- Right hemisphere -->
-    <path d="M20,-180 C80,-180 160,-160 190,-100 C220,-40 210,20 180,70
-             C160,100 170,130 160,160 C150,190 120,200 80,200
-             C50,200 30,190 20,170"
-          fill="none" stroke="url(#glow)" stroke-width="12" stroke-linecap="round"/>
+  <!-- Outer nodes -->
+  <circle cx="308" cy="358" r="40" fill="#7c5cbf" filter="url(#nodeGlow)"/>
+  <circle cx="716" cy="358" r="40" fill="#7c5cbf" filter="url(#nodeGlow)"/>
+  <circle cx="256" cy="614" r="40" fill="#7c5cbf" filter="url(#nodeGlow)"/>
+  <circle cx="768" cy="614" r="40" fill="#7c5cbf" filter="url(#nodeGlow)"/>
+  <circle cx="512" cy="225" r="40" fill="#7c5cbf" filter="url(#nodeGlow)"/>
+  <circle cx="512" cy="768" r="40" fill="#7c5cbf" filter="url(#nodeGlow)"/>
 
-    <!-- Right inner fold 1 -->
-    <path d="M20,-140 C60,-140 120,-120 150,-80 C170,-50 160,-10 140,20"
-          fill="none" stroke="url(#innerGlow)" stroke-width="8" stroke-linecap="round" opacity="0.7"/>
-
-    <!-- Right inner fold 2 -->
-    <path d="M20,-60 C50,-60 100,-40 120,0 C140,40 120,80 80,100"
-          fill="none" stroke="url(#innerGlow)" stroke-width="8" stroke-linecap="round" opacity="0.6"/>
-
-    <!-- Brain stem / center line -->
-    <line x1="0" y1="-180" x2="0" y2="200" stroke="url(#glow)" stroke-width="6" opacity="0.3"/>
-
-    <!-- Neural nodes — memory points -->
-    <circle cx="-140" cy="-80" r="8" fill="#c4b5fd" filter="url(#softGlow)"/>
-    <circle cx="-120" cy="30" r="6" fill="#a78bfa" filter="url(#softGlow)"/>
-    <circle cx="-70" cy="-130" r="5" fill="#ddd6fe" filter="url(#softGlow)"/>
-    <circle cx="140" cy="-80" r="8" fill="#c4b5fd" filter="url(#softGlow)"/>
-    <circle cx="120" cy="30" r="6" fill="#a78bfa" filter="url(#softGlow)"/>
-    <circle cx="70" cy="-130" r="5" fill="#ddd6fe" filter="url(#softGlow)"/>
-
-    <!-- Center consciousness dot -->
-    <circle cx="0" cy="0" r="12" fill="#e9d5ff" filter="url(#softGlow)"/>
-    <circle cx="0" cy="0" r="6" fill="#ffffff" opacity="0.9"/>
-  </g>
-
-  <!-- SAGE text -->
-  <text x="512" y="780" text-anchor="middle"
-        font-family="'SF Pro Display', 'Helvetica Neue', 'Segoe UI', sans-serif"
-        font-weight="700" font-size="120" letter-spacing="16"
-        fill="url(#glow)" filter="url(#softGlow)">SAGE</text>
-
-  <!-- Subtle tagline -->
-  <text x="512" y="840" text-anchor="middle"
-        font-family="'SF Pro Text', 'Helvetica Neue', 'Segoe UI', sans-serif"
-        font-weight="400" font-size="44" letter-spacing="6"
-        fill="#a78bfa" opacity="0.6">AI MEMORY</text>
+  <!-- Center node -->
+  <circle cx="512" cy="512" r="64" fill="#a78bfa" filter="url(#centerGlow)"/>
+  <circle cx="512" cy="512" r="32" fill="#e9d5ff" opacity="0.9"/>
 </svg>

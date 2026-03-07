@@ -189,18 +189,26 @@
 
   function renderLog() {
     const logEl = document.getElementById("sage-log");
-    logEl.innerHTML = toolLog
-      .slice(0, 20)
-      .map((e) => {
-        const time = e.time.toLocaleTimeString();
-        const cls = e.status === "error" ? "error" : e.status === "success" ? "success" : "";
-        return `<div class="sage-log-entry">
-          <span class="sage-log-tool">${e.tool}</span>
-          <span class="sage-log-time">${time}</span>
-          ${e.result ? `<div class="sage-log-result ${cls}">${escapeHtml(truncate(e.result, 200))}</div>` : ""}
-        </div>`;
-      })
-      .join("");
+    logEl.textContent = "";
+    for (const e of toolLog.slice(0, 20)) {
+      const entry = document.createElement("div");
+      entry.className = "sage-log-entry";
+      const toolSpan = document.createElement("span");
+      toolSpan.className = "sage-log-tool";
+      toolSpan.textContent = e.tool;
+      const timeSpan = document.createElement("span");
+      timeSpan.className = "sage-log-time";
+      timeSpan.textContent = e.time.toLocaleTimeString();
+      entry.appendChild(toolSpan);
+      entry.appendChild(timeSpan);
+      if (e.result) {
+        const resultDiv = document.createElement("div");
+        resultDiv.className = "sage-log-result" + (e.status === "error" ? " error" : e.status === "success" ? " success" : "");
+        resultDiv.textContent = truncate(e.result, 200);
+        entry.appendChild(resultDiv);
+      }
+      logEl.appendChild(entry);
+    }
   }
 
   // --- Chat Interaction ---

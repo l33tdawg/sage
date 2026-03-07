@@ -6,7 +6,11 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "sage-memory@l33tdawg.github.io",
-      "strict_min_version": "128.0"
+      "strict_min_version": "128.0",
+      "data_collection_permissions": {
+        "data_collected": false,
+        "required": false
+      }
     }
   },
   "permissions": ["activeTab", "storage", "scripting"],
