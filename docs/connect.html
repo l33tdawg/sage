@@ -12,7 +12,7 @@
   gtag('config', 'G-Y9LD21QVEQ');
 </script>
 <title>Connect Your AI to SAGE</title>
-<meta name="description" content="Step-by-step guide to connect Claude, ChatGPT, or Claude Code to your SAGE memory node via MCP.">
+<meta name="description" content="Give your AI a memory in under 2 minutes. Works with Claude, ChatGPT, Claude Code, and any MCP-compatible assistant.">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
 
@@ -32,6 +32,7 @@
   --ember: #f472b6;
   --teal: #2dd4bf;
   --gold: #fbbf24;
+  --green: #22c55e;
   --font-body: 'DM Sans', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
 }
@@ -66,7 +67,7 @@ body {
 /* Hero */
 .hero {
   text-align: center;
-  padding: 40px 0 60px;
+  padding: 40px 0 48px;
 }
 .hero h1 {
   font-size: 2.2rem;
@@ -76,32 +77,66 @@ body {
 }
 .hero p {
   font-size: 1.1rem;
-  color: var(--muted);
+  color: var(--text);
   max-width: 600px;
   margin: 0 auto;
+  line-height: 1.7;
+}
+.hero-note {
+  display: inline-block;
+  margin-top: 16px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.hero-note strong { color: var(--accent); }
+
+/* How it works overview */
+.overview {
+  display: flex;
+  justify-content: center;
+  gap: 48px;
+  margin-bottom: 56px;
+  flex-wrap: wrap;
+}
+.overview-step {
+  text-align: center;
+  flex: 0 0 150px;
+}
+.overview-icon {
+  width: 56px; height: 56px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  margin: 0 auto 10px;
+  background: var(--surface);
+  border: 2px solid var(--border);
+}
+.overview-label {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--bright);
+  margin-bottom: 4px;
+}
+.overview-desc {
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.4;
 }
 
-/* Prerequisites */
-.prereq {
+/* Check badge */
+.check-badge {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 24px 28px;
+  padding: 20px 24px;
   margin-bottom: 48px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
-.prereq h3 {
-  color: var(--gold);
-  font-size: 0.9rem;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-bottom: 12px;
-}
-.prereq ol {
-  padding-left: 20px;
-  color: var(--text);
-}
-.prereq li { margin-bottom: 8px; }
-.prereq code {
+.check-badge svg { flex-shrink: 0; }
+.check-badge p { font-size: 0.95rem; color: var(--text); }
+.check-badge p strong { color: var(--bright); }
+.check-badge code {
   background: var(--raised);
   padding: 2px 8px;
   border-radius: 4px;
@@ -116,14 +151,15 @@ body {
   gap: 0;
   margin-bottom: 0;
   border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
 }
 .tab {
-  padding: 14px 28px;
+  padding: 14px 24px;
   background: transparent;
   border: none;
   color: var(--muted);
   font-family: var(--font-body);
-  font-size: 1rem;
+  font-size: 0.95rem;
   font-weight: 500;
   cursor: pointer;
   border-bottom: 2px solid transparent;
@@ -133,6 +169,25 @@ body {
 .tab.active {
   color: var(--accent);
   border-bottom-color: var(--accent);
+}
+.tab-badge {
+  display: inline-block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.tab-badge.popular {
+  background: rgba(167,139,250,0.2);
+  color: var(--accent);
+}
+.tab-badge.new {
+  background: rgba(34,197,94,0.15);
+  color: var(--green);
 }
 
 .tab-content { display: none; padding: 32px 0; }
@@ -164,6 +219,7 @@ body {
   margin-top: 10px;
   margin-left: 38px;
   color: var(--text);
+  font-size: 0.95rem;
 }
 .step ul {
   margin-top: 10px;
@@ -224,17 +280,22 @@ p code, li code {
   font-size: 0.9rem;
 }
 .info-box strong { color: var(--accent); }
+.info-box.warn {
+  border-color: rgba(251,191,36,0.3);
+  background: rgba(251,191,36,0.06);
+}
+.info-box.warn strong { color: var(--gold); }
+.info-box.success {
+  border-color: rgba(34,197,94,0.25);
+  background: rgba(34,197,94,0.06);
+}
+.info-box.success strong { color: var(--green); }
 
-/* Screenshot placeholder */
-.screenshot {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 40px;
-  margin: 12px 0 0 38px;
-  text-align: center;
-  color: var(--muted);
-  font-size: 0.85rem;
+/* Divider */
+.section-divider {
+  margin: 40px 0;
+  border: none;
+  border-top: 1px solid var(--border);
 }
 
 /* Troubleshooting */
@@ -260,6 +321,14 @@ p code, li code {
   color: var(--text);
   font-size: 0.9rem;
 }
+.faq-item code {
+  background: var(--raised);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--accent);
+}
 
 /* Footer */
 .footer {
@@ -274,10 +343,12 @@ p code, li code {
 
 @media (max-width: 640px) {
   .hero h1 { font-size: 1.6rem; }
-  .tab { padding: 10px 16px; font-size: 0.9rem; }
+  .tab { padding: 10px 14px; font-size: 0.85rem; }
   pre { margin-left: 0; }
   .step p, .step ul { margin-left: 0; }
   .info-box { margin-left: 0; }
+  .overview { gap: 24px; }
+  .check-badge { flex-direction: column; text-align: center; }
 }
 </style>
 </head>
@@ -297,32 +368,104 @@ p code, li code {
 <div class="container">
   <div class="hero">
     <h1>Connect Your AI to SAGE</h1>
-    <p>SAGE is installed. Now give your AI access to its memory. Pick your provider below.</p>
+    <p>Give your AI a permanent memory in under 2 minutes. Works with any AI that supports MCP &mdash; Claude, ChatGPT, Cursor, and more.</p>
+    <span class="hero-note"><strong>MCP</strong> = Model Context Protocol &mdash; the standard way AI apps connect to local tools.</span>
   </div>
 
-  <div class="prereq">
-    <h3>Before you start</h3>
-    <ol>
-      <li><strong>SAGE is installed</strong> &mdash; you've run the app or <code>sage-lite setup</code></li>
-      <li><strong>SAGE is running</strong> &mdash; double-click the app, or run <code>sage-lite serve</code> in a terminal</li>
-      <li>You should see the Brain Dashboard at <code>http://localhost:8080/ui/</code></li>
-    </ol>
+  <!-- Quick visual overview -->
+  <div class="overview">
+    <div class="overview-step">
+      <div class="overview-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      </div>
+      <div class="overview-label">SAGE Running</div>
+      <div class="overview-desc">App open or server started</div>
+    </div>
+    <div class="overview-step">
+      <div class="overview-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6m-6 3h4m-6 3h6"/></svg>
+      </div>
+      <div class="overview-label">Paste Config</div>
+      <div class="overview-desc">One JSON snippet</div>
+    </div>
+    <div class="overview-step">
+      <div class="overview-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>
+      </div>
+      <div class="overview-label">Wake Up</div>
+      <div class="overview-desc">Your AI remembers everything</div>
+    </div>
+  </div>
+
+  <!-- Prerequisite check -->
+  <div class="check-badge">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>
+    <p><strong>Before you start:</strong> Make sure SAGE is running. If you installed the app, just open it. If you built from source, run <code>sage-lite serve</code>. You should see the Brain Dashboard at <code>http://localhost:8080/ui/</code></p>
   </div>
 
   <!-- Provider Tabs -->
   <div class="tabs">
-    <button class="tab active" onclick="showTab('claude-code')">Claude Code</button>
-    <button class="tab" onclick="showTab('claude-desktop')">Claude Desktop</button>
-    <button class="tab" onclick="showTab('chatgpt')">ChatGPT</button>
+    <button class="tab active" onclick="showTab('claude-desktop', this)">Claude Desktop <span class="tab-badge popular">Popular</span></button>
+    <button class="tab" onclick="showTab('claude-code', this)">Claude Code</button>
+    <button class="tab" onclick="showTab('chatgpt', this)">ChatGPT</button>
+    <button class="tab" onclick="showTab('other', this)">Other AIs <span class="tab-badge new">MCP</span></button>
   </div>
 
-  <!-- Claude Code -->
-  <div id="claude-code" class="tab-content active">
+  <!-- ========== Claude Desktop ========== -->
+  <div id="claude-desktop" class="tab-content active">
     <div class="step">
       <span class="step-num">1</span>
-      <h3>Find your sage-lite binary path</h3>
+      <h3>Open MCP settings</h3>
+      <p>In Claude Desktop: <strong>Settings</strong> &rarr; <strong>Developer</strong> &rarr; <strong>Edit Config</strong>.</p>
+      <p>This opens a JSON file called <code>claude_desktop_config.json</code>.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">2</span>
+      <h3>Paste the SAGE config</h3>
+      <p>Add this to the file (replace the entire contents if it's empty):</p>
+      <pre><code>{
+  "mcpServers": {
+    "sage": {
+      "command": "/Applications/SAGE.app/Contents/MacOS/sage-lite",
+      "args": ["mcp"],
+      "env": {
+        "SAGE_HOME": "~/.sage",
+        "SAGE_PROVIDER": "claude-desktop"
+      }
+    }
+  }
+}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box warn" style="margin-top:12px;">
+        <strong>Windows?</strong> Change the command to:<br>
+        <code>"command": "C:\\Program Files\\SAGE\\sage-lite.exe"</code>
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="step-num">3</span>
+      <h3>Restart Claude Desktop</h3>
+      <p>Quit and reopen Claude Desktop. You should see a tools icon (hammer) in the chat &mdash; click it to verify SAGE tools are listed.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">4</span>
+      <h3>Wake up your AI</h3>
+      <p>Start a new conversation and type:</p>
+      <pre><code>Take the red pill. Initialize your SAGE memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box success" style="margin-top:12px;">
+        <strong>That's it!</strong> Claude will initialize its memory and start learning from every conversation. It will remember your projects, preferences, and insights across sessions.
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== Claude Code ========== -->
+  <div id="claude-code" class="tab-content">
+    <div class="step">
+      <span class="step-num">1</span>
+      <h3>Find your sage-lite path</h3>
       <p>If you installed from the DMG, it's inside the app bundle. If you built from source, it's wherever you put it.</p>
-      <pre><code># DMG install (macOS):
+      <pre><code># macOS (DMG install):
 /Applications/SAGE.app/Contents/MacOS/sage-lite
 
 # Built from source:
@@ -332,7 +475,7 @@ which sage-lite</code><button class="copy-btn" onclick="copyCode(this)">Copy</bu
     <div class="step">
       <span class="step-num">2</span>
       <h3>Add MCP config to your project</h3>
-      <p>Create a <code>.mcp.json</code> file in your project root (or home directory for global config):</p>
+      <p>Create a <code>.mcp.json</code> file in your project root:</p>
       <pre><code>{
   "mcpServers": {
     "sage": {
@@ -346,90 +489,48 @@ which sage-lite</code><button class="copy-btn" onclick="copyCode(this)">Copy</bu
   }
 }</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
       <div class="info-box">
-        <strong>SAGE_PROVIDER</strong> scopes your memories. Claude Code memories stay separate from ChatGPT memories. Facts (verified truths) are shared across providers.
+        <strong>Tip:</strong> Put this in your home directory for global config, or in each project root for per-project setup. Claude Code picks it up automatically.
       </div>
     </div>
 
     <div class="step">
       <span class="step-num">3</span>
-      <h3>Restart Claude Code</h3>
-      <p>Close and reopen Claude Code (or start a new session). You should see SAGE tools available: <code>sage_turn</code>, <code>sage_recall</code>, <code>sage_remember</code>, etc.</p>
+      <h3>Start a new session</h3>
+      <p>Close and reopen Claude Code (or start a new terminal session). SAGE tools will appear automatically.</p>
     </div>
 
     <div class="step">
       <span class="step-num">4</span>
-      <h3>Initialize your AI's brain</h3>
-      <p>In your first conversation, tell Claude:</p>
-      <pre><code>Call sage_red_pill to initialize your memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
-      <p style="margin-top:12px;margin-left:38px;">That's it. Claude will now remember things across conversations.</p>
-    </div>
-  </div>
-
-  <!-- Claude Desktop -->
-  <div id="claude-desktop" class="tab-content">
-    <div class="step">
-      <span class="step-num">1</span>
-      <h3>Open Claude Desktop settings</h3>
-      <p>Go to <strong>Claude Desktop</strong> &rarr; <strong>Settings</strong> &rarr; <strong>Developer</strong> &rarr; <strong>Edit Config</strong> (under MCP Servers).</p>
-      <p>This opens the file <code>claude_desktop_config.json</code>.</p>
-    </div>
-
-    <div class="step">
-      <span class="step-num">2</span>
-      <h3>Add the SAGE MCP server</h3>
-      <p>Paste this into the config file:</p>
-      <pre><code>{
-  "mcpServers": {
-    "sage": {
-      "command": "/Applications/SAGE.app/Contents/MacOS/sage-lite",
-      "args": ["mcp"],
-      "env": {
-        "SAGE_HOME": "~/.sage",
-        "SAGE_PROVIDER": "claude-desktop"
-      }
-    }
-  }
-}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
-      <div class="info-box">
-        <strong>Windows?</strong> Change the command to:<br>
-        <code>C:\\Program Files\\SAGE\\sage-lite.exe</code>
+      <h3>Wake up your AI</h3>
+      <p>Tell Claude:</p>
+      <pre><code>Take the red pill. Initialize your SAGE memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box success" style="margin-top:12px;">
+        <strong>Done!</strong> Claude Code will now build persistent memory across all your coding sessions &mdash; debugging insights, project context, your preferences.
+      </div>
+      <div class="info-box" style="margin-top:12px;">
+        <strong>Pro tip:</strong> Add a <code>CLAUDE.md</code> file to your project with: <em>"Call sage_turn every turn to maintain persistent memory."</em> This ensures Claude never forgets to save its experience.
       </div>
     </div>
-
-    <div class="step">
-      <span class="step-num">3</span>
-      <h3>Restart Claude Desktop</h3>
-      <p>Completely quit and reopen Claude Desktop. Look for the SAGE tools icon in the chat input area &mdash; you should see tools like <code>sage_turn</code> and <code>sage_recall</code>.</p>
-    </div>
-
-    <div class="step">
-      <span class="step-num">4</span>
-      <h3>Initialize</h3>
-      <p>Start a new conversation and say:</p>
-      <pre><code>Call sage_red_pill to initialize your memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
-      <p style="margin-top:12px;margin-left:38px;">Claude will seed its foundational memories and start learning from every conversation.</p>
-    </div>
   </div>
 
-  <!-- ChatGPT -->
+  <!-- ========== ChatGPT ========== -->
   <div id="chatgpt" class="tab-content">
-    <!-- Native MCP (Paid plans) -->
-    <h3 style="color:var(--bright);margin-bottom:16px;font-size:1.1rem;">Option A: Native MCP (Paid plans)</h3>
+    <h3 style="color:var(--bright);margin-bottom:16px;font-size:1.1rem;">Option A: ChatGPT Desktop App (Paid plans)</h3>
 
-    <div class="info-box" style="margin-left:0;margin-bottom:24px;border-color:rgba(251,191,36,0.3);background:rgba(251,191,36,0.06);">
-      <strong style="color:var(--gold);">Requires ChatGPT Plus, Pro, Team, or Enterprise.</strong> Native MCP support via Developer Mode is not available on the free ChatGPT plan.
+    <div class="info-box warn" style="margin-left:0;margin-bottom:24px;">
+      <strong>Requires ChatGPT Plus, Pro, Team, or Enterprise.</strong> Native MCP support via Developer Mode is available on paid plans only.
     </div>
 
     <div class="step">
       <span class="step-num">1</span>
       <h3>Enable Developer Mode</h3>
-      <p>Go to <strong>Settings</strong> &rarr; <strong>Beta Features</strong> &rarr; enable <strong>Developer Mode</strong>. Then in Settings &rarr; Developer, add an MCP server.</p>
+      <p><strong>Settings</strong> &rarr; <strong>Beta Features</strong> &rarr; enable <strong>Developer Mode</strong>. Then go to <strong>Settings</strong> &rarr; <strong>Developer</strong> and add an MCP server.</p>
     </div>
 
     <div class="step">
       <span class="step-num">2</span>
-      <h3>Add SAGE as an MCP server</h3>
-      <p>In ChatGPT's MCP configuration, add:</p>
+      <h3>Add SAGE</h3>
+      <p>Paste this MCP config:</p>
       <pre><code>{
   "mcpServers": {
     "sage": {
@@ -442,39 +543,40 @@ which sage-lite</code><button class="copy-btn" onclick="copyCode(this)">Copy</bu
     }
   }
 }</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
-      <div class="info-box">
+      <div class="info-box warn" style="margin-top:12px;">
         <strong>Windows?</strong> Change the command to:<br>
-        <code>C:\\Program Files\\SAGE\\sage-lite.exe</code>
+        <code>"command": "C:\\Program Files\\SAGE\\sage-lite.exe"</code>
       </div>
     </div>
 
     <div class="step">
       <span class="step-num">3</span>
-      <h3>Restart ChatGPT and initialize</h3>
-      <p>Quit and reopen the ChatGPT desktop app. SAGE tools should appear in the tools menu. Start a new conversation and say:</p>
-      <pre><code>Call sage_red_pill to wake up. Then call sage_turn every time I send you a message so you build persistent memory across our conversations.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
-      <div class="info-box">
-        <strong>Tip:</strong> ChatGPT doesn't have a CLAUDE.md file to remind it. Add "Always call sage_turn at the start of each reply" to your <strong>Custom Instructions</strong> (Settings &rarr; Personalization) so it remembers automatically.
+      <h3>Restart and wake up</h3>
+      <p>Quit and reopen the ChatGPT app. Start a new conversation and say:</p>
+      <pre><code>Take the red pill. Initialize your SAGE memory. Use sage_turn every reply to remember our conversations.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box" style="margin-top:12px;">
+        <strong>Important:</strong> ChatGPT doesn't have a config file to remind it. Go to <strong>Settings &rarr; Personalization &rarr; Custom Instructions</strong> and add: <em>"Always call sage_turn at the start of each reply to maintain persistent memory."</em>
       </div>
     </div>
 
-    <!-- Chrome Extension (Free plans) -->
-    <h3 style="color:var(--bright);margin:40px 0 16px;font-size:1.1rem;">Option B: Chrome Extension (Free &amp; Paid plans)</h3>
+    <hr class="section-divider">
 
-    <div class="info-box" style="margin-left:0;margin-bottom:24px;">
-      <strong>Works on all ChatGPT plans</strong> including free — no desktop app required. Uses a Chrome extension to bridge MCP tools to the <strong>ChatGPT website</strong> (<a href="https://chat.openai.com" style="color:var(--accent);">chat.openai.com</a>). Note: the extension can see your chat content.
+    <h3 style="color:var(--bright);margin-bottom:16px;font-size:1.1rem;">Option B: Chrome Extension (All plans, including Free)</h3>
+
+    <div class="info-box success" style="margin-left:0;margin-bottom:24px;">
+      <strong>Works on all ChatGPT plans</strong> &mdash; including free. Uses a Chrome extension to connect SAGE to the <a href="https://chat.openai.com" style="color:var(--accent);">ChatGPT website</a> directly in your browser. No desktop app needed.
     </div>
 
     <div class="step">
       <span class="step-num">1</span>
       <h3>Install MCP SuperAssistant</h3>
-      <p>Install the <a href="https://chromewebstore.google.com/detail/mcp-superassistant/kngiafgkdnlkgmefdafaibkibegkcaef" style="color:var(--accent);">MCP SuperAssistant</a> Chrome extension. It detects MCP tool calls from AI chats and executes them locally.</p>
+      <p>Install the <a href="https://chromewebstore.google.com/detail/mcp-superassistant/kngiafgkdnlkgmefdafaibkibegkcaef" style="color:var(--accent);">MCP SuperAssistant</a> Chrome extension. It bridges MCP tools between your browser and local services.</p>
     </div>
 
     <div class="step">
       <span class="step-num">2</span>
-      <h3>Configure SAGE as an MCP server</h3>
-      <p>Open the extension's sidebar and add a new MCP server with the same config:</p>
+      <h3>Add SAGE in the extension</h3>
+      <p>Open the extension sidebar and add a new MCP server:</p>
       <pre><code>Command: /Applications/SAGE.app/Contents/MacOS/sage-lite
 Arguments: mcp
 Environment:
@@ -484,9 +586,50 @@ Environment:
 
     <div class="step">
       <span class="step-num">3</span>
-      <h3>Use ChatGPT as normal</h3>
-      <p>Open <a href="https://chat.openai.com" style="color:var(--accent);">chat.openai.com</a> in Chrome and chat normally — no desktop app needed. The extension intercepts MCP tool calls, runs them against your local SAGE instance, and injects the results back into the chat. Tell ChatGPT:</p>
-      <pre><code>Call sage_red_pill to wake up. You have SAGE MCP tools available — use sage_turn every reply to build persistent memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <h3>Chat on the web</h3>
+      <p>Open <a href="https://chat.openai.com" style="color:var(--accent);">chat.openai.com</a> in Chrome and chat normally. The extension handles the rest. Tell ChatGPT:</p>
+      <pre><code>Take the red pill. You have SAGE memory tools. Use sage_turn every reply to build persistent memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+    </div>
+  </div>
+
+  <!-- ========== Other AIs ========== -->
+  <div id="other" class="tab-content">
+    <div class="info-box" style="margin-left:0;margin-bottom:24px;">
+      <strong>SAGE works with any AI that supports MCP</strong> (Model Context Protocol). This includes Cursor, Windsurf, Cody, and other tools adopting the standard. The setup is the same pattern: point the MCP config at <code>sage-lite mcp</code>.
+    </div>
+
+    <div class="step">
+      <span class="step-num">1</span>
+      <h3>Find the MCP config for your AI tool</h3>
+      <p>Most MCP-compatible tools have a JSON config file or settings panel for MCP servers. Check your tool's documentation for where to add MCP server configs.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">2</span>
+      <h3>Add SAGE</h3>
+      <p>The config is the same everywhere &mdash; just change the <code>SAGE_PROVIDER</code> to match your tool:</p>
+      <pre><code>{
+  "mcpServers": {
+    "sage": {
+      "command": "/path/to/sage-lite",
+      "args": ["mcp"],
+      "env": {
+        "SAGE_HOME": "~/.sage",
+        "SAGE_PROVIDER": "your-tool-name"
+      }
+    }
+  }
+}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box">
+        <strong>SAGE_PROVIDER</strong> keeps memories scoped per tool. Set it to something descriptive like <code>cursor</code>, <code>windsurf</code>, etc. Facts (verified truths) are shared across all providers automatically.
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="step-num">3</span>
+      <h3>Restart and initialize</h3>
+      <p>Restart your AI tool, then tell it:</p>
+      <pre><code>Call sage_red_pill to initialize your memory. Then call sage_turn every reply.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
     </div>
   </div>
 
@@ -496,27 +639,32 @@ Environment:
 
     <div class="faq-item">
       <h4>"SAGE tools don't appear"</h4>
-      <p>Make sure <code>sage-lite serve</code> is running (or the SAGE app is open). Check that the path to <code>sage-lite</code> in your config is correct. Try running the command manually in a terminal to verify it works.</p>
+      <p>Make sure SAGE is running &mdash; check <code>http://localhost:8080/ui/</code> in your browser. If the Brain Dashboard loads, SAGE is running. Also verify the path to <code>sage-lite</code> in your config is correct.</p>
     </div>
 
     <div class="faq-item">
-      <h4>"Connection refused" or "embedding provider error"</h4>
-      <p>SAGE needs to be running on port 8080. Check <code>http://localhost:8080/ui/</code> in your browser. If the dashboard loads, SAGE is running. If not, start it with <code>sage-lite serve</code> or open the SAGE app.</p>
+      <h4>"Connection refused"</h4>
+      <p>SAGE runs on port 8080 by default. Make sure no other app is using that port, and that SAGE was started before your AI tool.</p>
     </div>
 
     <div class="faq-item">
-      <h4>"sage_inception fails"</h4>
-      <p>This usually means the embedding provider isn't configured. Run <code>sage-lite setup</code> to re-run the setup wizard and pick an embedding provider (Ollama recommended, or Hash for zero-setup).</p>
+      <h4>"Initialization fails"</h4>
+      <p>This usually means the embedding provider isn't configured. Open the SAGE app (or run <code>sage-lite setup</code>) to re-run the setup wizard. Pick "Hash" for zero-setup or "Ollama" for semantic search.</p>
     </div>
 
     <div class="faq-item">
-      <h4>Can I use SAGE with multiple AI providers at the same time?</h4>
-      <p>Yes! That's exactly what <code>SAGE_PROVIDER</code> is for. Each provider gets its own memory scope. Set <code>"SAGE_PROVIDER": "claude-code"</code> in one config and <code>"SAGE_PROVIDER": "chatgpt"</code> in another. Facts are shared across providers, but observations and reflections stay scoped.</p>
+      <h4>Can I use SAGE with multiple AI tools at the same time?</h4>
+      <p>Yes! That's what <code>SAGE_PROVIDER</code> is for. Each tool gets its own memory space. Set different provider names in each config. Facts are shared; personal observations and reflections stay scoped to each tool.</p>
     </div>
 
     <div class="faq-item">
       <h4>Where is my data stored?</h4>
-      <p>Everything stays on your machine in <code>~/.sage/</code>. The database is a SQLite file. Nothing is sent to any cloud service. You can export your entire memory vault with <code>sage-lite vault export</code>.</p>
+      <p>Everything stays on your machine in <code>~/.sage/</code>. The database is a single SQLite file. Nothing is ever sent to any cloud. If you enabled encryption during setup, all memories are AES-256-GCM encrypted at rest.</p>
+    </div>
+
+    <div class="faq-item">
+      <h4>Can I switch from ChatGPT to Claude (or vice versa)?</h4>
+      <p>Absolutely. SAGE is model-agnostic &mdash; your memories belong to you, not to any provider. Just add the config to your new tool and your AI picks up where the last one left off. Facts are shared across providers automatically.</p>
     </div>
   </div>
 
@@ -528,11 +676,11 @@ Environment:
 </div>
 
 <script>
-function showTab(id) {
+function showTab(id, btn) {
   document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
   document.getElementById(id).classList.add('active');
-  event.target.classList.add('active');
+  btn.classList.add('active');
 }
 
 function copyCode(btn) {
