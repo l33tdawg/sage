@@ -68,6 +68,7 @@ type EpochScore struct {
 // QueryOptions defines parameters for similarity queries.
 type QueryOptions struct {
 	DomainTag     string  `json:"domain_tag,omitempty"`
+	Provider      string  `json:"provider,omitempty"`
 	MinConfidence float64 `json:"min_confidence,omitempty"`
 	StatusFilter  string  `json:"status_filter,omitempty"`
 	TopK          int     `json:"top_k"`
@@ -77,6 +78,7 @@ type QueryOptions struct {
 // ListOptions defines parameters for listing memories.
 type ListOptions struct {
 	DomainTag string
+	Provider  string
 	Status    string
 	Limit     int
 	Offset    int

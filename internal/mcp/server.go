@@ -43,6 +43,7 @@ type Server struct {
 	baseURL    string
 	agentKey   ed25519.PrivateKey
 	agentID    string
+	provider   string // Provider identity (e.g. "claude-code", "chatgpt") from SAGE_PROVIDER env var.
 	httpClient *http.Client
 	tools      map[string]Tool
 
@@ -61,6 +62,7 @@ func NewServer(baseURL string, agentKey ed25519.PrivateKey) *Server {
 		baseURL:    baseURL,
 		agentKey:   agentKey,
 		agentID:    hex.EncodeToString(pub),
+		provider:   os.Getenv("SAGE_PROVIDER"),
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 	s.tools = s.registerTools()

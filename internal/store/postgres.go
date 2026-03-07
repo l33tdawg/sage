@@ -60,15 +60,15 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, confidence_score, status, parent_hash, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (memory_id) DO UPDATE SET
 			submitting_agent = EXCLUDED.submitting_agent,
 			status = EXCLUDED.status,
 			created_at = EXCLUDED.created_at`,
 		record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
 		emb, record.EmbeddingHash,
-		string(record.MemoryType), record.DomainTag, record.ConfidenceScore,
+		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,
 		string(record.Status), record.ParentHash, record.CreatedAt,
 	)
 	if err != nil {
@@ -80,7 +80,7 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at
+			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at
 		FROM memories WHERE memory_id = $1`, memoryID)
 
 	var r memory.MemoryRecord
@@ -89,7 +89,7 @@ func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory
 	var parentHash *string
 
 	err := row.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
-		&emb, &r.EmbeddingHash, &mt, &r.DomainTag, &r.ConfidenceScore,
+		&emb, &r.EmbeddingHash, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
 		&st, &parentHash, &r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -142,7 +142,7 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 	}
 
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding,
-		memory_type, domain_tag, confidence_score, status, parent_hash, created_at,
+		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
 		committed_at, deprecated_at, embedding <=> $1 AS distance
 		FROM memories WHERE embedding IS NOT NULL`
 	args := []any{pgvector.NewVector(embedding)}
@@ -151,6 +151,11 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 	if opts.DomainTag != "" {
 		query += fmt.Sprintf(" AND domain_tag = $%d", argIdx)
 		args = append(args, opts.DomainTag)
+		argIdx++
+	}
+	if opts.Provider != "" {
+		query += fmt.Sprintf(" AND (provider = $%d OR provider = '' OR memory_type = 'fact')", argIdx)
+		args = append(args, opts.Provider)
 		argIdx++
 	}
 	if opts.MinConfidence > 0 {
@@ -182,7 +187,7 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		var distance float64
 
 		scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
-			&emb, &mt, &r.DomainTag, &r.ConfidenceScore,
+			&emb, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
 			&st, &parentHash, &r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt, &distance)
 		if scanErr != nil {
 			return nil, fmt.Errorf("scan row: %w", scanErr)
@@ -856,7 +861,7 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 
 	countQuery := `SELECT COUNT(*) FROM memories WHERE 1=1`
 	query := `SELECT memory_id, submitting_agent, content, content_hash,
-		memory_type, domain_tag, confidence_score, status, parent_hash, created_at,
+		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
 		committed_at, deprecated_at FROM memories WHERE 1=1`
 	var args []any
 	argIdx := 1
@@ -866,6 +871,13 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 		query += filter
 		countQuery += filter
 		args = append(args, opts.DomainTag)
+		argIdx++
+	}
+	if opts.Provider != "" {
+		filter := fmt.Sprintf(" AND (provider = $%d OR provider = '' OR memory_type = 'fact')", argIdx)
+		query += filter
+		countQuery += filter
+		args = append(args, opts.Provider)
 		argIdx++
 	}
 	if opts.Status != "" {
@@ -905,7 +917,7 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 		var mt, st string
 		var parentHash *string
 		if scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
-			&mt, &r.DomainTag, &r.ConfidenceScore, &st, &parentHash,
+			&mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash,
 			&r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt); scanErr != nil {
 			return nil, 0, fmt.Errorf("scan memory: %w", scanErr)
 		}

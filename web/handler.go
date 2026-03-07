@@ -90,6 +90,7 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 
 	opts := store.ListOptions{
 		DomainTag: q.Get("domain"),
+		Provider:  q.Get("provider"),
 		Status:    q.Get("status"),
 		Limit:     limit,
 		Offset:    offset,

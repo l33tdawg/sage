@@ -26,6 +26,7 @@ type SubmitMemoryRequest struct {
 	Content          string                   `json:"content"`
 	MemoryType       string                   `json:"memory_type"`
 	DomainTag        string                   `json:"domain_tag"`
+	Provider         string                   `json:"provider,omitempty"`
 	ConfidenceScore  float64                  `json:"confidence_score"`
 	Classification   int                      `json:"classification,omitempty"`
 	Embedding        []float32                `json:"embedding,omitempty"`
@@ -44,6 +45,7 @@ type SubmitMemoryResponse struct {
 type QueryMemoryRequest struct {
 	Embedding     []float32 `json:"embedding"`
 	DomainTag     string    `json:"domain_tag,omitempty"`
+	Provider      string    `json:"provider,omitempty"`
 	MinConfidence float64   `json:"min_confidence,omitempty"`
 	StatusFilter  string    `json:"status_filter,omitempty"`
 	TopK          int       `json:"top_k,omitempty"`
@@ -209,6 +211,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		EmbeddingHash:   embeddingHash,
 		MemoryType:      memory.MemoryType(req.MemoryType),
 		DomainTag:       req.DomainTag,
+		Provider:        req.Provider,
 		ConfidenceScore: req.ConfidenceScore,
 		Status:          memory.StatusProposed,
 		ParentHash:      req.ParentHash,
@@ -270,6 +273,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 
 	opts := store.QueryOptions{
 		DomainTag:     req.DomainTag,
+		Provider:      req.Provider,
 		MinConfidence: req.MinConfidence,
 		StatusFilter:  req.StatusFilter,
 		TopK:          req.TopK,

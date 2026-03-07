@@ -40,6 +40,17 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Upload stable-named Linux tarball for direct download links
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cp "dist/sage-lite_${VERSION}_linux_amd64.tar.gz" "dist/sage-lite-linux-amd64.tar.gz"
+        shell: bash
+
+      - name: Upload stable-named asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/sage-lite-linux-amd64.tar.gz
+
   macos-dmg:
     name: macOS DMG (${{ matrix.arch }})
     runs-on: macos-latest
@@ -91,10 +102,17 @@ jobs:
             echo "label=arm64" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Create stable-name copy for direct download links
+        run: |
+          cp "dist/macos-${{ steps.arch.outputs.label }}/SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg" \
+             "dist/macos-${{ steps.arch.outputs.label }}/SAGE-macOS-${{ steps.arch.outputs.label }}.dmg"
+
       - name: Upload DMG to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/macos-${{ steps.arch.outputs.label }}/SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg
+          files: |
+            dist/macos-${{ steps.arch.outputs.label }}/SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg
+            dist/macos-${{ steps.arch.outputs.label }}/SAGE-macOS-${{ steps.arch.outputs.label }}.dmg
 
   windows-exe:
     name: Windows Installer
@@ -123,7 +141,14 @@ jobs:
           SAGE_VERSION: ${{ github.ref_name }}
         run: ./installer/windows/build-exe.sh
 
+      - name: Create stable-name copy for direct download links
+        run: |
+          cp "dist/windows-amd64/SAGE-${{ github.ref_name }}-Windows-Setup.exe" \
+             "dist/windows-amd64/SAGE-Windows-Setup.exe"
+
       - name: Upload EXE to release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/windows-amd64/SAGE-${{ github.ref_name }}-Windows-Setup.exe
+          files: |
+            dist/windows-amd64/SAGE-${{ github.ref_name }}-Windows-Setup.exe
+            dist/windows-amd64/SAGE-Windows-Setup.exe

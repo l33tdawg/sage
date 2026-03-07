@@ -34,6 +34,7 @@ type MemoryRecord struct {
 	EmbeddingHash   []byte       `json:"embedding_hash,omitempty"`
 	MemoryType      MemoryType   `json:"memory_type"`
 	DomainTag       string       `json:"domain_tag"`
+	Provider        string       `json:"provider,omitempty"`
 	ConfidenceScore float64      `json:"confidence_score"`
 	Status          MemoryStatus `json:"status"`
 	ParentHash      string       `json:"parent_hash,omitempty"`

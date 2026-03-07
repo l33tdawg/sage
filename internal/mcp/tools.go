@@ -175,6 +175,7 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		"content":          content,
 		"memory_type":      memType,
 		"domain_tag":       domain,
+		"provider":         s.provider,
 		"confidence_score": confidence,
 		"embedding":        embedResp.Embedding,
 	})
@@ -193,6 +194,7 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		"tx_hash":   submitResp.TxHash,
 		"domain":    domain,
 		"type":      memType,
+		"provider":  s.provider,
 	}, nil
 }
 
@@ -219,6 +221,7 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 	queryReq, _ := json.Marshal(map[string]any{
 		"embedding":      embedResp.Embedding,
 		"domain_tag":     domain,
+		"provider":       s.provider,
 		"min_confidence": minConf,
 		"status_filter":  "committed",
 		"top_k":          topK,
@@ -289,6 +292,9 @@ func (s *Server) toolList(ctx context.Context, params map[string]any) (any, erro
 	q := url.Values{}
 	if domain != "" {
 		q.Set("domain", domain)
+	}
+	if s.provider != "" {
+		q.Set("provider", s.provider)
 	}
 	if status != "" {
 		q.Set("status", status)
@@ -410,6 +416,7 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 		queryReq, _ := json.Marshal(map[string]any{
 			"embedding":     embedResp.Embedding,
 			"domain_tag":    "", // Search ALL domains — the topic determines relevance, not a filter
+			"provider":      s.provider,
 			"status_filter": "committed", // ONLY consensus-validated memories
 			"top_k":         5,
 		})
@@ -542,6 +549,7 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 			"content":          mem.content,
 			"memory_type":      mem.memType,
 			"domain_tag":       mem.domain,
+			"provider":         s.provider,
 			"confidence_score": mem.confidence,
 			"embedding":        embedResp.Embedding,
 		})
@@ -621,6 +629,7 @@ func (s *Server) storeMemory(ctx context.Context, content, domain, memType strin
 		"content":          content,
 		"memory_type":      memType,
 		"domain_tag":       domain,
+		"provider":         s.provider,
 		"confidence_score": confidence,
 		"embedding":        embedResp.Embedding,
 	})

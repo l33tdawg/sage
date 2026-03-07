@@ -271,6 +271,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		return fmt.Errorf("create schema: %w", err)
 	}
 
+	// Migration: add provider column if missing.
+	s.migrateProvider(ctx)
+
 	// Seed default domains
 	seeds := []struct {
 		tag  string
@@ -293,6 +296,18 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// migrateProvider adds the provider column to memories if it doesn't exist.
+func (s *SQLiteStore) migrateProvider(ctx context.Context) {
+	// Check if column exists by attempting a query.
+	row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='provider'`)
+	var count int
+	if err := row.Scan(&count); err != nil || count > 0 {
+		return // already exists or error checking
+	}
+	_, _ = s.conn.ExecContext(ctx, `ALTER TABLE memories ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
 }
 
 // --- Helper functions ---
@@ -404,15 +419,15 @@ func cosineSimilarity(a, b []float32) float64 {
 func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRecord) error {
 	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, confidence_score, status, parent_hash, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (memory_id) DO UPDATE SET
 			submitting_agent = excluded.submitting_agent,
 			status = excluded.status,
 			created_at = excluded.created_at`,
 		record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
 		encodeEmbedding(record.Embedding), record.EmbeddingHash,
-		string(record.MemoryType), record.DomainTag, record.ConfidenceScore,
+		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,
 		string(record.Status), record.ParentHash, formatTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
@@ -423,7 +438,7 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {
 	row := s.conn.QueryRowContext(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at
+			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at
 		FROM memories WHERE memory_id = ?`, memoryID)
 
 	var r memory.MemoryRecord
@@ -432,7 +447,7 @@ func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.M
 	var parentHash, committedAt, deprecatedAt *string
 
 	err := row.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
-		&embData, &r.EmbeddingHash, &mt, &r.DomainTag, &r.ConfidenceScore,
+		&embData, &r.EmbeddingHash, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
 		&st, &parentHash, &createdAt, &committedAt, &deprecatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -486,7 +501,7 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 	}
 
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding,
-		memory_type, domain_tag, confidence_score, status, parent_hash, created_at,
+		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
 		committed_at, deprecated_at
 		FROM memories WHERE embedding IS NOT NULL`
 	var args []any
@@ -494,6 +509,11 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 	if opts.DomainTag != "" {
 		query += " AND domain_tag = ?"
 		args = append(args, opts.DomainTag)
+	}
+	if opts.Provider != "" {
+		// Provider scoping: show memories from this provider OR facts (shared cross-provider).
+		query += " AND (provider = ? OR provider = '' OR memory_type = 'fact')"
+		args = append(args, opts.Provider)
 	}
 	if opts.MinConfidence > 0 {
 		query += " AND confidence_score >= ?"
@@ -523,7 +543,7 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		var parentHash, committedAt, deprecatedAt *string
 
 		scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
-			&embData, &mt, &r.DomainTag, &r.ConfidenceScore,
+			&embData, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
 			&st, &parentHash, &createdAt, &committedAt, &deprecatedAt)
 		if scanErr != nil {
 			return nil, fmt.Errorf("scan row: %w", scanErr)
@@ -709,7 +729,7 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 
 	countQuery := `SELECT COUNT(*) FROM memories WHERE 1=1`
 	query := `SELECT memory_id, submitting_agent, content, content_hash,
-		memory_type, domain_tag, confidence_score, status, parent_hash, created_at,
+		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
 		committed_at, deprecated_at FROM memories WHERE 1=1`
 	var args []any
 
@@ -718,6 +738,12 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		query += filter
 		countQuery += filter
 		args = append(args, opts.DomainTag)
+	}
+	if opts.Provider != "" {
+		filter := " AND (provider = ? OR provider = '' OR memory_type = 'fact')"
+		query += filter
+		countQuery += filter
+		args = append(args, opts.Provider)
 	}
 	if opts.Status != "" {
 		filter := " AND status = ?"
@@ -757,7 +783,7 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		var mt, st, createdAt string
 		var parentHash, committedAt, deprecatedAt *string
 		if scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
-			&mt, &r.DomainTag, &r.ConfidenceScore, &st, &parentHash,
+			&mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash,
 			&createdAt, &committedAt, &deprecatedAt); scanErr != nil {
 			return nil, 0, fmt.Errorf("scan memory: %w", scanErr)
 		}

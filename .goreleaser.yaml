@@ -61,13 +61,38 @@ builds:
       - -X main.date={{.Date}}
 
 archives:
-  - id: default
+  - id: sage-lite
+    builds:
+      - sage-lite
     format: tar.gz
     format_overrides:
       - goos: windows
         format: zip
     name_template: >-
-      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      sage-lite_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+
+  - id: amid
+    builds:
+      - amid
+    format: tar.gz
+    name_template: >-
+      amid_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+      - LICENSE
+
+  - id: sage-cli
+    builds:
+      - sage-cli
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: >-
+      sage-cli_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     files:
       - README.md
       - LICENSE
