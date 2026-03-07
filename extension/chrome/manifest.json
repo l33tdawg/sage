@@ -3,7 +3,7 @@
   "name": "SAGE Memory for AI",
   "version": "1.0.0",
   "description": "Give your AI a secure, permanent memory. Works with ChatGPT, and more — even on free plans.",
-  "permissions": ["activeTab", "storage", "scripting"],
+  "permissions": ["activeTab", "storage"],
   "host_permissions": [
     "http://localhost:8080/*",
     "https://chatgpt.com/*",

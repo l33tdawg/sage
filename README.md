@@ -88,6 +88,8 @@ The AI uses these automatically. You just talk to it normally, and it builds ins
 
 Open `http://localhost:8080/ui/` to see your AI's memory visualized as a living neural network. Memories appear as glowing nodes colored by domain, connections light up on recall, and everything updates in real-time via SSE. Includes search, timeline, memory export, and per-memory detail (content hash, confidence, provider, timestamps).
 
+![SAGE Brain Dashboard](docs/brain-dashboard.png)
+
 ---
 
 ## The Research Behind It
