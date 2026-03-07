@@ -175,7 +175,10 @@ func (h *DashboardHandler) validSession(token string) bool {
 	if !ok {
 		return false
 	}
-	expiry := val.(time.Time)
+	expiry, ok := val.(time.Time)
+	if !ok {
+		return false
+	}
 	if time.Now().After(expiry) {
 		h.sessions.Delete(token)
 		return false

@@ -81,8 +81,8 @@ func Init(keyFilePath, passphrase string) error {
 	}
 
 	nonce := make([]byte, nonceLen)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return fmt.Errorf("generate nonce: %w", err)
+	if _, randErr := io.ReadFull(rand.Reader, nonce); randErr != nil {
+		return fmt.Errorf("generate nonce: %w", randErr)
 	}
 
 	encryptedKey := gcm.Seal(nil, nonce, dataKey, nil)
@@ -114,8 +114,8 @@ func Open(keyFilePath, passphrase string) (*Vault, error) {
 	}
 
 	var kf keyFile
-	if err := json.Unmarshal(data, &kf); err != nil {
-		return nil, fmt.Errorf("parse key file: %w", err)
+	if unmarshalErr := json.Unmarshal(data, &kf); unmarshalErr != nil {
+		return nil, fmt.Errorf("parse key file: %w", unmarshalErr)
 	}
 
 	// Derive wrapping key from passphrase
@@ -216,8 +216,8 @@ func ChangePassphrase(keyFilePath, oldPassphrase, newPassphrase string) error {
 
 	// Generate new salt
 	salt := make([]byte, saltLen)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return fmt.Errorf("generate salt: %w", err)
+	if _, saltErr := io.ReadFull(rand.Reader, salt); saltErr != nil {
+		return fmt.Errorf("generate salt: %w", saltErr)
 	}
 
 	// Derive new wrapping key
@@ -233,8 +233,8 @@ func ChangePassphrase(keyFilePath, oldPassphrase, newPassphrase string) error {
 	}
 
 	nonce := make([]byte, nonceLen)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return fmt.Errorf("generate nonce: %w", err)
+	if _, nonceErr := io.ReadFull(rand.Reader, nonce); nonceErr != nil {
+		return fmt.Errorf("generate nonce: %w", nonceErr)
 	}
 
 	encryptedKey := gcm.Seal(nil, nonce, v.dataKey, nil)
