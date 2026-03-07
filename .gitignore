@@ -98,6 +98,7 @@ docs/*
 !docs/ARCHITECTURE.md
 !docs/GETTING_STARTED.md
 !docs/index.html
+!docs/connect.html
 !docs/og-image.png
 
 # Papers PDFs are tracked in papers/ (not gitignored)

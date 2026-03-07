@@ -238,7 +238,8 @@ func (s *Server) writeError(id any, code int, message string) {
 }
 
 // turnNudge returns a reminder string if the agent hasn't called sage_turn recently.
-// Escalates from gentle to urgent based on how many calls have passed.
+// Uses both call count AND elapsed time to catch agents with long turns (many
+// non-SAGE tool calls between SAGE calls). Escalates from gentle to urgent.
 func (s *Server) turnNudge(currentTool string) string {
 	// Don't nudge on sage_turn itself, inception, or reflect (they're memory operations).
 	switch currentTool {
@@ -246,19 +247,26 @@ func (s *Server) turnNudge(currentTool string) string {
 		return ""
 	}
 
+	minutesSinceTurn := 0.0
+	if !s.lastTurnTime.IsZero() {
+		minutesSinceTurn = time.Since(s.lastTurnTime).Minutes()
+	}
+
 	switch {
-	case s.callsSinceTurn >= 5:
-		// Urgent — agent is clearly not calling sage_turn.
+	case s.callsSinceTurn >= 5 || (minutesSinceTurn > 10 && !s.lastTurnTime.IsZero()):
+		// Urgent — too many calls or too much time without sage_turn.
 		return "[SAGE] ⚠️ You have not called sage_turn in " +
 			fmt.Sprintf("%d", s.callsSinceTurn) +
-			" tool calls. Your experience this session is NOT being recorded. " +
+			" tool calls (" + fmt.Sprintf("%.0f", minutesSinceTurn) + "min). " +
+			"Your experience this session is NOT being recorded. " +
 			"Call sage_turn now with the current topic and what's happened — " +
 			"otherwise this work is lost if the conversation ends."
-	case s.callsSinceTurn >= 3:
+	case s.callsSinceTurn >= 3 || (minutesSinceTurn > 5 && !s.lastTurnTime.IsZero()):
 		// Firm reminder.
 		return "[SAGE] Reminder: call sage_turn with the current topic + observation. " +
 			"You haven't logged a turn in " +
-			fmt.Sprintf("%d", s.callsSinceTurn) + " calls — your recent experience isn't being stored."
+			fmt.Sprintf("%d", s.callsSinceTurn) + " calls (" +
+			fmt.Sprintf("%.0f", minutesSinceTurn) + "min) — your recent experience isn't being stored."
 	case s.callsSinceTurn == 2 && s.lastTurnTime.IsZero():
 		// First session, never called sage_turn — might not know about it yet.
 		return "[SAGE] Tip: call sage_turn every conversation turn to build persistent memory. " +

@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connect Your AI to SAGE</title>
+<meta name="description" content="Step-by-step guide to connect Claude, ChatGPT, or Claude Code to your SAGE memory node via MCP.">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --void: #06020e;
+  --deep: #0a0614;
+  --surface: #110b22;
+  --raised: #1a1133;
+  --border: #2a1d4a;
+  --muted: #6b5a8e;
+  --text: #c8bfe0;
+  --bright: #ede8f7;
+  --accent: #a78bfa;
+  --accent-glow: #7c3aed;
+  --ember: #f472b6;
+  --teal: #2dd4bf;
+  --gold: #fbbf24;
+  --font-body: 'DM Sans', system-ui, -apple-system, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', monospace;
+}
+
+html { scroll-behavior: smooth; }
+body {
+  font-family: var(--font-body);
+  background: var(--void);
+  color: var(--text);
+  line-height: 1.65;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.container { max-width: 800px; margin: 0 auto; padding: 0 24px; }
+
+/* Header */
+.header {
+  padding: 24px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 48px;
+}
+.header .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.header a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+.header a:hover { color: var(--bright); }
+.logo { font-size: 1.2rem; font-weight: 700; color: var(--bright); letter-spacing: 2px; }
+
+/* Hero */
+.hero {
+  text-align: center;
+  padding: 40px 0 60px;
+}
+.hero h1 {
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: var(--bright);
+  margin-bottom: 16px;
+}
+.hero p {
+  font-size: 1.1rem;
+  color: var(--muted);
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* Prerequisites */
+.prereq {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px 28px;
+  margin-bottom: 48px;
+}
+.prereq h3 {
+  color: var(--gold);
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 12px;
+}
+.prereq ol {
+  padding-left: 20px;
+  color: var(--text);
+}
+.prereq li { margin-bottom: 8px; }
+.prereq code {
+  background: var(--raised);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+/* Provider tabs */
+.tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  padding: 14px 28px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.tab-content { display: none; padding: 32px 0; }
+.tab-content.active { display: block; }
+
+/* Steps */
+.step {
+  margin-bottom: 36px;
+}
+.step-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: var(--accent-glow);
+  color: white;
+  border-radius: 50%;
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-right: 10px;
+}
+.step h3 {
+  display: inline;
+  color: var(--bright);
+  font-size: 1.1rem;
+}
+.step p {
+  margin-top: 10px;
+  margin-left: 38px;
+  color: var(--text);
+}
+.step ul {
+  margin-top: 10px;
+  margin-left: 56px;
+  color: var(--text);
+}
+.step li { margin-bottom: 4px; }
+
+/* Code blocks */
+pre {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin: 12px 0 0 38px;
+  overflow-x: auto;
+  position: relative;
+}
+pre code {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text);
+  line-height: 1.6;
+}
+.copy-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  font-family: var(--font-body);
+  transition: all 0.2s;
+}
+.copy-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Inline code */
+p code, li code {
+  background: var(--raised);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+/* Info box */
+.info-box {
+  background: rgba(139,92,246,0.08);
+  border: 1px solid rgba(139,92,246,0.2);
+  border-radius: 10px;
+  padding: 16px 20px;
+  margin: 16px 0 0 38px;
+  font-size: 0.9rem;
+}
+.info-box strong { color: var(--accent); }
+
+/* Screenshot placeholder */
+.screenshot {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 40px;
+  margin: 12px 0 0 38px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* Troubleshooting */
+.troubleshoot {
+  margin-top: 60px;
+  padding-top: 40px;
+  border-top: 1px solid var(--border);
+}
+.troubleshoot h2 {
+  color: var(--bright);
+  font-size: 1.5rem;
+  margin-bottom: 24px;
+}
+.faq-item {
+  margin-bottom: 24px;
+}
+.faq-item h4 {
+  color: var(--ember);
+  font-size: 0.95rem;
+  margin-bottom: 6px;
+}
+.faq-item p {
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+/* Footer */
+.footer {
+  margin-top: 80px;
+  padding: 32px 0;
+  border-top: 1px solid var(--border);
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.footer a { color: var(--accent); text-decoration: none; }
+
+@media (max-width: 640px) {
+  .hero h1 { font-size: 1.6rem; }
+  .tab { padding: 10px 16px; font-size: 0.9rem; }
+  pre { margin-left: 0; }
+  .step p, .step ul { margin-left: 0; }
+  .info-box { margin-left: 0; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="container">
+    <span class="logo">SAGE</span>
+    <div>
+      <a href="./">Home</a>
+      &nbsp;&middot;&nbsp;
+      <a href="https://github.com/l33tdawg/sage">GitHub</a>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+  <div class="hero">
+    <h1>Connect Your AI to SAGE</h1>
+    <p>SAGE is installed. Now give your AI access to its memory. Pick your provider below.</p>
+  </div>
+
+  <div class="prereq">
+    <h3>Before you start</h3>
+    <ol>
+      <li><strong>SAGE is installed</strong> &mdash; you've run the app or <code>sage-lite setup</code></li>
+      <li><strong>SAGE is running</strong> &mdash; double-click the app, or run <code>sage-lite serve</code> in a terminal</li>
+      <li>You should see the Brain Dashboard at <code>http://localhost:8080/ui/</code></li>
+    </ol>
+  </div>
+
+  <!-- Provider Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('claude-code')">Claude Code</button>
+    <button class="tab" onclick="showTab('claude-desktop')">Claude Desktop</button>
+    <button class="tab" onclick="showTab('chatgpt')">ChatGPT</button>
+  </div>
+
+  <!-- Claude Code -->
+  <div id="claude-code" class="tab-content active">
+    <div class="step">
+      <span class="step-num">1</span>
+      <h3>Find your sage-lite binary path</h3>
+      <p>If you installed from the DMG, it's inside the app bundle. If you built from source, it's wherever you put it.</p>
+      <pre><code># DMG install (macOS):
+/Applications/SAGE.app/Contents/MacOS/sage-lite
+
+# Built from source:
+which sage-lite</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+    </div>
+
+    <div class="step">
+      <span class="step-num">2</span>
+      <h3>Add MCP config to your project</h3>
+      <p>Create a <code>.mcp.json</code> file in your project root (or home directory for global config):</p>
+      <pre><code>{
+  "mcpServers": {
+    "sage": {
+      "command": "/Applications/SAGE.app/Contents/MacOS/sage-lite",
+      "args": ["mcp"],
+      "env": {
+        "SAGE_HOME": "~/.sage",
+        "SAGE_PROVIDER": "claude-code"
+      }
+    }
+  }
+}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box">
+        <strong>SAGE_PROVIDER</strong> scopes your memories. Claude Code memories stay separate from ChatGPT memories. Facts (verified truths) are shared across providers.
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="step-num">3</span>
+      <h3>Restart Claude Code</h3>
+      <p>Close and reopen Claude Code (or start a new session). You should see SAGE tools available: <code>sage_turn</code>, <code>sage_recall</code>, <code>sage_remember</code>, etc.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">4</span>
+      <h3>Initialize your AI's brain</h3>
+      <p>In your first conversation, tell Claude:</p>
+      <pre><code>Call sage_inception to initialize your memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <p style="margin-top:12px;margin-left:38px;">That's it. Claude will now remember things across conversations.</p>
+    </div>
+  </div>
+
+  <!-- Claude Desktop -->
+  <div id="claude-desktop" class="tab-content">
+    <div class="step">
+      <span class="step-num">1</span>
+      <h3>Open Claude Desktop settings</h3>
+      <p>Go to <strong>Claude Desktop</strong> &rarr; <strong>Settings</strong> &rarr; <strong>Developer</strong> &rarr; <strong>Edit Config</strong> (under MCP Servers).</p>
+      <p>This opens the file <code>claude_desktop_config.json</code>.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">2</span>
+      <h3>Add the SAGE MCP server</h3>
+      <p>Paste this into the config file:</p>
+      <pre><code>{
+  "mcpServers": {
+    "sage": {
+      "command": "/Applications/SAGE.app/Contents/MacOS/sage-lite",
+      "args": ["mcp"],
+      "env": {
+        "SAGE_HOME": "~/.sage",
+        "SAGE_PROVIDER": "claude-desktop"
+      }
+    }
+  }
+}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box">
+        <strong>Windows?</strong> Change the command to:<br>
+        <code>C:\\Program Files\\SAGE\\sage-lite.exe</code>
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="step-num">3</span>
+      <h3>Restart Claude Desktop</h3>
+      <p>Completely quit and reopen Claude Desktop. Look for the SAGE tools icon in the chat input area &mdash; you should see tools like <code>sage_turn</code> and <code>sage_recall</code>.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">4</span>
+      <h3>Initialize</h3>
+      <p>Start a new conversation and say:</p>
+      <pre><code>Call sage_inception to initialize your memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <p style="margin-top:12px;margin-left:38px;">Claude will seed its foundational memories and start learning from every conversation.</p>
+    </div>
+  </div>
+
+  <!-- ChatGPT -->
+  <div id="chatgpt" class="tab-content">
+    <div class="step">
+      <span class="step-num">1</span>
+      <h3>Open ChatGPT Desktop settings</h3>
+      <p>ChatGPT desktop app supports MCP servers. Go to <strong>Settings</strong> &rarr; <strong>Beta Features</strong> and enable <strong>MCP Servers</strong> if not already enabled.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">2</span>
+      <h3>Add SAGE as an MCP server</h3>
+      <p>In ChatGPT's MCP configuration, add:</p>
+      <pre><code>{
+  "mcpServers": {
+    "sage": {
+      "command": "/Applications/SAGE.app/Contents/MacOS/sage-lite",
+      "args": ["mcp"],
+      "env": {
+        "SAGE_HOME": "~/.sage",
+        "SAGE_PROVIDER": "chatgpt"
+      }
+    }
+  }
+}</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box">
+        <strong>Windows?</strong> Change the command to:<br>
+        <code>C:\\Program Files\\SAGE\\sage-lite.exe</code>
+      </div>
+    </div>
+
+    <div class="step">
+      <span class="step-num">3</span>
+      <h3>Restart ChatGPT</h3>
+      <p>Quit and reopen the ChatGPT desktop app. SAGE tools should appear in the tools menu.</p>
+    </div>
+
+    <div class="step">
+      <span class="step-num">4</span>
+      <h3>Initialize and start remembering</h3>
+      <p>In your first conversation, say:</p>
+      <pre><code>Call sage_inception to initialize your memory. Then call sage_turn every time I send you a message so you build persistent memory across our conversations.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <div class="info-box">
+        <strong>Tip:</strong> ChatGPT doesn't have a CLAUDE.md file to remind it. You may want to add "Always call sage_turn at the start of each reply" to your ChatGPT custom instructions so it remembers automatically.
+      </div>
+    </div>
+  </div>
+
+  <!-- Troubleshooting -->
+  <div class="troubleshoot">
+    <h2>Troubleshooting</h2>
+
+    <div class="faq-item">
+      <h4>"SAGE tools don't appear"</h4>
+      <p>Make sure <code>sage-lite serve</code> is running (or the SAGE app is open). Check that the path to <code>sage-lite</code> in your config is correct. Try running the command manually in a terminal to verify it works.</p>
+    </div>
+
+    <div class="faq-item">
+      <h4>"Connection refused" or "embedding provider error"</h4>
+      <p>SAGE needs to be running on port 8080. Check <code>http://localhost:8080/ui/</code> in your browser. If the dashboard loads, SAGE is running. If not, start it with <code>sage-lite serve</code> or open the SAGE app.</p>
+    </div>
+
+    <div class="faq-item">
+      <h4>"sage_inception fails"</h4>
+      <p>This usually means the embedding provider isn't configured. Run <code>sage-lite setup</code> to re-run the setup wizard and pick an embedding provider (Ollama recommended, or Hash for zero-setup).</p>
+    </div>
+
+    <div class="faq-item">
+      <h4>Can I use SAGE with multiple AI providers at the same time?</h4>
+      <p>Yes! That's exactly what <code>SAGE_PROVIDER</code> is for. Each provider gets its own memory scope. Set <code>"SAGE_PROVIDER": "claude-code"</code> in one config and <code>"SAGE_PROVIDER": "chatgpt"</code> in another. Facts are shared across providers, but observations and reflections stay scoped.</p>
+    </div>
+
+    <div class="faq-item">
+      <h4>Where is my data stored?</h4>
+      <p>Everything stays on your machine in <code>~/.sage/</code>. The database is a SQLite file. Nothing is sent to any cloud service. You can export your entire memory vault with <code>sage-lite vault export</code>.</p>
+    </div>
+  </div>
+
+  <div class="footer">
+    <a href="./">SAGE</a> &middot;
+    <a href="https://github.com/l33tdawg/sage">GitHub</a> &middot;
+    Apache 2.0 License
+  </div>
+</div>
+
+<script>
+function showTab(id) {
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+
+function copyCode(btn) {
+  const code = btn.previousElementSibling || btn.parentElement.querySelector('code');
+  const text = code.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+  });
+}
+</script>
+</body>
+</html>
