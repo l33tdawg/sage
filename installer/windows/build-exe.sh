@@ -37,8 +37,9 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
     -o "${BUILD_DIR}/sage-cli.exe" \
     "${PROJECT_ROOT}/cmd/sage-cli"
 
-# Copy NSIS script to build dir
+# Copy NSIS script and icon to build dir
 cp "$SCRIPT_DIR/sage-installer.nsi" "$BUILD_DIR/"
+cp "$SCRIPT_DIR/sage.ico" "$BUILD_DIR/"
 
 # Build installer with NSIS
 echo "==> Building NSIS installer..."

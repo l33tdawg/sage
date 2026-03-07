@@ -28,9 +28,8 @@ SetCompressor /SOLID lzma
 !define MUI_ABORTWARNING
 !define MUI_WELCOMEFINISHPAGE_BITMAP_NOSTRETCH
 
-; Icon (use default if custom not available)
-; !define MUI_ICON "sage.ico"
-; !define MUI_UNICON "sage.ico"
+!define MUI_ICON "sage.ico"
+!define MUI_UNICON "sage.ico"
 
 !define MUI_WELCOMEPAGE_TITLE "Welcome to SAGE Setup"
 !define MUI_WELCOMEPAGE_TEXT "SAGE gives your AI a memory.$\r$\n$\r$\nThis wizard will install SAGE Personal on your computer. After installation, run the setup wizard to configure your personal memory node.$\r$\n$\r$\nYour data stays on your machine. No cloud. No tracking.$\r$\n$\r$\nClick Next to continue."
