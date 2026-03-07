@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/l33tdawg/sage/internal/embedding"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 func runSetup() error {
@@ -137,11 +138,13 @@ func handleTestProvider(w http.ResponseWriter, r *http.Request) {
 
 func handleSaveConfig(w http.ResponseWriter, r *http.Request, cfg *Config, home string) {
 	var req struct {
-		Provider  string `json:"provider"`
-		APIKey    string `json:"api_key"`
-		Model     string `json:"model"`
-		Dimension int    `json:"dimension"`
-		BaseURL   string `json:"base_url"`
+		Provider   string `json:"provider"`
+		APIKey     string `json:"api_key"`
+		Model      string `json:"model"`
+		Dimension  int    `json:"dimension"`
+		BaseURL    string `json:"base_url"`
+		Encryption bool   `json:"encryption"`
+		Passphrase string `json:"passphrase"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"ok":false}`, http.StatusBadRequest)
@@ -153,6 +156,18 @@ func handleSaveConfig(w http.ResponseWriter, r *http.Request, cfg *Config, home 
 	cfg.Embedding.Model = req.Model
 	cfg.Embedding.Dimension = req.Dimension
 	cfg.Embedding.BaseURL = req.BaseURL
+	cfg.Encryption.Enabled = req.Encryption
+
+	// Initialize vault if encryption enabled
+	if req.Encryption && req.Passphrase != "" {
+		vaultKeyPath := filepath.Join(home, "vault.key")
+		if !vault.Exists(vaultKeyPath) {
+			if err := vault.Init(vaultKeyPath, req.Passphrase); err != nil {
+				_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "Failed to create vault: " + err.Error()})
+				return
+			}
+		}
+	}
 
 	if err := SaveConfig(cfg); err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": err.Error()})
@@ -937,7 +952,32 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
   <div class="celebration">
     <div class="celebration-icon">&#129504;</div>
     <h2>SAGE is ready!</h2>
-    <p style="margin-top:1rem">Now start the SAGE server:</p>
+
+    <!-- Encryption toggle -->
+    <div style="background:#111827; border-radius:12px; padding:1.25rem; margin-top:1.5rem; text-align:left; border:1px solid #1f2937">
+      <div style="display:flex; align-items:center; gap:0.75rem; cursor:pointer" onclick="toggleEncryption()">
+        <div id="enc-toggle" style="width:44px; height:24px; border-radius:12px; background:#374151; position:relative; transition:background 0.2s; flex-shrink:0">
+          <div id="enc-knob" style="width:20px; height:20px; border-radius:50%; background:#e5e7eb; position:absolute; top:2px; left:2px; transition:left 0.2s"></div>
+        </div>
+        <div>
+          <h3 style="font-size:1rem; margin-bottom:0.15rem">Encrypt memories at rest</h3>
+          <p style="color:#9ca3af; font-size:0.85rem">AES-256-GCM encryption. If your laptop is stolen or you back up to the cloud, nobody can read your memories without the passphrase.</p>
+        </div>
+      </div>
+
+      <div id="enc-fields" style="display:none; margin-top:1rem; padding-top:1rem; border-top:1px solid #1f2937">
+        <label style="display:block; font-size:0.9rem; margin-bottom:0.5rem; color:#9ca3af">Create a vault passphrase</label>
+        <input type="password" id="enc-pass" placeholder="Choose a strong passphrase..." style="width:100%; padding:0.65rem 0.85rem; background:#0a0e17; border:1px solid #374151; border-radius:8px; color:#e5e7eb; font-size:0.95rem; margin-bottom:0.5rem" />
+        <input type="password" id="enc-pass2" placeholder="Confirm passphrase..." style="width:100%; padding:0.65rem 0.85rem; background:#0a0e17; border:1px solid #374151; border-radius:8px; color:#e5e7eb; font-size:0.95rem" />
+        <p id="enc-error" style="color:#ef4444; font-size:0.85rem; margin-top:0.5rem; display:none"></p>
+        <p style="color:#6b7280; font-size:0.8rem; margin-top:0.75rem; line-height:1.5">
+          &#9888; Store this passphrase somewhere safe. If you lose it, your encrypted memories cannot be recovered.
+          You can also set <code style="color:#06b6d4; font-size:0.8rem">SAGE_PASSPHRASE</code> as an environment variable for headless use.
+        </p>
+      </div>
+    </div>
+
+    <p style="margin-top:1.25rem">Now start the SAGE server:</p>
     <p style="margin-top:0.75rem"><code>sage-lite serve</code></p>
     <p style="margin-top:1.25rem">Then open your AI app and send the inception message.</p>
     <p style="margin-top:1.25rem; font-size:0.9rem">Your Brain Dashboard will be at <strong style="color:#06b6d4">http://localhost:8080/ui/</strong></p>
@@ -948,7 +988,7 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
     </div>
 
     <div style="margin-top:2rem">
-      <button class="btn" onclick="finishSetup()" style="padding:0.85rem 2.5rem; font-size:1.05rem">Close Setup</button>
+      <button class="btn" onclick="finishSetup()" style="padding:0.85rem 2.5rem; font-size:1.05rem" id="finish-btn">Close Setup</button>
     </div>
   </div>
 </div>
@@ -1198,17 +1238,73 @@ function copyPrompt() {
   });
 }
 
+let encryptionEnabled = false;
+
+function toggleEncryption() {
+  encryptionEnabled = !encryptionEnabled;
+  const toggle = document.getElementById('enc-toggle');
+  const knob = document.getElementById('enc-knob');
+  const fields = document.getElementById('enc-fields');
+  if (encryptionEnabled) {
+    toggle.style.background = '#06b6d4';
+    knob.style.left = '22px';
+    fields.style.display = 'block';
+  } else {
+    toggle.style.background = '#374151';
+    knob.style.left = '2px';
+    fields.style.display = 'none';
+  }
+}
+
 function finishSetup() {
-  // Signal done - config was already saved in step 3
+  const body = {
+    provider: selectedProvider || 'hash',
+    dimension: 768,
+    base_url: selectedProvider === 'ollama' ? (document.getElementById('ollama-url')?.value || 'http://localhost:11434') : '',
+    model: selectedProvider === 'ollama' ? 'nomic-embed-text' : '',
+    encryption: encryptionEnabled,
+  };
+
+  // Validate passphrase if encryption enabled
+  if (encryptionEnabled) {
+    const pass1 = document.getElementById('enc-pass').value;
+    const pass2 = document.getElementById('enc-pass2').value;
+    const errEl = document.getElementById('enc-error');
+
+    if (pass1.length < 8) {
+      errEl.textContent = 'Passphrase must be at least 8 characters.';
+      errEl.style.display = 'block';
+      return;
+    }
+    if (pass1 !== pass2) {
+      errEl.textContent = 'Passphrases do not match.';
+      errEl.style.display = 'block';
+      return;
+    }
+    errEl.style.display = 'none';
+    body.passphrase = pass1;
+  }
+
+  const btn = document.getElementById('finish-btn');
+  btn.disabled = true;
+  btn.textContent = encryptionEnabled ? 'Creating vault...' : 'Saving...';
+
   fetch('/api/save-config', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      provider: selectedProvider || 'hash',
-      dimension: 768,
-      base_url: selectedProvider === 'ollama' ? (document.getElementById('ollama-url')?.value || 'http://localhost:11434') : '',
-      model: selectedProvider === 'ollama' ? 'nomic-embed-text' : '',
-    })
+    body: JSON.stringify(body)
+  }).then(r => r.json()).then(data => {
+    if (data.ok === false && data.error) {
+      const errEl = document.getElementById('enc-error');
+      errEl.textContent = data.error;
+      errEl.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Close Setup';
+    }
+    // Config saved — window can close or user navigates away
+  }).catch(() => {
+    btn.disabled = false;
+    btn.textContent = 'Close Setup';
   });
 }
 </script>

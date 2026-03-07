@@ -10,11 +10,17 @@ import (
 
 // Config holds the sage-lite configuration.
 type Config struct {
-	Embedding EmbeddingConfig `yaml:"embedding"`
-	DataDir   string          `yaml:"data_dir"`
-	RESTAddr  string          `yaml:"rest_addr"`
-	AgentKey  string          `yaml:"agent_key_file"`
-	BlockTime string          `yaml:"block_time"` // e.g. "1s", "3s"
+	Embedding  EmbeddingConfig `yaml:"embedding"`
+	Encryption EncryptionConfig `yaml:"encryption"`
+	DataDir    string           `yaml:"data_dir"`
+	RESTAddr   string           `yaml:"rest_addr"`
+	AgentKey   string           `yaml:"agent_key_file"`
+	BlockTime  string           `yaml:"block_time"` // e.g. "1s", "3s"
+}
+
+// EncryptionConfig controls AES-256-GCM encryption of memory content at rest.
+type EncryptionConfig struct {
+	Enabled bool `yaml:"enabled"` // Whether encryption is active
 }
 
 // EmbeddingConfig configures the embedding provider.

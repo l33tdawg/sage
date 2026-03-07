@@ -182,6 +182,24 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 		}
 	}
 
+	// Enforce turn discipline: block non-SAGE tools after threshold.
+	// This guarantees memories are saved — agents can't just ignore the nudge.
+	if s.shouldBlockForTurn(params.Name) {
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: map[string]any{
+				"content": []map[string]any{
+					{"type": "text", "text": "[SAGE] ⛔ Turn checkpoint — call sage_turn before continuing. " +
+						"You have " + fmt.Sprintf("%d", s.callsSinceTurn) + " unrecorded tool calls. " +
+						"Summarize what's happened so far (topic + observation), then retry this operation. " +
+						"This protects your work from being lost if the conversation ends unexpectedly."},
+				},
+				"isError": true,
+			},
+		}
+	}
+
 	result, err := tool.Handler(ctx, params.Arguments)
 	if err != nil {
 		return &jsonRPCResponse{
@@ -237,6 +255,30 @@ func (s *Server) writeError(id any, code int, message string) {
 	})
 }
 
+// shouldBlockForTurn returns true if the agent should be forced to call sage_turn
+// before any more non-SAGE tool calls. This is the hard enforcement — after 7 calls
+// or 5 minutes, we block until sage_turn is called.
+func (s *Server) shouldBlockForTurn(toolName string) bool {
+	// Never block SAGE tools themselves.
+	switch toolName {
+	case "sage_turn", "sage_inception", "sage_reflect", "sage_recall",
+		"sage_remember", "sage_forget", "sage_list", "sage_status", "sage_timeline":
+		return false
+	}
+
+	// Block after 7 non-SAGE calls.
+	if s.callsSinceTurn >= 7 {
+		return true
+	}
+
+	// Block after 5 minutes without sage_turn (but only if we've had at least one turn).
+	if !s.lastTurnTime.IsZero() && time.Since(s.lastTurnTime).Minutes() > 5 && s.callsSinceTurn >= 2 {
+		return true
+	}
+
+	return false
+}
+
 // turnNudge returns a reminder string if the agent hasn't called sage_turn recently.
 // Uses both call count AND elapsed time to catch agents with long turns (many
 // non-SAGE tool calls between SAGE calls). Escalates from gentle to urgent.
@@ -253,7 +295,7 @@ func (s *Server) turnNudge(currentTool string) string {
 	}
 
 	switch {
-	case s.callsSinceTurn >= 5 || (minutesSinceTurn > 10 && !s.lastTurnTime.IsZero()):
+	case s.callsSinceTurn >= 5 || (minutesSinceTurn > 5 && !s.lastTurnTime.IsZero()):
 		// Urgent — too many calls or too much time without sage_turn.
 		return "[SAGE] ⚠️ You have not called sage_turn in " +
 			fmt.Sprintf("%d", s.callsSinceTurn) +
@@ -261,7 +303,7 @@ func (s *Server) turnNudge(currentTool string) string {
 			"Your experience this session is NOT being recorded. " +
 			"Call sage_turn now with the current topic and what's happened — " +
 			"otherwise this work is lost if the conversation ends."
-	case s.callsSinceTurn >= 3 || (minutesSinceTurn > 5 && !s.lastTurnTime.IsZero()):
+	case s.callsSinceTurn >= 3 || (minutesSinceTurn > 3 && !s.lastTurnTime.IsZero()):
 		// Firm reminder.
 		return "[SAGE] Reminder: call sage_turn with the current topic + observation. " +
 			"You haven't logged a turn in " +

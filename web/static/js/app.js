@@ -6,7 +6,9 @@ const { h, render } = preact;
 const { useState, useEffect, useRef, useCallback } = preactHooks;
 const html = window.html;
 
-// Domain color palette
+// Domain color palette — vibrant, distinct hues for every domain.
+// Known domains get hand-picked colors; unknown domains get a stable
+// hash-derived color so each domain is always the same hue.
 const DOMAIN_COLORS = {
     crypto: '#06b6d4',
     vuln_intel: '#ef4444',
@@ -17,16 +19,38 @@ const DOMAIN_COLORS = {
     general: '#6b7280',
     security: '#f43f5e',
     exploit: '#ec4899',
-    default: '#64748b',
+    'sage-project': '#a78bfa',
+    'sage-release': '#2dd4bf',
+    'sage-development': '#f472b6',
+    'sage-roadmap': '#fbbf24',
+    'sage-security': '#fb923c',
+    'sage-distribution': '#38bdf8',
+    'go-debugging': '#34d399',
+    'user-preferences': '#c084fc',
 };
 
+const _domainColorCache = {};
+
 function getDomainColor(domain) {
-    if (!domain) return DOMAIN_COLORS.default;
+    if (!domain) return '#64748b';
     const lower = domain.toLowerCase();
+
+    // Check known domains first
     for (const [key, color] of Object.entries(DOMAIN_COLORS)) {
-        if (lower.includes(key)) return color;
+        if (lower === key || lower.includes(key)) return color;
     }
-    return DOMAIN_COLORS.default;
+
+    // Hash-based color for unknown domains — stable across sessions
+    if (_domainColorCache[lower]) return _domainColorCache[lower];
+    let hash = 0;
+    for (let i = 0; i < lower.length; i++) {
+        hash = lower.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    // Use HSL for vibrant colors: spread hue, keep saturation/lightness punchy
+    const hue = ((hash % 360) + 360) % 360;
+    const color = `hsl(${hue}, 70%, 60%)`;
+    _domainColorCache[lower] = color;
+    return color;
 }
 
 function timeAgo(dateStr) {
@@ -613,6 +637,24 @@ function MemoryDetail({ memory, onClose, onDelete }) {
                         <label>Memory ID</label>
                         <span class="value" style="font-size: 10px; word-break: break-all;">${memory.id || memory.memory_id}</span>
                     </div>
+                    ${memory.content_hash && html`
+                        <div class="detail-meta-item">
+                            <label>Content Hash</label>
+                            <span class="value" style="font-size: 10px; word-break: break-all; font-family: var(--font-mono, monospace);">${typeof memory.content_hash === 'string' ? memory.content_hash : btoa(String.fromCharCode(...new Uint8Array(memory.content_hash)))}</span>
+                        </div>
+                    `}
+                    ${memory.committed_at && html`
+                        <div class="detail-meta-item">
+                            <label>Committed</label>
+                            <span class="value">${timeAgo(memory.committed_at)}</span>
+                        </div>
+                    `}
+                    ${memory.provider && html`
+                        <div class="detail-meta-item">
+                            <label>Provider</label>
+                            <span class="value">${memory.provider}</span>
+                        </div>
+                    `}
                 </div>
 
                 <div class="detail-section" style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);">
@@ -722,6 +764,7 @@ function SettingsPage() {
     }, []);
 
     const ver = health?.version || 'dev';
+    const encrypted = health?.encrypted || false;
 
     return html`
         <div class="settings-page">
@@ -730,6 +773,12 @@ function SettingsPage() {
                 <div class="settings-row">
                     <span class="label">Version</span>
                     <span class="value">${ver}</span>
+                </div>
+                <div class="settings-row">
+                    <span class="label">Encryption</span>
+                    <span class="value" style="color: ${encrypted ? 'var(--success, #10b981)' : 'var(--text-muted, #6b7280)'}">
+                        ${encrypted ? 'AES-256-GCM (active)' : 'Off'}
+                    </span>
                 </div>
                 <div class="settings-row">
                     <span class="label">Dashboard API</span>

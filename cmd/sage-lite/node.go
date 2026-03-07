@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"bufio"
+
 	"github.com/cometbft/cometbft/config"
 	cmtlog "github.com/cometbft/cometbft/libs/log"
 	"github.com/cometbft/cometbft/node"
@@ -30,6 +32,7 @@ import (
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/vault"
 	"github.com/l33tdawg/sage/web"
 )
 
@@ -71,6 +74,30 @@ func runServe() error {
 		return fmt.Errorf("open SQLite: %w", err)
 	}
 	defer sqliteStore.Close()
+
+	// Unlock encryption vault if enabled
+	if cfg.Encryption.Enabled {
+		vaultKeyPath := filepath.Join(SageHome(), "vault.key")
+		if !vault.Exists(vaultKeyPath) {
+			return fmt.Errorf("encryption enabled but vault.key not found at %s — run 'sage-lite setup' first", vaultKeyPath)
+		}
+
+		passphrase := os.Getenv("SAGE_PASSPHRASE")
+		if passphrase == "" {
+			fmt.Print("  Enter vault passphrase: ")
+			passphrase, err = readPassphrase()
+			if err != nil {
+				return fmt.Errorf("read passphrase: %w", err)
+			}
+		}
+
+		v, vaultErr := vault.Open(vaultKeyPath, passphrase)
+		if vaultErr != nil {
+			return fmt.Errorf("unlock vault: %w", vaultErr)
+		}
+		sqliteStore.SetVault(v)
+		logger.Info().Msg("encryption vault unlocked — memories are encrypted at rest (AES-256-GCM)")
+	}
 
 	// Create BadgerDB store
 	badgerStore, err := store.NewBadgerStore(badgerPath)
@@ -152,6 +179,7 @@ func runServe() error {
 
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
+	dashboard.Encrypted = cfg.Encryption.Enabled
 
 	// Build combined router
 	r := chi.NewRouter()
@@ -441,6 +469,19 @@ func autoImport(cfg *Config, embedProvider embedding.Provider, logger zerolog.Lo
 	// Write a marker so we don't re-import
 	doneMsg := fmt.Sprintf("Imported %d/%d memories on %s", success, len(memories), time.Now().Format(time.RFC3339))
 	_ = os.WriteFile(filepath.Join(home, "import-done.txt"), []byte(doneMsg), 0600)
+}
+
+// readPassphrase reads a line from stdin. For the DMG launcher (no terminal),
+// the passphrase must be set via SAGE_PASSPHRASE env var.
+func readPassphrase() (string, error) {
+	scanner := bufio.NewScanner(os.Stdin)
+	if scanner.Scan() {
+		return scanner.Text(), nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("no input")
 }
 
 func runStatus() error {

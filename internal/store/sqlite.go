@@ -3,16 +3,19 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // sqlQuerier is satisfied by both *sql.DB and *sql.Tx, allowing
@@ -28,6 +31,67 @@ type SQLiteStore struct {
 	conn   sqlQuerier // either *sql.DB or *sql.Tx
 	db     *sql.DB    // nil for tx-scoped stores
 	dbPath string
+	vault  *vault.Vault // nil = no encryption
+}
+
+// encPrefix marks content as encrypted (prepended to base64 ciphertext).
+const encPrefix = "enc::"
+
+// SetVault attaches an encryption vault to the store.
+// When set, memory content is encrypted on write and decrypted on read.
+func (s *SQLiteStore) SetVault(v *vault.Vault) {
+	s.vault = v
+}
+
+// encryptContent encrypts a string if the vault is set.
+// Returns the original string if no vault.
+func (s *SQLiteStore) encryptContent(plaintext string) (string, error) {
+	if s.vault == nil {
+		return plaintext, nil
+	}
+	encrypted, err := s.vault.EncryptString(plaintext)
+	if err != nil {
+		return "", fmt.Errorf("encrypt content: %w", err)
+	}
+	return encPrefix + base64.StdEncoding.EncodeToString(encrypted), nil
+}
+
+// decryptContent decrypts a string if it's encrypted.
+// Returns the original string if not encrypted or no vault.
+func (s *SQLiteStore) decryptContent(stored string) (string, error) {
+	if !strings.HasPrefix(stored, encPrefix) {
+		return stored, nil // not encrypted
+	}
+	if s.vault == nil {
+		return "[encrypted — vault locked]", nil
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, encPrefix))
+	if err != nil {
+		return "", fmt.Errorf("decode encrypted content: %w", err)
+	}
+	return s.vault.DecryptString(data)
+}
+
+// encryptEmbedding encrypts embedding bytes if the vault is set.
+func (s *SQLiteStore) encryptEmbedding(data []byte) ([]byte, error) {
+	if s.vault == nil || data == nil {
+		return data, nil
+	}
+	return s.vault.Encrypt(data)
+}
+
+// decryptEmbedding decrypts embedding bytes if vault is set and data looks encrypted.
+// Encrypted embeddings are longer than raw ones (nonce + tag overhead).
+func (s *SQLiteStore) decryptEmbedding(data []byte) ([]byte, error) {
+	if s.vault == nil || data == nil {
+		return data, nil
+	}
+	// Try to decrypt — if it fails, it's likely unencrypted legacy data.
+	decrypted, err := s.vault.Decrypt(data)
+	if err != nil {
+		return data, nil // return as-is for backward compatibility
+	}
+	return decrypted, nil
 }
 
 // NewSQLiteStore creates a new SQLite-backed store.
@@ -417,7 +481,18 @@ func cosineSimilarity(a, b []float32) float64 {
 // --- MemoryStore implementation ---
 
 func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRecord) error {
-	_, err := s.conn.ExecContext(ctx,
+	// Encrypt content and embedding if vault is set.
+	content, err := s.encryptContent(record.Content)
+	if err != nil {
+		return err
+	}
+	embData := encodeEmbedding(record.Embedding)
+	encEmb, err := s.encryptEmbedding(embData)
+	if err != nil {
+		return fmt.Errorf("encrypt embedding: %w", err)
+	}
+
+	_, err = s.conn.ExecContext(ctx,
 		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
 			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -425,8 +500,8 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 			submitting_agent = excluded.submitting_agent,
 			status = excluded.status,
 			created_at = excluded.created_at`,
-		record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
-		encodeEmbedding(record.Embedding), record.EmbeddingHash,
+		record.MemoryID, record.SubmittingAgent, content, record.ContentHash,
+		encEmb, record.EmbeddingHash,
 		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,
 		string(record.Status), record.ParentHash, formatTime(record.CreatedAt))
 	if err != nil {
@@ -458,7 +533,14 @@ func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.M
 
 	r.MemoryType = memory.MemoryType(mt)
 	r.Status = memory.MemoryStatus(st)
-	r.Embedding = decodeEmbedding(embData)
+
+	// Decrypt content and embedding if encrypted.
+	if decContent, decErr := s.decryptContent(r.Content); decErr == nil {
+		r.Content = decContent
+	}
+	decEmb, _ := s.decryptEmbedding(embData)
+	r.Embedding = decodeEmbedding(decEmb)
+
 	r.CreatedAt = parseTime(createdAt)
 	r.CommittedAt = parseTimePtr(committedAt)
 	r.DeprecatedAt = parseTimePtr(deprecatedAt)
@@ -551,7 +633,14 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 
 		r.MemoryType = memory.MemoryType(mt)
 		r.Status = memory.MemoryStatus(st)
-		r.Embedding = decodeEmbedding(embData)
+
+		// Decrypt content and embedding if encrypted.
+		if decContent, decErr := s.decryptContent(r.Content); decErr == nil {
+			r.Content = decContent
+		}
+		decEmb, _ := s.decryptEmbedding(embData)
+		r.Embedding = decodeEmbedding(decEmb)
+
 		r.CreatedAt = parseTime(createdAt)
 		r.CommittedAt = parseTimePtr(committedAt)
 		r.DeprecatedAt = parseTimePtr(deprecatedAt)
@@ -794,6 +883,10 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		r.DeprecatedAt = parseTimePtr(deprecatedAt)
 		if parentHash != nil {
 			r.ParentHash = *parentHash
+		}
+		// Decrypt content if encrypted.
+		if decContent, decErr := s.decryptContent(r.Content); decErr == nil {
+			r.Content = decContent
 		}
 		results = append(results, &r)
 	}
