@@ -1,6 +1,6 @@
 // SAGE Brain Dashboard — Root Application
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories } from './api.js';
 
 const { h, render } = preact;
 const { useState, useEffect, useRef, useCallback } = preactHooks;
@@ -81,6 +81,7 @@ const icons = {
     brain: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/><line x1="10" y1="22" x2="14" y2="22"/><line x1="9" y1="17" x2="15" y2="17"/></svg>`,
     search: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
     settings: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.32 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+    import: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
 };
 
 // ============================================================================
@@ -869,6 +870,213 @@ function SettingsPage() {
 }
 
 // ============================================================================
+// Import Page
+// ============================================================================
+
+function ImportPage() {
+    const [selectedFile, setSelectedFile] = useState(null);
+    const [dragging, setDragging] = useState(false);
+    const [importing, setImporting] = useState(false);
+    const [result, setResult] = useState(null);
+    const [error, setError] = useState(null);
+    const fileInputRef = useRef(null);
+
+    function handleDragOver(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragging(true);
+    }
+
+    function handleDragLeave(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragging(false);
+    }
+
+    function handleDrop(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragging(false);
+        const file = e.dataTransfer.files[0];
+        if (file && (file.name.endsWith('.json') || file.name.endsWith('.zip'))) {
+            setSelectedFile(file);
+            setResult(null);
+            setError(null);
+        } else {
+            setError('Please drop a .json or .zip file.');
+        }
+    }
+
+    function handleFileSelect(e) {
+        const file = e.target.files[0];
+        if (file) {
+            setSelectedFile(file);
+            setResult(null);
+            setError(null);
+        }
+    }
+
+    async function handleImport() {
+        if (!selectedFile || importing) return;
+        setImporting(true);
+        setError(null);
+        setResult(null);
+        try {
+            const res = await importMemories(selectedFile);
+            if (res.error) {
+                setError(res.error);
+            } else {
+                setResult(res);
+            }
+        } catch (err) {
+            setError(err.message || 'Import failed. Please try again.');
+        } finally {
+            setImporting(false);
+        }
+    }
+
+    function formatFileSize(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    return html`
+        <div class="import-page">
+            <div class="import-header">
+                <h2>Import Memories</h2>
+                <p class="import-subtitle">Bring your AI conversations into SAGE</p>
+            </div>
+
+            <div class="provider-cards">
+                <div class="provider-card">
+                    <div class="provider-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M8 12l2-4h4l2 4-2 4h-4l-2-4z"/>
+                        </svg>
+                    </div>
+                    <h3>ChatGPT</h3>
+                    <p>Export from <strong>Settings</strong> > <strong>Data Controls</strong> > <strong>Export Data</strong>. Upload the ZIP.</p>
+                    <span class="provider-file-type">.zip</span>
+                </div>
+                <div class="provider-card">
+                    <div class="provider-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                            <path d="M2 17l10 5 10-5"/>
+                            <path d="M2 12l10 5 10-5"/>
+                        </svg>
+                    </div>
+                    <h3>Claude.ai</h3>
+                    <p>Export from <strong>Settings</strong> > <strong>Privacy</strong> > <strong>Export Data</strong>. Upload the JSON.</p>
+                    <span class="provider-file-type">.json</span>
+                </div>
+                <div class="provider-card">
+                    <div class="provider-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+                            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+                        </svg>
+                    </div>
+                    <h3>Gemini</h3>
+                    <p>Export from <strong>Google Takeout</strong> > <strong>My Activity</strong> > <strong>Gemini Apps</strong>. Upload the JSON.</p>
+                    <span class="provider-file-type">.json</span>
+                </div>
+            </div>
+
+            <div class="drop-zone ${dragging ? 'drop-zone-active' : ''} ${selectedFile ? 'drop-zone-has-file' : ''}"
+                 onDragOver=${handleDragOver}
+                 onDragLeave=${handleDragLeave}
+                 onDrop=${handleDrop}
+                 onClick=${() => fileInputRef.current && fileInputRef.current.click()}>
+                <input type="file" ref=${fileInputRef} accept=".json,.zip"
+                       style="display:none" onChange=${handleFileSelect} />
+                ${selectedFile ? html`
+                    <div class="drop-zone-file">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" width="28" height="28">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/>
+                        </svg>
+                        <div>
+                            <div class="drop-zone-filename">${selectedFile.name}</div>
+                            <div class="drop-zone-filesize">${formatFileSize(selectedFile.size)}</div>
+                        </div>
+                    </div>
+                ` : html`
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="40" height="40" style="opacity:0.5">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                    <p class="drop-zone-text">Drop your export file here or click to browse</p>
+                    <span class="drop-zone-hint">Accepts .zip and .json files</span>
+                `}
+            </div>
+
+            <div class="import-actions">
+                <button class="btn import-btn ${importing ? 'importing' : ''}"
+                        disabled=${!selectedFile || importing}
+                        onClick=${handleImport}>
+                    ${importing ? html`
+                        <span class="import-spinner"></span> Importing...
+                    ` : 'Import Memories'}
+                </button>
+            </div>
+
+            ${error && html`
+                <div class="import-error">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="15" y1="9" x2="9" y2="15"/>
+                        <line x1="9" y1="9" x2="15" y2="15"/>
+                    </svg>
+                    <span>${error}</span>
+                </div>
+            `}
+
+            ${result && html`
+                <div class="import-results fade-in">
+                    <div class="import-results-header">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" width="24" height="24">
+                            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                            <polyline points="22 4 12 14.01 9 11.01"/>
+                        </svg>
+                        <h3>Import Complete</h3>
+                    </div>
+                    <div class="import-results-stats">
+                        ${result.imported != null && html`
+                            <div class="import-stat">
+                                <span class="import-stat-value">${result.imported}</span>
+                                <span class="import-stat-label">memories imported${result.provider ? ` from ${result.provider}` : ''}</span>
+                            </div>
+                        `}
+                        ${result.skipped != null && result.skipped > 0 && html`
+                            <div class="import-stat">
+                                <span class="import-stat-value import-stat-dim">${result.skipped}</span>
+                                <span class="import-stat-label">skipped (duplicates or empty)</span>
+                            </div>
+                        `}
+                        ${result.errors && result.errors.length > 0 && html`
+                            <div class="import-stat">
+                                <span class="import-stat-value import-stat-warn">${result.errors.length}</span>
+                                <span class="import-stat-label">errors</span>
+                            </div>
+                            <div class="import-error-list">
+                                ${result.errors.slice(0, 5).map(e => html`<div class="import-error-item">${e}</div>`)}
+                                ${result.errors.length > 5 && html`<div class="import-error-item">...and ${result.errors.length - 5} more</div>`}
+                            </div>
+                        `}
+                    </div>
+                    <button class="btn import-view-btn" onClick=${() => { window.location.hash = '/'; }}>
+                        View in Brain
+                    </button>
+                </div>
+            `}
+        </div>
+    `;
+}
+
+// ============================================================================
 // Timeline Bar
 // ============================================================================
 
@@ -1046,6 +1254,7 @@ function App() {
             const hash = window.location.hash.slice(1) || '/';
             if (hash === '/search') setPage('search');
             else if (hash === '/settings') setPage('settings');
+            else if (hash === '/import') setPage('import');
             else setPage('brain');
         }
         window.addEventListener('hashchange', onHash);
@@ -1084,6 +1293,9 @@ function App() {
             <button class="sidebar-btn ${page === 'search' ? 'active' : ''}" onClick=${() => navigate('search')} title="Search">
                 ${icons.search}
             </button>
+            <button class="sidebar-btn ${page === 'import' ? 'active' : ''}" onClick=${() => navigate('import')} title="Import">
+                ${icons.import}
+            </button>
             <button class="sidebar-btn ${page === 'settings' ? 'active' : ''}" onClick=${() => navigate('settings')} title="Settings">
                 ${icons.settings}
             </button>
@@ -1104,6 +1316,7 @@ function App() {
                 <${TimelineBar} />
             `}
             ${page === 'search' && html`<${SearchPage} onSelectMemory=${onSelectMemory} />`}
+            ${page === 'import' && html`<${ImportPage} />`}
             ${page === 'settings' && html`<${SettingsPage} />`}
 
             <${MemoryDetail}

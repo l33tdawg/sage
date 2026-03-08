@@ -67,3 +67,13 @@ export async function updateMemory(id, data) {
     });
     return res.json();
 }
+
+export async function importMemories(file) {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${API_BASE}/v1/dashboard/import`, {
+        method: 'POST',
+        body: form,
+    });
+    return res.json();
+}

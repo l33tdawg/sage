@@ -63,6 +63,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Delete("/v1/dashboard/memory/{id}", h.handleDeleteMemory)
 		r.Patch("/v1/dashboard/memory/{id}", h.handleUpdateMemory)
 		r.Get("/v1/dashboard/events", h.SSE.ServeHTTP)
+		r.Post("/v1/dashboard/import", h.handleImportUpload)
 	})
 
 	// SPA — serve static files, fallback to index.html
