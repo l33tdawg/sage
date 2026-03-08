@@ -969,6 +969,9 @@ footer a:hover { text-decoration: underline; }
           Chrome Extension
         </a>
       </div>
+          <div style="margin-top:10px;font-size:0.8rem;color:var(--text-muted, #6b7280);">
+            Latest: <strong id="latest-version" style="color:var(--accent, #8b5cf6);">...</strong> &mdash; Signed &amp; notarized
+          </div>
 
         </div><!-- /hero-text -->
       </div><!-- /hero-split -->
@@ -1523,7 +1526,7 @@ function copyPrompt(box) {
   });
 }
 
-// ─── Download Counter ("AI Minds Freed") ───
+// ─── Download Counter ("AI Minds Freed") + Latest Version ───
 (function() {
   fetch('https://api.github.com/repos/l33tdawg/sage/releases')
     .then(r => r.json())
@@ -1538,6 +1541,12 @@ function copyPrompt(box) {
       if (total > 0) {
         document.getElementById('download-count').textContent = total.toLocaleString();
         document.getElementById('minds-freed').style.display = 'block';
+      }
+      // Show latest version tag
+      const latest = releases.find(r => !r.prerelease && !r.draft);
+      if (latest) {
+        const el = document.getElementById('latest-version');
+        if (el) el.textContent = latest.tag_name;
       }
     })
     .catch(() => {}); // Silently fail on rate limit or network error
