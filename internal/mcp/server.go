@@ -50,6 +50,9 @@ type Server struct {
 	// Turn discipline tracking — nudge agents that forget to call sage_turn.
 	callsSinceTurn int
 	lastTurnTime   time.Time
+
+	// Auto-inception: automatically initialize brain on first tool call if empty.
+	inceptionChecked bool
 }
 
 // NewServer creates a new MCP server instance.
@@ -182,6 +185,17 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 		}
 	}
 
+	// Auto-inception: on the very first tool call, check if brain is empty
+	// and auto-initialize if needed. This makes onboarding seamless — no need
+	// for the user to manually tell their AI to "take the red pill".
+	var autoInceptionMsg string
+	if !s.inceptionChecked {
+		s.inceptionChecked = true
+		if params.Name != "sage_inception" && params.Name != "sage_red_pill" {
+			autoInceptionMsg = s.maybeAutoInception(ctx)
+		}
+	}
+
 	// Enforce turn discipline: block non-SAGE tools after threshold.
 	// This guarantees memories are saved — agents can't just ignore the nudge.
 	if s.shouldBlockForTurn(params.Name) {
@@ -224,6 +238,11 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 
 	text, _ := json.MarshalIndent(result, "", "  ")
 	output := string(text)
+
+	// Prepend auto-inception message if brain was just initialized.
+	if autoInceptionMsg != "" {
+		output = autoInceptionMsg + "\n\n---\n\n" + output
+	}
 
 	// Nudge the agent if sage_turn hasn't been called recently.
 	// This is server-side enforcement — works across all providers (Claude, ChatGPT, etc).
@@ -313,6 +332,36 @@ func (s *Server) turnNudge(currentTool string) string {
 		// First session, never called sage_turn — might not know about it yet.
 		return "[SAGE] Tip: call sage_turn every conversation turn to build persistent memory. " +
 			"It recalls relevant context AND stores what just happened, atomically."
+	}
+
+	return ""
+}
+
+// maybeAutoInception checks if the brain has memories. If empty, runs inception
+// automatically and returns the inception message. If brain already has memories,
+// returns the "welcome back" instructions. This ensures every new user gets
+// onboarded without needing to manually call sage_inception.
+func (s *Server) maybeAutoInception(ctx context.Context) string {
+	result, err := s.toolInception(ctx, nil)
+	if err != nil {
+		return ""
+	}
+
+	resultMap, ok := result.(map[string]any)
+	if !ok {
+		return ""
+	}
+
+	status, _ := resultMap["status"].(string)
+	switch status {
+	case "awakened":
+		// Brain already has memories — return instructions silently
+		instructions, _ := resultMap["instructions"].(string)
+		return "[SAGE Auto-Connect] Your persistent memory is online.\n\n" + instructions
+	case "inception_complete":
+		// Fresh brain — return full inception message
+		msg, _ := resultMap["message"].(string)
+		return "[SAGE Auto-Inception] First connection detected — initializing your brain.\n\n" + msg
 	}
 
 	return ""
