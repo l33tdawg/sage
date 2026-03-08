@@ -123,12 +123,32 @@ func runServe() error {
 	// Start CometBFT in-process
 	cometCfg := config.DefaultConfig()
 	cometCfg.SetRoot(cometHome)
-	cometCfg.Consensus.TimeoutCommit = 1 * time.Second // Fast blocks for personal use
-	cometCfg.Consensus.CreateEmptyBlocks = false          // Don't create empty blocks
+	cometCfg.Consensus.CreateEmptyBlocks = false
 	cometCfg.Consensus.CreateEmptyBlocksInterval = 0
-	cometCfg.P2P.ListenAddress = "tcp://127.0.0.1:26656"  // Local-only P2P (single node)
 	cometCfg.RPC.ListenAddress = "tcp://127.0.0.1:26657"
 	cometCfg.Instrumentation.Prometheus = false
+
+	if cfg.Quorum.Enabled {
+		// Quorum mode: enable P2P for multi-validator consensus
+		cometCfg.Consensus.TimeoutCommit = 3 * time.Second
+		p2pAddr := cfg.Quorum.P2PAddr
+		if p2pAddr == "" {
+			p2pAddr = "tcp://0.0.0.0:26656"
+		}
+		cometCfg.P2P.ListenAddress = p2pAddr
+		cometCfg.P2P.PersistentPeers = joinPeers(cfg.Quorum.Peers)
+		cometCfg.P2P.AddrBookStrict = false   // Allow LAN addresses
+		cometCfg.P2P.AllowDuplicateIP = true   // Multiple nodes on same network
+		cometCfg.P2P.PexReactor = false        // Use persistent peers only
+		logger.Info().
+			Str("p2p_addr", p2pAddr).
+			Int("peers", len(cfg.Quorum.Peers)).
+			Msg("quorum mode enabled — multi-validator consensus")
+	} else {
+		// Personal mode: single validator, fast blocks, no P2P
+		cometCfg.Consensus.TimeoutCommit = 1 * time.Second
+		cometCfg.P2P.ListenAddress = "tcp://127.0.0.1:26656"
+	}
 
 	pv := privval.LoadFilePV(
 		cometCfg.PrivValidatorKeyFile(),
@@ -228,7 +248,12 @@ func runServe() error {
 	}()
 
 	// Start auto-validator goroutine
+	// In quorum mode, auto-validator still runs locally (memories auto-commit on each node).
+	// Full cross-node vote exchange is a Phase 2 feature.
 	go autoValidator(ctx, sqliteStore, logger)
+	if cfg.Quorum.Enabled {
+		logger.Info().Msg("quorum mode — P2P consensus active, blocks validated by both nodes")
+	}
 
 	// Auto-import pending chat history (from setup wizard)
 	go autoImport(cfg, embedProvider, logger)
@@ -242,6 +267,18 @@ func runServe() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// joinPeers joins a list of peers into a comma-separated string.
+func joinPeers(peers []string) string {
+	result := ""
+	for i, p := range peers {
+		if i > 0 {
+			result += ","
+		}
+		result += p
+	}
+	return result
 }
 
 // initCometBFTConfig generates CometBFT config files for a single-validator node.

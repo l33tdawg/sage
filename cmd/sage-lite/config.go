@@ -10,12 +10,20 @@ import (
 
 // Config holds the sage-lite configuration.
 type Config struct {
-	Embedding  EmbeddingConfig `yaml:"embedding"`
+	Embedding  EmbeddingConfig  `yaml:"embedding"`
 	Encryption EncryptionConfig `yaml:"encryption"`
+	Quorum     QuorumConfig     `yaml:"quorum"`
 	DataDir    string           `yaml:"data_dir"`
 	RESTAddr   string           `yaml:"rest_addr"`
 	AgentKey   string           `yaml:"agent_key_file"`
 	BlockTime  string           `yaml:"block_time"` // e.g. "1s", "3s"
+}
+
+// QuorumConfig controls multi-validator consensus mode.
+type QuorumConfig struct {
+	Enabled bool     `yaml:"enabled"`           // Enable quorum mode (multi-validator)
+	Peers   []string `yaml:"peers,omitempty"`    // Persistent peers (nodeID@host:port)
+	P2PAddr string   `yaml:"p2p_addr,omitempty"` // P2P listen address (default: tcp://0.0.0.0:26656)
 }
 
 // EncryptionConfig controls AES-256-GCM encryption of memory content at rest.

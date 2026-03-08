@@ -36,6 +36,10 @@ func main() {
 		err = runImport()
 	case "backup":
 		err = runBackup()
+	case "quorum-init":
+		err = runQuorumInit()
+	case "quorum-join":
+		err = runQuorumJoin()
 	case "version":
 		fmt.Printf("sage-lite %s (commit %s, built %s)\n", version, commit, date)
 	case "help", "--help", "-h":
@@ -65,6 +69,8 @@ Commands:
   export    Export memories to a .vault file (optionally encrypted)
   import    Import memories from a .vault file
   backup    Create a timestamped backup of the memory database
+  quorum-init   Initialize a quorum network (generates shared genesis)
+  quorum-join   Join a quorum network (imports genesis from another node)
   status    Show node status
   version   Print version
 
