@@ -1338,43 +1338,6 @@ footer a:hover { text-decoration: underline; }
           <p>Visualize your AI's memory as a living neural network. Search and filter by domain, type, or agent. Click any memory to see full details with agent attribution.</p>
         </div>
       </div>
-      <div class="reveal" style="margin: 32px 0 16px;">
-        <div class="screenshot-grid">
-          <div class="screenshot-thumb" onclick="openLightbox(0)">
-            <img src="screen-brain.png" alt="CEREBRUM — Neural network memory visualization" loading="lazy">
-            <div class="screenshot-label">CEREBRUM</div>
-          </div>
-          <div class="screenshot-thumb" onclick="openLightbox(1)">
-            <img src="screen-network.png" alt="Network — Multi-agent management" loading="lazy">
-            <div class="screenshot-label">Network</div>
-          </div>
-          <div class="screenshot-thumb" onclick="openLightbox(2)">
-            <img src="screen-overview.png" alt="Settings Overview" loading="lazy">
-            <div class="screenshot-label">Overview</div>
-          </div>
-          <div class="screenshot-thumb" onclick="openLightbox(3)">
-            <img src="screen-security.png" alt="Security" loading="lazy">
-            <div class="screenshot-label">Security</div>
-          </div>
-          <div class="screenshot-thumb" onclick="openLightbox(4)">
-            <img src="screen-config.png" alt="Configuration" loading="lazy">
-            <div class="screenshot-label">Configuration</div>
-          </div>
-          <div class="screenshot-thumb" onclick="openLightbox(5)">
-            <img src="screen-update.png" alt="Software Update" loading="lazy">
-            <div class="screenshot-label">Update</div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Lightbox -->
-      <div class="lightbox-overlay" id="lightbox" onclick="closeLightbox(event)">
-        <button class="lightbox-close" onclick="closeLightbox()">&times;</button>
-        <button class="lightbox-nav lightbox-prev" onclick="lightboxNav(event,-1)">&lsaquo;</button>
-        <img class="lightbox-img" id="lightboxImg" src="" alt="">
-        <button class="lightbox-nav lightbox-next" onclick="lightboxNav(event,1)">&rsaquo;</button>
-        <div class="lightbox-caption" id="lightboxCaption"></div>
-      </div>
       <div class="feature-card">
         <div class="feature-icon pink">&#128230;</div>
         <div>
@@ -1406,6 +1369,54 @@ footer a:hover { text-decoration: underline; }
     </div>
   </div>
 </section>
+
+<!-- Screenshots -->
+<section id="screenshots" style="padding: 80px 0;">
+  <div class="container">
+    <div class="reveal" style="text-align:center; margin-bottom: 48px;">
+      <div class="section-tag">Dashboard</div>
+      <h2>See it in action</h2>
+      <p class="section-desc" style="margin:0 auto;">The CEREBRUM dashboard — your AI's brain, network, and settings in one place.</p>
+    </div>
+    <div class="reveal">
+      <div class="screenshot-grid">
+        <div class="screenshot-thumb" onclick="openLightbox(0)">
+          <img src="screen-brain.png" alt="CEREBRUM — Neural network memory visualization" loading="lazy">
+          <div class="screenshot-label">CEREBRUM</div>
+        </div>
+        <div class="screenshot-thumb" onclick="openLightbox(1)">
+          <img src="screen-network.png" alt="Network — Multi-agent management" loading="lazy">
+          <div class="screenshot-label">Network</div>
+        </div>
+        <div class="screenshot-thumb" onclick="openLightbox(2)">
+          <img src="screen-overview.png" alt="Settings Overview" loading="lazy">
+          <div class="screenshot-label">Overview</div>
+        </div>
+        <div class="screenshot-thumb" onclick="openLightbox(3)">
+          <img src="screen-security.png" alt="Security" loading="lazy">
+          <div class="screenshot-label">Security</div>
+        </div>
+        <div class="screenshot-thumb" onclick="openLightbox(4)">
+          <img src="screen-config.png" alt="Configuration" loading="lazy">
+          <div class="screenshot-label">Configuration</div>
+        </div>
+        <div class="screenshot-thumb" onclick="openLightbox(5)">
+          <img src="screen-update.png" alt="Software Update" loading="lazy">
+          <div class="screenshot-label">Update</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Lightbox -->
+<div class="lightbox-overlay" id="lightbox" onclick="closeLightbox(event)">
+  <button class="lightbox-close" onclick="closeLightbox()">&times;</button>
+  <button class="lightbox-nav lightbox-prev" onclick="lightboxNav(event,-1)">&lsaquo;</button>
+  <img class="lightbox-img" id="lightboxImg" src="" alt="">
+  <button class="lightbox-nav lightbox-next" onclick="lightboxNav(event,1)">&rsaquo;</button>
+  <div class="lightbox-caption" id="lightboxCaption"></div>
+</div>
 
 <!-- Chrome Extension — Free ChatGPT Users -->
 <section id="chrome-extension" style="padding: 80px 0;">
