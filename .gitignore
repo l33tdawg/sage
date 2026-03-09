@@ -104,6 +104,12 @@ docs/*
 !docs/sage-brain.svg
 !docs/privacy.html
 
+# Node.js (Playwright e2e tests)
+node_modules/
+package-lock.json
+test-results/
+playwright-report/
+
 # Extension build output
 extension/dist/
 

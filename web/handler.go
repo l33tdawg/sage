@@ -39,6 +39,23 @@ type DashboardHandler struct {
 	// Auth — only active when VaultKeyPath is set.
 	VaultKeyPath string
 	sessions     sync.Map // token -> expiry time
+
+	// Redeployer — when set, write endpoints return 503 during active redeployment
+	// and the /redeploy endpoint can trigger chain redeployment.
+	// Must implement RedeployChecker (for the guard middleware).
+	// Also provides Deploy/GetStatus for the network redeploy endpoint.
+	Redeployer RedeployOrchestrator
+
+	// Pairing — ephemeral pairing code store for LAN agent setup.
+	Pairing *PairingStore
+}
+
+// RedeployOrchestrator extends RedeployChecker with deploy/status methods
+// for the network redeploy endpoint. Implemented by *orchestrator.Redeployer.
+type RedeployOrchestrator interface {
+	RedeployChecker
+	DeployOp(ctx context.Context, op, agentID string) error
+	GetRedeployStatus(ctx context.Context) (active bool, operation, agentID string, err error)
 }
 
 // NewDashboardHandler creates a new dashboard handler.
@@ -47,6 +64,7 @@ func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardH
 		store:   memStore,
 		SSE:     NewSSEBroadcaster(),
 		Version: version,
+		Pairing: NewPairingStore(),
 	}
 	// If the store implements PreferencesStore, wire it up.
 	if ps, ok := memStore.(PreferencesStore); ok {
@@ -67,11 +85,16 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 	// Health is public (needed by CLI status command).
 	r.Get("/v1/dashboard/health", h.handleHealth)
 
+	// Pairing redemption — unauthenticated (the code IS the auth).
+	h.RegisterPairingRoutes(r)
+
 	// Protected routes — wrapped in auth middleware when encryption is enabled.
 	r.Group(func(r chi.Router) {
 		if h.VaultKeyPath != "" {
 			r.Use(h.authMiddleware)
 		}
+		// Redeploy guard — returns 503 for write endpoints during active redeployment.
+		r.Use(redeployGuard(h.Redeployer))
 
 		r.Get("/v1/dashboard/memory/list", h.handleListMemories)
 		r.Get("/v1/dashboard/memory/timeline", h.handleTimeline)
@@ -84,6 +107,22 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Get("/v1/dashboard/settings/cleanup", h.handleGetCleanupSettings)
 		r.Post("/v1/dashboard/settings/cleanup", h.handleSaveCleanupSettings)
 		r.Post("/v1/dashboard/cleanup/run", h.handleRunCleanup)
+		r.Get("/v1/dashboard/settings/boot-instructions", h.handleGetBootInstructions)
+		r.Post("/v1/dashboard/settings/boot-instructions", h.handleSaveBootInstructions)
+
+		// Software Update
+		r.Get("/v1/dashboard/settings/update/check", h.handleCheckUpdate)
+		r.Post("/v1/dashboard/settings/update/apply", h.handleApplyUpdate)
+		r.Post("/v1/dashboard/settings/update/restart", h.handleRestart)
+
+		// Synaptic Ledger (encryption vault) management
+		r.Get("/v1/dashboard/settings/ledger", h.handleGetLedgerStatus)
+		r.Post("/v1/dashboard/settings/ledger/enable", h.handleEnableLedger)
+		r.Post("/v1/dashboard/settings/ledger/change-passphrase", h.handleChangePassphrase)
+		r.Post("/v1/dashboard/settings/ledger/disable", h.handleDisableLedger)
+
+		// Network agent management routes
+		h.RegisterNetworkRoutes(r)
 	})
 
 	// SPA — serve static files, fallback to index.html
@@ -223,12 +262,13 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
 	opts := store.ListOptions{
-		DomainTag: q.Get("domain"),
-		Provider:  q.Get("provider"),
-		Status:    q.Get("status"),
-		Limit:     limit,
-		Offset:    offset,
-		Sort:      q.Get("sort"),
+		DomainTag:       q.Get("domain"),
+		Provider:        q.Get("provider"),
+		Status:          q.Get("status"),
+		SubmittingAgent: q.Get("agent"),
+		Limit:           limit,
+		Offset:          offset,
+		Sort:            q.Get("sort"),
 	}
 
 	records, total, err := h.store.ListMemories(r.Context(), opts)
@@ -634,4 +674,38 @@ func (h *DashboardHandler) handleRunCleanup(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSONResp(w, http.StatusOK, result)
+}
+
+// handleGetBootInstructions returns the custom boot instructions for MCP inception.
+func (h *DashboardHandler) handleGetBootInstructions(w http.ResponseWriter, r *http.Request) {
+	if h.prefStore == nil {
+		writeError(w, http.StatusNotImplemented, "preferences not available")
+		return
+	}
+	instructions, err := h.prefStore.GetPreference(r.Context(), "boot_instructions")
+	if err != nil {
+		instructions = ""
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"instructions": instructions})
+}
+
+// handleSaveBootInstructions saves custom boot instructions for MCP inception.
+func (h *DashboardHandler) handleSaveBootInstructions(w http.ResponseWriter, r *http.Request) {
+	if h.prefStore == nil {
+		writeError(w, http.StatusNotImplemented, "preferences not available")
+		return
+	}
+	var body struct {
+		Instructions string `json:"instructions"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := h.prefStore.SetPreference(r.Context(), "boot_instructions", body.Instructions); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "instructions": body.Instructions})
 }

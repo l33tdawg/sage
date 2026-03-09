@@ -106,6 +106,64 @@ type cometBroadcastResponse struct {
 	} `json:"error"`
 }
 
+// --- Domain Access Enforcement -----------------------------------------------
+
+// checkDomainAccess verifies an agent has the required access level for a domain.
+// Returns nil if allowed, descriptive error if denied.
+// Unregistered agents (not in network_agents) are always allowed for backwards compatibility.
+// Admins bypass all checks. Observers cannot write.
+func checkDomainAccess(ctx context.Context, agentStore store.AgentStore, agentID, domain, action string) error {
+	if agentStore == nil || agentID == "" {
+		return nil // No agent store or no agent identity — allow
+	}
+
+	agent, err := agentStore.GetAgent(ctx, agentID)
+	if err != nil {
+		return nil // Agent not registered in network_agents — backwards compat
+	}
+
+	if agent.Role == "admin" {
+		return nil // Admins have full access
+	}
+
+	if action == "write" && agent.Role == "observer" {
+		return fmt.Errorf("observer agents cannot submit memories")
+	}
+
+	// Parse domain_access JSON: [{"domain":"x","read":true,"write":false}, ...]
+	if agent.DomainAccess == "" {
+		return nil // No restrictions configured — allow all
+	}
+
+	var access []struct {
+		Domain string `json:"domain"`
+		Read   bool   `json:"read"`
+		Write  bool   `json:"write"`
+	}
+	if err := json.Unmarshal([]byte(agent.DomainAccess), &access); err != nil {
+		return nil // Malformed JSON — allow (safe default for existing data)
+	}
+
+	if len(access) == 0 {
+		return nil // Empty list means no restrictions
+	}
+
+	for _, a := range access {
+		if a.Domain == domain {
+			if action == "read" && a.Read {
+				return nil
+			}
+			if action == "write" && a.Write {
+				return nil
+			}
+			return fmt.Errorf("agent does not have %s access to domain '%s'", action, domain)
+		}
+	}
+
+	// Domain not in the access list — deny (explicit allowlist model)
+	return fmt.Errorf("agent does not have %s access to domain '%s'", action, domain)
+}
+
 // --- Handlers ----------------------------------------------------------------
 
 // handleSubmitMemory handles POST /v1/memory/submit.
@@ -138,6 +196,13 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentID := middleware.ContextAgentID(r.Context())
+
+	// Enforce domain access policy from network_agents registry
+	if accessErr := checkDomainAccess(r.Context(), s.agentStore, agentID, req.DomainTag, "write"); accessErr != nil {
+		writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+		return
+	}
+
 	memoryID := generateUUID()
 
 	// Compute content hash.
@@ -253,6 +318,15 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	if len(req.Embedding) == 0 {
 		writeProblem(w, http.StatusBadRequest, "Missing embedding", "embedding is required for similarity search.")
 		return
+	}
+
+	// Network agent domain access enforcement (read side)
+	if req.DomainTag != "" {
+		agentID := middleware.ContextAgentID(r.Context())
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, agentID, req.DomainTag, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
 	}
 
 	// Multi-org access control gate — only enforce when domain has a registered owner

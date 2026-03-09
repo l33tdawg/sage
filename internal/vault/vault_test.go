@@ -134,6 +134,54 @@ func TestExists(t *testing.T) {
 	assert.True(t, Exists(keyFile))
 }
 
+func TestRecoveryKey(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "vault.key")
+	require.NoError(t, Init(keyFile, "test-pass"))
+
+	v, err := Open(keyFile, "test-pass")
+	require.NoError(t, err)
+
+	// Get recovery key
+	recoveryKey, err := v.RecoveryKey()
+	require.NoError(t, err)
+	assert.NotEmpty(t, recoveryKey)
+
+	// Encrypt something
+	encrypted, err := v.EncryptString("secret memory")
+	require.NoError(t, err)
+
+	// Simulate lost passphrase — re-init from recovery key with new passphrase
+	keyFile2 := filepath.Join(t.TempDir(), "vault2.key")
+	require.NoError(t, InitFromRecoveryKey(keyFile2, recoveryKey, "new-pass"))
+
+	// Open with new passphrase
+	v2, err := Open(keyFile2, "new-pass")
+	require.NoError(t, err)
+
+	// Should decrypt data encrypted with original vault (same data key)
+	decrypted, err := v2.DecryptString(encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, "secret memory", decrypted)
+}
+
+func TestRecoveryKeyNilVault(t *testing.T) {
+	var v *Vault
+	_, err := v.RecoveryKey()
+	assert.ErrorIs(t, err, ErrLocked)
+}
+
+func TestInitFromRecoveryKeyInvalid(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "vault.key")
+
+	// Invalid base64
+	err := InitFromRecoveryKey(keyFile, "not-valid-base64!!!", "pass")
+	assert.Error(t, err)
+
+	// Wrong length
+	err = InitFromRecoveryKey(keyFile, "dG9vc2hvcnQ=", "pass")
+	assert.Error(t, err)
+}
+
 func TestKeyFilePermissions(t *testing.T) {
 	keyFile := filepath.Join(t.TempDir(), "vault.key")
 	require.NoError(t, Init(keyFile, "pass"))

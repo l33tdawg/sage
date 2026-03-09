@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -595,4 +597,399 @@ func TestOrgStore(t *testing.T) {
 func TestPing(t *testing.T) {
 	s := newTestStore(t)
 	require.NoError(t, s.Ping(context.Background()))
+}
+
+// --- Agent store tests ---
+
+func testAgent(id, name, role string) *AgentEntry {
+	return &AgentEntry{
+		AgentID:   id,
+		Name:      name,
+		Role:      role,
+		Status:    "pending",
+		Clearance: 1,
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+func TestCreateAndGetAgent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("agent-1", "Agent One", "validator")
+	agent.Avatar = "avatar.png"
+	agent.BootBio = "I am agent one"
+	agent.ValidatorPubkey = "pubkey123"
+	agent.NodeID = "node-1"
+	agent.P2PAddress = "tcp://127.0.0.1:26656"
+	agent.OrgID = "org-1"
+	agent.DeptID = "dept-1"
+	agent.DomainAccess = "security,general"
+	agent.BundlePath = "/bundles/agent-1.tar.gz"
+
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	got, err := s.GetAgent(ctx, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", got.AgentID)
+	assert.Equal(t, "Agent One", got.Name)
+	assert.Equal(t, "validator", got.Role)
+	assert.Equal(t, "avatar.png", got.Avatar)
+	assert.Equal(t, "I am agent one", got.BootBio)
+	assert.Equal(t, "pubkey123", got.ValidatorPubkey)
+	assert.Equal(t, "node-1", got.NodeID)
+	assert.Equal(t, "tcp://127.0.0.1:26656", got.P2PAddress)
+	assert.Equal(t, "pending", got.Status)
+	assert.Equal(t, 1, got.Clearance)
+	assert.Equal(t, "org-1", got.OrgID)
+	assert.Equal(t, "dept-1", got.DeptID)
+	assert.Equal(t, "security,general", got.DomainAccess)
+	assert.Equal(t, "/bundles/agent-1.tar.gz", got.BundlePath)
+
+	// Not found
+	_, err = s.GetAgent(ctx, "nonexistent")
+	assert.Error(t, err)
+}
+
+func TestListAgents(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		a := testAgent(fmt.Sprintf("agent-%d", i), fmt.Sprintf("Agent %d", i), "validator")
+		require.NoError(t, s.CreateAgent(ctx, a))
+	}
+
+	agents, err := s.ListAgents(ctx)
+	require.NoError(t, err)
+	assert.Len(t, agents, 3)
+
+	// Remove one agent — ListAgents excludes removed agents
+	require.NoError(t, s.RemoveAgent(ctx, "agent-1"))
+
+	agents, err = s.ListAgents(ctx)
+	require.NoError(t, err)
+	assert.Len(t, agents, 2, "removed agent should be excluded from list")
+
+	// But GetAgent still returns the removed agent with status "removed"
+	removed, err := s.GetAgent(ctx, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, "removed", removed.Status)
+	assert.NotNil(t, removed.RemovedAt)
+}
+
+func TestUpdateAgent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("agent-1", "Original Name", "observer")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	agent.Name = "Updated Name"
+	agent.Role = "validator"
+	agent.Clearance = 3
+	require.NoError(t, s.UpdateAgent(ctx, agent))
+
+	got, err := s.GetAgent(ctx, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, "Updated Name", got.Name)
+	assert.Equal(t, "validator", got.Role)
+	assert.Equal(t, 3, got.Clearance)
+}
+
+func TestRemoveAgent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("agent-1", "Agent One", "validator")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	require.NoError(t, s.RemoveAgent(ctx, "agent-1"))
+
+	got, err := s.GetAgent(ctx, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, "removed", got.Status)
+	assert.NotNil(t, got.RemovedAt)
+}
+
+func TestUpdateAgentStatus(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("agent-1", "Agent One", "validator")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	require.NoError(t, s.UpdateAgentStatus(ctx, "agent-1", "active"))
+
+	got, err := s.GetAgent(ctx, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, "active", got.Status)
+}
+
+func TestUpdateAgentLastSeen(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("agent-1", "Agent One", "validator")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, s.UpdateAgentLastSeen(ctx, "agent-1", now))
+
+	got, err := s.GetAgent(ctx, "agent-1")
+	require.NoError(t, err)
+	require.NotNil(t, got.LastSeen)
+	assert.WithinDuration(t, now, *got.LastSeen, time.Second)
+	assert.Equal(t, "active", got.Status, "UpdateAgentLastSeen should also set status to active")
+}
+
+func TestAcquireRedeployLock(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Acquire lock
+	require.NoError(t, s.AcquireRedeployLock(ctx, "agent-1", "add_agent", 10*time.Minute))
+
+	// Try to acquire again — should fail because lock is held
+	err := s.AcquireRedeployLock(ctx, "agent-2", "add_agent", 10*time.Minute)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent-1")
+
+	// Verify lock info
+	lock, err := s.GetRedeployLock(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-1", lock.LockedBy)
+	assert.Equal(t, "add_agent", lock.Operation)
+
+	// Release and re-acquire
+	require.NoError(t, s.ReleaseRedeployLock(ctx))
+	require.NoError(t, s.AcquireRedeployLock(ctx, "agent-2", "remove_agent", 10*time.Minute))
+
+	lock, err = s.GetRedeployLock(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-2", lock.LockedBy)
+}
+
+func TestRedeployLockExpiry(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Acquire lock with 2s TTL (RFC3339 has second precision)
+	require.NoError(t, s.AcquireRedeployLock(ctx, "agent-1", "add_agent", 2*time.Second))
+
+	// Sleep to let it expire
+	time.Sleep(3 * time.Second)
+
+	// Should succeed because the lock has expired
+	require.NoError(t, s.AcquireRedeployLock(ctx, "agent-2", "add_agent", 10*time.Minute))
+
+	lock, err := s.GetRedeployLock(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "agent-2", lock.LockedBy)
+}
+
+func TestRedeployLog(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	entry := &RedeploymentLogEntry{
+		Operation: "add_agent",
+		AgentID:   "agent-1",
+		Phase:     "LOCK_ACQUIRED",
+		Status:    "in_progress",
+		Details:   "acquiring lock",
+	}
+	require.NoError(t, s.InsertRedeployLog(ctx, entry))
+	assert.NotZero(t, entry.ID, "InsertRedeployLog should populate ID")
+
+	// Get log entries
+	logs, err := s.GetRedeployLog(ctx, "add_agent")
+	require.NoError(t, err)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "LOCK_ACQUIRED", logs[0].Phase)
+	assert.Equal(t, "in_progress", logs[0].Status)
+	assert.Equal(t, "acquiring lock", logs[0].Details)
+	assert.NotNil(t, logs[0].StartedAt)
+
+	// Update log entry
+	require.NoError(t, s.UpdateRedeployLog(ctx, entry.ID, "completed", ""))
+
+	logs, err = s.GetRedeployLog(ctx, "add_agent")
+	require.NoError(t, err)
+	require.Len(t, logs, 1)
+	assert.Equal(t, "completed", logs[0].Status)
+	assert.NotNil(t, logs[0].CompletedAt)
+
+	// Update with error
+	entry2 := &RedeploymentLogEntry{
+		Operation: "add_agent",
+		AgentID:   "agent-1",
+		Phase:     "CHAIN_STOPPED",
+		Status:    "in_progress",
+	}
+	require.NoError(t, s.InsertRedeployLog(ctx, entry2))
+	require.NoError(t, s.UpdateRedeployLog(ctx, entry2.ID, "failed", "chain stop timeout"))
+
+	logs, err = s.GetRedeployLog(ctx, "add_agent")
+	require.NoError(t, err)
+	assert.Len(t, logs, 2)
+	assert.Equal(t, "failed", logs[1].Status)
+	assert.Equal(t, "chain stop timeout", logs[1].Error)
+}
+
+func TestListMemoriesWithAgentFilter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert memories from different agents
+	rec1 := testMemory("m1", "agent-alpha", "content from alpha", "general")
+	require.NoError(t, s.InsertMemory(ctx, rec1))
+
+	rec2 := testMemory("m2", "agent-alpha", "more content from alpha", "general")
+	require.NoError(t, s.InsertMemory(ctx, rec2))
+
+	rec3 := testMemory("m3", "agent-beta", "content from beta", "general")
+	require.NoError(t, s.InsertMemory(ctx, rec3))
+
+	// Filter by agent-alpha
+	records, total, err := s.ListMemories(ctx, ListOptions{
+		SubmittingAgent: "agent-alpha",
+		Limit:           50,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	assert.Len(t, records, 2)
+	for _, r := range records {
+		assert.Equal(t, "agent-alpha", r.SubmittingAgent)
+	}
+
+	// Filter by agent-beta
+	records, total, err = s.ListMemories(ctx, ListOptions{
+		SubmittingAgent: "agent-beta",
+		Limit:           50,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	assert.Len(t, records, 1)
+	assert.Equal(t, "agent-beta", records[0].SubmittingAgent)
+
+	// No filter — returns all
+	records, total, err = s.ListMemories(ctx, ListOptions{Limit: 50})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	assert.Len(t, records, 3)
+}
+
+// --- Key rotation tests ---
+
+func TestRotateAgentKey(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Create an agent with known Ed25519 key
+	agent := testAgent("old-agent-id", "Rotation Test Agent", "validator")
+	agent.ValidatorPubkey = "oldpubkey"
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Insert memories attributed to this agent
+	rec1 := testMemory("m1", "old-agent-id", "memory one", "general")
+	require.NoError(t, s.InsertMemory(ctx, rec1))
+	rec2 := testMemory("m2", "old-agent-id", "memory two", "security")
+	require.NoError(t, s.InsertMemory(ctx, rec2))
+	rec3 := testMemory("m3", "other-agent", "memory three", "general")
+	require.NoError(t, s.InsertMemory(ctx, rec3))
+
+	// Rotate the key
+	newAgentID, seed, err := s.RotateAgentKey(ctx, "old-agent-id")
+	require.NoError(t, err)
+	assert.NotEmpty(t, newAgentID)
+	assert.NotEqual(t, "old-agent-id", newAgentID)
+	assert.Len(t, seed, ed25519.SeedSize, "seed should be 32 bytes")
+
+	// Verify newAgentID is hex-encoded Ed25519 public key
+	pubBytes, err := hex.DecodeString(newAgentID)
+	require.NoError(t, err)
+	assert.Len(t, pubBytes, ed25519.PublicKeySize, "decoded agent_id should be 32 bytes (Ed25519 pubkey)")
+
+	// Verify the seed reconstructs the same public key
+	privKey := ed25519.NewKeyFromSeed(seed)
+	pubKey := privKey.Public().(ed25519.PublicKey)
+	assert.Equal(t, newAgentID, hex.EncodeToString(pubKey))
+
+	// Verify the new agent exists with correct properties
+	newAgent, err := s.GetAgent(ctx, newAgentID)
+	require.NoError(t, err)
+	assert.Equal(t, "Rotation Test Agent", newAgent.Name)
+	assert.Equal(t, "validator", newAgent.Role)
+	assert.NotEmpty(t, newAgent.ValidatorPubkey)
+	assert.NotEqual(t, "oldpubkey", newAgent.ValidatorPubkey)
+
+	// Verify old agent is marked as removed
+	oldAgent, err := s.GetAgent(ctx, "old-agent-id")
+	require.NoError(t, err)
+	assert.Equal(t, "removed", oldAgent.Status)
+	assert.NotNil(t, oldAgent.RemovedAt)
+
+	// Verify memories were re-attributed to the new agent
+	mem1, err := s.GetMemory(ctx, "m1")
+	require.NoError(t, err)
+	assert.Equal(t, newAgentID, mem1.SubmittingAgent)
+
+	mem2, err := s.GetMemory(ctx, "m2")
+	require.NoError(t, err)
+	assert.Equal(t, newAgentID, mem2.SubmittingAgent)
+
+	// Verify other agent's memory was NOT re-attributed
+	mem3, err := s.GetMemory(ctx, "m3")
+	require.NoError(t, err)
+	assert.Equal(t, "other-agent", mem3.SubmittingAgent)
+}
+
+func TestRotateAgentKey_RemovedAgent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("removed-agent", "Removed Agent", "validator")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	require.NoError(t, s.RemoveAgent(ctx, "removed-agent"))
+
+	_, _, err := s.RotateAgentKey(ctx, "removed-agent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "removed")
+}
+
+func TestRotateAgentKey_NonexistentAgent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	_, _, err := s.RotateAgentKey(ctx, "does-not-exist")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestRotateAgentKey_MemoryCountTransfers(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	agent := testAgent("rotate-mem-agent", "Memory Count Agent", "member")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	// Insert 3 memories
+	for i := 0; i < 3; i++ {
+		rec := testMemory(fmt.Sprintf("rm%d", i), "rotate-mem-agent", fmt.Sprintf("content %d", i), "general")
+		require.NoError(t, s.InsertMemory(ctx, rec))
+	}
+
+	newAgentID, _, err := s.RotateAgentKey(ctx, "rotate-mem-agent")
+	require.NoError(t, err)
+
+	// New agent should now have 3 memories attributed
+	newAgent, err := s.GetAgent(ctx, newAgentID)
+	require.NoError(t, err)
+	assert.Equal(t, 3, newAgent.MemoryCount)
+
+	// Old agent should have 0 memories (they were re-attributed)
+	oldAgent, err := s.GetAgent(ctx, "rotate-mem-agent")
+	require.NoError(t, err)
+	assert.Equal(t, 0, oldAgent.MemoryCount)
 }

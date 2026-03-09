@@ -851,6 +851,32 @@ footer a:hover { text-decoration: underline; }
 }
 .dev-badge strong { color: var(--bright); }
 
+/* ─── Network Agents Section ─── */
+.network { background: linear-gradient(180deg, var(--void) 0%, var(--deep) 50%, var(--void) 100%); }
+.network-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin-top: 48px;
+}
+.network-grid .feature-card {
+  padding: 28px;
+  background: rgba(167,139,250,0.02);
+  border: 1px solid rgba(167,139,250,0.07);
+  border-radius: 14px;
+  transition: all 0.3s;
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.network-grid .feature-card:hover {
+  background: rgba(167,139,250,0.05);
+  border-color: rgba(167,139,250,0.15);
+}
+.network-span-2 {
+  grid-column: span 2;
+}
+
 /* ─── Scroll Reveal ─── */
 .reveal {
   opacity: 0;
@@ -875,6 +901,8 @@ footer a:hover { text-decoration: underline; }
   .steps-grid { grid-template-columns: 1fr; gap: 20px; }
   .step:not(:last-child)::after { display: none; }
   .features-grid { grid-template-columns: 1fr; }
+  .network-grid { grid-template-columns: 1fr; }
+  .network-span-2 { grid-column: span 1; }
   .migrate-grid { grid-template-columns: 1fr; }
   .paper { grid-template-columns: auto 1fr; }
   .paper-arrow { display: none; }
@@ -903,6 +931,82 @@ footer a:hover { text-decoration: underline; }
   .dev-install-body { font-size: 0.75rem; padding: 14px; }
   .dev-badges { gap: 8px; }
 }
+
+/* Screenshot Carousel */
+.screenshot-carousel {
+  position: relative;
+  max-width: 100%;
+  border-radius: 16px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 32px rgba(124,58,237,0.2);
+  background: #0a0e17;
+}
+.carousel-track { position: relative; }
+.carousel-slide {
+  display: none;
+  animation: carouselFade 0.4s ease;
+}
+.carousel-slide.active { display: block; }
+.carousel-slide img {
+  width: 100%;
+  display: block;
+}
+@keyframes carouselFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.carousel-caption {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 16px 20px;
+  background: linear-gradient(transparent, rgba(10,14,23,0.9));
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+.carousel-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(10,14,23,0.7);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #fff;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  font-size: 22px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  z-index: 2;
+}
+.carousel-btn:hover { background: rgba(124,58,237,0.6); border-color: rgba(124,58,237,0.4); }
+.carousel-prev { left: 12px; }
+.carousel-next { right: 12px; }
+.carousel-dots {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 0;
+  background: rgba(10,14,23,0.8);
+}
+.carousel-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255,255,255,0.2);
+  cursor: pointer;
+  transition: all 0.2s;
+  padding: 0;
+}
+.carousel-dot.active { background: var(--purple); transform: scale(1.3); }
+.carousel-dot:hover { background: rgba(255,255,255,0.5); }
 </style>
 </head>
 <body>
@@ -925,6 +1029,7 @@ footer a:hover { text-decoration: underline; }
       <a href="#features">Features</a>
       <a href="#research">Research</a>
       <a href="#switch">Switch</a>
+      <a href="#network">Network</a>
       <a href="#developers">Developers</a>
       <a href="https://github.com/l33tdawg/sage" class="nav-cta">GitHub</a>
     </div>
@@ -1201,12 +1306,49 @@ footer a:hover { text-decoration: underline; }
       <div class="feature-card">
         <div class="feature-icon purple">&#127912;</div>
         <div>
-          <h3>CEREBRUM</h3>
-          <p>Visualize your AI's memory as a living neural network. Force-directed graph, timeline, real-time updates via SSE.</p>
+          <h3>CEREBRUM Dashboard</h3>
+          <p>Visualize your AI's memory as a living neural network. Search and filter by domain, type, or agent. Click any memory to see full details with agent attribution.</p>
         </div>
       </div>
-      <div class="reveal" style="margin: 32px 0 16px; text-align: center;">
-        <img src="brain-dashboard.png" alt="SAGE CEREBRUM — neural network visualization with memory detail panel" style="max-width: 100%; border-radius: 16px; border: 1px solid var(--border); box-shadow: 0 8px 32px rgba(124,58,237,0.2);">
+      <div class="reveal" style="margin: 32px 0 16px;">
+        <div class="screenshot-carousel" id="screenshotCarousel">
+          <div class="carousel-track">
+            <div class="carousel-slide active">
+              <img src="screen-brain.png" alt="CEREBRUM — Neural network memory visualization" loading="lazy">
+              <div class="carousel-caption">CEREBRUM — Your AI's memory as a living neural network</div>
+            </div>
+            <div class="carousel-slide">
+              <img src="screen-network.png" alt="Network — Multi-agent management dashboard" loading="lazy">
+              <div class="carousel-caption">Network — Manage agents, permissions, and keys from the dashboard</div>
+            </div>
+            <div class="carousel-slide">
+              <img src="screen-overview.png" alt="Settings Overview — Chain health and system status" loading="lazy">
+              <div class="carousel-caption">Overview — Chain health, peers, and system status at a glance</div>
+            </div>
+            <div class="carousel-slide">
+              <img src="screen-security.png" alt="Security — Synaptic Ledger encryption" loading="lazy">
+              <div class="carousel-caption">Security — AES-256-GCM encryption and data export</div>
+            </div>
+            <div class="carousel-slide">
+              <img src="screen-config.png" alt="Configuration — Boot instructions and cleanup" loading="lazy">
+              <div class="carousel-caption">Configuration — Boot instructions, cleanup, and preferences</div>
+            </div>
+            <div class="carousel-slide">
+              <img src="screen-update.png" alt="Update — One-click software updates" loading="lazy">
+              <div class="carousel-caption">Update — One-click updates from the dashboard</div>
+            </div>
+          </div>
+          <button class="carousel-btn carousel-prev" onclick="carouselNav(-1)" aria-label="Previous">&lsaquo;</button>
+          <button class="carousel-btn carousel-next" onclick="carouselNav(1)" aria-label="Next">&rsaquo;</button>
+          <div class="carousel-dots">
+            <button class="carousel-dot active" onclick="carouselGo(0)"></button>
+            <button class="carousel-dot" onclick="carouselGo(1)"></button>
+            <button class="carousel-dot" onclick="carouselGo(2)"></button>
+            <button class="carousel-dot" onclick="carouselGo(3)"></button>
+            <button class="carousel-dot" onclick="carouselGo(4)"></button>
+            <button class="carousel-dot" onclick="carouselGo(5)"></button>
+          </div>
+        </div>
       </div>
       <div class="feature-card">
         <div class="feature-icon pink">&#128230;</div>
@@ -1220,6 +1362,20 @@ footer a:hover { text-decoration: underline; }
         <div>
           <h3>Works With Everything</h3>
           <p>Claude, ChatGPT, DeepSeek, Gemini, Mistral, Cursor, LM Studio, Ollama — any model, any provider. Setup wizard generates the config.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon teal">&#128260;</div>
+        <div>
+          <h3>One-Click Updates</h3>
+          <p>Built-in auto-updater checks GitHub releases, downloads, and replaces the binary — all from the dashboard. No re-downloading DMGs or hunting for processes.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon pink">&#128221;</div>
+        <div>
+          <h3>Boot Instructions</h3>
+          <p>Customize what your AI does on startup — pull yesterday's reflection, focus on a project, check a feed. Set it from the dashboard, no config files.</p>
         </div>
       </div>
     </div>
@@ -1330,10 +1486,10 @@ footer a:hover { text-decoration: underline; }
         <h3>Coming from ChatGPT</h3>
         <p>Export your conversations from OpenAI, then let SAGE turn them into structured memories your new AI can search and learn from.</p>
         <ol class="migrate-steps">
-          <li><span class="step-marker">1</span> Go to <strong>Settings &rarr; Data Controls &rarr; Export Data</strong> in ChatGPT</li>
-          <li><span class="step-marker">2</span> Download the ZIP file from the email OpenAI sends you</li>
-          <li><span class="step-marker">3</span> Open the CEREBRUM &rarr; <strong>Import</strong> and drop the ZIP file</li>
-          <li><span class="step-marker">4</span> Watch your conversations become searchable, governed memories</li>
+          <li><span class="step-marker">1</span><span>Go to <strong>Settings &rarr; Data Controls &rarr; Export Data</strong> in ChatGPT</span></li>
+          <li><span class="step-marker">2</span><span>Download the ZIP file from the email OpenAI sends you</span></li>
+          <li><span class="step-marker">3</span><span>Open the CEREBRUM &rarr; <strong>Import</strong> and drop the ZIP file</span></li>
+          <li><span class="step-marker">4</span><span>Watch your conversations become searchable, governed memories</span></li>
         </ol>
       </div>
       <div class="migrate-card">
@@ -1341,10 +1497,10 @@ footer a:hover { text-decoration: underline; }
         <h3>Coming from Claude</h3>
         <p>Export your Claude.ai conversations, then import them into SAGE so your AI remembers everything from your previous sessions.</p>
         <ol class="migrate-steps">
-          <li><span class="step-marker">1</span> Go to <strong>Settings &rarr; Privacy &rarr; Export Data</strong> on claude.ai</li>
-          <li><span class="step-marker">2</span> Download the export file Anthropic emails you</li>
-          <li><span class="step-marker">3</span> Open the CEREBRUM &rarr; <strong>Import</strong> and drop the file</li>
-          <li><span class="step-marker">4</span> Your Claude history becomes persistent, governed memory</li>
+          <li><span class="step-marker">1</span><span>Go to <strong>Settings &rarr; Privacy &rarr; Export Data</strong> on claude.ai</span></li>
+          <li><span class="step-marker">2</span><span>Download the export file Anthropic emails you</span></li>
+          <li><span class="step-marker">3</span><span>Open the CEREBRUM &rarr; <strong>Import</strong> and drop the file</span></li>
+          <li><span class="step-marker">4</span><span>Your Claude history becomes persistent, governed memory</span></li>
         </ol>
       </div>
       <div class="migrate-card">
@@ -1352,10 +1508,10 @@ footer a:hover { text-decoration: underline; }
         <h3>Coming from Gemini</h3>
         <p>Export your Google Gemini conversations via Takeout, then import them into SAGE for permanent, local memory.</p>
         <ol class="migrate-steps">
-          <li><span class="step-marker">1</span> Go to <strong>Google Takeout</strong> &rarr; select <strong>My Activity</strong> &rarr; <strong>Gemini Apps</strong></li>
-          <li><span class="step-marker">2</span> Download the export archive Google prepares for you</li>
-          <li><span class="step-marker">3</span> Open the CEREBRUM &rarr; <strong>Import</strong> and drop the JSON file</li>
-          <li><span class="step-marker">4</span> Your Gemini activity becomes searchable memory</li>
+          <li><span class="step-marker">1</span><span>Go to <strong>Google Takeout</strong> &rarr; select <strong>My Activity</strong> &rarr; <strong>Gemini Apps</strong></span></li>
+          <li><span class="step-marker">2</span><span>Download the export archive Google prepares for you</span></li>
+          <li><span class="step-marker">3</span><span>Open the CEREBRUM &rarr; <strong>Import</strong> and drop the JSON file</span></li>
+          <li><span class="step-marker">4</span><span>Your Gemini activity becomes searchable memory</span></li>
         </ol>
       </div>
     </div>
@@ -1410,7 +1566,67 @@ footer a:hover { text-decoration: underline; }
     </div>
 
     <div class="migrate-note reveal" style="margin-top:32px;">
-      <strong>Scales to enterprise.</strong> SAGE Personal is the single-node edition. The full architecture supports multi-validator BFT consensus, RBAC, federation, departments, clearance levels, and cross-org knowledge sharing. Same codebase, same API — just add validators. See the <a href="https://github.com/l33tdawg/sage/blob/main/docs/ARCHITECTURE.md">Architecture Guide</a>.
+      <strong>Scales to enterprise.</strong> SAGE Personal is the single-node edition. Add agents from the <a href="#network" style="color:var(--teal);">CEREBRUM dashboard</a> for multi-agent networks, or deploy the full architecture with multi-validator BFT consensus, RBAC, federation, and cross-org knowledge sharing. Same codebase, same API. See the <a href="https://github.com/l33tdawg/sage/blob/main/docs/ARCHITECTURE.md">Architecture Guide</a>.
+    </div>
+  </div>
+</section>
+
+<!-- Multi-Agent Networks -->
+<section class="network" id="network">
+  <div class="container">
+    <div class="reveal" style="text-align:center;">
+      <div class="section-tag">Multi-Agent Networks</div>
+      <h2>Build your private<br>AI network</h2>
+      <p class="section-desc" style="margin:0 auto;">SAGE Personal is one brain. When you need a team of brains — across machines, family members, or an entire org — add agents from the CEREBRUM dashboard. Same security, same consensus, zero configuration files.</p>
+    </div>
+
+    <div class="network-grid reveal">
+      <div class="feature-card">
+        <div class="feature-icon purple">&#128101;</div>
+        <div>
+          <h3>Agent Management</h3>
+          <p>Add, configure, and manage agents from the CEREBRUM dashboard. Each agent gets its own signing keys, identity, role, and permissions. No CLI needed.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon teal">&#128737;</div>
+        <div>
+          <h3>Domain Access Control</h3>
+          <p>Per-domain read/write permissions with a visual matrix. Five clearance tiers from Guest to Top Secret. Enforced server-side on every request.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon gold">&#128279;</div>
+        <div>
+          <h3>LAN Pairing</h3>
+          <p>Generate a 6-character pairing code. New agents fetch their config automatically over your local network. Setup takes seconds, not hours.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon pink">&#128260;</div>
+        <div>
+          <h3>Key Rotation</h3>
+          <p>Rotate agent keys with one click. All memories are re-attributed in a single atomic transaction. Old keys are permanently retired.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon purple">&#9881;&#65039;</div>
+        <div>
+          <h3>Redeployment Orchestrator</h3>
+          <p>9-phase state machine handles chain redeployment automatically. Backups at every phase, rollback on failure. Your memories are never at risk.</p>
+        </div>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon gold">&#128100;</div>
+        <div>
+          <h3>Agent Attribution</h3>
+          <p>Every memory tracks which agent created it. Click any memory in the dashboard to see the agent's name, role, and jump to their profile.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="migrate-note reveal" style="margin-top:32px;">
+      <strong>100% dashboard-driven.</strong> Generate signing keys, download agent bundles, configure permissions, rotate credentials — all from the CEREBRUM dashboard. No CLI commands, no config files, no SSH. Click "Add Agent", pair over LAN, done.
     </div>
   </div>
 </section>
@@ -1563,6 +1779,27 @@ function copyPrompt(box) {
     })
     .catch(() => {}); // Silently fail on rate limit or network error
 })();
+
+// Screenshot carousel
+let carouselIdx = 0;
+const carouselTotal = 6;
+let carouselTimer = setInterval(() => carouselNav(1), 5000);
+
+function carouselNav(dir) {
+  carouselGo((carouselIdx + dir + carouselTotal) % carouselTotal);
+  clearInterval(carouselTimer);
+  carouselTimer = setInterval(() => carouselNav(1), 5000);
+}
+
+function carouselGo(idx) {
+  const slides = document.querySelectorAll('.carousel-slide');
+  const dots = document.querySelectorAll('.carousel-dot');
+  slides[carouselIdx]?.classList.remove('active');
+  dots[carouselIdx]?.classList.remove('active');
+  carouselIdx = idx;
+  slides[carouselIdx]?.classList.add('active');
+  dots[carouselIdx]?.classList.add('active');
+}
 </script>
 </body>
 </html>

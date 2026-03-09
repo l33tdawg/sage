@@ -188,6 +188,53 @@ The dashboard updates in real-time via Server-Sent Events. When your AI stores o
 
 ---
 
+## Multi-Agent Network
+
+Once you have SAGE running for yourself, you can add more agents — other machines, family members, teammates, or dedicated AI assistants with different roles.
+
+### When to add agents
+
+- **Multiple machines** — Your laptop and desktop sharing the same memory
+- **Family or household** — Each person gets their own agent with separate permissions
+- **Small team** — Developers, researchers, or collaborators working with shared knowledge
+- **Specialized AI assistants** — A coding agent, a research agent, and a writing agent, each with access to different memory domains
+
+### Adding an agent via the CEREBRUM dashboard
+
+Open `http://localhost:8080/ui/` and go to the Network tab. The wizard walks you through four steps:
+
+1. **Name & Role** — Give the agent a name (e.g., "Work Laptop") and pick a role: Admin, Validator, Writer, Reader, or Observer
+2. **Clearance Level** — Set the clearance tier (Guest through Top Secret) to control how much the agent can see and do
+3. **Domain Access** — Use the visual matrix to toggle read/write access per knowledge domain (e.g., "security" read+write, "personal" read-only)
+4. **Confirm** — Review the config and click Create. The agent gets its own Ed25519 identity automatically
+
+### LAN pairing quick setup
+
+The fastest way to connect a new machine:
+
+1. On your main SAGE node, click **Add Agent** and select **LAN Pairing**
+2. You get a 6-character code (valid for 5 minutes)
+3. On the new machine, run `sage-lite pair ABC123` (replacing with your code)
+4. The new machine automatically receives its config, keys, and connects to your network
+
+No port forwarding, no config files to copy, no keys to email around. Everything happens over your local network.
+
+### Domain access configuration
+
+Domains are the knowledge categories your agents work with (e.g., "security", "finance", "personal", "code"). For each agent, you control:
+
+- **Read access** — Can the agent query memories in this domain?
+- **Write access** — Can the agent propose new memories to this domain?
+
+Set these per-domain from the Access Control tab on any agent's card in the dashboard. Changes take effect immediately — no restart needed.
+
+A few practical examples:
+- Your personal laptop: full read+write on everything
+- A shared family machine: read+write on "household", read-only on "work"
+- A guest device: read-only on "public", no access to anything else
+
+---
+
 ## Using Ollama for Local Embeddings
 
 For fully private, local-only operation:

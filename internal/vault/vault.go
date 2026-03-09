@@ -10,6 +10,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -239,6 +240,71 @@ func ChangePassphrase(keyFilePath, oldPassphrase, newPassphrase string) error {
 
 	encryptedKey := gcm.Seal(nil, nonce, v.dataKey, nil)
 	verifyHash := sha256.Sum256(v.dataKey)
+
+	kf := keyFile{
+		Salt:         salt,
+		EncryptedKey: encryptedKey,
+		Nonce:        nonce,
+		VerifyHash:   verifyHash[:],
+	}
+
+	data, err := json.Marshal(kf)
+	if err != nil {
+		return fmt.Errorf("marshal key file: %w", err)
+	}
+
+	return os.WriteFile(keyFilePath, data, 0600)
+}
+
+// RecoveryKey returns the raw data key as a base64-encoded string.
+// This is the ultimate recovery mechanism — store this offline.
+// With this key, the vault can be re-initialized with a new passphrase
+// using InitFromRecoveryKey.
+func (v *Vault) RecoveryKey() (string, error) {
+	if v == nil || v.dataKey == nil {
+		return "", ErrLocked
+	}
+	return base64.StdEncoding.EncodeToString(v.dataKey), nil
+}
+
+// InitFromRecoveryKey re-initializes the vault from a recovery key.
+// This allows password reset without losing encrypted data.
+func InitFromRecoveryKey(keyFilePath, recoveryKeyB64, newPassphrase string) error {
+	// Decode the recovery key
+	dataKey, err := base64.StdEncoding.DecodeString(recoveryKeyB64)
+	if err != nil {
+		return fmt.Errorf("invalid recovery key: %w", err)
+	}
+	if len(dataKey) != argonKeyLen {
+		return fmt.Errorf("invalid recovery key length: got %d, want %d", len(dataKey), argonKeyLen)
+	}
+
+	// Generate new salt
+	salt := make([]byte, saltLen)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return fmt.Errorf("generate salt: %w", err)
+	}
+
+	// Derive wrapping key from new passphrase
+	wrapKey := argon2.IDKey([]byte(newPassphrase), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+
+	// Encrypt data key with wrapping key
+	block, err := aes.NewCipher(wrapKey)
+	if err != nil {
+		return fmt.Errorf("create cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("create GCM: %w", err)
+	}
+
+	nonce := make([]byte, nonceLen)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return fmt.Errorf("generate nonce: %w", err)
+	}
+
+	encryptedKey := gcm.Seal(nil, nonce, dataKey, nil)
+	verifyHash := sha256.Sum256(dataKey)
 
 	kf := keyFile{
 		Salt:         salt,

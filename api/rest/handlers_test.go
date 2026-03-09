@@ -567,3 +567,260 @@ func TestGetEpoch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, resp.Scores, 1)
 }
+
+// --- Mock AgentStore for domain access tests ---------------------------------
+
+type mockAgentStore struct {
+	agents map[string]*store.AgentEntry
+}
+
+func newMockAgentStore() *mockAgentStore {
+	return &mockAgentStore{agents: make(map[string]*store.AgentEntry)}
+}
+
+func (m *mockAgentStore) GetAgent(_ context.Context, agentID string) (*store.AgentEntry, error) {
+	a, ok := m.agents[agentID]
+	if !ok {
+		return nil, fmt.Errorf("agent not found: %s", agentID)
+	}
+	return a, nil
+}
+
+func (m *mockAgentStore) ListAgents(_ context.Context) ([]*store.AgentEntry, error) {
+	return nil, nil
+}
+
+func (m *mockAgentStore) CreateAgent(_ context.Context, _ *store.AgentEntry) error { return nil }
+func (m *mockAgentStore) UpdateAgent(_ context.Context, _ *store.AgentEntry) error { return nil }
+func (m *mockAgentStore) RemoveAgent(_ context.Context, _ string) error            { return nil }
+func (m *mockAgentStore) UpdateAgentStatus(_ context.Context, _, _ string) error    { return nil }
+func (m *mockAgentStore) UpdateAgentLastSeen(_ context.Context, _ string, _ time.Time) error {
+	return nil
+}
+func (m *mockAgentStore) AcquireRedeployLock(_ context.Context, _, _ string, _ time.Duration) error {
+	return nil
+}
+func (m *mockAgentStore) ReleaseRedeployLock(_ context.Context) error                  { return nil }
+func (m *mockAgentStore) GetRedeployLock(_ context.Context) (*store.RedeploymentLock, error) {
+	return nil, nil
+}
+func (m *mockAgentStore) InsertRedeployLog(_ context.Context, _ *store.RedeploymentLogEntry) error {
+	return nil
+}
+func (m *mockAgentStore) GetRedeployLog(_ context.Context, _ string) ([]*store.RedeploymentLogEntry, error) {
+	return nil, nil
+}
+func (m *mockAgentStore) UpdateRedeployLog(_ context.Context, _ int64, _, _ string) error {
+	return nil
+}
+func (m *mockAgentStore) RotateAgentKey(_ context.Context, _ string) (string, []byte, error) {
+	return "", nil, nil
+}
+
+// --- Domain Access Read Enforcement Tests ------------------------------------
+
+func TestQueryMemory_ReadAccess_AdminBypasses(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	memStore.memories["m1"] = &memory.MemoryRecord{
+		MemoryID:        "m1",
+		SubmittingAgent: "agent-1",
+		Content:         "secret stuff",
+		ContentHash:     []byte{1},
+		MemoryType:      memory.TypeFact,
+		DomainTag:       "restricted",
+		ConfidenceScore: 0.9,
+		Status:          memory.StatusCommitted,
+		CreatedAt:       time.Now().Add(-time.Hour),
+	}
+
+	embedding := make([]float32, 8)
+	for i := range embedding {
+		embedding[i] = 0.1
+	}
+	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, DomainTag: "restricted", TopK: 10})
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+
+	// Register agent as admin — should bypass domain check
+	agentSt.agents[agentID] = &store.AgentEntry{
+		AgentID:      agentID,
+		Role:         "admin",
+		DomainAccess: `[{"domain":"other","read":false,"write":false}]`,
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	var resp QueryMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.TotalCount)
+}
+
+func TestQueryMemory_ReadAccess_ObserverAllowed(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	memStore.memories["m1"] = &memory.MemoryRecord{
+		MemoryID:        "m1",
+		SubmittingAgent: "agent-1",
+		Content:         "observable",
+		ContentHash:     []byte{1},
+		MemoryType:      memory.TypeFact,
+		DomainTag:       "public",
+		ConfidenceScore: 0.8,
+		Status:          memory.StatusCommitted,
+		CreatedAt:       time.Now().Add(-time.Hour),
+	}
+
+	embedding := make([]float32, 8)
+	for i := range embedding {
+		embedding[i] = 0.1
+	}
+	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, DomainTag: "public", TopK: 10})
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+
+	// Observer with no domain_access — should be allowed to read
+	agentSt.agents[agentID] = &store.AgentEntry{
+		AgentID: agentID,
+		Role:    "observer",
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+}
+
+func TestQueryMemory_ReadAccess_MemberAllowed(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	memStore.memories["m1"] = &memory.MemoryRecord{
+		MemoryID:        "m1",
+		SubmittingAgent: "agent-1",
+		Content:         "allowed content",
+		ContentHash:     []byte{1},
+		MemoryType:      memory.TypeFact,
+		DomainTag:       "crypto",
+		ConfidenceScore: 0.9,
+		Status:          memory.StatusCommitted,
+		CreatedAt:       time.Now().Add(-time.Hour),
+	}
+
+	embedding := make([]float32, 8)
+	for i := range embedding {
+		embedding[i] = 0.1
+	}
+	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, DomainTag: "crypto", TopK: 10})
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+
+	// Member with read access to "crypto"
+	agentSt.agents[agentID] = &store.AgentEntry{
+		AgentID:      agentID,
+		Role:         "member",
+		DomainAccess: `[{"domain":"crypto","read":true,"write":false}]`,
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code)
+	var resp QueryMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, 1, resp.TotalCount)
+}
+
+func TestQueryMemory_ReadAccess_MemberDenied(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	embedding := make([]float32, 8)
+	for i := range embedding {
+		embedding[i] = 0.1
+	}
+	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, DomainTag: "secret", TopK: 10})
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+
+	// Member with read:false on "secret"
+	agentSt.agents[agentID] = &store.AgentEntry{
+		AgentID:      agentID,
+		Role:         "member",
+		DomainAccess: `[{"domain":"secret","read":false,"write":false}]`,
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), "read access")
+}
+
+func TestQueryMemory_ReadAccess_MemberDomainNotInList(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	embedding := make([]float32, 8)
+	for i := range embedding {
+		embedding[i] = 0.1
+	}
+	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, DomainTag: "unlisted", TopK: 10})
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+
+	// Member with domain_access that doesn't include "unlisted" — deny (allowlist model)
+	agentSt.agents[agentID] = &store.AgentEntry{
+		AgentID:      agentID,
+		Role:         "member",
+		DomainAccess: `[{"domain":"crypto","read":true,"write":true}]`,
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), "read access")
+}
+
+func TestQueryMemory_ReadAccess_NoDomainAllowed(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+	agentSt := newMockAgentStore()
+	srv.agentStore = agentSt
+
+	memStore.memories["m1"] = &memory.MemoryRecord{
+		MemoryID:        "m1",
+		SubmittingAgent: "agent-1",
+		Content:         "cross domain",
+		ContentHash:     []byte{1},
+		MemoryType:      memory.TypeFact,
+		DomainTag:       "crypto",
+		ConfidenceScore: 0.9,
+		Status:          memory.StatusCommitted,
+		CreatedAt:       time.Now().Add(-time.Hour),
+	}
+
+	embedding := make([]float32, 8)
+	for i := range embedding {
+		embedding[i] = 0.1
+	}
+	// Empty domain tag — cross-domain query, should be allowed even for restricted members
+	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, TopK: 10})
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+
+	agentSt.agents[agentID] = &store.AgentEntry{
+		AgentID:      agentID,
+		Role:         "member",
+		DomainAccess: `[{"domain":"crypto","read":false,"write":false}]`,
+	}
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	// Empty domain tag skips the check entirely
+	assert.Equal(t, http.StatusOK, rr.Code)
+}

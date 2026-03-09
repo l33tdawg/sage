@@ -18,22 +18,49 @@ Agent (Claude, ChatGPT, DeepSeek, Gemini, etc.)
   ▼
 sage-lite
   ├── ABCI App (validation, confidence, decay, Ed25519 sigs)
-  ├── CometBFT consensus (single-validator personal mode)
+  ├── CometBFT consensus (single-validator or multi-agent network)
   ├── SQLite + optional AES-256-GCM encryption
-  └── Brain Dashboard (SPA, real-time SSE)
+  ├── CEREBRUM Dashboard (SPA, real-time SSE)
+  └── Network Agent Manager (add/remove agents, key rotation, LAN pairing)
 ```
 
-Personal mode runs a real single-validator CometBFT node — every memory write goes through the same `DeliverTx → Commit` pipeline as the full multi-node deployment.
+Personal mode runs a real single-validator CometBFT node — every memory write goes through the same `DeliverTx → Commit` pipeline as the full multi-node deployment. Add more agents from the dashboard when you're ready.
 
-Full deployment guide (4+ validators, RBAC, federation, monitoring): **[Architecture docs](docs/ARCHITECTURE.md)**
+Full deployment guide (multi-agent networks, RBAC, federation, monitoring): **[Architecture docs](docs/ARCHITECTURE.md)**
 
 ---
 
-## Brain Dashboard
+## CEREBRUM Dashboard
 
-![SAGE Brain Dashboard](docs/brain-dashboard.png)
+![CEREBRUM — Neural network memory visualization](docs/screen-brain.png)
 
-`http://localhost:8080/ui/` — force-directed neural graph, semantic search, timeline, real-time updates. [Details](docs/ARCHITECTURE.md)
+`http://localhost:8080/ui/` — force-directed neural graph, domain filtering, semantic search, real-time updates via SSE.
+
+### Network Management
+
+![Network — Multi-agent management](docs/screen-network.png)
+
+Add agents, configure domain-level read/write permissions, manage clearance levels, rotate keys, download bundles — all from the dashboard.
+
+### Settings
+
+| Overview | Security | Configuration | Update |
+|:---:|:---:|:---:|:---:|
+| ![Overview](docs/screen-overview.png) | ![Security](docs/screen-security.png) | ![Config](docs/screen-config.png) | ![Update](docs/screen-update.png) |
+| Chain health, peers, system status | Synaptic Ledger encryption, export | Boot instructions, cleanup, tooltips | One-click updates from dashboard |
+
+---
+
+## What's New in v3.0
+
+- **Multi-Agent Networks** — Add and manage agents from the CEREBRUM dashboard. Each agent gets signing keys, role, clearance level, and per-domain read/write permissions.
+- **LAN Pairing** — Generate a 6-character pairing code. New agents fetch their config over your local network in seconds.
+- **Agent Key Rotation** — Rotate agent credentials with one click. Memories are re-attributed atomically.
+- **Redeployment Orchestrator** — 9-phase state machine handles chain reconfiguration with rollback at every phase.
+- **In-App Auto-Updater** — Check for updates, download, and restart from the Settings page.
+- **Boot Instructions** — Customize what your AI does on startup from the admin dashboard.
+- **Tabbed Settings** — Overview, Security, Configuration, and Update tabs keep everything organized.
+- **Brain Graph Search** — Filter memories by content, domain, type, or agent. Only matching bubbles are shown.
 
 ---
 
@@ -65,8 +92,8 @@ Or grab a binary: [macOS DMG](https://github.com/l33tdawg/sage/releases/latest) 
 
 | Doc | What's in it |
 |-----|-------------|
-| [Architecture & Deployment](docs/ARCHITECTURE.md) | Multi-node BFT, RBAC, federation, API reference, monitoring |
-| [Getting Started](docs/GETTING_STARTED.md) | Setup walkthrough, embedding providers, configuration |
+| [Architecture & Deployment](docs/ARCHITECTURE.md) | Multi-agent networks, BFT, RBAC, federation, API reference |
+| [Getting Started](docs/GETTING_STARTED.md) | Setup walkthrough, embedding providers, multi-agent network guide |
 | [Security FAQ](SECURITY_FAQ.md) | Threat model, encryption, auth, signature scheme |
 | [Connect Your AI](https://l33tdawg.github.io/sage/connect.html) | Interactive setup wizard for any provider |
 
@@ -74,7 +101,7 @@ Or grab a binary: [macOS DMG](https://github.com/l33tdawg/sage/releases/latest) 
 
 ## Stack
 
-Go / CometBFT / chi / SQLite (personal) / PostgreSQL (multi-node) / Ed25519 + AES-256-GCM + Argon2id / MCP
+Go / CometBFT v0.38 / chi / SQLite / Ed25519 + AES-256-GCM + Argon2id / MCP
 
 ---
 

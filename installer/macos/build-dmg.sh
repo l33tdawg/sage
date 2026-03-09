@@ -80,17 +80,62 @@ open_dashboard() {
     osascript -e 'display dialog "SAGE could not start. Check ~/.sage/logs/sage.log for details." with title "SAGE" with icon caution buttons {"OK"} default button "OK"'
 }
 
-# Check if SAGE is already running
-if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    # Already running — just open the dashboard
-    open "$DASHBOARD_URL"
+stop_existing() {
+    # Stop any running sage-lite process (needed for updates)
+    if [ -f "$PID_FILE" ]; then
+        OLD_PID=$(cat "$PID_FILE")
+        if kill -0 "$OLD_PID" 2>/dev/null; then
+            kill "$OLD_PID" 2>/dev/null
+            # Wait up to 5 seconds for graceful shutdown
+            for i in $(seq 1 10); do
+                kill -0 "$OLD_PID" 2>/dev/null || break
+                sleep 0.5
+            done
+            # Force kill if still alive
+            kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
+        fi
+        rm -f "$PID_FILE"
+    fi
+    # Also check for any orphaned sage-lite processes on port 8080
+    ORPHAN_PID=$(lsof -ti tcp:8080 -s tcp:listen 2>/dev/null)
+    if [ -n "$ORPHAN_PID" ]; then
+        kill "$ORPHAN_PID" 2>/dev/null
+        sleep 1
+        kill -0 "$ORPHAN_PID" 2>/dev/null && kill -9 "$ORPHAN_PID" 2>/dev/null
+    fi
+}
+
+# Handle "stop" argument (used by update scripts or user: SAGE.app/Contents/MacOS/SAGE stop)
+if [ "${1:-}" = "stop" ]; then
+    stop_existing
+    echo "SAGE stopped."
     exit 0
 fi
 
-# Check if port 8080 is in use (maybe running from CLI)
+# If SAGE is already running from THIS binary, just open the dashboard
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+    # Check if the running process is the same binary (not an old version)
+    RUNNING_BIN=$(ps -p "$(cat "$PID_FILE")" -o command= 2>/dev/null | awk '{print $1}')
+    if [ "$RUNNING_BIN" = "$SAGE_BIN" ]; then
+        open "$DASHBOARD_URL"
+        exit 0
+    fi
+    # Different binary (old version) — stop it and start fresh
+    echo "$(date): Stopping old SAGE instance for update..." >> "$LOG_FILE"
+    stop_existing
+fi
+
+# Check if port 8080 is in use by a non-SAGE process
 if curl -s -o /dev/null http://localhost:8080/health 2>/dev/null; then
-    open "$DASHBOARD_URL"
-    exit 0
+    # If it's sage-lite from CLI, just open dashboard
+    PORT_PID=$(lsof -ti tcp:8080 -s tcp:listen 2>/dev/null)
+    if [ -n "$PORT_PID" ]; then
+        PORT_CMD=$(ps -p "$PORT_PID" -o command= 2>/dev/null)
+        if echo "$PORT_CMD" | grep -q "sage-lite"; then
+            open "$DASHBOARD_URL"
+            exit 0
+        fi
+    fi
 fi
 
 # First run — need setup
@@ -179,18 +224,62 @@ mkdir -p "$DMG_TEMP"
 cp -R "${APP_DIR}" "$DMG_TEMP/"
 ln -s /Applications "$DMG_TEMP/Applications"
 
+# Create upgrade helper script
+cat > "$DMG_TEMP/Upgrade SAGE.command" << 'UPGRADE'
+#!/bin/bash
+# SAGE Upgrade Helper — stops the running instance so you can replace it.
+echo ""
+echo "  SAGE Upgrade Helper"
+echo "  ==================="
+echo ""
+
+PID_FILE="$HOME/.sage/sage.pid"
+
+# Stop via PID file
+if [ -f "$PID_FILE" ]; then
+    OLD_PID=$(cat "$PID_FILE")
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "  Stopping SAGE (PID $OLD_PID)..."
+        kill "$OLD_PID" 2>/dev/null
+        sleep 2
+        kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
+    fi
+    rm -f "$PID_FILE"
+fi
+
+# Also kill any orphaned sage-lite
+killall sage-lite 2>/dev/null
+
+echo "  SAGE stopped."
+echo ""
+echo "  Now drag SAGE.app to Applications to replace the old version."
+echo "  Then double-click SAGE in Applications to start."
+echo ""
+read -p "  Press Enter to close..."
+UPGRADE
+chmod +x "$DMG_TEMP/Upgrade SAGE.command"
+
 # Create a README in the DMG
 cat > "$DMG_TEMP/README.txt" << README
 SAGE — Give Your AI a Persistent, Secure Memory
 =================================================
 
-Drag SAGE.app to Applications, then double-click to start.
+INSTALL: Drag SAGE.app to Applications, then double-click to start.
 
-On first launch, SAGE opens a Terminal window and runs the
-setup wizard to configure your personal memory node.
+On first launch, SAGE runs the setup wizard to configure your
+personal memory node.
 
 After setup, SAGE starts automatically and opens the Brain
 Dashboard in your browser at http://localhost:8080.
+
+UPDATE: If upgrading from a previous version:
+  1. Open Terminal and run:
+     /Applications/SAGE.app/Contents/MacOS/SAGE stop
+  2. Drag the new SAGE.app to Applications (replace old)
+  3. Double-click to start the new version.
+
+  Or simply: killall sage-lite
+  Then drag the new SAGE.app over the old one.
 
 For Claude Code / CLI usage:
   /Applications/SAGE.app/Contents/MacOS/sage-lite serve

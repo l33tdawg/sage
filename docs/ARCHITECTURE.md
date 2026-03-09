@@ -13,13 +13,14 @@ This document covers the full multi-node BFT deployment, Python SDK, REST API, m
 5. [Environment Variables](#environment-variables)
 6. [Python SDK](#python-sdk)
 7. [Sovereign Layer (RBAC & Federation)](#sovereign-layer-rbac--federation)
-8. [CLI Tools](#cli-tools)
-9. [REST API](#rest-api)
-10. [Monitoring](#monitoring)
-11. [Testing](#testing)
-12. [Troubleshooting](#troubleshooting)
-13. [Repository Structure](#repository-structure)
-14. [Makefile Reference](#makefile-reference)
+8. [Agent Management & Network Topology](#agent-management--network-topology)
+9. [CLI Tools](#cli-tools)
+10. [REST API](#rest-api)
+11. [Monitoring](#monitoring)
+12. [Testing](#testing)
+13. [Troubleshooting](#troubleshooting)
+14. [Repository Structure](#repository-structure)
+15. [Makefile Reference](#makefile-reference)
 
 ---
 
@@ -476,6 +477,115 @@ graph TB
 | 4 | Admin | Full control, grant/revoke access |
 
 All RBAC state is on-chain -- organizations, departments, clearance levels, access grants, and federation agreements are committed to the BFT network and replicated across all validators.
+
+---
+
+## Agent Management & Network Topology
+
+SAGE v3.0 introduces a built-in agent management system for multi-agent networks. This replaces manual key distribution and config editing with a dashboard-driven workflow.
+
+### Agent Registry
+
+All agents are tracked in the `network_agents` SQLite table:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | TEXT | Primary key (UUID) |
+| `name` | TEXT | Human-readable agent name |
+| `public_key` | TEXT | Hex-encoded Ed25519 public key |
+| `role` | TEXT | `admin`, `validator`, `writer`, `reader`, `observer` |
+| `clearance` | INTEGER | 0-4 clearance tier |
+| `domain_access` | JSON | Per-domain read/write permission map |
+| `status` | TEXT | `active`, `suspended`, `retired` |
+| `created_at` | TIMESTAMP | Registration time |
+| `updated_at` | TIMESTAMP | Last modification time |
+
+On upgrade to v3, existing genesis validators are auto-seeded into this table so they appear in the dashboard immediately.
+
+### Agent Lifecycle
+
+```
+Creation → Active → Key Rotation → Removal
+              ↓           ↓
+          Suspended    Re-keyed (new Ed25519 identity,
+              ↓         memories re-attributed atomically)
+           Retired
+```
+
+1. **Creation** — Admin adds agent via CEREBRUM dashboard or REST API. Agent receives an Ed25519 keypair, role, clearance level, and domain access map.
+2. **Active** — Agent participates in the network. Reads and writes are enforced against its `domain_access` map and `clearance` level.
+3. **Key Rotation** — Admin triggers key rotation. A new Ed25519 keypair is generated, all memories attributed to the old key are re-attributed to the new key in a single atomic transaction, and the old key is marked as retired.
+4. **Suspension** — Admin suspends agent. All requests from the agent's key are rejected with 403.
+5. **Removal** — Admin removes agent. The record is soft-deleted (status set to `retired`). Memories remain attributed for audit purposes.
+
+### Redeployment Orchestrator
+
+When the validator set changes (agents added or removed), the CometBFT chain must be redeployed with a new genesis. The orchestrator handles this as a 9-phase state machine:
+
+```
+LOCK → BACKUP → STOP → GENESIS → WIPE → RESTART → VERIFY → RBAC → COMPLETE
+```
+
+| Phase | Action | Rollback |
+|-------|--------|----------|
+| `LOCK` | Acquire startup lock, reject new requests (503 middleware) | Release lock |
+| `BACKUP` | Snapshot SQLite database and CometBFT state | Delete snapshot |
+| `STOP` | Stop CometBFT node via `node.Stop()` | — |
+| `GENESIS` | Generate new genesis.json with updated validator set | Restore old genesis |
+| `WIPE` | Remove CometBFT data directory (blocks, WAL) | Restore from backup |
+| `RESTART` | Create fresh `node.NewNode()` and start it | Restore backup and restart with old genesis |
+| `VERIFY` | Wait for first block, confirm node is syncing | Retry or rollback |
+| `RBAC` | Apply RBAC permissions for new validator set | — |
+| `COMPLETE` | Release startup lock, resume accepting requests | — |
+
+Key implementation detail: CometBFT nodes cannot be restarted after `Stop()` — a fresh `node.NewNode()` must be created. The `FilePV` validator state must be reset to height 0 before starting with a new genesis.
+
+If any phase fails, the orchestrator rolls back to the `BACKUP` phase state and restarts with the original configuration. The 503 middleware ensures no client requests are lost during redeployment — they receive a `503 Service Unavailable` with a `Retry-After` header.
+
+### Domain Access Enforcement
+
+Every memory operation (propose, query, vote, challenge, corroborate) is checked against the agent's `domain_access` map:
+
+- **Read side** — `GET /v1/memory/{id}` and `POST /v1/memory/query` check that the agent has `read: true` for the memory's `domain_tag`.
+- **Write side** — `POST /v1/memory/submit`, `/vote`, `/challenge`, `/corroborate` check that the agent has `write: true` for the target domain.
+- **Observer role** — Agents with role `observer` are blocked from all write operations regardless of domain access.
+- **Clearance tiers** — Five levels (0=Guest, 1=Reader, 2=Writer, 3=Validator, 4=Admin) provide coarse-grained access control on top of domain-specific permissions.
+
+The `domain_access` field is a JSON object mapping domain names to permission objects:
+
+```json
+{
+  "security": {"read": true, "write": true},
+  "finance": {"read": true, "write": false},
+  "personal": {"read": false, "write": false}
+}
+```
+
+### LAN Pairing Flow
+
+For adding agents on a local network without manual key exchange:
+
+1. Admin clicks "Add Agent" in the CEREBRUM dashboard and selects "LAN Pairing"
+2. Server generates a 6-character alphanumeric pairing code (expires after 5 minutes)
+3. New agent runs `sage-lite pair <code>` or enters the code in their setup wizard
+4. Agent and server perform a key exchange over the LAN
+5. Server registers the agent with its Ed25519 public key, assigns default role and permissions
+6. Admin can then adjust role, clearance, and domain access from the dashboard
+
+The pairing code is single-use and time-limited. The exchange happens over the local network only — no external servers involved.
+
+### Key Rotation Mechanics
+
+Key rotation replaces an agent's Ed25519 keypair without losing memory attribution:
+
+1. Admin initiates rotation from the dashboard (or agent requests it via REST API)
+2. Server generates a new Ed25519 keypair for the agent
+3. All memories where `agent_id` matches the old public key are updated to the new public key in a single database transaction
+4. The old public key is added to a `retired_keys` list on the agent record
+5. The new private key is delivered to the agent (via LAN pairing channel or manual download)
+6. Subsequent requests from the old key are rejected
+
+This is an atomic operation — if any step fails, the entire rotation is rolled back and the old key remains active.
 
 ---
 
