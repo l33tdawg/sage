@@ -59,16 +59,18 @@ cp "${BUILD_DIR}/sage-lite" "${APP_DIR}/Contents/MacOS/sage-lite"
 # Create launcher script that opens Terminal with sage-lite
 cat > "${APP_DIR}/Contents/MacOS/SAGE" << 'LAUNCHER'
 #!/bin/bash
-# SAGE Launcher — runs completely in the background, no Terminal.
-SAGE_BIN="$(dirname "$0")/sage-lite"
-LOG_DIR="$HOME/.sage/logs"
-mkdir -p "$LOG_DIR"
+# SAGE Launcher — copies binary out of .app bundle so the bundle can be replaced freely.
+# The running sage-lite process lives in ~/.sage/bin/, NOT inside SAGE.app.
+APP_BIN="$(dirname "$0")/sage-lite"
+SAGE_DIR="$HOME/.sage"
+SAGE_BIN="$SAGE_DIR/bin/sage-lite"
+LOG_DIR="$SAGE_DIR/logs"
+mkdir -p "$LOG_DIR" "$SAGE_DIR/bin"
 LOG_FILE="$LOG_DIR/sage.log"
 DASHBOARD_URL="http://localhost:8080/ui/"
-PID_FILE="$HOME/.sage/sage.pid"
+PID_FILE="$SAGE_DIR/sage.pid"
 
 open_dashboard() {
-    # Wait for the server to be ready, then open browser
     for i in $(seq 1 30); do
         if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null | grep -q "200"; then
             open "$DASHBOARD_URL"
@@ -76,27 +78,22 @@ open_dashboard() {
         fi
         sleep 1
     done
-    # If server didn't start, show an error dialog
     osascript -e 'display dialog "SAGE could not start. Check ~/.sage/logs/sage.log for details." with title "SAGE" with icon caution buttons {"OK"} default button "OK"'
 }
 
 stop_existing() {
-    # Stop any running sage-lite process (needed for updates)
     if [ -f "$PID_FILE" ]; then
         OLD_PID=$(cat "$PID_FILE")
         if kill -0 "$OLD_PID" 2>/dev/null; then
             kill "$OLD_PID" 2>/dev/null
-            # Wait up to 5 seconds for graceful shutdown
             for i in $(seq 1 10); do
                 kill -0 "$OLD_PID" 2>/dev/null || break
                 sleep 0.5
             done
-            # Force kill if still alive
             kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
         fi
         rm -f "$PID_FILE"
     fi
-    # Also check for any orphaned sage-lite processes on port 8080
     ORPHAN_PID=$(lsof -ti tcp:8080 -s tcp:listen 2>/dev/null)
     if [ -n "$ORPHAN_PID" ]; then
         kill "$ORPHAN_PID" 2>/dev/null
@@ -105,54 +102,55 @@ stop_existing() {
     fi
 }
 
-# Handle "stop" argument (used by update scripts or user: SAGE.app/Contents/MacOS/SAGE stop)
+# Handle "stop" argument
 if [ "${1:-}" = "stop" ]; then
     stop_existing
     echo "SAGE stopped."
     exit 0
 fi
 
-# If SAGE is already running from THIS binary, just open the dashboard
+# Copy binary from .app bundle to ~/.sage/bin/ (always update on launch)
+cp -f "$APP_BIN" "$SAGE_BIN"
+chmod +x "$SAGE_BIN"
+
+# If SAGE is already running, check if it's the same version
 if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    # Check if the running process is the same binary (not an old version)
-    RUNNING_BIN=$(ps -p "$(cat "$PID_FILE")" -o command= 2>/dev/null | awk '{print $1}')
-    if [ "$RUNNING_BIN" = "$SAGE_BIN" ]; then
+    # Compare binary checksums to detect version change
+    RUNNING_HASH=$(md5 -q "$SAGE_BIN" 2>/dev/null)
+    APP_HASH=$(md5 -q "$APP_BIN" 2>/dev/null)
+    if [ "$RUNNING_HASH" = "$APP_HASH" ]; then
         open "$DASHBOARD_URL"
         exit 0
     fi
-    # Different binary (old version) — stop it and start fresh
-    echo "$(date): Stopping old SAGE instance for update..." >> "$LOG_FILE"
+    # New version — stop old, start new
+    echo "$(date): Upgrading SAGE — stopping old instance..." >> "$LOG_FILE"
     stop_existing
 fi
 
 # Check if port 8080 is in use by a non-SAGE process
 if curl -s -o /dev/null http://localhost:8080/health 2>/dev/null; then
-    # If it's sage-lite from CLI, just open dashboard
     PORT_PID=$(lsof -ti tcp:8080 -s tcp:listen 2>/dev/null)
     if [ -n "$PORT_PID" ]; then
         PORT_CMD=$(ps -p "$PORT_PID" -o command= 2>/dev/null)
         if echo "$PORT_CMD" | grep -q "sage-lite"; then
-            open "$DASHBOARD_URL"
-            exit 0
+            # Existing sage-lite (maybe from CLI) — stop and replace with new version
+            stop_existing
         fi
     fi
 fi
 
 # First run — need setup
-if [ ! -f "$HOME/.sage/config.yaml" ]; then
-    # Run setup wizard (it opens its own browser window)
+if [ ! -f "$SAGE_DIR/config.yaml" ]; then
     "$SAGE_BIN" setup >> "$LOG_FILE" 2>&1
 fi
 
-# Start SAGE in the background
+# Start SAGE from ~/.sage/bin/ (NOT from inside .app bundle)
 "$SAGE_BIN" serve >> "$LOG_FILE" 2>&1 &
 SAGE_PID=$!
 echo "$SAGE_PID" > "$PID_FILE"
 
-# Clean up PID file when sage-lite exits
 (wait "$SAGE_PID" 2>/dev/null; rm -f "$PID_FILE") &
 
-# Open the dashboard once it's ready
 open_dashboard &
 
 exit 0
@@ -269,21 +267,18 @@ INSTALL: Drag SAGE.app to Applications, then double-click to start.
 On first launch, SAGE runs the setup wizard to configure your
 personal memory node.
 
-After setup, SAGE starts automatically and opens the Brain
+After setup, SAGE starts automatically and opens the CEREBRUM
 Dashboard in your browser at http://localhost:8080.
 
-UPDATE: If upgrading from a previous version:
-  1. Open Terminal and run:
-     /Applications/SAGE.app/Contents/MacOS/SAGE stop
-  2. Drag the new SAGE.app to Applications (replace old)
-  3. Double-click to start the new version.
+UPDATE: Just drag the new SAGE.app over the old one — it works
+even while SAGE is running. Next time you launch, it picks up
+the new version automatically.
 
-  Or simply: killall sage-lite
-  Then drag the new SAGE.app over the old one.
+You can also update from the dashboard: Settings > Update tab.
 
 For Claude Code / CLI usage:
-  /Applications/SAGE.app/Contents/MacOS/sage-lite serve
-  /Applications/SAGE.app/Contents/MacOS/sage-lite mcp
+  ~/.sage/bin/sage-lite serve
+  ~/.sage/bin/sage-lite mcp
 
 More info: https://github.com/l33tdawg/sage
 License: Apache 2.0

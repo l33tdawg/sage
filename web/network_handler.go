@@ -147,8 +147,8 @@ func handleCreateAgent(agentStore store.AgentStore) http.HandlerFunc {
 			P2PAddress:      req.P2PAddress,
 		}
 
-		if err := agentStore.CreateAgent(r.Context(), agent); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		if createErr := agentStore.CreateAgent(r.Context(), agent); createErr != nil {
+			writeError(w, http.StatusInternalServerError, createErr.Error())
 			return
 		}
 
@@ -160,7 +160,7 @@ func handleCreateAgent(agentStore store.AgentStore) http.HandlerFunc {
 		}
 
 		// Save agent key (seed)
-		if err := os.WriteFile(filepath.Join(bundleDir, "agent.key"), seed, 0600); err != nil {
+		if wErr := os.WriteFile(filepath.Join(bundleDir, "agent.key"), seed, 0600); wErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to save agent key")
 			return
 		}
@@ -503,8 +503,8 @@ func generateBundle(bundleDir string, agent *store.AgentEntry, seed []byte) (str
 	if err != nil {
 		return "", err
 	}
-	if _, err := fw.Write(seed); err != nil {
-		return "", err
+	if _, wErr := fw.Write(seed); wErr != nil {
+		return "", wErr
 	}
 
 	// config.yaml — minimal config pointing to this node
@@ -524,8 +524,8 @@ quorum:
 	if err != nil {
 		return "", err
 	}
-	if _, err := fw.Write([]byte(configYAML)); err != nil {
-		return "", err
+	if _, wErr := fw.Write([]byte(configYAML)); wErr != nil {
+		return "", wErr
 	}
 
 	// .mcp.json — MCP config for Claude
@@ -544,8 +544,8 @@ quorum:
 	if err != nil {
 		return "", err
 	}
-	if _, err := fw.Write([]byte(mcpJSON)); err != nil {
-		return "", err
+	if _, wErr := fw.Write([]byte(mcpJSON)); wErr != nil {
+		return "", wErr
 	}
 
 	// SETUP.txt — human-readable instructions
@@ -569,8 +569,8 @@ This agent will connect to the primary node's network.
 	if err != nil {
 		return "", err
 	}
-	if _, err := fw.Write([]byte(setupTxt)); err != nil {
-		return "", err
+	if _, wErr := fw.Write([]byte(setupTxt)); wErr != nil {
+		return "", wErr
 	}
 
 	if err := zw.Close(); err != nil {

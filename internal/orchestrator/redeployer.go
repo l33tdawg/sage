@@ -259,21 +259,17 @@ func (r *Redeployer) rollback(ctx context.Context, failedPhase Phase, op Operati
 }
 
 func (r *Redeployer) waitForConsensus(ctx context.Context, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(2 * time.Second):
-			// In a real implementation, check CometBFT RPC for block height > 2
-			// For now, just wait a bit and assume success
-			r.logger.Info().Msg("consensus check — waiting for blocks")
-		}
-		// TODO: Check actual block height via CometBFT RPC
-		// For v3.0 MVP, we trust that chain restart succeeded
+	// For v3.0 MVP, wait briefly and assume success.
+	// TODO: Check actual block height via CometBFT RPC (height > 2).
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(3 * time.Second):
+		r.logger.Info().Msg("consensus check — assuming success (MVP)")
 		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("consensus timeout after %s", timeout)
 	}
-	return fmt.Errorf("consensus timeout after %s", timeout)
 }
 
 func (r *Redeployer) broadcastStatus(op Operation, agentID string, phase Phase, status PhaseStatus) {

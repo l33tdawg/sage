@@ -157,7 +157,11 @@ func (c *SageNodeController) RegenerateGenesis(validators []orchestrator.Validat
 			pubKey = cmtcrypto.PubKey(v.PubKey)
 		} else {
 			// If no pubkey provided, use the local validator key (for the primary node)
-			pubKey = c.pv.Key.PubKey.(cmtcrypto.PubKey)
+			localPK, ok := c.pv.Key.PubKey.(cmtcrypto.PubKey)
+			if !ok {
+				return fmt.Errorf("local validator pubkey is not ed25519")
+			}
+			pubKey = localPK
 		}
 
 		power := v.Power

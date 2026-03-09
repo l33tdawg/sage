@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -117,27 +115,6 @@ func TestPairingStoreCleanup(t *testing.T) {
 	ps.mu.RUnlock()
 }
 
-// createTestAgentWithBundle sets up an agent with a bundle directory for pairing tests.
-func createTestAgentWithBundle(t *testing.T, s *store.SQLiteStore, agentID, name string) {
-	t.Helper()
-	agent := &store.AgentEntry{
-		AgentID:         agentID,
-		Name:            name,
-		Role:            "member",
-		ValidatorPubkey: "dGVzdA==",
-		Status:          "pending",
-		Clearance:       1,
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), agent))
-
-	// Create bundle directory with agent key
-	bundleDir := filepath.Join(t.TempDir(), "bundles", agentID)
-	require.NoError(t, os.MkdirAll(bundleDir, 0700))
-	require.NoError(t, os.WriteFile(filepath.Join(bundleDir, "agent.key"), []byte("test-seed-32-bytes-for-testing!!"), 0600))
-
-	// Point SAGE_HOME to temp dir so the handler finds bundles
-	t.Setenv("SAGE_HOME", filepath.Dir(bundleDir[:len(bundleDir)-len(agentID)-1]))
-}
 
 func TestHandleCreatePairingCode(t *testing.T) {
 	h, s := newTestHandler(t)

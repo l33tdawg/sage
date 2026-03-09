@@ -630,8 +630,10 @@ func seedNetworkAgents(ctx context.Context, s *store.SQLiteStore, cometHome stri
 	localAgentID := ""
 	agentKeyPath := filepath.Join(SageHome(), "agent.key")
 	if seed, readErr := os.ReadFile(agentKeyPath); readErr == nil && len(seed) == ed25519.SeedSize {
-		pk := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
-		localAgentID = hex.EncodeToString(pk)
+		pk, ok := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+		if ok {
+			localAgentID = hex.EncodeToString(pk)
+		}
 	}
 
 	seeded := 0

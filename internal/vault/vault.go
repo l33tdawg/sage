@@ -281,8 +281,8 @@ func InitFromRecoveryKey(keyFilePath, recoveryKeyB64, newPassphrase string) erro
 
 	// Generate new salt
 	salt := make([]byte, saltLen)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return fmt.Errorf("generate salt: %w", err)
+	if _, saltErr := io.ReadFull(rand.Reader, salt); saltErr != nil {
+		return fmt.Errorf("generate salt: %w", saltErr)
 	}
 
 	// Derive wrapping key from new passphrase
@@ -299,8 +299,8 @@ func InitFromRecoveryKey(keyFilePath, recoveryKeyB64, newPassphrase string) erro
 	}
 
 	nonce := make([]byte, nonceLen)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return fmt.Errorf("generate nonce: %w", err)
+	if _, nonceErr := io.ReadFull(rand.Reader, nonce); nonceErr != nil {
+		return fmt.Errorf("generate nonce: %w", nonceErr)
 	}
 
 	encryptedKey := gcm.Seal(nil, nonce, dataKey, nil)

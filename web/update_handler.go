@@ -138,7 +138,12 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 
 	// Download the archive
 	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(body.DownloadURL)
+	dlReq, err := http.NewRequestWithContext(r.Context(), "GET", body.DownloadURL, nil)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid download URL")
+		return
+	}
+	resp, err := client.Do(dlReq)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "download failed: "+err.Error())
 		return
@@ -173,16 +178,16 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 	// Move new -> current
 	if err := os.Rename(newBinary, execPath); err != nil {
 		// Rollback
-		os.Rename(backupPath, execPath)
+		_ = os.Rename(backupPath, execPath)
 		writeError(w, http.StatusInternalServerError, "failed to install new binary: "+err.Error())
 		return
 	}
 
 	// Copy permissions from backup
 	if info, err := os.Stat(backupPath); err == nil {
-		os.Chmod(execPath, info.Mode())
+		_ = os.Chmod(execPath, info.Mode())
 	} else {
-		os.Chmod(execPath, 0755)
+		_ = os.Chmod(execPath, 0755)
 	}
 
 	// Clean up backup
@@ -257,13 +262,13 @@ func extractBinaryFromTarGz(reader io.Reader, binaryName string) (string, error)
 			if err != nil {
 				return "", err
 			}
-			if _, err := io.Copy(tmpFile, tr); err != nil {
+			if _, err := io.Copy(tmpFile, io.LimitReader(tr, 500<<20)); err != nil { // 500MB max
 				tmpFile.Close()
 				os.Remove(tmpFile.Name())
 				return "", err
 			}
 			tmpFile.Close()
-			os.Chmod(tmpFile.Name(), 0755)
+			_ = os.Chmod(tmpFile.Name(), 0755)
 			return tmpFile.Name(), nil
 		}
 	}
