@@ -222,57 +222,123 @@ mkdir -p "$DMG_TEMP"
 cp -R "${APP_DIR}" "$DMG_TEMP/"
 ln -s /Applications "$DMG_TEMP/Applications"
 
-# Create upgrade helper script
-cat > "$DMG_TEMP/Upgrade SAGE.command" << 'UPGRADE'
+# Create the main installer script — handles stop, copy, and launch automatically
+cat > "$DMG_TEMP/Install SAGE.command" << 'INSTALL'
 #!/bin/bash
-# SAGE Upgrade Helper — stops the running instance so you can replace it.
+# SAGE Installer — stops any running instance, installs, and launches.
+clear
 echo ""
-echo "  SAGE Upgrade Helper"
-echo "  ==================="
+echo "  ╔═══════════════════════════════════════╗"
+echo "  ║       SAGE Installer                  ║"
+echo "  ╚═══════════════════════════════════════╝"
 echo ""
 
 PID_FILE="$HOME/.sage/sage.pid"
+DMG_APP="$(dirname "$0")/SAGE.app"
+DEST="/Applications/SAGE.app"
+
+# --- Step 1: Stop any running SAGE process ---
+echo "  [1/3] Checking for running SAGE..."
+
+STOPPED=0
 
 # Stop via PID file
 if [ -f "$PID_FILE" ]; then
     OLD_PID=$(cat "$PID_FILE")
     if kill -0 "$OLD_PID" 2>/dev/null; then
-        echo "  Stopping SAGE (PID $OLD_PID)..."
+        echo "        Stopping SAGE (PID $OLD_PID)..."
         kill "$OLD_PID" 2>/dev/null
-        sleep 2
+        for i in $(seq 1 10); do
+            kill -0 "$OLD_PID" 2>/dev/null || break
+            sleep 0.5
+        done
         kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
+        STOPPED=1
     fi
     rm -f "$PID_FILE"
 fi
 
-# Also kill any orphaned sage-lite
-killall sage-lite 2>/dev/null
+# Kill any sage-lite on port 8080
+ORPHAN_PID=$(lsof -ti tcp:8080 -s tcp:listen 2>/dev/null)
+if [ -n "$ORPHAN_PID" ]; then
+    ORPHAN_CMD=$(ps -p "$ORPHAN_PID" -o command= 2>/dev/null)
+    if echo "$ORPHAN_CMD" | grep -q "sage-lite"; then
+        echo "        Stopping sage-lite on port 8080 (PID $ORPHAN_PID)..."
+        kill "$ORPHAN_PID" 2>/dev/null
+        sleep 1
+        kill -0 "$ORPHAN_PID" 2>/dev/null && kill -9 "$ORPHAN_PID" 2>/dev/null
+        STOPPED=1
+    fi
+fi
 
-echo "  SAGE stopped."
+# Also kill any other sage-lite processes
+killall sage-lite 2>/dev/null && STOPPED=1
+
+if [ "$STOPPED" -eq 1 ]; then
+    echo "        SAGE stopped."
+    sleep 1  # Brief pause to let macOS release file locks
+else
+    echo "        No running SAGE found."
+fi
+
+# --- Step 2: Copy SAGE.app to /Applications ---
+echo "  [2/3] Installing SAGE.app to /Applications..."
+
+if [ ! -d "$DMG_APP" ]; then
+    echo ""
+    echo "  ERROR: Cannot find SAGE.app in this disk image."
+    echo "  Please re-download the DMG and try again."
+    echo ""
+    read -p "  Press Enter to close..."
+    exit 1
+fi
+
+# Remove old version and copy new
+rm -rf "$DEST"
+cp -R "$DMG_APP" "$DEST"
+
+if [ ! -d "$DEST" ]; then
+    echo ""
+    echo "  ERROR: Failed to copy SAGE.app to /Applications."
+    echo "  You may need to run this with administrator privileges."
+    echo ""
+    read -p "  Press Enter to close..."
+    exit 1
+fi
+
+echo "        Installed successfully."
+
+# --- Step 3: Launch SAGE ---
+echo "  [3/3] Launching SAGE..."
+open "$DEST"
+
 echo ""
-echo "  Now drag SAGE.app to Applications to replace the old version."
-echo "  Then double-click SAGE in Applications to start."
+echo "  ✓ SAGE has been installed and launched."
+echo "    The CEREBRUM dashboard will open in your browser shortly."
+echo ""
+echo "    You can safely eject the disk image now."
 echo ""
 read -p "  Press Enter to close..."
-UPGRADE
-chmod +x "$DMG_TEMP/Upgrade SAGE.command"
+INSTALL
+chmod +x "$DMG_TEMP/Install SAGE.command"
 
 # Create a README in the DMG
 cat > "$DMG_TEMP/README.txt" << README
 SAGE — Give Your AI a Persistent, Secure Memory
 =================================================
 
-INSTALL: Drag SAGE.app to Applications, then double-click to start.
+INSTALL / UPDATE:
+  Double-click "Install SAGE.command" — it handles everything:
+  stops any running SAGE, installs the app, and launches it.
+
+  Alternatively, you can drag SAGE.app to Applications manually.
+  If you get "SAGE is still open", run "Install SAGE.command" instead.
 
 On first launch, SAGE runs the setup wizard to configure your
 personal memory node.
 
 After setup, SAGE starts automatically and opens the CEREBRUM
 Dashboard in your browser at http://localhost:8080.
-
-UPDATE: Just drag the new SAGE.app over the old one — it works
-even while SAGE is running. Next time you launch, it picks up
-the new version automatically.
 
 You can also update from the dashboard: Settings > Update tab.
 
