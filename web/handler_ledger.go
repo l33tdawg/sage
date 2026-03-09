@@ -1,0 +1,166 @@
+package web
+
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+	"strings"
+
+	"github.com/l33tdawg/sage/internal/vault"
+)
+
+// VaultStore is implemented by stores that support encryption.
+type VaultStore interface {
+	SetVault(v *vault.Vault)
+}
+
+// handleGetLedgerStatus returns the current Synaptic Ledger (encryption vault) status.
+func (h *DashboardHandler) handleGetLedgerStatus(w http.ResponseWriter, _ *http.Request) {
+	if !h.Encrypted && !vault.Exists(h.VaultKeyPath) {
+		writeJSONResp(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+
+	// Tilde-shorten the path for display.
+	displayPath := h.VaultKeyPath
+	if home, err := os.UserHomeDir(); err == nil {
+		displayPath = strings.Replace(displayPath, home, "~", 1)
+	}
+
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"enabled":    h.Encrypted,
+		"algorithm":  "AES-256-GCM",
+		"kdf":        "Argon2id",
+		"vault_path": displayPath,
+	})
+}
+
+// handleEnableLedger initialises the encryption vault and attaches it to the store.
+func (h *DashboardHandler) handleEnableLedger(w http.ResponseWriter, r *http.Request) {
+	if h.Encrypted {
+		writeError(w, http.StatusConflict, "encryption is already enabled")
+		return
+	}
+	if h.VaultKeyPath == "" {
+		writeError(w, http.StatusBadRequest, "vault key path not configured")
+		return
+	}
+
+	var body struct {
+		Passphrase string `json:"passphrase"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Passphrase == "" {
+		writeError(w, http.StatusBadRequest, "passphrase is required")
+		return
+	}
+
+	// Create the vault key file.
+	if err := vault.Init(h.VaultKeyPath, body.Passphrase); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to initialise vault: "+err.Error())
+		return
+	}
+
+	// Open the vault so we can attach it to the store.
+	v, err := vault.Open(h.VaultKeyPath, body.Passphrase)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "vault created but failed to open: "+err.Error())
+		return
+	}
+
+	// Attach vault to the store if the store supports it.
+	if vs, ok := h.store.(VaultStore); ok {
+		vs.SetVault(v)
+	}
+
+	h.Encrypted = true
+
+	// Recovery key: the raw data key, base64-encoded.
+	// This can re-initialize the vault with a new passphrase if the original is lost.
+	recoveryKey, _ := v.RecoveryKey()
+
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"recovery_key": recoveryKey,
+	})
+}
+
+// handleChangePassphrase changes the vault passphrase without re-encrypting data.
+func (h *DashboardHandler) handleChangePassphrase(w http.ResponseWriter, r *http.Request) {
+	if !h.Encrypted {
+		writeError(w, http.StatusBadRequest, "encryption is not enabled")
+		return
+	}
+
+	var body struct {
+		OldPassphrase string `json:"old_passphrase"`
+		NewPassphrase string `json:"new_passphrase"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.OldPassphrase == "" || body.NewPassphrase == "" {
+		writeError(w, http.StatusBadRequest, "old_passphrase and new_passphrase are required")
+		return
+	}
+
+	if err := vault.ChangePassphrase(h.VaultKeyPath, body.OldPassphrase, body.NewPassphrase); err != nil {
+		if err == vault.ErrWrongPassphrase {
+			writeError(w, http.StatusUnauthorized, "wrong passphrase")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to change passphrase: "+err.Error())
+		return
+	}
+
+	// Return a fresh recovery key (same data key, but user should save again
+	// since they may have lost the old recovery key alongside the old passphrase).
+	var recoveryKey string
+	if v, openErr := vault.Open(h.VaultKeyPath, body.NewPassphrase); openErr == nil {
+		recoveryKey, _ = v.RecoveryKey()
+	}
+
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"recovery_key": recoveryKey,
+	})
+}
+
+// handleDisableLedger disables encryption for new memories. Existing encrypted
+// memories remain encrypted — they can still be read while the vault is in
+// memory, but new writes will be plaintext.
+func (h *DashboardHandler) handleDisableLedger(w http.ResponseWriter, r *http.Request) {
+	if !h.Encrypted {
+		writeError(w, http.StatusBadRequest, "encryption is not enabled")
+		return
+	}
+
+	var body struct {
+		Passphrase string `json:"passphrase"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Passphrase == "" {
+		writeError(w, http.StatusBadRequest, "passphrase is required")
+		return
+	}
+
+	// Verify the passphrase is correct before disabling.
+	_, err := vault.Open(h.VaultKeyPath, body.Passphrase)
+	if err != nil {
+		if err == vault.ErrWrongPassphrase {
+			writeError(w, http.StatusUnauthorized, "wrong passphrase")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to verify passphrase: "+err.Error())
+		return
+	}
+
+	h.Encrypted = false
+
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"warning": "Existing encrypted memories will remain encrypted but new memories won't be encrypted. Re-enable encryption to protect new data.",
+	})
+}

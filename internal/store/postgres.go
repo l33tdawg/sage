@@ -1083,3 +1083,57 @@ func (s *PostgresStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) e
 	}
 	return tx.Commit(ctx)
 }
+
+// --- AgentStore stubs (PostgreSQL implementation TODO) ---
+
+func (s *PostgresStore) ListAgents(_ context.Context) ([]*AgentEntry, error) {
+	return nil, fmt.Errorf("ListAgents not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) GetAgent(_ context.Context, _ string) (*AgentEntry, error) {
+	return nil, fmt.Errorf("GetAgent not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) CreateAgent(_ context.Context, _ *AgentEntry) error {
+	return fmt.Errorf("CreateAgent not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) UpdateAgent(_ context.Context, _ *AgentEntry) error {
+	return fmt.Errorf("UpdateAgent not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) RemoveAgent(_ context.Context, _ string) error {
+	return fmt.Errorf("RemoveAgent not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) UpdateAgentStatus(_ context.Context, _, _ string) error {
+	return fmt.Errorf("UpdateAgentStatus not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) UpdateAgentLastSeen(_ context.Context, _ string, _ time.Time) error {
+	return fmt.Errorf("UpdateAgentLastSeen not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) AcquireRedeployLock(_ context.Context, _, _ string, _ time.Duration) error {
+	return fmt.Errorf("AcquireRedeployLock not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) ReleaseRedeployLock(_ context.Context) error {
+	return fmt.Errorf("ReleaseRedeployLock not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) GetRedeployLock(_ context.Context) (*RedeploymentLock, error) {
+	return nil, fmt.Errorf("GetRedeployLock not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) InsertRedeployLog(_ context.Context, _ *RedeploymentLogEntry) error {
+	return fmt.Errorf("InsertRedeployLog not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) GetRedeployLog(_ context.Context, _ string) ([]*RedeploymentLogEntry, error) {
+	return nil, fmt.Errorf("GetRedeployLog not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) UpdateRedeployLog(_ context.Context, _ int64, _, _ string) error {
+	return fmt.Errorf("UpdateRedeployLog not implemented for PostgresStore")
+}

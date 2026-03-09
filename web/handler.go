@@ -39,6 +39,20 @@ type DashboardHandler struct {
 	// Auth — only active when VaultKeyPath is set.
 	VaultKeyPath string
 	sessions     sync.Map // token -> expiry time
+
+	// Redeployer — when set, write endpoints return 503 during active redeployment
+	// and the /redeploy endpoint can trigger chain redeployment.
+	// Must implement RedeployChecker (for the guard middleware).
+	// Also provides Deploy/GetStatus for the network redeploy endpoint.
+	Redeployer RedeployOrchestrator
+}
+
+// RedeployOrchestrator extends RedeployChecker with deploy/status methods
+// for the network redeploy endpoint. Implemented by *orchestrator.Redeployer.
+type RedeployOrchestrator interface {
+	RedeployChecker
+	DeployOp(ctx context.Context, op, agentID string) error
+	GetRedeployStatus(ctx context.Context) (active bool, operation, agentID string, err error)
 }
 
 // NewDashboardHandler creates a new dashboard handler.
@@ -72,6 +86,8 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		if h.VaultKeyPath != "" {
 			r.Use(h.authMiddleware)
 		}
+		// Redeploy guard — returns 503 for write endpoints during active redeployment.
+		r.Use(redeployGuard(h.Redeployer))
 
 		r.Get("/v1/dashboard/memory/list", h.handleListMemories)
 		r.Get("/v1/dashboard/memory/timeline", h.handleTimeline)
@@ -84,6 +100,15 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Get("/v1/dashboard/settings/cleanup", h.handleGetCleanupSettings)
 		r.Post("/v1/dashboard/settings/cleanup", h.handleSaveCleanupSettings)
 		r.Post("/v1/dashboard/cleanup/run", h.handleRunCleanup)
+
+		// Synaptic Ledger (encryption vault) management
+		r.Get("/v1/dashboard/settings/ledger", h.handleGetLedgerStatus)
+		r.Post("/v1/dashboard/settings/ledger/enable", h.handleEnableLedger)
+		r.Post("/v1/dashboard/settings/ledger/change-passphrase", h.handleChangePassphrase)
+		r.Post("/v1/dashboard/settings/ledger/disable", h.handleDisableLedger)
+
+		// Network agent management routes
+		h.RegisterNetworkRoutes(r)
 	})
 
 	// SPA — serve static files, fallback to index.html
@@ -223,12 +248,13 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
 	opts := store.ListOptions{
-		DomainTag: q.Get("domain"),
-		Provider:  q.Get("provider"),
-		Status:    q.Get("status"),
-		Limit:     limit,
-		Offset:    offset,
-		Sort:      q.Get("sort"),
+		DomainTag:       q.Get("domain"),
+		Provider:        q.Get("provider"),
+		Status:          q.Get("status"),
+		SubmittingAgent: q.Get("agent"),
+		Limit:           limit,
+		Offset:          offset,
+		Sort:            q.Get("sort"),
 	}
 
 	records, total, err := h.store.ListMemories(r.Context(), opts)

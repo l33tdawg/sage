@@ -20,7 +20,6 @@ import (
 	"github.com/cometbft/cometbft/node"
 	"github.com/cometbft/cometbft/p2p"
 	"github.com/cometbft/cometbft/privval"
-	"github.com/cometbft/cometbft/proxy"
 	cmttypes "github.com/cometbft/cometbft/types"
 	cmttime "github.com/cometbft/cometbft/types/time"
 	"github.com/go-chi/chi/v5"
@@ -32,6 +31,7 @@ import (
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
+	"github.com/l33tdawg/sage/internal/orchestrator"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/vault"
 	"github.com/l33tdawg/sage/web"
@@ -172,34 +172,26 @@ func runServe() error {
 	cmtLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(os.Stderr))
 	cmtLogger = cmtlog.NewFilter(cmtLogger, cmtlog.AllowError()) // Quiet CometBFT logs
 
-	cometNode, err := node.NewNode(
-		cometCfg,
-		pv,
-		nodeKey,
-		proxy.NewLocalClientCreator(app),
-		node.DefaultGenesisDocProviderFunc(cometCfg),
-		config.DefaultDBProvider,
-		node.DefaultMetricsProvider(cometCfg.Instrumentation),
-		cmtLogger,
-	)
-	if err != nil {
-		return fmt.Errorf("create CometBFT node: %w", err)
-	}
+	// Create the node controller — manages CometBFT lifecycle for redeployment
+	nodeCtrl := NewSageNodeController(cometCfg, app, pv, nodeKey, cmtLogger, logger, cfg.DataDir)
 
-	if err := cometNode.Start(); err != nil {
+	if err := nodeCtrl.StartChain(); err != nil {
 		return fmt.Errorf("start CometBFT: %w", err)
 	}
 	defer func() {
-		if stopErr := cometNode.Stop(); stopErr != nil {
+		if stopErr := nodeCtrl.StopChain(); stopErr != nil {
 			logger.Error().Err(stopErr).Msg("error stopping CometBFT")
 		}
-		cometNode.Wait()
 	}()
 
 	health.SetCometBFTHealth(true)
+	cometNode := nodeCtrl.GetCometNode()
 	logger.Info().
 		Str("node_id", string(cometNode.NodeInfo().ID())).
 		Msg("CometBFT node started (single-validator personal mode)")
+
+	// Auto-seed network_agents from existing chain state (v3 upgrade path)
+	seedNetworkAgents(ctx, sqliteStore, cometHome, cometNode, logger)
 
 	// CometBFT RPC URL for tx broadcast
 	cometRPC := "http://127.0.0.1:26657"
@@ -213,6 +205,25 @@ func runServe() error {
 	if cfg.Encryption.Enabled {
 		dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")
 	}
+
+	// Create redeployment orchestrator and wire it to the dashboard
+	redeployer := orchestrator.NewRedeployer(sqliteStore, nodeCtrl, logger)
+	dashboard.Redeployer = redeployer
+
+	// Bridge redeployer status updates to SSE so the dashboard gets live updates
+	go func() {
+		for status := range redeployer.StatusChan() {
+			dashboard.SSE.Broadcast(web.SSEEvent{
+				Type: "redeploy",
+				Data: map[string]any{
+					"active":    status.Active,
+					"operation": status.Operation,
+					"agent_id":  status.AgentID,
+					"phases":    status.Phases,
+				},
+			})
+		}
+	}()
 
 	// Build combined router
 	r := chi.NewRouter()
@@ -579,4 +590,96 @@ func runStatus() error {
 	}
 
 	return nil
+}
+
+// seedNetworkAgents auto-populates the network_agents table from existing chain
+// state on first v3 boot. This ensures existing validators appear in the Network
+// page without requiring manual re-registration.
+func seedNetworkAgents(ctx context.Context, s *store.SQLiteStore, cometHome string, cometNode *node.Node, logger zerolog.Logger) {
+	// Check if agents already exist
+	agents, err := s.ListAgents(ctx)
+	if err != nil {
+		logger.Warn().Err(err).Msg("seed agents: failed to list existing agents")
+		return
+	}
+	if len(agents) > 0 {
+		return // Already seeded
+	}
+
+	// Read genesis to find validators
+	genesisPath := filepath.Join(cometHome, "config", "genesis.json")
+	genDoc, err := cmttypes.GenesisDocFromFile(genesisPath)
+	if err != nil {
+		logger.Warn().Err(err).Msg("seed agents: failed to read genesis")
+		return
+	}
+
+	// Get local node info
+	localNodeID := string(cometNode.NodeInfo().ID())
+	localMoniker := "sage-node"
+	if dni, ok := cometNode.NodeInfo().(p2p.DefaultNodeInfo); ok {
+		localMoniker = dni.Moniker
+	}
+
+	// Get the local validator pubkey
+	pvKeyPath := filepath.Join(cometHome, "config", "priv_validator_key.json")
+	localPV := privval.LoadFilePV(pvKeyPath, filepath.Join(cometHome, "data", "priv_validator_state.json"))
+	localValPubkey := hex.EncodeToString(localPV.Key.PubKey.Bytes())
+
+	// Get agent signing key (Ed25519 pubkey from agent.key)
+	localAgentID := ""
+	agentKeyPath := filepath.Join(SageHome(), "agent.key")
+	if seed, readErr := os.ReadFile(agentKeyPath); readErr == nil && len(seed) == ed25519.SeedSize {
+		pk := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+		localAgentID = hex.EncodeToString(pk)
+	}
+
+	seeded := 0
+	for _, v := range genDoc.Validators {
+		valPubkeyHex := hex.EncodeToString(v.PubKey.Bytes())
+		isLocal := valPubkeyHex == localValPubkey
+
+		agentID := valPubkeyHex // Default: use validator pubkey as agent_id
+		nodeName := v.Name
+		nodeID := ""
+		p2pAddr := ""
+		status := "active"
+		role := "member"
+		avatar := ""
+
+		if isLocal {
+			// Local node — use the actual agent signing key if available
+			if localAgentID != "" {
+				agentID = localAgentID
+			}
+			nodeName = localMoniker
+			nodeID = localNodeID
+			role = "admin"
+			avatar = "💻"
+		} else {
+			avatar = "🖥️"
+		}
+
+		agent := &store.AgentEntry{
+			AgentID:         agentID,
+			Name:            nodeName,
+			Role:            role,
+			Avatar:          avatar,
+			ValidatorPubkey: valPubkeyHex,
+			NodeID:          nodeID,
+			P2PAddress:      p2pAddr,
+			Status:          status,
+			Clearance:       2,
+		}
+		if createErr := s.CreateAgent(ctx, agent); createErr != nil {
+			logger.Warn().Err(createErr).Str("name", nodeName).Msg("seed agents: failed to create")
+			continue
+		}
+		seeded++
+		logger.Info().Str("name", nodeName).Str("role", role).Bool("local", isLocal).Msg("seeded network agent from genesis")
+	}
+
+	if seeded > 0 {
+		logger.Info().Int("count", seeded).Msg("auto-seeded network agents from existing chain state")
+	}
 }

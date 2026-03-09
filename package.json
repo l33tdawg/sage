@@ -1,0 +1,27 @@
+{
+  "name": "sage",
+  "version": "1.0.0",
+  "description": "**Persistent, consensus-validated memory infrastructure for AI agents.**",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/l33tdawg/sage.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/l33tdawg/sage/issues"
+  },
+  "homepage": "https://github.com/l33tdawg/sage#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}

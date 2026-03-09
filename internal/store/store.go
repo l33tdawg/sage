@@ -77,12 +77,13 @@ type QueryOptions struct {
 
 // ListOptions defines parameters for listing memories.
 type ListOptions struct {
-	DomainTag string
-	Provider  string
-	Status    string
-	Limit     int
-	Offset    int
-	Sort      string // "newest", "oldest", "confidence"
+	DomainTag       string
+	Provider        string
+	Status          string
+	SubmittingAgent string // filter memories by agent_id
+	Limit           int
+	Offset          int
+	Sort            string // "newest", "oldest", "confidence"
 }
 
 // StoreStats holds aggregate statistics.
@@ -90,6 +91,7 @@ type StoreStats struct {
 	TotalMemories int            `json:"total_memories"`
 	ByDomain      map[string]int `json:"by_domain"`
 	ByStatus      map[string]int `json:"by_status"`
+	ByAgent       map[string]int `json:"by_agent,omitempty"`
 	DBSizeBytes   int64          `json:"db_size_bytes"`
 	LastActivity  *time.Time     `json:"last_activity,omitempty"`
 }
@@ -258,6 +260,70 @@ type DeptMemberEntry struct {
 	RemovedAt     *time.Time     `json:"removed_at,omitempty"`
 }
 
+// AgentEntry represents a network agent (validator/peer node).
+type AgentEntry struct {
+	AgentID         string     `json:"agent_id"`
+	Name            string     `json:"name"`
+	Role            string     `json:"role"`
+	Avatar          string     `json:"avatar,omitempty"`
+	BootBio         string     `json:"boot_bio,omitempty"`
+	ValidatorPubkey string     `json:"validator_pubkey,omitempty"`
+	NodeID          string     `json:"node_id,omitempty"`
+	P2PAddress      string     `json:"p2p_address,omitempty"`
+	Status          string     `json:"status"`
+	Clearance       int        `json:"clearance"`
+	OrgID           string     `json:"org_id,omitempty"`
+	DeptID          string     `json:"dept_id,omitempty"`
+	DomainAccess    string     `json:"domain_access,omitempty"`
+	BundlePath      string     `json:"bundle_path,omitempty"`
+	FirstSeen       *time.Time `json:"first_seen,omitempty"`
+	LastSeen        *time.Time `json:"last_seen,omitempty"`
+	CreatedAt       time.Time  `json:"created_at"`
+	RemovedAt       *time.Time `json:"removed_at,omitempty"`
+	MemoryCount     int        `json:"memory_count,omitempty"`
+}
+
+// RedeploymentLogEntry represents a redeployment operation log entry.
+type RedeploymentLogEntry struct {
+	ID            int64      `json:"id"`
+	Operation     string     `json:"operation"`
+	AgentID       string     `json:"agent_id"`
+	Phase         string     `json:"phase"`
+	Status        string     `json:"status"`
+	Details       string     `json:"details,omitempty"`
+	SQLiteBackup  string     `json:"sqlite_backup,omitempty"`
+	GenesisBackup string     `json:"genesis_backup,omitempty"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	Error         string     `json:"error,omitempty"`
+}
+
+// RedeploymentLock represents the singleton redeployment lock.
+type RedeploymentLock struct {
+	LockedBy  string    `json:"locked_by"`
+	LockedAt  time.Time `json:"locked_at"`
+	Operation string    `json:"operation"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// AgentStore defines the interface for network agent management.
+type AgentStore interface {
+	ListAgents(ctx context.Context) ([]*AgentEntry, error)
+	GetAgent(ctx context.Context, agentID string) (*AgentEntry, error)
+	CreateAgent(ctx context.Context, agent *AgentEntry) error
+	UpdateAgent(ctx context.Context, agent *AgentEntry) error
+	RemoveAgent(ctx context.Context, agentID string) error
+	UpdateAgentStatus(ctx context.Context, agentID, status string) error
+	UpdateAgentLastSeen(ctx context.Context, agentID string, lastSeen time.Time) error
+	// Redeployment
+	AcquireRedeployLock(ctx context.Context, lockedBy, operation string, ttl time.Duration) error
+	ReleaseRedeployLock(ctx context.Context) error
+	GetRedeployLock(ctx context.Context) (*RedeploymentLock, error)
+	InsertRedeployLog(ctx context.Context, entry *RedeploymentLogEntry) error
+	GetRedeployLog(ctx context.Context, operation string) ([]*RedeploymentLogEntry, error)
+	UpdateRedeployLog(ctx context.Context, id int64, status, errorMsg string) error
+}
+
 // OffchainStore is the combined interface for all off-chain storage operations.
 // Both PostgresStore and SQLiteStore implement this interface, allowing the ABCI
 // app to work with either backend.
@@ -266,6 +332,7 @@ type OffchainStore interface {
 	ValidatorScoreStore
 	AccessStore
 	OrgStore
+	AgentStore
 	Ping(ctx context.Context) error
 	// RunInTx executes fn within a database transaction. If fn returns an error,
 	// the transaction is rolled back; otherwise it is committed. The OffchainStore

@@ -335,6 +335,49 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		value      TEXT NOT NULL,
 		updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	);
+
+	CREATE TABLE IF NOT EXISTS network_agents (
+		agent_id         TEXT PRIMARY KEY,
+		name             TEXT NOT NULL,
+		role             TEXT DEFAULT 'member',
+		avatar           TEXT,
+		boot_bio         TEXT,
+		validator_pubkey TEXT,
+		node_id          TEXT,
+		p2p_address      TEXT,
+		status           TEXT DEFAULT 'pending',
+		clearance        INTEGER DEFAULT 1,
+		org_id           TEXT,
+		dept_id          TEXT,
+		domain_access    TEXT,
+		bundle_path      TEXT,
+		first_seen       TEXT,
+		last_seen        TEXT,
+		created_at       TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		removed_at       TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS redeployment_log (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		operation       TEXT NOT NULL,
+		agent_id        TEXT NOT NULL,
+		phase           TEXT NOT NULL,
+		status          TEXT NOT NULL,
+		details         TEXT,
+		sqlite_backup   TEXT,
+		genesis_backup  TEXT,
+		started_at      TEXT,
+		completed_at    TEXT,
+		error           TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS redeployment_lock (
+		id          INTEGER PRIMARY KEY CHECK (id = 1),
+		locked_by   TEXT,
+		locked_at   TEXT,
+		operation   TEXT,
+		expires_at  TEXT
+	);
 	`
 
 	if _, err := s.conn.ExecContext(ctx, schema); err != nil {
@@ -846,6 +889,12 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		countQuery += filter
 		args = append(args, opts.Status)
 	}
+	if opts.SubmittingAgent != "" {
+		filter := " AND submitting_agent = ?"
+		query += filter
+		countQuery += filter
+		args = append(args, opts.SubmittingAgent)
+	}
 
 	switch opts.Sort {
 	case "oldest":
@@ -936,6 +985,23 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 			return nil, fmt.Errorf("scan status count: %w", scanErr)
 		}
 		stats.ByStatus[status] = count
+	}
+	rows.Close()
+
+	// Count by agent
+	stats.ByAgent = make(map[string]int)
+	rows, err = s.conn.QueryContext(ctx, `SELECT submitting_agent, COUNT(*) FROM memories GROUP BY submitting_agent`)
+	if err != nil {
+		return nil, fmt.Errorf("count by agent: %w", err)
+	}
+	for rows.Next() {
+		var agent string
+		var count int
+		if scanErr := rows.Scan(&agent, &count); scanErr != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan agent count: %w", scanErr)
+		}
+		stats.ByAgent[agent] = count
 	}
 	rows.Close()
 
@@ -1578,6 +1644,221 @@ func (s *SQLiteStore) UpdateDeptMemberClearance(ctx context.Context, orgID, dept
 		return fmt.Errorf("update dept member clearance: %w", err)
 	}
 	return nil
+}
+
+// --- AgentStore implementation ---
+
+func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT a.agent_id, a.name, a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
+			COALESCE(a.validator_pubkey,''), COALESCE(a.node_id,''), COALESCE(a.p2p_address,''),
+			a.status, a.clearance, COALESCE(a.org_id,''), COALESCE(a.dept_id,''),
+			COALESCE(a.domain_access,''), COALESCE(a.bundle_path,''),
+			a.first_seen, a.last_seen, a.created_at, a.removed_at,
+			COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0)
+		FROM network_agents a
+		WHERE a.status != 'removed'
+		ORDER BY a.created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list agents: %w", err)
+	}
+	defer rows.Close()
+
+	var agents []*AgentEntry
+	for rows.Next() {
+		a := &AgentEntry{}
+		var firstSeen, lastSeen, createdAt, removedAt *string
+		if scanErr := rows.Scan(&a.AgentID, &a.Name, &a.Role, &a.Avatar, &a.BootBio,
+			&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
+			&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
+			&firstSeen, &lastSeen, &createdAt, &removedAt, &a.MemoryCount); scanErr != nil {
+			return nil, fmt.Errorf("scan agent: %w", scanErr)
+		}
+		a.FirstSeen = parseTimePtr(firstSeen)
+		a.LastSeen = parseTimePtr(lastSeen)
+		if createdAt != nil {
+			a.CreatedAt = parseTime(*createdAt)
+		}
+		a.RemovedAt = parseTimePtr(removedAt)
+		agents = append(agents, a)
+	}
+	return agents, nil
+}
+
+func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry, error) {
+	a := &AgentEntry{}
+	var firstSeen, lastSeen, createdAt, removedAt *string
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT a.agent_id, a.name, a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
+			COALESCE(a.validator_pubkey,''), COALESCE(a.node_id,''), COALESCE(a.p2p_address,''),
+			a.status, a.clearance, COALESCE(a.org_id,''), COALESCE(a.dept_id,''),
+			COALESCE(a.domain_access,''), COALESCE(a.bundle_path,''),
+			a.first_seen, a.last_seen, a.created_at, a.removed_at,
+			COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0)
+		FROM network_agents a WHERE a.agent_id = ?`, agentID).Scan(
+		&a.AgentID, &a.Name, &a.Role, &a.Avatar, &a.BootBio,
+		&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
+		&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
+		&firstSeen, &lastSeen, &createdAt, &removedAt, &a.MemoryCount)
+	if err != nil {
+		return nil, fmt.Errorf("get agent: %w", err)
+	}
+	a.FirstSeen = parseTimePtr(firstSeen)
+	a.LastSeen = parseTimePtr(lastSeen)
+	if createdAt != nil {
+		a.CreatedAt = parseTime(*createdAt)
+	}
+	a.RemovedAt = parseTimePtr(removedAt)
+	return a, nil
+}
+
+func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *AgentEntry) error {
+	_, err := s.conn.ExecContext(ctx, `
+		INSERT INTO network_agents (agent_id, name, role, avatar, boot_bio, validator_pubkey,
+			node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, bundle_path)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		agent.AgentID, agent.Name, agent.Role, agent.Avatar, agent.BootBio, agent.ValidatorPubkey,
+		agent.NodeID, agent.P2PAddress, agent.Status, agent.Clearance, agent.OrgID, agent.DeptID,
+		agent.DomainAccess, agent.BundlePath)
+	if err != nil {
+		return fmt.Errorf("create agent: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateAgent(ctx context.Context, agent *AgentEntry) error {
+	_, err := s.conn.ExecContext(ctx, `
+		UPDATE network_agents SET name=?, role=?, avatar=?, boot_bio=?, clearance=?,
+			org_id=?, dept_id=?, domain_access=?, p2p_address=?
+		WHERE agent_id=?`,
+		agent.Name, agent.Role, agent.Avatar, agent.BootBio, agent.Clearance,
+		agent.OrgID, agent.DeptID, agent.DomainAccess, agent.P2PAddress, agent.AgentID)
+	if err != nil {
+		return fmt.Errorf("update agent: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) RemoveAgent(ctx context.Context, agentID string) error {
+	_, err := s.conn.ExecContext(ctx, `
+		UPDATE network_agents SET status='removed', removed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		WHERE agent_id=?`, agentID)
+	if err != nil {
+		return fmt.Errorf("remove agent: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, agentID, status string) error {
+	_, err := s.conn.ExecContext(ctx, `UPDATE network_agents SET status=? WHERE agent_id=?`, status, agentID)
+	if err != nil {
+		return fmt.Errorf("update agent status: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateAgentLastSeen(ctx context.Context, agentID string, lastSeen time.Time) error {
+	ts := lastSeen.UTC().Format("2006-01-02T15:04:05.000Z")
+	_, err := s.conn.ExecContext(ctx, `UPDATE network_agents SET last_seen=?, status='active' WHERE agent_id=?`, ts, agentID)
+	if err != nil {
+		return fmt.Errorf("update agent last seen: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) AcquireRedeployLock(ctx context.Context, lockedBy, operation string, ttl time.Duration) error {
+	now := time.Now().UTC()
+	expires := now.Add(ttl)
+	// Try to insert the singleton lock row. If it exists, check if expired.
+	_, err := s.conn.ExecContext(ctx, `
+		INSERT INTO redeployment_lock (id, locked_by, locked_at, operation, expires_at)
+		VALUES (1, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			locked_by=excluded.locked_by, locked_at=excluded.locked_at,
+			operation=excluded.operation, expires_at=excluded.expires_at
+		WHERE redeployment_lock.expires_at < ?`,
+		lockedBy, now.Format(time.RFC3339), operation, expires.Format(time.RFC3339),
+		now.Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("acquire redeploy lock: %w", err)
+	}
+	// Verify we actually hold the lock
+	var holder string
+	if scanErr := s.conn.QueryRowContext(ctx, `SELECT locked_by FROM redeployment_lock WHERE id=1`).Scan(&holder); scanErr != nil {
+		return fmt.Errorf("verify lock: %w", scanErr)
+	}
+	if holder != lockedBy {
+		return fmt.Errorf("lock held by %s", holder)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ReleaseRedeployLock(ctx context.Context) error {
+	_, err := s.conn.ExecContext(ctx, `DELETE FROM redeployment_lock WHERE id=1`)
+	return err
+}
+
+func (s *SQLiteStore) GetRedeployLock(ctx context.Context) (*RedeploymentLock, error) {
+	lock := &RedeploymentLock{}
+	var lockedAt, expiresAt string
+	err := s.conn.QueryRowContext(ctx, `SELECT locked_by, locked_at, operation, expires_at FROM redeployment_lock WHERE id=1`).
+		Scan(&lock.LockedBy, &lockedAt, &lock.Operation, &expiresAt)
+	if err != nil {
+		return nil, err // sql.ErrNoRows if no lock
+	}
+	lock.LockedAt = parseTime(lockedAt)
+	lock.ExpiresAt = parseTime(expiresAt)
+	return lock, nil
+}
+
+func (s *SQLiteStore) InsertRedeployLog(ctx context.Context, entry *RedeploymentLogEntry) error {
+	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	res, err := s.conn.ExecContext(ctx, `
+		INSERT INTO redeployment_log (operation, agent_id, phase, status, details, sqlite_backup, genesis_backup, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		entry.Operation, entry.AgentID, entry.Phase, entry.Status, entry.Details,
+		entry.SQLiteBackup, entry.GenesisBackup, now)
+	if err != nil {
+		return fmt.Errorf("insert redeploy log: %w", err)
+	}
+	id, _ := res.LastInsertId()
+	entry.ID = id
+	return nil
+}
+
+func (s *SQLiteStore) GetRedeployLog(ctx context.Context, operation string) ([]*RedeploymentLogEntry, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT id, operation, agent_id, phase, status, COALESCE(details,''),
+			COALESCE(sqlite_backup,''), COALESCE(genesis_backup,''),
+			started_at, completed_at, COALESCE(error,'')
+		FROM redeployment_log WHERE operation=? ORDER BY id ASC`, operation)
+	if err != nil {
+		return nil, fmt.Errorf("get redeploy log: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []*RedeploymentLogEntry
+	for rows.Next() {
+		e := &RedeploymentLogEntry{}
+		var startedAt, completedAt *string
+		if scanErr := rows.Scan(&e.ID, &e.Operation, &e.AgentID, &e.Phase, &e.Status,
+			&e.Details, &e.SQLiteBackup, &e.GenesisBackup,
+			&startedAt, &completedAt, &e.Error); scanErr != nil {
+			return nil, fmt.Errorf("scan redeploy log: %w", scanErr)
+		}
+		e.StartedAt = parseTimePtr(startedAt)
+		e.CompletedAt = parseTimePtr(completedAt)
+		entries = append(entries, e)
+	}
+	return entries, nil
+}
+
+func (s *SQLiteStore) UpdateRedeployLog(ctx context.Context, id int64, status, errorMsg string) error {
+	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	_, err := s.conn.ExecContext(ctx, `
+		UPDATE redeployment_log SET status=?, completed_at=?, error=? WHERE id=?`,
+		status, now, errorMsg, id)
+	return err
 }
 
 // --- Close & Ping ---

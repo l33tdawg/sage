@@ -31,6 +31,7 @@ type Server struct {
 	badgerStore *store.BadgerStore       // On-chain state for access control
 	accessStore store.AccessStore        // PostgreSQL access control queries
 	orgStore    store.OrgStore           // Organization and federation queries
+	agentStore  store.AgentStore        // Network agent registry (domain access enforcement)
 	health      *metrics.HealthChecker
 	logger      zerolog.Logger
 	httpServer  *http.Server
@@ -59,6 +60,12 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 		orgStore = os
 	}
 
+	// Type-assert memStore to AgentStore for domain access enforcement
+	var agentStore store.AgentStore
+	if as, ok := memStore.(store.AgentStore); ok {
+		agentStore = as
+	}
+
 	s := &Server{
 		cometbftRPC: cometbftRPC,
 		store:       memStore,
@@ -66,6 +73,7 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 		badgerStore: badgerStore,
 		accessStore: accessStore,
 		orgStore:    orgStore,
+		agentStore:  agentStore,
 		health:      health,
 		logger:      logger,
 		signingKey:  signingKey,

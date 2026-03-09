@@ -1,11 +1,14 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	_ "modernc.org/sqlite" // Pure Go SQLite driver
 )
 
 const versionFile = "version.txt"
@@ -39,7 +42,7 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 	// Version changed — need migration
 	fmt.Fprintf(os.Stderr, "\n  Upgrading SAGE from %s → %s\n", lastVersion, version)
 
-	// Step 1: Backup SQLite (the precious data)
+	// Step 1: Backup SQLite (the precious data) using VACUUM INTO for atomic consistency
 	if _, statErr := os.Stat(sqlitePath); statErr == nil {
 		backupDir := filepath.Join(SageHome(), "backups")
 		if mkErr := os.MkdirAll(backupDir, 0700); mkErr != nil {
@@ -48,12 +51,23 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 		ts := time.Now().Format("2006-01-02T15-04-05")
 		backupPath := filepath.Join(backupDir, fmt.Sprintf("sage-pre-upgrade-%s-%s.db", lastVersion, ts))
 
-		src, readErr := os.ReadFile(sqlitePath)
-		if readErr != nil {
-			return false, fmt.Errorf("read sqlite for backup: %w", readErr)
+		// Use VACUUM INTO for atomic, consistent snapshot (safe during concurrent WAL writes)
+		dsn := sqlitePath + "?_journal_mode=WAL&_busy_timeout=5000"
+		srcDB, openErr := sql.Open("sqlite", dsn)
+		if openErr != nil {
+			return false, fmt.Errorf("open sqlite for backup: %w", openErr)
 		}
-		if writeErr := os.WriteFile(backupPath, src, 0600); writeErr != nil {
-			return false, fmt.Errorf("write backup: %w", writeErr)
+		_, vacuumErr := srcDB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, backupPath))
+		srcDB.Close()
+		if vacuumErr != nil {
+			// Fallback to file copy if VACUUM INTO fails (e.g., older SQLite)
+			src, readErr := os.ReadFile(sqlitePath)
+			if readErr != nil {
+				return false, fmt.Errorf("read sqlite for backup: %w", readErr)
+			}
+			if writeErr := os.WriteFile(backupPath, src, 0600); writeErr != nil {
+				return false, fmt.Errorf("write backup: %w", writeErr)
+			}
 		}
 		fmt.Fprintf(os.Stderr, "  Backed up memories to %s\n", backupPath)
 	}
