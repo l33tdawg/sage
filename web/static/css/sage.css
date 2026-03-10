@@ -1385,6 +1385,52 @@ body {
     margin-bottom: 16px;
 }
 
+/* Import suggestion (unstructured doc warning) */
+.import-suggestion {
+    background: var(--bg-surface);
+    border: 1px solid rgba(234, 179, 8, 0.3);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    margin-bottom: 16px;
+}
+
+.import-suggestion-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    color: rgb(234, 179, 8);
+}
+
+.import-suggestion-header h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+}
+
+.import-suggestion-text {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-bottom: 16px;
+    line-height: 1.5;
+}
+
+.import-suggestion-example {
+    font-size: 13px;
+    color: var(--text-secondary);
+    background: var(--bg);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    line-height: 1.6;
+}
+
+.import-suggestion-example code {
+    background: rgba(var(--accent-rgb, 99, 102, 241), 0.15);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+}
+
 /* Import results */
 .import-results {
     background: var(--bg-surface);

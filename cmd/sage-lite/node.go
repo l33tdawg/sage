@@ -201,6 +201,7 @@ func runServe() error {
 
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
+	dashboard.SetEmbedder(embedProvider)
 	dashboard.Encrypted = cfg.Encryption.Enabled
 	if cfg.Encryption.Enabled {
 		dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")

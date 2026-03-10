@@ -2,6 +2,7 @@ package web
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
@@ -57,12 +58,20 @@ func (h *DashboardHandler) handleImportUpload(w http.ResponseWriter, r *http.Req
 	var source string
 	var parseErrors []string
 
-	filename := header.Filename
+	filename := strings.ToLower(header.Filename)
 
-	if strings.HasSuffix(strings.ToLower(filename), ".zip") {
+	if strings.HasSuffix(filename, ".zip") {
 		// ZIP file — assume ChatGPT export
 		records, parseErrors, err = parseChatGPTZip(data)
 		source = "chatgpt"
+	} else if strings.HasSuffix(filename, ".md") || strings.HasSuffix(filename, ".txt") {
+		// Markdown or plain text — Claude Code MEMORY.md, notes, etc.
+		records, parseErrors = parseMarkdownImport(string(data))
+		if strings.HasSuffix(filename, ".md") {
+			source = "markdown"
+		} else {
+			source = "plaintext"
+		}
 	} else {
 		// Try JSON detection
 		records, source, parseErrors, err = detectAndParseJSON(data)
@@ -73,13 +82,31 @@ func (h *DashboardHandler) handleImportUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Insert memories
+	// Check for unstructured data: if markdown/text produced very few large chunks,
+	// it's likely a raw document dump rather than structured memories.
+	if (source == "markdown" || source == "plaintext") && isUnstructuredDocument(records) {
+		writeJSONResp(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":      "unstructured_document",
+			"message":    "This looks like a raw document rather than structured memories.",
+			"suggestion": "Ask your AI agent to read this document and use sage_remember or sage_reflect to store the key takeaways as memories. Raw documents don't make good memories — your agent can extract what matters.",
+		})
+		return
+	}
+
+	// Generate embeddings and insert memories
 	imported := 0
 	skipped := 0
 	for _, rec := range records {
 		if rec.Content == "" {
 			skipped++
 			continue
+		}
+		// Generate embedding if provider is available
+		if h.embedder != nil {
+			if emb, embErr := h.embedder.Embed(r.Context(), rec.Content); embErr == nil {
+				rec.Embedding = emb
+			}
+			// Non-fatal: if embedding fails, still insert with empty embedding
 		}
 		if insertErr := h.store.InsertMemory(r.Context(), rec); insertErr != nil {
 			parseErrors = append(parseErrors, fmt.Sprintf("insert %s: %s", rec.MemoryID, insertErr.Error()))
@@ -502,6 +529,179 @@ func detectAndParseJSON(data []byte) ([]*memory.MemoryRecord, string, []string, 
 	// Fallback: generic
 	recs, errs, err := parseGenericJSON(data)
 	return recs, "generic", errs, err
+}
+
+// ---- Markdown / plain-text parser ----
+
+const (
+	minChunkLen    = 20   // Skip chunks shorter than this
+	targetChunkLen = 500  // Target chunk size for merging small paragraphs
+	maxChunkLen    = 1500 // Split chunks larger than this
+)
+
+// parseMarkdownImport parses a markdown file into memory records.
+// Each section (# or ## heading + body) becomes one memory.
+// Small sections are merged; large sections are split into chunks.
+func parseMarkdownImport(text string) ([]*memory.MemoryRecord, []string) {
+	var records []*memory.MemoryRecord
+	var errors []string
+
+	scanner := bufio.NewScanner(strings.NewReader(text))
+	var current strings.Builder
+	var currentHeading string
+
+	flush := func() {
+		content := strings.TrimSpace(current.String())
+		if len(content) < minChunkLen {
+			current.Reset()
+			return
+		}
+		if currentHeading != "" {
+			content = currentHeading + ": " + content
+		}
+		// Split large sections into multiple chunks
+		chunks := chunkContent(content)
+		for _, chunk := range chunks {
+			records = append(records, makeRecord(chunk, "claude-memory", 0.85, time.Now()))
+		}
+		current.Reset()
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "## ") {
+			flush()
+			currentHeading = strings.TrimPrefix(line, "## ")
+		} else if strings.HasPrefix(line, "# ") {
+			flush()
+			currentHeading = strings.TrimPrefix(line, "# ")
+		} else {
+			current.WriteString(line)
+			current.WriteString("\n")
+		}
+	}
+	flush()
+
+	// Merge tiny adjacent records to reduce noise
+	records = mergeSmallRecords(records)
+
+	if len(records) == 0 {
+		errors = append(errors, "no sections with enough content found (minimum 20 characters per section)")
+	}
+
+	return records, errors
+}
+
+// chunkContent splits content that exceeds maxChunkLen into smaller pieces,
+// breaking at paragraph boundaries where possible.
+func chunkContent(content string) []string {
+	if len(content) <= maxChunkLen {
+		return []string{content}
+	}
+
+	var chunks []string
+	paragraphs := strings.Split(content, "\n\n")
+	var current strings.Builder
+
+	for _, p := range paragraphs {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		// If adding this paragraph would exceed the limit, flush
+		if current.Len() > 0 && current.Len()+len(p)+2 > maxChunkLen {
+			chunks = append(chunks, strings.TrimSpace(current.String()))
+			current.Reset()
+		}
+		// If a single paragraph exceeds the limit, hard-split at sentence boundaries
+		if len(p) > maxChunkLen {
+			if current.Len() > 0 {
+				chunks = append(chunks, strings.TrimSpace(current.String()))
+				current.Reset()
+			}
+			chunks = append(chunks, splitAtSentences(p, maxChunkLen)...)
+			continue
+		}
+		if current.Len() > 0 {
+			current.WriteString("\n\n")
+		}
+		current.WriteString(p)
+	}
+	if current.Len() > 0 {
+		chunks = append(chunks, strings.TrimSpace(current.String()))
+	}
+	return chunks
+}
+
+// splitAtSentences splits text at sentence boundaries (. ! ?) to stay under maxLen.
+func splitAtSentences(text string, maxLen int) []string {
+	var chunks []string
+	for len(text) > maxLen {
+		// Find the last sentence boundary before maxLen
+		cutPoint := maxLen
+		for i := maxLen - 1; i > maxLen/2; i-- {
+			if text[i] == '.' || text[i] == '!' || text[i] == '?' {
+				cutPoint = i + 1
+				break
+			}
+		}
+		chunks = append(chunks, strings.TrimSpace(text[:cutPoint]))
+		text = strings.TrimSpace(text[cutPoint:])
+	}
+	if len(text) >= minChunkLen {
+		chunks = append(chunks, text)
+	}
+	return chunks
+}
+
+// mergeSmallRecords combines adjacent records that are both under targetChunkLen
+// to reduce memory noise from tiny fragments.
+func mergeSmallRecords(records []*memory.MemoryRecord) []*memory.MemoryRecord {
+	if len(records) <= 1 {
+		return records
+	}
+	var merged []*memory.MemoryRecord
+	i := 0
+	for i < len(records) {
+		rec := records[i]
+		// If this record is small, try to merge with the next one
+		for i+1 < len(records) && len(rec.Content)+len(records[i+1].Content)+2 < targetChunkLen {
+			i++
+			rec = makeRecord(rec.Content+"\n\n"+records[i].Content, rec.DomainTag, rec.ConfidenceScore, rec.CreatedAt)
+		}
+		merged = append(merged, rec)
+		i++
+	}
+	return merged
+}
+
+// isUnstructuredDocument detects if parsed records look like a raw document dump
+// rather than structured memories. Heuristics:
+// - Very few sections relative to total content size
+// - Most chunks are at or near the max size (wall of text)
+// - No heading structure detected (single chunk from huge file)
+func isUnstructuredDocument(records []*memory.MemoryRecord) bool {
+	if len(records) == 0 {
+		return false
+	}
+	// Single massive chunk from a large file = definitely unstructured
+	if len(records) == 1 && len(records[0].Content) > maxChunkLen-100 {
+		return true
+	}
+	// If most records are near max size, it's a wall-of-text split mechanically
+	nearMaxCount := 0
+	totalLen := 0
+	for _, r := range records {
+		totalLen += len(r.Content)
+		if len(r.Content) > maxChunkLen-200 {
+			nearMaxCount++
+		}
+	}
+	// More than 60% of chunks at max size + total content > 5KB = raw doc
+	if len(records) > 3 && float64(nearMaxCount)/float64(len(records)) > 0.6 && totalLen > 5000 {
+		return true
+	}
+	return false
 }
 
 // ---- Helpers ----

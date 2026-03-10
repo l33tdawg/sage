@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, checkForUpdate, applyUpdate, restartServer } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, importMemories, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -1403,6 +1403,48 @@ function BootInstructions() {
 // Cleanup Settings Component
 // ============================================================================
 
+function AutostartToggle() {
+    const [autostart, setAutostartState] = useState(null);
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        fetchAutostart().then(res => {
+            if (res.supported) setAutostartState(res);
+        }).catch(() => {});
+    }, []);
+
+    if (!autostart || !autostart.supported) return null;
+
+    async function handleToggle() {
+        setLoading(true);
+        try {
+            const res = await setAutostart(!autostart.enabled);
+            if (!res.error) {
+                setAutostartState(res);
+            }
+        } catch (e) {
+            // ignore
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    return html`
+        <div class="settings-row">
+            <span class="label">Open at Login</span>
+            <span class="value" style="display:flex;align-items:center;gap:8px;">
+                <label class="toggle-switch" onClick=${(e) => e.stopPropagation()}>
+                    <input type="checkbox" checked=${autostart.enabled}
+                        disabled=${loading}
+                        onChange=${handleToggle} />
+                    <span class="toggle-slider"></span>
+                </label>
+                <span style="color:var(--text-dim);font-size:12px;">${loading ? 'Saving...' : autostart.enabled ? 'On' : 'Off'}</span>
+            </span>
+        </div>
+    `;
+}
+
 function CleanupSettings() {
     const [config, setConfig] = useState(null);
     const [saving, setSaving] = useState(false);
@@ -1884,6 +1926,7 @@ function SettingsPage() {
                                 <span style="color:var(--text-dim);font-size:12px;">${window.__sageTooltips?.enabled ? 'On' : 'Off'}</span>
                             </span>
                         </div>
+                        ${html`<${AutostartToggle} />`}
                     </div>
                 </div>
             `}
@@ -1918,6 +1961,7 @@ function ImportPage() {
     const [importing, setImporting] = useState(false);
     const [result, setResult] = useState(null);
     const [error, setError] = useState(null);
+    const [suggestion, setSuggestion] = useState(null);
     const fileInputRef = useRef(null);
 
     function handleDragOver(e) {
@@ -1937,12 +1981,12 @@ function ImportPage() {
         e.stopPropagation();
         setDragging(false);
         const file = e.dataTransfer.files[0];
-        if (file && (file.name.endsWith('.json') || file.name.endsWith('.zip'))) {
+        if (file && (file.name.endsWith('.json') || file.name.endsWith('.zip') || file.name.endsWith('.md') || file.name.endsWith('.txt'))) {
             setSelectedFile(file);
             setResult(null);
             setError(null);
         } else {
-            setError('Please drop a .json or .zip file.');
+            setError('Please drop a .json, .zip, .md, or .txt file.');
         }
     }
 
@@ -1960,9 +2004,12 @@ function ImportPage() {
         setImporting(true);
         setError(null);
         setResult(null);
+        setSuggestion(null);
         try {
             const res = await importMemories(selectedFile);
-            if (res.error) {
+            if (res.error === 'unstructured_document') {
+                setSuggestion(res.suggestion || res.message);
+            } else if (res.error) {
                 setError(res.error);
             } else {
                 setResult(res);
@@ -2021,6 +2068,17 @@ function ImportPage() {
                     <p>Export from <strong>Google Takeout</strong> > <strong>My Activity</strong> > <strong>Gemini Apps</strong>. Upload the JSON.</p>
                     <span class="provider-file-type">.json</span>
                 </div>
+                <div class="provider-card">
+                    <div class="provider-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="32" height="32">
+                            <path d="M4 4h16v16H4z"/>
+                            <path d="M8 8h8M8 12h6M8 16h4"/>
+                        </svg>
+                    </div>
+                    <h3>Claude Code / Markdown</h3>
+                    <p>Upload your <strong>MEMORY.md</strong> file or any markdown/text notes. Each section becomes a memory.</p>
+                    <span class="provider-file-type">.md .txt</span>
+                </div>
             </div>
 
             <div class="drop-zone ${dragging ? 'drop-zone-active' : ''} ${selectedFile ? 'drop-zone-has-file' : ''}"
@@ -2028,7 +2086,7 @@ function ImportPage() {
                  onDragLeave=${handleDragLeave}
                  onDrop=${handleDrop}
                  onClick=${() => fileInputRef.current && fileInputRef.current.click()}>
-                <input type="file" ref=${fileInputRef} accept=".json,.zip"
+                <input type="file" ref=${fileInputRef} accept=".json,.zip,.md,.txt"
                        style="display:none" onChange=${handleFileSelect} />
                 ${selectedFile ? html`
                     <div class="drop-zone-file">
@@ -2048,7 +2106,7 @@ function ImportPage() {
                         <line x1="12" y1="3" x2="12" y2="15"/>
                     </svg>
                     <p class="drop-zone-text">Drop your export file here or click to browse</p>
-                    <span class="drop-zone-hint">Accepts .zip and .json files</span>
+                    <span class="drop-zone-hint">Accepts .zip, .json, .md, and .txt files</span>
                 `}
             </div>
 
@@ -2070,6 +2128,23 @@ function ImportPage() {
                         <line x1="9" y1="9" x2="15" y2="15"/>
                     </svg>
                     <span>${error}</span>
+                </div>
+            `}
+
+            ${suggestion && html`
+                <div class="import-suggestion fade-in">
+                    <div class="import-suggestion-header">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="22" height="22">
+                            <circle cx="12" cy="12" r="10"/>
+                            <line x1="12" y1="16" x2="12" y2="12"/>
+                            <line x1="12" y1="8" x2="12.01" y2="8"/>
+                        </svg>
+                        <h3>Not quite right for import</h3>
+                    </div>
+                    <p class="import-suggestion-text">${suggestion}</p>
+                    <div class="import-suggestion-example">
+                        <strong>Better approach:</strong> Open your AI agent (Claude, ChatGPT, etc.) and ask it to read the document, then use SAGE MCP tools like <code>sage_remember</code> or <code>sage_reflect</code> to store the key insights as structured memories.
+                    </div>
                 </div>
             `}
 

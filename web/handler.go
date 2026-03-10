@@ -28,10 +28,16 @@ type PreferencesStore interface {
 	DeprecateMemories(ctx context.Context, memoryIDs []string) (int, error)
 }
 
+// Embedder generates vector embeddings for text content.
+type Embedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
 // DashboardHandler serves the CEREBRUM dashboard UI and its API endpoints.
 type DashboardHandler struct {
 	store     store.MemoryStore
 	prefStore PreferencesStore
+	embedder  Embedder
 	SSE       *SSEBroadcaster
 	Version   string
 	Encrypted bool
@@ -71,6 +77,11 @@ func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardH
 		h.prefStore = ps
 	}
 	return h
+}
+
+// SetEmbedder configures the embedding provider for import operations.
+func (h *DashboardHandler) SetEmbedder(e Embedder) {
+	h.embedder = e
 }
 
 const sessionCookieName = "sage_session"
@@ -113,6 +124,10 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		// Task backlog
 		r.Get("/v1/dashboard/tasks", h.handleGetTasks)
 		r.Put("/v1/dashboard/tasks/{id}/status", h.handleUpdateTaskStatusDashboard)
+
+		// Auto-start (open at login)
+		r.Get("/v1/dashboard/settings/autostart", h.handleGetAutostart)
+		r.Post("/v1/dashboard/settings/autostart", h.handleSetAutostart)
 
 		// Software Update
 		r.Get("/v1/dashboard/settings/update/check", h.handleCheckUpdate)

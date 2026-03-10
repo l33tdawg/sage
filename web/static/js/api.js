@@ -234,6 +234,22 @@ export async function rotateAgentKey(agentId) {
     return res.json();
 }
 
+// ─── Auto-start API ───
+
+export async function fetchAutostart() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/autostart`);
+    return res.json();
+}
+
+export async function setAutostart(enabled) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/autostart`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+    });
+    return res.json();
+}
+
 // ─── Software Update API ───
 
 export async function checkForUpdate() {
