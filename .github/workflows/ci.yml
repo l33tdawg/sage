@@ -18,12 +18,12 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
       - name: golangci-lint
         uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v6
         with:
-          version: v1.64.8
+          version: v1.65.1
           install-mode: binary
 
   test:
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
       - name: Run tests
         run: go test ./... -v -count=1 -race
@@ -46,7 +46,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
       - name: Build binary
         run: go build -o bin/amid ./cmd/amid
