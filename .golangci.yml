@@ -27,11 +27,11 @@ linters:
       excludes:
         - G104 # unhandled errors (too noisy with logger calls)
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-        - gosec
-  max-issues-per-linter: 0
-  max-same-issues: 0
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+    max-issues-per-linter: 0
+    max-same-issues: 0
