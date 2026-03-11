@@ -19,7 +19,7 @@ import (
 const (
 	pairingCodeTTL    = 15 * time.Minute
 	pairingCodePrefix = "SAG"
-	pairingCodeLen    = 3 // chars after prefix+dash
+	pairingCodeLen    = 8 // chars after prefix+dash (32^8 ≈ 1T combinations)
 )
 
 // pairingEntry holds a pairing code and its metadata.
@@ -104,7 +104,41 @@ func (ps *PairingStore) Cleanup() {
 	}
 }
 
-// generatePairingCode creates a code like "SAG-X7K" using crypto/rand.
+// redeemRateLimiter tracks redemption attempts per IP for brute-force protection.
+type redeemRateLimiter struct {
+	attempts sync.Map // IP -> *[]time.Time
+}
+
+const redeemMaxAttempts = 10
+const redeemWindow = 1 * time.Minute
+
+// allow returns true if the IP is within the rate limit.
+func (rl *redeemRateLimiter) allow(ip string) bool {
+	now := time.Now()
+	cutoff := now.Add(-redeemWindow)
+
+	val, _ := rl.attempts.LoadOrStore(ip, &[]time.Time{})
+	times := val.(*[]time.Time)
+
+	// Prune old entries
+	fresh := make([]time.Time, 0, len(*times))
+	for _, t := range *times {
+		if t.After(cutoff) {
+			fresh = append(fresh, t)
+		}
+	}
+
+	if len(fresh) >= redeemMaxAttempts {
+		*times = fresh
+		return false
+	}
+
+	fresh = append(fresh, now)
+	*times = fresh
+	return true
+}
+
+// generatePairingCode creates a code like "SAG-X7KP4M2N" using crypto/rand.
 func generatePairingCode() (string, error) {
 	const charset = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no 0/O/1/I for readability
 	b := make([]byte, pairingCodeLen)
@@ -153,8 +187,19 @@ func handleCreatePairingCode(agentStore store.AgentStore, ps *PairingStore) http
 // handleRedeemPairingCode redeems a pairing code and returns the agent bundle.
 // GET /v1/dashboard/network/pair/{code}
 // UNAUTHENTICATED — the code IS the authentication.
-func handleRedeemPairingCode(agentStore store.AgentStore, ps *PairingStore) http.HandlerFunc {
+func handleRedeemPairingCode(agentStore store.AgentStore, ps *PairingStore, rl *redeemRateLimiter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Rate limit by IP to prevent brute-force attacks
+		ip := r.RemoteAddr
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			ip = strings.Split(fwd, ",")[0]
+		}
+		ip = strings.TrimSpace(ip)
+		if !rl.allow(ip) {
+			writeError(w, http.StatusTooManyRequests, "too many redemption attempts, try again later")
+			return
+		}
+
 		code := chi.URLParam(r, "code")
 		code = strings.ToUpper(strings.TrimSpace(code))
 
@@ -206,7 +251,7 @@ func (h *DashboardHandler) RegisterPairingRoutes(r chi.Router) {
 	if !ok {
 		return
 	}
-	r.Get("/v1/dashboard/network/pair/{code}", handleRedeemPairingCode(agentStore, h.Pairing))
+	r.Get("/v1/dashboard/network/pair/{code}", handleRedeemPairingCode(agentStore, h.Pairing, &redeemRateLimiter{}))
 }
 
 // registerPairingCreateRoute registers the authenticated pairing code creation route.

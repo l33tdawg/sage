@@ -21,8 +21,8 @@ func TestGeneratePairingCode(t *testing.T) {
 	code, err := generatePairingCode()
 	require.NoError(t, err)
 
-	// Format: SAG-XXX
-	assert.Len(t, code, 7) // "SAG" + "-" + 3 chars
+	// Format: SAG-XXXXXXXX
+	assert.Len(t, code, 12) // "SAG" + "-" + 8 chars
 	assert.Equal(t, "SAG-", code[:4])
 
 	// All chars after prefix should be from the charset
@@ -40,7 +40,7 @@ func TestGeneratePairingCodeUniqueness(t *testing.T) {
 		require.NoError(t, err)
 		seen[code] = true
 	}
-	// With 28^3 = 21952 possible codes, 100 should all be unique
+	// With 32^8 ≈ 1T possible codes, 100 should all be unique
 	assert.GreaterOrEqual(t, len(seen), 95, "too many collisions in 100 codes")
 }
 
@@ -275,6 +275,46 @@ func TestHandleRedeemPairingCodeExpired(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestRedeemRateLimiter(t *testing.T) {
+	rl := &redeemRateLimiter{}
+
+	// First 10 attempts should be allowed
+	for i := 0; i < redeemMaxAttempts; i++ {
+		assert.True(t, rl.allow("192.168.1.1"), "attempt %d should be allowed", i+1)
+	}
+
+	// 11th attempt should be rejected
+	assert.False(t, rl.allow("192.168.1.1"), "attempt 11 should be rejected")
+
+	// Different IP should still be allowed
+	assert.True(t, rl.allow("192.168.1.2"), "different IP should be allowed")
+}
+
+func TestRedeemRateLimiterHTTP(t *testing.T) {
+	h, _ := newTestHandler(t)
+	ps := NewPairingStore()
+	h.Pairing = ps
+
+	r := chi.NewRouter()
+	h.RegisterRoutes(r)
+
+	// Exhaust the rate limit with invalid codes
+	for i := 0; i < redeemMaxAttempts; i++ {
+		req := httptest.NewRequest("GET", "/v1/dashboard/network/pair/SAG-INVALID0", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code, "attempt %d should be 404", i+1)
+	}
+
+	// Next attempt should be rate limited
+	req := httptest.NewRequest("GET", "/v1/dashboard/network/pair/SAG-INVALID0", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 }
 
 func TestHandleRedeemCaseInsensitive(t *testing.T) {
