@@ -252,7 +252,12 @@ func runServe() error {
 	// Build combined router
 	r := chi.NewRouter()
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins: []string{
+			"http://localhost:8080",
+			"http://localhost:*",
+			"http://127.0.0.1:8080",
+			"http://127.0.0.1:*",
+		},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
 		AllowCredentials: false,

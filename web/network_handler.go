@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -426,8 +427,15 @@ func handleDownloadBundle(agentStore store.AgentStore) http.HandlerFunc {
 			return
 		}
 
+		// Sanitize agent name for use in Content-Disposition header
+		safeName := strings.Map(func(r rune) rune {
+			if r == '"' || r == '\\' || r == '\r' || r == '\n' || r < 32 {
+				return '_'
+			}
+			return r
+		}, agent.Name)
 		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="sage-agent-%s.zip"`, agent.Name))
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="sage-agent-%s.zip"`, safeName))
 		w.Write(data) //nolint:errcheck
 	}
 }
