@@ -1,3 +1,5 @@
+version: "2"
+
 run:
   timeout: 5m
   modules-download-mode: readonly
@@ -16,15 +18,15 @@ linters:
     - gosec
     - prealloc
 
-linters-settings:
-  govet:
-    enable:
-      - shadow
-  errcheck:
-    check-type-assertions: true
-  gosec:
-    excludes:
-      - G104 # unhandled errors (too noisy with logger calls)
+  settings:
+    govet:
+      enable:
+        - shadow
+    errcheck:
+      check-type-assertions: true
+    gosec:
+      excludes:
+        - G104 # unhandled errors (too noisy with logger calls)
 
 issues:
   exclude-rules:
