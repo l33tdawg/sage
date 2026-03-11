@@ -200,8 +200,8 @@ func TestProcessAgentRegisterIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "agent-v1", agent.Name, "idempotent register should keep original name")
 
-	// Only 1 pending write (from first registration)
-	assert.Len(t, app.pendingWrites, 1, "second register should not buffer another write")
+	// 2 pending writes: first registration + idempotent backfill write for on_chain_height
+	assert.Len(t, app.pendingWrites, 2, "idempotent register should buffer backfill write for on_chain_height")
 }
 
 // ---------------------------------------------------------------------------

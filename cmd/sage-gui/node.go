@@ -199,6 +199,11 @@ func runServe() error {
 	// CometBFT RPC URL for tx broadcast
 	cometRPC := "http://127.0.0.1:26657"
 
+	// Backfill on_chain_height and first_seen for agents already registered on-chain
+	// but missing these fields in SQLite (upgrade path from v3.5 → v3.7.6+)
+	signingKeyForMigrate := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger)
+	sageabci.MigrateAgentsOnChain(ctx, sqliteStore, badgerStore, cometRPC, signingKeyForMigrate, logger)
+
 	// Create REST server
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger)
 

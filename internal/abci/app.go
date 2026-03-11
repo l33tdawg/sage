@@ -1454,10 +1454,25 @@ func (app *SageApp) processAgentRegister(parsedTx *tx.ParsedTx, height int64, bl
 		regAgentID = agentID
 	}
 
-	// Idempotent: if already registered, return success with existing data
+	// Idempotent: if already registered, still buffer offchain write to backfill on_chain_height
 	if app.badgerStore.IsAgentRegistered(regAgentID) {
 		existing, _ := app.badgerStore.GetRegisteredAgent(regAgentID)
 		if existing != nil {
+			app.pendingWrites = append(app.pendingWrites, pendingWrite{
+				writeType: "agent_register",
+				data: &store.AgentEntry{
+					AgentID:       regAgentID,
+					Name:          existing.Name,
+					Role:          existing.Role,
+					BootBio:       existing.BootBio,
+					Provider:      existing.Provider,
+					P2PAddress:    existing.P2PAddress,
+					Status:        "active",
+					Clearance:     int(existing.Clearance),
+					OnChainHeight: existing.RegisteredAt,
+					CreatedAt:     blockTime,
+				},
+			})
 			return &abcitypes.ExecTxResult{Code: 0, Data: []byte(regAgentID), Log: fmt.Sprintf("agent %s already registered", regAgentID[:16])}
 		}
 	}

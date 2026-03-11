@@ -116,24 +116,26 @@ func securityHeaders(next http.Handler) http.Handler {
 
 // RegisterRoutes mounts dashboard routes on the given router.
 func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
-	r.Use(securityHeaders)
-
-	// Auth endpoints — always available (login page needs to load without auth).
-	r.Post("/v1/dashboard/auth/login", h.handleLogin)
-	r.Post("/v1/dashboard/auth/lock", h.handleLock)
-	r.Get("/v1/dashboard/auth/check", h.handleAuthCheck)
-
-	// Health is public (needed by CLI status command).
-	r.Get("/v1/dashboard/health", h.handleHealth)
-
-	// Pairing redemption — unauthenticated (the code IS the auth).
-	h.RegisterPairingRoutes(r)
-
-	// Protected routes — auth middleware checks dynamically whether encryption is active.
+	// Use a group so securityHeaders doesn't conflict with already-registered routes on the parent router.
 	r.Group(func(r chi.Router) {
-		r.Use(h.authMiddleware)
-		// Redeploy guard — returns 503 for write endpoints during active redeployment.
-		r.Use(redeployGuard(h.Redeployer))
+		r.Use(securityHeaders)
+
+		// Auth endpoints — always available (login page needs to load without auth).
+		r.Post("/v1/dashboard/auth/login", h.handleLogin)
+		r.Post("/v1/dashboard/auth/lock", h.handleLock)
+		r.Get("/v1/dashboard/auth/check", h.handleAuthCheck)
+
+		// Health is public (needed by CLI status command).
+		r.Get("/v1/dashboard/health", h.handleHealth)
+
+		// Pairing redemption — unauthenticated (the code IS the auth).
+		h.RegisterPairingRoutes(r)
+
+		// Protected routes — auth middleware checks dynamically whether encryption is active.
+		r.Group(func(r chi.Router) {
+			r.Use(h.authMiddleware)
+			// Redeploy guard — returns 503 for write endpoints during active redeployment.
+			r.Use(redeployGuard(h.Redeployer))
 
 		r.Get("/v1/dashboard/memory/list", h.handleListMemories)
 		r.Get("/v1/dashboard/export", h.handleExport)
@@ -228,6 +230,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/ui/", http.StatusFound)
 	})
+	}) // end securityHeaders group
 }
 
 // authMiddleware checks for a valid session cookie when encryption is active.
