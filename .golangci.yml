@@ -12,7 +12,6 @@ linters:
     - unused
     - gosimple
     - ineffassign
-    - typecheck
     - bodyclose
     - noctx
     - gosec
