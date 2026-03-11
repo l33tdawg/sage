@@ -215,6 +215,12 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 
 	metrics.ChallengesTotal.Inc()
 
+	if s.OnEvent != nil {
+		s.OnEvent("forget", memoryID, "", req.Reason, map[string]any{
+			"tx_hash": txHash,
+		})
+	}
+
 	writeJSON(w, http.StatusOK, ChallengeResponse{
 		Message: "Challenge submitted successfully.",
 		TxHash:  txHash,
