@@ -136,9 +136,7 @@ jobs:
         run: |
           # Download EnVar plugin for PATH manipulation
           wget -q https://nsis.sourceforge.io/mediawiki/images/7/7f/EnVar_plugin.zip -O /tmp/envar.zip
-          # TODO: Replace placeholder hash with actual SHA256 of EnVar_plugin.zip
-          # Compute with: sha256sum /tmp/envar.zip
-          echo "4ffb6a88bf498a4b823be20098e5df7378db517e67e9be6c11db1cbc3e5f0aff  /tmp/envar.zip" | sha256sum -c -
+          echo "e9aa92de351345ed82795251d838f1ae9041ba35af9d381a5780c7843b01f56a  /tmp/envar.zip" | sha256sum -c -
           sudo unzip -o /tmp/envar.zip -d /usr/share/nsis/
 
       - name: Build Windows installer
