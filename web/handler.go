@@ -373,11 +373,6 @@ func (h *DashboardHandler) handleExport(w http.ResponseWriter, r *http.Request) 
 	// status, provider, submitting_agent, created_at, committed_at, etc.
 	// Embeddings are excluded to keep export portable (re-generated on import).
 
-	format := r.URL.Query().Get("format")
-	if format == "" {
-		format = "jsonl"
-	}
-
 	// Page through all records to avoid loading everything in memory at once.
 	const pageSize = 500
 	offset := 0
