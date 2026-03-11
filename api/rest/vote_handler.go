@@ -285,6 +285,12 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 
 	metrics.CorroborationsTotal.Inc()
 
+	if s.OnEvent != nil {
+		s.OnEvent("consensus", memoryID, "", "Memory corroborated", map[string]any{
+			"tx_hash": txHash,
+		})
+	}
+
 	writeJSON(w, http.StatusOK, CorroborateResponse{
 		Message: "Corroboration recorded successfully.",
 		TxHash:  txHash,

@@ -347,6 +347,13 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 
 	metrics.MemoriesTotal.WithLabelValues(req.MemoryType, req.DomainTag, string(memory.StatusProposed)).Inc()
 
+	// Update agent's last activity timestamp
+	if agentID != "" && s.agentStore != nil {
+		if updateErr := s.agentStore.UpdateAgentLastSeen(r.Context(), agentID, time.Now()); updateErr != nil {
+			s.logger.Warn().Err(updateErr).Str("agent_id", agentID).Msg("failed to update agent last_seen")
+		}
+	}
+
 	// Emit event for SSE chain activity log
 	if s.OnEvent != nil {
 		s.OnEvent("remember", memoryID, req.DomainTag, truncateContent(req.Content, 80), map[string]any{
@@ -482,6 +489,13 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 				}
 				results = filtered
 			}
+		}
+	}
+
+	// Update agent's last activity timestamp on recall
+	if queryAgentID != "" && s.agentStore != nil {
+		if updateErr := s.agentStore.UpdateAgentLastSeen(r.Context(), queryAgentID, time.Now()); updateErr != nil {
+			s.logger.Warn().Err(updateErr).Str("agent_id", queryAgentID).Msg("failed to update agent last_seen on recall")
 		}
 	}
 

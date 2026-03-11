@@ -87,6 +87,10 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.OnEvent != nil {
+		s.OnEvent("agent", agentID, "", fmt.Sprintf("Agent %q registered (%s)", req.Name, req.Role), nil)
+	}
+
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"agent_id": agentID,
 		"name":     req.Name,
