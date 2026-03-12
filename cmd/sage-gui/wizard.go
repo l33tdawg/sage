@@ -261,7 +261,7 @@ func handleInstallMCP(w http.ResponseWriter, r *http.Request) {
 
 	// Read existing config or create new
 	existing := make(map[string]any)
-	if data, err := os.ReadFile(configPath); err == nil {
+	if data, err := os.ReadFile(configPath); err == nil { //nolint:gosec // configPath is user's config dir
 		if jsonErr := json.Unmarshal(data, &existing); jsonErr != nil {
 			writeWizardJSON(w, map[string]any{"ok": false, "error": "existing config has invalid JSON — please edit manually", "path": configPath})
 			return
@@ -277,14 +277,14 @@ func handleInstallMCP(w http.ResponseWriter, r *http.Request) {
 	existing["mcpServers"] = servers
 
 	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil { //nolint:gosec // configPath is user's config dir
 		writeWizardJSON(w, map[string]any{"ok": false, "error": "cannot create config directory: " + err.Error()})
 		return
 	}
 
 	// Write back with pretty formatting
 	data, _ := json.MarshalIndent(existing, "", "  ")
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
+	if err := os.WriteFile(configPath, data, 0600); err != nil { //nolint:gosec // configPath is user's config dir
 		writeWizardJSON(w, map[string]any{"ok": false, "error": "cannot write config: " + err.Error()})
 		return
 	}

@@ -206,7 +206,7 @@ func runImport() error {
 	fmt.Printf("Vault: %d memories, created %s\n", vault.Header.Memories, vault.Header.CreatedAt)
 
 	// Load agent key for signing imports.
-	keyData, err := os.ReadFile(keyPath)
+	keyData, err := os.ReadFile(keyPath) //nolint:gosec // keyPath from config
 	if err != nil {
 		return fmt.Errorf("read agent key: %w", err)
 	}
@@ -304,7 +304,7 @@ func doSignedRequest(baseURL string, key ed25519.PrivateKey, method, path string
 
 // encryptVault encrypts vault JSON using AES-256-GCM derived from the agent's Ed25519 key.
 func encryptVault(plaintext []byte, keyPath string) ([]byte, error) {
-	keyData, err := os.ReadFile(keyPath)
+	keyData, err := os.ReadFile(keyPath) //nolint:gosec // keyPath from config
 	if err != nil {
 		return nil, fmt.Errorf("read key: %w", err)
 	}
@@ -345,7 +345,7 @@ func decryptVault(data []byte, keyPath string) ([]byte, error) {
 		data = data[len(magic):]
 	}
 
-	keyData, err := os.ReadFile(keyPath)
+	keyData, err := os.ReadFile(keyPath) //nolint:gosec // keyPath from config
 	if err != nil {
 		return nil, fmt.Errorf("read key: %w", err)
 	}
@@ -398,7 +398,7 @@ func runBackup() error {
 		return fmt.Errorf("read database: %w", readErr)
 	}
 
-	if writeErr := os.WriteFile(backupPath, src, 0600); writeErr != nil {
+	if writeErr := os.WriteFile(backupPath, src, 0600); writeErr != nil { //nolint:gosec // backupPath is server-controlled
 		return fmt.Errorf("write backup: %w", writeErr)
 	}
 

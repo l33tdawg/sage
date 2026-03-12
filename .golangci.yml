@@ -37,10 +37,8 @@ linters:
         - G301 # dir perms 0755 — standard for user dirs
         - G302 # file perms 0755 — intentional for executables
         - G304 # file inclusion via variable — internal paths only
-        - G702 # command injection via taint — intentional self-exec in update
-        - G703 # path traversal via taint — all paths are from config/CLI, not HTTP
-        - G704 # SSRF via taint — all URLs are from config, not user input
-        - G705 # XSS via taint — responses are JSON/binary, not user-reflected HTML
+        # G702-G705 (taint analysis) suppressed via inline nolint comments;
+        # these IDs are only available in newer gosec versions.
 
   exclusions:
     rules:
