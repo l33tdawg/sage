@@ -8,6 +8,10 @@ The architecture is described in [Paper 1: Agent Memory Infrastructure](papers/P
 
 > **Just want to install it?** [Download here](https://l33tdawg.github.io/sage/) — double-click, done. Works with any AI.
 
+<a href="https://glama.ai/mcp/servers/l33tdawg/s-age">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/l33tdawg/s-age/badge" alt="(S)AGE MCP server" />
+</a>
+
 ---
 
 ## Architecture
