@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -44,6 +45,19 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 
 	// Step 1: Backup SQLite (the precious data) using VACUUM INTO for atomic consistency
 	if _, statErr := os.Stat(sqlitePath); statErr == nil {
+		// Clean up stale WAL/SHM files from previous version — these can cause
+		// hangs when the new binary tries to open the database.
+		for _, suffix := range []string{"-wal", "-shm"} {
+			walPath := sqlitePath + suffix
+			if _, walErr := os.Stat(walPath); walErr == nil {
+				// Checkpoint WAL into main DB first, then remove
+				if cpErr := checkpointWAL(sqlitePath); cpErr != nil {
+					fmt.Fprintf(os.Stderr, "  Warning: WAL checkpoint failed: %v (removing stale WAL)\n", cpErr)
+				}
+				_ = os.Remove(walPath)
+			}
+		}
+
 		backupDir := filepath.Join(SageHome(), "backups")
 		if mkErr := os.MkdirAll(backupDir, 0700); mkErr != nil {
 			return false, fmt.Errorf("create backup dir: %w", mkErr)
@@ -51,21 +65,16 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 		ts := time.Now().Format("2006-01-02T15-04-05")
 		backupPath := filepath.Join(backupDir, fmt.Sprintf("sage-pre-upgrade-%s-%s.db", lastVersion, ts))
 
-		// Use VACUUM INTO for atomic, consistent snapshot (safe during concurrent WAL writes)
-		dsn := sqlitePath + "?_journal_mode=WAL&_busy_timeout=5000"
-		srcDB, openErr := sql.Open("sqlite", dsn)
-		if openErr != nil {
-			return false, fmt.Errorf("open sqlite for backup: %w", openErr)
-		}
-		_, vacuumErr := srcDB.Exec(fmt.Sprintf(`VACUUM INTO '%s'`, backupPath))
-		_ = srcDB.Close()
+		// Use VACUUM INTO with a 30-second timeout to prevent indefinite hangs.
+		vacuumErr := vacuumBackup(sqlitePath, backupPath)
 		if vacuumErr != nil {
-			// Fallback to file copy if VACUUM INTO fails (e.g., older SQLite)
+			// Fallback to file copy if VACUUM INTO fails or times out
+			fmt.Fprintf(os.Stderr, "  VACUUM INTO failed (%v), falling back to file copy\n", vacuumErr)
 			src, readErr := os.ReadFile(sqlitePath)
 			if readErr != nil {
 				return false, fmt.Errorf("read sqlite for backup: %w", readErr)
 			}
-			if writeErr := os.WriteFile(backupPath, src, 0600); writeErr != nil {
+			if writeErr := os.WriteFile(backupPath, src, 0600); writeErr != nil { //nolint:gosec // backupPath is server-controlled
 				return false, fmt.Errorf("write backup: %w", writeErr)
 			}
 		}
@@ -125,17 +134,21 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 // and empty reflections that accumulated before v4.0.0's quality validators.
 // Returns the number of memories deprecated.
 func cleanupNoisyMemories(sqlitePath string) int {
-	dsn := sqlitePath + "?_journal_mode=WAL&_busy_timeout=5000"
+	dsn := sqlitePath + "?_journal_mode=WAL&_busy_timeout=15000"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return 0
 	}
 	defer func() { _ = db.Close() }()
 
+	// Use a 60-second timeout for the entire cleanup operation
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
 	deprecated := 0
 
 	// 1. Deduplicate boot safeguard memories — keep only the newest one per agent
-	rows, err := db.Query(`
+	rows, err := db.QueryContext(ctx, `
 		SELECT memory_id FROM memories
 		WHERE domain_tag = 'meta'
 		  AND status = 'committed'
@@ -153,7 +166,7 @@ func cleanupNoisyMemories(sqlitePath string) int {
 		// Keep the first (newest), deprecate the rest
 		if len(ids) > 1 {
 			for _, id := range ids[1:] {
-				if _, execErr := db.Exec(`UPDATE memories SET status = 'deprecated' WHERE memory_id = ?`, id); execErr == nil {
+				if _, execErr := db.ExecContext(ctx, `UPDATE memories SET status = 'deprecated' WHERE memory_id = ?`, id); execErr == nil {
 					deprecated++
 				}
 			}
@@ -168,7 +181,7 @@ func cleanupNoisyMemories(sqlitePath string) int {
 		"%user said hello%", "%greeted the user%",
 	}
 	for _, pattern := range noisePatterns {
-		res, execErr := db.Exec(`UPDATE memories SET status = 'deprecated'
+		res, execErr := db.ExecContext(ctx, `UPDATE memories SET status = 'deprecated'
 			WHERE status = 'committed' AND LOWER(content) LIKE ?`, pattern)
 		if execErr == nil {
 			if n, _ := res.RowsAffected(); n > 0 {
@@ -178,7 +191,7 @@ func cleanupNoisyMemories(sqlitePath string) int {
 	}
 
 	// 3. Deprecate very short observations (< 20 chars content)
-	res, err := db.Exec(`UPDATE memories SET status = 'deprecated'
+	res, err := db.ExecContext(ctx, `UPDATE memories SET status = 'deprecated'
 		WHERE status = 'committed' AND memory_type = 'observation' AND LENGTH(content) < 20`)
 	if err == nil {
 		if n, _ := res.RowsAffected(); n > 0 {
@@ -187,7 +200,7 @@ func cleanupNoisyMemories(sqlitePath string) int {
 	}
 
 	// 4. Deduplicate — deprecate memories with identical content_hash, keep newest
-	dupRows, err := db.Query(`
+	dupRows, err := db.QueryContext(ctx, `
 		SELECT content_hash FROM memories
 		WHERE status = 'committed' AND content_hash IS NOT NULL
 		GROUP BY content_hash HAVING COUNT(*) > 1`)
@@ -202,7 +215,7 @@ func cleanupNoisyMemories(sqlitePath string) int {
 		_ = dupRows.Close()
 		for _, h := range hashes {
 			// Keep the newest, deprecate the rest
-			res, execErr := db.Exec(`UPDATE memories SET status = 'deprecated'
+			res, execErr := db.ExecContext(ctx, `UPDATE memories SET status = 'deprecated'
 				WHERE content_hash = ? AND status = 'committed'
 				AND memory_id NOT IN (
 					SELECT memory_id FROM memories
@@ -218,6 +231,38 @@ func cleanupNoisyMemories(sqlitePath string) int {
 	}
 
 	return deprecated
+}
+
+// checkpointWAL forces a WAL checkpoint on the database, merging any
+// pending WAL writes into the main DB file. This prevents stale WAL files
+// from causing hangs on upgrade.
+func checkpointWAL(dbPath string) error {
+	dsn := dbPath + "?_busy_timeout=5000"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	return err
+}
+
+// vacuumBackup creates an atomic backup using VACUUM INTO with a timeout.
+func vacuumBackup(srcPath, dstPath string) error {
+	dsn := srcPath + "?_journal_mode=WAL&_busy_timeout=15000"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err = db.ExecContext(ctx, fmt.Sprintf(`VACUUM INTO '%s'`, dstPath))
+	return err
 }
 
 func stampVersion(path string) error {

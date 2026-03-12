@@ -99,7 +99,7 @@ func (s *SQLiteStore) decryptEmbedding(data []byte) ([]byte, error) {
 
 // NewSQLiteStore creates a new SQLite-backed store.
 func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
-	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=5000&_synchronous=NORMAL&_foreign_keys=ON"
+	dsn := dbPath + "?_journal_mode=WAL&_busy_timeout=15000&_synchronous=NORMAL&_foreign_keys=ON"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -1003,7 +1003,7 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 	}
 
 	query += " LIMIT ? OFFSET ?"
-	queryArgs := make([]any, len(args))
+	queryArgs := make([]any, len(args), len(args)+2)
 	copy(queryArgs, args)
 	queryArgs = append(queryArgs, opts.Limit, opts.Offset)
 

@@ -20,6 +20,20 @@ import (
 	"github.com/l33tdawg/sage/internal/mcp"
 )
 
+// Embedded hook scripts deployed by `sage-gui mcp install`.
+const sageBootScript = `#!/bin/bash
+# SAGE Boot Sequence Enforcement
+# Fires on SessionStart (startup, resume, compact).
+echo "MANDATORY: Call sage_inception (or sage_red_pill) NOW, before responding to the user. This is a new session — your brain needs to boot. Do NOT skip this step, even if you have a context continuation summary. Those summaries do NOT replace your SAGE memory."
+`
+
+const sageTurnScript = `#!/bin/bash
+# SAGE Turn Reminder
+# Fires on PreCompact (sync), Stop, SubagentStop, and PostToolUse (async).
+# Reminds Claude to call sage_turn so memories are flushed before context loss.
+echo "SAGE REMINDER: Call sage_turn with the current topic and a brief observation of what just happened. This saves your experience and recalls relevant memories. If you just completed a significant task, also call sage_reflect with dos and don'ts."
+`
+
 func runMCP() error {
 	home := os.Getenv("SAGE_HOME")
 	if home == "" {
@@ -30,7 +44,7 @@ func runMCP() error {
 		home = filepath.Join(userHome, ".sage")
 	}
 
-	if err := os.MkdirAll(home, 0700); err != nil {
+	if err := os.MkdirAll(home, 0700); err != nil { //nolint:gosec // home is ~/.sage, not user input
 		return fmt.Errorf("create SAGE home: %w", err)
 	}
 
@@ -200,6 +214,12 @@ func runMCPInstall() error {
 		return fmt.Errorf("write .mcp.json: %w", writeErr)
 	}
 
+	// Install Claude Code hooks and permissions for reliable SAGE integration.
+	if hookErr := installClaudeHooks(projectDir); hookErr != nil {
+		fmt.Fprintf(os.Stderr, "⚠ Could not install Claude Code hooks: %v\n", hookErr)
+		fmt.Fprintln(os.Stderr, "  SAGE will still work, but memory persistence may be less reliable.")
+	}
+
 	projectName := filepath.Base(projectDir)
 	fmt.Printf("✓ SAGE MCP installed for project: %s\n", projectName)
 	fmt.Printf("  Config: %s\n", mcpPath)
@@ -215,6 +235,154 @@ func runMCPInstall() error {
 	return nil
 }
 
+// installClaudeHooks creates .claude/hooks/ scripts and merges hook config +
+// permissions into .claude/settings.json. This ensures SAGE tools fire reliably
+// across long agentic runs, context compactions, and subagent lifecycles.
+func installClaudeHooks(projectDir string) error {
+	hookDir := filepath.Join(projectDir, ".claude", "hooks")
+	if err := os.MkdirAll(hookDir, 0755); err != nil {
+		return fmt.Errorf("create hooks dir: %w", err)
+	}
+
+	// Write hook scripts
+	scripts := map[string]string{
+		"sage-boot.sh": sageBootScript,
+		"sage-turn.sh": sageTurnScript,
+	}
+	for name, content := range scripts {
+		path := filepath.Join(hookDir, name)
+		if err := os.WriteFile(path, []byte(content), 0755); err != nil { //nolint:gosec // hook scripts must be executable
+			return fmt.Errorf("write %s: %w", name, err)
+		}
+	}
+
+	// Merge hooks and permissions into .claude/settings.json
+	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
+	settings := make(map[string]any)
+
+	if existing, err := os.ReadFile(settingsPath); err == nil {
+		_ = json.Unmarshal(existing, &settings)
+	}
+
+	settings["hooks"] = sageHooksConfig()
+	settings["permissions"] = sagePermissionsConfig(settings)
+
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+	if err := os.WriteFile(settingsPath, append(data, '\n'), 0600); err != nil {
+		return fmt.Errorf("write settings: %w", err)
+	}
+
+	fmt.Println("✓ Claude Code hooks installed for SAGE memory persistence")
+	fmt.Printf("  Hooks: %s\n", hookDir)
+	fmt.Printf("  Settings: %s\n", settingsPath)
+	return nil
+}
+
+// sageHooksConfig returns the hooks configuration for reliable SAGE integration.
+func sageHooksConfig() map[string]any {
+	bootHook := []any{
+		map[string]any{
+			"type":    "command",
+			"command": "bash .claude/hooks/sage-boot.sh",
+			"timeout": 5,
+		},
+	}
+	turnHook := []any{
+		map[string]any{
+			"type":    "command",
+			"command": "bash .claude/hooks/sage-turn.sh",
+			"timeout": 5,
+		},
+	}
+	turnHookAsync := []any{
+		map[string]any{
+			"type":    "command",
+			"command": "bash .claude/hooks/sage-turn.sh",
+			"timeout": 5,
+		},
+	}
+
+	return map[string]any{
+		// Boot: ensure sage_inception fires on every session lifecycle event
+		"SessionStart": []any{
+			map[string]any{"matcher": "startup", "hooks": bootHook},
+			map[string]any{"matcher": "resume", "hooks": bootHook},
+			map[string]any{"matcher": "compact", "hooks": bootHook},
+		},
+		// PreCompact: flush memories BEFORE context gets summarized (synchronous!)
+		"PreCompact": []any{
+			map[string]any{"hooks": turnHook},
+		},
+		// Stop/SubagentStop: remind to reflect after completing work
+		"Stop": []any{
+			map[string]any{"hooks": turnHookAsync},
+		},
+		"SubagentStop": []any{
+			map[string]any{"hooks": turnHookAsync},
+		},
+		// PostToolUse: periodic turn reminders during long runs
+		"PostToolUse": []any{
+			map[string]any{
+				"matcher": "Edit|Write|Bash",
+				"hooks":   turnHookAsync,
+			},
+		},
+	}
+}
+
+// sagePermissionsConfig returns permissions with SAGE MCP tools allowed,
+// preserving any existing permissions the user already has.
+func sagePermissionsConfig(settings map[string]any) map[string]any {
+	sageTools := []string{
+		"mcp__sage__sage_inception",
+		"mcp__sage__sage_red_pill",
+		"mcp__sage__sage_turn",
+		"mcp__sage__sage_remember",
+		"mcp__sage__sage_recall",
+		"mcp__sage__sage_reflect",
+		"mcp__sage__sage_forget",
+		"mcp__sage__sage_list",
+		"mcp__sage__sage_status",
+		"mcp__sage__sage_task",
+		"mcp__sage__sage_backlog",
+		"mcp__sage__sage_register",
+		"mcp__sage__sage_timeline",
+	}
+
+	perms := make(map[string]any)
+	if existing, ok := settings["permissions"].(map[string]any); ok {
+		for k, v := range existing {
+			perms[k] = v
+		}
+	}
+
+	// Merge SAGE tools into existing allow list
+	var allowList []string
+	if existing, ok := perms["allow"].([]any); ok {
+		for _, v := range existing {
+			if s, ok := v.(string); ok {
+				allowList = append(allowList, s)
+			}
+		}
+	}
+
+	// Add SAGE tools that aren't already in the list
+	existing := make(map[string]bool, len(allowList))
+	for _, v := range allowList {
+		existing[v] = true
+	}
+	for _, tool := range sageTools {
+		if !existing[tool] {
+			allowList = append(allowList, tool)
+		}
+	}
+	perms["allow"] = allowList
+	return perms
+}
+
 // claimAgentIdentity calls the SAGE dashboard to claim a pre-configured agent
 // identity using a one-time claim token. Downloads the agent key and saves it.
 func claimAgentIdentity(sageHome, token, keyPath string) error {
@@ -227,13 +395,13 @@ func claimAgentIdentity(sageHome, token, keyPath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/dashboard/network/claim", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/dashboard/network/claim", bytes.NewReader(body)) //nolint:gosec // baseURL is from config/env, not user input
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // internal API call
 	if err != nil {
 		return fmt.Errorf("connect to SAGE: %w (is sage-gui serve running?)", err)
 	}
@@ -283,7 +451,7 @@ func claimAgentIdentity(sageHome, token, keyPath string) error {
 // loadOrGenerateKey loads an Ed25519 private key from disk, or generates one.
 // The key file stores the 32-byte seed; the full 64-byte private key is derived.
 func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path is from internal agent key directory
 	if err == nil {
 		switch len(data) {
 		case ed25519.SeedSize: // 32-byte seed
@@ -305,7 +473,7 @@ func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
 
-	if err := os.WriteFile(path, priv.Seed(), 0600); err != nil {
+	if err := os.WriteFile(path, priv.Seed(), 0600); err != nil { //nolint:gosec // path is internal agent key dir
 		return nil, fmt.Errorf("save key file: %w", err)
 	}
 

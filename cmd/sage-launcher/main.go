@@ -54,7 +54,7 @@ func main() {
 	}
 
 	// Start sage-gui serve as detached background process
-	cmd := exec.Command(exePath, "serve")
+	cmd := exec.Command(exePath, "serve") //nolint:noctx // long-running daemon, no context needed
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Dir = filepath.Dir(exePath)
@@ -165,11 +165,11 @@ func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
+		cmd = exec.Command("cmd", "/c", "start", url)   //nolint:noctx // fire-and-forget browser open
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", url)                //nolint:noctx // fire-and-forget browser open
 	default: // linux, freebsd, etc.
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", url) //nolint:noctx // fire-and-forget browser open
 	}
 	_ = cmd.Start()
 }

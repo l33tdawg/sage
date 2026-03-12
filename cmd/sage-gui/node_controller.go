@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/cometbft/cometbft/config"
 	cmtcrypto "github.com/cometbft/cometbft/crypto/ed25519"
@@ -100,22 +101,45 @@ func (c *SageNodeController) StartChain() error {
 		c.cometCfg.PrivValidatorStateFile(),
 	)
 
-	cometNode, err := node.NewNode(
-		c.cometCfg,
-		c.pv,
-		c.nodeKey,
-		proxy.NewLocalClientCreator(c.app),
-		node.DefaultGenesisDocProviderFunc(c.cometCfg),
-		config.DefaultDBProvider,
-		node.DefaultMetricsProvider(c.cometCfg.Instrumentation),
-		c.cmtLogger,
-	)
-	if err != nil {
-		return fmt.Errorf("create CometBFT node: %w", err)
+	// Create and start CometBFT with a timeout to prevent indefinite hangs
+	// (e.g., corrupted blockstore from a previous version).
+	type startResult struct {
+		node *node.Node
+		err  error
 	}
+	ch := make(chan startResult, 1)
+	go func() {
+		cometNode, createErr := node.NewNode(
+			c.cometCfg,
+			c.pv,
+			c.nodeKey,
+			proxy.NewLocalClientCreator(c.app),
+			node.DefaultGenesisDocProviderFunc(c.cometCfg),
+			config.DefaultDBProvider,
+			node.DefaultMetricsProvider(c.cometCfg.Instrumentation),
+			c.cmtLogger,
+		)
+		if createErr != nil {
+			ch <- startResult{err: fmt.Errorf("create CometBFT node: %w", createErr)}
+			return
+		}
+		if startErr := cometNode.Start(); startErr != nil {
+			ch <- startResult{err: fmt.Errorf("start CometBFT: %w", startErr)}
+			return
+		}
+		ch <- startResult{node: cometNode}
+	}()
 
-	if err := cometNode.Start(); err != nil {
-		return fmt.Errorf("start CometBFT: %w", err)
+	var cometNode *node.Node
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return res.err
+		}
+		cometNode = res.node
+	case <-time.After(60 * time.Second):
+		return fmt.Errorf("CometBFT startup timed out after 60s — try deleting %s/data/ and restarting",
+			c.cometCfg.RootDir)
 	}
 
 	c.cometNode = cometNode

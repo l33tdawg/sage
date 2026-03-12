@@ -119,12 +119,12 @@ func cmdStatus() {
 }
 
 func cmdHealth(apiURL string) {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL+"/health", nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, apiURL+"/health", nil) //nolint:gosec // apiURL is from config, not user input
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // internal health check
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

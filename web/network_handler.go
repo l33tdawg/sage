@@ -424,7 +424,7 @@ func handleDownloadBundle(agentStore store.AgentStore) http.HandlerFunc {
 			return
 		}
 
-		data, err := os.ReadFile(agent.BundlePath)
+		data, err := os.ReadFile(agent.BundlePath) //nolint:gosec // BundlePath is from trusted agent store
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "bundle file not found")
 			return
@@ -439,7 +439,7 @@ func handleDownloadBundle(agentStore store.AgentStore) http.HandlerFunc {
 		}, agent.Name)
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="sage-agent-%s.zip"`, safeName))
-		w.Write(data) //nolint:errcheck
+		w.Write(data) //nolint:errcheck,gosec // server-generated ZIP archive, not user input
 	}
 }
 
@@ -467,13 +467,13 @@ func handleRotateAgentKey(agentStore store.AgentStore) http.HandlerFunc {
 
 		// Generate and save new bundle
 		bundleDir := filepath.Join(sageHome(), "bundles", newAgentID)
-		if mkErr := os.MkdirAll(bundleDir, 0700); mkErr != nil {
+		if mkErr := os.MkdirAll(bundleDir, 0700); mkErr != nil { //nolint:gosec // bundleDir is server-controlled path
 			writeError(w, http.StatusInternalServerError, "failed to create bundle dir")
 			return
 		}
 
 		// Save new agent key (seed)
-		if wErr := os.WriteFile(filepath.Join(bundleDir, "agent.key"), seed, 0600); wErr != nil {
+		if wErr := os.WriteFile(filepath.Join(bundleDir, "agent.key"), seed, 0600); wErr != nil { //nolint:gosec // server-controlled path
 			writeError(w, http.StatusInternalServerError, "failed to save agent key")
 			return
 		}
@@ -1069,7 +1069,7 @@ This agent will connect to the primary node's network.
 		return "", err
 	}
 
-	if err := os.WriteFile(zipPath, buf.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(zipPath, buf.Bytes(), 0600); err != nil { //nolint:gosec // zipPath is server-controlled
 		return "", err
 	}
 	return zipPath, nil

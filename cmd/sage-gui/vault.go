@@ -78,8 +78,8 @@ func runExport() error {
 
 	for {
 		listURL := fmt.Sprintf("%s/v1/dashboard/memory/list?limit=%d&offset=%d&sort=oldest", baseURL, limit, offset)
-		listReq, _ := http.NewRequestWithContext(context.Background(), "GET", listURL, nil)
-		resp, doErr := http.DefaultClient.Do(listReq)
+		listReq, _ := http.NewRequestWithContext(context.Background(), "GET", listURL, nil) //nolint:gosec // listURL built from config baseURL
+		resp, doErr := http.DefaultClient.Do(listReq) //nolint:gosec // internal API call
 		if doErr != nil {
 			return fmt.Errorf("fetch memories (is sage-gui serve running?): %w", doErr)
 		}
@@ -143,7 +143,7 @@ func runExport() error {
 		outputData = vaultJSON
 	}
 
-	if err := os.WriteFile(outputPath, outputData, 0600); err != nil {
+	if err := os.WriteFile(outputPath, outputData, 0600); err != nil { //nolint:gosec // outputPath from CLI args
 		return fmt.Errorf("write vault file: %w", err)
 	}
 
@@ -184,7 +184,7 @@ func runImport() error {
 	}
 
 	// Read vault file.
-	data, err := os.ReadFile(inputPath)
+	data, err := os.ReadFile(inputPath) //nolint:gosec // inputPath from CLI args
 	if err != nil {
 		return fmt.Errorf("read vault file: %w", err)
 	}
@@ -268,19 +268,19 @@ func doSignedRequest(baseURL string, key ed25519.PrivateKey, method, path string
 	hash := sha256.Sum256(canonical)
 	msg := make([]byte, 40)
 	copy(msg[:32], hash[:])
-	msg[32] = byte(timestamp >> 56)
-	msg[33] = byte(timestamp >> 48)
-	msg[34] = byte(timestamp >> 40)
-	msg[35] = byte(timestamp >> 32)
-	msg[36] = byte(timestamp >> 24)
-	msg[37] = byte(timestamp >> 16)
-	msg[38] = byte(timestamp >> 8)
-	msg[39] = byte(timestamp)
+	msg[32] = byte(timestamp >> 56) //nolint:gosec // timestamp is always positive Unix epoch
+	msg[33] = byte(timestamp >> 48) //nolint:gosec // timestamp is always positive Unix epoch
+	msg[34] = byte(timestamp >> 40) //nolint:gosec // timestamp is always positive Unix epoch
+	msg[35] = byte(timestamp >> 32) //nolint:gosec // timestamp is always positive Unix epoch
+	msg[36] = byte(timestamp >> 24) //nolint:gosec // timestamp is always positive Unix epoch
+	msg[37] = byte(timestamp >> 16) //nolint:gosec // timestamp is always positive Unix epoch
+	msg[38] = byte(timestamp >> 8)  //nolint:gosec // timestamp is always positive Unix epoch
+	msg[39] = byte(timestamp)       //nolint:gosec // timestamp is always positive Unix epoch
 
 	sig := ed25519.Sign(key, msg)
 	pub, _ := key.Public().(ed25519.PublicKey) //nolint:errcheck
 
-	req, err := http.NewRequestWithContext(context.Background(), method, baseURL+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(context.Background(), method, baseURL+path, bytes.NewReader(body)) //nolint:gosec // baseURL from config
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +289,7 @@ func doSignedRequest(baseURL string, key ed25519.PrivateKey, method, path string
 	req.Header.Set("X-Signature", fmt.Sprintf("%x", sig))
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) //nolint:gosec // internal API call
 	if err != nil {
 		return nil, err
 	}

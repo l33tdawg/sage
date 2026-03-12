@@ -59,7 +59,7 @@ Examples:
 
 	baseURL := os.Getenv("SAGE_API_URL")
 	if baseURL == "" {
-		baseURL = fmt.Sprintf("http://localhost%s", cfg.RESTAddr)
+		baseURL = restBaseURL(cfg.RESTAddr)
 	}
 
 	// Load agent key
@@ -72,7 +72,7 @@ Examples:
 	agentID := hex.EncodeToString(pub)
 
 	// Read file
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filePath) //nolint:gosec // filePath is from CLI args
 	if err != nil {
 		return fmt.Errorf("read file: %w", err)
 	}
@@ -96,6 +96,8 @@ Examples:
 
 	fmt.Printf("Seeding %d memories from %s (domain: %s)\n\n", len(memories), filePath, domain)
 
+	const maxRetries = 3
+
 	success := 0
 	for i, mem := range memories {
 		if mem.Domain == "" {
@@ -108,24 +110,42 @@ Examples:
 			mem.Confidence = 0.85
 		}
 
-		// Get embedding
-		embedding, err := getEmbedding(baseURL, mem.Content, agentID, priv)
-		if err != nil {
-			fmt.Printf("[%d/%d] FAIL (embed): %v\n", i+1, len(memories), err)
-			continue
+		var lastErr error
+		for attempt := range maxRetries {
+			lastErr = nil
+
+			// Get embedding
+			embedding, err := getEmbedding(baseURL, mem.Content, agentID, priv)
+			if err != nil {
+				lastErr = fmt.Errorf("embed: %w", err)
+				if backoffOnRetry(attempt, maxRetries, err) {
+					continue
+				}
+				break
+			}
+
+			// Submit memory
+			body, _ := json.Marshal(map[string]any{
+				"content":          mem.Content,
+				"memory_type":      mem.Type,
+				"domain_tag":       mem.Domain,
+				"confidence_score": mem.Confidence,
+				"embedding":        embedding,
+			})
+
+			if err := submitSigned(baseURL+"/v1/memory/submit", body, agentID, priv); err != nil {
+				lastErr = err
+				if backoffOnRetry(attempt, maxRetries, err) {
+					continue
+				}
+				break
+			}
+
+			break
 		}
 
-		// Submit memory
-		body, _ := json.Marshal(map[string]any{
-			"content":          mem.Content,
-			"memory_type":      mem.Type,
-			"domain_tag":       mem.Domain,
-			"confidence_score": mem.Confidence,
-			"embedding":        embedding,
-		})
-
-		if err := submitSigned(baseURL+"/v1/memory/submit", body, agentID, priv); err != nil {
-			fmt.Printf("[%d/%d] FAIL: %v\n", i+1, len(memories), err)
+		if lastErr != nil {
+			fmt.Printf("[%d/%d] FAIL: %v\n", i+1, len(memories), lastErr)
 			continue
 		}
 
@@ -135,6 +155,12 @@ Examples:
 			preview = preview[:70] + "..."
 		}
 		fmt.Printf("[%d/%d] OK: %s\n", i+1, len(memories), preview)
+
+		// Pace requests to stay within rate limits (2 calls per memory: embed + submit).
+		// 100 req/min ≈ 50 memories/min → ~1.2s per memory.
+		if i < len(memories)-1 {
+			time.Sleep(1200 * time.Millisecond)
+		}
 	}
 
 	fmt.Printf("\nSeeded %d/%d memories successfully.\n", success, len(memories))
@@ -238,6 +264,30 @@ func submitSigned(url string, body []byte, agentID string, priv ed25519.PrivateK
 	return nil
 }
 
+// backoffOnRetry returns true if the caller should retry after sleeping.
+// It implements exponential backoff: 2s, 4s, 8s, etc.
+// Returns false on the last attempt so the caller can stop.
+func backoffOnRetry(attempt, maxRetries int, err error) bool {
+	if attempt >= maxRetries-1 {
+		return false
+	}
+	errStr := err.Error()
+	// Longer wait for rate limits
+	if strings.Contains(errStr, "429") {
+		fmt.Printf("  rate limited, waiting 60s before retry...\n")
+		time.Sleep(60 * time.Second)
+		return true
+	}
+	// Exponential backoff for server errors (500, SQLITE_BUSY, etc.)
+	if strings.Contains(errStr, "500") || strings.Contains(errStr, "BUSY") {
+		wait := time.Duration(2<<uint(attempt)) * time.Second //nolint:gosec // attempt is bounded by maxRetries (3)
+		fmt.Printf("  server busy, retrying in %v...\n", wait)
+		time.Sleep(wait)
+		return true
+	}
+	return false
+}
+
 func doSignedHTTP(method, url string, body []byte, agentID string, priv ed25519.PrivateKey) (*http.Response, error) {
 	ts := time.Now().Unix()
 	// Extract path from URL for canonical signing.
@@ -257,7 +307,7 @@ func doSignedHTTP(method, url string, body []byte, agentID string, priv ed25519.
 	msg := append(h[:], tsBuf[:]...)
 	sig := ed25519.Sign(priv, msg)
 
-	req, err := http.NewRequestWithContext(context.Background(), method, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(context.Background(), method, url, bytes.NewReader(body)) //nolint:gosec // url is from config baseURL
 	if err != nil {
 		return nil, err
 	}
@@ -266,5 +316,5 @@ func doSignedHTTP(method, url string, body []byte, agentID string, priv ed25519.
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
 	req.Header.Set("X-Signature", hex.EncodeToString(sig))
 
-	return http.DefaultClient.Do(req)
+	return http.DefaultClient.Do(req) //nolint:gosec // internal API call
 }

@@ -318,7 +318,7 @@ func (h *DashboardHandler) handleRestart(w http.ResponseWriter, r *http.Request)
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		// Re-exec the binary with the same args
-		syscall.Exec(execPath, os.Args, os.Environ()) //nolint:errcheck
+		syscall.Exec(execPath, os.Args, os.Environ()) //nolint:errcheck,gosec // execPath is the verified current binary
 	}()
 }
 
@@ -466,7 +466,7 @@ func updateAppBundle(newBinaryPath string) {
 		filepath.Join(os.Getenv("HOME"), "Applications/SAGE.app/Contents/MacOS/sage-gui"),
 	}
 	for _, appBin := range appBundlePaths {
-		if _, err := os.Stat(appBin); err != nil {
+		if _, err := os.Stat(appBin); err != nil { //nolint:gosec // appBin is from hardcoded paths
 			continue
 		}
 		// Copy the new binary into the .app bundle

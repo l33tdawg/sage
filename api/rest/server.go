@@ -111,7 +111,7 @@ func loadValidatorSigningKey(logger zerolog.Logger) ed25519.PrivateKey {
 		return sk
 	}
 
-	data, err := os.ReadFile(keyFile)
+	data, err := os.ReadFile(keyFile) //nolint:gosec // keyFile is from trusted config
 	if err != nil {
 		logger.Error().Err(err).Str("file", keyFile).Msg("failed to read validator key file — using random key")
 		_, sk, _ := ed25519.GenerateKey(nil)

@@ -56,7 +56,7 @@ func runSetup() error {
 	mux.HandleFunc("/api/install-mcp", handleInstallMCP)
 
 	// Find an available port
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", "127.0.0.1:0") //nolint:noctx // local-only listener, no context needed
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -395,11 +395,11 @@ func openBrowser(rawURL string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", u.String())
+		cmd = exec.Command("open", u.String())           //nolint:noctx // fire-and-forget browser open
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u.String())
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", u.String()) //nolint:noctx // fire-and-forget browser open
 	default:
-		cmd = exec.Command("xdg-open", u.String())
+		cmd = exec.Command("xdg-open", u.String()) //nolint:noctx // fire-and-forget browser open
 	}
 	_ = cmd.Run()
 }

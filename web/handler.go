@@ -294,7 +294,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			w.Header().Set("Content-Type", "image/x-icon")
 		}
 
-		w.Write(f) //nolint:errcheck
+		w.Write(f) //nolint:errcheck,gosec // static embedded file, not user input
 	})
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {

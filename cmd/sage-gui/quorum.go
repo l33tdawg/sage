@@ -185,7 +185,7 @@ func runQuorumJoin() error {
 	}
 
 	// Load peer manifest
-	data, err := os.ReadFile(manifestPath)
+	data, err := os.ReadFile(manifestPath) //nolint:gosec // manifestPath is from CLI args, not HTTP input
 	if err != nil {
 		return fmt.Errorf("read manifest: %w", err)
 	}
@@ -353,5 +353,5 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0600)
+	return os.WriteFile(dst, data, 0600) //nolint:gosec // dst is server-controlled path
 }
