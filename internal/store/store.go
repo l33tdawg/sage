@@ -67,24 +67,26 @@ type EpochScore struct {
 
 // QueryOptions defines parameters for similarity queries.
 type QueryOptions struct {
-	DomainTag     string  `json:"domain_tag,omitempty"`
-	Provider      string  `json:"provider,omitempty"`
-	MinConfidence float64 `json:"min_confidence,omitempty"`
-	StatusFilter  string  `json:"status_filter,omitempty"`
-	TopK          int     `json:"top_k"`
-	Cursor        string  `json:"cursor,omitempty"`
+	DomainTag       string   `json:"domain_tag,omitempty"`
+	Provider        string   `json:"provider,omitempty"`
+	MinConfidence   float64  `json:"min_confidence,omitempty"`
+	StatusFilter    string   `json:"status_filter,omitempty"`
+	TopK            int      `json:"top_k"`
+	Cursor          string   `json:"cursor,omitempty"`
+	SubmittingAgents []string `json:"submitting_agents,omitempty"` // RBAC: restrict to these agent IDs
 }
 
 // ListOptions defines parameters for listing memories.
 type ListOptions struct {
-	DomainTag       string
-	Tag             string // filter by user-defined tag
-	Provider        string
-	Status          string
-	SubmittingAgent string // filter memories by agent_id
-	Limit           int
-	Offset          int
-	Sort            string // "newest", "oldest", "confidence"
+	DomainTag        string
+	Tag              string // filter by user-defined tag
+	Provider         string
+	Status           string
+	SubmittingAgent  string   // filter memories by agent_id (single)
+	SubmittingAgents []string // RBAC: restrict to these agent IDs
+	Limit            int
+	Offset           int
+	Sort             string // "newest", "oldest", "confidence"
 }
 
 // StoreStats holds aggregate statistics.

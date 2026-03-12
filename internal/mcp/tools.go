@@ -427,7 +427,7 @@ func (s *Server) toolList(ctx context.Context, params map[string]any) (any, erro
 	q.Set("offset", strconv.Itoa(offset))
 	q.Set("sort", sort)
 
-	path := "/v1/dashboard/memory/list?" + q.Encode()
+	path := "/v1/memory/list?" + q.Encode()
 	var listResp struct {
 		Memories []struct {
 			MemoryID        string  `json:"memory_id"`
@@ -479,7 +479,7 @@ func (s *Server) toolTimeline(ctx context.Context, params map[string]any) (any, 
 		q.Set("domain", domain)
 	}
 
-	path := "/v1/dashboard/memory/timeline?" + q.Encode()
+	path := "/v1/memory/timeline?" + q.Encode()
 	var timelineResp struct {
 		Buckets []struct {
 			Period string `json:"period"`
@@ -1014,7 +1014,7 @@ func (s *Server) bootSafeguardExists(ctx context.Context) bool {
 		q.Set("provider", s.provider)
 	}
 
-	path := "/v1/dashboard/memory/list?" + q.Encode()
+	path := "/v1/memory/list?" + q.Encode()
 	var listResp struct {
 		Memories []struct {
 			Content string `json:"content"`
@@ -1048,7 +1048,7 @@ func (s *Server) similarMemoryExists(ctx context.Context, content, domain string
 		q.Set("provider", s.provider)
 	}
 
-	path := "/v1/dashboard/memory/list?" + q.Encode()
+	path := "/v1/memory/list?" + q.Encode()
 	var listResp struct {
 		Memories []struct {
 			Content string `json:"content"`

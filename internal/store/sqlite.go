@@ -744,6 +744,14 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		query += " AND status = ?"
 		args = append(args, opts.StatusFilter)
 	}
+	if len(opts.SubmittingAgents) > 0 {
+		placeholders := make([]string, len(opts.SubmittingAgents))
+		for i, a := range opts.SubmittingAgents {
+			placeholders[i] = "?"
+			args = append(args, a)
+		}
+		query += " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
+	}
 
 	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -991,6 +999,16 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		query += filter
 		countQuery += filter
 		args = append(args, opts.Tag)
+	}
+	if len(opts.SubmittingAgents) > 0 {
+		placeholders := make([]string, len(opts.SubmittingAgents))
+		for i, a := range opts.SubmittingAgents {
+			placeholders[i] = "?"
+			args = append(args, a)
+		}
+		filter := " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
+		query += filter
+		countQuery += filter
 	}
 
 	switch opts.Sort {

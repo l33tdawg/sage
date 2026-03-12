@@ -401,9 +401,12 @@ func TestQueryMemory(t *testing.T) {
 func TestGetMemory(t *testing.T) {
 	srv, memStore, _ := newTestServer(t, "")
 
+	// Build the signed request first so we know the agent ID
+	req, agentID := signedRequest(t, http.MethodGet, "/v1/memory/mem-123", nil)
+
 	memStore.memories["mem-123"] = &memory.MemoryRecord{
 		MemoryID:        "mem-123",
-		SubmittingAgent: "agent-1",
+		SubmittingAgent: agentID, // Must match requesting agent for RBAC isolation
 		Content:         "Detailed memory content",
 		ContentHash:     []byte{0xAA, 0xBB},
 		MemoryType:      memory.TypeObservation,
@@ -413,7 +416,6 @@ func TestGetMemory(t *testing.T) {
 		CreatedAt:       time.Now(),
 	}
 
-	req, _ := signedRequest(t, http.MethodGet, "/v1/memory/mem-123", nil)
 	rr := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr, req)
 

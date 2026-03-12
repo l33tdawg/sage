@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -211,6 +212,41 @@ func checkDomainAccess(ctx context.Context, agentStore store.AgentStore, badgerS
 	return fmt.Errorf("agent does not have %s access to domain '%s'", action, domain)
 }
 
+// --- Agent Isolation (RBAC) --------------------------------------------------
+
+// resolveVisibleAgents determines which agents' memories the given agent can see.
+// Returns (allowedAgentIDs, seeAll). If seeAll is true, no filtering needed.
+// RBAC is on-chain: checks BadgerDB for role and visible_agents.
+func (s *Server) resolveVisibleAgents(agentID string) ([]string, bool) {
+	if agentID == "" {
+		return nil, true // No identity = legacy/internal, allow all
+	}
+
+	// Check on-chain state (BadgerDB)
+	if s.badgerStore != nil {
+		agent, err := s.badgerStore.GetRegisteredAgent(agentID)
+		if err == nil && agent != nil {
+			if agent.Role == "admin" {
+				return nil, true
+			}
+			if agent.VisibleAgents == "*" {
+				return nil, true
+			}
+			allowed := []string{agentID} // Always see own
+			if agent.VisibleAgents != "" {
+				var list []string
+				if json.Unmarshal([]byte(agent.VisibleAgents), &list) == nil {
+					allowed = append(allowed, list...)
+				}
+			}
+			return allowed, false
+		}
+	}
+
+	// Not registered on-chain — isolated by default
+	return []string{agentID}, false
+}
+
 // --- Handlers ----------------------------------------------------------------
 
 // handleSubmitMemory handles POST /v1/memory/submit.
@@ -407,6 +443,10 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Resolve agent isolation RBAC — determines which agents' memories are visible
+	queryAgentID := middleware.ContextAgentID(r.Context())
+	allowedAgents, seeAll := s.resolveVisibleAgents(queryAgentID)
+
 	start := time.Now()
 
 	opts := store.QueryOptions{
@@ -416,6 +456,9 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		StatusFilter:  req.StatusFilter,
 		TopK:          req.TopK,
 		Cursor:        req.Cursor,
+	}
+	if !seeAll {
+		opts.SubmittingAgents = allowedAgents
 	}
 
 	var records []*memory.MemoryRecord
@@ -429,7 +472,6 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	metrics.RecordQuery(req.DomainTag, time.Since(start))
 
 	// Apply confidence decay and classification filtering.
-	queryAgentID := middleware.ContextAgentID(r.Context())
 	now := time.Now()
 	results := make([]*MemoryResult, 0, len(records))
 	for _, rec := range records {
@@ -467,29 +509,6 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:       rec.CreatedAt,
 			CommittedAt:     rec.CommittedAt,
 		})
-	}
-
-	// Apply visible_agents filter: restrict results to only memories from allowed agents
-	if s.badgerStore != nil {
-		queryAgentOnChain, onChainErr := s.badgerStore.GetRegisteredAgent(queryAgentID)
-		if onChainErr == nil && queryAgentOnChain != nil && queryAgentOnChain.VisibleAgents != "" && queryAgentOnChain.VisibleAgents != "*" {
-			var visibleList []string
-			if json.Unmarshal([]byte(queryAgentOnChain.VisibleAgents), &visibleList) == nil && len(visibleList) > 0 {
-				visibleSet := make(map[string]bool, len(visibleList))
-				for _, v := range visibleList {
-					visibleSet[v] = true
-				}
-				// Always allow seeing own memories
-				visibleSet[queryAgentID] = true
-				filtered := make([]*MemoryResult, 0, len(results))
-				for _, r := range results {
-					if visibleSet[r.SubmittingAgent] {
-						filtered = append(filtered, r)
-					}
-				}
-				results = filtered
-			}
-		}
 	}
 
 	// Update agent's last activity timestamp on recall
@@ -542,11 +561,30 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Agent isolation RBAC check: can this agent see this memory's author?
+	agentID := middleware.ContextAgentID(r.Context())
+	if agentID != rec.SubmittingAgent {
+		allowedAgents, seeAll := s.resolveVisibleAgents(agentID)
+		if !seeAll {
+			visible := false
+			for _, a := range allowedAgents {
+				if a == rec.SubmittingAgent {
+					visible = true
+					break
+				}
+			}
+			if !visible {
+				writeProblem(w, http.StatusForbidden, "Access denied",
+					"You do not have visibility into this agent's memories.")
+				return
+			}
+		}
+	}
+
 	// Access control gate: multi-org + classification enforcement.
 	// Submitting agent always has access to their own memory.
 	// Domain-level access is only enforced when the domain has a registered owner.
 	if rec.DomainTag != "" && s.badgerStore != nil {
-		agentID := middleware.ContextAgentID(r.Context())
 		if agentID != rec.SubmittingAgent {
 			// Only enforce access if the domain has a registered owner (org structure exists)
 			domainOwner, domainErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
@@ -793,4 +831,81 @@ func truncateContent(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// handleListMemoriesAuth handles GET /v1/memory/list (authenticated, agent-isolated).
+// Mirrors the dashboard list endpoint but applies RBAC agent isolation.
+func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset, _ := strconv.Atoi(q.Get("offset"))
+
+	agentID := middleware.ContextAgentID(r.Context())
+	allowedAgents, seeAll := s.resolveVisibleAgents(agentID)
+
+	opts := store.ListOptions{
+		DomainTag: q.Get("domain"),
+		Tag:       q.Get("tag"),
+		Provider:  q.Get("provider"),
+		Status:    q.Get("status"),
+		Limit:     limit,
+		Offset:    offset,
+		Sort:      q.Get("sort"),
+	}
+	// Apply single-agent filter from query param (only if allowed)
+	if agent := q.Get("agent"); agent != "" {
+		opts.SubmittingAgent = agent
+	}
+	if !seeAll {
+		opts.SubmittingAgents = allowedAgents
+	}
+
+	records, total, err := s.store.ListMemories(r.Context(), opts)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query error", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"memories": records,
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+	})
+}
+
+// handleTimelineAuth handles GET /v1/memory/timeline (authenticated, agent-isolated).
+// Mirrors the dashboard timeline endpoint. Timeline aggregation is domain-level
+// so agent isolation is not applied to counts, but only authenticated agents can call it.
+func (s *Server) handleTimelineAuth(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	domain := q.Get("domain")
+	bucket := q.Get("bucket")
+	if bucket == "" {
+		bucket = "hour"
+	}
+
+	from := time.Now().Add(-24 * time.Hour)
+	to := time.Now()
+	if v := q.Get("from"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			from = t
+		}
+	}
+	if v := q.Get("to"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			to = t
+		}
+	}
+
+	buckets, err := s.store.GetTimeline(r.Context(), from, to, domain, bucket)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Query error", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"buckets": buckets})
 }

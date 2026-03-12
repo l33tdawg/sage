@@ -66,7 +66,7 @@ func mockSageAPI(t *testing.T) *httptest.Server {
 		json.NewEncoder(w).Encode(map[string]string{"status": "challenged"})
 	})
 
-	mux.HandleFunc("/v1/dashboard/memory/list", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"memories": []map[string]any{
@@ -84,7 +84,7 @@ func mockSageAPI(t *testing.T) *httptest.Server {
 		})
 	})
 
-	mux.HandleFunc("/v1/dashboard/memory/timeline", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/memory/timeline", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"buckets": []map[string]any{
@@ -415,7 +415,7 @@ func TestSageReflect_DosOnly(t *testing.T) {
 func TestBootSafeguardExistsTrue(t *testing.T) {
 	// Mock API returns a memory with boot protocol content in meta domain
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/dashboard/memory/list", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"memories": []map[string]any{
@@ -438,7 +438,7 @@ func TestBootSafeguardExistsTrue(t *testing.T) {
 func TestBootSafeguardExistsFalse(t *testing.T) {
 	// Mock API returns no matching memories
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/dashboard/memory/list", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"memories": []map[string]any{},
@@ -456,7 +456,7 @@ func TestBootSafeguardExistsFalse(t *testing.T) {
 
 func TestSimilarMemoryExists(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/dashboard/memory/list", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"memories": []map[string]any{

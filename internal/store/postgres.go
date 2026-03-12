@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -167,6 +168,15 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		query += fmt.Sprintf(" AND status = $%d", argIdx)
 		args = append(args, opts.StatusFilter)
 		argIdx++
+	}
+	if len(opts.SubmittingAgents) > 0 {
+		placeholders := make([]string, len(opts.SubmittingAgents))
+		for i, a := range opts.SubmittingAgents {
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
+			args = append(args, a)
+			argIdx++
+		}
+		query += " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
 	}
 
 	query += fmt.Sprintf(" ORDER BY embedding <=> $1 LIMIT $%d", argIdx)
@@ -886,6 +896,24 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 		countQuery += filter
 		args = append(args, opts.Status)
 		argIdx++
+	}
+	if opts.SubmittingAgent != "" {
+		filter := fmt.Sprintf(" AND submitting_agent = $%d", argIdx)
+		query += filter
+		countQuery += filter
+		args = append(args, opts.SubmittingAgent)
+		argIdx++
+	}
+	if len(opts.SubmittingAgents) > 0 {
+		placeholders := make([]string, len(opts.SubmittingAgents))
+		for i, a := range opts.SubmittingAgents {
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
+			args = append(args, a)
+			argIdx++
+		}
+		filter := " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
+		query += filter
+		countQuery += filter
 	}
 
 	switch opts.Sort {

@@ -187,6 +187,8 @@ func (s *Server) setupRouter() chi.Router {
 		r.Put("/v1/memory/{memory_id}/task-status", s.handleUpdateTaskStatus)
 		r.Post("/v1/memory/link", s.handleLinkMemories)
 		r.Get("/v1/memory/tasks", s.handleGetOpenTasks)
+		r.Get("/v1/memory/list", s.handleListMemoriesAuth)
+		r.Get("/v1/memory/timeline", s.handleTimelineAuth)
 		r.Post("/v1/memory/pre-validate", s.handlePreValidate)
 
 		// Agent endpoints
