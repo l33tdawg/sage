@@ -167,8 +167,11 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Compute body hash for on-chain embedding.
-		bodyHash := sha256.Sum256(body)
+		// Compute canonical body hash for on-chain embedding.
+		// Must match the signing format: SHA-256(method + " " + path + "\n" + body)
+		canonical := []byte(r.Method + " " + r.URL.Path + "\n")
+		canonical = append(canonical, body...)
+		bodyHash := sha256.Sum256(canonical)
 
 		// Store agent ID and raw auth proof in context for downstream handlers.
 		proof := &AgentAuthProof{
