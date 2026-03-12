@@ -60,6 +60,24 @@ builds:
       - -X main.commit={{.ShortCommit}}
       - -X main.date={{.Date}}
 
+  - id: sage-launcher
+    main: ./cmd/sage-launcher
+    binary: sage-launcher
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+    overrides:
+      - goos: windows
+        ldflags:
+          - -s -w -H=windowsgui
+
 archives:
   - id: sage-gui
     builds:

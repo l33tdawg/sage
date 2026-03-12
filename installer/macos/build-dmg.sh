@@ -53,141 +53,26 @@ echo "==> Creating app bundle..."
 mkdir -p "${APP_DIR}/Contents/MacOS"
 mkdir -p "${APP_DIR}/Contents/Resources"
 
-# Copy binary
+# Copy sage-gui binary
 cp "${BUILD_DIR}/sage-gui" "${APP_DIR}/Contents/MacOS/sage-gui"
 
-# Create launcher script that opens Terminal with sage-gui
-cat > "${APP_DIR}/Contents/MacOS/SAGE" << 'LAUNCHER'
-#!/bin/bash
-# SAGE Launcher — copies binary out of .app bundle so the bundle can be replaced freely.
-# The running sage-gui process lives in ~/.sage/bin/, NOT inside SAGE.app.
-APP_BIN="$(dirname "$0")/sage-gui"
-SAGE_DIR="$HOME/.sage"
-SAGE_BIN="$SAGE_DIR/bin/sage-gui"
-LOG_DIR="$SAGE_DIR/logs"
-mkdir -p "$LOG_DIR" "$SAGE_DIR/bin"
-LOG_FILE="$LOG_DIR/sage.log"
-DASHBOARD_URL="http://localhost:8080/ui/"
-PID_FILE="$SAGE_DIR/sage.pid"
-
-open_dashboard() {
-    for i in $(seq 1 30); do
-        if curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null | grep -q "200"; then
-            open "$DASHBOARD_URL"
-            return
-        fi
-        sleep 1
-    done
-    osascript -e 'display dialog "SAGE could not start. Check ~/.sage/logs/sage.log for details." with title "SAGE" with icon caution buttons {"OK"} default button "OK"'
-}
-
-stop_existing() {
-    if [ -f "$PID_FILE" ]; then
-        OLD_PID=$(cat "$PID_FILE")
-        if kill -0 "$OLD_PID" 2>/dev/null; then
-            kill "$OLD_PID" 2>/dev/null
-            for i in $(seq 1 10); do
-                kill -0 "$OLD_PID" 2>/dev/null || break
-                sleep 0.5
-            done
-            kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
-        fi
-        rm -f "$PID_FILE"
+# Compile native Swift dock app (sage-tray)
+echo "==> Compiling native dock app (sage-tray)..."
+SWIFT_SRC="${PROJECT_ROOT}/cmd/sage-tray/main.swift"
+if [ -f "$SWIFT_SRC" ]; then
+    if [ "$GOARCH" = "arm64" ]; then
+        SWIFT_ARCH="arm64"
+    else
+        SWIFT_ARCH="x86_64"
     fi
-    ORPHAN_PID=$(lsof -ti tcp:8080 -s tcp:listen 2>/dev/null)
-    if [ -n "$ORPHAN_PID" ]; then
-        kill "$ORPHAN_PID" 2>/dev/null
-        sleep 1
-        kill -0 "$ORPHAN_PID" 2>/dev/null && kill -9 "$ORPHAN_PID" 2>/dev/null
-    fi
-}
-
-# Handle "stop" argument
-if [ "${1:-}" = "stop" ]; then
-    stop_existing
-    echo "SAGE stopped."
-    exit 0
+    swiftc -O -target "${SWIFT_ARCH}-apple-macosx12.0" \
+        -o "${APP_DIR}/Contents/MacOS/sage-tray" \
+        "$SWIFT_SRC" -framework Cocoa
+else
+    echo "    WARNING: cmd/sage-tray/main.swift not found — falling back to launcher script"
 fi
 
-# Migrate: remove old com.sage.lite launchd plist (renamed in v3.6.0)
-OLD_PLIST="$HOME/Library/LaunchAgents/com.sage.lite.plist"
-if [ -f "$OLD_PLIST" ]; then
-    launchctl unload "$OLD_PLIST" 2>/dev/null || true
-    rm -f "$OLD_PLIST"
-    echo "$(date): Migrated — removed legacy com.sage.lite plist" >> "$LOG_FILE"
-fi
-
-# If SAGE is already running, check if it's the same version BEFORE copying.
-# (Must compare before cp, otherwise hashes always match.)
-needs_restart=false
-if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-    if [ -f "$SAGE_BIN" ]; then
-        INSTALLED_HASH=$(md5 -q "$SAGE_BIN" 2>/dev/null)
-        APP_HASH=$(md5 -q "$APP_BIN" 2>/dev/null)
-        if [ "$INSTALLED_HASH" = "$APP_HASH" ]; then
-            # Same binary — just open dashboard
-            open "$DASHBOARD_URL"
-            exit 0
-        fi
-    fi
-    # Different binary — stop old, will start new after copy
-    echo "$(date): Upgrading SAGE — stopping old instance..." >> "$LOG_FILE"
-    stop_existing
-    needs_restart=true
-fi
-
-# Check if port 8080 is in use by a non-SAGE process (or sage without PID file)
-if [ "$needs_restart" = false ] && curl -s -o /dev/null http://localhost:8080/health 2>/dev/null; then
-    PORT_PID=$(lsof -ti tcp:8080 -s tcp:listen 2>/dev/null)
-    if [ -n "$PORT_PID" ]; then
-        PORT_CMD=$(ps -p "$PORT_PID" -o command= 2>/dev/null)
-        if echo "$PORT_CMD" | grep -q "sage-gui"; then
-            # Existing sage-gui (maybe from CLI) — stop and replace with new version
-            stop_existing
-            needs_restart=true
-        fi
-    fi
-fi
-
-# Copy binary from .app bundle to ~/.sage/bin/
-# But only if the .app binary is newer or same version — don't overwrite in-app updates.
-should_copy=true
-if [ -f "$SAGE_BIN" ]; then
-    APP_VER=$("$APP_BIN" version 2>/dev/null | awk '{print $2}' | tr -d 'v')
-    CUR_VER=$("$SAGE_BIN" version 2>/dev/null | awk '{print $2}' | tr -d 'v')
-    if [ -n "$CUR_VER" ] && [ -n "$APP_VER" ] && [ "$APP_VER" != "$CUR_VER" ]; then
-        # Compare using sort -V (available on macOS 12+)
-        HIGHEST=$(printf '%s\n%s' "$APP_VER" "$CUR_VER" | sort -rV 2>/dev/null | head -1)
-        if [ "$HIGHEST" = "$CUR_VER" ]; then
-            should_copy=false
-            echo "$(date): Keeping in-app updated binary (v$CUR_VER > v$APP_VER from .app)" >> "$LOG_FILE"
-        fi
-    fi
-fi
-if [ "$should_copy" = true ]; then
-    cp -f "$APP_BIN" "$SAGE_BIN"
-    chmod +x "$SAGE_BIN"
-fi
-
-# First run — need setup
-if [ ! -f "$SAGE_DIR/config.yaml" ]; then
-    "$SAGE_BIN" setup >> "$LOG_FILE" 2>&1
-fi
-
-# Start SAGE from ~/.sage/bin/ (NOT from inside .app bundle)
-"$SAGE_BIN" serve >> "$LOG_FILE" 2>&1 &
-SAGE_PID=$!
-echo "$SAGE_PID" > "$PID_FILE"
-
-(wait "$SAGE_PID" 2>/dev/null; rm -f "$PID_FILE") &
-
-open_dashboard &
-
-exit 0
-LAUNCHER
-chmod +x "${APP_DIR}/Contents/MacOS/SAGE"
-
-# Create Info.plist
+# Create Info.plist — native dock app (LSUIElement=false shows in dock)
 cat > "${APP_DIR}/Contents/Info.plist" << PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -196,15 +81,15 @@ cat > "${APP_DIR}/Contents/Info.plist" << PLIST
     <key>CFBundleName</key>
     <string>SAGE</string>
     <key>CFBundleDisplayName</key>
-    <string>SAGE — AI Memory</string>
+    <string>SAGE Brain</string>
     <key>CFBundleIdentifier</key>
-    <string>com.sage.personal</string>
+    <string>com.sage.brain</string>
     <key>CFBundleVersion</key>
     <string>${VERSION}</string>
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundleExecutable</key>
-    <string>SAGE</string>
+    <string>sage-tray</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -214,7 +99,7 @@ cat > "${APP_DIR}/Contents/Info.plist" << PLIST
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright 2024-2026 Dhillon Andrew Kannabhiran. Apache 2.0 License.</string>
 </dict>
@@ -235,6 +120,12 @@ if [ -n "${SIGN_IDENTITY:-}" ]; then
         --sign "$SIGN_IDENTITY" \
         --timestamp \
         "${APP_DIR}/Contents/MacOS/sage-gui"
+    if [ -f "${APP_DIR}/Contents/MacOS/sage-tray" ]; then
+        codesign --force --options runtime --deep \
+            --sign "$SIGN_IDENTITY" \
+            --timestamp \
+            "${APP_DIR}/Contents/MacOS/sage-tray"
+    fi
     codesign --force --options runtime --deep \
         --sign "$SIGN_IDENTITY" \
         --timestamp \

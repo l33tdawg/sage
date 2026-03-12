@@ -3391,6 +3391,45 @@ input[type="range"]::-moz-range-thumb {
     padding: 24px 8px;
 }
 
+/* ─── Task Add Form ─── */
+.task-add-form {
+    display: flex;
+    gap: 8px;
+    padding: 12px 0;
+    align-items: center;
+    flex-wrap: wrap;
+}
+.task-add-input {
+    flex: 1;
+    min-width: 200px;
+    padding: 8px 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+}
+.task-add-input:focus { border-color: var(--accent); outline: none; }
+.task-add-domain {
+    width: 140px;
+    padding: 8px 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 13px;
+}
+.task-add-domain:focus { border-color: var(--accent); outline: none; }
+.task-add-submit { font-weight: 600; }
+.tasks-old-done-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
 /* ─── Agent Tabs (Brain View) ─── */
 .agent-tab-bar {
     display: flex;

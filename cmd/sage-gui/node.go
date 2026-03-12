@@ -356,8 +356,10 @@ func runServe() error {
 		fmt.Fprintf(os.Stderr, "  CEREBRUM:  http://localhost%s/ui/\n", cfg.RESTAddr)
 		fmt.Fprintf(os.Stderr, "  REST API:  http://localhost%s/v1/\n\n", cfg.RESTAddr)
 
-		// Auto-open dashboard in browser
-		go openBrowser(fmt.Sprintf("http://localhost%s/ui/", cfg.RESTAddr))
+		// Auto-open dashboard in browser (unless suppressed by tray app)
+		if os.Getenv("SAGE_NO_BROWSER") == "" {
+			go openBrowser(fmt.Sprintf("http://localhost%s/ui/", cfg.RESTAddr))
+		}
 
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Error().Err(err).Msg("HTTP server error")

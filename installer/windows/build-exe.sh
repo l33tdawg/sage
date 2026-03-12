@@ -37,6 +37,12 @@ CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
     -o "${BUILD_DIR}/sage-cli.exe" \
     "${PROJECT_ROOT}/cmd/sage-cli"
 
+echo "==> Cross-compiling sage-launcher for Windows (GUI mode, no console)..."
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+    -ldflags "$LDFLAGS -H=windowsgui" \
+    -o "${BUILD_DIR}/sage-launcher.exe" \
+    "${PROJECT_ROOT}/cmd/sage-launcher"
+
 # Copy NSIS script and icon to build dir
 cp "$SCRIPT_DIR/sage-installer.nsi" "$BUILD_DIR/"
 cp "$SCRIPT_DIR/sage.ico" "$BUILD_DIR/"

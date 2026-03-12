@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -1373,6 +1373,11 @@ function TasksPage() {
     const [domains, setDomains] = useState([]);
     const [dragging, setDragging] = useState(null);
     const [dragOver, setDragOver] = useState(null);
+    const [showAddForm, setShowAddForm] = useState(false);
+    const [newContent, setNewContent] = useState('');
+    const [newDomain, setNewDomain] = useState('');
+    const [adding, setAdding] = useState(false);
+    const [showOldDone, setShowOldDone] = useState(false);
 
     useEffect(() => { loadTasks(); }, []);
 
@@ -1396,6 +1401,31 @@ function TasksPage() {
         } catch (e) {
             loadTasks(); // revert on error
         }
+    }
+
+    async function handleAddTask(e) {
+        e.preventDefault();
+        if (!newContent.trim()) return;
+        setAdding(true);
+        try {
+            await createTask(newContent.trim(), newDomain.trim() || 'general');
+            setNewContent('');
+            setNewDomain('');
+            setShowAddForm(false);
+            loadTasks();
+        } catch (err) {
+            // stay on form so user can retry
+        }
+        setAdding(false);
+    }
+
+    // Filter out done/dropped items older than 7 days unless showOldDone is on
+    function isRecentDone(task) {
+        if (task.task_status !== 'done' && task.task_status !== 'dropped') return true;
+        if (showOldDone) return true;
+        const created = new Date(task.created_at);
+        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        return created > sevenDaysAgo;
     }
 
     function handleDragStart(e, task) {
@@ -1424,7 +1454,8 @@ function TasksPage() {
         setDragOver(null);
     }
 
-    const filtered = domainFilter ? tasks.filter(t => t.domain_tag === domainFilter) : tasks;
+    const filtered = (domainFilter ? tasks.filter(t => t.domain_tag === domainFilter) : tasks).filter(isRecentDone);
+    const hiddenDoneCount = tasks.filter(t => (t.task_status === 'done' || t.task_status === 'dropped') && !isRecentDone(t)).length;
 
     return html`
         <div class="tasks-page">
@@ -1435,9 +1466,39 @@ function TasksPage() {
                         <option value="">All domains</option>
                         ${domains.map(d => html`<option value=${d}>${d}</option>`)}
                     </select>
+                    <button class="btn" onClick=${() => setShowAddForm(!showAddForm)} title="Add task" style="font-weight:bold;">+ Add</button>
                     <button class="btn" onClick=${loadTasks} title="Refresh">↻</button>
                 </div>
             </div>
+            ${showAddForm && html`
+                <form class="task-add-form" onSubmit=${handleAddTask}>
+                    <input class="task-add-input" type="text" placeholder="What needs to be done?"
+                        value=${newContent} onInput=${e => setNewContent(e.target.value)}
+                        autoFocus disabled=${adding} />
+                    <input class="task-add-domain" type="text" placeholder="domain (optional)"
+                        value=${newDomain} onInput=${e => setNewDomain(e.target.value)}
+                        disabled=${adding} list="domain-suggestions" />
+                    <datalist id="domain-suggestions">
+                        ${domains.map(d => html`<option value=${d} />`)}
+                    </datalist>
+                    <button class="btn task-add-submit" type="submit" disabled=${adding || !newContent.trim()}>
+                        ${adding ? '...' : 'Add'}
+                    </button>
+                    <button class="btn" type="button" onClick=${() => setShowAddForm(false)}>Cancel</button>
+                </form>
+            `}
+            ${hiddenDoneCount > 0 && !showOldDone && html`
+                <div class="tasks-old-done-bar">
+                    <span>${hiddenDoneCount} older completed task${hiddenDoneCount !== 1 ? 's' : ''} hidden</span>
+                    <button class="btn" onClick=${() => setShowOldDone(true)}>Show all</button>
+                </div>
+            `}
+            ${showOldDone && html`
+                <div class="tasks-old-done-bar">
+                    <span>Showing all tasks</span>
+                    <button class="btn" onClick=${() => setShowOldDone(false)}>Hide old</button>
+                </div>
+            `}
             <div class="kanban-board">
                 ${TASK_COLUMNS.map(col => {
                     const colTasks = filtered.filter(t => t.task_status === col.key);
@@ -3342,13 +3403,11 @@ function ChainActivityLog({ sse }) {
             sse.on('consensus', (data) => addEvent('consensus', data)),
             sse.on('agent', (data) => addEvent('agent', data)),
             sse.on('connection', (data) => {
-                // Only show first connection and actual disconnects (not routine reconnects)
-                if (data.connected && !connectedOnce) {
+                // Track connection state internally but don't show in chain activity
+                if (data.connected) {
                     connectedOnce = true;
-                    addEvent('connection', data);
-                } else if (!data.connected) {
+                } else {
                     connectedOnce = false;
-                    addEvent('connection', data);
                 }
             }),
         ];

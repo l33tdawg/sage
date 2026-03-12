@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=SAGE
+GenericName=AI Memory
+Comment=Persistent, governed memory for AI agents
+Exec=sage-launcher
+Icon=sage
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+Keywords=AI;memory;agent;brain;
+StartupNotify=true
+StartupWMClass=sage

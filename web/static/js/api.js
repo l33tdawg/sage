@@ -392,3 +392,12 @@ export async function updateTaskStatus(id, taskStatus) {
     });
     return res.json();
 }
+
+export async function createTask(content, domain) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/tasks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, domain }),
+    });
+    return res.json();
+}

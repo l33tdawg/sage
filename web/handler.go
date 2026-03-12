@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
 )
 
@@ -214,6 +216,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 		// Task backlog
 		r.Get("/v1/dashboard/tasks", h.handleGetTasks)
+		r.Post("/v1/dashboard/tasks", h.handleCreateTaskDashboard)
 		r.Put("/v1/dashboard/tasks/{id}/status", h.handleUpdateTaskStatusDashboard)
 
 		// Tags
@@ -241,6 +244,16 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 		// Network agent management routes
 		h.RegisterNetworkRoutes(r)
+	})
+
+	// Launch endpoint — opens CEREBRUM in a named window for tab reuse across all browsers.
+	// The dock/tray app opens this URL; the named target ensures only one tab ever exists.
+	r.Get("/ui/launch", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(`<!DOCTYPE html><html><head><title>Launching CEREBRUM…</title></head><body>
+<script>window.open('/ui/', 'cerebrum'); window.close();</script>
+<noscript><meta http-equiv="refresh" content="0;url=/ui/"></noscript>
+</body></html>`)) //nolint:errcheck
 	})
 
 	// SPA — serve static files, fallback to index.html
@@ -812,6 +825,94 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 		return
 	}
 	writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "task_status": body.TaskStatus})
+}
+
+// handleCreateTaskDashboard creates a new task from the CEREBRUM dashboard.
+func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Content string `json:"content"`
+		Domain  string `json:"domain"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Content == "" {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	if body.Domain == "" {
+		body.Domain = "general"
+	}
+
+	taskContent := "[TASK] " + body.Content
+	memoryID := uuid.New().String()
+
+	// Generate embedding
+	var embedding []float32
+	var embeddingHash []byte
+	if h.embedder != nil {
+		if emb, err := h.embedder.Embed(r.Context(), taskContent); err == nil {
+			embedding = emb
+			eh := sha256.New()
+			for _, v := range emb {
+				fmt.Fprintf(eh, "%f", v)
+			}
+			embeddingHash = eh.Sum(nil)
+		}
+	}
+
+	contentHash := sha256.Sum256([]byte(taskContent))
+
+	rec := &memory.MemoryRecord{
+		MemoryID:        memoryID,
+		Content:         taskContent,
+		ContentHash:     contentHash[:],
+		MemoryType:      memory.TypeTask,
+		DomainTag:       body.Domain,
+		ConfidenceScore: 0.90,
+		TaskStatus:      memory.TaskStatusPlanned,
+		CreatedAt:       time.Now(),
+		Embedding:       embedding,
+	}
+
+	// Broadcast on-chain through CometBFT consensus
+	if h.CometBFTRPC != "" && h.SigningKey != nil {
+		submitTx := &tx.ParsedTx{
+			Type:      tx.TxTypeMemorySubmit,
+			Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+			Timestamp: time.Now(),
+			MemorySubmit: &tx.MemorySubmit{
+				MemoryID:        memoryID,
+				ContentHash:     contentHash[:],
+				EmbeddingHash:   embeddingHash,
+				MemoryType:      tx.MemoryTypeTask,
+				DomainTag:       body.Domain,
+				ConfidenceScore: 0.90,
+				Content:         taskContent,
+				TaskStatus:      "planned",
+				Classification:  tx.ClearanceLevel(1), // INTERNAL
+			},
+		}
+		embedDashboardAgentProof(submitTx, h.SigningKey)
+		if signErr := tx.SignTx(submitTx, h.SigningKey); signErr == nil {
+			if encoded, encErr := tx.EncodeTx(submitTx); encErr == nil {
+				broadcastTxSync(h.CometBFTRPC, encoded)
+			}
+		}
+	}
+
+	if err := h.store.InsertMemory(r.Context(), rec); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSONResp(w, http.StatusCreated, map[string]string{
+		"memory_id":   memoryID,
+		"task_status": "planned",
+		"domain":      body.Domain,
+	})
 }
 
 // handleHealth returns system health including Ollama status.
