@@ -462,12 +462,19 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	queryAgentID := middleware.ContextAgentID(r.Context())
 	allowedAgents, seeAll := s.resolveVisibleAgents(queryAgentID)
 
-	// Grant-aware override: if querying a specific domain the agent has been granted
-	// access to, skip agent isolation so the granter's memories are visible.
+	// Grant-aware override: if querying a specific domain, skip agent isolation when:
+	// (a) the agent has been granted access to the domain, or
+	// (b) the domain has no registered owner (no access policy = open visibility)
 	if !seeAll && req.DomainTag != "" && s.badgerStore != nil {
 		hasGrant, _ := s.badgerStore.HasAccess(req.DomainTag, queryAgentID, 1, time.Now())
 		if hasGrant {
 			seeAll = true
+		} else {
+			// Unregistered domains have no access policy — don't enforce agent isolation
+			_, ownerErr := s.badgerStore.GetDomainOwner(req.DomainTag)
+			if ownerErr != nil {
+				seeAll = true
+			}
 		}
 	}
 
@@ -872,12 +879,18 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 
 	domainFilter := q.Get("domain")
 
-	// Grant-aware override: if listing a specific domain the agent has been granted
-	// access to, skip agent isolation so the granter's memories are visible.
+	// Grant-aware override: if listing a specific domain, skip agent isolation when:
+	// (a) the agent has been granted access to the domain, or
+	// (b) the domain has no registered owner (no access policy = open visibility)
 	if !seeAll && domainFilter != "" && s.badgerStore != nil {
 		hasGrant, _ := s.badgerStore.HasAccess(domainFilter, agentID, 1, time.Now())
 		if hasGrant {
 			seeAll = true
+		} else {
+			_, ownerErr := s.badgerStore.GetDomainOwner(domainFilter)
+			if ownerErr != nil {
+				seeAll = true
+			}
 		}
 	}
 
