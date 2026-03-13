@@ -222,29 +222,44 @@ func (s *Server) resolveVisibleAgents(agentID string) ([]string, bool) {
 		return nil, true // No identity = legacy/internal, allow all
 	}
 
-	// Check on-chain state (BadgerDB)
+	// Resolve visible_agents from the best available source.
+	// On-chain (BadgerDB) is checked first, then SQLite as fallback
+	// since dashboard writes may not have been broadcast to chain yet.
+	var role, visibleAgents string
+
 	if s.badgerStore != nil {
 		agent, err := s.badgerStore.GetRegisteredAgent(agentID)
 		if err == nil && agent != nil {
-			if agent.Role == "admin" {
-				return nil, true
-			}
-			if agent.VisibleAgents == "*" {
-				return nil, true
-			}
-			allowed := []string{agentID} // Always see own
-			if agent.VisibleAgents != "" {
-				var list []string
-				if json.Unmarshal([]byte(agent.VisibleAgents), &list) == nil {
-					allowed = append(allowed, list...)
-				}
-			}
-			return allowed, false
+			role = agent.Role
+			visibleAgents = agent.VisibleAgents
 		}
 	}
 
-	// Not registered on-chain — isolated by default
-	return []string{agentID}, false
+	// Fallback to SQLite if on-chain state has no visible_agents
+	if visibleAgents == "" && s.agentStore != nil {
+		ctx := context.Background()
+		if sqlAgent, err := s.agentStore.GetAgent(ctx, agentID); err == nil && sqlAgent != nil {
+			if role == "" {
+				role = sqlAgent.Role
+			}
+			visibleAgents = sqlAgent.VisibleAgents
+		}
+	}
+
+	if role == "admin" {
+		return nil, true
+	}
+	if visibleAgents == "*" {
+		return nil, true
+	}
+	allowed := []string{agentID} // Always see own
+	if visibleAgents != "" {
+		var list []string
+		if json.Unmarshal([]byte(visibleAgents), &list) == nil {
+			allowed = append(allowed, list...)
+		}
+	}
+	return allowed, false
 }
 
 // --- Handlers ----------------------------------------------------------------
