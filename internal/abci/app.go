@@ -475,6 +475,7 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	}
 
 	// Domain write-access check: if the domain has a registered owner, verify the agent has write access.
+	// If the domain doesn't exist, auto-register it with the submitting agent as owner.
 	if submit.DomainTag != "" {
 		domainOwner, domainErr := app.badgerStore.GetDomainOwner(submit.DomainTag)
 		if domainErr == nil && domainOwner != "" {
@@ -482,6 +483,17 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 			hasAccess, accessErr := app.badgerStore.HasAccessMultiOrg(submit.DomainTag, agentID, 0, blockTime)
 			if accessErr != nil || !hasAccess {
 				return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf("access denied: agent %s has no write access to domain %s", agentID[:16], submit.DomainTag)}
+			}
+		} else {
+			// Domain not registered — auto-register with submitting agent as owner
+			if regErr := app.badgerStore.RegisterDomain(submit.DomainTag, agentID, "", height); regErr != nil {
+				app.logger.Error().Err(regErr).Str("domain", submit.DomainTag).Msg("failed to auto-register domain")
+			} else {
+				app.logger.Info().Str("domain", submit.DomainTag).Str("owner", agentID[:16]).Msg("auto-registered domain on first memory submit")
+				// Also grant the owner full access
+				if grantErr := app.badgerStore.SetAccessGrant(submit.DomainTag, agentID, 2, 0, agentID); grantErr != nil {
+					app.logger.Error().Err(grantErr).Str("domain", submit.DomainTag).Msg("failed to auto-grant owner access")
+				}
 			}
 		}
 	}
@@ -667,8 +679,9 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 		return &abcitypes.ExecTxResult{Code: 15, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
-	// Update on-chain status
-	if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, nil, string(memory.StatusChallenged)); err != nil {
+	// A challenge that passes BFT consensus (included in a block) is decisive —
+	// the memory is deprecated immediately. The block inclusion IS the consensus.
+	if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, nil, string(memory.StatusDeprecated)); err != nil {
 		return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
 	}
 
@@ -685,18 +698,18 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 		},
 	})
 
-	// Buffer status update for the memory.
+	// Buffer status update — deprecated immediately.
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{
 		writeType: "status_update",
 		data: &statusUpdate{
 			MemoryID: challenge.MemoryID,
-			Status:   memory.StatusChallenged,
+			Status:   memory.StatusDeprecated,
 			At:       blockTime,
 		},
 	})
 
 	metrics.ChallengesTotal.Inc()
-	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("challenge submitted for memory %s by %s", challenge.MemoryID, challengerID[:16])}
+	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("memory %s deprecated by %s", challenge.MemoryID, challengerID[:16])}
 }
 
 func (app *SageApp) processMemoryCorroborate(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
@@ -1985,6 +1998,25 @@ func (app *SageApp) flushPendingWrites(ctx context.Context, s store.OffchainStor
 						existing.DeptID = d.DeptID
 					}
 					err = s.UpdateAgent(ctx, existing)
+				} else {
+					// Agent exists on-chain but not in SQLite — create it so permissions persist
+					now := time.Now()
+					agent := &store.AgentEntry{
+						AgentID:       d.AgentID,
+						Clearance:     d.Clearance,
+						DomainAccess:  d.DomainAccess,
+						VisibleAgents: d.VisibleAgents,
+						OrgID:         d.OrgID,
+						DeptID:        d.DeptID,
+						Status:        "active",
+						CreatedAt:     now,
+						FirstSeen:     &now,
+					}
+					if createErr := s.CreateAgent(ctx, agent); createErr != nil {
+						err = fmt.Errorf("agent %s not in offchain store and create failed: %w", d.AgentID[:16], createErr)
+					} else {
+						app.logger.Info().Str("agent_id", d.AgentID[:16]).Msg("created offchain agent record for permission sync")
+					}
 				}
 			}
 		case "memory_reassign":

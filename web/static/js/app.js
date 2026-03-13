@@ -260,6 +260,8 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
         window.addEventListener('resize', resize);
 
         function tick() {
+            // Schedule next frame FIRST — if anything throws, the loop survives
+            animFrame = requestAnimationFrame(tick);
             const s = stateRef.current;
             const W = canvas.width / devicePixelRatio;
             const H = canvas.height / devicePixelRatio;
@@ -361,7 +363,6 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                 // Snap-back: when exiting focus, give returning nodes a velocity kick
                 if (s._wasInFocus && s.focusTransition > 0.3) {
                     s._wasInFocus = false;
-                    s._settled = false;
                     s._forceFrame = 0;
                     // Compute cloud centroid from ALL nodes
                     let cx = 0, cy = 0;
@@ -672,7 +673,6 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             }
 
             ctx.restore();
-            animFrame = requestAnimationFrame(tick);
         }
 
         animFrame = requestAnimationFrame(tick);
@@ -1200,17 +1200,8 @@ function simulateForces(state, W, H) {
     const edges = state.edges;
     if (nodes.length === 0) return;
 
-    // Skip simulation if nodes have settled (check every 30 frames)
     if (!state._forceFrame) state._forceFrame = 0;
     state._forceFrame++;
-    if (state._forceFrame % 30 === 0) {
-        let totalV = 0;
-        for (let i = 0; i < Math.min(50, nodes.length); i++) {
-            totalV += Math.abs(nodes[i].vx) + Math.abs(nodes[i].vy);
-        }
-        state._settled = totalV < 0.5;
-    }
-    if (state._settled && !state.focusDomain && state._forceFrame > 120) return;
 
     const dt = 0.3;
     const repulsion = 800;
@@ -1313,19 +1304,25 @@ function simulateForces(state, W, H) {
         }
     }
 
-    // Center gravity + damping + integration
-    for (const n of nodes) {
+    // Center gravity + damping + ambient drift + integration
+    const time = state._forceFrame * 0.015;
+    for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i];
         n.vx -= n.x * centerGravity;
         n.vy -= n.y * centerGravity;
         n.vx *= damping;
         n.vy *= damping;
+        // Ambient drift — layered sine waves per node for organic floating motion
+        const p = i * 2.399; // golden angle offset per node
+        const drift = 0.15;
+        n.vx += (Math.sin(p + time) + Math.sin(p * 0.7 + time * 1.3) * 0.5) * drift;
+        n.vy += (Math.cos(p * 0.8 + time * 0.9) + Math.cos(p * 1.1 + time * 0.7) * 0.5) * drift;
         n.x += n.vx * dt;
         n.y += n.vy * dt;
     }
 
-    // Reset settled state when camera changes (ball pit needs to recalculate)
+    // Reset force frame when camera changes (ball pit needs to recalculate)
     if (cam && (state._lastZoom !== cam.zoom || state._lastCamX !== cam.x || state._lastCamY !== cam.y)) {
-        state._settled = false;
         state._forceFrame = 0;
         state._lastZoom = cam.zoom;
         state._lastCamX = cam.x;

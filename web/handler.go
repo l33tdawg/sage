@@ -570,7 +570,16 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 
 	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
 	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
-		opts.SubmittingAgents = allowedAgents
+		// Grant-aware override: if listing a specific domain the agent has been granted
+		// access to, skip agent isolation so the granter's memories are visible.
+		listAgentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+		if opts.DomainTag != "" && h.BadgerStore != nil && listAgentID != "" {
+			if hasGrant, _ := h.BadgerStore.HasAccess(opts.DomainTag, listAgentID, 1, time.Now()); !hasGrant {
+				opts.SubmittingAgents = allowedAgents
+			}
+		} else {
+			opts.SubmittingAgents = allowedAgents
+		}
 	}
 
 	records, total, err := h.store.ListMemories(r.Context(), opts)

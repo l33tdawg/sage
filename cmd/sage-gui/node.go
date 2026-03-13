@@ -218,6 +218,14 @@ func runServe() error {
 		Str("node_id", string(cometNode.NodeInfo().ID())).
 		Msg("CometBFT node started (single-validator personal mode)")
 
+	// Resolve any stale "challenged" memories → deprecated (upgrade from < v4.5.0
+	// where challenges stayed in limbo instead of being auto-deprecated).
+	if n, resolveErr := sqliteStore.ResolveChallengedMemories(ctx); resolveErr != nil {
+		logger.Warn().Err(resolveErr).Msg("failed to resolve challenged memories")
+	} else if n > 0 {
+		logger.Info().Int("resolved", n).Msg("upgraded challenged memories to deprecated")
+	}
+
 	// Auto-seed network_agents from existing chain state (v3 upgrade path)
 	seedNetworkAgents(ctx, sqliteStore, cometHome, cometNode, logger)
 

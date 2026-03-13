@@ -2516,6 +2516,20 @@ func (s *SQLiteStore) DeprecateMemories(ctx context.Context, memoryIDs []string)
 	return int(n), nil
 }
 
+// ResolveChallengedMemories upgrades all "challenged" memories to "deprecated".
+// In v4.5.0+, challenges are auto-deprecated on consensus. This resolves any
+// stale challenged memories from earlier versions.
+func (s *SQLiteStore) ResolveChallengedMemories(ctx context.Context) (int, error) {
+	result, err := s.conn.ExecContext(ctx,
+		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE status = 'challenged'`)
+	if err != nil {
+		return 0, fmt.Errorf("resolve challenged: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
 // scanMemoryRow scans a single memory row from a *sql.Rows.
 func (s *SQLiteStore) scanMemoryRow(rows *sql.Rows) (*memory.MemoryRecord, error) {
 	var r memory.MemoryRecord

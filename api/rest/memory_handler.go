@@ -462,6 +462,15 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	queryAgentID := middleware.ContextAgentID(r.Context())
 	allowedAgents, seeAll := s.resolveVisibleAgents(queryAgentID)
 
+	// Grant-aware override: if querying a specific domain the agent has been granted
+	// access to, skip agent isolation so the granter's memories are visible.
+	if !seeAll && req.DomainTag != "" && s.badgerStore != nil {
+		hasGrant, _ := s.badgerStore.HasAccess(req.DomainTag, queryAgentID, 1, time.Now())
+		if hasGrant {
+			seeAll = true
+		}
+	}
+
 	start := time.Now()
 
 	opts := store.QueryOptions{
@@ -861,8 +870,19 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 	agentID := middleware.ContextAgentID(r.Context())
 	allowedAgents, seeAll := s.resolveVisibleAgents(agentID)
 
+	domainFilter := q.Get("domain")
+
+	// Grant-aware override: if listing a specific domain the agent has been granted
+	// access to, skip agent isolation so the granter's memories are visible.
+	if !seeAll && domainFilter != "" && s.badgerStore != nil {
+		hasGrant, _ := s.badgerStore.HasAccess(domainFilter, agentID, 1, time.Now())
+		if hasGrant {
+			seeAll = true
+		}
+	}
+
 	opts := store.ListOptions{
-		DomainTag: q.Get("domain"),
+		DomainTag: domainFilter,
 		Tag:       q.Get("tag"),
 		Provider:  q.Get("provider"),
 		Status:    q.Get("status"),
