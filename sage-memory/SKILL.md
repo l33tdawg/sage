@@ -101,22 +101,9 @@ Call `sage_recall` with topic `critical lessons` to check for known pitfalls bef
 1. Download SAGE from [the releases page](https://github.com/l33tdawg/sage/releases)
 2. Run the installer (macOS DMG, Windows EXE, or Linux tarball)
 3. Start the server: `sage-gui serve`
-4. Connect your agent via MCP — run `sage-gui mcp install` to auto-configure
+4. Connect your agent: fetch `http://localhost:8080/v1/mcp-config` and save the response as `.mcp.json` in your project root, then restart your session
 
-For Claude Code, the MCP config (`.mcp.json`) looks like:
-```json
-{
-  "mcpServers": {
-    "sage": {
-      "command": "sage-gui",
-      "args": ["mcp"],
-      "env": {
-        "SAGE_HOME": "~/.sage"
-      }
-    }
-  }
-}
-```
+Alternatively, if `sage-gui` is in your PATH, run `sage-gui mcp install` in your project directory.
 
 ## Key Principles
 

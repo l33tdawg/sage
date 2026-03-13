@@ -654,9 +654,11 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
         function findNode(wx, wy) {
             const s = stateRef.current;
             const focusT = s.focusTransition || 0;
-            // In focus mode, only allow selecting focused domain nodes
+            const visibleIds = s._visibleIds;
+            // Only allow hovering/clicking nodes that are visible (respects agent tab, domain filter, search, timeline)
             for (let i = s.nodes.length - 1; i >= 0; i--) {
                 const n = s.nodes[i];
+                if (visibleIds && !visibleIds.has(n.id)) continue;
                 // Skip non-focused nodes when in focus mode
                 if (focusT > 0.3 && s.focusDomain && n.domain !== s.focusDomain) continue;
                 // Use drawn position (accounting for focus mode lerp)
