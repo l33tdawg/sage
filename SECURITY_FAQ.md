@@ -11,7 +11,7 @@ SAGE has two distinct deployment models with fundamentally different threat mode
 | **Who** | One user, one AI agent | Multiple agents, teams, organizations |
 | **Trust model** | User IS the only validator | Byzantine fault tolerance across validators |
 | **Database** | SQLite file in `~/.sage/data/` | PostgreSQL |
-| **Release** | v2.0.0 (current) | Research/enterprise architecture (Paper 1) |
+| **Release** | v4.3.0 (current) | Research/enterprise architecture (Paper 1) |
 
 Many concerns raised about the enterprise codebase do not apply to SAGE Personal, and vice versa. Each item below is tagged with which deployment it affects.
 
@@ -139,10 +139,10 @@ Many concerns raised about the enterprise codebase do not apply to SAGE Personal
 
 The following are honest limitations of the current codebase:
 
-**SAGE Personal (sage-gui v2.0.0):**
+**SAGE Personal (sage-gui v4.3.0):**
 - Designed for single-user, single-machine use. Not a networked service.
 - No authentication — anyone with access to your machine can access the API on localhost.
-- SQLite database is not encrypted at rest. Protect it as you would any local file.
+- SQLite database supports optional AES-256-GCM encryption at rest (Synaptic Ledger). Enable from CEREBRUM Settings → Security.
 
 **SAGE Enterprise:**
 - The enterprise deployment is a research prototype, not production-hardened infrastructure.

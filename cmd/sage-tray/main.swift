@@ -6,6 +6,7 @@ import Cocoa
 
 class SAGEApp: NSObject, NSApplicationDelegate {
     var serverProcess: Process?
+    var vaultPassphrase: String?
 
     let sageHome: String = {
         ProcessInfo.processInfo.environment["SAGE_HOME"] ?? NSHomeDirectory() + "/.sage"
@@ -17,8 +18,16 @@ class SAGEApp: NSObject, NSApplicationDelegate {
         if FileManager.default.fileExists(atPath: sibling) { return sibling }
         return "/usr/local/bin/sage-gui"
     }
+    var vaultKeyPath: String { sageHome + "/vault.key" }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // If vault.key exists, prompt for passphrase before starting the server.
+        // This ensures encryption is unlocked at startup, not deferred to the web UI.
+        if FileManager.default.fileExists(atPath: vaultKeyPath) {
+            vaultPassphrase = promptPassphrase()
+            // If user cancels, server starts locked — web UI shows lock screen
+        }
+
         startServer()
 
         // Open dashboard after server has a moment to start
@@ -64,6 +73,10 @@ class SAGEApp: NSObject, NSApplicationDelegate {
 
         var env = ProcessInfo.processInfo.environment
         env["SAGE_NO_BROWSER"] = "1"
+        if let passphrase = vaultPassphrase {
+            env["SAGE_PASSPHRASE"] = passphrase
+            vaultPassphrase = nil // clear from memory after passing to server
+        }
         process.environment = env
 
         FileManager.default.createFile(atPath: logPath, contents: nil)
@@ -79,6 +92,29 @@ class SAGEApp: NSObject, NSApplicationDelegate {
         } catch {
             NSLog("Failed to start SAGE server: \(error)")
         }
+    }
+
+    /// Show a native macOS dialog to collect the vault passphrase.
+    /// Returns the passphrase string, or nil if the user cancels.
+    func promptPassphrase() -> String? {
+        let alert = NSAlert()
+        alert.messageText = "SAGE — Unlock Encrypted Memory"
+        alert.informativeText = "Your memory vault is encrypted. Enter your passphrase to unlock."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Unlock")
+        alert.addButton(withTitle: "Skip")
+
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        input.placeholderString = "Vault passphrase"
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let value = input.stringValue
+            if !value.isEmpty { return value }
+        }
+        return nil
     }
 
     @objc func openDashboard() {

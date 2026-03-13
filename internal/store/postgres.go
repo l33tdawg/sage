@@ -1077,6 +1077,17 @@ func (s *PostgresStore) UpdateDomainTag(ctx context.Context, memoryID string, do
 	return nil
 }
 
+// UpdateMemoryAgent updates the submitting agent of a memory.
+func (s *PostgresStore) UpdateMemoryAgent(ctx context.Context, memoryID string, agentID string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE memories SET submitting_agent = $2 WHERE memory_id = $1`,
+		memoryID, agentID)
+	if err != nil {
+		return fmt.Errorf("update memory agent: %w", err)
+	}
+	return nil
+}
+
 // UpdateTaskStatus updates the task_status of a task memory.
 func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
 	result, err := s.db.Exec(ctx,
@@ -1189,6 +1200,10 @@ func (s *PostgresStore) SetTags(_ context.Context, _ string, _ []string) error {
 
 func (s *PostgresStore) GetTags(_ context.Context, _ string) ([]string, error) {
 	return nil, nil
+}
+
+func (s *PostgresStore) GetTagsBatch(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
 }
 
 func (s *PostgresStore) ListAllTags(_ context.Context) ([]TagCount, error) {

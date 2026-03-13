@@ -47,7 +47,8 @@ type DashboardHandler struct {
 	embedder  Embedder
 	SSE       *SSEBroadcaster
 	Version   string
-	Encrypted atomic.Bool
+	Encrypted   atomic.Bool
+	VaultLocked atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
 
 	// Auth — only active when Encrypted is true.
 	VaultKeyPath   string
@@ -71,6 +72,10 @@ type DashboardHandler struct {
 	CometBFTRPC string
 	SigningKey   ed25519.PrivateKey
 
+	// BadgerStore — when set, on-chain RBAC is enforced on dashboard endpoints
+	// when requests include X-Agent-ID headers (i.e. MCP agent requests).
+	BadgerStore *store.BadgerStore
+
 	// pendingImports holds parsed records from preview, keyed by import ID.
 	pendingImports sync.Map // string -> *pendingImport
 
@@ -92,6 +97,38 @@ type PreValidateVote struct {
 	Validator string `json:"validator"`
 	Decision  string `json:"decision"`
 	Reason    string `json:"reason"`
+}
+
+// resolveAgentRBAC checks whether the request comes from an authenticated MCP agent
+// (X-Agent-ID header present) and resolves on-chain RBAC visibility.
+// Returns (allowedAgents, seeAll). If no agent header or no BadgerStore, returns (nil, true)
+// meaning no filtering (human dashboard user).
+func (h *DashboardHandler) resolveAgentRBAC(r *http.Request) ([]string, bool) {
+	agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+	if agentID == "" || h.BadgerStore == nil {
+		return nil, true // Human dashboard — no filtering
+	}
+
+	agent, err := h.BadgerStore.GetRegisteredAgent(agentID)
+	if err == nil && agent != nil {
+		if agent.Role == "admin" {
+			return nil, true
+		}
+		if agent.VisibleAgents == "*" {
+			return nil, true
+		}
+		allowed := []string{agentID} // Always see own
+		if agent.VisibleAgents != "" {
+			var list []string
+			if json.Unmarshal([]byte(agent.VisibleAgents), &list) == nil {
+				allowed = append(allowed, list...)
+			}
+		}
+		return allowed, false
+	}
+
+	// Not registered on-chain — isolated by default (own memories only)
+	return []string{agentID}, false
 }
 
 // NewDashboardHandler creates a new dashboard handler.
@@ -200,6 +237,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Get("/v1/dashboard/stats", h.handleStats)
 		r.Delete("/v1/dashboard/memory/{id}", h.handleDeleteMemory)
 		r.Patch("/v1/dashboard/memory/{id}", h.handleUpdateMemory)
+		r.Post("/v1/dashboard/memory/bulk", h.handleBulkUpdateMemories)
 		r.Get("/v1/dashboard/events", h.SSE.ServeHTTP)
 		r.Post("/v1/dashboard/import", h.handleImportUpload)
 		r.Post("/v1/dashboard/import/preview", h.handleImportPreview)
@@ -361,11 +399,19 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify passphrase against vault
-	_, err := vault.Open(h.VaultKeyPath, req.Passphrase)
+	v, err := vault.Open(h.VaultKeyPath, req.Passphrase)
 	if err != nil {
 		writeJSONResp(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "wrong passphrase"})
 		return
 	}
+
+	// Unlock the vault store so new writes are encrypted.
+	// This handles the case where the server started without a passphrase
+	// (e.g. launched from app icon) and the user unlocks via the web UI.
+	if vs, ok := h.store.(VaultStore); ok {
+		vs.SetVault(v)
+	}
+	h.VaultLocked.Store(false)
 
 	// Create session
 	token := generateToken()
@@ -461,6 +507,11 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		Limit:           limit,
 		Offset:          offset,
 		Sort:            q.Get("sort"),
+	}
+
+	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
+	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
+		opts.SubmittingAgents = allowedAgents
 	}
 
 	records, total, err := h.store.ListMemories(r.Context(), opts)
@@ -572,14 +623,15 @@ func (h *DashboardHandler) handleTimeline(w http.ResponseWriter, r *http.Request
 
 // graphNode is a memory node for the force-directed graph.
 type graphNode struct {
-	ID         string  `json:"id"`
-	Content    string  `json:"content"`
-	Domain     string  `json:"domain"`
-	Confidence float64 `json:"confidence"`
-	Status     string  `json:"status"`
-	MemoryType string  `json:"memory_type"`
-	CreatedAt  string  `json:"created_at"`
-	Agent      string  `json:"agent"`
+	ID         string   `json:"id"`
+	Content    string   `json:"content"`
+	Domain     string   `json:"domain"`
+	Confidence float64  `json:"confidence"`
+	Status     string   `json:"status"`
+	MemoryType string   `json:"memory_type"`
+	CreatedAt  string   `json:"created_at"`
+	Agent      string   `json:"agent"`
+	Tags       []string `json:"tags,omitempty"`
 }
 
 // graphEdge connects two memories.
@@ -597,10 +649,16 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 		limit = 500
 	}
 
-	records, _, err := h.store.ListMemories(r.Context(), store.ListOptions{
+	opts := store.ListOptions{
 		Limit: limit,
 		Sort:  "newest",
-	})
+	}
+	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
+	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
+		opts.SubmittingAgents = allowedAgents
+	}
+
+	records, _, err := h.store.ListMemories(r.Context(), opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -608,6 +666,13 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 
 	nodes := make([]graphNode, 0, len(records))
 	edges := make([]graphEdge, 0)
+
+	// Batch-fetch tags for all memories
+	memIDs := make([]string, len(records))
+	for i, rec := range records {
+		memIDs[i] = rec.MemoryID
+	}
+	tagMap, _ := h.store.GetTagsBatch(r.Context(), memIDs)
 
 	// Build domain groups for edge generation
 	domainMemories := make(map[string][]string)
@@ -621,6 +686,7 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 			MemoryType: string(rec.MemoryType),
 			CreatedAt:  rec.CreatedAt.Format(time.RFC3339),
 			Agent:      rec.SubmittingAgent,
+			Tags:       tagMap[rec.MemoryID],
 		})
 		domainMemories[rec.DomainTag] = append(domainMemories[rec.DomainTag], rec.MemoryID)
 
@@ -708,6 +774,93 @@ func (h *DashboardHandler) handleUpdateMemory(w http.ResponseWriter, r *http.Req
 		}
 	}
 	writeJSONResp(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// handleBulkUpdateMemories applies domain and/or tag changes to multiple memories at once.
+func (h *DashboardHandler) handleBulkUpdateMemories(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs     []string `json:"ids"`
+		Domain  string   `json:"domain,omitempty"`
+		AddTags []string `json:"add_tags,omitempty"`
+		Agent   string   `json:"agent,omitempty"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if len(body.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, "ids is required")
+		return
+	}
+	if len(body.IDs) > 500 {
+		writeError(w, http.StatusBadRequest, "max 500 memories per bulk operation")
+		return
+	}
+	if body.Domain == "" && len(body.AddTags) == 0 && body.Agent == "" {
+		writeError(w, http.StatusBadRequest, "domain, add_tags, or agent is required")
+		return
+	}
+
+	ctx := r.Context()
+	updated := 0
+	var firstErr error
+
+	for _, id := range body.IDs {
+		if body.Domain != "" {
+			if err := h.store.UpdateDomainTag(ctx, id, body.Domain); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
+		if body.Agent != "" {
+			if err := h.store.UpdateMemoryAgent(ctx, id, body.Agent); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
+		if len(body.AddTags) > 0 {
+			existing, err := h.store.GetTags(ctx, id)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			tagSet := make(map[string]bool, len(existing)+len(body.AddTags))
+			for _, t := range existing {
+				tagSet[t] = true
+			}
+			for _, t := range body.AddTags {
+				tagSet[t] = true
+			}
+			merged := make([]string, 0, len(tagSet))
+			for t := range tagSet {
+				merged = append(merged, t)
+			}
+			if err := h.store.SetTags(ctx, id, merged); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+		}
+		updated++
+	}
+
+	if firstErr != nil && updated == 0 {
+		writeError(w, http.StatusInternalServerError, firstErr.Error())
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"status":  "updated",
+		"updated": updated,
+		"total":   len(body.IDs),
+	})
 }
 
 // handleListTags returns all unique tags with counts.
@@ -918,10 +1071,11 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 // handleHealth returns system health including Ollama status.
 func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	health := map[string]any{
-		"sage":      "running",
-		"version":   h.Version,
-		"encrypted": h.Encrypted.Load(),
-		"uptime":    time.Since(startTime).String(),
+		"sage":         "running",
+		"version":      h.Version,
+		"encrypted":    h.Encrypted.Load(),
+		"vault_locked": h.VaultLocked.Load(),
+		"uptime":       time.Since(startTime).String(),
 	}
 
 	// Check Ollama

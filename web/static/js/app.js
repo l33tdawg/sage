@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -145,6 +145,12 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
     // Domain transfer state
     const [domainTransfer, setDomainTransfer] = useState(null); // { domain, sourceAgentId }
     const [domainTransferring, setDomainTransferring] = useState(false);
+    // Selection state for bulk operations (only active in focus mode)
+    const [selectedMemories, setSelectedMemories] = useState(new Set());
+    const [bulkAction, setBulkAction] = useState(null); // 'domain' | 'tag' | 'agent' | null
+    const [bulkInput, setBulkInput] = useState('');
+    const [bulkBusy, setBulkBusy] = useState(false);
+    const selectedRef = useRef(new Set()); // mirror for canvas access
     // Draggable stats panel
     const [statsPos, setStatsPos] = useState(() => {
         try { const s = JSON.parse(localStorage.getItem('sage_stats_pos')); if (s && s.x != null) return s; } catch {}
@@ -501,7 +507,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                 ctx.globalAlpha = (dim ? (focusT > 0 ? 0.08 : 0.2) : 0.85) * fadeOut;
                 ctx.fill();
 
-                // Focus mode: draw date label below focused nodes
+                // Focus mode: draw date label and tag pills below focused nodes
                 if (focusT > 0.5 && isFocused) {
                     const ct = n.created_at || n.createdAt;
                     if (ct) {
@@ -512,6 +518,28 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                         ctx.fillStyle = n.color;
                         ctx.textAlign = 'center';
                         ctx.fillText(label, drawX, drawY + r + 14);
+                    }
+                    // Tag indicator dots
+                    if (n.tags && n.tags.length > 0) {
+                        const tagY = drawY + r + 22;
+                        const dotR = 3;
+                        const dotSpacing = 8;
+                        const startX = drawX - ((n.tags.length - 1) * dotSpacing) / 2;
+                        for (let ti = 0; ti < Math.min(n.tags.length, 5); ti++) {
+                            ctx.beginPath();
+                            ctx.arc(startX + ti * dotSpacing, tagY, dotR, 0, Math.PI * 2);
+                            ctx.fillStyle = '#8b5cf6';
+                            ctx.globalAlpha = focusT * 0.9;
+                            ctx.fill();
+                        }
+                        // Show first tag name if only one
+                        if (n.tags.length <= 2) {
+                            ctx.globalAlpha = focusT * 0.6;
+                            ctx.font = '8px system-ui, sans-serif';
+                            ctx.fillStyle = '#8b5cf6';
+                            ctx.textAlign = 'center';
+                            ctx.fillText(n.tags.join(', '), drawX, tagY + 11);
+                        }
                     }
                 }
 
@@ -532,6 +560,30 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                     ctx.strokeStyle = n.color;
                     ctx.globalAlpha = ringAlpha * 0.6;
                     ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+
+                // Selection indicator (focus mode only)
+                if (focusT > 0.3 && isFocused && selectedRef.current.has(n.id)) {
+                    // Bright selection ring
+                    ctx.beginPath();
+                    ctx.arc(drawX, drawY, r + 5, 0, Math.PI * 2);
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.globalAlpha = 0.9;
+                    ctx.lineWidth = 2.5;
+                    ctx.stroke();
+                    // Checkmark
+                    ctx.globalAlpha = 1;
+                    ctx.fillStyle = '#10b981';
+                    ctx.beginPath();
+                    ctx.arc(drawX + r - 2, drawY - r + 2, 6, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = '#ffffff';
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.moveTo(drawX + r - 5, drawY - r + 2);
+                    ctx.lineTo(drawX + r - 2, drawY - r + 5);
+                    ctx.lineTo(drawX + r + 2, drawY - r - 1);
                     ctx.stroke();
                 }
 
@@ -662,6 +714,10 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             }
         }
 
+        // Double-click timer for focus mode (single-click = select, double-click = detail)
+        let clickTimer = null;
+        let lastClickNode = null;
+
         function onMouseUp(e) {
             const s = stateRef.current;
             const wasDragging = s.mouse.dragging;
@@ -674,23 +730,49 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                     if (s.mouse.hoveredNode) {
                         const clickedDomain = s.mouse.hoveredNode.domain;
                         if (s.focusDomain === clickedDomain) {
-                            // Second click on same domain: open the memory detail
-                            onSelectMemory(s.mouse.hoveredNode);
+                            // In focus mode: detect double-click vs single-click
+                            const node = s.mouse.hoveredNode;
+                            if (clickTimer && lastClickNode === node.id) {
+                                // Double-click: open detail
+                                clearTimeout(clickTimer);
+                                clickTimer = null;
+                                lastClickNode = null;
+                                onSelectMemory(node);
+                            } else {
+                                // Single-click: toggle selection (with 250ms delay to detect double)
+                                lastClickNode = node.id;
+                                clickTimer = setTimeout(() => {
+                                    clickTimer = null;
+                                    lastClickNode = null;
+                                    const nodeId = node.id || node.memory_id;
+                                    setSelectedMemories(prev => {
+                                        const next = new Set(prev);
+                                        if (next.has(nodeId)) next.delete(nodeId);
+                                        else next.add(nodeId);
+                                        selectedRef.current = next;
+                                        return next;
+                                    });
+                                }, 250);
+                            }
                         } else {
-                            // First click: enter focus mode for this domain
+                            // First click on different domain: enter focus mode
                             s.focusDomain = clickedDomain;
                             s.focusTransition = 0;
                             s.focusTargetPositions.clear();
-                            s._focusCacheDomain = null; // force recompute
-                            // Camera pan is handled in grid computation (centers on cloud centroid)
+                            s._focusCacheDomain = null;
                             setFocusedDomain(clickedDomain);
+                            setSelectedMemories(new Set());
+                            selectedRef.current = new Set();
                         }
                     } else {
-                        // Clicked empty space: exit focus mode and close detail panel
+                        // Clicked empty space: exit focus mode and clear selection
                         if (s.focusDomain) {
                             s.focusDomain = null;
                             s.focusTargetPositions.clear();
                             setFocusedDomain(null);
+                            setSelectedMemories(new Set());
+                            selectedRef.current = new Set();
+                            setBulkAction(null);
                         }
                         onSelectMemory(null);
                     }
@@ -741,6 +823,49 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             loadData();
         } catch (e) { showToast('Transfer failed: ' + e.message, 'error'); }
         setDomainTransferring(false);
+    };
+
+    const handleBulkAction = async () => {
+        if (selectedMemories.size === 0 || !bulkAction) return;
+        const ids = [...selectedMemories];
+        setBulkBusy(true);
+        try {
+            if (bulkAction === 'domain') {
+                const domain = bulkInput.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+                if (!domain) { showToast('Enter a domain name', 'warning'); setBulkBusy(false); return; }
+                const res = await bulkUpdateMemories(ids, { domain });
+                if (res.error) { showToast(res.error, 'error'); } else {
+                    showToast(`${res.updated} memories moved to ${domain}`, 'success');
+                    setSelectedMemories(new Set()); selectedRef.current = new Set();
+                    setBulkAction(null); setBulkInput(''); loadData();
+                }
+            } else if (bulkAction === 'tag') {
+                const tag = bulkInput.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+                if (!tag) { showToast('Enter a tag name', 'warning'); setBulkBusy(false); return; }
+                const res = await bulkUpdateMemories(ids, { addTags: [tag] });
+                if (res.error) { showToast(res.error, 'error'); } else {
+                    showToast(`Tag "${tag}" added to ${res.updated} memories`, 'success');
+                    setSelectedMemories(new Set()); selectedRef.current = new Set();
+                    setBulkAction(null); setBulkInput(''); loadData();
+                }
+            }
+        } catch (e) { showToast('Bulk operation failed: ' + e.message, 'error'); }
+        setBulkBusy(false);
+    };
+
+    const handleBulkReassign = async (targetAgentId) => {
+        if (selectedMemories.size === 0) return;
+        setBulkBusy(true);
+        try {
+            const ids = [...selectedMemories];
+            const res = await bulkUpdateMemories(ids, { agent: targetAgentId });
+            if (res.error) { showToast(res.error, 'error'); } else {
+                showToast(`${res.updated} memories reassigned`, 'success');
+                setSelectedMemories(new Set()); selectedRef.current = new Set();
+                setBulkAction(null); loadData();
+            }
+        } catch (e) { showToast('Reassign failed: ' + e.message, 'error'); }
+        setBulkBusy(false);
     };
 
     return html`
@@ -825,24 +950,39 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             ${focusedDomain && html`
                 <div class="focus-indicator">
                     <span style="color: ${getDomainColor(focusedDomain)}">
-                        Focused: ${focusedDomain}
+                        ${focusedDomain}
                     </span>
-                    ${agentFilter && registeredAgentsRef.current.length > 1 && html`
-                        <button class="focus-exit-btn" style="background:var(--primary-dim);color:var(--primary);border-color:var(--primary);" onClick=${() => {
-                            const sourceAgent = registeredAgentsRef.current.find(a => a.agent_id === agentFilter);
-                            setDomainTransfer({
-                                domain: focusedDomain,
-                                sourceAgentId: agentFilter,
-                                sourceAgentName: sourceAgent?.name || agentFilter.slice(0, 16),
-                            });
-                        }}>Transfer to Agent</button>
+                    ${selectedMemories.size > 0 ? html`
+                        <span class="focus-selection-count">${selectedMemories.size} selected</span>
+                        <button class="focus-action-btn" onClick=${() => setBulkAction('domain')}>Move Domain</button>
+                        <button class="focus-action-btn" onClick=${() => setBulkAction('tag')}>Add Tag</button>
+                        ${registeredAgentsRef.current.length > 1 ? html`
+                            <button class="focus-action-btn" onClick=${() => setBulkAction('agent')}>Reassign</button>
+                        ` : ''}
+                        <button class="focus-action-btn deselect" onClick=${() => {
+                            setSelectedMemories(new Set());
+                            selectedRef.current = new Set();
+                        }}>Deselect</button>
+                    ` : html`
+                        <button class="focus-action-btn select-all" onClick=${() => {
+                            const s = stateRef.current;
+                            const ids = new Set();
+                            for (const n of s.nodes) {
+                                if (n.domain === focusedDomain) ids.add(n.id);
+                            }
+                            setSelectedMemories(ids);
+                            selectedRef.current = ids;
+                        }}>Select All</button>
                     `}
                     <button class="focus-exit-btn" onClick=${() => {
                         stateRef.current.focusDomain = null;
                         stateRef.current.focusTargetPositions.clear();
                         setFocusedDomain(null);
+                        setSelectedMemories(new Set());
+                        selectedRef.current = new Set();
+                        setBulkAction(null);
                     }}>Exit Focus</button>
-                    <span class="focus-hint">Click a bubble to view details. Click empty space to exit.</span>
+                    <span class="focus-hint">${selectedMemories.size > 0 ? 'Choose an action above' : 'Click bubbles to select · Double-click for details'}</span>
                 </div>
             `}
 
@@ -924,7 +1064,12 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                         <span class="tooltip-meta-sep"></span>
                         <span class="tooltip-meta-item">${timeAgo(tooltip.node.created_at || tooltip.node.createdAt)}</span>
                     </div>
-                    <div class="tooltip-hint">Click to focus domain · Double-click for full details</div>
+                    ${tooltip.node.tags && tooltip.node.tags.length > 0 && html`
+                        <div class="tooltip-tags">
+                            ${tooltip.node.tags.map(t => html`<span class="tooltip-tag">${t}</span>`)}
+                        </div>
+                    `}
+                    <div class="tooltip-hint">${focusedDomain ? 'Click to select · Double-click for details' : 'Click to focus domain · Double-click for details'}</div>
                 </div>
             `}
 
@@ -950,6 +1095,69 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                                 `)}
                             </div>
                             ${domainTransferring && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Submitting to blockchain consensus...</p>`}
+                        </div>
+                    </div>
+                </div>
+            `}
+
+            ${bulkAction && (bulkAction === 'domain' || bulkAction === 'tag') && html`
+                <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) { setBulkAction(null); setBulkInput(''); } }}>
+                    <div class="wizard-modal" style="max-width:420px;">
+                        <div class="wizard-header">
+                            <h2>${bulkAction === 'domain' ? 'Move to Domain' : 'Add Tag'}</h2>
+                            <button class="detail-close" onClick=${() => { setBulkAction(null); setBulkInput(''); }}>x</button>
+                        </div>
+                        <div class="wizard-body" style="padding:20px;">
+                            <p style="color:var(--text-dim);margin-bottom:12px;">
+                                ${bulkAction === 'domain' ? 'Move' : 'Tag'} <strong>${selectedMemories.size}</strong> selected ${selectedMemories.size === 1 ? 'memory' : 'memories'}${bulkAction === 'domain' ? ' to:' : ' with:'}
+                            </p>
+                            <div style="display:flex;gap:8px;align-items:center;">
+                                <input class="tag-input" type="text" style="flex:1;font-size:14px;padding:8px 12px;"
+                                    placeholder=${bulkAction === 'domain' ? 'e.g. sage-architecture' : 'e.g. important'}
+                                    value=${bulkInput} onInput=${e => setBulkInput(e.target.value)}
+                                    onKeyDown=${e => { if (e.key === 'Enter') handleBulkAction(); }}
+                                    ref=${el => { if (el) setTimeout(() => el.focus(), 50); }}
+                                />
+                                <button class="btn btn-primary" onClick=${handleBulkAction} disabled=${bulkBusy || !bulkInput.trim()}>
+                                    ${bulkBusy ? '...' : bulkAction === 'domain' ? 'Move' : 'Add'}
+                                </button>
+                            </div>
+                            ${bulkAction === 'domain' && domains.length > 0 && html`
+                                <div style="margin-top:12px;display:flex;flex-wrap:wrap;gap:6px;">
+                                    ${domains.filter(d => d !== focusedDomain).slice(0, 12).map(d => html`
+                                        <button class="domain-pill" style="color:${getDomainColor(d)};font-size:11px;padding:3px 8px;cursor:pointer;"
+                                            onClick=${() => { setBulkInput(d); }}>
+                                            ${d}
+                                        </button>
+                                    `)}
+                                </div>
+                            `}
+                        </div>
+                    </div>
+                </div>
+            `}
+
+            ${bulkAction === 'agent' && html`
+                <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) setBulkAction(null); }}>
+                    <div class="wizard-modal" style="max-width:480px;">
+                        <div class="wizard-header">
+                            <h2>Reassign Memories</h2>
+                            <button class="detail-close" onClick=${() => setBulkAction(null)}>x</button>
+                        </div>
+                        <div class="wizard-body" style="padding:20px;">
+                            <p style="color:var(--text-dim);margin-bottom:16px;">
+                                Reassign <strong>${selectedMemories.size}</strong> selected ${selectedMemories.size === 1 ? 'memory' : 'memories'} to:
+                            </p>
+                            <div style="display:flex;flex-direction:column;gap:8px;">
+                                ${registeredAgentsRef.current.filter(a => a.status !== 'removed').map(a => html`
+                                    <button class="merge-target-btn" onClick=${() => handleBulkReassign(a.agent_id)} disabled=${bulkBusy}>
+                                        <span>${a.avatar || '\u{1F916}'}</span>
+                                        <span>${a.name}</span>
+                                        <span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>
+                                    </button>
+                                `)}
+                            </div>
+                            ${bulkBusy && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Processing...</p>`}
                         </div>
                     </div>
                 </div>
@@ -2645,11 +2853,14 @@ function SettingsPage() {
         return () => clearInterval(iv);
     }, []);
 
-    // Background update check on page load
+    // Background update check on page load + every 12 hours
     useEffect(() => {
-        checkForUpdate().then(data => {
+        const doCheck = () => checkForUpdate().then(data => {
             if (data && data.update_available) setUpdateAvailable(true);
         }).catch(() => {});
+        doCheck();
+        const iv = setInterval(doCheck, 12 * 60 * 60 * 1000);
+        return () => clearInterval(iv);
     }, []);
 
     // Countdown ticker — force re-render every 100ms for smooth display

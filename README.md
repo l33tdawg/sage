@@ -56,7 +56,16 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v4.0
+## What's New in v4.3
+
+- **Synaptic Ledger Safeguards** — Three-layer defense against silent encryption downgrade: server auto-re-enables if vault.key exists, web login now actually unlocks the vault for writes (was a bug), and the native macOS app icon prompts for your passphrase before launch. Plaintext writes are blocked when the vault is locked.
+- **Vault-Locked API** — `/v1/dashboard/health` now exposes `vault_locked` status. MCP tools (`sage_remember`, `sage_turn`, `sage_reflect`) check this flag and return clear errors telling agents to prompt the user to unlock via CEREBRUM — no more silent plaintext fallback.
+- **Isolated-by-Default RBAC** — Agents can only see their own memories by default. Domain-level read/write permissions, clearance levels, and multi-org federation with department filtering.
+- **Bulk Operations** — Multi-select memories in CEREBRUM for bulk domain moves, tag additions, and agent reassignment.
+- **Dashboard Update Check** — Long-open tabs now poll for new releases every 12 hours so you never miss an update.
+- **Automated Docker + MCP Registry** — Release CI now auto-builds Docker images, pushes to GHCR, and updates `server.json` — MCP registries get new versions without manual intervention.
+
+### v4.0
 
 - **4 Application Validators** — Every memory now passes through 4 in-process validators before committing: **Sentinel** (baseline accept, ensures liveness), **Dedup** (rejects duplicate content by SHA-256 hash), **Quality** (rejects noise — greeting observations, short content, empty headers), **Consistency** (enforces confidence thresholds, required fields). Quorum requires 3/4 accept (BFT 2/3 threshold).
 - **Pre-Validation Endpoint** — `POST /v1/memory/pre-validate` dry-runs all 4 validators without submitting on-chain. Returns per-validator decisions and quorum result. MCP tools use this to reject low-quality memories before they hit the chain.

@@ -76,6 +76,19 @@ export async function updateMemory(id, data) {
     return res.json();
 }
 
+export async function bulkUpdateMemories(ids, { domain, addTags, agent } = {}) {
+    const body = { ids };
+    if (domain) body.domain = domain;
+    if (addTags) body.add_tags = addTags;
+    if (agent) body.agent = agent;
+    const res = await fetch(`${API_BASE}/v1/dashboard/memory/bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    return res.json();
+}
+
 export async function importMemories(file) {
     const form = new FormData();
     form.append('file', file);

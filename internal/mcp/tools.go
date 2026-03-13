@@ -213,7 +213,26 @@ func (s *Server) registerTools() map[string]Tool {
 
 // --- Tool Handlers ---
 
+// checkVaultLocked queries the health endpoint for vault_locked status.
+// Returns true if the Synaptic Ledger is encrypted but locked (passphrase not entered).
+func (s *Server) checkVaultLocked(ctx context.Context) bool {
+	var health map[string]any
+	if err := s.doSignedJSON(ctx, "GET", "/v1/dashboard/health", nil, &health); err != nil {
+		return false
+	}
+	locked, _ := health["vault_locked"].(bool)
+	return locked
+}
+
 func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, error) {
+	if s.checkVaultLocked(ctx) {
+		return map[string]any{
+			"error":        "vault_locked",
+			"message":      "Synaptic Ledger is locked. The user must unlock encryption via CEREBRUM before memories can be stored. Tell the user to open the dashboard and enter their passphrase.",
+			"vault_locked": true,
+		}, nil
+	}
+
 	content, _ := params["content"].(string)
 	if content == "" {
 		return nil, fmt.Errorf("content is required")
@@ -519,6 +538,14 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 		return nil, fmt.Errorf("topic is required")
 	}
 
+	if s.checkVaultLocked(ctx) {
+		return map[string]any{
+			"error":        "vault_locked",
+			"message":      "Synaptic Ledger is locked. The user must unlock encryption via CEREBRUM before memories can be stored or recalled. Tell the user to open the dashboard and enter their passphrase.",
+			"vault_locked": true,
+		}, nil
+	}
+
 	observation := stringParam(params, "observation", "")
 	domain := stringParam(params, "domain", "general")
 
@@ -681,7 +708,7 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 			instructions += "\n\nCUSTOM BOOT INSTRUCTIONS (from admin):\n" + bootInstructions
 		}
 
-		return map[string]any{
+		resp := map[string]any{
 			"status":       "awakened",
 			"message":      "Welcome back. Your institutional memory is online.",
 			"agent_id":     s.agentID,
@@ -689,7 +716,16 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 			"stats":        statsResp,
 			"registration": registrationStatus,
 			"instructions": instructions,
-		}, nil
+		}
+
+		// Warn agent if the Synaptic Ledger is locked — reads will return placeholders,
+		// writes will be rejected until the user unlocks via CEREBRUM.
+		if s.checkVaultLocked(ctx) {
+			resp["vault_locked"] = true
+			resp["message"] = "WARNING: Synaptic Ledger is locked. Encrypted memories are unreadable and new writes are blocked. Tell the user to open CEREBRUM and enter their vault passphrase to unlock."
+		}
+
+		return resp, nil
 	}
 
 	// Fresh brain — seed foundational memories
@@ -783,6 +819,14 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 }
 
 func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, error) {
+	if s.checkVaultLocked(ctx) {
+		return map[string]any{
+			"error":        "vault_locked",
+			"message":      "Synaptic Ledger is locked. The user must unlock encryption via CEREBRUM before reflections can be stored.",
+			"vault_locked": true,
+		}, nil
+	}
+
 	taskSummary, _ := params["task_summary"].(string)
 	if taskSummary == "" {
 		return nil, fmt.Errorf("task_summary is required")

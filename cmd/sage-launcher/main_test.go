@@ -82,10 +82,8 @@ func TestIsRunning_WithPIDFile(t *testing.T) {
 }
 
 func TestOpenBrowser(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping browser test in short mode")
-	}
-	// Just verify openBrowser doesn't panic with an invalid URL
-	// (it fires and forgets, so errors are silently ignored)
+	// Skip in automated test runs — openBrowser actually opens a browser tab.
+	// This test is only useful for manual verification.
+	t.Skip("skipping: openBrowser opens a real browser tab")
 	openBrowser("http://127.0.0.1:1/nonexistent")
 }

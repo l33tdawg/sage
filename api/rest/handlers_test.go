@@ -133,6 +133,14 @@ func (m *mockMemoryStore) UpdateDomainTag(_ context.Context, memoryID string, do
 	return nil
 }
 
+func (m *mockMemoryStore) UpdateMemoryAgent(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (m *mockMemoryStore) GetTagsBatch(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
+
 func (m *mockMemoryStore) UpdateTaskStatus(_ context.Context, memoryID string, taskStatus memory.TaskStatus) error {
 	if rec, ok := m.memories[memoryID]; ok {
 		rec.TaskStatus = taskStatus

@@ -89,27 +89,50 @@ func runServe() error {
 	defer func() { _ = sqliteStore.Close() }()
 
 	// Unlock encryption vault if enabled
+	vaultKeyPath := filepath.Join(SageHome(), "vault.key")
+
+	// Safeguard: if vault.key exists but encryption is disabled in config,
+	// auto-re-enable to prevent silent encryption downgrade.
+	if !cfg.Encryption.Enabled && vault.Exists(vaultKeyPath) {
+		logger.Warn().Msg("vault.key exists but encryption disabled in config — auto-re-enabling encryption")
+		cfg.Encryption.Enabled = true
+		if saveErr := SaveConfig(cfg); saveErr != nil {
+			logger.Error().Err(saveErr).Msg("failed to save re-enabled encryption config")
+		}
+	}
+
+	vaultUnlocked := false
 	if cfg.Encryption.Enabled {
-		vaultKeyPath := filepath.Join(SageHome(), "vault.key")
 		if !vault.Exists(vaultKeyPath) {
 			return fmt.Errorf("encryption enabled but vault.key not found at %s — run 'sage-gui setup' first", vaultKeyPath)
 		}
+
+		// Mark that encryption is expected — writes will be rejected if vault stays locked.
+		sqliteStore.SetVaultExpected(true)
 
 		passphrase := os.Getenv("SAGE_PASSPHRASE")
 		if passphrase == "" {
 			fmt.Print("  Enter vault passphrase: ")
 			passphrase, err = readPassphrase()
 			if err != nil {
-				return fmt.Errorf("read passphrase: %w", err)
+				// No terminal available (e.g. launched from app icon) —
+				// server starts with encryption flag on but vault locked.
+				// The web UI will show a login screen for the user to unlock.
+				// Writes are blocked until then (vaultExpected = true, vault = nil).
+				logger.Warn().Msg("no passphrase available — Synaptic Ledger locked (writes blocked until unlock via CEREBRUM)")
+				passphrase = ""
 			}
 		}
 
-		v, vaultErr := vault.Open(vaultKeyPath, passphrase)
-		if vaultErr != nil {
-			return fmt.Errorf("unlock vault: %w", vaultErr)
+		if passphrase != "" {
+			v, vaultErr := vault.Open(vaultKeyPath, passphrase)
+			if vaultErr != nil {
+				return fmt.Errorf("unlock vault: %w", vaultErr)
+			}
+			sqliteStore.SetVault(v)
+			vaultUnlocked = true
+			logger.Info().Msg("Synaptic Ledger unlocked — memories are encrypted at rest (AES-256-GCM)")
 		}
-		sqliteStore.SetVault(v)
-		logger.Info().Msg("encryption vault unlocked — memories are encrypted at rest (AES-256-GCM)")
 	}
 
 	// Create BadgerDB store
@@ -211,6 +234,7 @@ func runServe() error {
 
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
+	dashboard.BadgerStore = badgerStore // Wire on-chain RBAC for agent isolation
 
 	// Bridge REST API events to dashboard SSE for the chain activity log
 	restServer.OnEvent = func(eventType, memoryID, domain, content string, data any) {
@@ -224,6 +248,7 @@ func runServe() error {
 	}
 	dashboard.SetEmbedder(embedProvider)
 	dashboard.Encrypted.Store(cfg.Encryption.Enabled)
+	dashboard.VaultLocked.Store(cfg.Encryption.Enabled && !vaultUnlocked)
 	dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")
 	dashboard.SaveEncryptionConfig = func(enabled bool) error {
 		cfg.Encryption.Enabled = enabled

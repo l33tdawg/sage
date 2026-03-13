@@ -124,6 +124,7 @@ type MemoryStore interface {
 	GetTimeline(ctx context.Context, from, to time.Time, domain string, bucket string) ([]TimelineBucket, error)
 	DeleteMemory(ctx context.Context, memoryID string) error
 	UpdateDomainTag(ctx context.Context, memoryID string, domain string) error
+	UpdateMemoryAgent(ctx context.Context, memoryID string, agentID string) error
 	UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error
 	LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error
 	GetLinkedMemories(ctx context.Context, memoryID string) ([]memory.MemoryLink, error)
@@ -132,6 +133,7 @@ type MemoryStore interface {
 	// Tags
 	SetTags(ctx context.Context, memoryID string, tags []string) error
 	GetTags(ctx context.Context, memoryID string) ([]string, error)
+	GetTagsBatch(ctx context.Context, memoryIDs []string) (map[string][]string, error)
 	ListAllTags(ctx context.Context) ([]TagCount, error)
 	ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error)
 	// FindByContentHash checks if a committed memory with this content hash exists.

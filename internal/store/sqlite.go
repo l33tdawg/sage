@@ -31,10 +31,11 @@ type sqlQuerier interface {
 
 // SQLiteStore implements MemoryStore, ValidatorScoreStore, AccessStore, and OrgStore using SQLite.
 type SQLiteStore struct {
-	conn   sqlQuerier // either *sql.DB or *sql.Tx
-	db     *sql.DB    // nil for tx-scoped stores
-	dbPath string
-	vault  *vault.Vault // nil = no encryption
+	conn          sqlQuerier   // either *sql.DB or *sql.Tx
+	db            *sql.DB      // nil for tx-scoped stores
+	dbPath        string
+	vault         *vault.Vault // nil = no encryption
+	vaultExpected bool         // true = encryption should be active; reject writes if vault nil
 }
 
 // encPrefix marks content as encrypted (prepended to base64 ciphertext).
@@ -46,10 +47,20 @@ func (s *SQLiteStore) SetVault(v *vault.Vault) {
 	s.vault = v
 }
 
+// VaultExpected marks that encryption should be active. When true and the vault
+// is nil (locked), writes are rejected rather than silently going plaintext.
+func (s *SQLiteStore) SetVaultExpected(expected bool) {
+	s.vaultExpected = expected
+}
+
 // encryptContent encrypts a string if the vault is set.
-// Returns the original string if no vault.
+// Returns the original string if no vault and encryption is not expected.
+// Returns an error if encryption is expected but vault is locked.
 func (s *SQLiteStore) encryptContent(plaintext string) (string, error) {
 	if s.vault == nil {
+		if s.vaultExpected {
+			return "", fmt.Errorf("vault is locked — unlock encryption before storing memories")
+		}
 		return plaintext, nil
 	}
 	encrypted, err := s.vault.EncryptString(plaintext)
@@ -78,6 +89,9 @@ func (s *SQLiteStore) decryptContent(stored string) (string, error) {
 // encryptEmbedding encrypts embedding bytes if the vault is set.
 func (s *SQLiteStore) encryptEmbedding(data []byte) ([]byte, error) {
 	if s.vault == nil || data == nil {
+		if s.vaultExpected && data != nil {
+			return nil, fmt.Errorf("vault is locked — unlock encryption before storing embeddings")
+		}
 		return data, nil
 	}
 	return s.vault.Encrypt(data)
@@ -1197,6 +1211,16 @@ func (s *SQLiteStore) UpdateDomainTag(ctx context.Context, memoryID string, doma
 		domain, memoryID)
 	if err != nil {
 		return fmt.Errorf("update domain tag: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateMemoryAgent(ctx context.Context, memoryID string, agentID string) error {
+	_, err := s.conn.ExecContext(ctx,
+		`UPDATE memories SET submitting_agent = ? WHERE memory_id = ?`,
+		agentID, memoryID)
+	if err != nil {
+		return fmt.Errorf("update memory agent: %w", err)
 	}
 	return nil
 }
@@ -2684,6 +2708,35 @@ func (s *SQLiteStore) SetTags(ctx context.Context, memoryID string, tags []strin
 	}
 
 	return tx.Commit()
+}
+
+// GetTagsBatch returns tags for multiple memories in one query.
+func (s *SQLiteStore) GetTagsBatch(ctx context.Context, memoryIDs []string) (map[string][]string, error) {
+	if len(memoryIDs) == 0 {
+		return map[string][]string{}, nil
+	}
+	placeholders := make([]string, len(memoryIDs))
+	args := make([]any, len(memoryIDs))
+	for i, id := range memoryIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := `SELECT memory_id, tag FROM memory_tags WHERE memory_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY memory_id, tag`
+	rows, err := s.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query tags batch: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string][]string, len(memoryIDs))
+	for rows.Next() {
+		var memID, tag string
+		if err := rows.Scan(&memID, &tag); err != nil {
+			return nil, fmt.Errorf("scan tag: %w", err)
+		}
+		result[memID] = append(result[memID], tag)
+	}
+	return result, rows.Err()
 }
 
 // GetTags returns all tags for a memory.

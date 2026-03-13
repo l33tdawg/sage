@@ -187,6 +187,24 @@ body {
 .main-content.zoom-medium { zoom: 1; }
 .main-content.zoom-large { zoom: 1.15; }
 
+/* Tooltip tags */
+.tooltip-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid var(--border);
+}
+.tooltip-tag {
+    font-size: 9px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(139, 92, 246, 0.2);
+    color: #a78bfa;
+    letter-spacing: 0.3px;
+}
+
 /* Tooltip click hint */
 .tooltip-hint {
     font-size: 9px;
@@ -572,6 +590,44 @@ body {
 .focus-hint {
     font-size: 11px;
     color: var(--text-muted);
+}
+.focus-selection-count {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    background: rgba(16, 185, 129, 0.12);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+.focus-action-btn {
+    background: none;
+    border: 1px solid var(--primary);
+    color: var(--primary);
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+.focus-action-btn:hover {
+    background: var(--primary);
+    color: var(--bg-deep);
+}
+.focus-action-btn.deselect {
+    border-color: var(--text-muted);
+    color: var(--text-muted);
+}
+.focus-action-btn.deselect:hover {
+    background: var(--text-muted);
+    color: var(--bg-deep);
+}
+.focus-action-btn.select-all {
+    border-color: var(--text-dim);
+    color: var(--text-dim);
+}
+.focus-action-btn.select-all:hover {
+    background: var(--text-dim);
+    color: var(--bg-deep);
 }
 
 /* Draggable stats panel */
