@@ -56,7 +56,22 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v4.3
+## What's New in v4.5
+
+- **Cross-Agent Visibility Fixed** — Org-based access (clearance levels, multi-org federation) now correctly grants visibility across agents. Queries and list operations check direct grants, org membership, and unregistered domain fallback — no more 0-result queries when clearance should allow access.
+- **Domain Auto-Registration** — First write to an unregistered domain auto-registers it with the submitting agent as owner and full access granted. No more propose-succeeds-but-query-404.
+- **RBAC Gate Simplification** — DomainAccess (explicit allowlist) and multi-org gates are alternatives, not stacked. Passing one skips the other.
+- **Python Agent SDK** — `sage-agent-sdk` on PyPI for building SAGE-integrated agents. CI-tested on every release.
+- **`/v1/mcp-config` Endpoint** — Agents can self-configure their MCP connection without manual setup.
+- **Docker Images** — Every release auto-builds and pushes to `ghcr.io/l33tdawg/sage`. Pin a version or pull `latest`.
+
+### v4.4
+
+- **CEREBRUM UX Overhaul** — Snap-back physics (nodes spring back to cloud on focus exit), forget animation (fade-and-remove instead of full reload), tab backgrounding fix (no physics jumps after alt-tab).
+- **Clean Synaptic Ledger** — Always-visible button with double-click confirmation. Cleanup toggle auto-saves.
+- **Focus Mode** — Single-click to view memory detail, side panel closes on exit. Graph defaults to committed status.
+
+### v4.3
 
 - **Synaptic Ledger Safeguards** — Three-layer defense against silent encryption downgrade: server auto-re-enables if vault.key exists, web login now actually unlocks the vault for writes (was a bug), and the native macOS app icon prompts for your passphrase before launch. Plaintext writes are blocked when the vault is locked.
 - **Vault-Locked API** — `/v1/dashboard/health` now exposes `vault_locked` status. MCP tools (`sage_remember`, `sage_turn`, `sage_reflect`) check this flag and return clear errors telling agents to prompt the user to unlock via CEREBRUM — no more silent plaintext fallback.
