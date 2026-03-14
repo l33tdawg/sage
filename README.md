@@ -149,6 +149,17 @@ docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 
 Pin a specific version with `ghcr.io/l33tdawg/sage:4.5.2`.
 
+### Upgrading from an older version?
+
+If you installed SAGE before v4.5 and your AI isn't doing turn-by-turn memory updates, re-run the installer in your project directory:
+
+```bash
+cd /path/to/your/project
+sage-gui mcp install
+```
+
+This installs Claude Code hooks that enforce the memory lifecycle (boot, turn, reflect) — even if your `.mcp.json` is already configured. Restart your Claude Code session after running this.
+
 ---
 
 ## Documentation

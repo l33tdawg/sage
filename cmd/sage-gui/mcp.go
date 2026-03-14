@@ -151,6 +151,7 @@ func runMCPInstall() error {
 	mcpPath := filepath.Join(projectDir, ".mcp.json")
 
 	// Check if .mcp.json already exists with sage configured
+	alreadyConfigured := false
 	if _, statErr := os.Stat(mcpPath); statErr == nil {
 		existing, readErr := os.ReadFile(mcpPath)
 		if readErr == nil {
@@ -158,13 +159,28 @@ func runMCPInstall() error {
 			if json.Unmarshal(existing, &config) == nil {
 				if servers, ok := config["mcpServers"].(map[string]any); ok {
 					if _, hasSage := servers["sage"]; hasSage {
-						fmt.Println("✓ SAGE MCP is already configured in this project.")
-						fmt.Printf("  Config: %s\n", mcpPath)
-						return nil
+						alreadyConfigured = true
 					}
 				}
 			}
 		}
+	}
+
+	if alreadyConfigured {
+		fmt.Println("✓ SAGE MCP is already configured in this project.")
+		fmt.Printf("  Config: %s\n", mcpPath)
+		fmt.Println()
+		fmt.Println("  Updating Claude Code hooks and permissions...")
+
+		// Still install/update hooks — older installs may be missing them.
+		if hookErr := installClaudeHooks(projectDir); hookErr != nil {
+			fmt.Fprintf(os.Stderr, "⚠ Could not install Claude Code hooks: %v\n", hookErr)
+			fmt.Fprintln(os.Stderr, "  SAGE will still work, but memory persistence may be less reliable.")
+		} else {
+			fmt.Println()
+			fmt.Println("  Restart your Claude Code session to activate the updated hooks.")
+		}
+		return nil
 	}
 
 	// Determine SAGE_HOME

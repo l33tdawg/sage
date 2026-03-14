@@ -172,6 +172,24 @@ Both make the AI better. The `sage_reflect` tool captures this at the end of eac
 > **Claude:** *[uses sage_recall to find the stored decisions]*
 > Based on what I remember: 1. We chose microservices over monolith because...
 
+### Upgrading from an older version?
+
+If you installed SAGE before v4.5 and your AI isn't calling `sage_turn` every turn or `sage_inception` on startup, you're likely missing the **Claude Code hooks** that were added in later versions. These hooks enforce the memory lifecycle automatically — no manual prompting needed.
+
+Re-run the installer in each project directory where you use SAGE:
+
+```bash
+cd /path/to/your/project
+sage-gui mcp install
+```
+
+This is safe to run on existing installs — it won't overwrite your `.mcp.json`, but it will add/update the hook scripts and permissions that make everything work reliably. Restart your Claude Code session after running this.
+
+**What the hooks do:**
+- **Boot hook** (`SessionStart`) — tells the AI to call `sage_inception` at the start of every session
+- **Turn hook** (`PreCompact`, `Stop`, `PostToolUse`) — reminds the AI to call `sage_turn` so memories are flushed before context loss
+- **Permissions** — auto-allows all SAGE MCP tools so the AI doesn't need to ask permission each time
+
 ---
 
 ## Connect to ChatGPT
