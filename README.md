@@ -125,6 +125,15 @@ go build -o sage-gui ./cmd/sage-gui/
 
 Or grab a binary: [macOS DMG](https://github.com/l33tdawg/sage/releases/latest) (signed & notarized) | [Windows EXE](https://github.com/l33tdawg/sage/releases/latest) | [Linux tar.gz](https://github.com/l33tdawg/sage/releases/latest)
 
+### Docker
+
+```bash
+docker pull ghcr.io/l33tdawg/sage:latest
+docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
+```
+
+Pin a specific version with `ghcr.io/l33tdawg/sage:4.5.2`.
+
 ---
 
 ## Documentation
