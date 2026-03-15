@@ -233,6 +233,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		// Pairing redemption — unauthenticated (the code IS the auth).
 		h.RegisterPairingRoutes(r)
 
+		// Recovery — unauthenticated (the recovery key IS the auth).
+		r.Post("/v1/dashboard/settings/ledger/recover", h.handleRecoverLedger)
+
 		// Protected routes — auth middleware checks dynamically whether encryption is active.
 		r.Group(func(r chi.Router) {
 			r.Use(h.authMiddleware)

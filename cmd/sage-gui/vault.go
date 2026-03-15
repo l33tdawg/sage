@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // VaultHeader is the metadata at the top of a .vault file.
@@ -370,6 +372,63 @@ func decryptVault(data []byte, keyPath string) ([]byte, error) {
 	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
 	return gcm.Open(nil, nonce, ciphertext, nil)
 }
+
+func runRecover() error {
+	recoveryKey := ""
+	newPassphrase := ""
+
+	// Parse flags: sage-gui recover --key <recovery_key> --passphrase <new_passphrase>
+	for i := 2; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "--key", "-k":
+			if i+1 < len(os.Args) {
+				recoveryKey = os.Args[i+1]
+				i++
+			}
+		case "--passphrase", "-p":
+			if i+1 < len(os.Args) {
+				newPassphrase = os.Args[i+1]
+				i++
+			}
+		}
+	}
+
+	if recoveryKey == "" || newPassphrase == "" {
+		return fmt.Errorf("usage: sage-gui recover --key <recovery_key_base64> --passphrase <new_passphrase>\n\n" +
+			"  --key, -k         Your base64 recovery key (shown when encryption was enabled)\n" +
+			"  --passphrase, -p  New passphrase (min 8 characters)")
+	}
+
+	if len(newPassphrase) < 8 {
+		return fmt.Errorf("passphrase must be at least 8 characters")
+	}
+
+	home := SageHome()
+	vaultKeyPath := filepath.Join(home, "vault.key")
+
+	if !vault.Exists(vaultKeyPath) {
+		return fmt.Errorf("no vault.key found at %s — encryption was never enabled", vaultKeyPath)
+	}
+
+	// Back up the current vault.key before overwriting.
+	backupPath := vaultKeyPath + ".bak"
+	if src, err := os.ReadFile(vaultKeyPath); err == nil {
+		if writeErr := os.WriteFile(backupPath, src, 0600); writeErr == nil {
+			fmt.Printf("Backed up vault.key to %s\n", backupPath)
+		}
+	}
+
+	// Use the vault package to re-initialize from recovery key.
+	if err := vault.InitFromRecoveryKey(vaultKeyPath, recoveryKey, newPassphrase); err != nil {
+		return fmt.Errorf("recovery failed: %w", err)
+	}
+
+	fmt.Println("Vault recovered successfully!")
+	fmt.Printf("You can now unlock SAGE with your new passphrase.\n")
+	fmt.Printf("Start SAGE with: sage-gui serve\n")
+	return nil
+}
+
 
 func runBackup() error {
 	cfg, err := LoadConfig()

@@ -278,6 +278,71 @@ func TestHandleChangePassphrase_NotEnabled(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestHandleRecoverLedger(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+
+	// Enable encryption first.
+	body, _ := json.Marshal(map[string]string{"passphrase": "original-pass"})
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var enableResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &enableResp))
+	recoveryKey := enableResp["recovery_key"].(string)
+	require.NotEmpty(t, recoveryKey)
+
+	// Simulate lockout: mark vault as locked.
+	h.VaultLocked.Store(true)
+
+	// Recover using recovery key (no auth cookie needed — endpoint is unauthenticated).
+	body, _ = json.Marshal(map[string]string{
+		"recovery_key":   recoveryKey,
+		"new_passphrase": "new-pass-456",
+	})
+	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/recover", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["ok"])
+	assert.False(t, h.VaultLocked.Load(), "vault should be unlocked after recovery")
+}
+
+func TestHandleRecoverLedger_BadKey(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+
+	// Enable encryption.
+	body, _ := json.Marshal(map[string]string{"passphrase": "original-pass"})
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Try recovering with a bad key.
+	body, _ = json.Marshal(map[string]string{
+		"recovery_key":   "dGhpcyBpcyBub3QgYSB2YWxpZCBrZXk=",
+		"new_passphrase": "new-pass-456",
+	})
+	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/recover", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
 func TestHandleEnableLedger_NoVaultPath(t *testing.T) {
 	h, _ := newTestHandler(t)
 	r := testRouter(h)

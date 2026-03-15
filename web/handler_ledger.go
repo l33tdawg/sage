@@ -144,6 +144,61 @@ func (h *DashboardHandler) handleChangePassphrase(w http.ResponseWriter, r *http
 	})
 }
 
+// handleRecoverLedger resets the vault passphrase using the recovery key.
+// This is the escape hatch when a user loses their passphrase but has the recovery key.
+func (h *DashboardHandler) handleRecoverLedger(w http.ResponseWriter, r *http.Request) {
+	if !h.Encrypted.Load() && !vault.Exists(h.VaultKeyPath) {
+		writeError(w, http.StatusBadRequest, "encryption is not enabled")
+		return
+	}
+	if h.VaultKeyPath == "" {
+		writeError(w, http.StatusBadRequest, "vault key path not configured")
+		return
+	}
+
+	var body struct {
+		RecoveryKey   string `json:"recovery_key"`
+		NewPassphrase string `json:"new_passphrase"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.RecoveryKey == "" || body.NewPassphrase == "" {
+		writeError(w, http.StatusBadRequest, "recovery_key and new_passphrase are required")
+		return
+	}
+	if len(body.NewPassphrase) < 8 {
+		writeError(w, http.StatusBadRequest, "passphrase must be at least 8 characters")
+		return
+	}
+
+	// Re-initialize the vault key file from the recovery key.
+	if err := vault.InitFromRecoveryKey(h.VaultKeyPath, body.RecoveryKey, body.NewPassphrase); err != nil {
+		writeError(w, http.StatusUnauthorized, "recovery failed: "+err.Error())
+		return
+	}
+
+	// Open the vault with the new passphrase to verify it works.
+	v, err := vault.Open(h.VaultKeyPath, body.NewPassphrase)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "vault recovered but failed to open: "+err.Error())
+		return
+	}
+
+	// Attach vault to the store and unlock.
+	if vs, ok := h.store.(VaultStore); ok {
+		vs.SetVault(v)
+	}
+	h.VaultLocked.Store(false)
+
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"message": "vault recovered successfully — you are now unlocked",
+	})
+}
+
 // handleDisableLedger disables encryption for new memories. Existing encrypted
 // memories remain encrypted — they can still be read while the vault is in
 // memory, but new writes will be plaintext.

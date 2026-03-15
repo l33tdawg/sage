@@ -2314,6 +2314,26 @@ body {
     opacity: 0.5;
     cursor: not-allowed;
 }
+.login-recover-link {
+    display: block;
+    margin: 16px auto 0;
+    background: none;
+    border: none;
+    color: var(--text-muted, #888);
+    font-size: 0.85em;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+.login-recover-link:hover {
+    color: var(--accent, #a78bfa);
+}
+.login-success {
+    color: #22c55e;
+    font-size: 0.9em;
+    text-align: center;
+    margin-top: 8px;
+}
 
 /* Toggle Switch */
 .toggle-switch {

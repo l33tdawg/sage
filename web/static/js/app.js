@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -2173,7 +2173,7 @@ function SynapticLedger() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
                     <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                 </svg>
-                Synaptic Ledger <${HelpTip} text="Encrypts all memories at rest with AES-256-GCM. You'll need to enter your passphrase each session. If you lose it, your data cannot be recovered." />
+                Synaptic Ledger <${HelpTip} text="Encrypts all memories at rest with AES-256-GCM. You'll need to enter your passphrase each session. If you lose it, use your recovery key to reset it." />
             </h3>
             ${enabled ? html`
                 <div style="margin:12px 0;">
@@ -4268,11 +4268,11 @@ function HelpOverlay({ onClose, initialSection }) {
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Changing passphrase</div>
-                        <div class="guide-detail-desc">You can change your passphrase in Settings. All memories are re-encrypted with the new key. Make sure you remember it — there is no recovery mechanism if the passphrase is lost.</div>
+                        <div class="guide-detail-desc">You can change your passphrase in Settings. The underlying data key stays the same — only the wrapper changes. If you lose your passphrase, use your recovery key on the lock screen to reset it.</div>
                     </div>
                 </div>
                 <div class="guide-callout" style="border-color: var(--warning, #f59e0b);">
-                    <strong>Important:</strong> If you lose your passphrase, your encrypted memories cannot be recovered. There is no backdoor. Write it down and store it safely.
+                    <strong>Important:</strong> Save your recovery key somewhere safe. If you lose your passphrase, the recovery key is the only way to regain access. There is no backdoor beyond the recovery key.
                 </div>
             `,
         },
@@ -4383,6 +4383,10 @@ function LoginScreen({ onSuccess }) {
     const [passphrase, setPassphrase] = useState('');
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
+    const [showRecovery, setShowRecovery] = useState(false);
+    const [recoveryKey, setRecoveryKey] = useState('');
+    const [newPassphrase, setNewPassphrase] = useState('');
+    const [recoverySuccess, setRecoverySuccess] = useState(false);
 
     async function handleSubmit(e) {
         e.preventDefault();
@@ -4400,6 +4404,74 @@ function LoginScreen({ onSuccess }) {
             setError('Connection failed');
         }
         setLoading(false);
+    }
+
+    async function handleRecover(e) {
+        e.preventDefault();
+        if (!recoveryKey || !newPassphrase) return;
+        if (newPassphrase.length < 8) { setError('New passphrase must be at least 8 characters'); return; }
+        setLoading(true);
+        setError('');
+        try {
+            const res = await recoverVault(recoveryKey.trim(), newPassphrase);
+            if (res.ok) {
+                setRecoverySuccess(true);
+                setShowRecovery(false);
+                setPassphrase(newPassphrase);
+                // Auto-login with the new passphrase.
+                const loginRes = await login(newPassphrase);
+                if (loginRes.ok) {
+                    onSuccess();
+                }
+            } else {
+                setError(res.error || 'Recovery failed — check your recovery key');
+            }
+        } catch (err) {
+            setError('Connection failed');
+        }
+        setLoading(false);
+    }
+
+    if (showRecovery) {
+        return html`
+            <div class="login-screen">
+                <div class="login-card">
+                    <div class="login-icon">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--accent, #a78bfa)" stroke-width="1.5">
+                            <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+                        </svg>
+                    </div>
+                    <h2 class="login-title">Vault Recovery</h2>
+                    <p class="login-subtitle">Enter your recovery key to reset your passphrase.</p>
+                    <form onSubmit=${handleRecover}>
+                        <textarea
+                            class="login-input"
+                            placeholder="Paste your recovery key (base64)"
+                            value=${recoveryKey}
+                            onInput=${e => setRecoveryKey(e.target.value)}
+                            rows="2"
+                            style="resize: vertical; font-family: monospace; font-size: 0.85em;"
+                            autofocus
+                        />
+                        <input
+                            type="password"
+                            class="login-input"
+                            placeholder="New passphrase (min 8 characters)"
+                            value=${newPassphrase}
+                            onInput=${e => setNewPassphrase(e.target.value)}
+                            style="margin-top: 8px;"
+                        />
+                        ${error && html`<div class="login-error">${error}</div>`}
+                        <button type="submit" class="login-btn" disabled=${loading || !recoveryKey || !newPassphrase}>
+                            ${loading ? 'Recovering...' : 'Reset Passphrase'}
+                        </button>
+                    </form>
+                    <button class="login-recover-link" onClick=${() => { setShowRecovery(false); setError(''); }}>
+                        Back to login
+                    </button>
+                </div>
+            </div>
+        `;
     }
 
     return html`
@@ -4428,6 +4500,10 @@ function LoginScreen({ onSuccess }) {
                         ${loading ? 'Unlocking...' : 'Unlock'}
                     </button>
                 </form>
+                ${recoverySuccess && html`<div class="login-success">Passphrase reset successfully!</div>`}
+                <button class="login-recover-link" onClick=${() => { setShowRecovery(true); setError(''); }}>
+                    Lost your passphrase? Use recovery key
+                </button>
             </div>
         </div>
     `;

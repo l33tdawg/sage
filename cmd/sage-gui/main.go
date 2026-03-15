@@ -40,6 +40,8 @@ func main() {
 		err = runImport()
 	case "backup":
 		err = runBackup()
+	case "recover":
+		err = runRecover()
 	case "quorum-init":
 		err = runQuorumInit()
 	case "quorum-join":
@@ -73,6 +75,7 @@ Commands:
   export    Export memories to a .vault file (optionally encrypted)
   import    Import memories from a .vault file
   backup    Create a timestamped backup of the memory database
+  recover   Reset vault passphrase using your recovery key
   quorum-init   Initialize a quorum network (generates shared genesis)
   quorum-join   Join a quorum network (imports genesis from another node)
   status    Show node status

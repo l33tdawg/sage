@@ -24,6 +24,16 @@ export async function login(passphrase) {
     return res.json();
 }
 
+// Recover vault using recovery key — returns { ok, message?, error? }
+export async function recoverVault(recoveryKey, newPassphrase) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/ledger/recover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recovery_key: recoveryKey, new_passphrase: newPassphrase }),
+    });
+    return res.json();
+}
+
 export async function fetchMemories(params = {}) {
     const q = new URLSearchParams();
     if (params.domain) q.set('domain', params.domain);
