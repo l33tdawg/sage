@@ -143,131 +143,15 @@ mkdir -p "$DMG_TEMP"
 cp -R "${APP_DIR}" "$DMG_TEMP/"
 ln -s /Applications "$DMG_TEMP/Applications"
 
-# Create the main installer script — handles stop, copy, and launch automatically
-cat > "$DMG_TEMP/Install SAGE.command" << 'INSTALL'
-#!/bin/bash
-# SAGE Installer — stops any running instance, installs, and launches.
-clear
-echo ""
-echo "  ╔═══════════════════════════════════════╗"
-echo "  ║       SAGE Installer                  ║"
-echo "  ╚═══════════════════════════════════════╝"
-echo ""
-
-PID_FILE="$HOME/.sage/sage.pid"
-DMG_APP="$(dirname "$0")/SAGE.app"
-DEST="/Applications/SAGE.app"
-
-# --- Step 1: Stop any running SAGE process ---
-echo "  [1/3] Checking for running SAGE..."
-
-STOPPED=0
-
-# Stop via PID file
-if [ -f "$PID_FILE" ]; then
-    OLD_PID=$(cat "$PID_FILE")
-    if kill -0 "$OLD_PID" 2>/dev/null; then
-        echo "        Stopping SAGE (PID $OLD_PID)..."
-        kill "$OLD_PID" 2>/dev/null
-        for i in $(seq 1 10); do
-            kill -0 "$OLD_PID" 2>/dev/null || break
-            sleep 0.5
-        done
-        kill -0 "$OLD_PID" 2>/dev/null && kill -9 "$OLD_PID" 2>/dev/null
-        STOPPED=1
-    fi
-    rm -f "$PID_FILE"
-fi
-
-# Kill any sage-gui on port 8080
-ORPHAN_PID=$(lsof -ti tcp:8080 -s tcp:listen 2>/dev/null)
-if [ -n "$ORPHAN_PID" ]; then
-    ORPHAN_CMD=$(ps -p "$ORPHAN_PID" -o command= 2>/dev/null)
-    if echo "$ORPHAN_CMD" | grep -q "sage-gui"; then
-        echo "        Stopping sage-gui on port 8080 (PID $ORPHAN_PID)..."
-        kill "$ORPHAN_PID" 2>/dev/null
-        sleep 1
-        kill -0 "$ORPHAN_PID" 2>/dev/null && kill -9 "$ORPHAN_PID" 2>/dev/null
-        STOPPED=1
-    fi
-fi
-
-# Also kill any other sage-gui processes (and legacy sage-lite)
-killall sage-gui 2>/dev/null && STOPPED=1
-killall sage-lite 2>/dev/null && STOPPED=1
-
-if [ "$STOPPED" -eq 1 ]; then
-    echo "        SAGE stopped."
-    sleep 1  # Brief pause to let macOS release file locks
-else
-    echo "        No running SAGE found."
-fi
-
-# Migrate: remove old com.sage.lite launchd plist (renamed in v3.6.0)
-OLD_PLIST="$HOME/Library/LaunchAgents/com.sage.lite.plist"
-if [ -f "$OLD_PLIST" ]; then
-    launchctl unload "$OLD_PLIST" 2>/dev/null || true
-    rm -f "$OLD_PLIST"
-    echo "        Migrated — removed legacy com.sage.lite plist"
-fi
-
-# --- Step 2: Copy SAGE.app to /Applications ---
-echo "  [2/3] Installing SAGE.app to /Applications..."
-
-if [ ! -d "$DMG_APP" ]; then
-    echo ""
-    echo "  ERROR: Cannot find SAGE.app in this disk image."
-    echo "  Please re-download the DMG and try again."
-    echo ""
-    read -p "  Press Enter to close..."
-    exit 1
-fi
-
-# Remove old version and copy new
-rm -rf "$DEST"
-cp -R "$DMG_APP" "$DEST"
-
-if [ ! -d "$DEST" ]; then
-    echo ""
-    echo "  ERROR: Failed to copy SAGE.app to /Applications."
-    echo "  You may need to run this with administrator privileges."
-    echo ""
-    read -p "  Press Enter to close..."
-    exit 1
-fi
-
-echo "        Installed successfully."
-
-# --- Step 3: Launch SAGE ---
-echo "  [3/3] Launching SAGE..."
-
-# Clear quarantine attributes — prevents Gatekeeper from blocking the app
-# on macOS Tahoe+ which is stricter about unsigned/non-notarized binaries.
-xattr -cr "$DEST" 2>/dev/null || true
-
-open "$DEST"
-
-echo ""
-echo "  ✓ SAGE has been installed and launched."
-echo "    The CEREBRUM dashboard will open in your browser shortly."
-echo ""
-echo "    You can safely eject the disk image now."
-echo ""
-read -p "  Press Enter to close..."
-INSTALL
-chmod +x "$DMG_TEMP/Install SAGE.command"
-
 # Create a README in the DMG
 cat > "$DMG_TEMP/README.txt" << README
 SAGE — Give Your AI a Persistent, Secure Memory
 =================================================
 
 INSTALL / UPDATE:
-  Double-click "Install SAGE.command" — it handles everything:
-  stops any running SAGE, installs the app, and launches it.
-
-  Alternatively, you can drag SAGE.app to Applications manually.
-  If you get "SAGE is still open", run "Install SAGE.command" instead.
+  1. If SAGE is already running, right-click its dock icon and choose Quit.
+  2. Drag SAGE.app to the Applications folder.
+  3. Open SAGE from Applications (or Launchpad).
 
 On first launch, SAGE runs the setup wizard to configure your
 personal memory node.
