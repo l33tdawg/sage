@@ -812,6 +812,9 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 			r.ParentHash = *parentHash
 		}
 
+		// Compute similarity for ranking only — no minimum threshold.
+		// When a domain filter is active, the domain IS the relevance filter;
+		// all matching records are returned regardless of similarity score.
 		sim := cosineSimilarity(embedding, r.Embedding)
 		scored = append(scored, scoredRecord{record: &r, similarity: sim})
 	}

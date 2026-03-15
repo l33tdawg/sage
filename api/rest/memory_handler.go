@@ -468,6 +468,12 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	queryAgentID := middleware.ContextAgentID(r.Context())
 	allowedAgents, seeAll := s.resolveVisibleAgents(queryAgentID)
 
+	// If checkDomainAccess already approved read access for this domain,
+	// skip agent isolation — the agent is authorized to see everything in the domain.
+	if !seeAll && domainAccessApproved {
+		seeAll = true
+	}
+
 	// Grant-aware override: if querying a specific domain, skip agent isolation when:
 	// (a) the agent has a direct grant on the domain, or
 	// (b) the agent has org-level access (clearance >= classification), or

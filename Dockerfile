@@ -7,7 +7,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-ARG VERSION=4.5.5
+ARG VERSION=4.5.6
 ARG COMMIT=unknown
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /sage-gui ./cmd/sage-gui
 
