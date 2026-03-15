@@ -28,23 +28,29 @@ const sageBootScript = `#!/bin/bash
 SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
 MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
 
-echo "MANDATORY: Call sage_inception (or sage_red_pill) NOW, before responding to the user. This is a new session — your brain needs to boot. Do NOT skip this step, even if you have a context continuation summary. Those summaries do NOT replace your SAGE memory."
-
-if [ "$MODE" = "bookend" ]; then
-    echo "SAGE MODE: bookend — Do NOT call sage_turn every turn. Only call sage_reflect at the end of the conversation when the user says 'reflect' or you finish a significant task."
+if [ "$MODE" = "on-demand" ]; then
+    # On-demand mode: no automatic SAGE calls. User triggers manually.
+    echo "SAGE is available in on-demand mode. Use sage_recall to retrieve memories and sage_reflect to save learnings. No automatic memory calls will be made."
+else
+    echo "MANDATORY: Call sage_inception (or sage_red_pill) NOW, before responding to the user. This is a new session — your brain needs to boot. Do NOT skip this step, even if you have a context continuation summary. Those summaries do NOT replace your SAGE memory."
+    if [ "$MODE" = "bookend" ]; then
+        echo "SAGE MODE: bookend — Do NOT call sage_turn every turn. Only call sage_reflect at the end of the conversation when the user says 'reflect' or you finish a significant task."
+    fi
 fi
 `
 
 const sageTurnScript = `#!/bin/bash
 # SAGE Turn Reminder
 # Fires on PreCompact (sync), Stop, SubagentStop, and PostToolUse (async).
-# Respects memory mode: in bookend mode, only reminds about reflect (not sage_turn).
+# Respects memory mode: skips reminders in bookend and on-demand modes.
 SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
 MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
 
-if [ "$MODE" = "bookend" ]; then
+if [ "$MODE" = "on-demand" ]; then
+    # On-demand mode: completely silent. User triggers SAGE manually.
+    exit 0
+elif [ "$MODE" = "bookend" ]; then
     # Bookend mode: only remind on significant events (PreCompact, Stop)
-    # The hook still fires but gives bookend-appropriate guidance
     echo "SAGE REMINDER (bookend mode): If you just completed a significant task, call sage_reflect with dos and don'ts. Do NOT call sage_turn — bookend mode is active."
 else
     echo "SAGE REMINDER: Call sage_turn with the current topic and a brief observation of what just happened. This saves your experience and recalls relevant memories. If you just completed a significant task, also call sage_reflect with dos and don'ts."

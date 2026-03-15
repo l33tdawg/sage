@@ -107,15 +107,20 @@ func TestSyncMemoryModeFlag_PreservesExisting(t *testing.T) {
 }
 
 func TestHookScripts_BookendModeCheck(t *testing.T) {
-	// Verify the hook scripts contain mode-checking logic
 	assert.Contains(t, sageTurnScript, "memory_mode")
 	assert.Contains(t, sageTurnScript, "bookend")
 	assert.Contains(t, sageBootScript, "memory_mode")
 	assert.Contains(t, sageBootScript, "bookend")
 }
 
+func TestHookScripts_OnDemandModeCheck(t *testing.T) {
+	assert.Contains(t, sageTurnScript, "on-demand")
+	assert.Contains(t, sageBootScript, "on-demand")
+	// Turn script should exit silently in on-demand mode
+	assert.Contains(t, sageTurnScript, "exit 0")
+}
+
 func TestHookScripts_FullModeDefault(t *testing.T) {
-	// Verify that full mode is the default fallback in hook scripts
 	assert.Contains(t, sageTurnScript, `echo "full"`)
 	assert.Contains(t, sageBootScript, `echo "full"`)
 }

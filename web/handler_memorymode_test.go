@@ -64,6 +64,32 @@ func TestHandleSaveMemoryMode_Bookend(t *testing.T) {
 	assert.Equal(t, "bookend", resp["mode"])
 }
 
+func TestHandleSaveMemoryMode_OnDemand(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+
+	body, _ := json.Marshal(map[string]string{"mode": "on-demand"})
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/memory-mode", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, true, resp["ok"])
+	assert.Equal(t, "on-demand", resp["mode"])
+
+	// Read back
+	req = httptest.NewRequest("GET", "/v1/dashboard/settings/memory-mode", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "on-demand", resp["mode"])
+}
+
 func TestHandleSaveMemoryMode_InvalidMode(t *testing.T) {
 	h, _ := newTestHandler(t)
 	r := testRouter(h)

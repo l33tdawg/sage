@@ -1549,7 +1549,8 @@ func (h *DashboardHandler) handleGetMemoryMode(w http.ResponseWriter, r *http.Re
 }
 
 // handleSaveMemoryMode saves the memory mode setting.
-// Valid modes: "full" (sage_turn every turn) or "bookend" (inception + reflect only).
+// Valid modes: "full" (sage_turn every turn), "bookend" (inception + reflect only),
+// or "on-demand" (no automatic calls — user manually triggers recall/reflect).
 // Also writes ~/.sage/memory_mode flag file so hook scripts can read it without an API call.
 func (h *DashboardHandler) handleSaveMemoryMode(w http.ResponseWriter, r *http.Request) {
 	if h.prefStore == nil {
@@ -1564,8 +1565,8 @@ func (h *DashboardHandler) handleSaveMemoryMode(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if body.Mode != "full" && body.Mode != "bookend" {
-		writeError(w, http.StatusBadRequest, "mode must be 'full' or 'bookend'")
+	if body.Mode != "full" && body.Mode != "bookend" && body.Mode != "on-demand" {
+		writeError(w, http.StatusBadRequest, "mode must be 'full', 'bookend', or 'on-demand'")
 		return
 	}
 	if err := h.prefStore.SetPreference(r.Context(), "memory_mode", body.Mode); err != nil {

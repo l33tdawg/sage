@@ -689,7 +689,16 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 		// Already initialized — return awakening message with stats
 		var instructions string
 
-		if memMode == "bookend" {
+		if memMode == "on-demand" {
+			// On-demand mode: no automatic calls. User triggers everything manually.
+			instructions = "You have persistent institutional memory via SAGE — but it is in ON-DEMAND mode.\n\n" +
+				"Do NOT call sage_inception, sage_turn, or sage_reflect automatically.\n" +
+				"Only interact with SAGE when the user explicitly asks you to:\n" +
+				"  - \"recall\" / \"remember\" / \"retrieve\" → call sage_recall with the topic\n" +
+				"  - \"reflect\" / \"save\" / \"store\" → call sage_reflect with dos and don'ts\n" +
+				"  - \"remember this\" → call sage_remember to store a specific memory\n\n" +
+				"This mode minimizes token usage. SAGE tools are available but passive."
+		} else if memMode == "bookend" {
 			// Bookend mode: inception at start, reflect at end. No per-turn calls.
 			instructions = "You have persistent institutional memory via SAGE — governed by consensus, not a flat file.\n\n" +
 				"MEMORY MODE: BOOKEND — your admin has configured SAGE to run only at session start and end to conserve tokens.\n" +
@@ -730,7 +739,8 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 		}
 
 		// Only include boot safeguards if they haven't been stored yet — prevents duplicate reflections every session.
-		if !s.bootSafeguardExists(ctx) {
+		// Skip for on-demand mode — boot safeguards would contradict the passive behavior.
+		if memMode != "on-demand" && !s.bootSafeguardExists(ctx) {
 			instructions += "\n\nBOOT SAFEGUARDS — deploy these NOW, before doing anything else:\n" +
 				"1. Call sage_reflect with task_summary='Boot sequence compliance', domain='meta', " +
 				"dos='Always run sage_inception BEFORE any response to the user on the first message of every conversation. No exceptions.', " +

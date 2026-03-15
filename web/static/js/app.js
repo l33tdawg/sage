@@ -2569,40 +2569,55 @@ function MemoryMode() {
         setSaving(false);
     }
 
+    const modes = [
+        {
+            id: 'full',
+            label: 'Full',
+            desc: 'sage_turn fires every turn — maximum recall and context building.',
+            who: 'Best for: power users, long-running projects, agents that need deep continuity.',
+        },
+        {
+            id: 'bookend',
+            label: 'Bookend',
+            desc: 'Inception at session start, reflect at end. No per-turn calls.',
+            who: 'Best for: cost-conscious users, shorter sessions, when you want memory without the overhead.',
+        },
+        {
+            id: 'on-demand',
+            label: 'On-Demand',
+            desc: 'No automatic SAGE calls. You say "recall" or "reflect" to trigger manually.',
+            who: 'Best for: maximum token savings, users who want full control, quick one-off tasks.',
+        },
+    ];
+
     return html`
         <h3>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
                 <path d="M12 2a7 7 0 0 1 7 7c0 2.4-1.2 4.5-3 5.7V17a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2v-2.3C6.2 13.5 5 11.4 5 9a7 7 0 0 1 7-7z"/>
                 <line x1="10" y1="22" x2="14" y2="22"/>
             </svg>
-            Memory Mode <${HelpTip} text="Controls when SAGE saves and recalls memories during a conversation. Full mode calls sage_turn every turn for maximum context. Bookend mode only runs at session start and end to save tokens." />
+            Memory Mode <${HelpTip} text="Controls when SAGE saves and recalls memories during a conversation. Affects token usage and how much context your AI agent carries between turns." />
         </h3>
-        <p style="font-size:12px;color:var(--text-dim);margin:0 0 12px">
-            Controls how aggressively your AI agents interact with SAGE during conversations.
+        <p style="font-size:12px;color:var(--text-dim);margin:0 0 14px">
+            Controls how your AI agents interact with SAGE during conversations. Higher engagement means richer memory but more token usage.
         </p>
         <div style="display:flex;gap:12px;flex-wrap:wrap">
-            <button class="btn ${mode === 'full' ? 'btn-primary' : ''}"
-                    onClick=${() => handleChange('full')}
-                    disabled=${saving}
-                    style="flex:1;min-width:200px;padding:12px;text-align:left;border:1px solid ${mode === 'full' ? 'var(--accent)' : 'var(--border)'};border-radius:8px;background:${mode === 'full' ? 'var(--accent-bg, rgba(99,102,241,0.1))' : 'var(--bg-elevated)'};cursor:pointer">
-                <div style="font-weight:600;margin-bottom:4px">
-                    ${mode === 'full' ? '● ' : '○ '}Full
-                </div>
-                <div style="font-size:11px;color:var(--text-dim);font-weight:normal">
-                    sage_turn every turn. Maximum context and recall. Uses more tokens.
-                </div>
-            </button>
-            <button class="btn ${mode === 'bookend' ? 'btn-primary' : ''}"
-                    onClick=${() => handleChange('bookend')}
-                    disabled=${saving}
-                    style="flex:1;min-width:200px;padding:12px;text-align:left;border:1px solid ${mode === 'bookend' ? 'var(--accent)' : 'var(--border)'};border-radius:8px;background:${mode === 'bookend' ? 'var(--accent-bg, rgba(99,102,241,0.1))' : 'var(--bg-elevated)'};cursor:pointer">
-                <div style="font-weight:600;margin-bottom:4px">
-                    ${mode === 'bookend' ? '● ' : '○ '}Bookend
-                </div>
-                <div style="font-size:11px;color:var(--text-dim);font-weight:normal">
-                    Inception at start, reflect at end. Minimal token usage. Say "reflect" to save.
-                </div>
-            </button>
+            ${modes.map(m => html`
+                <button class="btn ${mode === m.id ? 'btn-primary' : ''}"
+                        onClick=${() => handleChange(m.id)}
+                        disabled=${saving}
+                        style="flex:1;min-width:180px;padding:12px 14px;text-align:left;border:1px solid ${mode === m.id ? 'var(--accent)' : 'var(--border)'};border-radius:8px;background:${mode === m.id ? 'var(--accent-bg, rgba(99,102,241,0.1))' : 'var(--bg-elevated)'};cursor:pointer">
+                    <div style="font-weight:600;margin-bottom:4px">
+                        ${mode === m.id ? '● ' : '○ '}${m.label}
+                    </div>
+                    <div style="font-size:11px;color:var(--text-dim);font-weight:normal;margin-bottom:6px">
+                        ${m.desc}
+                    </div>
+                    <div style="font-size:10px;color:var(--text-muted);font-weight:normal;font-style:italic">
+                        ${m.who}
+                    </div>
+                </button>
+            `)}
         </div>
         ${saving && html`<div style="margin-top:8px;font-size:12px;color:var(--text-dim)">Saving and syncing hooks...</div>`}
         ${saved && html`<div style="margin-top:8px;font-size:12px;color:#10b981">✓ Saved — mode synced to hooks. Takes effect on next session.</div>`}
