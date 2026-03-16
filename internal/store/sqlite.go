@@ -2801,8 +2801,6 @@ func (s *SQLiteStore) ListAllTags(ctx context.Context) ([]TagCount, error) {
 }
 
 // ListMemoriesByTag returns memories that have a specific tag.
-//
-//nolint:dupl
 func (s *SQLiteStore) ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error) {
 	if limit <= 0 {
 		limit = 50
@@ -2928,7 +2926,7 @@ func (s *SQLiteStore) GetInbox(ctx context.Context, agentID, provider string, li
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []*PipelineMessage
 	for rows.Next() {
@@ -2985,7 +2983,7 @@ func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string,
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []*PipelineMessage
 	for rows.Next() {
@@ -3023,7 +3021,7 @@ func (s *SQLiteStore) ListPipelines(ctx context.Context, status string, limit in
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []*PipelineMessage
 	for rows.Next() {

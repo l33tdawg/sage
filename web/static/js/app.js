@@ -5785,8 +5785,8 @@ function PipelinePage() {
                 <div style="display:flex;flex-direction:column;gap:10px;">
                     ${items.map(item => {
                         const isExpanded = expanded === item.pipe_id;
-                        const from = item.from_provider || (item.from_agent ? item.from_agent.slice(0, 12) + '...' : 'unknown');
-                        const to = item.to_provider || (item.to_agent ? item.to_agent.slice(0, 12) + '...' : 'any');
+                        const from = item.from_name || item.from_provider || (item.from_agent ? item.from_agent.slice(0, 12) + '...' : 'unknown');
+                        const to = item.to_name || item.to_provider || (item.to_agent ? item.to_agent.slice(0, 12) + '...' : 'any');
                         return html`
                             <div key=${item.pipe_id}
                                 style="background:var(--card-bg);border:1px solid ${isExpanded ? 'var(--accent)' : 'var(--border)'};
