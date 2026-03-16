@@ -192,6 +192,27 @@ func runServe() error {
 		cometCfg.PrivValidatorKeyFile(),
 		cometCfg.PrivValidatorStateFile(),
 	)
+
+	// Detect and fix height regression: if the validator signing state is ahead
+	// of the block store (e.g. after chain reset, upgrade, or crash), CometBFT
+	// refuses to sign at the lower height.  Auto-reset to prevent a stuck chain.
+	pvStatePath := cometCfg.PrivValidatorStateFile()
+	if signedHeight := pv.LastSignState.Height; signedHeight > 0 {
+		blockStoreDBPath := filepath.Join(cometCfg.RootDir, "data", "blockstore.db")
+		if _, statErr := os.Stat(blockStoreDBPath); os.IsNotExist(statErr) {
+			// Block store was wiped but signing state wasn't — this causes
+			// "height regression" errors where CometBFT refuses to sign.
+			logger.Warn().
+				Int64("signed_height", signedHeight).
+				Msg("validator signed ahead of missing block store — resetting signing state to prevent height regression")
+			resetState := []byte(`{"height":"0","round":0,"step":0}`)
+			if wErr := os.WriteFile(pvStatePath, resetState, 0600); wErr != nil {
+				return fmt.Errorf("reset validator state: %w", wErr)
+			}
+			pv = privval.LoadFilePV(cometCfg.PrivValidatorKeyFile(), pvStatePath)
+		}
+	}
+
 	nodeKey, err := p2p.LoadNodeKey(cometCfg.NodeKeyFile())
 	if err != nil {
 		return fmt.Errorf("load node key: %w", err)
