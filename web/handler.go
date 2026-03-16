@@ -1478,7 +1478,7 @@ func (h *DashboardHandler) handleGetRecallSettings(w http.ResponseWriter, r *htt
 		}
 	}
 
-	confidence := 95
+	confidence := 70 // Default 70% — catches observations (0.80+) and inferences (0.60+), not just facts
 	if v, ok := prefs["recall_min_confidence"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			confidence = n
