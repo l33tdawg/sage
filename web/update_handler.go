@@ -265,6 +265,18 @@ func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string)
 
 	h.sendUpdateProgress("extract", "done", "Binary extracted")
 
+	// Step 3.5: Protect vault key — back it up before touching any files.
+	// The vault key is irreplaceable: if lost, all encrypted memories are
+	// permanently unrecoverable.
+	if h.VaultKeyPath != "" {
+		if vkData, vkErr := os.ReadFile(h.VaultKeyPath); vkErr == nil {
+			backupDir := filepath.Join(filepath.Dir(h.VaultKeyPath), "backups")
+			_ = os.MkdirAll(backupDir, 0700)
+			vaultBackup := filepath.Join(backupDir, "vault-pre-update.key")
+			_ = os.WriteFile(vaultBackup, vkData, 0600) //nolint:gosec // trusted local vault backup
+		}
+	}
+
 	// Step 4: Install
 	h.sendUpdateProgress("install", "active", "Installing new binary...")
 

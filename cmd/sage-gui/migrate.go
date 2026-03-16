@@ -43,6 +43,22 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 	// Version changed — need migration
 	fmt.Fprintf(os.Stderr, "\n  Upgrading SAGE from %s → %s\n", lastVersion, version)
 
+	// Step 0: Protect the vault key — back it up before touching anything.
+	// The vault key is irreplaceable: if lost, all encrypted memories become
+	// permanently unrecoverable. We back it up on every upgrade as a safety net.
+	vaultKeyPath := filepath.Join(SageHome(), "vault.key")
+	if _, vkErr := os.Stat(vaultKeyPath); vkErr == nil {
+		backupDir := filepath.Join(SageHome(), "backups")
+		_ = os.MkdirAll(backupDir, 0700)
+		ts := time.Now().Format("2006-01-02T15-04-05")
+		vaultBackup := filepath.Join(backupDir, fmt.Sprintf("vault-pre-upgrade-%s-%s.key", lastVersion, ts))
+		if src, readErr := os.ReadFile(vaultKeyPath); readErr == nil {
+			if writeErr := os.WriteFile(vaultBackup, src, 0600); writeErr == nil { //nolint:gosec // trusted local vault backup
+				fmt.Fprintf(os.Stderr, "  Backed up vault key to %s\n", vaultBackup)
+			}
+		}
+	}
+
 	// Step 1: Backup SQLite (the precious data) using VACUUM INTO for atomic consistency
 	if _, statErr := os.Stat(sqlitePath); statErr == nil {
 		// Clean up stale WAL/SHM files from previous version — these can cause
