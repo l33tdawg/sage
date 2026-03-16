@@ -36,6 +36,8 @@ func (h *DashboardHandler) handleGetLedgerStatus(w http.ResponseWriter, _ *http.
 }
 
 // handleEnableLedger initialises the encryption vault and attaches it to the store.
+// If a vault key already exists on disk (from a previous session), it reuses it
+// rather than creating a new one — preventing silent data loss.
 func (h *DashboardHandler) handleEnableLedger(w http.ResponseWriter, r *http.Request) {
 	if h.Encrypted.Load() {
 		writeError(w, http.StatusConflict, "encryption is already enabled")
@@ -59,15 +61,24 @@ func (h *DashboardHandler) handleEnableLedger(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Create the vault key file.
-	if err := vault.Init(h.VaultKeyPath, body.Passphrase); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to initialise vault: "+err.Error())
-		return
+	// If a vault key file already exists, re-enable by opening the existing key
+	// rather than creating a new one. Creating a new key would silently destroy
+	// all previously encrypted memories.
+	reusing := vault.Exists(h.VaultKeyPath)
+	if !reusing {
+		if err := vault.Init(h.VaultKeyPath, body.Passphrase); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to initialise vault: "+err.Error())
+			return
+		}
 	}
 
 	// Open the vault so we can attach it to the store.
 	v, err := vault.Open(h.VaultKeyPath, body.Passphrase)
 	if err != nil {
+		if reusing && err == vault.ErrWrongPassphrase {
+			writeError(w, http.StatusUnauthorized, "vault key exists from a previous session — enter the original passphrase to re-enable encryption")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "vault created but failed to open: "+err.Error())
 		return
 	}
@@ -91,10 +102,15 @@ func (h *DashboardHandler) handleEnableLedger(w http.ResponseWriter, r *http.Req
 	// This can re-initialize the vault with a new passphrase if the original is lost.
 	recoveryKey, _ := v.RecoveryKey()
 
-	writeJSONResp(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"ok":           true,
 		"recovery_key": recoveryKey,
-	})
+	}
+	if reusing {
+		resp["reused_existing_key"] = true
+		resp["message"] = "Re-enabled encryption using existing vault key — all previously encrypted memories remain accessible."
+	}
+	writeJSONResp(w, http.StatusOK, resp)
 }
 
 // handleChangePassphrase changes the vault passphrase without re-encrypting data.
@@ -172,6 +188,15 @@ func (h *DashboardHandler) handleRecoverLedger(w http.ResponseWriter, r *http.Re
 	if len(body.NewPassphrase) < 8 {
 		writeError(w, http.StatusBadRequest, "passphrase must be at least 8 characters")
 		return
+	}
+
+	// Auto-backup the current vault key before overwriting — safety net in case
+	// the recovery key is wrong or the user wants to roll back.
+	if vault.Exists(h.VaultKeyPath) {
+		backupPath := h.VaultKeyPath + ".bak"
+		if src, readErr := os.ReadFile(h.VaultKeyPath); readErr == nil {
+			_ = os.WriteFile(backupPath, src, 0600) //nolint:gosec // trusted local vault path
+		}
 	}
 
 	// Re-initialize the vault key file from the recovery key.

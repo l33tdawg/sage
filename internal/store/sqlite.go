@@ -13,6 +13,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
@@ -31,11 +32,12 @@ type sqlQuerier interface {
 
 // SQLiteStore implements MemoryStore, ValidatorScoreStore, AccessStore, and OrgStore using SQLite.
 type SQLiteStore struct {
-	conn          sqlQuerier   // either *sql.DB or *sql.Tx
-	db            *sql.DB      // nil for tx-scoped stores
-	dbPath        string
-	vault         *vault.Vault // nil = no encryption
-	vaultExpected bool         // true = encryption should be active; reject writes if vault nil
+	conn              sqlQuerier   // either *sql.DB or *sql.Tx
+	db                *sql.DB      // nil for tx-scoped stores
+	dbPath            string
+	vault             *vault.Vault // nil = no encryption
+	vaultExpected     bool         // true = encryption should be active; reject writes if vault nil
+	decryptWarnOnce   sync.Once    // gates the one-time decryption failure warning
 }
 
 // encPrefix marks content as encrypted (prepended to base64 ciphertext).
@@ -83,7 +85,17 @@ func (s *SQLiteStore) decryptContent(stored string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("decode encrypted content: %w", err)
 	}
-	return s.vault.DecryptString(data)
+	plaintext, decErr := s.vault.DecryptString(data)
+	if decErr != nil {
+		// Log once per process lifetime — this typically means the vault key
+		// doesn't match the key used to encrypt these memories (e.g., the vault
+		// was re-initialized). Logging every row would be too noisy.
+		s.decryptWarnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "SAGE WARNING: failed to decrypt memory content — vault key may not match the key used to encrypt stored memories. Use the recovery key to restore the original vault, or deprecated affected memories.\n")
+		})
+		return stored, decErr // return raw enc:: content so caller sees it's encrypted
+	}
+	return plaintext, nil
 }
 
 // encryptEmbedding encrypts embedding bytes if the vault is set.

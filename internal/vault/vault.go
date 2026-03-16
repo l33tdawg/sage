@@ -55,7 +55,16 @@ type Vault struct {
 // The actual data encryption key is randomly generated — the passphrase
 // just protects the key file. This means changing the passphrase doesn't
 // require re-encrypting the entire database.
+//
+// SAFETY: Init refuses to overwrite an existing vault key file. If a key
+// already exists, use ChangePassphrase or InitFromRecoveryKey instead.
+// Overwriting the key file would make all previously encrypted data
+// permanently unrecoverable.
 func Init(keyFilePath, passphrase string) error {
+	if Exists(keyFilePath) {
+		return fmt.Errorf("vault key already exists at %s — use ChangePassphrase to change the passphrase or InitFromRecoveryKey to restore from a recovery key; overwriting would destroy all encrypted data", keyFilePath)
+	}
+
 	// Generate random data key
 	dataKey := make([]byte, argonKeyLen)
 	if _, err := io.ReadFull(rand.Reader, dataKey); err != nil {

@@ -190,3 +190,26 @@ func TestKeyFilePermissions(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0600), info.Mode().Perm(), "key file should be owner-only")
 }
+
+func TestInitRefusesToOverwrite(t *testing.T) {
+	keyFile := filepath.Join(t.TempDir(), "vault.key")
+	require.NoError(t, Init(keyFile, "first-pass"))
+
+	// Encrypt something with the first key
+	v1, err := Open(keyFile, "first-pass")
+	require.NoError(t, err)
+	encrypted, err := v1.EncryptString("precious memory")
+	require.NoError(t, err)
+
+	// Second Init must fail — refusing to overwrite
+	err = Init(keyFile, "second-pass")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+
+	// Original key must still work
+	v2, err := Open(keyFile, "first-pass")
+	require.NoError(t, err)
+	decrypted, err := v2.DecryptString(encrypted)
+	require.NoError(t, err)
+	assert.Equal(t, "precious memory", decrypted)
+}

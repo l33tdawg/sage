@@ -343,6 +343,84 @@ func TestHandleRecoverLedger_BadKey(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
+func TestHandleEnableLedger_ReusesExistingKey(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+
+	// Enable encryption.
+	body, _ := json.Marshal(map[string]string{"passphrase": "original-pass"})
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var enableResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &enableResp))
+	recoveryKey1 := enableResp["recovery_key"].(string)
+
+	// Login and disable encryption.
+	cookie := loginAfterEnable(t, r, "original-pass")
+	body, _ = json.Marshal(map[string]string{"passphrase": "original-pass"})
+	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/disable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.False(t, h.Encrypted.Load())
+
+	// Re-enable encryption — should reuse existing vault.key, not create new one.
+	body, _ = json.Marshal(map[string]string{"passphrase": "original-pass"})
+	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var reEnableResp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &reEnableResp))
+	assert.Equal(t, true, reEnableResp["ok"])
+	assert.Equal(t, true, reEnableResp["reused_existing_key"])
+
+	// Recovery key should be the same (same data key).
+	recoveryKey2 := reEnableResp["recovery_key"].(string)
+	assert.Equal(t, recoveryKey1, recoveryKey2, "re-enable should reuse the same data key")
+}
+
+func TestHandleEnableLedger_ReusesExistingKey_WrongPassphrase(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+
+	// Enable and then disable.
+	body, _ := json.Marshal(map[string]string{"passphrase": "original-pass"})
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	cookie := loginAfterEnable(t, r, "original-pass")
+	body, _ = json.Marshal(map[string]string{"passphrase": "original-pass"})
+	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/disable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(cookie)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Re-enable with WRONG passphrase — should get 401, not create new key.
+	body, _ = json.Marshal(map[string]string{"passphrase": "wrong-pass!!"})
+	req = httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.False(t, h.Encrypted.Load(), "encryption should not be enabled after wrong passphrase")
+}
+
 func TestHandleEnableLedger_NoVaultPath(t *testing.T) {
 	h, _ := newTestHandler(t)
 	r := testRouter(h)
