@@ -14,13 +14,15 @@ This document covers the full multi-node BFT deployment, Python SDK, REST API, m
 6. [Python SDK](#python-sdk)
 7. [Sovereign Layer (RBAC & Federation)](#sovereign-layer-rbac--federation)
 8. [Agent Management & Network Topology](#agent-management--network-topology)
-9. [CLI Tools](#cli-tools)
-10. [REST API](#rest-api)
-11. [Monitoring](#monitoring)
-12. [Testing](#testing)
-13. [Troubleshooting](#troubleshooting)
-14. [Repository Structure](#repository-structure)
-15. [Makefile Reference](#makefile-reference)
+9. [Pipeline Architecture (Agent-to-Agent Messaging)](#pipeline-architecture-agent-to-agent-messaging)
+10. [Task Management](#task-management)
+11. [CLI Tools](#cli-tools)
+12. [REST API](#rest-api)
+13. [Monitoring](#monitoring)
+14. [Testing](#testing)
+15. [Troubleshooting](#troubleshooting)
+16. [Repository Structure](#repository-structure)
+17. [Makefile Reference](#makefile-reference)
 
 ---
 
@@ -93,7 +95,7 @@ No tokens. No gas fees. No cryptocurrency. Just consensus-validated knowledge.
 | On-chain State | BadgerDB v4 (hashes only) |
 | Off-chain Storage | PostgreSQL 16 + pgvector (HNSW indexes) |
 | Tx Format | Protobuf (deterministic serialization) |
-| REST API | Go chi v5 (11 endpoints, OpenAPI 3.1) |
+| REST API | Go chi v5 (25+ endpoints, OpenAPI 3.1) |
 | Agent SDK | Python (httpx + PyNaCl + Pydantic v2) |
 | Embeddings | Ollama nomic-embed-text (768-dim, fully local) |
 | Monitoring | Prometheus + Grafana (3 dashboards, 5 alert rules) |
@@ -478,6 +480,56 @@ graph TB
 
 All RBAC state is on-chain -- organizations, departments, clearance levels, access grants, and federation agreements are committed to the BFT network and replicated across all validators.
 
+### Clearance Level Details
+
+Beyond the operational access levels (0-4) used for read/write/validate/admin gating, clearance levels also classify the sensitivity of data itself:
+
+| Level | Name | Description |
+|-------|------|-------------|
+| 0 | Public | No registration needed. Open data accessible to any agent. |
+| 1 | Internal | Default for registered domains. Requires agent registration. |
+| 2 | Confidential | Restricted access. Requires explicit domain grant from an admin. |
+| 3 | Secret | High-security data. Limited to agents with clearance 3+ and explicit grants. |
+| 4 | Top Secret | Maximum restriction. Only clearance-4 agents with direct grants can access. |
+
+Memories inherit the clearance level of the domain they are submitted to. An agent must have a clearance level >= the domain's clearance level to interact with memories in that domain.
+
+### Domain Access + Clearance Interaction
+
+Access to a memory requires passing three checks, evaluated in order:
+
+1. **Clearance gate** — the agent's clearance level must be >= the domain's classification level. An agent with clearance 1 cannot access a domain classified at level 2, regardless of other grants.
+2. **Domain access grant** — the agent's `domain_access` map must include the target domain with the appropriate permission (`read: true` for queries, `write: true` for proposals/votes/challenges).
+3. **Department membership** — if the domain is scoped to a department, the agent must be a member of that department (or the parent organization's admin).
+
+**Federation caps:** When two organizations establish a federation agreement, they set a `max_clearance` ceiling. Even if an agent in Org B has clearance 4, their effective clearance for federated domains from Org A is capped by the federation agreement (e.g., `max_clearance: 2` means they can only see level-0, level-1, and level-2 data from Org A).
+
+**Precedence:** The most restrictive rule wins. If an agent has clearance 3 but the federation cap is 2, their effective clearance for federated domains is 2. If an agent has clearance 3 and a domain grant with `write: true`, but the domain is classified at level 4, they cannot access it at all.
+
+### Common RBAC Patterns
+
+**Read-only research domain:**
+- Create a domain `research` with classification level 1 (Internal)
+- Grant agents `{"research": {"read": true, "write": false}}`
+- Only designated curators get `write: true` to add new research memories
+
+**Write-restricted operational domain:**
+- Domain `ops` at classification level 2 (Confidential)
+- Field agents get `{"ops": {"read": true, "write": true}}` with clearance 2
+- Analysts get `{"ops": {"read": true, "write": false}}` — they can query but not add data
+
+**Cross-department visibility via federation:**
+- Org A (Red Team) and Org B (Blue Team) federate with `max_clearance: 1`
+- Both sides can see each other's Internal-level findings
+- Secret and Top Secret data stays within each org
+
+**Troubleshooting: "agent can't see memories":**
+1. Check the agent's clearance level — is it >= the domain's classification? (`GET /v1/agent/me` shows current clearance)
+2. Check domain access grants — does the agent have `read: true` for the target domain?
+3. Check `visible_agents` — if the field is set, the agent can only see memories from listed agent IDs. An empty list or `"*"` means no restriction.
+4. Check federation caps — for cross-org queries, is the federation `max_clearance` high enough?
+5. Check memory status — is the agent querying for `committed` memories but the memory is still `proposed`?
+
 ---
 
 ## Agent Management & Network Topology
@@ -537,6 +589,26 @@ Creation → Active → Key Rotation → Removal
 **Auto-Registration (v3.5+):** Agents connecting via MCP for the first time automatically register on-chain during the boot sequence (`sage_inception` -> `autoRegister`). The registration is idempotent — calling it again returns the existing record.
 
 **Permission Enforcement (v3.5+):** Memory operations check on-chain state (BadgerDB) first for clearance and domain access. If the agent isn't registered on-chain (legacy), it falls back to the SQLite record. The `visible_agents` field filters query results — agents only see memories from agents in their visibility list (or all, if the list is empty/"*").
+
+### Agent Registration & Updates (v5.0.1+)
+
+Agents register on-chain via REST, providing identity metadata that is committed through BFT consensus:
+
+**Register:** `POST /v1/agent/register` — creates a new agent record on-chain. Required fields: `name`, `role`, `boot_bio`, `provider`. The agent's Ed25519 public key (from the `X-Agent-ID` header) becomes its permanent identifier. Registration is idempotent.
+
+**Update Profile:** `PUT /v1/agent/update` — agents update their own `name` or `boot_bio`. The request is signed and committed on-chain for auditability.
+
+**Set Permissions:** `PUT /v1/agent/{id}/permission` — admin-only. Sets `clearance`, `domain_access`, and `visible_agents` for a target agent. This is the only way to change an agent's access level after registration.
+
+**Agent Roles (v5.0.1):**
+
+| Role | Description |
+|------|-------------|
+| `member` | Default role. Can read and write based on clearance and domain access |
+| `admin` | Full control. Can set permissions for other agents, manage domains |
+| `observer` | Read-only. Blocked from all write operations regardless of domain grants |
+
+**Visibility Controls:** The `visible_agents` field is a JSON array of agent IDs. When set, the agent can only see memories authored by agents in that list. An empty array or `"*"` means the agent sees all memories (subject to domain and clearance checks). This allows fine-grained compartmentalization — e.g., a review agent that only sees output from a specific working group.
 
 ### Redeployment Orchestrator
 
@@ -606,6 +678,84 @@ Key rotation replaces an agent's Ed25519 keypair without losing memory attributi
 6. Subsequent requests from the old key are rejected
 
 This is an atomic operation — if any step fails, the entire rotation is rolled back and the old key remains active.
+
+---
+
+## Pipeline Architecture (Agent-to-Agent Messaging)
+
+Introduced in v5.0.1, the pipeline is a direct messaging system between agents. Unlike shared memories (which are broadcast knowledge), pipeline messages are routed point-to-point — one agent sends a message to a specific agent (by ID) or to any agent matching a provider (e.g., `"claude-code"`).
+
+### How It Works
+
+The pipeline provides structured, asynchronous communication between agents without polluting the shared memory pool. Messages are short-lived (default 60-minute TTL) and designed for coordination, not permanent knowledge storage.
+
+### Message Lifecycle
+
+```
+send → pending → claimed → completed
+                    ↘ expired (TTL exceeded)
+```
+
+1. **Send** — Agent A posts a message via `POST /v1/pipe/send`, targeting a specific `agent_id` or `provider`. The message enters `pending` status.
+2. **Pending** — The message sits in the recipient's inbox. Recipients poll via `GET /v1/pipe/inbox` to discover new messages.
+3. **Claimed** — The recipient claims the message via `PUT /v1/pipe/{id}/claim`, signaling that work has begun. This prevents other agents from claiming the same message.
+4. **Completed** — The recipient posts a result via `PUT /v1/pipe/{id}/result`. The sender can retrieve results via `GET /v1/pipe/results`.
+5. **Expired** — If the TTL elapses before the message is claimed or completed, it transitions to `expired` and is no longer actionable.
+
+### Auto-Journaling
+
+When a pipeline message reaches `completed` status, SAGE automatically creates a memory entry (memory_type `journal`) capturing the exchange. This means significant inter-agent coordination is preserved in the knowledge base without agents needing to manually record it.
+
+### TTL and Expiry
+
+- **Default TTL:** 60 minutes
+- **Maximum TTL:** 1440 minutes (24 hours)
+- Senders can set a custom TTL per message within these bounds
+- Expired messages are soft-deleted — they remain queryable by ID but are excluded from inbox results
+
+### REST Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/v1/pipe/send` | Send a message to a target agent or provider |
+| `GET` | `/v1/pipe/inbox` | List pending messages for the authenticated agent |
+| `PUT` | `/v1/pipe/{id}/claim` | Claim a pending message (marks it in-progress) |
+| `PUT` | `/v1/pipe/{id}/result` | Post a result for a claimed message |
+| `GET` | `/v1/pipe/{id}` | Get a specific message by ID (any status) |
+| `GET` | `/v1/pipe/results` | List completed messages with results for the sender |
+
+### Use Cases
+
+- **Cross-provider coordination** — A Claude Code agent delegates a subtask to a Cursor agent by sending a pipeline message targeted at provider `"cursor"`. The Cursor agent picks it up, completes it, and posts the result.
+- **Task delegation** — An admin agent breaks a large task into subtasks and sends each to a specialized agent via the pipeline.
+- **Inter-agent review** — Agent A submits work, then pipes a review request to Agent B. Agent B claims it, reviews, and posts feedback as the result.
+
+---
+
+## Task Management
+
+v5.0.1 introduces first-class task tracking via the memory system. Tasks are memories with `memory_type="task"` and carry additional status metadata.
+
+### Task Status Lifecycle
+
+```
+planned → in_progress → done
+                ↘ dropped
+```
+
+- **planned** — Task is defined but work has not started
+- **in_progress** — Active work underway
+- **done** — Task completed successfully
+- **dropped** — Task abandoned or deprioritized
+
+### REST Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/memory/tasks` | List all task memories, filterable by status |
+| `PUT` | `/v1/memory/{id}/task-status` | Update a task's status (e.g., `planned` to `in_progress`) |
+
+Tasks follow the same consensus and RBAC rules as regular memories — they are proposed, validated, and committed on-chain. The task status field is an additional metadata layer that does not affect the memory's consensus status.
 
 ---
 
@@ -691,8 +841,48 @@ The Python SDK handles signing automatically. For raw HTTP access, compute `SHA-
 | `GET` | `/v1/validator/pending` | Yes | List memories awaiting validator votes |
 | `GET` | `/v1/validator/epoch` | Yes | Current epoch info and validator scores |
 | `POST` | `/v1/memory/pre-validate` | No | Dry-run 4 app validators without on-chain submission |
+| `GET` | `/v1/memory/list` | Yes | List memories with filtering (domain, status, agent, sort) |
+| `GET` | `/v1/memory/timeline` | Yes | Time-bucketed memory history (hour/day/week granularity) |
+| `POST` | `/v1/memory/link` | Yes | Create a link between two related memories |
+| `GET` | `/v1/memory/tasks` | Yes | List task memories, filterable by status |
+| `PUT` | `/v1/memory/{id}/task-status` | Yes | Update a task memory's status |
+| `POST` | `/v1/agent/register` | Yes | Register agent on-chain (name, role, boot_bio, provider) |
+| `PUT` | `/v1/agent/update` | Yes | Update agent's own profile (name, boot_bio) |
+| `PUT` | `/v1/agent/{id}/permission` | Yes | Admin: set clearance, domain access, visible_agents |
+| `POST` | `/v1/pipe/send` | Yes | Send a pipeline message to an agent or provider |
+| `GET` | `/v1/pipe/inbox` | Yes | List pending pipeline messages for the agent |
+| `PUT` | `/v1/pipe/{id}/claim` | Yes | Claim a pending pipeline message |
+| `PUT` | `/v1/pipe/{id}/result` | Yes | Post result for a claimed pipeline message |
+| `GET` | `/v1/pipe/{id}` | Yes | Get a specific pipeline message by ID |
+| `GET` | `/v1/pipe/results` | Yes | List completed pipeline messages with results |
 | `GET` | `/health` | No | Liveness probe |
 | `GET` | `/ready` | No | Readiness probe (checks PostgreSQL + CometBFT) |
+
+### Memory List & Timeline (v5.0.1+)
+
+**`GET /v1/memory/list`** supports flexible filtering and sorting:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `domain` | string | Filter by domain tag |
+| `status` | string | Filter by memory status (proposed, committed, challenged, deprecated) |
+| `agent` | string | Filter by authoring agent ID |
+| `memory_type` | string | Filter by type (fact, observation, task, journal, etc.) |
+| `sort` | string | Sort order: `newest`, `oldest`, `confidence` |
+| `limit` | int | Max results (default 50) |
+| `offset` | int | Pagination offset |
+
+**`GET /v1/memory/timeline`** returns memories grouped into time buckets for visualization:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `bucket` | string | Granularity: `hour`, `day`, `week` |
+| `domain` | string | Optional domain filter |
+| `agent` | string | Optional agent filter |
+
+**`POST /v1/memory/link`** creates a directional relationship between two memories (e.g., a task linked to the journal entry that resulted from it). Both memory IDs must exist and the agent must have read access to both.
+
+**`POST /v1/memory/pre-validate`** performs a dry-run through all 4 app validators (sentinel, dedup, quality, consistency) without submitting on-chain. Useful for testing memory content before committing.
 
 ### Memory Lifecycle
 

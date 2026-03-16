@@ -14,7 +14,7 @@ compatibility: >
   Tested with Claude Code, Cursor, Windsurf, Gemini CLI, and others.
 metadata:
   author: l33tdawg
-  version: "4.5.7"
+  version: "5.0.1"
   repository: https://github.com/l33tdawg/sage
 ---
 

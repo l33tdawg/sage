@@ -13,6 +13,7 @@ class MemoryType(str, Enum):
     fact = "fact"
     observation = "observation"
     inference = "inference"
+    task = "task"
 
 
 class MemoryStatus(str, Enum):
@@ -21,6 +22,21 @@ class MemoryStatus(str, Enum):
     committed = "committed"
     challenged = "challenged"
     deprecated = "deprecated"
+
+
+class TaskStatus(str, Enum):
+    planned = "planned"
+    in_progress = "in_progress"
+    done = "done"
+    dropped = "dropped"
+
+
+class PipelineStatus(str, Enum):
+    pending = "pending"
+    claimed = "claimed"
+    completed = "completed"
+    expired = "expired"
+    failed = "failed"
 
 
 class KnowledgeTriple(BaseModel):
@@ -41,6 +57,8 @@ class MemoryRecord(BaseModel):
     confidence_score: float = Field(ge=0, le=1)
     status: MemoryStatus
     parent_hash: str | None = None
+    task_status: str | None = None
+    classification: int | None = None
     created_at: datetime
     committed_at: datetime | None = None
     deprecated_at: datetime | None = None
@@ -80,6 +98,61 @@ class MemoryQueryResponse(BaseModel):
     total_count: int
 
 
+class MemoryListResponse(BaseModel):
+    memories: list[MemoryRecord]
+    total: int
+    limit: int
+    offset: int
+
+
+class TimelineBucket(BaseModel):
+    period: str
+    count: int
+    domain: str | None = None
+
+
+class TimelineResponse(BaseModel):
+    buckets: list[TimelineBucket]
+
+
+class TaskRecord(BaseModel):
+    memory_id: str
+    content: str
+    domain_tag: str
+    task_status: str
+    confidence_score: float
+    created_at: datetime
+
+
+class TaskListResponse(BaseModel):
+    tasks: list[TaskRecord]
+    total: int
+
+
+class PreValidateVote(BaseModel):
+    validator: str
+    decision: str
+    reason: str
+
+
+class PreValidateResponse(BaseModel):
+    accepted: bool
+    votes: list[PreValidateVote]
+    quorum: str
+
+
+class MemoryLinkRequest(BaseModel):
+    source_id: str
+    target_id: str
+    link_type: str = "related"
+
+
+class MemoryLinkResponse(BaseModel):
+    source_id: str
+    target_id: str
+    link_type: str
+
+
 class VoteRequest(BaseModel):
     decision: Literal["accept", "reject", "abstain"]
     rationale: str | None = None
@@ -94,11 +167,116 @@ class CorroborateRequest(BaseModel):
     evidence: str | None = None
 
 
+# --- Agent Models ---
+
 class AgentProfile(BaseModel):
     agent_id: str
     poe_weight: float
     vote_count: int
 
+
+class AgentRegistration(BaseModel):
+    agent_id: str
+    name: str
+    role: str | None = None
+    provider: str | None = None
+    status: str
+    registered_at: str | None = None
+    tx_hash: str | None = None
+
+
+class AgentInfo(BaseModel):
+    agent_id: str
+    name: str | None = None
+    role: str | None = None
+    avatar: str | None = None
+    boot_bio: str | None = None
+    validator_pubkey: str | None = None
+    node_id: str | None = None
+    p2p_address: str | None = None
+    status: str | None = None
+    clearance: int | None = None
+    org_id: str | None = None
+    dept_id: str | None = None
+    domain_access: str | None = None
+    bundle_path: str | None = None
+    first_seen: datetime | None = None
+    last_seen: datetime | None = None
+    created_at: datetime | None = None
+    removed_at: datetime | None = None
+    on_chain_height: int | None = None
+    visible_agents: str | None = None
+    provider: str | None = None
+    memory_count: int | None = None
+
+
+# --- Pipeline Models ---
+
+class PipeSendRequest(BaseModel):
+    to_agent: str | None = None
+    to_provider: str | None = None
+    intent: str | None = None
+    payload: str
+    ttl_minutes: int | None = None
+
+
+class PipeSendResponse(BaseModel):
+    pipe_id: str
+    status: str
+    expires_at: str
+
+
+class PipeMessage(BaseModel):
+    pipe_id: str
+    from_agent: str | None = None
+    from_provider: str | None = None
+    to_agent: str | None = None
+    to_provider: str | None = None
+    intent: str | None = None
+    payload: str | None = None
+    result: str | None = None
+    status: str
+    created_at: str | None = None
+    claimed_at: str | None = None
+    completed_at: str | None = None
+    expires_at: str | None = None
+    journal_id: str | None = None
+
+
+class PipeInboxResponse(BaseModel):
+    items: list[PipeMessage]
+    count: int
+
+
+class PipeResultResponse(BaseModel):
+    status: str
+    journal_id: str | None = None
+
+
+# --- Validator Models ---
+
+class ValidatorScore(BaseModel):
+    validator_id: str
+    weighted_sum: float | None = None
+    weight_denom: float | None = None
+    vote_count: int | None = None
+    expertise_vec: list[float] | None = None
+    last_active_ts: str | None = None
+    current_weight: float | None = None
+    updated_at: str | None = None
+
+
+class EpochInfo(BaseModel):
+    epoch_num: int
+    block_height: int
+    scores: list[ValidatorScore]
+
+
+class PendingMemoriesResponse(BaseModel):
+    memories: list[MemoryRecord]
+
+
+# --- Error Models ---
 
 class ProblemDetails(BaseModel):
     type: str
@@ -107,6 +285,8 @@ class ProblemDetails(BaseModel):
     detail: str
     instance: str | None = None
 
+
+# --- Access Control Models ---
 
 class AccessRequestModel(BaseModel):
     target_domain: str

@@ -9,15 +9,28 @@ import httpx
 from sage_sdk.auth import AgentIdentity
 from sage_sdk.exceptions import SageAPIError
 from sage_sdk.models import (
+    AgentInfo,
     AgentProfile,
+    AgentRegistration,
     ChallengeRequest,
     CorroborateRequest,
+    EpochInfo,
     KnowledgeTriple,
+    MemoryLinkResponse,
+    MemoryListResponse,
     MemoryQueryResponse,
     MemoryRecord,
     MemorySubmitRequest,
     MemorySubmitResponse,
     MemoryType,
+    PendingMemoriesResponse,
+    PipeInboxResponse,
+    PipeMessage,
+    PipeResultResponse,
+    PipeSendResponse,
+    PreValidateResponse,
+    TaskListResponse,
+    TimelineResponse,
     VoteRequest,
 )
 
@@ -61,6 +74,20 @@ class AsyncSageClient:
     def _handle_response(self, response: httpx.Response) -> None:
         if response.status_code >= 400:
             raise SageAPIError.from_response(response)
+
+    # --- Health ----------------------------------------------------------------
+
+    async def health(self) -> dict:
+        """Check node health."""
+        resp = await self._client.get("/health")
+        return resp.json()
+
+    async def ready(self) -> dict:
+        """Check node readiness."""
+        resp = await self._client.get("/ready")
+        return resp.json()
+
+    # --- Memory ----------------------------------------------------------------
 
     async def propose(
         self,
@@ -113,6 +140,101 @@ class AsyncSageClient:
         resp = await self._request("GET", f"/v1/memory/{memory_id}")
         return MemoryRecord.model_validate(resp.json())
 
+    async def list_memories(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        domain: str | None = None,
+        tag: str | None = None,
+        provider: str | None = None,
+        status: str | None = None,
+        sort: str | None = None,
+        agent: str | None = None,
+    ) -> MemoryListResponse:
+        """List memories with filtering and pagination."""
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if domain is not None:
+            params["domain"] = domain
+        if tag is not None:
+            params["tag"] = tag
+        if provider is not None:
+            params["provider"] = provider
+        if status is not None:
+            params["status"] = status
+        if sort is not None:
+            params["sort"] = sort
+        if agent is not None:
+            params["agent"] = agent
+        resp = await self._request("GET", "/v1/memory/list", params=params)
+        return MemoryListResponse.model_validate(resp.json())
+
+    async def timeline(
+        self,
+        domain: str | None = None,
+        bucket: str | None = None,
+        from_time: str | None = None,
+        to_time: str | None = None,
+    ) -> TimelineResponse:
+        """Get memory timeline with time-bucketed counts."""
+        params: dict[str, Any] = {}
+        if domain is not None:
+            params["domain"] = domain
+        if bucket is not None:
+            params["bucket"] = bucket
+        if from_time is not None:
+            params["from"] = from_time
+        if to_time is not None:
+            params["to"] = to_time
+        resp = await self._request("GET", "/v1/memory/timeline", params=params)
+        return TimelineResponse.model_validate(resp.json())
+
+    async def link_memories(
+        self,
+        source_id: str,
+        target_id: str,
+        link_type: str = "related",
+    ) -> MemoryLinkResponse:
+        """Link two related memories."""
+        body = {"source_id": source_id, "target_id": target_id, "link_type": link_type}
+        resp = await self._request("POST", "/v1/memory/link", json=body)
+        return MemoryLinkResponse.model_validate(resp.json())
+
+    async def pre_validate(
+        self,
+        content: str,
+        domain: str,
+        memory_type: str = "observation",
+        confidence: float = 0.8,
+    ) -> PreValidateResponse:
+        """Dry-run validator checks without submitting."""
+        body = {"content": content, "domain": domain, "type": memory_type, "confidence": confidence}
+        resp = await self._request("POST", "/v1/memory/pre-validate", json=body)
+        return PreValidateResponse.model_validate(resp.json())
+
+    # --- Tasks -----------------------------------------------------------------
+
+    async def list_tasks(
+        self,
+        domain: str | None = None,
+        provider: str | None = None,
+    ) -> TaskListResponse:
+        """Get open tasks."""
+        params: dict[str, Any] = {}
+        if domain is not None:
+            params["domain"] = domain
+        if provider is not None:
+            params["provider"] = provider
+        resp = await self._request("GET", "/v1/memory/tasks", params=params)
+        return TaskListResponse.model_validate(resp.json())
+
+    async def update_task_status(self, memory_id: str, task_status: str) -> dict:
+        """Update a task memory's status (planned/in_progress/done/dropped)."""
+        body = {"task_status": task_status}
+        resp = await self._request("PUT", f"/v1/memory/{memory_id}/task-status", json=body)
+        return resp.json()
+
+    # --- Voting ----------------------------------------------------------------
+
     async def vote(
         self,
         memory_id: str,
@@ -157,6 +279,8 @@ class AsyncSageClient:
         )
         return resp.json()
 
+    # --- Embeddings ------------------------------------------------------------
+
     async def embed(self, text: str) -> list[float]:
         """Generate a vector embedding via the SAGE network's local Ollama.
 
@@ -167,10 +291,144 @@ class AsyncSageClient:
         data = resp.json()
         return data["embedding"]
 
+    # --- Agent -----------------------------------------------------------------
+
     async def get_profile(self) -> AgentProfile:
         """Get the current agent's profile."""
         resp = await self._request("GET", "/v1/agent/me")
         return AgentProfile.model_validate(resp.json())
+
+    async def register_agent(
+        self,
+        name: str,
+        role: str = "member",
+        boot_bio: str | None = None,
+        provider: str | None = None,
+        p2p_address: str | None = None,
+    ) -> AgentRegistration:
+        """Register the current agent on-chain."""
+        body: dict[str, Any] = {"name": name, "role": role}
+        if boot_bio is not None:
+            body["boot_bio"] = boot_bio
+        if provider is not None:
+            body["provider"] = provider
+        if p2p_address is not None:
+            body["p2p_address"] = p2p_address
+        resp = await self._request("POST", "/v1/agent/register", json=body)
+        return AgentRegistration.model_validate(resp.json())
+
+    async def update_agent(self, name: str | None = None, boot_bio: str | None = None) -> dict:
+        """Update the current agent's profile."""
+        body: dict[str, Any] = {}
+        if name is not None:
+            body["name"] = name
+        if boot_bio is not None:
+            body["boot_bio"] = boot_bio
+        resp = await self._request("PUT", "/v1/agent/update", json=body)
+        return resp.json()
+
+    async def get_agent(self, agent_id: str) -> AgentInfo:
+        """Get a registered agent by ID."""
+        resp = await self._request("GET", f"/v1/agent/{agent_id}")
+        return AgentInfo.model_validate(resp.json())
+
+    async def set_agent_permission(
+        self,
+        agent_id: str,
+        clearance: int | None = None,
+        domain_access: str | None = None,
+        visible_agents: str | None = None,
+        org_id: str | None = None,
+        dept_id: str | None = None,
+    ) -> dict:
+        """Update an agent's permissions (admin only)."""
+        body: dict[str, Any] = {}
+        if clearance is not None:
+            body["clearance"] = clearance
+        if domain_access is not None:
+            body["domain_access"] = domain_access
+        if visible_agents is not None:
+            body["visible_agents"] = visible_agents
+        if org_id is not None:
+            body["org_id"] = org_id
+        if dept_id is not None:
+            body["dept_id"] = dept_id
+        resp = await self._request("PUT", f"/v1/agent/{agent_id}/permission", json=body)
+        return resp.json()
+
+    async def list_agents(self) -> list[dict]:
+        """List all registered agents (public info)."""
+        resp = await self._request("GET", "/v1/agents")
+        return resp.json()
+
+    # --- Validator -------------------------------------------------------------
+
+    async def get_pending(
+        self,
+        domain_tag: str | None = None,
+        limit: int = 20,
+    ) -> PendingMemoriesResponse:
+        """Get memories pending validation."""
+        params: dict[str, Any] = {"limit": limit}
+        if domain_tag is not None:
+            params["domain_tag"] = domain_tag
+        resp = await self._request("GET", "/v1/validator/pending", params=params)
+        return PendingMemoriesResponse.model_validate(resp.json())
+
+    async def get_epoch(self) -> EpochInfo:
+        """Get current epoch info and validator scores."""
+        resp = await self._request("GET", "/v1/validator/epoch")
+        return EpochInfo.model_validate(resp.json())
+
+    # --- Pipeline (Agent-to-Agent Messaging) -----------------------------------
+
+    async def pipe_send(
+        self,
+        payload: str,
+        to_agent: str | None = None,
+        to_provider: str | None = None,
+        intent: str | None = None,
+        ttl_minutes: int | None = None,
+    ) -> PipeSendResponse:
+        """Send a message through the agent pipeline."""
+        body: dict[str, Any] = {"payload": payload}
+        if to_agent is not None:
+            body["to_agent"] = to_agent
+        if to_provider is not None:
+            body["to_provider"] = to_provider
+        if intent is not None:
+            body["intent"] = intent
+        if ttl_minutes is not None:
+            body["ttl_minutes"] = ttl_minutes
+        resp = await self._request("POST", "/v1/pipe/send", json=body)
+        return PipeSendResponse.model_validate(resp.json())
+
+    async def pipe_inbox(self, limit: int = 5) -> PipeInboxResponse:
+        """Get pending messages in the agent's inbox."""
+        resp = await self._request("GET", "/v1/pipe/inbox", params={"limit": limit})
+        return PipeInboxResponse.model_validate(resp.json())
+
+    async def pipe_claim(self, pipe_id: str) -> dict:
+        """Claim a pipeline message for processing."""
+        resp = await self._request("PUT", f"/v1/pipe/{pipe_id}/claim")
+        return resp.json()
+
+    async def pipe_result(self, pipe_id: str, result: str) -> PipeResultResponse:
+        """Submit a result for a claimed pipeline message."""
+        resp = await self._request("PUT", f"/v1/pipe/{pipe_id}/result", json={"result": result})
+        return PipeResultResponse.model_validate(resp.json())
+
+    async def pipe_status(self, pipe_id: str) -> PipeMessage:
+        """Get the status of a pipeline message."""
+        resp = await self._request("GET", f"/v1/pipe/{pipe_id}")
+        return PipeMessage.model_validate(resp.json())
+
+    async def pipe_results(self, limit: int = 5) -> PipeInboxResponse:
+        """List completed pipeline message results."""
+        resp = await self._request("GET", "/v1/pipe/results", params={"limit": limit})
+        return PipeInboxResponse.model_validate(resp.json())
+
+    # --- Access Control --------------------------------------------------------
 
     async def request_access(self, domain: str, justification: str = "", level: int = 1) -> dict:
         """Request access to a domain."""
