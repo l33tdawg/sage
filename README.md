@@ -56,14 +56,23 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v4.5
+## What's New in v5.0.7
+
+- **Agent Pipeline** — Inter-agent message bus (`sage_pipe`) for direct agent-to-agent communication. Send messages, check results, coordinate work across agents in real-time.
+- **Python Agent SDK** — `sage-agent-sdk` on PyPI with full v5 API coverage for building SAGE-integrated agents. CI-tested on every release.
+- **Vault Recovery** — Reset your Synaptic Ledger passphrase using a recovery key. No more permanent lockouts.
+- **Memory Modes** — Choose `full` (every turn), `bookend` (boot + reflect only), or `on-demand` (zero automatic token usage) to control how much context your agent spends on memory.
+- **Vault Key Protection** — Vault key is automatically backed up on every upgrade and in-app update. Prevents the silent overwrite that could cause permanent memory loss.
+- **macOS Tahoe Compatibility** — Fixed Gatekeeper warnings and launch failures on macOS 15.x. Removed the `Install SAGE.command` that triggered quarantine blocks.
+- **Linux ARM64 Containers** — Docker images now build for `linux/arm64` in addition to `amd64`.
+- **`/v1/mcp-config` Endpoint** — Agents can self-configure their MCP connection without manual setup.
+- **Docker Images** — Every release auto-builds and pushes to `ghcr.io/l33tdawg/sage`. Pin a version or pull `latest`.
+
+### v4.5
 
 - **Cross-Agent Visibility Fixed** — Org-based access (clearance levels, multi-org federation) now correctly grants visibility across agents. Queries and list operations check direct grants, org membership, and unregistered domain fallback — no more 0-result queries when clearance should allow access.
 - **Domain Auto-Registration** — First write to an unregistered domain auto-registers it with the submitting agent as owner and full access granted. No more propose-succeeds-but-query-404.
 - **RBAC Gate Simplification** — DomainAccess (explicit allowlist) and multi-org gates are alternatives, not stacked. Passing one skips the other.
-- **Python Agent SDK** — `sage-agent-sdk` on PyPI for building SAGE-integrated agents. CI-tested on every release.
-- **`/v1/mcp-config` Endpoint** — Agents can self-configure their MCP connection without manual setup.
-- **Docker Images** — Every release auto-builds and pushes to `ghcr.io/l33tdawg/sage`. Pin a version or pull `latest`.
 
 ### v4.4
 
@@ -147,11 +156,11 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:4.5.2`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:5.0.7`.
 
 ### Upgrading from an older version?
 
-If you installed SAGE before v4.5 and your AI isn't doing turn-by-turn memory updates, re-run the installer in your project directory:
+If you installed SAGE before v5.0 and your AI isn't doing turn-by-turn memory updates, re-run the installer in your project directory:
 
 ```bash
 cd /path/to/your/project
