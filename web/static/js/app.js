@@ -3141,7 +3141,7 @@ function SettingsPage() {
                             <h3>System Status</h3>
                             <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:#10b981">Running</span></div>
                             <div class="settings-row"><span class="label">${statusDot(ollama === 'running')} Ollama</span><span class="value" style="color: ${ollama === 'running' ? '#10b981' : '#6b7280'}">${ollama === 'running' ? 'Connected' : 'Offline'}</span></div>
-                            <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger</span><span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">${encrypted ? 'AES-256-GCM' : 'Off'}</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span><span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">${encrypted ? 'AES-256-GCM' : 'Off'}</span></div>
                             <div class="settings-row"><span class="label">Version</span><span class="value">${ver}</span></div>
                             <div class="settings-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>
                             <div class="settings-row"><span class="label">API Endpoint</span><span class="value">${window.location.origin}</span></div>

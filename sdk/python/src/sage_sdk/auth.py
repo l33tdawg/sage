@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import struct
 import time
 from pathlib import Path
@@ -49,7 +50,7 @@ class AgentIdentity:
         Example:
             SAGE_IDENTITY_PATH=~/.sage/identities/agent-01.key claude-code ...
         """
-        custom_path = os.environ.get("SAGE_IDENTITY_PATH")
+        custom_path = os.environ.get("SAGE_IDENTITY_PATH", "").strip()
         path = Path(custom_path).expanduser() if custom_path else cls.DEFAULT_KEY_PATH
 
         if path.exists():
@@ -78,7 +79,11 @@ class AgentIdentity:
         body: bytes | None = None,
         timestamp: int | None = None,
     ) -> dict[str, str]:
-        """Sign an HTTP request and return auth headers."""
+        """Sign an HTTP request and return auth headers.
+
+        The signed message is: SHA256(method + " " + path + "\\n" + body) || big-endian int64 timestamp.
+        This binds signatures to specific endpoints, preventing cross-endpoint replay.
+        """
         ts = timestamp or int(time.time())
         canonical = method.encode() + b" " + path.encode() + b"\n" + (body or b"")
         body_hash = hashlib.sha256(canonical).digest()

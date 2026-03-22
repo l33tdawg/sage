@@ -56,7 +56,12 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v5.0.9
+## What's New in v5.0.10
+
+- **Multi-Agent Identity** — New `SAGE_IDENTITY_PATH` env var and `AgentIdentity.default()` for running multiple Claude Code agents on the same machine without key collisions. (Community PR by @emx)
+- **Dashboard Fix** — "Synaptic Ledger" label in overview settings now reads "Synaptic Ledger Encryption" to clarify it refers to the encryption state, not the ledger itself.
+
+### v5.0.9
 
 - **Upgrade Hang Fix** — Fixed CometBFT startup hang after drag-and-drop upgrades. Stale consensus WAL files left behind during migration caused a 60-second timeout and prevented the REST API from starting. Now cleaned up automatically at both migration and startup time.
 
@@ -160,7 +165,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:5.0.9`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:5.0.10`.
 
 ### Upgrading from an older version?
 
