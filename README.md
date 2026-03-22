@@ -56,7 +56,11 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v5.0.7
+## What's New in v5.0.9
+
+- **Upgrade Hang Fix** — Fixed CometBFT startup hang after drag-and-drop upgrades. Stale consensus WAL files left behind during migration caused a 60-second timeout and prevented the REST API from starting. Now cleaned up automatically at both migration and startup time.
+
+### v5.0.7
 
 - **Agent Pipeline** — Inter-agent message bus (`sage_pipe`) for direct agent-to-agent communication. Send messages, check results, coordinate work across agents in real-time.
 - **Python Agent SDK** — `sage-agent-sdk` on PyPI with full v5 API coverage for building SAGE-integrated agents. CI-tested on every release.
@@ -156,7 +160,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:5.0.7`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:5.0.9`.
 
 ### Upgrading from an older version?
 
