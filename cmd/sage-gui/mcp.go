@@ -260,8 +260,8 @@ func runMCPInstall() error {
 		fmt.Fprintf(os.Stderr, "INFO: Install using SAGE_IDENTITY_PATH: %s\n", keyPath)
 		// Ensure parent dir exists (auto-generation + claiming)
 		if dir := filepath.Dir(keyPath); dir != "." {
-			if err := os.MkdirAll(dir, 0700); err != nil {
-				return fmt.Errorf("create identity dir: %w", err)
+			if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
+				return fmt.Errorf("create identity dir: %w", mkErr)
 			}
 		}
 	} else {

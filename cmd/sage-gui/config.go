@@ -88,6 +88,10 @@ func LoadConfig() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			// REST_ADDR env var override (for Docker: REST_ADDR=0.0.0.0:8080)
+			if envAddr := os.Getenv("REST_ADDR"); envAddr != "" {
+				cfg.RESTAddr = envAddr
+			}
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -95,6 +99,11 @@ func LoadConfig() (*Config, error) {
 
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	// REST_ADDR env var override (for Docker: REST_ADDR=0.0.0.0:8080)
+	if envAddr := os.Getenv("REST_ADDR"); envAddr != "" {
+		cfg.RESTAddr = envAddr
 	}
 
 	// Expand ~ and ensure absolute paths

@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -410,19 +411,29 @@ func runServe() error {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// Build display URL: extract just the port for localhost display
+	displayAddr := cfg.RESTAddr
+	if host, port, err := net.SplitHostPort(cfg.RESTAddr); err == nil {
+		if host == "" || host == "0.0.0.0" || host == "127.0.0.1" {
+			displayAddr = "localhost:" + port
+		} else {
+			displayAddr = host + ":" + port
+		}
+	}
+
 	go func() {
 		logger.Info().
 			Str("addr", cfg.RESTAddr).
-			Str("dashboard", fmt.Sprintf("http://localhost%s/ui/", cfg.RESTAddr)).
+			Str("dashboard", fmt.Sprintf("http://%s/ui/", displayAddr)).
 			Msg("SAGE Personal ready")
 
 		fmt.Fprintf(os.Stderr, "\n  SAGE Personal is running!\n")
-		fmt.Fprintf(os.Stderr, "  CEREBRUM:  http://localhost%s/ui/\n", cfg.RESTAddr)
-		fmt.Fprintf(os.Stderr, "  REST API:  http://localhost%s/v1/\n\n", cfg.RESTAddr)
+		fmt.Fprintf(os.Stderr, "  CEREBRUM:  http://%s/ui/\n", displayAddr)
+		fmt.Fprintf(os.Stderr, "  REST API:  http://%s/v1/\n\n", displayAddr)
 
 		// Auto-open dashboard in browser (unless suppressed by tray app)
 		if os.Getenv("SAGE_NO_BROWSER") == "" {
-			go openBrowser(fmt.Sprintf("http://localhost%s/ui/", cfg.RESTAddr))
+			go openBrowser(fmt.Sprintf("http://%s/ui/", displayAddr))
 		}
 
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {

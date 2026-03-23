@@ -16,6 +16,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /sage-gui /usr/local/bin/sage-gui
 
+ENV REST_ADDR=0.0.0.0:8080
 EXPOSE 8080
 
 LABEL org.opencontainers.image.source="https://github.com/l33tdawg/sage"
