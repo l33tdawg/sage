@@ -79,7 +79,11 @@ func TestRedirectRestriction(t *testing.T) {
 
 	// Build the CheckRedirect function (same as in handleApplyUpdate)
 	checkRedirect := func(req *http.Request, via []*http.Request) error {
-		if !strings.HasPrefix(req.URL.String(), "https://github.com/") && !strings.HasPrefix(req.URL.String(), "https://objects.githubusercontent.com/") {
+		u := req.URL.String()
+		allowed := strings.HasPrefix(u, "https://github.com/") ||
+			strings.HasPrefix(u, "https://objects.githubusercontent.com/") ||
+			strings.HasPrefix(u, "https://release-assets.githubusercontent.com/")
+		if !allowed {
 			return fmt.Errorf("redirect to non-GitHub URL blocked")
 		}
 		return nil
@@ -103,6 +107,13 @@ func TestRedirectRestriction(t *testing.T) {
 	// Test: objects.githubusercontent.com redirect is allowed
 	t.Run("allows githubusercontent redirect", func(t *testing.T) {
 		req, _ := http.NewRequest("GET", "https://objects.githubusercontent.com/some-hash/archive.tar.gz", nil)
+		err := checkRedirect(req, nil)
+		assert.NoError(t, err)
+	})
+
+	// Test: release-assets.githubusercontent.com redirect is allowed
+	t.Run("allows release-assets githubusercontent redirect", func(t *testing.T) {
+		req, _ := http.NewRequest("GET", "https://release-assets.githubusercontent.com/github-production-release-asset/123456/archive.tar.gz", nil)
 		err := checkRedirect(req, nil)
 		assert.NoError(t, err)
 	})

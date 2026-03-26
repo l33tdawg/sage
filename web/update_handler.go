@@ -194,7 +194,11 @@ func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string)
 	client := &http.Client{
 		Timeout: 5 * time.Minute,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !strings.HasPrefix(req.URL.String(), "https://github.com/") && !strings.HasPrefix(req.URL.String(), "https://objects.githubusercontent.com/") {
+			u := req.URL.String()
+			allowed := strings.HasPrefix(u, "https://github.com/") ||
+				strings.HasPrefix(u, "https://objects.githubusercontent.com/") ||
+				strings.HasPrefix(u, "https://release-assets.githubusercontent.com/")
+			if !allowed {
 				return fmt.Errorf("redirect to non-GitHub URL blocked")
 			}
 			return nil
