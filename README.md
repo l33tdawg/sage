@@ -196,6 +196,10 @@ This installs Claude Code hooks that enforce the memory lifecycle (boot, turn, r
 
 ---
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/l33tdawg-sage).
+
 ## Documentation
 
 | Doc | What's in it |
