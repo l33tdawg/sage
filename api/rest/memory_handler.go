@@ -127,7 +127,7 @@ type cometCommitResponse struct {
 			Log  string `json:"log"`
 		} `json:"tx_result"`
 		Hash   string `json:"hash"`
-		Height int64  `json:"height"`
+		Height int64  `json:"height,string"`
 	} `json:"result"`
 	Error *struct {
 		Code    int    `json:"code"`

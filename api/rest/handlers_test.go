@@ -307,7 +307,7 @@ func TestSubmitMemory(t *testing.T) {
 				"check_tx":  map[string]interface{}{"code": 0, "log": ""},
 				"tx_result": map[string]interface{}{"code": 0, "data": "", "log": "memory submitted"},
 				"hash":      "ABCDEF1234567890",
-				"height":    1,
+				"height":    "1",
 			},
 		})
 	}))

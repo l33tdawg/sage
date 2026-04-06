@@ -38,6 +38,7 @@ type SQLiteStore struct {
 	vault             *vault.Vault // nil = no encryption
 	vaultExpected     bool         // true = encryption should be active; reject writes if vault nil
 	decryptWarnOnce   sync.Once    // gates the one-time decryption failure warning
+	writeMu           sync.Mutex   // serializes write transactions to prevent SQLITE_BUSY
 }
 
 // encPrefix marks content as encrypted (prepended to base64 ciphertext).
@@ -2473,6 +2474,11 @@ func (s *SQLiteStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) err
 		// Already in a transaction — execute directly.
 		return fn(s)
 	}
+	// Serialize write transactions at the Go level to prevent SQLITE_BUSY.
+	// SQLite's busy_timeout handles statement-level contention, but concurrent
+	// DEFERRED transactions that both escalate to write locks can still fail.
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
