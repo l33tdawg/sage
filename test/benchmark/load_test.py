@@ -39,16 +39,18 @@ class SageAgent:
         self.verify_key = self.signing_key.verify_key
         self.agent_id = self.verify_key.encode().hex()
 
-    def sign_request(self, body_bytes: bytes, timestamp: int) -> str:
-        body_hash = hashlib.sha256(body_bytes).digest()
+    def sign_request(self, method: str, path: str, body_bytes: bytes, timestamp: int) -> str:
+        # Must match auth middleware: SHA-256(method + " " + path + "\n" + body) + BigEndian(ts)
+        canonical = f"{method} {path}\n".encode() + body_bytes
+        body_hash = hashlib.sha256(canonical).digest()
         ts_bytes = struct.pack(">q", timestamp)
         message = body_hash + ts_bytes
         signed = self.signing_key.sign(message)
         return signed.signature.hex()
 
-    def make_headers(self, body_bytes: bytes) -> dict:
+    def make_headers(self, method: str, path: str, body_bytes: bytes) -> dict:
         ts = int(time.time())
-        sig = self.sign_request(body_bytes, ts)
+        sig = self.sign_request(method, path, body_bytes, ts)
         return {
             "Content-Type": "application/json",
             "X-Agent-ID": self.agent_id,
@@ -70,7 +72,7 @@ def submit_memory(client: httpx.Client, agent: SageAgent) -> dict:
         "confidence_score": round(random.uniform(0.5, 1.0), 4),
     }
     body_bytes = json.dumps(payload).encode()
-    headers = agent.make_headers(body_bytes)
+    headers = agent.make_headers("POST", "/v1/memory/submit", body_bytes)
 
     start = time.monotonic()
     try:
@@ -103,7 +105,7 @@ def query_memory(client: httpx.Client, agent: SageAgent) -> dict:
         "top_k": 10,
     }
     body_bytes = json.dumps(payload).encode()
-    headers = agent.make_headers(body_bytes)
+    headers = agent.make_headers("POST", "/v1/memory/query", body_bytes)
 
     start = time.monotonic()
     try:
@@ -372,7 +374,7 @@ def main():
         "domain_tag": "crypto",
         "confidence_score": 0.9,
     }).encode()
-    headers = agent.make_headers(payload)
+    headers = agent.make_headers("POST", "/v1/memory/submit", payload)
     try:
         r = httpx.post(f"{BASE_URL}/v1/memory/submit", content=payload, headers=headers, timeout=10.0)
         if r.status_code == 201:

@@ -17,6 +17,7 @@ import (
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/embedding"
+	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -43,10 +44,17 @@ type Server struct {
 	signingKey  ed25519.PrivateKey      // Node-level key for signing on-chain txs
 	embedder    embedding.Provider       // Embedding provider (Ollama or hash)
 	OnEvent     EventCallback           // Optional: called when notable events occur
+	suppCache   SuppCacheWriter         // Bridges off-chain data (embeddings) to ABCI for consensus-first writes
 
 	// PreValidateFunc runs the 4 app validators without on-chain submission.
 	// Set during node startup. Returns per-validator results.
 	PreValidateFunc func(content, contentHash, domain, memType string, confidence float64) []PreValidateResult
+}
+
+// SuppCacheWriter is the interface the REST server uses to store supplementary data
+// for the ABCI app to pick up during FinalizeBlock. Implemented by abci.SupplementaryCache.
+type SuppCacheWriter interface {
+	Put(memoryID string, data *memory.SupplementaryData)
 }
 
 // PreValidateResult holds one validator's pre-validation result.
@@ -96,6 +104,12 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 	}
 	s.router = s.setupRouter()
 	return s
+}
+
+// SetSuppCache wires the supplementary data cache used for consensus-first writes.
+// Must be called before the server starts accepting requests.
+func (s *Server) SetSuppCache(cache SuppCacheWriter) {
+	s.suppCache = cache
 }
 
 // loadValidatorSigningKey loads the CometBFT validator private key so that

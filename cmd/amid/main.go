@@ -191,6 +191,7 @@ func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC string
 	pgStore := app.GetOffchainStore()
 	badgerStore := app.GetBadgerStore()
 	restServer := rest.NewServer(cometRPC, pgStore, pgStore, badgerStore, health, logger, embedding.NewClient("", ""))
+	restServer.SetSuppCache(app.SuppCache)
 	go func() {
 		logger.Info().Str("addr", restAddr).Str("comet_rpc", cometRPC).Msg("starting REST server")
 		if err := restServer.Start(restAddr); err != nil && err != http.ErrServerClosed {

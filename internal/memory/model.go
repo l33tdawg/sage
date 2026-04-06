@@ -70,6 +70,17 @@ type KnowledgeTriple struct {
 	Object    string `json:"object"`
 }
 
+// SupplementaryData holds off-chain data that accompanies a memory submission but
+// is too large for on-chain consensus (e.g. embedding vectors). The REST handler
+// stages this in a process-local cache; the ABCI app reads it during FinalizeBlock
+// to build the complete record that Commit flushes to the offchain store.
+type SupplementaryData struct {
+	Embedding        []float32
+	EmbeddingHash    []byte
+	Provider         string
+	KnowledgeTriples []KnowledgeTriple
+}
+
 // ValidMemoryTypes returns all valid memory types.
 func ValidMemoryTypes() []MemoryType {
 	return []MemoryType{TypeFact, TypeObservation, TypeInference, TypeTask}

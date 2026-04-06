@@ -61,17 +61,21 @@ Many concerns raised about the enterprise codebase do not apply to SAGE Personal
 
 **Planned:** Production deployment guides will bind CometBFT RPC to internal-only networks and front the REST API with a reverse proxy. CometBFT RPC should never be internet-facing.
 
-### 5. Wildcard CORS, Default DB Passwords, Containers Running as Root
+### 5. Docker Security Hardening (PARTIALLY RESOLVED)
 
 **Applies to:** Enterprise (Docker Compose config)
 
-**What it is:** The development Docker Compose setup uses `CORS: *`, default PostgreSQL credentials, and containers run as root.
+**What it was:** The development Docker Compose setup uses `CORS: *`, default PostgreSQL credentials, and containers running as root.
 
-**Current status:** These are development defaults. They exist to minimize setup friction for researchers reproducing the Paper 1 benchmarks. They are not intended for production.
+**Resolution (v5.3.0):**
+- ABCI containers now run as non-root (`sage` user) in `Dockerfile.abci`. CometBFT nodes remain root due to bind-mount ownership requirements, but are internal-only (no external traffic)
+- Added `docker-compose.prod.yml` override with: PostgreSQL SSL required, CORS restricted (no wildcard, must be explicitly set), read-only root filesystems, CometBFT RPC bound to localhost only
+- Usage: `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`
+- The base `docker-compose.yml` retains development defaults for researcher friction reduction
 
 **SAGE Personal:** Not applicable. sage-gui does not use Docker, does not run a database server, and binds only to localhost.
 
-**Planned:** Add a `docker-compose.prod.yml` with locked-down CORS, secrets management, and non-root containers. Document the difference clearly.
+**Remaining:** Secrets management (e.g. Docker secrets, Vault integration) for validator keys. HSM-backed signing for production deployments.
 
 ### 6. REST API Acts as Validator-Signing Proxy
 
@@ -83,15 +87,13 @@ Many concerns raised about the enterprise codebase do not apply to SAGE Personal
 
 **Planned:** Evaluate moving to a model where the API server submits unsigned proposals and a separate signing service (or HSM-backed signer) handles validator key operations.
 
-### 7. Pre-Commit Writes to Postgres Before Consensus Finalizes
+### 7. Consensus-First Write Ordering (RESOLVED)
 
 **Applies to:** Enterprise
 
-**What it is:** Memories are written to PostgreSQL during `CheckTx`/`DeliverTx` before the CometBFT block is finalized via `Commit`. If consensus fails, the database may contain uncommitted state.
+**What it was:** Previously, memories were written to PostgreSQL by the REST handler immediately after `broadcast_tx_sync`, before the CometBFT block was finalized. This meant the offchain query layer could return data that hadn't been through consensus.
 
-**Current status:** This is a known deviation from strict consensus-first ordering. In practice, with a single-validator or cooperative 4-node testnet, the window for inconsistency is small. It is not acceptable for adversarial deployments.
-
-**Planned:** Move to write-ahead pattern: buffer in memory during `DeliverTx`, flush to Postgres only in `Commit`. This is a prerequisite for production enterprise use.
+**Resolution (v5.3.0):** The REST handler now uses `broadcast_tx_commit`, which blocks until the block is finalized. Supplementary off-chain data (embedding vectors, provider metadata, knowledge triples) is staged in a process-local cache and merged into the record by the ABCI app during `FinalizeBlock`. The offchain store is written to only in `Commit`, inside an atomic transaction. The `InsertMemory` upsert uses `COALESCE` to safely handle multi-validator write races. Memories now only appear in the query layer after consensus.
 
 ### 8. PoE Scoring Exists but Live System Uses Weight 1.0
 
@@ -113,25 +115,21 @@ Many concerns raised about the enterprise codebase do not apply to SAGE Personal
 
 **Planned:** Adopt a migration tool (golang-migrate or similar) for the enterprise schema. sage-gui will continue to self-initialize on startup.
 
-### 10. Benchmark Not Reproducible (k6 Uses Placeholder Auth)
+### 10. Benchmark Reproducibility (RESOLVED)
 
 **Applies to:** Enterprise
 
-**What it is:** The k6 load-testing scripts use placeholder authentication tokens, making it difficult for external researchers to reproduce the Paper 1 benchmarks exactly.
+**What it was:** The k6 load-testing scripts used placeholder authentication tokens (`benchmark-sig`), making it difficult for external researchers to reproduce benchmarks.
 
-**Current status:** The benchmarks in Paper 1 were run against an authenticated cluster with real keys. The published k6 scripts were sanitized for release. This makes independent reproduction harder than it should be.
+**Resolution (v5.3.0):** The primary benchmark tool is now `test/benchmark/load_test.py` which generates real Ed25519 keypairs per agent, signs requests with the correct canonical format (method + path + body + timestamp), and runs authenticated submission + query benchmarks. Run via `make benchmark`. The k6 scripts are retained for users with k6 Ed25519 extensions but are no longer the default benchmark entry point.
 
-**Planned:** Provide a `make benchmark` target that spins up a fresh cluster, generates test keys, and runs the k6 suite end-to-end.
-
-### 11. No Multi-Node Integration or Byzantine Tests in CI
+### 11. Byzantine Fault Tests in CI (RESOLVED)
 
 **Applies to:** Enterprise
 
-**What it is:** CI runs unit tests but does not spin up a multi-node CometBFT cluster or inject Byzantine faults.
+**What it was:** CI ran unit tests only, with no multi-node CometBFT cluster or Byzantine fault injection.
 
-**Current status:** Valid. Multi-node testing was performed manually for the research papers. It is not automated in CI due to resource requirements (4-node cluster + CometBFT).
-
-**Planned:** Add a CI stage that runs a 4-node Docker cluster with basic liveness and consensus tests. Full Byzantine fault injection is a longer-term goal.
+**Resolution (v5.3.0):** Added `make byzantine` target and a GitHub Actions CI job that spins up a 4-validator Docker cluster, verifies all nodes are online, and runs the Byzantine fault test suite (`test/byzantine/`). Tests cover: 1-of-4 node failure (chain continues), 2-of-4 failure (chain halts), and recovery after restart.
 
 ---
 

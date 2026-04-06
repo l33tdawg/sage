@@ -66,7 +66,11 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 		ON CONFLICT (memory_id) DO UPDATE SET
 			submitting_agent = EXCLUDED.submitting_agent,
 			status = EXCLUDED.status,
-			created_at = EXCLUDED.created_at`,
+			created_at = EXCLUDED.created_at,
+			embedding = COALESCE(EXCLUDED.embedding, memories.embedding),
+			embedding_hash = COALESCE(EXCLUDED.embedding_hash, memories.embedding_hash),
+			provider = COALESCE(NULLIF(EXCLUDED.provider, ''), memories.provider),
+			parent_hash = COALESCE(NULLIF(EXCLUDED.parent_hash, ''), memories.parent_hash)`,
 		record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
 		emb, record.EmbeddingHash,
 		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,

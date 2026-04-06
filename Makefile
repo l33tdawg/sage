@@ -1,4 +1,4 @@
-.PHONY: build build-all test lint fmt proto init up up-full down down-clean status logs logs-abci integration benchmark sdk-test clean help
+.PHONY: build build-all test lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine benchmark benchmark-k6 sdk-test clean help
 
 BINARY=bin/amid
 COMPOSE_FILE=deploy/docker-compose.yml
@@ -64,7 +64,13 @@ logs-abci: ## View ABCI application logs
 integration: ## Run integration tests (requires running network)
 	go test ./test/integration/... -v -count=1 -timeout 300s -tags=integration
 
-benchmark: ## Run k6 load test
+byzantine: ## Run Byzantine fault tolerance tests (requires running network)
+	go test ./test/byzantine/... -v -count=1 -timeout 120s -tags=byzantine
+
+benchmark: ## Run authenticated load test (Python, Ed25519 signed)
+	cd test/benchmark && pip install -q httpx pynacl && python load_test.py
+
+benchmark-k6: ## Run k6 load test (requires pre-configured auth bypass or k6 Ed25519 extension)
 	k6 run test/benchmark/load.js
 
 sdk-test: ## Run Python SDK tests

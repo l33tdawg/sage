@@ -1,7 +1,11 @@
 # CometBFT v0.38.15 validator node
 # Multi-stage build: compile from source, copy binary to minimal Alpine
+#
+# Note: runs as root because CometBFT needs write access to bind-mounted
+# host directories (genesis config/data). The ABCI container (Dockerfile.abci)
+# runs as non-root since it only uses named volumes.
 
-# ── Builder ──────────────────────────────────
+# -- Builder -------------------------------------------
 FROM golang:1.22-alpine AS builder
 
 RUN apk add --no-cache git make
@@ -10,7 +14,7 @@ WORKDIR /src
 RUN git clone --branch v0.38.15 --depth 1 https://github.com/cometbft/cometbft.git .
 RUN CGO_ENABLED=0 go build -o /usr/local/bin/cometbft ./cmd/cometbft
 
-# ── Final ────────────────────────────────────
+# -- Final ---------------------------------------------
 FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates

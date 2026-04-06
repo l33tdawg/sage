@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
@@ -23,7 +24,7 @@ import (
 
 // pendingWrite represents a PostgreSQL write buffered until Commit.
 type pendingWrite struct {
-	writeType string // "memory", "challenge", "vote", "corroborate", "epoch_score", "validator_score", "status_update", "access_grant", "access_request", "access_revoke", "access_log", "domain_register", "access_request_status", "org_register", "org_member", "org_member_remove", "org_member_clearance", "federation", "federation_approve", "federation_revoke", "mem_classification", "dept_register", "dept_member", "dept_member_remove", "agent_register", "agent_update", "agent_permission"
+	writeType string // "memory", "triples", "challenge", "vote", "corroborate", "epoch_score", "validator_score", "status_update", "access_grant", "access_request", "access_revoke", "access_log", "domain_register", "access_request_status", "org_register", "org_member", "org_member_remove", "org_member_clearance", "federation", "federation_approve", "federation_revoke", "mem_classification", "dept_register", "dept_member", "dept_member_remove", "agent_register", "agent_update", "agent_permission"
 	data      interface{}
 }
 
@@ -111,6 +112,68 @@ type memoryReassignData struct {
 	TargetAgentID string
 }
 
+// triplesData carries knowledge triples buffered for Commit.
+type triplesData struct {
+	MemoryID string
+	Triples  []memory.KnowledgeTriple
+}
+
+// suppCacheEntry wraps supplementary data with a timestamp for eviction.
+type suppCacheEntry struct {
+	data     *memory.SupplementaryData
+	storedAt time.Time
+}
+
+// SupplementaryCache bridges REST API → ABCI for data that doesn't travel on-chain.
+// The REST handler stores supplementary data here before broadcasting a tx; ABCI
+// FinalizeBlock reads it when building the pending write for Commit, ensuring
+// strict consensus-first ordering while preserving off-chain data like embeddings.
+type SupplementaryCache struct {
+	mu    sync.RWMutex
+	items map[string]*suppCacheEntry
+}
+
+// NewSupplementaryCache creates a cache with automatic eviction of stale entries.
+func NewSupplementaryCache() *SupplementaryCache {
+	c := &SupplementaryCache{items: make(map[string]*suppCacheEntry)}
+	go c.evictLoop()
+	return c
+}
+
+// Put stores supplementary data for a memory ID.
+func (c *SupplementaryCache) Put(memoryID string, data *memory.SupplementaryData) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items[memoryID] = &suppCacheEntry{data: data, storedAt: time.Now()}
+}
+
+// Pop retrieves and removes supplementary data for a memory ID.
+func (c *SupplementaryCache) Pop(memoryID string) *memory.SupplementaryData {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.items[memoryID]
+	delete(c.items, memoryID)
+	if entry != nil {
+		return entry.data
+	}
+	return nil
+}
+
+func (c *SupplementaryCache) evictLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		c.mu.Lock()
+		now := time.Now()
+		for id, entry := range c.items {
+			if now.Sub(entry.storedAt) > 60*time.Second {
+				delete(c.items, id)
+			}
+		}
+		c.mu.Unlock()
+	}
+}
+
 // SageApp implements the CometBFT ABCI 2.0 Application interface.
 type SageApp struct {
 	badgerStore   *store.BadgerStore
@@ -124,6 +187,10 @@ type SageApp struct {
 
 	// Buffered writes — only flushed to PostgreSQL in Commit
 	pendingWrites []pendingWrite
+
+	// SuppCache bridges REST→ABCI for off-chain data (embeddings, triples, provider).
+	// Nil in standalone ABCI mode without co-located REST API.
+	SuppCache *SupplementaryCache
 }
 
 // NewSageApp creates a new SAGE ABCI application.
@@ -157,6 +224,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		phiTracker:    poe.NewPhiTracker(50),
 		state:         state,
 		logger:        logger.With().Str("component", "abci").Logger(),
+		SuppCache:     NewSupplementaryCache(),
 	}
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -195,6 +263,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 		phiTracker:    poe.NewPhiTracker(50),
 		state:         state,
 		logger:        logger.With().Str("component", "abci").Logger(),
+		SuppCache:     NewSupplementaryCache(),
 	}
 
 	persistedVals, err := bs.LoadValidators()
@@ -519,20 +588,47 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 
 	memType := txMemoryTypeToString(submit.MemoryType)
 
-	// Buffer PostgreSQL write for Commit
+	// Buffer PostgreSQL write for Commit — this is the ONLY path that writes
+	// memories to the offchain store, enforcing consensus-first ordering.
 	record := &memory.MemoryRecord{
 		MemoryID:        memoryID,
 		SubmittingAgent: agentID,
 		Content:         submit.Content,
 		ContentHash:     contentHash,
+		EmbeddingHash:   submit.EmbeddingHash,
 		MemoryType:      memory.MemoryType(memType),
 		DomainTag:       submit.DomainTag,
 		ConfidenceScore: submit.ConfidenceScore,
 		Status:          memory.StatusProposed,
+		ParentHash:      submit.ParentHash,
 		TaskStatus:      memory.TaskStatus(submit.TaskStatus),
 		CreatedAt:       blockTime,
 	}
+
+	// Enrich with off-chain supplementary data (embedding vector, provider,
+	// knowledge triples) that the REST handler cached before broadcasting.
+	// Only the node that received the REST request will have this data.
+	var suppTriples []memory.KnowledgeTriple
+	if app.SuppCache != nil {
+		if supp := app.SuppCache.Pop(memoryID); supp != nil {
+			record.Embedding = supp.Embedding
+			record.Provider = supp.Provider
+			if len(supp.EmbeddingHash) > 0 {
+				record.EmbeddingHash = supp.EmbeddingHash
+			}
+			suppTriples = supp.KnowledgeTriples
+		}
+	}
+
+	// Memory must be inserted before triples (FK constraint: knowledge_triples.memory_id → memories).
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "memory", data: record})
+
+	if len(suppTriples) > 0 {
+		app.pendingWrites = append(app.pendingWrites, pendingWrite{
+			writeType: "triples",
+			data:      &triplesData{MemoryID: memoryID, Triples: suppTriples},
+		})
+	}
 
 	// Store memory classification on-chain
 	classification := uint8(submit.Classification)
@@ -1869,6 +1965,10 @@ func (app *SageApp) flushPendingWrites(ctx context.Context, s store.OffchainStor
 		case "memory":
 			if record, ok := pw.data.(*memory.MemoryRecord); ok {
 				err = s.InsertMemory(ctx, record)
+			}
+		case "triples":
+			if td, ok := pw.data.(*triplesData); ok {
+				err = s.InsertTriples(ctx, td.MemoryID, td.Triples)
 			}
 		case "challenge":
 			if ch, ok := pw.data.(*store.ChallengeEntry); ok {

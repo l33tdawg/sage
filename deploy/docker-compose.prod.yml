@@ -1,0 +1,78 @@
+# SAGE Production Hardening Override
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# This override file applies production security settings on top of the base config:
+#   - PostgreSQL SSL enabled
+#   - CORS restricted (no wildcard)
+#   - ABCI containers run as non-root (set in Dockerfile.abci)
+#   - CometBFT RPC exposed only to localhost
+#   - Read-only root filesystems where possible
+#
+# Prerequisites:
+#   - Set POSTGRES_PASSWORD to a strong, unique secret (not default)
+#   - Generate TLS certificates and mount them if enabling inter-node TLS
+#   - Set CORS_ALLOWED_ORIGINS to your actual frontend domain(s)
+
+services:
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a strong POSTGRES_PASSWORD for production}
+    command: >
+      postgres
+        -c ssl=on
+        -c ssl_cert_file=/var/lib/postgresql/server.crt
+        -c ssl_key_file=/var/lib/postgresql/server.key
+    # In production, bind Postgres to localhost only (not externally accessible)
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  abci0:
+    environment:
+      POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=require"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:?Set CORS_ALLOWED_ORIGINS for production}"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  abci1:
+    environment:
+      POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=require"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  abci2:
+    environment:
+      POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=require"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  abci3:
+    environment:
+      POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=require"
+      CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # Bind CometBFT RPC to internal network only — prevents external bypass of REST auth
+  cometbft0:
+    environment:
+      COMETBFT_RPC_LADDR: "tcp://0.0.0.0:26657"
+    ports:
+      - "127.0.0.1:26657:26657"
+
+  cometbft1:
+    ports:
+      - "127.0.0.1:26757:26657"
+
+  cometbft2:
+    ports:
+      - "127.0.0.1:26857:26657"
+
+  cometbft3:
+    ports:
+      - "127.0.0.1:26957:26657"

@@ -56,7 +56,15 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What’s New in v5.2.2
+## What’s New in v5.3.0
+
+- **Consensus-First Write Ordering** — Memory submissions now go through full BFT consensus before appearing in the query layer. Previously, the REST handler wrote to the offchain store immediately after broadcasting; now it uses `broadcast_tx_commit` and a supplementary data cache so ABCI `Commit` is the sole write path. Eliminates the pre-consensus data visibility window flagged in the security FAQ.
+- **Byzantine Fault Tests in CI** — `make byzantine` target + GitHub Actions job that spins up a 4-validator Docker cluster and runs fault injection tests (1-node down, 2-node halt, recovery).
+- **Docker Security Hardening** — ABCI containers now run as non-root (`sage` user). New `docker-compose.prod.yml` override with PostgreSQL SSL, restricted CORS, read-only root filesystems, and localhost-only port bindings.
+- **Benchmark Reproducibility** — Python benchmark (`make benchmark`) now generates real Ed25519 keypairs and signs requests with the correct canonical format. No more placeholder auth tokens.
+- **Multi-Node Upsert Safety** — `InsertMemory` upserts in both PostgreSQL and SQLite now use `COALESCE` to preserve non-NULL supplementary data (embeddings, provider) regardless of write order across validators.
+
+### v5.2.2
 
 - **Memory Type Guidance** — `sage_remember` tool description now guides agents to use the `fact` type for infrastructure details (IPs, hostnames, SSH commands) instead of `observation`, preventing decay across provider boundaries.
 

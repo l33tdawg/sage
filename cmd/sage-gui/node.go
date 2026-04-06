@@ -268,6 +268,7 @@ func runServe() error {
 
 	// Create REST server
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
+	restServer.SetSuppCache(app.SuppCache)
 
 	// Create dashboard handler
 	dashboard := web.NewDashboardHandler(sqliteStore, version)

@@ -19,10 +19,14 @@ RUN CGO_ENABLED=0 go build -o /app/amid ./cmd/amid
 # ── Final ────────────────────────────────────
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S sage && adduser -S sage -G sage
 
 WORKDIR /app
 COPY --from=builder /app/amid ./amid
+RUN chown -R sage:sage /app
+
+USER sage
 
 EXPOSE 8080 2112 26658
 

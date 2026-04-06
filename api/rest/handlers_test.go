@@ -299,20 +299,21 @@ func TestReadyEndpoint(t *testing.T) {
 }
 
 func TestSubmitMemory(t *testing.T) {
-	// Set up a fake CometBFT RPC server.
+	// Set up a fake CometBFT RPC server that returns broadcast_tx_commit format.
 	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"result": map[string]interface{}{
-				"code": 0,
-				"hash": "ABCDEF1234567890",
-				"log":  "",
+				"check_tx":  map[string]interface{}{"code": 0, "log": ""},
+				"tx_result": map[string]interface{}{"code": 0, "data": "", "log": "memory submitted"},
+				"hash":      "ABCDEF1234567890",
+				"height":    1,
 			},
 		})
 	}))
 	defer cometMock.Close()
 
-	srv, memStore, _ := newTestServer(t, cometMock.URL)
+	srv, _, _ := newTestServer(t, cometMock.URL)
 
 	body := []byte(`{
 		"content": "Test memory content",
@@ -334,8 +335,9 @@ func TestSubmitMemory(t *testing.T) {
 	assert.Equal(t, "ABCDEF1234567890", resp.TxHash)
 	assert.Equal(t, "proposed", resp.Status)
 
-	// Verify the memory was stored.
-	assert.Len(t, memStore.memories, 1)
+	// Note: memory is no longer stored directly by the REST handler.
+	// It is written by ABCI Commit after consensus finalizes the block.
+	// This test verifies the REST layer correctly broadcasts and returns.
 }
 
 func TestSubmitMemory_ValidationErrors(t *testing.T) {

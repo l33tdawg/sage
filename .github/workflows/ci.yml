@@ -63,6 +63,51 @@ jobs:
         run: |
           docker compose -f deploy/docker-compose.yml build
 
+  byzantine:
+    name: Byzantine Fault Tests
+    runs-on: ubuntu-latest
+    needs: [build]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Initialize testnet
+        run: bash deploy/init-testnet.sh
+      - name: Start 4-validator network
+        env:
+          POSTGRES_PASSWORD: ci_test_password
+        run: |
+          docker compose -f deploy/docker-compose.yml up -d --build
+          echo "Waiting for network to stabilize..."
+          # Poll REST API health endpoints until all 4 ABCI nodes are ready
+          for i in $(seq 1 60); do
+            ALL_UP=true
+            for port in 8080 8081 8082 8083; do
+              if ! curl -sf "http://localhost:${port}/healthz" > /dev/null 2>&1; then
+                ALL_UP=false
+                break
+              fi
+            done
+            if [ "$ALL_UP" = true ]; then
+              echo "All 4 ABCI nodes healthy"
+              break
+            fi
+            echo "Waiting for nodes... (attempt $i/60)"
+            sleep 5
+          done
+          if [ "$ALL_UP" != true ]; then
+            echo "Nodes failed to start in time"
+            docker compose -f deploy/docker-compose.yml logs --tail=50
+            exit 1
+          fi
+      - name: Run Byzantine fault tests
+        run: go test ./test/byzantine/... -v -count=1 -timeout 120s -tags=byzantine
+      - name: Stop network
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml down -v --remove-orphans
+
   sdk-test:
     name: Python SDK Tests
     runs-on: ubuntu-latest

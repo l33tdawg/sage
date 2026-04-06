@@ -112,6 +112,29 @@ type cometBroadcastResponse struct {
 	} `json:"error"`
 }
 
+// CometBFT broadcast_tx_commit response structure.
+// Unlike broadcast_tx_sync, this waits for the block to be finalized,
+// ensuring ABCI Commit has flushed writes before we return.
+type cometCommitResponse struct {
+	Result struct {
+		CheckTx struct {
+			Code int    `json:"code"`
+			Log  string `json:"log"`
+		} `json:"check_tx"`
+		TxResult struct {
+			Code int    `json:"code"`
+			Data string `json:"data"`
+			Log  string `json:"log"`
+		} `json:"tx_result"`
+		Hash   string `json:"hash"`
+		Height int64  `json:"height"`
+	} `json:"result"`
+	Error *struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
 // --- Domain Access Enforcement -----------------------------------------------
 
 // checkDomainAccess verifies an agent has the required access level for a domain.
@@ -357,43 +380,27 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Broadcast via CometBFT RPC.
-	txHash, err := s.broadcastTx(encoded)
+	// Stage supplementary off-chain data (embedding vector, provider, triples)
+	// in the process-local cache. The ABCI app reads this during FinalizeBlock
+	// and includes it in the pending write that Commit flushes to the store.
+	// This ensures memories only appear in the query layer AFTER consensus.
+	if s.suppCache != nil {
+		s.suppCache.Put(memoryID, &memory.SupplementaryData{
+			Embedding:        req.Embedding,
+			EmbeddingHash:    embeddingHash,
+			Provider:         req.Provider,
+			KnowledgeTriples: req.KnowledgeTriples,
+		})
+	}
+
+	// Broadcast via CometBFT RPC and wait for block finalization.
+	// broadcast_tx_commit blocks until the block containing this tx is committed,
+	// meaning ABCI Commit has already flushed the memory to the offchain store.
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast submit tx")
 		writeProblem(w, http.StatusInternalServerError, "Broadcast error", "Failed to broadcast transaction to CometBFT.")
 		return
-	}
-
-	// Store the full memory object off-chain.
-	record := &memory.MemoryRecord{
-		MemoryID:        memoryID,
-		SubmittingAgent: agentID,
-		Content:         req.Content,
-		ContentHash:     contentHash[:],
-		Embedding:       req.Embedding,
-		EmbeddingHash:   embeddingHash,
-		MemoryType:      memory.MemoryType(req.MemoryType),
-		DomainTag:       req.DomainTag,
-		Provider:        req.Provider,
-		ConfidenceScore: req.ConfidenceScore,
-		Status:          memory.StatusProposed,
-		ParentHash:      req.ParentHash,
-		CreatedAt:       time.Now(),
-	}
-
-	if err = s.store.InsertMemory(r.Context(), record); err != nil {
-		s.logger.Error().Err(err).Str("memory_id", memoryID).Msg("failed to insert memory")
-		writeProblem(w, http.StatusInternalServerError, "Storage error", "Failed to store memory.")
-		return
-	}
-
-	// Store knowledge triples if provided.
-	if len(req.KnowledgeTriples) > 0 {
-		if err = s.store.InsertTriples(r.Context(), memoryID, req.KnowledgeTriples); err != nil {
-			s.logger.Error().Err(err).Str("memory_id", memoryID).Msg("failed to insert triples")
-			// Non-fatal: memory was stored, triples can be retried.
-		}
 	}
 
 	metrics.MemoriesTotal.WithLabelValues(req.MemoryType, req.DomainTag, string(memory.StatusProposed)).Inc()
@@ -740,6 +747,46 @@ func (s *Server) broadcastTx(txBytes []byte) (string, error) {
 
 	if result.Result.Code != 0 {
 		return "", fmt.Errorf("tx rejected (code %d): %s", result.Result.Code, result.Result.Log)
+	}
+
+	return result.Result.Hash, nil
+}
+
+// broadcastTxCommit sends a transaction to CometBFT and waits for block finalization.
+// Unlike broadcastTx (sync), this blocks until the block is committed, ensuring
+// ABCI Commit has flushed all pending writes to the offchain store before returning.
+func (s *Server) broadcastTxCommit(txBytes []byte) (string, error) {
+	txHex := hex.EncodeToString(txBytes)
+	url := fmt.Sprintf("%s/broadcast_tx_commit?tx=0x%s", s.cometbftRPC, txHex)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) // #nosec G107 -- internal CometBFT RPC
+	if err != nil {
+		return "", fmt.Errorf("create broadcast request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("broadcast tx commit: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result cometCommitResponse
+	if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode broadcast commit response: %w", err)
+	}
+
+	if result.Error != nil {
+		return "", fmt.Errorf("broadcast error: %s", result.Error.Message)
+	}
+
+	if result.Result.CheckTx.Code != 0 {
+		return "", fmt.Errorf("tx rejected in CheckTx (code %d): %s", result.Result.CheckTx.Code, result.Result.CheckTx.Log)
+	}
+
+	if result.Result.TxResult.Code != 0 {
+		return "", fmt.Errorf("tx rejected in FinalizeBlock (code %d): %s", result.Result.TxResult.Code, result.Result.TxResult.Log)
 	}
 
 	return result.Result.Hash, nil

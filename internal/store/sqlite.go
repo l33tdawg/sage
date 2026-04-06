@@ -667,7 +667,11 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 		ON CONFLICT (memory_id) DO UPDATE SET
 			submitting_agent = excluded.submitting_agent,
 			status = excluded.status,
-			created_at = excluded.created_at`,
+			created_at = excluded.created_at,
+			embedding = COALESCE(excluded.embedding, memories.embedding),
+			embedding_hash = COALESCE(excluded.embedding_hash, memories.embedding_hash),
+			provider = COALESCE(NULLIF(excluded.provider, ''), memories.provider),
+			parent_hash = COALESCE(NULLIF(excluded.parent_hash, ''), memories.parent_hash)`,
 		record.MemoryID, record.SubmittingAgent, content, record.ContentHash,
 		encEmb, record.EmbeddingHash,
 		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,

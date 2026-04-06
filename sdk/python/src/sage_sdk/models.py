@@ -178,6 +178,7 @@ class AgentProfile(BaseModel):
 class AgentRegistration(BaseModel):
     agent_id: str
     name: str
+    registered_name: str | None = None
     role: str | None = None
     provider: str | None = None
     status: str
@@ -188,6 +189,7 @@ class AgentRegistration(BaseModel):
 class AgentInfo(BaseModel):
     agent_id: str
     name: str | None = None
+    registered_name: str | None = None
     role: str | None = None
     avatar: str | None = None
     boot_bio: str | None = None
