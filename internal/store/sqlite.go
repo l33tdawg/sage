@@ -38,7 +38,18 @@ type SQLiteStore struct {
 	vault             *vault.Vault // nil = no encryption
 	vaultExpected     bool         // true = encryption should be active; reject writes if vault nil
 	decryptWarnOnce   sync.Once    // gates the one-time decryption failure warning
-	writeMu           sync.Mutex   // serializes write transactions to prevent SQLITE_BUSY
+	writeMu           sync.Mutex   // serializes ALL writes to prevent SQLITE_BUSY
+}
+
+// writeExecContext wraps ExecContext with writeMu for standalone (non-tx) writes.
+// Inside a transaction (db == nil), the mutex was already acquired by RunInTx,
+// so we skip it to avoid deadlock.
+func (s *SQLiteStore) writeExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	if s.db != nil {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+	}
+	return s.conn.ExecContext(ctx, query, args...) //nolint:wrapcheck // intentional pass-through
 }
 
 // encPrefix marks content as encrypted (prepended to base64 ciphertext).
@@ -427,7 +438,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag);
 	`
 
-	if _, err := s.conn.ExecContext(ctx, schema); err != nil {
+	if _, err := s.writeExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
 
@@ -447,7 +458,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		"ALTER TABLE network_agents ADD COLUMN registered_name TEXT DEFAULT ''",
 	}
 	for _, m := range agentMigrations {
-		_, _ = s.conn.ExecContext(ctx, m) // Ignore "duplicate column" errors for idempotency
+		_, _ = s.writeExecContext(ctx, m) // Ignore "duplicate column" errors for idempotency
 	}
 
 	// Migration: add pipeline_messages table.
@@ -466,7 +477,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		{"infrastructure", 0.005},
 	}
 	for _, seed := range seeds {
-		_, err := s.conn.ExecContext(ctx,
+		_, err := s.writeExecContext(ctx,
 			`INSERT INTO domains (domain_tag, decay_rate) VALUES (?, ?) ON CONFLICT DO NOTHING`,
 			seed.tag, seed.rate)
 		if err != nil {
@@ -485,8 +496,8 @@ func (s *SQLiteStore) migrateProvider(ctx context.Context) {
 	if err := row.Scan(&count); err != nil || count > 0 {
 		return // already exists or error checking
 	}
-	_, _ = s.conn.ExecContext(ctx, `ALTER TABLE memories ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
 }
 
 // migrateTaskSupport adds task_status column and updates the memory_type CHECK constraint
@@ -501,11 +512,11 @@ func (s *SQLiteStore) migrateTaskSupport(ctx context.Context) {
 	}
 
 	// Add task_status column
-	_, _ = s.conn.ExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_status TEXT DEFAULT '' CHECK (task_status IN ('', 'planned', 'in_progress', 'done', 'dropped'))`)
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_status TEXT DEFAULT '' CHECK (task_status IN ('', 'planned', 'in_progress', 'done', 'dropped'))`)
 
 	// Recreate the table to update the memory_type CHECK constraint.
 	// SQLite doesn't allow altering CHECK constraints, so we use the rename-and-copy approach.
-	_, err := s.conn.ExecContext(ctx, `
+	_, err := s.writeExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS memories_new (
 			memory_id        TEXT PRIMARY KEY,
 			submitting_agent TEXT NOT NULL,
@@ -529,18 +540,18 @@ func (s *SQLiteStore) migrateTaskSupport(ctx context.Context) {
 		return
 	}
 
-	_, err = s.conn.ExecContext(ctx, `INSERT INTO memories_new SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash, memory_type, domain_tag, confidence_score, status, parent_hash, classification, created_at, committed_at, deprecated_at, provider, '' FROM memories`)
+	_, err = s.writeExecContext(ctx, `INSERT INTO memories_new SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash, memory_type, domain_tag, confidence_score, status, parent_hash, classification, created_at, committed_at, deprecated_at, provider, '' FROM memories`)
 	if err != nil {
-		_, _ = s.conn.ExecContext(ctx, `DROP TABLE IF EXISTS memories_new`)
+		_, _ = s.writeExecContext(ctx, `DROP TABLE IF EXISTS memories_new`)
 		return
 	}
 
-	_, _ = s.conn.ExecContext(ctx, `DROP TABLE memories`)
-	_, _ = s.conn.ExecContext(ctx, `ALTER TABLE memories_new RENAME TO memories`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain_tag)`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_task_status ON memories(task_status) WHERE task_status != ''`)
+	_, _ = s.writeExecContext(ctx, `DROP TABLE memories`)
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories_new RENAME TO memories`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain_tag)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_status ON memories(status)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_task_status ON memories(task_status) WHERE task_status != ''`)
 }
 
 // --- Helper functions ---
@@ -661,7 +672,7 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 		return fmt.Errorf("encrypt embedding: %w", err)
 	}
 
-	_, err = s.conn.ExecContext(ctx,
+	_, err = s.writeExecContext(ctx,
 		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
 			memory_type, domain_tag, provider, confidence_score, status, parent_hash, task_status, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -730,15 +741,15 @@ func (s *SQLiteStore) UpdateStatus(ctx context.Context, memoryID string, status 
 	var err error
 	switch status {
 	case memory.StatusCommitted:
-		_, err = s.conn.ExecContext(ctx,
+		_, err = s.writeExecContext(ctx,
 			`UPDATE memories SET status = ?, committed_at = ? WHERE memory_id = ?`,
 			string(status), nowStr, memoryID)
 	case memory.StatusDeprecated:
-		_, err = s.conn.ExecContext(ctx,
+		_, err = s.writeExecContext(ctx,
 			`UPDATE memories SET status = ?, deprecated_at = ? WHERE memory_id = ?`,
 			string(status), nowStr, memoryID)
 	default:
-		_, err = s.conn.ExecContext(ctx,
+		_, err = s.writeExecContext(ctx,
 			`UPDATE memories SET status = ? WHERE memory_id = ?`,
 			string(status), memoryID)
 	}
@@ -891,7 +902,7 @@ func (s *SQLiteStore) InsertTriples(ctx context.Context, memoryID string, triple
 }
 
 func (s *SQLiteStore) InsertVote(ctx context.Context, vote *ValidationVote) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO validation_votes (memory_id, validator_id, decision, rationale, weight_at_vote, block_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (memory_id, validator_id) DO UPDATE SET decision = excluded.decision, rationale = excluded.rationale, weight_at_vote = excluded.weight_at_vote`,
@@ -926,7 +937,7 @@ func (s *SQLiteStore) GetVotes(ctx context.Context, memoryID string) ([]*Validat
 }
 
 func (s *SQLiteStore) InsertChallenge(ctx context.Context, challenge *ChallengeEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO challenges (memory_id, challenger_id, reason, evidence, block_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		challenge.MemoryID, challenge.ChallengerID, challenge.Reason, challenge.Evidence, challenge.BlockHeight, formatTime(challenge.CreatedAt))
@@ -937,7 +948,7 @@ func (s *SQLiteStore) InsertChallenge(ctx context.Context, challenge *ChallengeE
 }
 
 func (s *SQLiteStore) InsertCorroboration(ctx context.Context, corr *Corroboration) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO corroborations (memory_id, agent_id, evidence, created_at)
 		VALUES (?, ?, ?, ?)`,
 		corr.MemoryID, corr.AgentID, corr.Evidence, formatTime(corr.CreatedAt))
@@ -1222,7 +1233,7 @@ func (s *SQLiteStore) GetTimeline(ctx context.Context, from, to time.Time, domai
 }
 
 func (s *SQLiteStore) DeleteMemory(ctx context.Context, memoryID string) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE memory_id = ?`,
 		memoryID)
 	if err != nil {
@@ -1232,7 +1243,7 @@ func (s *SQLiteStore) DeleteMemory(ctx context.Context, memoryID string) error {
 }
 
 func (s *SQLiteStore) UpdateDomainTag(ctx context.Context, memoryID string, domain string) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE memories SET domain_tag = ? WHERE memory_id = ?`,
 		domain, memoryID)
 	if err != nil {
@@ -1242,7 +1253,7 @@ func (s *SQLiteStore) UpdateDomainTag(ctx context.Context, memoryID string, doma
 }
 
 func (s *SQLiteStore) UpdateMemoryAgent(ctx context.Context, memoryID string, agentID string) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE memories SET submitting_agent = ? WHERE memory_id = ?`,
 		agentID, memoryID)
 	if err != nil {
@@ -1277,7 +1288,7 @@ func (s *SQLiteStore) GetScore(ctx context.Context, validatorID string) (*Valida
 }
 
 func (s *SQLiteStore) UpdateScore(ctx context.Context, score *ValidatorScore) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO validator_scores (validator_id, weighted_sum, weight_denom, vote_count, expertise_vec,
 			last_active_ts, current_weight, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1323,7 +1334,7 @@ func (s *SQLiteStore) GetAllScores(ctx context.Context) ([]*ValidatorScore, erro
 }
 
 func (s *SQLiteStore) InsertEpochScore(ctx context.Context, epoch *EpochScore) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO epoch_scores (epoch_num, block_height, validator_id, accuracy, domain_score,
 			recency_score, corr_score, raw_weight, capped_weight, normalized_weight)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1339,7 +1350,7 @@ func (s *SQLiteStore) InsertEpochScore(ctx context.Context, epoch *EpochScore) e
 // --- AccessStore implementation ---
 
 func (s *SQLiteStore) InsertAccessGrant(ctx context.Context, grant *AccessGrantEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO access_grants (domain, grantee_id, granter_id, access_level, expires_at, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (domain, grantee_id, created_height) DO NOTHING`,
@@ -1378,7 +1389,7 @@ func (s *SQLiteStore) GetActiveGrants(ctx context.Context, agentID string) ([]*A
 }
 
 func (s *SQLiteStore) RevokeGrant(ctx context.Context, domain, granteeID string, height int64) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE access_grants SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE domain = ? AND grantee_id = ? AND revoked_at IS NULL`,
 		domain, granteeID)
@@ -1389,7 +1400,7 @@ func (s *SQLiteStore) RevokeGrant(ctx context.Context, domain, granteeID string,
 }
 
 func (s *SQLiteStore) InsertAccessRequest(ctx context.Context, req *AccessRequestEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO access_requests (request_id, requester_id, target_domain, justification, status, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (request_id) DO NOTHING`,
@@ -1401,7 +1412,7 @@ func (s *SQLiteStore) InsertAccessRequest(ctx context.Context, req *AccessReques
 }
 
 func (s *SQLiteStore) UpdateAccessRequestStatus(ctx context.Context, requestID, status string, height int64) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE access_requests SET status = ?, resolved_height = ? WHERE request_id = ?`,
 		status, height, requestID)
 	if err != nil {
@@ -1412,7 +1423,7 @@ func (s *SQLiteStore) UpdateAccessRequestStatus(ctx context.Context, requestID, 
 
 func (s *SQLiteStore) InsertAccessLog(ctx context.Context, log *AccessLogEntry) error {
 	memoryIDsJSON := encodeStringSlice(log.MemoryIDs)
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO access_logs (agent_id, domain, action, memory_ids, block_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		log.AgentID, log.Domain, log.Action, memoryIDsJSON, log.BlockHeight, formatTime(log.CreatedAt))
@@ -1423,7 +1434,7 @@ func (s *SQLiteStore) InsertAccessLog(ctx context.Context, log *AccessLogEntry) 
 }
 
 func (s *SQLiteStore) InsertDomain(ctx context.Context, domain *DomainEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO domain_registry (domain_name, owner_agent_id, parent_domain, description, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (domain_name) DO NOTHING`,
@@ -1462,7 +1473,7 @@ func (s *SQLiteStore) GetDomain(ctx context.Context, name string) (*DomainEntry,
 // --- OrgStore implementation ---
 
 func (s *SQLiteStore) InsertOrg(ctx context.Context, org *OrgEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO organizations (org_id, name, description, admin_agent_id, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (org_id) DO NOTHING`,
@@ -1496,7 +1507,7 @@ func (s *SQLiteStore) GetOrg(ctx context.Context, orgID string) (*OrgEntry, erro
 }
 
 func (s *SQLiteStore) InsertOrgMember(ctx context.Context, member *OrgMemberEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO org_members (org_id, agent_id, clearance, role, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT (org_id, agent_id) DO NOTHING`,
@@ -1508,7 +1519,7 @@ func (s *SQLiteStore) InsertOrgMember(ctx context.Context, member *OrgMemberEntr
 }
 
 func (s *SQLiteStore) RemoveOrgMember(ctx context.Context, orgID, agentID string, height int64) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE org_members SET removed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE org_id = ? AND agent_id = ? AND removed_at IS NULL`,
 		orgID, agentID)
@@ -1519,7 +1530,7 @@ func (s *SQLiteStore) RemoveOrgMember(ctx context.Context, orgID, agentID string
 }
 
 func (s *SQLiteStore) UpdateMemberClearance(ctx context.Context, orgID, agentID string, clearance ClearanceLevel) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE org_members SET clearance = ?
 		WHERE org_id = ? AND agent_id = ? AND removed_at IS NULL`,
 		int(clearance), orgID, agentID)
@@ -1555,7 +1566,7 @@ func (s *SQLiteStore) GetOrgMembers(ctx context.Context, orgID string) ([]*OrgMe
 }
 
 func (s *SQLiteStore) InsertFederation(ctx context.Context, fed *FederationEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO federations (federation_id, proposer_org_id, target_org_id, allowed_domains, allowed_depts,
 			max_clearance, expires_at, requires_approval, status, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1614,7 +1625,7 @@ func (s *SQLiteStore) GetFederation(ctx context.Context, federationID string) (*
 }
 
 func (s *SQLiteStore) ApproveFederation(ctx context.Context, federationID string, height int64) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE federations SET status = 'active', approved_height = ?
 		WHERE federation_id = ? AND status = 'proposed'`,
 		height, federationID)
@@ -1625,7 +1636,7 @@ func (s *SQLiteStore) ApproveFederation(ctx context.Context, federationID string
 }
 
 func (s *SQLiteStore) RevokeFederation(ctx context.Context, federationID string, height int64) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE federations SET status = 'revoked', revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE federation_id = ? AND status = 'active'`,
 		federationID)
@@ -1676,7 +1687,7 @@ func (s *SQLiteStore) GetActiveFederations(ctx context.Context, orgID string) ([
 }
 
 func (s *SQLiteStore) UpdateMemoryClassification(ctx context.Context, memoryID string, classification ClearanceLevel) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE memories SET classification = ? WHERE memory_id = ?`,
 		int(classification), memoryID)
 	if err != nil {
@@ -1688,7 +1699,7 @@ func (s *SQLiteStore) UpdateMemoryClassification(ctx context.Context, memoryID s
 // --- Department methods ---
 
 func (s *SQLiteStore) InsertDept(ctx context.Context, dept *DeptEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO departments (dept_id, org_id, dept_name, description, parent_dept, created_height)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING`,
@@ -1754,7 +1765,7 @@ func (s *SQLiteStore) GetOrgDepts(ctx context.Context, orgID string) ([]*DeptEnt
 }
 
 func (s *SQLiteStore) InsertDeptMember(ctx context.Context, member *DeptMemberEntry) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO dept_members (org_id, dept_id, agent_id, clearance, role, created_height, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING`,
@@ -1766,7 +1777,7 @@ func (s *SQLiteStore) InsertDeptMember(ctx context.Context, member *DeptMemberEn
 }
 
 func (s *SQLiteStore) RemoveDeptMember(ctx context.Context, orgID, deptID, agentID string, height int64) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE dept_members SET removed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE org_id = ? AND dept_id = ? AND agent_id = ? AND removed_at IS NULL`,
 		orgID, deptID, agentID)
@@ -1802,7 +1813,7 @@ func (s *SQLiteStore) GetDeptMembers(ctx context.Context, orgID, deptID string) 
 }
 
 func (s *SQLiteStore) UpdateDeptMemberClearance(ctx context.Context, orgID, deptID, agentID string, clearance ClearanceLevel) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`UPDATE dept_members SET clearance = ?
 		WHERE org_id = ? AND dept_id = ? AND agent_id = ? AND removed_at IS NULL`,
 		int(clearance), orgID, deptID, agentID)
@@ -1944,7 +1955,7 @@ func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *AgentEntry) error 
 	if !agent.CreatedAt.IsZero() {
 		createdAt = agent.CreatedAt.Format(time.RFC3339Nano)
 	}
-	_, err := s.conn.ExecContext(ctx, `
+	_, err := s.writeExecContext(ctx, `
 		INSERT INTO network_agents (agent_id, name, registered_name, role, avatar, boot_bio, validator_pubkey,
 			node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, bundle_path,
 			on_chain_height, visible_agents, provider, claim_token, claim_expires_at,
@@ -1966,7 +1977,7 @@ func (s *SQLiteStore) UpdateAgent(ctx context.Context, agent *AgentEntry) error 
 		t := agent.ClaimExpiresAt.Format(time.RFC3339)
 		claimExpiry = &t
 	}
-	_, err := s.conn.ExecContext(ctx, `
+	_, err := s.writeExecContext(ctx, `
 		UPDATE network_agents SET name=?, role=?, avatar=?, boot_bio=?, clearance=?,
 			org_id=?, dept_id=?, domain_access=?, p2p_address=?,
 			on_chain_height=?, visible_agents=?, provider=?,
@@ -1983,7 +1994,7 @@ func (s *SQLiteStore) UpdateAgent(ctx context.Context, agent *AgentEntry) error 
 }
 
 func (s *SQLiteStore) RemoveAgent(ctx context.Context, agentID string) error {
-	_, err := s.conn.ExecContext(ctx, `
+	_, err := s.writeExecContext(ctx, `
 		UPDATE network_agents SET status='removed', removed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		WHERE agent_id=?`, agentID)
 	if err != nil {
@@ -1993,7 +2004,7 @@ func (s *SQLiteStore) RemoveAgent(ctx context.Context, agentID string) error {
 }
 
 func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, agentID, status string) error {
-	_, err := s.conn.ExecContext(ctx, `UPDATE network_agents SET status=? WHERE agent_id=?`, status, agentID)
+	_, err := s.writeExecContext(ctx, `UPDATE network_agents SET status=? WHERE agent_id=?`, status, agentID)
 	if err != nil {
 		return fmt.Errorf("update agent status: %w", err)
 	}
@@ -2002,7 +2013,7 @@ func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, agentID, status str
 
 func (s *SQLiteStore) UpdateAgentLastSeen(ctx context.Context, agentID string, lastSeen time.Time) error {
 	ts := lastSeen.UTC().Format("2006-01-02T15:04:05.000Z")
-	_, err := s.conn.ExecContext(ctx, `UPDATE network_agents SET last_seen=?, status='active' WHERE agent_id=?`, ts, agentID)
+	_, err := s.writeExecContext(ctx, `UPDATE network_agents SET last_seen=?, status='active' WHERE agent_id=?`, ts, agentID)
 	if err != nil {
 		return fmt.Errorf("update agent last seen: %w", err)
 	}
@@ -2011,7 +2022,7 @@ func (s *SQLiteStore) UpdateAgentLastSeen(ctx context.Context, agentID string, l
 
 func (s *SQLiteStore) BackfillFirstSeen(ctx context.Context, agentID string, firstSeen time.Time) error {
 	ts := firstSeen.UTC().Format("2006-01-02T15:04:05.000Z")
-	_, err := s.conn.ExecContext(ctx, `UPDATE network_agents SET first_seen=? WHERE agent_id=? AND first_seen IS NULL`, ts, agentID)
+	_, err := s.writeExecContext(ctx, `UPDATE network_agents SET first_seen=? WHERE agent_id=? AND first_seen IS NULL`, ts, agentID)
 	if err != nil {
 		return fmt.Errorf("backfill first_seen: %w", err)
 	}
@@ -2343,7 +2354,7 @@ func (s *SQLiteStore) AcquireRedeployLock(ctx context.Context, lockedBy, operati
 	now := time.Now().UTC()
 	expires := now.Add(ttl)
 	// Try to insert the singleton lock row. If it exists, check if expired.
-	_, err := s.conn.ExecContext(ctx, `
+	_, err := s.writeExecContext(ctx, `
 		INSERT INTO redeployment_lock (id, locked_by, locked_at, operation, expires_at)
 		VALUES (1, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
@@ -2367,7 +2378,7 @@ func (s *SQLiteStore) AcquireRedeployLock(ctx context.Context, lockedBy, operati
 }
 
 func (s *SQLiteStore) ReleaseRedeployLock(ctx context.Context) error {
-	_, err := s.conn.ExecContext(ctx, `DELETE FROM redeployment_lock WHERE id=1`)
+	_, err := s.writeExecContext(ctx, `DELETE FROM redeployment_lock WHERE id=1`)
 	return err
 }
 
@@ -2386,7 +2397,7 @@ func (s *SQLiteStore) GetRedeployLock(ctx context.Context) (*RedeploymentLock, e
 
 func (s *SQLiteStore) InsertRedeployLog(ctx context.Context, entry *RedeploymentLogEntry) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	res, err := s.conn.ExecContext(ctx, `
+	res, err := s.writeExecContext(ctx, `
 		INSERT INTO redeployment_log (operation, agent_id, phase, status, details, sqlite_backup, genesis_backup, started_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		entry.Operation, entry.AgentID, entry.Phase, entry.Status, entry.Details,
@@ -2428,7 +2439,7 @@ func (s *SQLiteStore) GetRedeployLog(ctx context.Context, operation string) ([]*
 
 func (s *SQLiteStore) UpdateRedeployLog(ctx context.Context, id int64, status, errorMsg string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
-	_, err := s.conn.ExecContext(ctx, `
+	_, err := s.writeExecContext(ctx, `
 		UPDATE redeployment_log SET status=?, completed_at=?, error=? WHERE id=?`,
 		status, now, errorMsg, id)
 	return err
@@ -2506,7 +2517,7 @@ func (s *SQLiteStore) GetPreference(ctx context.Context, key string) (string, er
 
 // SetPreference sets a single preference key-value pair.
 func (s *SQLiteStore) SetPreference(ctx context.Context, key, value string) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
 		key, value)
@@ -2580,7 +2591,7 @@ func (s *SQLiteStore) DeprecateMemories(ctx context.Context, memoryIDs []string)
 		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ', 'now')
 		WHERE memory_id IN (%s) AND status != 'deprecated'`,
 		strings.Join(placeholders, ","))
-	result, err := s.conn.ExecContext(ctx, query, args...)
+	result, err := s.writeExecContext(ctx, query, args...)
 	if err != nil {
 		return 0, fmt.Errorf("deprecate memories: %w", err)
 	}
@@ -2592,7 +2603,7 @@ func (s *SQLiteStore) DeprecateMemories(ctx context.Context, memoryIDs []string)
 // In v4.5.0+, challenges are auto-deprecated on consensus. This resolves any
 // stale challenged memories from earlier versions.
 func (s *SQLiteStore) ResolveChallengedMemories(ctx context.Context) (int, error) {
-	result, err := s.conn.ExecContext(ctx,
+	result, err := s.writeExecContext(ctx,
 		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE status = 'challenged'`)
 	if err != nil {
@@ -2638,7 +2649,7 @@ func (s *SQLiteStore) scanMemoryRow(rows *sql.Rows) (*memory.MemoryRecord, error
 
 // UpdateTaskStatus updates the task_status of a task memory.
 func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
-	result, err := s.conn.ExecContext(ctx,
+	result, err := s.writeExecContext(ctx,
 		`UPDATE memories SET task_status = ? WHERE memory_id = ? AND memory_type = 'task'`,
 		string(taskStatus), memoryID)
 	if err != nil {
@@ -2653,7 +2664,7 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 
 // LinkMemories creates a link between two memories.
 func (s *SQLiteStore) LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO memory_links (source_id, target_id, link_type) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
 		sourceID, targetID, linkType)
 	if err != nil {
@@ -2921,7 +2932,7 @@ func (s *SQLiteStore) ListMemoriesByTag(ctx context.Context, tag string, limit, 
 
 // migratePipeline creates the pipeline_messages table if it doesn't exist.
 func (s *SQLiteStore) migratePipeline(ctx context.Context) {
-	_, _ = s.conn.ExecContext(ctx, `
+	_, _ = s.writeExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS pipeline_messages (
 		pipe_id       TEXT PRIMARY KEY,
 		from_agent    TEXT NOT NULL,
@@ -2939,14 +2950,14 @@ func (s *SQLiteStore) migratePipeline(ctx context.Context) {
 		expires_at    TEXT NOT NULL,
 		journal_id    TEXT
 	)`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_provider ON pipeline_messages(to_provider, status)`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_agent ON pipeline_messages(to_agent, status)`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_from_agent ON pipeline_messages(from_agent, status)`)
-	_, _ = s.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_expires ON pipeline_messages(status, expires_at)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_provider ON pipeline_messages(to_provider, status)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_agent ON pipeline_messages(to_agent, status)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_from_agent ON pipeline_messages(from_agent, status)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_expires ON pipeline_messages(status, expires_at)`)
 }
 
 func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) error {
-	_, err := s.conn.ExecContext(ctx,
+	_, err := s.writeExecContext(ctx,
 		`INSERT INTO pipeline_messages (pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.PipeID, msg.FromAgent, msg.FromProvider, msg.ToAgent, msg.ToProvider,
@@ -3008,7 +3019,7 @@ func (s *SQLiteStore) GetInbox(ctx context.Context, agentID, provider string, li
 }
 
 func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string) error {
-	res, err := s.conn.ExecContext(ctx,
+	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'claimed', claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		 WHERE pipe_id = ? AND status = 'pending'`, pipeID)
 	if err != nil {
@@ -3022,7 +3033,7 @@ func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string)
 }
 
 func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, result, journalID string) error {
-	res, err := s.conn.ExecContext(ctx,
+	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'completed', result = ?, journal_id = ?,
 		        completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		 WHERE pipe_id = ? AND status = 'claimed'`, result, journalID, pipeID)
@@ -3127,7 +3138,7 @@ func (s *SQLiteStore) PipelineStats(ctx context.Context) (map[string]int, error)
 }
 
 func (s *SQLiteStore) ExpirePipelines(ctx context.Context) (int, error) {
-	res, err := s.conn.ExecContext(ctx,
+	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'expired'
 		 WHERE status IN ('pending', 'claimed')
 		   AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
@@ -3139,7 +3150,7 @@ func (s *SQLiteStore) ExpirePipelines(ctx context.Context) (int, error) {
 }
 
 func (s *SQLiteStore) PurgePipelines(ctx context.Context, olderThan time.Time) (int, error) {
-	res, err := s.conn.ExecContext(ctx,
+	res, err := s.writeExecContext(ctx,
 		`DELETE FROM pipeline_messages
 		 WHERE status IN ('completed', 'expired', 'failed')
 		   AND created_at < ?`, formatTime(olderThan))

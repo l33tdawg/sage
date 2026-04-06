@@ -1941,12 +1941,34 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 	// Flush pending writes to the offchain store atomically within a single
 	// database transaction. If any write fails, the entire batch rolls back,
 	// preventing partial state divergence between BadgerDB and the query layer.
+	//
+	// Retry with exponential backoff on SQLITE_BUSY — consensus already succeeded
+	// so these writes MUST eventually land in the offchain store.
 	if len(app.pendingWrites) > 0 {
 		writes := app.pendingWrites
-		if err := app.offchainStore.RunInTx(ctx, func(tx store.OffchainStore) error {
-			return app.flushPendingWrites(ctx, tx, writes)
-		}); err != nil {
-			app.logger.Error().Err(err).Int("count", len(writes)).
+		const maxRetries = 5
+		var lastErr error
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			if attempt > 0 {
+				backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond // 100ms, 200ms, 400ms, 800ms
+				app.logger.Warn().Int("attempt", attempt+1).Dur("backoff", backoff).Int("count", len(writes)).
+					Msg("retrying offchain flush after SQLITE_BUSY")
+				time.Sleep(backoff)
+			}
+			lastErr = app.offchainStore.RunInTx(ctx, func(tx store.OffchainStore) error {
+				return app.flushPendingWrites(ctx, tx, writes)
+			})
+			if lastErr == nil {
+				break
+			}
+			// Only retry on SQLITE_BUSY; other errors are not transient.
+			if !strings.Contains(lastErr.Error(), "SQLITE_BUSY") &&
+				!strings.Contains(lastErr.Error(), "database is locked") {
+				break
+			}
+		}
+		if lastErr != nil {
+			app.logger.Error().Err(lastErr).Int("count", len(writes)).Int("attempts", maxRetries).
 				Msg("CRITICAL: atomic flush of pending writes failed — offchain store may be behind on-chain state")
 		}
 	}
