@@ -16,6 +16,16 @@ func mockSageAPI(t *testing.T) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"semantic":  false,
+			"provider":  "hash",
+			"dimension": 768,
+			"ready":     true,
+		})
+	})
+
 	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
@@ -32,22 +42,29 @@ func mockSageAPI(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mockQueryResults := map[string]any{
+		"results": []map[string]any{
+			{
+				"memory_id":        "mem-123",
+				"content":          "test memory",
+				"domain_tag":       "general",
+				"confidence_score": 0.9,
+				"memory_type":      "observation",
+				"status":           "committed",
+				"created_at":       "2024-01-01T00:00:00Z",
+			},
+		},
+		"total_count": 1,
+	}
+
 	mux.HandleFunc("/v1/memory/query", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{
-			"results": []map[string]any{
-				{
-					"memory_id":        "mem-123",
-					"content":          "test memory",
-					"domain_tag":       "general",
-					"confidence_score": 0.9,
-					"memory_type":      "observation",
-					"status":           "committed",
-					"created_at":       "2024-01-01T00:00:00Z",
-				},
-			},
-			"total_count": 1,
-		})
+		json.NewEncoder(w).Encode(mockQueryResults)
+	})
+
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(mockQueryResults)
 	})
 
 	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, r *http.Request) {

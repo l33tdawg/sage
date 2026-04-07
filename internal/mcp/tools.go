@@ -401,24 +401,7 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 	topK := intParam(params, "top_k", defaultTopK)
 	minConf := floatParam(params, "min_confidence", defaultMinConf)
 
-	// Get embedding for the query.
-	embedReq, _ := json.Marshal(map[string]string{"text": query})
-	var embedResp struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
-		return nil, fmt.Errorf("get embedding: %w", err)
-	}
-
-	// Query memories by similarity.
-	queryReq, _ := json.Marshal(map[string]any{
-		"embedding":      embedResp.Embedding,
-		"domain_tag":     domain,
-		"provider":       s.provider,
-		"min_confidence": minConf,
-		"status_filter":  "committed",
-		"top_k":          topK,
-	})
+	// Response type shared by both paths.
 	var queryResp struct {
 		Results []struct {
 			MemoryID        string  `json:"memory_id"`
@@ -431,8 +414,41 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 		} `json:"results"`
 		TotalCount int `json:"total_count"`
 	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, &queryResp); err != nil {
-		return nil, fmt.Errorf("query memories: %w", err)
+
+	if s.isSemanticMode(ctx) {
+		// Semantic path: embed query → cosine similarity search.
+		embedReq, _ := json.Marshal(map[string]string{"text": query})
+		var embedResp struct {
+			Embedding []float32 `json:"embedding"`
+		}
+		if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
+			return nil, fmt.Errorf("get embedding: %w", err)
+		}
+
+		queryReq, _ := json.Marshal(map[string]any{
+			"embedding":      embedResp.Embedding,
+			"domain_tag":     domain,
+			"provider":       s.provider,
+			"min_confidence": minConf,
+			"status_filter":  "committed",
+			"top_k":          topK,
+		})
+		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, &queryResp); err != nil {
+			return nil, fmt.Errorf("query memories: %w", err)
+		}
+	} else {
+		// FTS5 path: full-text search when embeddings aren't semantic.
+		searchReq, _ := json.Marshal(map[string]any{
+			"query":          query,
+			"domain_tag":     domain,
+			"provider":       s.provider,
+			"min_confidence": minConf,
+			"status_filter":  "committed",
+			"top_k":          topK,
+		})
+		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, &queryResp); err != nil {
+			return nil, fmt.Errorf("search memories: %w", err)
+		}
 	}
 
 	memories := make([]map[string]any, 0, len(queryResp.Results))
@@ -609,52 +625,70 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 	}
 
 	// Phase 1: Recall — get consensus-committed memories relevant to this topic.
-	// This goes through the full chain: embed query → cosine similarity → return ONLY committed memories.
-	embedReq, _ := json.Marshal(map[string]string{"text": topic})
-	var embedResp struct {
-		Embedding []float32 `json:"embedding"`
+	// Uses semantic vector search (Ollama) or FTS5 text search (hash mode).
+	recallTopK, recallMinConf := s.getRecallDefaults(ctx)
+	var recallResp struct {
+		Results []struct {
+			MemoryID        string  `json:"memory_id"`
+			Content         string  `json:"content"`
+			DomainTag       string  `json:"domain_tag"`
+			ConfidenceScore float64 `json:"confidence_score"`
+			MemoryType      string  `json:"memory_type"`
+			CreatedAt       string  `json:"created_at"`
+		} `json:"results"`
+		TotalCount int `json:"total_count"`
 	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
-		// Non-fatal — we can still store the observation even if recall fails
-		result["recall_error"] = err.Error()
+
+	if s.isSemanticMode(ctx) {
+		// Semantic path: embed topic → cosine similarity search.
+		embedReq, _ := json.Marshal(map[string]string{"text": topic})
+		var embedResp struct {
+			Embedding []float32 `json:"embedding"`
+		}
+		if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
+			result["recall_error"] = err.Error()
+		} else {
+			queryReq, _ := json.Marshal(map[string]any{
+				"embedding":      embedResp.Embedding,
+				"domain_tag":     "", // Search ALL domains — the topic determines relevance, not a filter
+				"provider":       s.provider,
+				"status_filter":  "committed",
+				"top_k":          recallTopK,
+				"min_confidence": recallMinConf,
+			})
+			if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, &recallResp); err != nil {
+				result["recall_error"] = err.Error()
+			}
+		}
 	} else {
-		recallTopK, recallMinConf := s.getRecallDefaults(ctx)
-		queryReq, _ := json.Marshal(map[string]any{
-			"embedding":      embedResp.Embedding,
-			"domain_tag":     "", // Search ALL domains — the topic determines relevance, not a filter
+		// FTS5 path: full-text search when embeddings aren't semantic.
+		searchReq, _ := json.Marshal(map[string]any{
+			"query":          topic,
+			"domain_tag":     "", // Search ALL domains
 			"provider":       s.provider,
-			"status_filter":  "committed", // ONLY consensus-validated memories
+			"status_filter":  "committed",
 			"top_k":          recallTopK,
 			"min_confidence": recallMinConf,
 		})
-		var queryResp struct {
-			Results []struct {
-				MemoryID        string  `json:"memory_id"`
-				Content         string  `json:"content"`
-				DomainTag       string  `json:"domain_tag"`
-				ConfidenceScore float64 `json:"confidence_score"`
-				MemoryType      string  `json:"memory_type"`
-				CreatedAt       string  `json:"created_at"`
-			} `json:"results"`
-			TotalCount int `json:"total_count"`
-		}
-		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, &queryResp); err != nil {
+		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, &recallResp); err != nil {
 			result["recall_error"] = err.Error()
-		} else {
-			memories := make([]map[string]any, 0, len(queryResp.Results))
-			for _, r := range queryResp.Results {
-				memories = append(memories, map[string]any{
-					"memory_id":  r.MemoryID,
-					"content":    r.Content,
-					"domain":     r.DomainTag,
-					"confidence": r.ConfidenceScore,
-					"type":       r.MemoryType,
-					"created_at": r.CreatedAt,
-				})
-			}
-			result["recalled"] = memories
-			result["recalled_count"] = len(memories)
 		}
+	}
+
+	if _, hasErr := result["recall_error"]; !hasErr && len(recallResp.Results) > 0 {
+		memories := make([]map[string]any, 0, len(recallResp.Results))
+		for _, r := range recallResp.Results {
+			memories = append(memories, map[string]any{
+				"memory_id":  r.MemoryID,
+				"content":    r.Content,
+				"domain":     r.DomainTag,
+				"confidence": r.ConfidenceScore,
+				"type":       r.MemoryType,
+				"created_at": r.CreatedAt,
+			})
+		}
+		result["recalled"] = memories
+		result["recalled_count"] = len(memories)
 	}
 
 	// Phase 2: Store — save this turn's observation as an episodic memory.
@@ -1347,6 +1381,25 @@ func (s *Server) getRecallDefaults(ctx context.Context) (topK int, minConf float
 
 	// Defaults if not configured
 	return 5, 0
+}
+
+// isSemanticMode returns true if the embedding provider produces semantically meaningful vectors.
+// Cached for the lifetime of the server (provider doesn't change at runtime).
+func (s *Server) isSemanticMode(ctx context.Context) bool {
+	if s.semanticMode != nil {
+		return *s.semanticMode
+	}
+
+	var infoResp struct {
+		Semantic bool `json:"semantic"`
+	}
+	semantic := false
+	if err := s.doSignedJSON(ctx, "GET", "/v1/embed/info", nil, &infoResp); err == nil {
+		semantic = infoResp.Semantic
+	}
+	s.semanticMode = &semantic
+	s.semanticCacheAge = time.Now()
+	return semantic
 }
 
 // getMemoryMode returns the current memory mode preference ("full" or "bookend").

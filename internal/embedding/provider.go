@@ -10,4 +10,7 @@ type Provider interface {
 	Dimension() int
 	// Ready returns true if the provider is operational.
 	Ready() bool
+	// Semantic returns true if embeddings carry semantic meaning (e.g. Ollama).
+	// Hash-based providers return false — cosine similarity is meaningless.
+	Semantic() bool
 }

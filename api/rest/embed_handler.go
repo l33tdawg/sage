@@ -16,6 +16,29 @@ type EmbedResponse struct {
 	Dimension int       `json:"dimension"`
 }
 
+// EmbedInfoResponse describes the active embedding provider.
+type EmbedInfoResponse struct {
+	Semantic  bool   `json:"semantic"`
+	Provider  string `json:"provider"`
+	Dimension int    `json:"dimension"`
+	Ready     bool   `json:"ready"`
+}
+
+// handleEmbedInfo returns metadata about the active embedding provider.
+// Clients use this to decide between vector similarity and FTS5 text search.
+func (s *Server) handleEmbedInfo(w http.ResponseWriter, r *http.Request) {
+	provider := "hash"
+	if s.embedder.Semantic() {
+		provider = "ollama"
+	}
+	writeJSON(w, http.StatusOK, EmbedInfoResponse{
+		Semantic:  s.embedder.Semantic(),
+		Provider:  provider,
+		Dimension: s.embedder.Dimension(),
+		Ready:     s.embedder.Ready(),
+	})
+}
+
 // handleEmbed generates a vector embedding via local Ollama.
 // This allows agents to get embeddings from the SAGE network without
 // running Ollama locally — fully sovereign, no cloud API calls.

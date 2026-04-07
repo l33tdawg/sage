@@ -602,6 +602,172 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// SearchMemoryRequest is the JSON body for POST /v1/memory/search.
+type SearchMemoryRequest struct {
+	Query         string  `json:"query"`
+	DomainTag     string  `json:"domain_tag,omitempty"`
+	Provider      string  `json:"provider,omitempty"`
+	MinConfidence float64 `json:"min_confidence,omitempty"`
+	StatusFilter  string  `json:"status_filter,omitempty"`
+	TopK          int     `json:"top_k,omitempty"`
+}
+
+// handleSearchMemory handles POST /v1/memory/search — FTS5 full-text search.
+// Same access control as handleQueryMemory but uses text matching instead of embeddings.
+func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
+	var req SearchMemoryRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if req.Query == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing query", "query field is required for text search.")
+		return
+	}
+
+	// Domain access control (same as handleQueryMemory)
+	domainAccessApproved := false
+	if req.DomainTag != "" {
+		agentID := middleware.ContextAgentID(r.Context())
+		if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, req.DomainTag, "read"); accessErr != nil {
+			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+			return
+		}
+		domainAccessApproved = true
+	}
+
+	// Multi-org access control gate
+	if req.DomainTag != "" && !domainAccessApproved && s.badgerStore != nil {
+		domainOwner, domainErr := s.badgerStore.GetDomainOwner(req.DomainTag)
+		if domainErr == nil && domainOwner != "" {
+			agentID := middleware.ContextAgentID(r.Context())
+			hasAccess, accessErr := s.badgerStore.HasAccessMultiOrg(req.DomainTag, agentID, 0, time.Now())
+			if accessErr != nil || !hasAccess {
+				writeProblem(w, http.StatusForbidden, "Access denied",
+					fmt.Sprintf("No read access to domain %s", req.DomainTag))
+				return
+			}
+		}
+	}
+
+	// Agent isolation RBAC
+	queryAgentID := middleware.ContextAgentID(r.Context())
+	allowedAgents, seeAll := s.resolveVisibleAgents(queryAgentID)
+
+	if !seeAll && domainAccessApproved {
+		seeAll = true
+	}
+
+	if !seeAll && req.DomainTag != "" && s.badgerStore != nil {
+		hasGrant, _ := s.badgerStore.HasAccess(req.DomainTag, queryAgentID, 1, time.Now())
+		if hasGrant {
+			seeAll = true
+		} else {
+			hasOrgAccess, _ := s.badgerStore.HasAccessMultiOrg(req.DomainTag, queryAgentID, 0, time.Now())
+			if hasOrgAccess {
+				seeAll = true
+			} else {
+				_, ownerErr := s.badgerStore.GetDomainOwner(req.DomainTag)
+				if ownerErr != nil {
+					seeAll = true
+				}
+			}
+		}
+	}
+
+	start := time.Now()
+
+	opts := store.QueryOptions{
+		DomainTag:     req.DomainTag,
+		Provider:      req.Provider,
+		MinConfidence: req.MinConfidence,
+		StatusFilter:  req.StatusFilter,
+		TopK:          req.TopK,
+	}
+	if !seeAll {
+		opts.SubmittingAgents = allowedAgents
+	}
+
+	records, err := s.store.SearchByText(r.Context(), req.Query, opts)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to search memories")
+		writeProblem(w, http.StatusInternalServerError, "Search error", err.Error())
+		return
+	}
+
+	metrics.RecordQuery(req.DomainTag, time.Since(start))
+
+	// Apply confidence decay and classification filtering (same as handleQueryMemory).
+	now := time.Now()
+	results := make([]*MemoryResult, 0, len(records))
+	for _, rec := range records {
+		var memClass uint8
+		if s.badgerStore != nil {
+			memClass, _ = s.badgerStore.GetMemoryClassification(rec.MemoryID)
+			if memClass > 0 {
+				domainOwner, domErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
+				if domErr == nil && domainOwner != "" {
+					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
+					if !hasAccess && rec.SubmittingAgent != queryAgentID {
+						continue
+					}
+				}
+			}
+		}
+
+		corrs, _ := s.store.GetCorroborations(r.Context(), rec.MemoryID)
+		currentConf := memory.ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, now, len(corrs), rec.DomainTag)
+
+		results = append(results, &MemoryResult{
+			MemoryID:        rec.MemoryID,
+			SubmittingAgent: rec.SubmittingAgent,
+			Content:         rec.Content,
+			ContentHash:     hex.EncodeToString(rec.ContentHash),
+			MemoryType:      string(rec.MemoryType),
+			DomainTag:       rec.DomainTag,
+			ConfidenceScore: currentConf,
+			Classification:  int(memClass),
+			Status:          string(rec.Status),
+			ParentHash:      rec.ParentHash,
+			CreatedAt:       rec.CreatedAt,
+			CommittedAt:     rec.CommittedAt,
+		})
+	}
+
+	// Update agent last activity
+	if queryAgentID != "" && s.agentStore != nil {
+		if updateErr := s.agentStore.UpdateAgentLastSeen(r.Context(), queryAgentID, time.Now()); updateErr != nil {
+			s.logger.Warn().Err(updateErr).Str("agent_id", queryAgentID).Msg("failed to update agent last_seen on search")
+		}
+	}
+
+	// Emit search event for SSE chain activity log
+	if s.OnEvent != nil && len(results) > 0 {
+		domain := req.DomainTag
+		if domain == "" && len(results) > 0 {
+			domain = results[0].DomainTag
+		}
+		retrieved := make([]map[string]any, 0, len(results))
+		for _, r := range results {
+			retrieved = append(retrieved, map[string]any{
+				"memory_id":  r.MemoryID,
+				"content":    r.Content,
+				"domain":     r.DomainTag,
+				"confidence": r.ConfidenceScore,
+				"type":       r.MemoryType,
+			})
+		}
+		s.OnEvent("search", "", domain, fmt.Sprintf("%d memories found via text search", len(results)), map[string]any{
+			"retrieved": retrieved,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, QueryMemoryResponse{
+		Results:    results,
+		TotalCount: len(results),
+	})
+}
+
 // handleGetMemory handles GET /v1/memory/{memory_id}.
 func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	memoryID := chi.URLParam(r, "memory_id")

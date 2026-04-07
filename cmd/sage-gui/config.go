@@ -92,6 +92,10 @@ func LoadConfig() (*Config, error) {
 			if envAddr := os.Getenv("REST_ADDR"); envAddr != "" {
 				cfg.RESTAddr = envAddr
 			}
+			// SAGE_EMBEDDING_PROVIDER env var override (for Docker: SAGE_EMBEDDING_PROVIDER=ollama)
+			if envProvider := os.Getenv("SAGE_EMBEDDING_PROVIDER"); envProvider != "" {
+				cfg.Embedding.Provider = envProvider
+			}
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -104,6 +108,11 @@ func LoadConfig() (*Config, error) {
 	// REST_ADDR env var override (for Docker: REST_ADDR=0.0.0.0:8080)
 	if envAddr := os.Getenv("REST_ADDR"); envAddr != "" {
 		cfg.RESTAddr = envAddr
+	}
+
+	// SAGE_EMBEDDING_PROVIDER env var override (for Docker: SAGE_EMBEDDING_PROVIDER=ollama)
+	if envProvider := os.Getenv("SAGE_EMBEDDING_PROVIDER"); envProvider != "" {
+		cfg.Embedding.Provider = envProvider
 	}
 
 	// Expand ~ and ensure absolute paths

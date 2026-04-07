@@ -464,6 +464,17 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// Migration: add pipeline_messages table.
 	s.migratePipeline(ctx)
 
+	// FTS5 full-text search index on memory content.
+	// Used as a fallback when semantic embeddings are unavailable (hash mode).
+	_, _ = s.writeExecContext(ctx, `
+		CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+			memory_id UNINDEXED,
+			content,
+			domain_tag UNINDEXED,
+			tokenize='porter unicode61'
+		)
+	`)
+
 	// Seed default domains
 	seeds := []struct {
 		tag  string
@@ -691,6 +702,15 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
 	}
+
+	// Sync FTS5 index with plaintext content for full-text search.
+	// Skip when vault is active to avoid storing plaintext in a secondary table.
+	if s.vault == nil {
+		_, _ = s.writeExecContext(ctx, `DELETE FROM memories_fts WHERE memory_id = ?`, record.MemoryID)
+		_, _ = s.writeExecContext(ctx, `INSERT INTO memories_fts(memory_id, content, domain_tag) VALUES (?, ?, ?)`,
+			record.MemoryID, record.Content, record.DomainTag)
+	}
+
 	return nil
 }
 
@@ -865,6 +885,122 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		results[i] = scored[i].record
 	}
 	return results, nil
+}
+
+// SearchByText performs full-text search using FTS5 with BM25 ranking.
+// Falls back gracefully when vault is active (encrypted content can't be FTS-indexed).
+func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts QueryOptions) ([]*memory.MemoryRecord, error) {
+	if s.vault != nil {
+		return nil, fmt.Errorf("text search unavailable: content is encrypted — use semantic search with Ollama")
+	}
+	if query == "" {
+		return nil, fmt.Errorf("search query is required")
+	}
+	if opts.TopK <= 0 {
+		opts.TopK = 10
+	}
+	if opts.TopK > 100 {
+		opts.TopK = 100
+	}
+
+	// Escape FTS5 special characters by wrapping each term in double quotes.
+	// This prevents query syntax injection while preserving multi-word search.
+	escapedQuery := ftsEscapeQuery(query)
+
+	sqlStr := `SELECT m.memory_id, m.submitting_agent, m.content, m.content_hash, m.embedding,
+		m.memory_type, m.domain_tag, m.provider, m.confidence_score, m.status, m.parent_hash,
+		m.created_at, m.committed_at, m.deprecated_at, COALESCE(m.task_status, '')
+		FROM memories_fts f
+		JOIN memories m ON m.memory_id = f.memory_id
+		WHERE memories_fts MATCH ?`
+	args := []any{escapedQuery}
+
+	if opts.DomainTag != "" {
+		sqlStr += " AND f.domain_tag = ?"
+		args = append(args, opts.DomainTag)
+	}
+	if opts.Provider != "" && opts.DomainTag == "" {
+		sqlStr += " AND (m.provider = ? OR m.provider = '' OR m.memory_type = 'fact')"
+		args = append(args, opts.Provider)
+	}
+	if opts.MinConfidence > 0 {
+		sqlStr += " AND m.confidence_score >= ?"
+		args = append(args, opts.MinConfidence)
+	}
+	if opts.StatusFilter != "" {
+		sqlStr += " AND m.status = ?"
+		args = append(args, opts.StatusFilter)
+	}
+	if len(opts.SubmittingAgents) > 0 {
+		placeholders := make([]string, len(opts.SubmittingAgents))
+		for i, a := range opts.SubmittingAgents {
+			placeholders[i] = "?"
+			args = append(args, a)
+		}
+		sqlStr += " AND m.submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
+	}
+
+	sqlStr += " ORDER BY rank LIMIT ?"
+	args = append(args, opts.TopK)
+
+	rows, err := s.conn.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search by text: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []*memory.MemoryRecord
+	for rows.Next() {
+		var r memory.MemoryRecord
+		var mt, st, createdAt, taskStatus string
+		var embData []byte
+		var parentHash, committedAt, deprecatedAt *string
+
+		scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
+			&embData, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
+			&st, &parentHash, &createdAt, &committedAt, &deprecatedAt, &taskStatus)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan row: %w", scanErr)
+		}
+
+		r.MemoryType = memory.MemoryType(mt)
+		r.Status = memory.MemoryStatus(st)
+		r.TaskStatus = memory.TaskStatus(taskStatus)
+
+		// Decrypt content if encrypted (shouldn't be in FTS mode, but defensive).
+		if decContent, decErr := s.decryptContent(r.Content); decErr == nil {
+			r.Content = decContent
+		}
+		decEmb, _ := s.decryptEmbedding(embData)
+		r.Embedding = decodeEmbedding(decEmb)
+
+		r.CreatedAt = parseTime(createdAt)
+		r.CommittedAt = parseTimePtr(committedAt)
+		r.DeprecatedAt = parseTimePtr(deprecatedAt)
+		if parentHash != nil {
+			r.ParentHash = *parentHash
+		}
+
+		results = append(results, &r)
+	}
+	return results, nil
+}
+
+// ftsEscapeQuery wraps individual words in double quotes to escape FTS5 special characters.
+func ftsEscapeQuery(query string) string {
+	words := strings.Fields(query)
+	if len(words) == 0 {
+		return query
+	}
+	escaped := make([]string, len(words))
+	for i, w := range words {
+		// Remove any existing double quotes to prevent injection
+		w = strings.ReplaceAll(w, `"`, ``)
+		if w != "" {
+			escaped[i] = `"` + w + `"`
+		}
+	}
+	return strings.Join(escaped, " ")
 }
 
 func (s *SQLiteStore) InsertTriples(ctx context.Context, memoryID string, triples []memory.KnowledgeTriple) error {
@@ -1238,6 +1374,27 @@ func (s *SQLiteStore) DeleteMemory(ctx context.Context, memoryID string) error {
 		memoryID)
 	if err != nil {
 		return fmt.Errorf("delete memory: %w", err)
+	}
+	// Clean up FTS5 index — deprecated memories shouldn't appear in text search.
+	_, _ = s.writeExecContext(ctx, `DELETE FROM memories_fts WHERE memory_id = ?`, memoryID)
+	return nil
+}
+
+// BackfillFTS populates the FTS5 index from existing memories that aren't yet indexed.
+// Only works when vault is nil (plaintext available). Call after vault setup.
+func (s *SQLiteStore) BackfillFTS(ctx context.Context) error {
+	if s.vault != nil {
+		return nil // Can't index encrypted content
+	}
+	_, err := s.writeExecContext(ctx, `
+		INSERT INTO memories_fts(memory_id, content, domain_tag)
+		SELECT m.memory_id, m.content, m.domain_tag
+		FROM memories m
+		LEFT JOIN memories_fts f ON f.memory_id = m.memory_id
+		WHERE f.memory_id IS NULL AND m.status != 'deprecated'
+	`)
+	if err != nil {
+		return fmt.Errorf("backfill FTS: %w", err)
 	}
 	return nil
 }

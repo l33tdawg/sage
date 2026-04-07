@@ -192,6 +192,7 @@ func (s *Server) setupRouter() chi.Router {
 		// Memory endpoints
 		r.Post("/v1/memory/submit", s.handleSubmitMemory)
 		r.Post("/v1/memory/query", s.handleQueryMemory)
+			r.Post("/v1/memory/search", s.handleSearchMemory)
 		r.Get("/v1/memory/{memory_id}", s.handleGetMemory)
 		r.Post("/v1/memory/{memory_id}/vote", s.handleVoteMemory)
 		r.Post("/v1/memory/{memory_id}/challenge", s.handleChallengeMemory)
@@ -216,8 +217,9 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/validator/pending", s.handleGetPending)
 		r.Get("/v1/validator/epoch", s.handleGetEpoch)
 
-		// Embedding endpoint (local Ollama, no cloud)
+		// Embedding endpoints (local Ollama, no cloud)
 		r.Post("/v1/embed", s.handleEmbed)
+			r.Get("/v1/embed/info", s.handleEmbedInfo)
 
 		// Access control endpoints
 		r.Post("/v1/access/request", s.handleAccessRequest)

@@ -112,6 +112,7 @@ type MemoryStore interface {
 	GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error)
 	UpdateStatus(ctx context.Context, memoryID string, status memory.MemoryStatus, now time.Time) error
 	QuerySimilar(ctx context.Context, embedding []float32, opts QueryOptions) ([]*memory.MemoryRecord, error)
+	SearchByText(ctx context.Context, query string, opts QueryOptions) ([]*memory.MemoryRecord, error)
 	InsertTriples(ctx context.Context, memoryID string, triples []memory.KnowledgeTriple) error
 	InsertVote(ctx context.Context, vote *ValidationVote) error
 	GetVotes(ctx context.Context, memoryID string) ([]*ValidationVote, error)

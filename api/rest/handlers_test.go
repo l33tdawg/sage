@@ -73,6 +73,10 @@ func (m *mockMemoryStore) QuerySimilar(_ context.Context, embedding []float32, o
 	return results, nil
 }
 
+func (m *mockMemoryStore) SearchByText(_ context.Context, query string, opts store.QueryOptions) ([]*memory.MemoryRecord, error) {
+	return nil, nil
+}
+
 func (m *mockMemoryStore) InsertTriples(_ context.Context, memoryID string, triples []memory.KnowledgeTriple) error {
 	return nil
 }

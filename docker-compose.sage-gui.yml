@@ -1,0 +1,57 @@
+# SAGE single-node with Ollama semantic embeddings
+#
+# Usage:
+#   docker compose -f docker-compose.sage-gui.yml up -d
+#
+# First run pulls the nomic-embed-text model (~274 MB).
+# Data persists across restarts in named volumes.
+#
+# Dashboard: http://localhost:8080
+# MCP:       Configure your agent to connect to http://localhost:8080
+
+services:
+  # ─────────────────────────────────────────────
+  # Ollama — local embedding model (sovereign, no cloud)
+  # ─────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  # Pull the embedding model on first start
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: ["sh", "-c", "OLLAMA_HOST=http://ollama:11434 ollama pull nomic-embed-text && echo 'Model ready'"]
+    restart: "no"
+
+  # ─────────────────────────────────────────────
+  # SAGE — persistent consensus-validated memory
+  # ─────────────────────────────────────────────
+  sage:
+    image: ghcr.io/l33tdawg/sage:latest
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    environment:
+      REST_ADDR: "0.0.0.0:8080"
+      OLLAMA_URL: "http://ollama:11434"
+      SAGE_EMBEDDING_PROVIDER: "ollama"
+    volumes:
+      - sage_data:/root/.sage
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  sage_data:

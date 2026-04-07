@@ -221,6 +221,11 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 	return results, nil
 }
 
+// SearchByText is not implemented for PostgresStore — Postgres deployments use Ollama for semantic search.
+func (s *PostgresStore) SearchByText(_ context.Context, _ string, _ QueryOptions) ([]*memory.MemoryRecord, error) {
+	return nil, fmt.Errorf("text search not available on PostgresStore — use semantic search with Ollama")
+}
+
 func (s *PostgresStore) InsertTriples(ctx context.Context, memoryID string, triples []memory.KnowledgeTriple) error {
 	batch := &pgx.Batch{}
 	for _, t := range triples {

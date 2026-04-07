@@ -123,6 +123,11 @@ func (c *Client) Ready() bool {
 	return c.ready
 }
 
+// Semantic returns true — Ollama produces semantically meaningful embeddings.
+func (c *Client) Semantic() bool {
+	return true
+}
+
 // Ping checks if Ollama is reachable.
 func (c *Client) Ping(ctx context.Context) error {
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/tags", nil)

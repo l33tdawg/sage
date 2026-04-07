@@ -67,3 +67,8 @@ func (p *HashProvider) Dimension() int {
 func (p *HashProvider) Ready() bool {
 	return true
 }
+
+// Semantic returns false — hash embeddings are deterministic but not semantically meaningful.
+func (p *HashProvider) Semantic() bool {
+	return false
+}

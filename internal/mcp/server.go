@@ -61,6 +61,10 @@ type Server struct {
 	memoryMode         string // "full" (default) or "bookend"
 	memoryModeCacheAge time.Time
 
+	// Cached embedding mode — nil means not yet checked.
+	semanticMode     *bool
+	semanticCacheAge time.Time
+
 	// Auto-inception: automatically initialize brain on first tool call if empty.
 	inceptionChecked bool
 
