@@ -1113,7 +1113,7 @@ func verifyAgentIdentity(parsedTx *tx.ParsedTx) (string, error) {
 	if len(parsedTx.AgentPubKey) == 0 || len(parsedTx.AgentSig) == 0 || len(parsedTx.AgentBodyHash) == 0 {
 		return "", fmt.Errorf("no agent identity proof in transaction")
 	}
-	return auth.VerifyAgentProof(parsedTx.AgentPubKey, parsedTx.AgentSig, parsedTx.AgentBodyHash, parsedTx.AgentTimestamp)
+	return auth.VerifyAgentProof(parsedTx.AgentPubKey, parsedTx.AgentSig, parsedTx.AgentBodyHash, parsedTx.AgentTimestamp, parsedTx.AgentNonce)
 }
 
 func (app *SageApp) processOrgRegister(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {

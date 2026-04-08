@@ -50,10 +50,15 @@ func EncodeTx(tx *ParsedTx) ([]byte, error) {
 		agentBodyHash = make([]byte, 32)
 	}
 
+	agentNonce := tx.AgentNonce
+	if agentNonce == nil {
+		agentNonce = []byte{}
+	}
+
 	// type(1) + payloadLen(4) + payload + nodeSig(64) + nodePub(32) + nonce(8) + timestamp(8)
-	// + agentPub(32) + agentSig(64) + agentTs(8) + agentBodyHash(32)
+	// + agentPub(32) + agentSig(64) + agentTs(8) + agentBodyHash(32) + agentNonceLen(4) + agentNonce(var)
 	totalLen := 1 + 4 + len(payload) + ed25519.SignatureSize + ed25519.PublicKeySize + 8 + 8 +
-		ed25519.PublicKeySize + ed25519.SignatureSize + 8 + 32
+		ed25519.PublicKeySize + ed25519.SignatureSize + 8 + 32 + 4 + len(agentNonce)
 	buf := make([]byte, 0, totalLen)
 	buf = append(buf, byte(tx.Type))
 	buf = appendUint32(buf, uint32(len(payload))) // #nosec G115 -- payload length fits in uint32
@@ -67,6 +72,9 @@ func EncodeTx(tx *ParsedTx) ([]byte, error) {
 	buf = append(buf, agentSig...)
 	buf = appendInt64(buf, tx.AgentTimestamp)
 	buf = append(buf, agentBodyHash...)
+	// Agent nonce (variable length, length-prefixed)
+	buf = appendUint32(buf, uint32(len(agentNonce))) // #nosec G115 -- nonce length fits in uint32
+	buf = append(buf, agentNonce...)
 
 	return buf, nil
 }
@@ -132,6 +140,17 @@ func DecodeTx(data []byte) (*ParsedTx, error) {
 
 		tx.AgentBodyHash = make([]byte, 32)
 		copy(tx.AgentBodyHash, data[offset:offset+32])
+		offset += 32
+
+		// Decode agent nonce if present (length-prefixed, variable length)
+		if offset+4 <= len(data) {
+			nonceLen := binary.BigEndian.Uint32(data[offset : offset+4])
+			offset += 4
+			if nonceLen > 0 && offset+int(nonceLen) <= len(data) { // #nosec G115 -- nonceLen validated
+				tx.AgentNonce = make([]byte, nonceLen)
+				copy(tx.AgentNonce, data[offset:offset+int(nonceLen)]) // #nosec G115 -- nonceLen validated
+			}
+		}
 	}
 
 	if err := decodePayload(tx, payload); err != nil {

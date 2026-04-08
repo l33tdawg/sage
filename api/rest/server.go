@@ -276,6 +276,7 @@ func embedAgentAuth(ctx context.Context, ptx *tx.ParsedTx) {
 	ptx.AgentSig = proof.Signature
 	ptx.AgentTimestamp = proof.Timestamp
 	ptx.AgentBodyHash = proof.BodyHash
+	ptx.AgentNonce = proof.Nonce
 }
 
 // Router returns the underlying chi router for testing.

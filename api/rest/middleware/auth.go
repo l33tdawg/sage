@@ -66,6 +66,7 @@ type AgentAuthProof struct {
 	Signature []byte // Ed25519 signature (64 bytes)
 	Timestamp int64  // Unix seconds used in signing
 	BodyHash  []byte // SHA-256 of request body (32 bytes)
+	Nonce     []byte // Optional nonce used in signing (nil if legacy)
 }
 
 // skipAuthPaths lists paths that bypass authentication.
@@ -204,6 +205,7 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 			Signature: sig,
 			Timestamp: tsUnix,
 			BodyHash:  bodyHash[:],
+			Nonce:     nonce,
 		}
 		ctx := context.WithValue(r.Context(), agentIDKey, agentID)
 		ctx = context.WithValue(ctx, agentAuthKey, proof)

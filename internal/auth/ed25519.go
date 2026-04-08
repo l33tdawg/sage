@@ -100,7 +100,7 @@ func buildRequestMessage(method, path string, body []byte, timestamp int64, nonc
 //
 // This is the critical on-chain identity verification — the ABCI handler uses
 // this to independently establish agent identity without trusting the REST layer.
-func VerifyAgentProof(agentPubKey, agentSig, bodyHash []byte, agentTimestamp int64) (string, error) {
+func VerifyAgentProof(agentPubKey, agentSig, bodyHash []byte, agentTimestamp int64, agentNonce []byte) (string, error) {
 	if len(agentPubKey) != ed25519.PublicKeySize {
 		return "", fmt.Errorf("invalid agent public key length: %d", len(agentPubKey))
 	}
@@ -123,12 +123,15 @@ func VerifyAgentProof(agentPubKey, agentSig, bodyHash []byte, agentTimestamp int
 		return "", fmt.Errorf("no agent identity proof in transaction")
 	}
 
-	// Reconstruct the signed message: bodyHash + bigEndian(timestamp)
+	// Reconstruct the signed message: bodyHash + bigEndian(timestamp) [+ nonce]
 	tsBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(tsBytes, uint64(agentTimestamp)) // #nosec G115 -- timestamp from trusted int64
-	message := make([]byte, 0, 40)
+	message := make([]byte, 0, 40+len(agentNonce))
 	message = append(message, bodyHash...)
 	message = append(message, tsBytes...)
+	if len(agentNonce) > 0 {
+		message = append(message, agentNonce...)
+	}
 
 	// Verify the agent's Ed25519 signature
 	if !ed25519.Verify(ed25519.PublicKey(agentPubKey), message, agentSig) {
