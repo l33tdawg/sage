@@ -192,7 +192,7 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 	}
 	defer rows.Close()
 
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var mt, st string
@@ -333,7 +333,7 @@ func (s *PostgresStore) GetPendingByDomain(ctx context.Context, domainTag string
 	}
 	defer rows.Close()
 
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var mt, st string
@@ -948,7 +948,7 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 	}
 	defer rows.Close()
 
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var mt, st string
@@ -1048,7 +1048,7 @@ func (s *PostgresStore) GetTimeline(ctx context.Context, from, to time.Time, dom
 	}
 	defer rows.Close()
 
-	var buckets []TimelineBucket
+	buckets := make([]TimelineBucket, 0)
 	for rows.Next() {
 		var period time.Time
 		var count int
@@ -1132,7 +1132,7 @@ func (s *PostgresStore) GetLinkedMemories(ctx context.Context, memoryID string) 
 	}
 	defer rows.Close()
 
-	var links []memory.MemoryLink
+	links := make([]memory.MemoryLink, 0)
 	for rows.Next() {
 		var l memory.MemoryLink
 		var createdAt time.Time
@@ -1175,7 +1175,7 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 	}
 	defer rows.Close()
 
-	var records []*memory.MemoryRecord
+	records := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var mt, st, ts string

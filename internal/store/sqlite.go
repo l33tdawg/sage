@@ -949,7 +949,7 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 	}
 	defer func() { _ = rows.Close() }()
 
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var mt, st, createdAt, taskStatus string
@@ -1130,7 +1130,7 @@ func (s *SQLiteStore) GetPendingByDomain(ctx context.Context, domainTag string, 
 	}
 	defer func() { _ = rows.Close() }()
 
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var mt, st, createdAt string
@@ -1223,7 +1223,7 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 	}
 	defer func() { _ = rows.Close() }()
 
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var mt, st, createdAt, taskStatus string
@@ -1352,7 +1352,7 @@ func (s *SQLiteStore) GetTimeline(ctx context.Context, from, to time.Time, domai
 	}
 	defer func() { _ = rows.Close() }()
 
-	var buckets []TimelineBucket
+	buckets := make([]TimelineBucket, 0)
 	for rows.Next() {
 		var period string
 		var count int
@@ -2722,7 +2722,7 @@ func (s *SQLiteStore) GetCleanupCandidates(ctx context.Context, observationTTLDa
 	}
 	defer func() { _ = rows.Close() }()
 
-	var records []*memory.MemoryRecord
+	records := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		rec, err := s.scanMemoryRow(rows)
 		if err != nil {
@@ -2840,7 +2840,7 @@ func (s *SQLiteStore) GetLinkedMemories(ctx context.Context, memoryID string) ([
 	}
 	defer func() { _ = rows.Close() }()
 
-	var links []memory.MemoryLink
+	links := make([]memory.MemoryLink, 0)
 	for rows.Next() {
 		var l memory.MemoryLink
 		if err := rows.Scan(&l.SourceID, &l.TargetID, &l.LinkType, &l.CreatedAt); err != nil {
@@ -2877,7 +2877,7 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 	}
 	defer func() { _ = rows.Close() }()
 
-	var records []*memory.MemoryRecord
+	records := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		rec, err := s.scanMemoryRow(rows)
 		if err != nil {
@@ -2919,7 +2919,7 @@ func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int)
 	}
 	defer func() { _ = rows.Close() }()
 
-	var records []*memory.MemoryRecord
+	records := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		rec, err := s.scanMemoryRow(rows)
 		if err != nil {
@@ -3058,7 +3058,7 @@ func (s *SQLiteStore) ListMemoriesByTag(ctx context.Context, tag string, limit, 
 	}
 	defer func() { _ = rows.Close() }()
 
-	var results []*memory.MemoryRecord
+	results := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
 		var memType, st, createdAt, taskStatus string
