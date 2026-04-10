@@ -96,6 +96,14 @@ func LoadConfig() (*Config, error) {
 			if envProvider := os.Getenv("SAGE_EMBEDDING_PROVIDER"); envProvider != "" {
 				cfg.Embedding.Provider = envProvider
 			}
+			// OLLAMA_URL env var override (for Docker: OLLAMA_URL=http://ollama:11434)
+			if envURL := os.Getenv("OLLAMA_URL"); envURL != "" {
+				cfg.Embedding.BaseURL = envURL
+			}
+			// OLLAMA_MODEL env var override (for Docker: OLLAMA_MODEL=nomic-embed-text)
+			if envModel := os.Getenv("OLLAMA_MODEL"); envModel != "" {
+				cfg.Embedding.Model = envModel
+			}
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -113,6 +121,14 @@ func LoadConfig() (*Config, error) {
 	// SAGE_EMBEDDING_PROVIDER env var override (for Docker: SAGE_EMBEDDING_PROVIDER=ollama)
 	if envProvider := os.Getenv("SAGE_EMBEDDING_PROVIDER"); envProvider != "" {
 		cfg.Embedding.Provider = envProvider
+	}
+	// OLLAMA_URL env var override (for Docker: OLLAMA_URL=http://ollama:11434)
+	if envURL := os.Getenv("OLLAMA_URL"); envURL != "" {
+		cfg.Embedding.BaseURL = envURL
+	}
+	// OLLAMA_MODEL env var override (for Docker: OLLAMA_MODEL=nomic-embed-text)
+	if envModel := os.Getenv("OLLAMA_MODEL"); envModel != "" {
+		cfg.Embedding.Model = envModel
 	}
 
 	// Expand ~ and ensure absolute paths
