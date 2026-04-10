@@ -56,7 +56,41 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What’s New in v5.3.0
+## What’s New in v5.4.5
+
+- **Docker Env Var Support** — `OLLAMA_URL` and `OLLAMA_MODEL` environment variables now properly configure the embedding provider in Docker deployments. Previously, only `SAGE_EMBEDDING_PROVIDER` was read from env; the Ollama base URL required a mounted config file.
+
+### v5.4.4
+
+- **Empty Blocks Fix** — Single-node mode now generates empty blocks (`create_empty_blocks=true` with 5s interval) to prevent `broadcast_tx_commit` timeouts after idle periods. Discovered during FalconEYE integration testing where 3+ minute LLM analysis gaps caused consensus stalls.
+
+### v5.4.3
+
+- **Null Array Fix** — Query and list endpoints now return empty arrays `[]` instead of `null` when no results match, preventing SDK deserialization errors.
+
+### v5.4.2
+
+- **Nonce Verification Fix** — Agent nonce is now threaded through the full tx pipeline (codec → ABCI FinalizeBlock → VerifyAgentProof). Previously, the nonce was dropped at three points causing signature mismatches for nonce-enabled requests.
+
+### v5.4.1
+
+- **Replay Protection** — Added random nonce to request signing to prevent sub-second replay collisions when multiple API calls share the same method+path+body+timestamp.
+
+### v5.4.0
+
+- **FTS5 Full-Text Search** — New `POST /v1/memory/search` endpoint with SQLite FTS5 + BM25 ranking as a text-based recall fallback when embeddings aren’t semantic (hash mode). Agents can now search memories by keywords without needing vector similarity.
+- **Docker Compose for sage-gui** — `docker-compose.sage-gui.yml` pairs SAGE with an Ollama sidecar that auto-pulls `nomic-embed-text` on first start. Single-command deployment for semantic embeddings.
+
+### v5.3.2
+
+- **Write Serialization** — All 70+ standalone SQLite `ExecContext` write calls now go through `writeMu` with retry + exponential backoff, preventing `SQLITE_BUSY` errors under concurrent access.
+
+### v5.3.1
+
+- **CometBFT Height Fix** — Fixed JSON deserialization of block height (CometBFT returns string, not int64). Added `json:",string"` tag.
+- **SQLite Write Contention** — Added `sync.Mutex` to serialize `RunInTx` calls, eliminating DEFERRED→write lock escalation races.
+
+### v5.3.0
 
 - **Consensus-First Write Ordering** — Memory submissions now go through full BFT consensus before appearing in the query layer. Previously, the REST handler wrote to the offchain store immediately after broadcasting; now it uses `broadcast_tx_commit` and a supplementary data cache so ABCI `Commit` is the sole write path. Eliminates the pre-consensus data visibility window flagged in the security FAQ.
 - **Byzantine Fault Tests in CI** — `make byzantine` target + GitHub Actions job that spins up a 4-validator Docker cluster and runs fault injection tests (1-node down, 2-node halt, recovery).
@@ -202,7 +236,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:5.1.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:5.4.5`.
 
 ### Upgrading from an older version?
 
