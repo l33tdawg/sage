@@ -251,6 +251,49 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolPipeResult,
 		},
+
+		// --- Governance Tools ---
+
+		"sage_gov_propose": {
+			Name:        "sage_gov_propose",
+			Description: "Submit a governance proposal to add, remove, or update a validator. Requires admin role.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"operation":     map[string]any{"type": "string", "enum": []string{"add_validator", "remove_validator", "update_power"}, "description": "Type of validator change"},
+					"target_id":     map[string]any{"type": "string", "description": "Hex-encoded agent/validator ID"},
+					"target_pubkey": map[string]any{"type": "string", "description": "Hex-encoded Ed25519 public key (required for add_validator)"},
+					"target_power":  map[string]any{"type": "integer", "description": "Voting power (required for add_validator and update_power)"},
+					"reason":        map[string]any{"type": "string", "description": "Human-readable justification for the proposal"},
+				},
+				"required": []string{"operation", "target_id", "reason"},
+			},
+			Handler: s.toolGovPropose,
+		},
+		"sage_gov_vote": {
+			Name:        "sage_gov_vote",
+			Description: "Vote on an active governance proposal. Only validators can vote.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"proposal_id": map[string]any{"type": "string", "description": "ID of the proposal to vote on"},
+					"decision":    map[string]any{"type": "string", "enum": []string{"accept", "reject", "abstain"}, "description": "Your vote"},
+				},
+				"required": []string{"proposal_id", "decision"},
+			},
+			Handler: s.toolGovVote,
+		},
+		"sage_gov_status": {
+			Name:        "sage_gov_status",
+			Description: "Check the status of governance proposals. Returns the active proposal (if any) with vote tally and quorum progress.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"proposal_id": map[string]any{"type": "string", "description": "Specific proposal ID to check (omit for active proposal)"},
+				},
+			},
+			Handler: s.toolGovStatus,
+		},
 	}
 	return tools
 }
@@ -1667,6 +1710,124 @@ func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
 	}
 
 	return result
+}
+
+// --- Governance Tool Handlers ---
+
+func (s *Server) toolGovPropose(ctx context.Context, params map[string]any) (any, error) {
+	operation := stringParam(params, "operation", "")
+	if operation == "" {
+		return nil, fmt.Errorf("operation is required (add_validator, remove_validator, update_power)")
+	}
+	targetID := stringParam(params, "target_id", "")
+	if targetID == "" {
+		return nil, fmt.Errorf("target_id is required")
+	}
+	reason := stringParam(params, "reason", "")
+	if reason == "" {
+		return nil, fmt.Errorf("reason is required")
+	}
+
+	targetPubkey := stringParam(params, "target_pubkey", "")
+	targetPower := intParam(params, "target_power", 0)
+
+	reqBody := map[string]any{
+		"operation": operation,
+		"target_id": targetID,
+		"reason":    reason,
+	}
+	if targetPubkey != "" {
+		reqBody["target_pubkey"] = targetPubkey
+	}
+	if targetPower > 0 {
+		reqBody["target_power"] = targetPower
+	}
+
+	body, _ := json.Marshal(reqBody)
+
+	var resp struct {
+		ProposalID string `json:"proposal_id"`
+		TxHash     string `json:"tx_hash"`
+		Status     string `json:"status"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/governance/propose", body, &resp); err != nil {
+		return nil, fmt.Errorf("governance propose: %w", err)
+	}
+
+	return map[string]any{
+		"proposal_id": resp.ProposalID,
+		"tx_hash":     resp.TxHash,
+		"status":      resp.Status,
+		"operation":   operation,
+		"target_id":   targetID,
+		"reason":      reason,
+	}, nil
+}
+
+func (s *Server) toolGovVote(ctx context.Context, params map[string]any) (any, error) {
+	proposalID := stringParam(params, "proposal_id", "")
+	if proposalID == "" {
+		return nil, fmt.Errorf("proposal_id is required")
+	}
+	decision := stringParam(params, "decision", "")
+	if decision == "" {
+		return nil, fmt.Errorf("decision is required (accept, reject, abstain)")
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"proposal_id": proposalID,
+		"decision":    decision,
+	})
+
+	var resp struct {
+		TxHash string `json:"tx_hash"`
+		Status string `json:"status"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/governance/vote", body, &resp); err != nil {
+		return nil, fmt.Errorf("governance vote: %w", err)
+	}
+
+	return map[string]any{
+		"tx_hash":     resp.TxHash,
+		"status":      resp.Status,
+		"proposal_id": proposalID,
+		"decision":    decision,
+	}, nil
+}
+
+func (s *Server) toolGovStatus(ctx context.Context, params map[string]any) (any, error) {
+	proposalID := stringParam(params, "proposal_id", "")
+
+	if proposalID != "" {
+		// Fetch a specific proposal with vote details.
+		var detail map[string]any
+		path := "/v1/dashboard/governance/proposals/" + url.PathEscape(proposalID)
+		if err := s.doSignedJSON(ctx, "GET", path, nil, &detail); err != nil {
+			return nil, fmt.Errorf("governance proposal detail: %w", err)
+		}
+		return detail, nil
+	}
+
+	// No proposal_id — list proposals and return the active (voting) one.
+	var listResp struct {
+		Proposals []map[string]any `json:"proposals"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/dashboard/governance/proposals?status=voting", nil, &listResp); err != nil {
+		return nil, fmt.Errorf("governance proposals list: %w", err)
+	}
+
+	if len(listResp.Proposals) == 0 {
+		return map[string]any{
+			"status":  "no_active_proposal",
+			"message": "There are no active governance proposals currently in voting.",
+		}, nil
+	}
+
+	// Return the first active proposal (there can only be one active at a time).
+	return map[string]any{
+		"status":   "active",
+		"proposal": listResp.Proposals[0],
+	}, nil
 }
 
 // isHexString returns true if the string contains only hex characters.

@@ -377,3 +377,69 @@ class DeptMemberInfo(BaseModel):
     agent_id: str
     clearance: int = 1
     role: str = "member"
+
+
+# --- Governance Models ---
+
+class GovProposeRequest(BaseModel):
+    operation: str  # "add_validator", "remove_validator", "update_power"
+    target_id: str
+    target_pubkey: str | None = None
+    target_power: int | None = None
+    reason: str
+
+
+class GovProposeResponse(BaseModel):
+    proposal_id: str
+    tx_hash: str
+    status: str
+
+
+class GovVoteRequest(BaseModel):
+    proposal_id: str
+    decision: str  # "accept", "reject", "abstain"
+
+
+class GovVoteResponse(BaseModel):
+    tx_hash: str
+    status: str
+
+
+class GovCancelRequest(BaseModel):
+    proposal_id: str
+
+
+class GovCancelResponse(BaseModel):
+    tx_hash: str
+    status: str
+
+
+class GovProposal(BaseModel):
+    proposal_id: str
+    operation: str
+    target_agent_id: str
+    target_pubkey: str | None = None
+    target_power: int | None = None
+    proposer_id: str
+    status: str
+    created_height: int
+    expiry_height: int
+    executed_height: int | None = None
+    reason: str | None = None
+
+
+class GovVote(BaseModel):
+    proposal_id: str
+    validator_id: str
+    decision: str
+    height: int
+
+
+class GovProposalListResponse(BaseModel):
+    proposals: list[GovProposal]
+
+
+class GovProposalDetailResponse(BaseModel):
+    proposal: GovProposal
+    votes: list[GovVote]
+    quorum_progress: dict | None = None

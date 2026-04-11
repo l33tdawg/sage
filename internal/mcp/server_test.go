@@ -56,7 +56,7 @@ func TestHandleToolsList(t *testing.T) {
 
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]map[string]any)
-	assert.Len(t, tools, 16)
+	assert.Len(t, tools, 19)
 
 	// Collect tool names
 	names := make(map[string]bool)
@@ -69,6 +69,9 @@ func TestHandleToolsList(t *testing.T) {
 	assert.True(t, names["sage_list"])
 	assert.True(t, names["sage_timeline"])
 	assert.True(t, names["sage_status"])
+	assert.True(t, names["sage_gov_propose"])
+	assert.True(t, names["sage_gov_vote"])
+	assert.True(t, names["sage_gov_status"])
 }
 
 func TestHandleToolsCall_UnknownTool(t *testing.T) {

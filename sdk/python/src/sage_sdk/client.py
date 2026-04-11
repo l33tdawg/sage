@@ -15,6 +15,14 @@ from sage_sdk.models import (
     ChallengeRequest,
     CorroborateRequest,
     EpochInfo,
+    GovCancelRequest,
+    GovCancelResponse,
+    GovProposeRequest,
+    GovProposeResponse,
+    GovProposalDetailResponse,
+    GovProposalListResponse,
+    GovVoteRequest,
+    GovVoteResponse,
     KnowledgeTriple,
     MemoryLinkResponse,
     MemoryListResponse,
@@ -622,6 +630,50 @@ class SageClient:
         """List active federation agreements for an organization."""
         resp = self._request("GET", f"/v1/federation/active/{org_id}")
         return resp.json()
+
+    # --- Governance ---------------------------------------------------------------
+
+    def governance_propose(
+        self,
+        operation: str,
+        target_id: str,
+        reason: str,
+        target_pubkey: str | None = None,
+        target_power: int | None = None,
+    ) -> GovProposeResponse:
+        """Submit a governance proposal to add/remove/update a validator."""
+        req = GovProposeRequest(
+            operation=operation,
+            target_id=target_id,
+            target_pubkey=target_pubkey,
+            target_power=target_power,
+            reason=reason,
+        )
+        resp = self._request("POST", "/v1/governance/propose", json=req.model_dump(exclude_none=True))
+        return GovProposeResponse.model_validate(resp.json())
+
+    def governance_vote(self, proposal_id: str, decision: str) -> GovVoteResponse:
+        """Vote on an active governance proposal."""
+        req = GovVoteRequest(proposal_id=proposal_id, decision=decision)
+        resp = self._request("POST", "/v1/governance/vote", json=req.model_dump())
+        return GovVoteResponse.model_validate(resp.json())
+
+    def governance_cancel(self, proposal_id: str) -> GovCancelResponse:
+        """Cancel a governance proposal (proposer only)."""
+        req = GovCancelRequest(proposal_id=proposal_id)
+        resp = self._request("POST", "/v1/governance/cancel", json=req.model_dump())
+        return GovCancelResponse.model_validate(resp.json())
+
+    def governance_proposals(self, status: str | None = None) -> GovProposalListResponse:
+        """List governance proposals, optionally filtered by status."""
+        params = {"status": status} if status else None
+        resp = self._request("GET", "/v1/dashboard/governance/proposals", params=params)
+        return GovProposalListResponse.model_validate(resp.json())
+
+    def governance_proposal_detail(self, proposal_id: str) -> GovProposalDetailResponse:
+        """Get detailed info about a governance proposal including votes and quorum."""
+        resp = self._request("GET", f"/v1/dashboard/governance/proposals/{proposal_id}")
+        return GovProposalDetailResponse.model_validate(resp.json())
 
     def __enter__(self) -> SageClient:
         return self
