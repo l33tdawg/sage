@@ -1385,3 +1385,23 @@ func (s *PostgresStore) ExpirePipelines(_ context.Context) (int, error) {
 func (s *PostgresStore) PurgePipelines(_ context.Context, _ time.Time) (int, error) {
 	return 0, fmt.Errorf("PurgePipelines not implemented for PostgresStore")
 }
+
+// GovernanceStore stubs — PostgresStore does not yet implement governance.
+func (s *PostgresStore) InsertGovProposal(_ context.Context, _ *GovProposal) error {
+	return nil // no-op
+}
+func (s *PostgresStore) GetGovProposal(_ context.Context, _ string) (*GovProposal, error) {
+	return nil, fmt.Errorf("governance not implemented for PostgresStore")
+}
+func (s *PostgresStore) UpdateGovProposalStatus(_ context.Context, _, _ string, _ *int64) error {
+	return nil // no-op
+}
+func (s *PostgresStore) ListGovProposals(_ context.Context, _ string) ([]*GovProposal, error) {
+	return make([]*GovProposal, 0), nil
+}
+func (s *PostgresStore) InsertGovVote(_ context.Context, _ *GovVote) error {
+	return nil // no-op
+}
+func (s *PostgresStore) GetGovVotes(_ context.Context, _ string) ([]*GovVote, error) {
+	return make([]*GovVote, 0), nil
+}

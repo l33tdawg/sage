@@ -23,6 +23,7 @@ Agent (Claude, ChatGPT, DeepSeek, Gemini, etc.)
 sage-gui
   ├── ABCI App (validation, confidence, decay, Ed25519 sigs)
   ├── App Validators (sentinel, dedup, quality, consistency — BFT 3/4 quorum)
+  ├── Governance Engine (on-chain validator proposals + voting)
   ├── CometBFT consensus (single-validator or multi-agent network)
   ├── SQLite + optional AES-256-GCM encryption
   ├── CEREBRUM Dashboard (SPA, real-time SSE)
@@ -56,154 +57,50 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What’s New in v5.4.5
+## What’s New in v6.0
 
-- **Docker Env Var Support** — `OLLAMA_URL` and `OLLAMA_MODEL` environment variables now properly configure the embedding provider in Docker deployments. Previously, only `SAGE_EMBEDDING_PROVIDER` was read from env; the Ollama base URL required a mounted config file.
+- **Dynamic Validator Governance** — Validators can now be added, removed, and have their power updated **without stopping the chain**. Admin agents submit governance proposals, validators vote on-chain with 2/3 BFT quorum, and CometBFT applies validator set changes at consensus level. Zero downtime.
+- **On-Chain Governance Engine** — New `internal/governance/` package with deterministic integer-only quorum math, proposal lifecycle (voting → executed/rejected/expired/cancelled), proposer cooldown, min voting period, and power constraints. All state in BadgerDB, included in AppHash.
+- **Governance Dashboard** — New Governance section in the CEREBRUM Network page. Active proposal cards with vote tally, quorum progress bar, expiry countdown, and one-click voting. Proposal history with status badges. "New Proposal" wizard for admins.
+- **Security Constraints** — 1/3 max power for new validators (prevents single-add takeover), min 2 validators after removal, 50-block proposer cooldown (prevents grief), 500-block max proposal TTL (prevents governance lockup), admin-only proposals, validator-only voting.
+- **Foundation for v6.5/v7.0** — This governance layer is required before encrypted node-to-node tunnels (v6.5) and internet federation (v7.0). Without hot validator eviction, internet-facing nodes would require full chain restart to remove bad actors.
 
-### v5.4.4
+### v5.x Highlights
 
-- **Empty Blocks Fix** — Single-node mode now generates empty blocks (`create_empty_blocks=true` with 5s interval) to prevent `broadcast_tx_commit` timeouts after idle periods. Discovered during FalconEYE integration testing where 3+ minute LLM analysis gaps caused consensus stalls.
+- **FTS5 Full-Text Search** — Keyword-based recall fallback when embeddings aren’t semantic.
+- **Docker Compose** — `docker-compose.sage-gui.yml` with Ollama sidecar for semantic embeddings.
+- **Consensus-First Writes** — Memory submissions go through full BFT consensus before appearing in queries.
+- **Byzantine Fault Tests in CI** — 4-validator Docker cluster with fault injection.
+- **Nonce Replay Protection** — Random nonce in request signing prevents sub-second replay collisions.
+- **Docker Env Vars** — `OLLAMA_URL` and `OLLAMA_MODEL` properly configure embeddings in Docker.
 
-### v5.4.3
+<details>
+<summary>Full v5.x changelog</summary>
 
-- **Null Array Fix** — Query and list endpoints now return empty arrays `[]` instead of `null` when no results match, preventing SDK deserialization errors.
+- v5.4.5: Docker env var support for OLLAMA_URL/OLLAMA_MODEL
+- v5.4.4: Empty blocks fix for single-node idle timeout prevention
+- v5.4.3: Null array fix (return `[]` not `null` for empty results)
+- v5.4.2: Nonce verification threaded through full tx pipeline
+- v5.4.1: Random nonce for replay protection
+- v5.4.0: FTS5 search, Docker Compose with Ollama
+- v5.3.x: Consensus-first writes, Byzantine CI tests, Docker hardening, write serialization
+- v5.2.x: Immutable RegisteredName, self-updater fix, memory type guidance
+- v5.1.0: Agent rename fix, self-healing name reconciliation
+- v5.0.x: Agent pipeline, Python SDK, vault recovery, memory modes, MCP identity fix, Docker fix
 
-### v5.4.2
+</details>
 
-- **Nonce Verification Fix** — Agent nonce is now threaded through the full tx pipeline (codec → ABCI FinalizeBlock → VerifyAgentProof). Previously, the nonce was dropped at three points causing signature mismatches for nonce-enabled requests.
+### v4.x Highlights
 
-### v5.4.1
+- **4 Application Validators** — Sentinel, Dedup, Quality, Consistency with 3/4 BFT quorum.
+- **RBAC** — Agent isolation by default, domain-level permissions, clearance levels, multi-org federation.
+- **Synaptic Ledger** — AES-256-GCM encryption with Argon2id key derivation, vault lock/unlock.
 
-- **Replay Protection** — Added random nonce to request signing to prevent sub-second replay collisions when multiple API calls share the same method+path+body+timestamp.
+### v3.x Highlights
 
-### v5.4.0
-
-- **FTS5 Full-Text Search** — New `POST /v1/memory/search` endpoint with SQLite FTS5 + BM25 ranking as a text-based recall fallback when embeddings aren’t semantic (hash mode). Agents can now search memories by keywords without needing vector similarity.
-- **Docker Compose for sage-gui** — `docker-compose.sage-gui.yml` pairs SAGE with an Ollama sidecar that auto-pulls `nomic-embed-text` on first start. Single-command deployment for semantic embeddings.
-
-### v5.3.2
-
-- **Write Serialization** — All 70+ standalone SQLite `ExecContext` write calls now go through `writeMu` with retry + exponential backoff, preventing `SQLITE_BUSY` errors under concurrent access.
-
-### v5.3.1
-
-- **CometBFT Height Fix** — Fixed JSON deserialization of block height (CometBFT returns string, not int64). Added `json:",string"` tag.
-- **SQLite Write Contention** — Added `sync.Mutex` to serialize `RunInTx` calls, eliminating DEFERRED→write lock escalation races.
-
-### v5.3.0
-
-- **Consensus-First Write Ordering** — Memory submissions now go through full BFT consensus before appearing in the query layer. Previously, the REST handler wrote to the offchain store immediately after broadcasting; now it uses `broadcast_tx_commit` and a supplementary data cache so ABCI `Commit` is the sole write path. Eliminates the pre-consensus data visibility window flagged in the security FAQ.
-- **Byzantine Fault Tests in CI** — `make byzantine` target + GitHub Actions job that spins up a 4-validator Docker cluster and runs fault injection tests (1-node down, 2-node halt, recovery).
-- **Docker Security Hardening** — ABCI containers now run as non-root (`sage` user). New `docker-compose.prod.yml` override with PostgreSQL SSL, restricted CORS, read-only root filesystems, and localhost-only port bindings.
-- **Benchmark Reproducibility** — Python benchmark (`make benchmark`) now generates real Ed25519 keypairs and signs requests with the correct canonical format. No more placeholder auth tokens.
-- **Multi-Node Upsert Safety** — `InsertMemory` upserts in both PostgreSQL and SQLite now use `COALESCE` to preserve non-NULL supplementary data (embeddings, provider) regardless of write order across validators.
-
-### v5.2.2
-
-- **Memory Type Guidance** — `sage_remember` tool description now guides agents to use the `fact` type for infrastructure details (IPs, hostnames, SSH commands) instead of `observation`, preventing decay across provider boundaries.
-
-### v5.2.1
-
-- **Self-Updater Fix** — Dashboard "Update" button no longer fails. GitHub changed release asset downloads to route through `release-assets.githubusercontent.com`, which wasn’t in the redirect allowlist.
-
-### v5.2.0
-
-- **Immutable RegisteredName** — Agents now have a permanent `RegisteredName` (set once at registration) alongside the mutable display `Name`. Renames preserve the original on-chain identity for audit trail and provenance. Dashboard shows "Registered As" when names differ.
-- **Lazy Backfill** — Pre-v5.2.0 agents automatically get their `RegisteredName` populated from their current name on first access.
-
-### v5.1.0
-
-- **Agent Rename Fix** — Renaming an agent in the dashboard (Network → Agents → Edit) now reliably syncs to on-chain state. Previously, the CometBFT broadcast was fire-and-forget and could silently fail, causing `sage_inception` to return the old auto-generated name.
-- **Self-Healing Name Reconciliation** — If on-chain and display names ever diverge, `sage_inception` automatically detects and repairs the mismatch on the agent’s next boot.
-- **Broadcast Error Feedback** — The dashboard now warns you if an on-chain sync fails instead of silently swallowing the error.
-
-### v5.0.12
-
-- **MCP Identity Fix** — `sage-gui mcp` and `sage-gui mcp install --token` now respect `SAGE_IDENTITY_PATH` environment variable as the **highest priority** (exactly matching the SDK’s `AgentIdentity.default()`).
-- Auto-creates directories + keypair if missing. Added clear INFO logs. 100% backward compatible.
-- Enables clean multi-agent setups (e.g. multiple Claude Code instances in tmux). Closes the identity collision issue.
-
-## What’s New in v5.0.11
-
-- **Docker Fix** — Container no longer stuck in restart loop. Default entrypoint changed from MCP stdio mode to `serve` (persistent REST API + dashboard). MCP stdio still available via `docker run -i ghcr.io/l33tdawg/sage mcp`. Fixes #14.
-
-### v5.0.10
-
-- **Multi-Agent Identity** — New `SAGE_IDENTITY_PATH` env var and `AgentIdentity.default()` for running multiple Claude Code agents on the same machine without key collisions. (Community PR by @emx)
-- **Dashboard Fix** — "Synaptic Ledger" label in overview settings now reads "Synaptic Ledger Encryption" to clarify it refers to the encryption state, not the ledger itself.
-
-### v5.0.9
-
-- **Upgrade Hang Fix** — Fixed CometBFT startup hang after drag-and-drop upgrades. Stale consensus WAL files left behind during migration caused a 60-second timeout and prevented the REST API from starting. Now cleaned up automatically at both migration and startup time.
-
-### v5.0.7
-
-- **Agent Pipeline** — Inter-agent message bus (`sage_pipe`) for direct agent-to-agent communication. Send messages, check results, coordinate work across agents in real-time.
-- **Python Agent SDK** — `sage-agent-sdk` on PyPI with full v5 API coverage for building SAGE-integrated agents. CI-tested on every release.
-- **Vault Recovery** — Reset your Synaptic Ledger passphrase using a recovery key. No more permanent lockouts.
-- **Memory Modes** — Choose `full` (every turn), `bookend` (boot + reflect only), or `on-demand` (zero automatic token usage) to control how much context your agent spends on memory.
-- **Vault Key Protection** — Vault key is automatically backed up on every upgrade and in-app update. Prevents the silent overwrite that could cause permanent memory loss.
-- **macOS Tahoe Compatibility** — Fixed Gatekeeper warnings and launch failures on macOS 15.x. Removed the `Install SAGE.command` that triggered quarantine blocks.
-- **Linux ARM64 Containers** — Docker images now build for `linux/arm64` in addition to `amd64`.
-- **`/v1/mcp-config` Endpoint** — Agents can self-configure their MCP connection without manual setup.
-- **Docker Images** — Every release auto-builds and pushes to `ghcr.io/l33tdawg/sage`. Pin a version or pull `latest`.
-
-### v4.5
-
-- **Cross-Agent Visibility Fixed** — Org-based access (clearance levels, multi-org federation) now correctly grants visibility across agents. Queries and list operations check direct grants, org membership, and unregistered domain fallback — no more 0-result queries when clearance should allow access.
-- **Domain Auto-Registration** — First write to an unregistered domain auto-registers it with the submitting agent as owner and full access granted. No more propose-succeeds-but-query-404.
-- **RBAC Gate Simplification** — DomainAccess (explicit allowlist) and multi-org gates are alternatives, not stacked. Passing one skips the other.
-
-### v4.4
-
-- **CEREBRUM UX Overhaul** — Snap-back physics (nodes spring back to cloud on focus exit), forget animation (fade-and-remove instead of full reload), tab backgrounding fix (no physics jumps after alt-tab).
-- **Clean Synaptic Ledger** — Always-visible button with double-click confirmation. Cleanup toggle auto-saves.
-- **Focus Mode** — Single-click to view memory detail, side panel closes on exit. Graph defaults to committed status.
-
-### v4.3
-
-- **Synaptic Ledger Safeguards** — Three-layer defense against silent encryption downgrade: server auto-re-enables if vault.key exists, web login now actually unlocks the vault for writes (was a bug), and the native macOS app icon prompts for your passphrase before launch. Plaintext writes are blocked when the vault is locked.
-- **Vault-Locked API** — `/v1/dashboard/health` now exposes `vault_locked` status. MCP tools (`sage_remember`, `sage_turn`, `sage_reflect`) check this flag and return clear errors telling agents to prompt the user to unlock via CEREBRUM — no more silent plaintext fallback.
-- **Isolated-by-Default RBAC** — Agents can only see their own memories by default. Domain-level read/write permissions, clearance levels, and multi-org federation with department filtering.
-- **Bulk Operations** — Multi-select memories in CEREBRUM for bulk domain moves, tag additions, and agent reassignment.
-- **Dashboard Update Check** — Long-open tabs now poll for new releases every 12 hours so you never miss an update.
-- **Automated Docker + MCP Registry** — Release CI now auto-builds Docker images, pushes to GHCR, and updates `server.json` — MCP registries get new versions without manual intervention.
-
-### v4.0
-
-- **4 Application Validators** — Every memory now passes through 4 in-process validators before committing: **Sentinel** (baseline accept, ensures liveness), **Dedup** (rejects duplicate content by SHA-256 hash), **Quality** (rejects noise — greeting observations, short content, empty headers), **Consistency** (enforces confidence thresholds, required fields). Quorum requires 3/4 accept (BFT 2/3 threshold).
-- **Pre-Validation Endpoint** — `POST /v1/memory/pre-validate` dry-runs all 4 validators without submitting on-chain. Returns per-validator decisions and quorum result. MCP tools use this to reject low-quality memories before they hit the chain.
-- **Memory Quality Gates** — `sage_turn` filters low-value observations (greeting noise, short content). `sage_reflect` detects similar existing memories and skips duplicates. Boot safeguard dedup prevents the same inception reminder from accumulating across sessions.
-- **Upgrade Cleanup** — On upgrade from v3.x, automatically deprecates duplicate boot safeguards, noise observations, very short memories, and content-hash duplicates. SQLite is backed up first. ~25-30 noisy memories cleaned per typical install.
-
-### v3.6
-
-- **Brain Graph Click-to-Focus** — Click any memory bubble to focus its domain group. Others fade out while focused memories arrange in a timeline row sorted by creation date. Click again to view detail, click empty space to exit.
-- **Interactive Timeline** — Click time buckets at the bottom of the brain graph to filter memories by time range. Multi-select hours to narrow down. Clear button to reset.
-- **Draggable Stats Panel** — Grab the "Memory Stats" header to reposition the panel anywhere. Position persists between sessions. Resize horizontally with the drag handle.
-- **Chain Activity Log** — Collapsible real-time event stream at the bottom of every page. See memory stored/recalled/forgotten events and consensus votes as they happen. Drag the top edge to resize.
-- **Agent Tab Ordering** — Admin agents appear first in brain view tabs for faster access.
-- **Renamed to SAGE GUI** — Binary renamed from sage-lite to sage-gui. Upgrade migration handles old launchd plists automatically.
-
-### v3.5
-
-- **On-Chain Agent Identity** — Agent registration, metadata updates, and permission changes go through CometBFT consensus. Every identity operation is auditable, tamper-resistant, and federation-ready.
-- **Auto-Registration** — Agents self-register on-chain during their first MCP connection. No manual setup needed.
-- **Visible Agents** — Control which agents' memories each agent can see. Set per-agent visibility from the dashboard.
-- **`sage_register` MCP Tool** — Agents can register themselves programmatically via MCP.
-- **Permission Enforcement** — On-chain clearance levels and domain access are enforced on every memory operation, with BadgerDB as the source of truth.
-- **Legacy Migration** — Existing agents auto-migrate to on-chain identity on first boot after upgrade.
-
-### v3.0
-
-- **Multi-Agent Networks** — Add and manage agents from the CEREBRUM dashboard. Each agent gets signing keys, role, clearance level, and per-domain read/write permissions.
-- **LAN Pairing** — Generate a 6-character pairing code. New agents fetch their config over your local network in seconds.
-- **Agent Key Rotation** — Rotate agent credentials with one click. Memories are re-attributed atomically.
-- **Redeployment Orchestrator** — 9-phase state machine handles chain reconfiguration with rollback at every phase.
-- **In-App Auto-Updater** — Check for updates, download, and restart from the Settings page.
-- **Boot Instructions** — Customize what your AI does on startup from the admin dashboard.
-- **Tabbed Settings** — Overview, Security, Configuration, and Update tabs keep everything organized.
-- **Brain Graph Search** — Filter memories by content, domain, type, or agent. Only matching bubbles are shown.
+- **Multi-Agent Networks** — Add agents from dashboard, LAN pairing, key rotation, redeployment orchestrator.
+- **On-Chain Agent Identity** — Registration, permissions, and metadata through CometBFT consensus.
+- **CEREBRUM Dashboard** — Brain graph, focus mode, timeline, search, draggable panels.
 
 ---
 
@@ -236,7 +133,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:5.4.5`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:6.0.0`.
 
 ### Upgrading from an older version?
 

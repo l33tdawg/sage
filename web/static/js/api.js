@@ -454,3 +454,38 @@ export async function fetchPipelineStats() {
     const res = await fetch(`${API_BASE}/v1/dashboard/pipeline/stats`);
     return res.json();
 }
+
+// ─── Governance API ───
+
+export async function fetchGovProposals(status) {
+    const params = status ? `?status=${status}` : '';
+    const res = await fetch(`${API_BASE}/v1/dashboard/governance/proposals${params}`);
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+}
+
+export async function fetchGovProposalDetail(proposalId) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/governance/proposals/${proposalId}`);
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+}
+
+export async function submitGovProposal(proposal) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/governance/propose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(proposal),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+}
+
+export async function submitGovVote(proposalId, decision) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/governance/vote`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ proposal_id: proposalId, decision }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+}

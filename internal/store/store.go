@@ -405,6 +405,16 @@ type PipelineStore interface {
 	PurgePipelines(ctx context.Context, olderThan time.Time) (int, error)
 }
 
+// GovernanceStore defines the interface for governance proposal and vote storage.
+type GovernanceStore interface {
+	InsertGovProposal(ctx context.Context, proposal *GovProposal) error
+	GetGovProposal(ctx context.Context, proposalID string) (*GovProposal, error)
+	UpdateGovProposalStatus(ctx context.Context, proposalID, status string, executedHeight *int64) error
+	ListGovProposals(ctx context.Context, status string) ([]*GovProposal, error)
+	InsertGovVote(ctx context.Context, vote *GovVote) error
+	GetGovVotes(ctx context.Context, proposalID string) ([]*GovVote, error)
+}
+
 // OffchainStore is the combined interface for all off-chain storage operations.
 // Both PostgresStore and SQLiteStore implement this interface, allowing the ABCI
 // app to work with either backend.
@@ -415,6 +425,7 @@ type OffchainStore interface {
 	OrgStore
 	AgentStore
 	PipelineStore
+	GovernanceStore
 	Ping(ctx context.Context) error
 	// RunInTx executes fn within a database transaction. If fn returns an error,
 	// the transaction is rolled back; otherwise it is committed. The OffchainStore

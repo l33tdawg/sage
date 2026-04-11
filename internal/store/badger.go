@@ -1600,6 +1600,216 @@ func (s *BadgerStore) UpdateAgentMeta(agentID, name, bio string) error {
 	})
 }
 
+// --- Dynamic Validator Governance ---
+
+// ValidatorPersist holds validator power and public key for enhanced persistence.
+type ValidatorPersist struct {
+	Power  int64  `json:"power"`
+	PubKey string `json:"pubkey"` // hex-encoded Ed25519 public key
+}
+
+// DeleteState removes a key from the state namespace.
+func (s *BadgerStore) DeleteState(key string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Delete(stateKey(key))
+	})
+}
+
+// PrefixKeys returns all keys in the state namespace matching the given prefix,
+// sorted lexicographically. Keys are returned WITHOUT the "state:" prefix.
+func (s *BadgerStore) PrefixKeys(prefix string) ([]string, error) {
+	fullPrefix := stateKey(prefix)
+	var keys []string
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false // keys only
+		opts.Prefix = fullPrefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(fullPrefix); it.ValidForPrefix(fullPrefix); it.Next() {
+			key := string(it.Item().Key())
+			// Strip the "state:" prefix to return the logical key
+			if len(key) > 6 {
+				keys = append(keys, key[6:])
+			}
+		}
+		return nil
+	})
+
+	return keys, err
+}
+
+// SetGovProposal stores a governance proposal in BadgerDB.
+func (s *BadgerStore) SetGovProposal(proposalID string, data []byte) error {
+	return s.SetState("gov:proposal:"+proposalID, data)
+}
+
+// GetGovProposal retrieves a governance proposal from BadgerDB.
+func (s *BadgerStore) GetGovProposal(proposalID string) ([]byte, error) {
+	return s.GetState("gov:proposal:" + proposalID)
+}
+
+// SetGovVote stores a governance vote.
+func (s *BadgerStore) SetGovVote(proposalID, validatorID, decision string) error {
+	key := "gov:vote:" + proposalID + ":" + validatorID
+	return s.SetState(key, []byte(decision))
+}
+
+// GetGovVote retrieves a single governance vote.
+func (s *BadgerStore) GetGovVote(proposalID, validatorID string) (string, error) {
+	key := "gov:vote:" + proposalID + ":" + validatorID
+	val, err := s.GetState(key)
+	if err != nil {
+		return "", err
+	}
+	if val == nil {
+		return "", nil
+	}
+	return string(val), nil
+}
+
+// GetGovVotes retrieves all votes for a governance proposal.
+// Returns map[validatorID]decision. Uses sorted prefix scan for determinism.
+func (s *BadgerStore) GetGovVotes(proposalID string) (map[string]string, error) {
+	result := make(map[string]string)
+	prefix := []byte("state:gov:vote:" + proposalID + ":")
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			key := string(item.Key())
+			// key = "state:gov:vote:{proposalID}:{validatorID}"
+			validatorID := key[len("state:gov:vote:"+proposalID+":"):]
+
+			valErr := item.Value(func(val []byte) error {
+				result[validatorID] = string(val)
+				return nil
+			})
+			if valErr != nil {
+				return valErr
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan gov votes: %w", err)
+	}
+	return result, nil
+}
+
+// SetActiveProposal sets the currently active governance proposal ID.
+func (s *BadgerStore) SetActiveProposal(proposalID string) error {
+	return s.SetState("gov:active", []byte(proposalID))
+}
+
+// GetActiveProposal returns the currently active governance proposal ID, or "" if none.
+func (s *BadgerStore) GetActiveProposal() (string, error) {
+	val, err := s.GetState("gov:active")
+	if err != nil {
+		return "", nil // No active proposal is not an error
+	}
+	if val == nil {
+		return "", nil
+	}
+	return string(val), nil
+}
+
+// ClearActiveProposal removes the active proposal pointer.
+func (s *BadgerStore) ClearActiveProposal() error {
+	return s.DeleteState("gov:active")
+}
+
+// SetGovCooldown records the last proposal height for a proposer.
+func (s *BadgerStore) SetGovCooldown(proposerID string, height int64) error {
+	val := make([]byte, 8)
+	binary.BigEndian.PutUint64(val, uint64(height)) // #nosec G115 -- block height is always non-negative
+	return s.SetState("gov:cooldown:"+proposerID, val)
+}
+
+// GetGovCooldown returns the last proposal height for a proposer, or 0 if none.
+func (s *BadgerStore) GetGovCooldown(proposerID string) (int64, error) {
+	val, err := s.GetState("gov:cooldown:" + proposerID)
+	if err != nil {
+		return 0, nil // No cooldown is not an error
+	}
+	if val == nil || len(val) != 8 {
+		return 0, nil
+	}
+	return int64(binary.BigEndian.Uint64(val)), nil // #nosec G115 -- block height fits in int64
+}
+
+// SaveValidatorsV2 persists validators with both power and public key.
+func (s *BadgerStore) SaveValidatorsV2(validators map[string]ValidatorPersist) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		for id, vp := range validators {
+			key := []byte("validator:" + id)
+			data, err := json.Marshal(vp)
+			if err != nil {
+				return fmt.Errorf("marshal validator %s: %w", id, err)
+			}
+			if err := txn.Set(key, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// LoadValidatorsV2 loads validators with power and public key.
+// Backward compatible: if value is exactly 8 bytes, treats as legacy power-only
+// and derives pubkey from validator ID (hex-encoded pubkey).
+func (s *BadgerStore) LoadValidatorsV2() (map[string]ValidatorPersist, error) {
+	result := make(map[string]ValidatorPersist)
+	prefix := []byte("validator:")
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			key := string(item.Key())
+			validatorID := key[len("validator:"):]
+
+			valErr := item.Value(func(val []byte) error {
+				if len(val) == 8 {
+					// Legacy format: 8-byte big-endian power
+					power := int64(binary.BigEndian.Uint64(val)) // #nosec G115 -- validator power fits in int64
+					result[validatorID] = ValidatorPersist{
+						Power:  power,
+						PubKey: validatorID, // ID IS the hex pubkey for non-app validators
+					}
+				} else {
+					// New format: JSON
+					var vp ValidatorPersist
+					if err := json.Unmarshal(val, &vp); err != nil {
+						return fmt.Errorf("unmarshal validator %s: %w", validatorID, err)
+					}
+					result[validatorID] = vp
+				}
+				return nil
+			})
+			if valErr != nil {
+				return valErr
+			}
+		}
+		return nil
+	})
+
+	return result, err
+}
+
 // SetRawForTest writes a raw key-value pair to BadgerDB. Test-only.
 func (s *BadgerStore) SetRawForTest(key, value []byte) error {
 	return s.db.Update(func(txn *badger.Txn) error {

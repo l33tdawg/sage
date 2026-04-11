@@ -259,6 +259,11 @@ func (s *Server) setupRouter() chi.Router {
 		r.Put("/v1/pipe/{pipe_id}/result", s.handlePipeResult)
 		r.Get("/v1/pipe/{pipe_id}", s.handlePipeStatus)
 		r.Get("/v1/pipe/results", s.handlePipeResults)
+
+		// Governance endpoints
+		r.Post("/v1/governance/propose", s.handleGovPropose)
+		r.Post("/v1/governance/vote", s.handleGovVote)
+		r.Post("/v1/governance/cancel", s.handleGovCancel)
 	})
 
 	return r

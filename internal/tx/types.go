@@ -29,6 +29,18 @@ const (
 	TxTypeAgentUpdate        TxType = 21
 	TxTypeAgentSetPermission TxType = 22
 	TxTypeMemoryReassign     TxType = 23
+	TxTypeGovPropose         TxType = 24
+	TxTypeGovVote            TxType = 25
+	TxTypeGovCancel          TxType = 26
+)
+
+// GovProposalOp identifies the governance operation being proposed.
+type GovProposalOp uint8
+
+const (
+	GovOpAddValidator    GovProposalOp = 1
+	GovOpRemoveValidator GovProposalOp = 2
+	GovOpUpdatePower     GovProposalOp = 3
 )
 
 // VoteDecision represents a validator's vote on a proposed memory.
@@ -240,6 +252,27 @@ type MemoryReassign struct {
 	TargetAgentID string // agent receiving the memories
 }
 
+// GovPropose proposes a validator governance action (add, remove, update power).
+type GovPropose struct {
+	Operation    GovProposalOp
+	TargetID     string // hex-encoded validator/agent ID
+	TargetPubKey []byte // Ed25519 pubkey (32 bytes, required for add)
+	TargetPower  int64  // power for add/update (0 for remove)
+	ExpiryBlocks int64  // 0 = default
+	Reason       string // human-readable justification
+}
+
+// GovVote records a validator's vote on a governance proposal.
+type GovVote struct {
+	ProposalID string
+	Decision   VoteDecision // reuse existing accept/reject/abstain enum
+}
+
+// GovCancel cancels a pending governance proposal.
+type GovCancel struct {
+	ProposalID string
+}
+
 // AgentSetPermission sets permissions on an agent (admin only).
 type AgentSetPermission struct {
 	AgentID       string
@@ -276,6 +309,9 @@ type ParsedTx struct {
 	AgentUpdateTx      *AgentUpdate        // Named AgentUpdateTx to avoid collision with existing method names
 	AgentSetPermission *AgentSetPermission
 	MemoryReassign     *MemoryReassign
+	GovPropose         *GovPropose
+	GovVote            *GovVote
+	GovCancel          *GovCancel
 	Signature          []byte // Node validator Ed25519 signature (64 bytes)
 	PublicKey          []byte // Node validator Ed25519 public key (32 bytes)
 	Nonce              uint64

@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote } from './api.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -4749,7 +4749,7 @@ function ActivityTab({ agent }) {
 }
 
 // --- Network Page (Accordion) ---
-function NetworkPage() {
+function NetworkPage({ sse }) {
     const [agents, setAgents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showWizard, setShowWizard] = useState(false);
@@ -4782,6 +4782,20 @@ function NetworkPage() {
     const [tagTransfer, setTagTransfer] = useState(null); // { agentId, agentName, tags: [], step: 'tags'|'target', selectedTag: null }
     const [transferring, setTransferring] = useState(false);
 
+    // Governance state
+    const [govProposals, setGovProposals] = useState([]);
+    const [activeProposal, setActiveProposal] = useState(null);
+    const [govHistoryOpen, setGovHistoryOpen] = useState(false);
+    const [showGovModal, setShowGovModal] = useState(false);
+    const [govSubmitting, setGovSubmitting] = useState(false);
+    const [govVoting, setGovVoting] = useState(false);
+    const [govNewOp, setGovNewOp] = useState('add_validator');
+    const [govNewTarget, setGovNewTarget] = useState('');
+    const [govNewPower, setGovNewPower] = useState('10');
+    const [govNewReason, setGovNewReason] = useState('');
+    const [currentHeight, setCurrentHeight] = useState(0);
+    const govPollRef = useRef(null);
+
     const loadAgents = useCallback(async () => {
         try {
             const data = await fetchAgents();
@@ -4797,13 +4811,67 @@ function NetworkPage() {
         } catch (e) { console.error(e); }
     }, []);
 
+    const loadGovProposals = useCallback(async () => {
+        try {
+            const data = await fetchGovProposals();
+            const proposals = data.proposals || [];
+            setGovProposals(proposals);
+            const active = proposals.find(p => p.status === 'voting');
+            setActiveProposal(active || null);
+        } catch (e) { /* governance endpoint may not exist yet */ }
+    }, []);
+
     useEffect(() => {
         loadAgents();
         loadUnregistered();
+        loadGovProposals();
         fetchStats().then(data => {
             if (data?.by_domain) setAllDomains(Object.keys(data.by_domain).sort());
         }).catch(() => {});
+        // Fetch current block height
+        fetchHealth().then(h => {
+            if (h?.chain?.block_height) setCurrentHeight(Number(h.chain.block_height));
+        }).catch(() => {});
     }, []);
+
+    // Poll active proposal detail + block height every 3s while one is active
+    useEffect(() => {
+        if (!activeProposal) {
+            if (govPollRef.current) { clearInterval(govPollRef.current); govPollRef.current = null; }
+            return;
+        }
+        if (govPollRef.current) return;
+        govPollRef.current = setInterval(async () => {
+            try {
+                const [detail, health] = await Promise.all([
+                    fetchGovProposalDetail(activeProposal.id),
+                    fetchHealth()
+                ]);
+                if (detail) {
+                    setActiveProposal(detail.proposal || detail);
+                    // If proposal is no longer voting, refresh the full list
+                    const p = detail.proposal || detail;
+                    if (p.status !== 'voting') {
+                        loadGovProposals();
+                    }
+                }
+                if (health?.chain?.block_height) setCurrentHeight(Number(health.chain.block_height));
+            } catch (e) { /* ignore polling errors */ }
+        }, 3000);
+        return () => { if (govPollRef.current) { clearInterval(govPollRef.current); govPollRef.current = null; } };
+    }, [activeProposal?.id, loadGovProposals]);
+
+    // SSE governance events — auto-refresh on governance activity
+    useEffect(() => {
+        if (!sse) return;
+        const unsub = sse.on('governance', () => {
+            loadGovProposals();
+            fetchHealth().then(h => {
+                if (h?.chain?.block_height) setCurrentHeight(Number(h.chain.block_height));
+            }).catch(() => {});
+        });
+        return unsub;
+    }, [sse, loadGovProposals]);
 
     // Redeploy polling
     const startRedeployPoll = useCallback(() => {
@@ -4939,6 +5007,63 @@ function NetworkPage() {
         setTransferring(false);
     }, [tagTransfer, loadAgents, loadUnregistered]);
 
+    // Governance handlers
+    const handleGovVote = useCallback(async (proposalId, decision) => {
+        setGovVoting(true);
+        try {
+            const res = await submitGovVote(proposalId, decision);
+            if (res.error) { showToast(res.error, 'error'); }
+            else { showToast(`Vote submitted: ${decision}`, 'success'); }
+            loadGovProposals();
+        } catch (e) { showToast('Vote failed: ' + e.message, 'error'); }
+        setGovVoting(false);
+    }, [loadGovProposals]);
+
+    const handleGovSubmit = useCallback(async () => {
+        setGovSubmitting(true);
+        try {
+            const proposal = {
+                operation: govNewOp,
+                target_agent_id: govNewTarget,
+                reason: govNewReason,
+            };
+            if (govNewOp === 'add_validator' || govNewOp === 'update_power') {
+                proposal.power = parseInt(govNewPower, 10) || 10;
+            }
+            const res = await submitGovProposal(proposal);
+            if (res.error) { showToast(res.error, 'error'); }
+            else {
+                showToast('Proposal submitted successfully', 'success');
+                setShowGovModal(false);
+                setGovNewOp('add_validator');
+                setGovNewTarget('');
+                setGovNewPower('10');
+                setGovNewReason('');
+            }
+            loadGovProposals();
+        } catch (e) { showToast('Proposal failed: ' + e.message, 'error'); }
+        setGovSubmitting(false);
+    }, [govNewOp, govNewTarget, govNewPower, govNewReason, loadGovProposals]);
+
+    // Governance helpers
+    const govOpLabel = (op) => {
+        const labels = { add_validator: 'Add Validator', remove_validator: 'Remove Validator', update_power: 'Update Power' };
+        return labels[op] || op;
+    };
+    const govOpIcon = (op) => {
+        const icons = { add_validator: '+', remove_validator: '-', update_power: '~' };
+        return icons[op] || '?';
+    };
+    const resolveAgentName = (agentId) => {
+        if (!agentId) return 'Unknown';
+        const a = agents.find(a => a.agent_id === agentId);
+        return a ? a.name : agentId.slice(0, 16) + '...';
+    };
+    const govStatusBadge = (status) => {
+        return html`<span class="gov-status-badge gov-status-${status}">${status.charAt(0).toUpperCase() + status.slice(1)}</span>`;
+    };
+    const pastProposals = govProposals.filter(p => p.status !== 'voting');
+
     if (loading) return html`<div class="network-page"><p style="color:var(--text-muted);text-align:center;padding:40px;">Loading agents...</p></div>`;
 
     const isRedeploying = redeployStatus?.status && !['idle','completed','failed'].includes(redeployStatus.status);
@@ -4949,6 +5074,139 @@ function NetworkPage() {
             <div class="network-header">
                 <div><h2>Network <${HelpTip} text="Manage agents on your SAGE chain. Each agent is a separate node that participates in BFT consensus. Click any agent to expand its details and permissions." /><${PageHelp} section="network" label="Network & Agents guide" /></h2><div class="network-header-sub">${agents.length} agent${agents.length !== 1 ? 's' : ''} on this network</div></div>
             </div>
+
+            <div class="gov-section">
+                <div class="gov-section-header">
+                    <h3>Governance <${HelpTip} text="Validator governance allows network participants to propose and vote on changes to the validator set. Proposals require 2/3 quorum to pass." /></h3>
+                    ${!activeProposal && html`<button class="gov-new-btn" onClick=${() => setShowGovModal(true)}>+ New Proposal</button>`}
+                </div>
+
+                ${activeProposal ? html`
+                    <div class="gov-proposal-card active">
+                        <div class="gov-proposal-header">
+                            <div class="gov-proposal-op">
+                                <span>${govOpIcon(activeProposal.operation)}</span>
+                                ${govOpLabel(activeProposal.operation)}: ${resolveAgentName(activeProposal.target_agent_id)}
+                            </div>
+                            ${govStatusBadge('voting')}
+                        </div>
+                        <div class="gov-proposal-meta">
+                            Proposed by: ${resolveAgentName(activeProposal.proposer_id)}${activeProposal.proposed_height ? ` \u00b7 Block #${activeProposal.proposed_height}` : ''}
+                        </div>
+                        ${activeProposal.reason && html`
+                            <div class="gov-proposal-reason">"${activeProposal.reason}"</div>
+                        `}
+                        <div class="gov-vote-tally">
+                            <span class="gov-vote-accept">Accept: ${activeProposal.accept_count || 0}</span>
+                            <span class="gov-vote-reject">Reject: ${activeProposal.reject_count || 0}</span>
+                            <span class="gov-vote-abstain">Abstain: ${activeProposal.abstain_count || 0}</span>
+                        </div>
+                        <div class="gov-quorum-row">
+                            <div class="gov-quorum-bar">
+                                <div class="gov-quorum-fill" style=${`width: ${Math.min(100, ((activeProposal.accept_power || 0) / Math.max(1, activeProposal.total_power || 1)) * 100)}%`}></div>
+                                <div class="gov-quorum-threshold" style="left: 66.7%;" title="2/3 quorum threshold"></div>
+                            </div>
+                            <span class="gov-quorum-label">${activeProposal.accept_power || 0}/${activeProposal.total_power || '?'} power (need 2/3)</span>
+                        </div>
+                        ${activeProposal.expiry_height && currentHeight > 0 ? html`
+                            <div class="gov-expiry">
+                                Expires in: ${Math.max(0, activeProposal.expiry_height - currentHeight)} blocks
+                                (~${Math.max(0, Math.round((activeProposal.expiry_height - currentHeight) * 3))}s)
+                            </div>
+                        ` : ''}
+                        <div class="gov-vote-actions">
+                            ${activeProposal.my_vote ? html`
+                                <div class="gov-voted-badge">
+                                    You voted: <strong>${activeProposal.my_vote}</strong>
+                                </div>
+                            ` : html`
+                                <button class="gov-vote-btn accept" onClick=${() => handleGovVote(activeProposal.id, 'accept')} disabled=${govVoting}>Accept</button>
+                                <button class="gov-vote-btn reject" onClick=${() => handleGovVote(activeProposal.id, 'reject')} disabled=${govVoting}>Reject</button>
+                                <button class="gov-vote-btn abstain" onClick=${() => handleGovVote(activeProposal.id, 'abstain')} disabled=${govVoting}>Abstain</button>
+                            `}
+                        </div>
+                    </div>
+                ` : html`
+                    <div class="gov-empty">
+                        <div class="gov-empty-icon">${'\u{1F5F3}\uFE0F'}</div>
+                        No active proposals
+                    </div>
+                `}
+
+                ${pastProposals.length > 0 && html`
+                    <button class="gov-history-toggle ${govHistoryOpen ? 'open' : ''}" onClick=${() => setGovHistoryOpen(!govHistoryOpen)}>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                        Past Proposals (${pastProposals.length})
+                    </button>
+                    ${govHistoryOpen && html`
+                        <div class="gov-history-list">
+                            ${pastProposals.map(p => html`
+                                <div class="gov-history-card" key=${p.id}>
+                                    <div class="gov-history-info">
+                                        <div class="gov-history-op">${govOpLabel(p.operation)}: ${resolveAgentName(p.target_agent_id)}</div>
+                                        <div class="gov-history-detail">
+                                            by ${resolveAgentName(p.proposer_id)}${p.proposed_height ? ` \u00b7 Block #${p.proposed_height}` : ''}
+                                        </div>
+                                    </div>
+                                    <div class="gov-history-right">
+                                        <div class="gov-history-votes">
+                                            <span class="gov-vote-accept">${p.accept_count || 0}A</span>
+                                            <span class="gov-vote-reject">${p.reject_count || 0}R</span>
+                                        </div>
+                                        ${govStatusBadge(p.status)}
+                                    </div>
+                                </div>
+                            `)}
+                        </div>
+                    `}
+                `}
+            </div>
+
+            ${showGovModal && html`
+                <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) setShowGovModal(false); }}>
+                    <div class="wizard-modal" style="max-width:520px;">
+                        <div class="wizard-header">
+                            <h2>New Governance Proposal</h2>
+                            <button class="detail-close" onClick=${() => setShowGovModal(false)}>x</button>
+                        </div>
+                        <div class="wizard-body" style="padding:20px;">
+                            <div class="wizard-field">
+                                <label>Operation</label>
+                                <select class="wizard-select" value=${govNewOp} onChange=${e => setGovNewOp(e.target.value)}>
+                                    <option value="add_validator">Add Validator</option>
+                                    <option value="remove_validator">Remove Validator</option>
+                                    <option value="update_power">Update Power</option>
+                                </select>
+                            </div>
+                            <div class="wizard-field">
+                                <label>Target Agent</label>
+                                <select class="wizard-select" value=${govNewTarget} onChange=${e => setGovNewTarget(e.target.value)}>
+                                    <option value="">Select agent...</option>
+                                    ${agents.filter(a => a.status !== 'removed').map(a => html`
+                                        <option value=${a.agent_id}>${a.name} (${a.role})</option>
+                                    `)}
+                                </select>
+                            </div>
+                            ${(govNewOp === 'add_validator' || govNewOp === 'update_power') && html`
+                                <div class="wizard-field">
+                                    <label>Voting Power</label>
+                                    <input class="wizard-input" type="number" min="1" max="100" value=${govNewPower} onInput=${e => setGovNewPower(e.target.value)} />
+                                </div>
+                            `}
+                            <div class="wizard-field">
+                                <label>Reason</label>
+                                <textarea class="wizard-textarea" placeholder="Why is this change needed?" value=${govNewReason} onInput=${e => setGovNewReason(e.target.value)} />
+                            </div>
+                        </div>
+                        <div class="wizard-footer">
+                            <button class="btn" onClick=${() => setShowGovModal(false)}>Cancel</button>
+                            <button class="btn btn-primary" onClick=${handleGovSubmit} disabled=${govSubmitting || !govNewTarget}>
+                                ${govSubmitting ? 'Submitting...' : 'Submit Proposal'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            `}
 
             <div class="agent-list">
                 ${agents.map(agent => {
@@ -6064,7 +6322,7 @@ function App() {
             ${page === 'search' && html`<${SearchPage} onSelectMemory=${onSelectMemory} />`}
             ${page === 'tasks' && html`<${TasksPage} />`}
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}
-            ${page === 'network' && html`<${NetworkPage} />`}
+            ${page === 'network' && html`<${NetworkPage} sse=${sseRef.current} />`}
             ${page === 'pipeline' && html`<${PipelinePage} />`}
             ${page === 'settings' && html`<${SettingsPage} />`}
 

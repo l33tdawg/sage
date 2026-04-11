@@ -679,16 +679,16 @@ footer a:hover { text-decoration: underline; }
         <p class="section-desc" style="margin:0 auto;">Not just a key-value store. SAGE is governed institutional memory &mdash; validated, scored, and evolving.</p>
       </div>
 
-      <!-- What's New in v5.0 -->
+      <!-- What's New in v6.0 -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v5.0</span></h3>
+        <h3>What's new in <span id="whats-new-version">v6.0</span></h3>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Agent Pipeline &mdash; Inter-Agent Message Bus</h4><p>Route work between AI agents through SAGE. Send research to Perplexity, get results back in Claude &mdash; no copy-pasting. Three new MCP tools: <code>sage_pipe</code>, <code>sage_inbox</code>, <code>sage_pipe_result</code>. Ephemeral messages with auto-expiry; only a journal summary persists as memory.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>Passive Pipeline Discovery</h4><p>Agents discover incoming work automatically on every <code>sage_turn</code> call &mdash; no polling needed. Completed results from pipes you sent also appear in your turn response. Zero-effort integration.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Pipeline Dashboard</h4><p>New Pipeline page in CEREBRUM shows all agent-to-agent messages with status filters, expandable payload/result views, and auto-refresh. Full visibility into your agent mesh.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Auto-Journal</h4><p>When a pipeline exchange completes, SAGE automatically creates a one-line observation memory summarizing who asked whom to do what. Persistent audit trail without storing full payloads.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Atomic Claim Routing</h4><p>Multiple agents of the same provider? First to check inbox claims the work &mdash; atomic SQL prevents double-processing. Route by provider name or by specific agent ID.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>TTL &amp; Auto-Cleanup</h4><p>Pipeline messages expire automatically (default: 1 hour, max: 24 hours). Background goroutine purges completed/expired messages. Your database stays lean.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Dynamic Validator Governance</h4><p>Add, remove, and update validators <strong>without stopping the chain</strong>. Admin agents submit on-chain governance proposals, validators vote with 2/3 BFT quorum, and CometBFT applies changes at consensus level. Zero downtime.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>Governance Dashboard</h4><p>New Governance section in CEREBRUM&rsquo;s Network page. Active proposal cards with vote tally, quorum progress bar, expiry countdown, and one-click voting. Full proposal history with status badges.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Security-First Design</h4><p>1/3 max power for new validators prevents single-add takeover. Proposer cooldown blocks grief attacks. Min voting period gives validators time to dissent. Integer-only quorum math ensures cross-platform determinism.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Foundation for Federation</h4><p>This governance layer is the prerequisite for encrypted node-to-node tunnels (v6.5) and internet federation (v7.0). Without hot validator eviction, internet-facing nodes can&rsquo;t safely remove bad actors.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Single-Node Auto-Approve</h4><p>Running solo? Governance proposals auto-approve instantly (1/1 = 100% quorum). Same code path for single-node and multi-node &mdash; no special cases.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Emergency Fallback</h4><p>The existing 9-phase redeployment orchestrator remains as a manual fallback for initial setup and catastrophic recovery. Governance is the new default for normal operations.</p></div></div>
         </div>
       </div>
 

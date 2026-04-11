@@ -436,6 +436,29 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		PRIMARY KEY (memory_id, tag)
 	);
 	CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag);
+
+	CREATE TABLE IF NOT EXISTS governance_proposals (
+		proposal_id     TEXT PRIMARY KEY,
+		operation       TEXT NOT NULL,
+		target_agent_id TEXT NOT NULL,
+		target_pubkey   TEXT,
+		target_power    INTEGER,
+		proposer_id     TEXT NOT NULL,
+		status          TEXT NOT NULL DEFAULT 'voting',
+		created_height  INTEGER NOT NULL,
+		expiry_height   INTEGER NOT NULL,
+		executed_height INTEGER,
+		reason          TEXT,
+		created_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	);
+
+	CREATE TABLE IF NOT EXISTS governance_votes (
+		proposal_id  TEXT NOT NULL,
+		validator_id TEXT NOT NULL,
+		decision     TEXT NOT NULL,
+		height       INTEGER NOT NULL,
+		PRIMARY KEY (proposal_id, validator_id)
+	);
 	`
 
 	if _, err := s.writeExecContext(ctx, schema); err != nil {
@@ -3316,4 +3339,150 @@ func (s *SQLiteStore) PurgePipelines(ctx context.Context, olderThan time.Time) (
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+// --- Dynamic Validator Governance ---
+
+// GovProposal represents a governance proposal in SQLite.
+type GovProposal struct {
+	ProposalID    string  `json:"proposal_id"`
+	Operation     string  `json:"operation"`
+	TargetAgentID string  `json:"target_agent_id"`
+	TargetPubkey  string  `json:"target_pubkey,omitempty"`
+	TargetPower   int64   `json:"target_power,omitempty"`
+	ProposerID    string  `json:"proposer_id"`
+	Status        string  `json:"status"`
+	CreatedHeight int64   `json:"created_height"`
+	ExpiryHeight  int64   `json:"expiry_height"`
+	ExecutedHeight *int64  `json:"executed_height,omitempty"`
+	Reason        string  `json:"reason,omitempty"`
+	CreatedAt     string  `json:"created_at,omitempty"`
+}
+
+// GovVote represents a governance vote in SQLite.
+type GovVote struct {
+	ProposalID  string `json:"proposal_id"`
+	ValidatorID string `json:"validator_id"`
+	Decision    string `json:"decision"`
+	Height      int64  `json:"height"`
+}
+
+// InsertGovProposal inserts a governance proposal into SQLite.
+func (s *SQLiteStore) InsertGovProposal(ctx context.Context, p *GovProposal) error {
+	_, err := s.writeExecContext(ctx, `
+		INSERT INTO governance_proposals (proposal_id, operation, target_agent_id, target_pubkey,
+			target_power, proposer_id, status, created_height, expiry_height, executed_height, reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ProposalID, p.Operation, p.TargetAgentID, p.TargetPubkey,
+		p.TargetPower, p.ProposerID, p.Status, p.CreatedHeight,
+		p.ExpiryHeight, p.ExecutedHeight, p.Reason)
+	if err != nil {
+		return fmt.Errorf("insert gov proposal: %w", err)
+	}
+	return nil
+}
+
+// GetGovProposal retrieves a governance proposal by ID.
+func (s *SQLiteStore) GetGovProposal(ctx context.Context, proposalID string) (*GovProposal, error) {
+	row := s.conn.QueryRowContext(ctx, `
+		SELECT proposal_id, operation, target_agent_id, COALESCE(target_pubkey,''),
+			COALESCE(target_power,0), proposer_id, status, created_height,
+			expiry_height, executed_height, COALESCE(reason,''),
+			COALESCE(created_at,'')
+		FROM governance_proposals WHERE proposal_id = ?`, proposalID)
+
+	var p GovProposal
+	err := row.Scan(&p.ProposalID, &p.Operation, &p.TargetAgentID, &p.TargetPubkey,
+		&p.TargetPower, &p.ProposerID, &p.Status, &p.CreatedHeight,
+		&p.ExpiryHeight, &p.ExecutedHeight, &p.Reason, &p.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("gov proposal not found: %s", proposalID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get gov proposal: %w", err)
+	}
+	return &p, nil
+}
+
+// UpdateGovProposalStatus updates the status (and optionally executed_height) of a proposal.
+func (s *SQLiteStore) UpdateGovProposalStatus(ctx context.Context, proposalID, status string, executedHeight *int64) error {
+	_, err := s.writeExecContext(ctx, `
+		UPDATE governance_proposals SET status = ?, executed_height = ?
+		WHERE proposal_id = ?`, status, executedHeight, proposalID)
+	if err != nil {
+		return fmt.Errorf("update gov proposal status: %w", err)
+	}
+	return nil
+}
+
+// ListGovProposals lists governance proposals, optionally filtered by status.
+func (s *SQLiteStore) ListGovProposals(ctx context.Context, status string) ([]*GovProposal, error) {
+	var query string
+	var args []any
+	if status != "" {
+		query = `SELECT proposal_id, operation, target_agent_id, COALESCE(target_pubkey,''),
+			COALESCE(target_power,0), proposer_id, status, created_height,
+			expiry_height, executed_height, COALESCE(reason,''),
+			COALESCE(created_at,'')
+			FROM governance_proposals WHERE status = ? ORDER BY created_height DESC`
+		args = append(args, status)
+	} else {
+		query = `SELECT proposal_id, operation, target_agent_id, COALESCE(target_pubkey,''),
+			COALESCE(target_power,0), proposer_id, status, created_height,
+			expiry_height, executed_height, COALESCE(reason,''),
+			COALESCE(created_at,'')
+			FROM governance_proposals ORDER BY created_height DESC`
+	}
+
+	rows, err := s.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list gov proposals: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var proposals []*GovProposal
+	for rows.Next() {
+		var p GovProposal
+		if err := rows.Scan(&p.ProposalID, &p.Operation, &p.TargetAgentID, &p.TargetPubkey,
+			&p.TargetPower, &p.ProposerID, &p.Status, &p.CreatedHeight,
+			&p.ExpiryHeight, &p.ExecutedHeight, &p.Reason, &p.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan gov proposal: %w", err)
+		}
+		proposals = append(proposals, &p)
+	}
+	return proposals, nil
+}
+
+// InsertGovVote inserts or replaces a governance vote in SQLite.
+func (s *SQLiteStore) InsertGovVote(ctx context.Context, v *GovVote) error {
+	_, err := s.writeExecContext(ctx, `
+		INSERT OR REPLACE INTO governance_votes (proposal_id, validator_id, decision, height)
+		VALUES (?, ?, ?, ?)`,
+		v.ProposalID, v.ValidatorID, v.Decision, v.Height)
+	if err != nil {
+		return fmt.Errorf("insert gov vote: %w", err)
+	}
+	return nil
+}
+
+// GetGovVotes retrieves all votes for a governance proposal.
+func (s *SQLiteStore) GetGovVotes(ctx context.Context, proposalID string) ([]*GovVote, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT proposal_id, validator_id, decision, height
+		FROM governance_votes WHERE proposal_id = ? ORDER BY validator_id`,
+		proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("get gov votes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var votes []*GovVote
+	for rows.Next() {
+		var v GovVote
+		if err := rows.Scan(&v.ProposalID, &v.ValidatorID, &v.Decision, &v.Height); err != nil {
+			return nil, fmt.Errorf("scan gov vote: %w", err)
+		}
+		votes = append(votes, &v)
+	}
+	return votes, nil
 }

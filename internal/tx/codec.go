@@ -326,6 +326,21 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 			return nil, fmt.Errorf("MemoryReassign is nil for memory reassign tx")
 		}
 		return encodeMemoryReassign(tx.MemoryReassign), nil
+	case TxTypeGovPropose:
+		if tx.GovPropose == nil {
+			return nil, fmt.Errorf("GovPropose is nil for gov propose tx")
+		}
+		return encodeGovPropose(tx.GovPropose), nil
+	case TxTypeGovVote:
+		if tx.GovVote == nil {
+			return nil, fmt.Errorf("GovVote is nil for gov vote tx")
+		}
+		return encodeGovVote(tx.GovVote), nil
+	case TxTypeGovCancel:
+		if tx.GovCancel == nil {
+			return nil, fmt.Errorf("GovCancel is nil for gov cancel tx")
+		}
+		return encodeGovCancel(tx.GovCancel), nil
 	default:
 		return nil, ErrUnknownTxType
 	}
@@ -493,6 +508,27 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 			return err
 		}
 		tx.MemoryReassign = m
+		return nil
+	case TxTypeGovPropose:
+		g, err := decodeGovPropose(data)
+		if err != nil {
+			return err
+		}
+		tx.GovPropose = g
+		return nil
+	case TxTypeGovVote:
+		g, err := decodeGovVote(data)
+		if err != nil {
+			return err
+		}
+		tx.GovVote = g
+		return nil
+	case TxTypeGovCancel:
+		g, err := decodeGovCancel(data)
+		if err != nil {
+			return err
+		}
+		tx.GovCancel = g
 		return nil
 	default:
 		return ErrUnknownTxType
@@ -1674,4 +1710,111 @@ func decodeMemoryReassign(data []byte) (*MemoryReassign, error) {
 	m.TargetAgentID = string(b)
 
 	return m, nil
+}
+
+// --- GovPropose ---
+
+func encodeGovPropose(g *GovPropose) []byte {
+	var buf []byte
+	buf = append(buf, byte(g.Operation))
+	buf = appendBytes(buf, []byte(g.TargetID))
+	buf = appendBytes(buf, g.TargetPubKey)
+	buf = appendInt64(buf, g.TargetPower)
+	buf = appendInt64(buf, g.ExpiryBlocks)
+	buf = appendBytes(buf, []byte(g.Reason))
+	return buf
+}
+
+func decodeGovPropose(data []byte) (*GovPropose, error) {
+	g := &GovPropose{}
+	var err error
+	var b []byte
+	off := 0
+
+	if off >= len(data) {
+		return nil, ErrInvalidTxData
+	}
+	g.Operation = GovProposalOp(data[off])
+	off++
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	g.TargetID = string(b)
+
+	g.TargetPubKey, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	g.TargetPower, off, err = readInt64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	g.ExpiryBlocks, off, err = readInt64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	b, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	g.Reason = string(b)
+
+	return g, nil
+}
+
+// --- GovVote ---
+
+func encodeGovVote(g *GovVote) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(g.ProposalID))
+	buf = append(buf, byte(g.Decision))
+	return buf
+}
+
+func decodeGovVote(data []byte) (*GovVote, error) {
+	g := &GovVote{}
+	var err error
+	var b []byte
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	g.ProposalID = string(b)
+
+	if off >= len(data) {
+		return nil, ErrInvalidTxData
+	}
+	g.Decision = VoteDecision(data[off])
+
+	return g, nil
+}
+
+// --- GovCancel ---
+
+func encodeGovCancel(g *GovCancel) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(g.ProposalID))
+	return buf
+}
+
+func decodeGovCancel(data []byte) (*GovCancel, error) {
+	g := &GovCancel{}
+	var err error
+	var b []byte
+	off := 0
+
+	b, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	g.ProposalID = string(b)
+
+	return g, nil
 }

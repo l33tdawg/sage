@@ -14,12 +14,15 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/internal/auth"
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/poe"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/validator"
+
+	cryptoproto "github.com/cometbft/cometbft/proto/tendermint/crypto"
 )
 
 // pendingWrite represents a PostgreSQL write buffered until Commit.
@@ -112,6 +115,59 @@ type memoryReassignData struct {
 	TargetAgentID string
 }
 
+// govProposalData carries governance proposal data for offchain write in Commit.
+type govProposalData struct {
+	ProposalID  string
+	Operation   string
+	TargetID    string
+	TargetPower int64
+	ProposerID  string
+	Status      string
+	CreatedHeight int64
+	ExpiryHeight  int64
+	Reason      string
+}
+
+// govVoteData carries governance vote data for offchain write in Commit.
+type govVoteData struct {
+	ProposalID  string
+	ValidatorID string
+	Decision    string
+	Height      int64
+}
+
+// govStatusUpdateData carries governance proposal status update for offchain write in Commit.
+type govStatusUpdateData struct {
+	ProposalID    string
+	Status        string
+	ExecutedHeight int64
+}
+
+// validatorSetAdapter wraps ValidatorSet to satisfy governance.ValidatorProvider.
+type validatorSetAdapter struct {
+	vs *validator.ValidatorSet
+}
+
+func (a *validatorSetAdapter) GetValidator(id string) (int64, bool) {
+	v, ok := a.vs.GetValidator(id)
+	if !ok {
+		return 0, false
+	}
+	return v.Power, true
+}
+
+func (a *validatorSetAdapter) GetAll() map[string]int64 {
+	result := make(map[string]int64)
+	for _, v := range a.vs.GetAll() {
+		result[v.ID] = v.Power
+	}
+	return result
+}
+
+func (a *validatorSetAdapter) Size() int {
+	return a.vs.Size()
+}
+
 // triplesData carries knowledge triples buffered for Commit.
 type triplesData struct {
 	MemoryID string
@@ -181,6 +237,7 @@ type SageApp struct {
 	validators    *validator.ValidatorSet
 	poeEngine     *poe.DomainRegistry
 	phiTracker    *poe.PhiTracker
+	govEngine     *governance.Engine
 	state         *AppState
 	logger        zerolog.Logger
 	Version       string
@@ -216,12 +273,15 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	domains := []string{"crypto", "vuln_intel", "challenge_generation", "solver_feedback", "calibration", "infrastructure"}
 	domainReg := poe.NewDomainRegistry(domains)
 
+	valSet := validator.NewValidatorSet()
+
 	app := &SageApp{
 		badgerStore:   bs,
 		offchainStore: ps,
-		validators:    validator.NewValidatorSet(),
+		validators:    valSet,
 		poeEngine:     domainReg,
 		phiTracker:    poe.NewPhiTracker(50),
+		govEngine:     governance.NewEngine(bs, &validatorSetAdapter{vs: valSet}),
 		state:         state,
 		logger:        logger.With().Str("component", "abci").Logger(),
 		SuppCache:     NewSupplementaryCache(),
@@ -255,12 +315,15 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	domains := []string{"crypto", "vuln_intel", "challenge_generation", "solver_feedback", "calibration", "infrastructure"}
 	domainReg := poe.NewDomainRegistry(domains)
 
+	valSet := validator.NewValidatorSet()
+
 	app := &SageApp{
 		badgerStore:   bs,
 		offchainStore: offchain,
-		validators:    validator.NewValidatorSet(),
+		validators:    valSet,
 		poeEngine:     domainReg,
 		phiTracker:    poe.NewPhiTracker(50),
+		govEngine:     governance.NewEngine(bs, &validatorSetAdapter{vs: valSet}),
 		state:         state,
 		logger:        logger.With().Str("component", "abci").Logger(),
 		SuppCache:     NewSupplementaryCache(),
@@ -423,6 +486,38 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		}
 	}
 
+	// Governance post-processing: evaluate active proposal after ALL txs are processed.
+	// This handles single-block auto-approve (proposal created + quorum in same block).
+	var valUpdates []abcitypes.ValidatorUpdate
+	executedProposal, govErr := app.govEngine.ProcessBlock(req.Height)
+	if govErr != nil {
+		app.logger.Error().Err(govErr).Msg("governance post-processing failed")
+	}
+	if executedProposal != nil {
+		app.logger.Info().
+			Str("proposal_id", executedProposal.ProposalID).
+			Uint8("operation", uint8(executedProposal.Operation)).
+			Str("target", executedProposal.TargetID).
+			Msg("governance proposal executed")
+
+		update, applyErr := app.applyGovernanceProposal(executedProposal, req.Height)
+		if applyErr != nil {
+			app.logger.Error().Err(applyErr).Msg("failed to apply governance proposal")
+		} else if update != nil {
+			valUpdates = append(valUpdates, *update)
+		}
+
+		// Buffer offchain status update for Commit
+		app.pendingWrites = append(app.pendingWrites, pendingWrite{
+			writeType: "gov_status_update",
+			data: govStatusUpdateData{
+				ProposalID:     executedProposal.ProposalID,
+				Status:         string(governance.StatusExecuted),
+				ExecutedHeight: req.Height,
+			},
+		})
+	}
+
 	// Check epoch boundary
 	if poe.IsEpochBoundary(req.Height) {
 		app.processEpoch(req.Height, req.Time)
@@ -442,8 +537,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 	metrics.FinalizeBlockDuration.Observe(time.Since(start).Seconds())
 
 	return &abcitypes.ResponseFinalizeBlock{
-		TxResults: txResults,
-		AppHash:   appHash,
+		TxResults:        txResults,
+		AppHash:          appHash,
+		ValidatorUpdates: valUpdates,
 	}, nil
 }
 
@@ -496,6 +592,12 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 		return app.processAgentSetPermission(parsedTx, height, blockTime)
 	case tx.TxTypeMemoryReassign:
 		return app.processMemoryReassign(parsedTx, height, blockTime)
+	case tx.TxTypeGovPropose:
+		return app.processGovPropose(parsedTx, height, blockTime)
+	case tx.TxTypeGovVote:
+		return app.processGovVote(parsedTx, height, blockTime)
+	case tx.TxTypeGovCancel:
+		return app.processGovCancel(parsedTx, height, blockTime)
 	default:
 		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
 	}
@@ -2157,6 +2259,37 @@ func (app *SageApp) flushPendingWrites(ctx context.Context, s store.OffchainStor
 						Msg("memories reassigned in offchain store")
 				}
 			}
+		case "gov_proposal":
+			if d, ok := pw.data.(govProposalData); ok {
+				err = s.InsertGovProposal(ctx, &store.GovProposal{
+					ProposalID:    d.ProposalID,
+					Operation:     d.Operation,
+					TargetAgentID: d.TargetID,
+					TargetPower:   d.TargetPower,
+					ProposerID:    d.ProposerID,
+					Status:        d.Status,
+					CreatedHeight: d.CreatedHeight,
+					ExpiryHeight:  d.ExpiryHeight,
+					Reason:        d.Reason,
+				})
+			}
+		case "gov_vote":
+			if d, ok := pw.data.(govVoteData); ok {
+				err = s.InsertGovVote(ctx, &store.GovVote{
+					ProposalID:  d.ProposalID,
+					ValidatorID: d.ValidatorID,
+					Decision:    d.Decision,
+					Height:      d.Height,
+				})
+			}
+		case "gov_status_update":
+			if d, ok := pw.data.(govStatusUpdateData); ok {
+				var execHeight *int64
+				if d.ExecutedHeight > 0 {
+					execHeight = &d.ExecutedHeight
+				}
+				err = s.UpdateGovProposalStatus(ctx, d.ProposalID, d.Status, execHeight)
+			}
 		}
 		if err != nil {
 			return fmt.Errorf("flush %s: %w", pw.writeType, err)
@@ -2241,4 +2374,272 @@ func (app *SageApp) GetPostgresStore() *store.PostgresStore {
 // GetBadgerStore returns the badger store for REST handlers.
 func (app *SageApp) GetBadgerStore() *store.BadgerStore {
 	return app.badgerStore
+}
+
+// GetGovEngine returns the governance engine for REST handlers.
+func (app *SageApp) GetGovEngine() *governance.Engine {
+	return app.govEngine
+}
+
+// ---------------------------------------------------------------------------
+// Governance transaction handlers
+// ---------------------------------------------------------------------------
+
+// processGovPropose handles a TxTypeGovPropose transaction.
+func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+	if parsedTx.GovPropose == nil {
+		return &abcitypes.ExecTxResult{Code: 70, Log: "missing governance propose payload"}
+	}
+
+	proposerID := auth.PublicKeyToAgentID(parsedTx.PublicKey)
+
+	// Verify proposer is an admin-role agent.
+	agent, err := app.badgerStore.GetRegisteredAgent(proposerID)
+	if err != nil {
+		return &abcitypes.ExecTxResult{Code: 71, Log: "proposer not registered: " + err.Error()}
+	}
+	if agent.Role != "admin" {
+		return &abcitypes.ExecTxResult{Code: 72, Log: "only admin agents can propose governance changes"}
+	}
+
+	gp := parsedTx.GovPropose
+	op := governance.ProposalOp(gp.Operation)
+
+	proposalID, propErr := app.govEngine.Propose(
+		proposerID, op, gp.TargetID, gp.TargetPubKey,
+		gp.TargetPower, gp.ExpiryBlocks, gp.Reason, height,
+	)
+	if propErr != nil {
+		return &abcitypes.ExecTxResult{Code: 73, Log: "governance propose failed: " + propErr.Error()}
+	}
+
+	app.logger.Info().
+		Str("proposal_id", proposalID).
+		Str("proposer", proposerID).
+		Uint8("operation", uint8(gp.Operation)).
+		Str("target", gp.TargetID).
+		Msg("governance proposal created")
+
+	// Buffer offchain proposal write for Commit.
+	expiryBlocks := gp.ExpiryBlocks
+	if expiryBlocks <= 0 {
+		expiryBlocks = governance.DefaultExpiryBlocks
+	}
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{
+		writeType: "gov_proposal",
+		data: govProposalData{
+			ProposalID:    proposalID,
+			Operation:     opToString(op),
+			TargetID:      gp.TargetID,
+			TargetPower:   gp.TargetPower,
+			ProposerID:    proposerID,
+			Status:        string(governance.StatusVoting),
+			CreatedHeight: height,
+			ExpiryHeight:  height + expiryBlocks,
+			Reason:        gp.Reason,
+		},
+	})
+
+	// Buffer the auto-vote for Commit.
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{
+		writeType: "gov_vote",
+		data: govVoteData{
+			ProposalID:  proposalID,
+			ValidatorID: proposerID,
+			Decision:    "accept",
+			Height:      height,
+		},
+	})
+
+	return &abcitypes.ExecTxResult{Code: 0, Log: "proposal created: " + proposalID}
+}
+
+// processGovVote handles a TxTypeGovVote transaction.
+func (app *SageApp) processGovVote(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+	if parsedTx.GovVote == nil {
+		return &abcitypes.ExecTxResult{Code: 74, Log: "missing governance vote payload"}
+	}
+
+	voterID := auth.PublicKeyToAgentID(parsedTx.PublicKey)
+	gv := parsedTx.GovVote
+
+	decisionStr := voteDecisionToGovString(gv.Decision)
+	if decisionStr == "" {
+		return &abcitypes.ExecTxResult{Code: 75, Log: "invalid vote decision"}
+	}
+
+	if err := app.govEngine.Vote(gv.ProposalID, voterID, decisionStr, height); err != nil {
+		return &abcitypes.ExecTxResult{Code: 76, Log: "governance vote failed: " + err.Error()}
+	}
+
+	app.logger.Info().
+		Str("proposal_id", gv.ProposalID).
+		Str("voter", voterID).
+		Str("decision", decisionStr).
+		Msg("governance vote recorded")
+
+	// Buffer offchain vote write for Commit.
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{
+		writeType: "gov_vote",
+		data: govVoteData{
+			ProposalID:  gv.ProposalID,
+			ValidatorID: voterID,
+			Decision:    decisionStr,
+			Height:      height,
+		},
+	})
+
+	return &abcitypes.ExecTxResult{Code: 0, Log: "vote recorded"}
+}
+
+// processGovCancel handles a TxTypeGovCancel transaction.
+func (app *SageApp) processGovCancel(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+	if parsedTx.GovCancel == nil {
+		return &abcitypes.ExecTxResult{Code: 77, Log: "missing governance cancel payload"}
+	}
+
+	cancellerID := auth.PublicKeyToAgentID(parsedTx.PublicKey)
+	gc := parsedTx.GovCancel
+
+	if err := app.govEngine.Cancel(gc.ProposalID, cancellerID, height); err != nil {
+		return &abcitypes.ExecTxResult{Code: 78, Log: "governance cancel failed: " + err.Error()}
+	}
+
+	app.logger.Info().
+		Str("proposal_id", gc.ProposalID).
+		Str("canceller", cancellerID).
+		Msg("governance proposal cancelled")
+
+	// Buffer offchain status update for Commit.
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{
+		writeType: "gov_status_update",
+		data: govStatusUpdateData{
+			ProposalID: gc.ProposalID,
+			Status:     string(governance.StatusCancelled),
+		},
+	})
+
+	return &abcitypes.ExecTxResult{Code: 0, Log: "proposal cancelled"}
+}
+
+// applyGovernanceProposal applies an executed governance proposal to the validator set
+// and returns a CometBFT ValidatorUpdate. Called from FinalizeBlock post-processing.
+func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, height int64) (*abcitypes.ValidatorUpdate, error) {
+	pubKeyBytes := proposal.TargetPubKey
+	if len(pubKeyBytes) == 0 {
+		// Derive from target ID (which is hex-encoded pubkey for non-app validators)
+		decoded, err := hex.DecodeString(proposal.TargetID)
+		if err != nil {
+			return nil, fmt.Errorf("cannot derive pubkey from target ID %s: %w", proposal.TargetID, err)
+		}
+		pubKeyBytes = decoded
+	}
+
+	if len(pubKeyBytes) != 32 {
+		return nil, fmt.Errorf("invalid Ed25519 public key length: %d", len(pubKeyBytes))
+	}
+
+	// Build the CometBFT ValidatorUpdate using protobuf types directly.
+	protoKey := cryptoproto.PublicKey{
+		Sum: &cryptoproto.PublicKey_Ed25519{Ed25519: pubKeyBytes},
+	}
+
+	switch proposal.Operation {
+	case governance.OpAddValidator:
+		// Add to in-memory validator set.
+		info := &validator.ValidatorInfo{
+			ID:        proposal.TargetID,
+			PublicKey: pubKeyBytes,
+			Power:     proposal.TargetPower,
+		}
+		if err := app.validators.AddValidator(info); err != nil {
+			// Validator might already exist from a previous run — update power instead.
+			app.logger.Warn().Err(err).Msg("add validator failed, attempting power update")
+			if upErr := app.validators.UpdatePower(proposal.TargetID, proposal.TargetPower); upErr != nil {
+				return nil, fmt.Errorf("add/update validator: %w", upErr)
+			}
+		}
+
+		// Persist updated validator set.
+		app.persistValidators()
+
+		app.logger.Info().
+			Str("validator", proposal.TargetID).
+			Int64("power", proposal.TargetPower).
+			Int64("height", height).
+			Msg("validator added via governance")
+
+		return &abcitypes.ValidatorUpdate{PubKey: protoKey, Power: proposal.TargetPower}, nil
+
+	case governance.OpRemoveValidator:
+		if err := app.validators.RemoveValidator(proposal.TargetID); err != nil {
+			return nil, fmt.Errorf("remove validator: %w", err)
+		}
+
+		app.persistValidators()
+
+		app.logger.Info().
+			Str("validator", proposal.TargetID).
+			Int64("height", height).
+			Msg("validator removed via governance")
+
+		return &abcitypes.ValidatorUpdate{PubKey: protoKey, Power: 0}, nil
+
+	case governance.OpUpdatePower:
+		if err := app.validators.UpdatePower(proposal.TargetID, proposal.TargetPower); err != nil {
+			return nil, fmt.Errorf("update power: %w", err)
+		}
+
+		app.persistValidators()
+
+		app.logger.Info().
+			Str("validator", proposal.TargetID).
+			Int64("power", proposal.TargetPower).
+			Int64("height", height).
+			Msg("validator power updated via governance")
+
+		return &abcitypes.ValidatorUpdate{PubKey: protoKey, Power: proposal.TargetPower}, nil
+
+	default:
+		return nil, fmt.Errorf("unknown governance operation: %d", proposal.Operation)
+	}
+}
+
+// persistValidators saves the current validator set to BadgerDB.
+func (app *SageApp) persistValidators() {
+	valMap := make(map[string]int64)
+	for _, v := range app.validators.GetAll() {
+		valMap[v.ID] = v.Power
+	}
+	if err := app.badgerStore.SaveValidators(valMap); err != nil {
+		app.logger.Error().Err(err).Msg("failed to persist validators after governance change")
+	}
+}
+
+// opToString converts a governance ProposalOp to a human-readable string.
+func opToString(op governance.ProposalOp) string {
+	switch op {
+	case governance.OpAddValidator:
+		return "add_validator"
+	case governance.OpRemoveValidator:
+		return "remove_validator"
+	case governance.OpUpdatePower:
+		return "update_power"
+	default:
+		return fmt.Sprintf("unknown_%d", op)
+	}
+}
+
+// voteDecisionToGovString converts a tx.VoteDecision to governance vote string.
+func voteDecisionToGovString(d tx.VoteDecision) string {
+	switch d {
+	case tx.VoteDecisionAccept:
+		return "accept"
+	case tx.VoteDecisionReject:
+		return "reject"
+	case tx.VoteDecisionAbstain:
+		return "abstain"
+	default:
+		return ""
+	}
 }

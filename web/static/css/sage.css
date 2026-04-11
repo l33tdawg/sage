@@ -3658,3 +3658,265 @@ input[type="range"]::-moz-range-thumb {
     from { opacity: 1; transform: translateX(0); }
     to { opacity: 0; transform: translateX(40px); }
 }
+
+/* ─── Governance Section ─── */
+.gov-section {
+    margin-bottom: 24px;
+}
+.gov-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.gov-section-header h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.gov-proposal-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 20px;
+    transition: border-color 0.2s;
+}
+.gov-proposal-card.active {
+    border-color: var(--primary);
+}
+.gov-proposal-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    margin-bottom: 12px;
+}
+.gov-proposal-op {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.gov-proposal-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+.gov-proposal-reason {
+    font-size: 13px;
+    color: var(--text-dim);
+    font-style: italic;
+    margin-bottom: 16px;
+    padding: 8px 12px;
+    background: var(--bg-elevated);
+    border-radius: var(--radius);
+    border-left: 3px solid var(--primary);
+}
+.gov-vote-tally {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 8px;
+}
+.gov-vote-accept { color: #22c55e; }
+.gov-vote-reject { color: #ef4444; }
+.gov-vote-abstain { color: #6b7280; }
+.gov-quorum-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+.gov-quorum-bar {
+    flex: 1;
+    height: 8px;
+    background: var(--bg-elevated);
+    border-radius: 4px;
+    overflow: visible;
+    position: relative;
+}
+.gov-quorum-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+    min-width: 0;
+}
+.gov-quorum-threshold {
+    position: absolute;
+    top: -3px;
+    bottom: -3px;
+    width: 2px;
+    background: var(--warning);
+    border-radius: 1px;
+    z-index: 1;
+}
+.gov-quorum-label {
+    font-size: 11px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.gov-expiry {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.gov-vote-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+.gov-vote-btn {
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 13px;
+    border: none;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.gov-vote-btn:hover:not(:disabled) { opacity: 0.85; transform: translateY(-1px); }
+.gov-vote-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+.gov-vote-btn.accept { background: #22c55e; color: white; }
+.gov-vote-btn.reject { background: #ef4444; color: white; }
+.gov-vote-btn.abstain { background: #6b7280; color: white; }
+.gov-vote-btn.cancel { background: transparent; border: 1px solid var(--border-light); color: var(--text-muted); }
+.gov-vote-btn.cancel:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+.gov-voted-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-light);
+    color: var(--text-dim);
+}
+
+/* Proposal history */
+.gov-history-toggle {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    padding: 6px 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    transition: color 0.2s;
+}
+.gov-history-toggle:hover { color: var(--text-dim); }
+.gov-history-toggle svg {
+    width: 14px;
+    height: 14px;
+    transition: transform 0.2s;
+}
+.gov-history-toggle.open svg { transform: rotate(180deg); }
+.gov-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+.gov-history-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+}
+.gov-history-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.gov-history-op {
+    font-weight: 600;
+    color: var(--text);
+    font-size: 13px;
+}
+.gov-history-detail {
+    color: var(--text-muted);
+}
+.gov-history-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+}
+.gov-history-votes {
+    display: flex;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+}
+.gov-status-badge {
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.gov-status-executed { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+.gov-status-rejected { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+.gov-status-expired { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+.gov-status-cancelled { background: rgba(107, 114, 128, 0.15); color: #9ca3af; }
+.gov-status-voting { background: rgba(6, 182, 212, 0.15); color: var(--primary); }
+
+/* New proposal button */
+.gov-new-btn {
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px dashed var(--border-light);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.gov-new-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: var(--primary-dim);
+}
+
+/* Empty state */
+.gov-empty {
+    text-align: center;
+    padding: 24px;
+    color: var(--text-muted);
+    font-size: 13px;
+    background: var(--bg-surface);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-lg);
+}
+.gov-empty-icon {
+    font-size: 24px;
+    margin-bottom: 8px;
+    opacity: 0.5;
+}

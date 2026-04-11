@@ -300,6 +300,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 		// Network agent management routes
 		h.RegisterNetworkRoutes(r)
+
+		// Governance routes
+		h.RegisterGovernanceRoutes(r)
 	})
 
 	// Launch endpoint — redirects to CEREBRUM dashboard.

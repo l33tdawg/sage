@@ -91,6 +91,36 @@ func TestEncodeDecode(t *testing.T) {
 			Nonce:     10,
 			Timestamp: time.Date(2025, 1, 1, 0, 0, 10, 0, time.UTC),
 		}},
+		{"GovPropose", &ParsedTx{
+			Type: TxTypeGovPropose,
+			GovPropose: &GovPropose{
+				Operation:    GovOpAddValidator,
+				TargetID:     "abcdef1234567890",
+				TargetPubKey: make([]byte, 32),
+				TargetPower:  100,
+				ExpiryBlocks: 1000,
+				Reason:       "Add new validator node",
+			},
+			Nonce:     11,
+			Timestamp: time.Date(2025, 1, 1, 0, 0, 11, 0, time.UTC),
+		}},
+		{"GovVote", &ParsedTx{
+			Type: TxTypeGovVote,
+			GovVote: &GovVote{
+				ProposalID: "prop-001",
+				Decision:   VoteDecisionAccept,
+			},
+			Nonce:     12,
+			Timestamp: time.Date(2025, 1, 1, 0, 0, 12, 0, time.UTC),
+		}},
+		{"GovCancel", &ParsedTx{
+			Type: TxTypeGovCancel,
+			GovCancel: &GovCancel{
+				ProposalID: "prop-001",
+			},
+			Nonce:     13,
+			Timestamp: time.Date(2025, 1, 1, 0, 0, 13, 0, time.UTC),
+		}},
 
 	}
 
@@ -132,6 +162,21 @@ func TestEncodeDecode(t *testing.T) {
 				require.NotNil(t, decoded.MemoryReassign)
 				assert.Equal(t, tt.tx.MemoryReassign.SourceAgentID, decoded.MemoryReassign.SourceAgentID)
 				assert.Equal(t, tt.tx.MemoryReassign.TargetAgentID, decoded.MemoryReassign.TargetAgentID)
+			case TxTypeGovPropose:
+				require.NotNil(t, decoded.GovPropose)
+				assert.Equal(t, tt.tx.GovPropose.Operation, decoded.GovPropose.Operation)
+				assert.Equal(t, tt.tx.GovPropose.TargetID, decoded.GovPropose.TargetID)
+				assert.Equal(t, tt.tx.GovPropose.TargetPubKey, decoded.GovPropose.TargetPubKey)
+				assert.Equal(t, tt.tx.GovPropose.TargetPower, decoded.GovPropose.TargetPower)
+				assert.Equal(t, tt.tx.GovPropose.ExpiryBlocks, decoded.GovPropose.ExpiryBlocks)
+				assert.Equal(t, tt.tx.GovPropose.Reason, decoded.GovPropose.Reason)
+			case TxTypeGovVote:
+				require.NotNil(t, decoded.GovVote)
+				assert.Equal(t, tt.tx.GovVote.ProposalID, decoded.GovVote.ProposalID)
+				assert.Equal(t, tt.tx.GovVote.Decision, decoded.GovVote.Decision)
+			case TxTypeGovCancel:
+				require.NotNil(t, decoded.GovCancel)
+				assert.Equal(t, tt.tx.GovCancel.ProposalID, decoded.GovCancel.ProposalID)
 			}
 		})
 	}
@@ -460,6 +505,264 @@ func TestAgentRegisterSignAndVerify(t *testing.T) {
 
 	// Tamper with the payload and verify signature fails
 	ptx.AgentRegister.Name = "Tampered"
+	encoded, err := EncodeTx(ptx)
+	require.NoError(t, err)
+	decoded, err := DecodeTx(encoded)
+	require.NoError(t, err)
+	valid, err = VerifyTx(decoded)
+	require.NoError(t, err)
+	assert.False(t, valid)
+}
+
+func TestGovProposeRoundTrip(t *testing.T) {
+	pubKey := make([]byte, 32)
+	for i := range pubKey {
+		pubKey[i] = byte(i)
+	}
+
+	original := &ParsedTx{
+		Type:      TxTypeGovPropose,
+		Nonce:     60,
+		Timestamp: time.Now().Truncate(time.Nanosecond),
+		GovPropose: &GovPropose{
+			Operation:    GovOpAddValidator,
+			TargetID:     "deadbeef01234567",
+			TargetPubKey: pubKey,
+			TargetPower:  100,
+			ExpiryBlocks: 5000,
+			Reason:       "Adding trusted validator from partner org",
+		},
+	}
+
+	encoded, err := EncodeTx(original)
+	require.NoError(t, err)
+	require.NotEmpty(t, encoded)
+
+	decoded, err := DecodeTx(encoded)
+	require.NoError(t, err)
+	require.NotNil(t, decoded.GovPropose)
+
+	assert.Equal(t, TxTypeGovPropose, decoded.Type)
+	assert.Equal(t, GovOpAddValidator, decoded.GovPropose.Operation)
+	assert.Equal(t, original.GovPropose.TargetID, decoded.GovPropose.TargetID)
+	assert.Equal(t, original.GovPropose.TargetPubKey, decoded.GovPropose.TargetPubKey)
+	assert.Equal(t, int64(100), decoded.GovPropose.TargetPower)
+	assert.Equal(t, int64(5000), decoded.GovPropose.ExpiryBlocks)
+	assert.Equal(t, original.GovPropose.Reason, decoded.GovPropose.Reason)
+	assert.Equal(t, original.Nonce, decoded.Nonce)
+}
+
+func TestGovProposeAllOperations(t *testing.T) {
+	ops := []struct {
+		name string
+		op   GovProposalOp
+	}{
+		{"AddValidator", GovOpAddValidator},
+		{"RemoveValidator", GovOpRemoveValidator},
+		{"UpdatePower", GovOpUpdatePower},
+	}
+
+	for _, tt := range ops {
+		t.Run(tt.name, func(t *testing.T) {
+			original := &ParsedTx{
+				Type:      TxTypeGovPropose,
+				Nonce:     61,
+				Timestamp: time.Now().Truncate(time.Nanosecond),
+				GovPropose: &GovPropose{
+					Operation:    tt.op,
+					TargetID:     "validator-id",
+					TargetPubKey: make([]byte, 32),
+					TargetPower:  50,
+					ExpiryBlocks: 0,
+					Reason:       "test operation " + tt.name,
+				},
+			}
+
+			encoded, err := EncodeTx(original)
+			require.NoError(t, err)
+
+			decoded, err := DecodeTx(encoded)
+			require.NoError(t, err)
+			require.NotNil(t, decoded.GovPropose)
+			assert.Equal(t, tt.op, decoded.GovPropose.Operation)
+		})
+	}
+}
+
+func TestGovProposeSignAndVerify(t *testing.T) {
+	_, privKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	ptx := &ParsedTx{
+		Type:      TxTypeGovPropose,
+		Nonce:     62,
+		Timestamp: time.Now().Truncate(time.Nanosecond),
+		GovPropose: &GovPropose{
+			Operation:    GovOpRemoveValidator,
+			TargetID:     "bad-validator",
+			TargetPubKey: nil,
+			TargetPower:  0,
+			ExpiryBlocks: 100,
+			Reason:       "Validator went offline",
+		},
+	}
+
+	require.NoError(t, SignTx(ptx, privKey))
+	require.NotEmpty(t, ptx.Signature)
+	require.NotEmpty(t, ptx.PublicKey)
+
+	valid, err := VerifyTx(ptx)
+	require.NoError(t, err)
+	assert.True(t, valid)
+
+	// Tamper and verify failure
+	ptx.GovPropose.Reason = "tampered reason"
+	encoded, err := EncodeTx(ptx)
+	require.NoError(t, err)
+	decoded, err := DecodeTx(encoded)
+	require.NoError(t, err)
+	valid, err = VerifyTx(decoded)
+	require.NoError(t, err)
+	assert.False(t, valid)
+}
+
+func TestGovVoteRoundTrip(t *testing.T) {
+	original := &ParsedTx{
+		Type:      TxTypeGovVote,
+		Nonce:     70,
+		Timestamp: time.Now().Truncate(time.Nanosecond),
+		GovVote: &GovVote{
+			ProposalID: "prop-abc-123",
+			Decision:   VoteDecisionAccept,
+		},
+	}
+
+	encoded, err := EncodeTx(original)
+	require.NoError(t, err)
+	require.NotEmpty(t, encoded)
+
+	decoded, err := DecodeTx(encoded)
+	require.NoError(t, err)
+	require.NotNil(t, decoded.GovVote)
+
+	assert.Equal(t, TxTypeGovVote, decoded.Type)
+	assert.Equal(t, "prop-abc-123", decoded.GovVote.ProposalID)
+	assert.Equal(t, VoteDecisionAccept, decoded.GovVote.Decision)
+	assert.Equal(t, original.Nonce, decoded.Nonce)
+}
+
+func TestGovVoteAllDecisions(t *testing.T) {
+	decisions := []struct {
+		name string
+		dec  VoteDecision
+	}{
+		{"Accept", VoteDecisionAccept},
+		{"Reject", VoteDecisionReject},
+		{"Abstain", VoteDecisionAbstain},
+	}
+
+	for _, tt := range decisions {
+		t.Run(tt.name, func(t *testing.T) {
+			original := &ParsedTx{
+				Type:      TxTypeGovVote,
+				Nonce:     71,
+				Timestamp: time.Now().Truncate(time.Nanosecond),
+				GovVote: &GovVote{
+					ProposalID: "prop-decision-test",
+					Decision:   tt.dec,
+				},
+			}
+
+			encoded, err := EncodeTx(original)
+			require.NoError(t, err)
+
+			decoded, err := DecodeTx(encoded)
+			require.NoError(t, err)
+			require.NotNil(t, decoded.GovVote)
+			assert.Equal(t, tt.dec, decoded.GovVote.Decision)
+		})
+	}
+}
+
+func TestGovVoteSignAndVerify(t *testing.T) {
+	_, privKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	ptx := &ParsedTx{
+		Type:      TxTypeGovVote,
+		Nonce:     72,
+		Timestamp: time.Now().Truncate(time.Nanosecond),
+		GovVote: &GovVote{
+			ProposalID: "prop-sign-test",
+			Decision:   VoteDecisionReject,
+		},
+	}
+
+	require.NoError(t, SignTx(ptx, privKey))
+	require.NotEmpty(t, ptx.Signature)
+	require.NotEmpty(t, ptx.PublicKey)
+
+	valid, err := VerifyTx(ptx)
+	require.NoError(t, err)
+	assert.True(t, valid)
+
+	// Tamper and verify failure
+	ptx.GovVote.Decision = VoteDecisionAccept
+	encoded, err := EncodeTx(ptx)
+	require.NoError(t, err)
+	decoded, err := DecodeTx(encoded)
+	require.NoError(t, err)
+	valid, err = VerifyTx(decoded)
+	require.NoError(t, err)
+	assert.False(t, valid)
+}
+
+func TestGovCancelRoundTrip(t *testing.T) {
+	original := &ParsedTx{
+		Type:      TxTypeGovCancel,
+		Nonce:     80,
+		Timestamp: time.Now().Truncate(time.Nanosecond),
+		GovCancel: &GovCancel{
+			ProposalID: "prop-to-cancel-xyz",
+		},
+	}
+
+	encoded, err := EncodeTx(original)
+	require.NoError(t, err)
+	require.NotEmpty(t, encoded)
+
+	decoded, err := DecodeTx(encoded)
+	require.NoError(t, err)
+	require.NotNil(t, decoded.GovCancel)
+
+	assert.Equal(t, TxTypeGovCancel, decoded.Type)
+	assert.Equal(t, "prop-to-cancel-xyz", decoded.GovCancel.ProposalID)
+	assert.Equal(t, original.Nonce, decoded.Nonce)
+}
+
+func TestGovCancelSignAndVerify(t *testing.T) {
+	_, privKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	ptx := &ParsedTx{
+		Type:      TxTypeGovCancel,
+		Nonce:     81,
+		Timestamp: time.Now().Truncate(time.Nanosecond),
+		GovCancel: &GovCancel{
+			ProposalID: "prop-cancel-sign-test",
+		},
+	}
+
+	require.NoError(t, SignTx(ptx, privKey))
+	require.NotEmpty(t, ptx.Signature)
+	require.NotEmpty(t, ptx.PublicKey)
+
+	valid, err := VerifyTx(ptx)
+	require.NoError(t, err)
+	assert.True(t, valid)
+
+	// Tamper and verify failure
+	ptx.GovCancel.ProposalID = "tampered-id"
 	encoded, err := EncodeTx(ptx)
 	require.NoError(t, err)
 	decoded, err := DecodeTx(encoded)
