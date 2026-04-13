@@ -428,37 +428,59 @@ func runServe() error {
 		}
 	}
 
-	// TLS listener for quorum mode: encrypted REST on a separate port.
-	// Plain HTTP stays on localhost for dashboard/MCP backward compatibility.
+	// TLS listener: encrypted REST on a separate port.
+	// Auto-generates self-signed certs on first run if none exist.
+	// Personal mode: TLS on localhost:8443. Quorum mode: TLS on 0.0.0.0:8443.
+	// Plain HTTP stays on localhost for dashboard backward compatibility.
 	var tlsServer *http.Server
-	if cfg.Quorum.Enabled {
-		certsDir := filepath.Join(SageHome(), "certs")
-		if tlsca.CertsExist(certsDir) {
-			tlsCfg, tlsErr := tlsca.ServerTLSConfig(certsDir)
-			if tlsErr != nil {
-				logger.Warn().Err(tlsErr).Msg("TLS certs found but failed to load — running without TLS")
-			} else {
-				tlsAddr := cfg.Quorum.TLSAddr
-				if tlsAddr == "" {
-					tlsAddr = "0.0.0.0:8443"
-				}
-				tlsServer = &http.Server{
-					Addr:         tlsAddr,
-					Handler:      r,
-					TLSConfig:    tlsCfg,
-					ReadTimeout:  15 * time.Second,
-					WriteTimeout: 15 * time.Second,
-					IdleTimeout:  60 * time.Second,
-				}
-				go func() {
-					logger.Info().Str("addr", tlsAddr).Msg("TLS REST API server starting")
-					if tlsServeErr := tlsServer.ListenAndServeTLS("", ""); tlsServeErr != nil && tlsServeErr != http.ErrServerClosed {
-						logger.Error().Err(tlsServeErr).Msg("TLS server error")
-					}
-				}()
-			}
+	certsDir := filepath.Join(SageHome(), "certs")
+	if !tlsca.CertsExist(certsDir) {
+		// Auto-generate self-signed certs for HTTPS.
+		chainID := "sage-personal"
+		if cfg.Quorum.Enabled {
+			chainID = "sage-quorum"
+		}
+		caCert, caKey, caErr := tlsca.LoadOrGenerateCA(certsDir, chainID)
+		if caErr != nil {
+			logger.Warn().Err(caErr).Msg("failed to generate TLS CA — running without TLS")
 		} else {
-			logger.Warn().Msg("quorum mode but no TLS certs found — run quorum-init/join to generate certificates")
+			nodeCert, nodeKey2, certErr := tlsca.GenerateNodeCert(caCert, caKey, "personal", []string{"127.0.0.1", "localhost"})
+			if certErr != nil {
+				logger.Warn().Err(certErr).Msg("failed to generate TLS node cert")
+			} else {
+				_ = tlsca.WriteCert(filepath.Join(certsDir, tlsca.NodeCertFile), nodeCert)
+				_ = tlsca.WriteKey(filepath.Join(certsDir, tlsca.NodeKeyFile), nodeKey2)
+				logger.Info().Str("certs_dir", certsDir).Msg("auto-generated TLS certificates")
+			}
+		}
+	}
+	if tlsca.CertsExist(certsDir) {
+		tlsCfg, tlsErr := tlsca.ServerTLSConfig(certsDir)
+		if tlsErr != nil {
+			logger.Warn().Err(tlsErr).Msg("TLS certs found but failed to load — running without TLS")
+		} else {
+			tlsAddr := cfg.Quorum.TLSAddr
+			if tlsAddr == "" {
+				if cfg.Quorum.Enabled {
+					tlsAddr = "0.0.0.0:8443" // Quorum: listen on all interfaces.
+				} else {
+					tlsAddr = "127.0.0.1:8443" // Personal: localhost only.
+				}
+			}
+			tlsServer = &http.Server{
+				Addr:         tlsAddr,
+				Handler:      r,
+				TLSConfig:    tlsCfg,
+				ReadTimeout:  15 * time.Second,
+				WriteTimeout: 15 * time.Second,
+				IdleTimeout:  60 * time.Second,
+			}
+			go func() {
+				logger.Info().Str("addr", tlsAddr).Msg("TLS REST API server starting")
+				if tlsServeErr := tlsServer.ListenAndServeTLS("", ""); tlsServeErr != nil && tlsServeErr != http.ErrServerClosed {
+					logger.Error().Err(tlsServeErr).Msg("TLS server error")
+				}
+			}()
 		}
 	}
 
