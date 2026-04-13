@@ -46,6 +46,8 @@ func main() {
 		err = runQuorumInit()
 	case "quorum-join":
 		err = runQuorumJoin()
+	case "cert-status":
+		err = runCertStatus()
 	case "version":
 		fmt.Printf("sage-gui %s (commit %s, built %s)\n", version, commit, date)
 	case "help", "--help", "-h":
@@ -78,6 +80,7 @@ Commands:
   recover   Reset vault passphrase using your recovery key
   quorum-init   Initialize a quorum network (generates shared genesis)
   quorum-join   Join a quorum network (imports genesis from another node)
+  cert-status   Show TLS certificate status and expiry
   status    Show node status
   version   Print version
 

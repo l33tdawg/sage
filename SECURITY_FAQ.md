@@ -145,8 +145,9 @@ The following are honest limitations of the current codebase:
 **SAGE Enterprise:**
 - The enterprise deployment is a research prototype, not production-hardened infrastructure.
 - The 4-node Docker Compose setup is for benchmarking and experimentation.
-- No TLS between validators in the default configuration.
-- No automated key rotation or certificate management.
+- CometBFT P2P connections between validators are encrypted by default (SecretConnection: X25519 DH + ChaCha20-Poly1305).
+- REST API supports TLS in quorum mode (v6.5+). Certificates are generated during `quorum-init`/`quorum-join` using a per-quorum ECDSA P-256 CA.
+- No automated key/certificate rotation yet (planned for governance-driven rotation).
 - RBAC is implemented but not battle-tested under adversarial conditions.
 - Federation (cross-org memory sharing) is designed but not yet deployed at scale.
 

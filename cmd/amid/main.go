@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	sageabci "github.com/l33tdawg/sage/internal/abci"
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/metrics"
+	"github.com/l33tdawg/sage/internal/tlsca"
 )
 
 // Set via ldflags at build time.
@@ -41,6 +43,9 @@ func main() {
 	badgerPath := flag.String("badger-path", envOrDefault("BADGER_PATH", "data/sage.db"), "BadgerDB data path")
 	abciAddr := flag.String("abci-addr", envOrDefault("ABCI_ADDR", ""), "ABCI server listen address (e.g. tcp://0.0.0.0:26658). If set, runs as standalone ABCI server; otherwise embeds CometBFT in-process")
 	cometRPC := flag.String("comet-rpc", envOrDefault("COMET_RPC", "http://127.0.0.1:26657"), "CometBFT RPC endpoint for REST API tx broadcast")
+	tlsCert := flag.String("tls-cert", os.Getenv("TLS_CERT"), "TLS certificate file for REST API (PEM)")
+	tlsKey := flag.String("tls-key", os.Getenv("TLS_KEY"), "TLS private key file for REST API (PEM)")
+	tlsCA := flag.String("tls-ca", os.Getenv("TLS_CA"), "CA certificate for TLS verification (PEM)")
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
 
@@ -78,18 +83,18 @@ func main() {
 
 	if *abciAddr != "" {
 		// ── Standalone ABCI server mode (Docker: separate CometBFT container) ──
-		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, health, logger)
+		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *tlsCert, *tlsKey, *tlsCA, health, logger)
 	} else {
 		// ── In-process mode (single binary: ABCI + CometBFT embedded) ──
 		if *cometHome == "" {
 			logger.Fatal().Msg("CometBFT home directory is required in in-process mode (--home or COMETBFT_HOME)")
 		}
-		runInProcess(app, *cometHome, *restAddr, *metricsAddr, health, logger)
+		runInProcess(app, *cometHome, *restAddr, *metricsAddr, *tlsCert, *tlsKey, *tlsCA, health, logger)
 	}
 }
 
 // runABCIServer starts the ABCI app as a TCP server for an external CometBFT node.
-func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC string, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
 	cmtLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(os.Stdout))
 
 	srv, err := abciserver.NewServer(abciAddr, "socket", app)
@@ -111,14 +116,14 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 	logger.Info().Str("addr", abciAddr).Msg("ABCI server listening")
 
 	// Start metrics + REST + health in background
-	startServices(app, restAddr, metricsAddr, cometRPC, health, logger)
+	startServices(app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
 
 	// Wait for shutdown
 	waitForShutdown(nil, nil, health, logger)
 }
 
 // runInProcess embeds CometBFT in the same process as the ABCI app.
-func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr string, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
 	cometCfg, err := loadCometConfig(cometHome)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to parse CometBFT config, using defaults")
@@ -168,7 +173,7 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr string
 
 	// In-process: CometBFT RPC is localhost
 	cometRPC := fmt.Sprintf("http://127.0.0.1%s", cometCfg.RPC.ListenAddress[len("tcp://0.0.0.0"):])
-	startServices(app, restAddr, metricsAddr, cometRPC, health, logger)
+	startServices(app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
 
 	// Health checks with node status
 	go healthLoop(app, cometNode, health)
@@ -177,7 +182,7 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr string
 }
 
 // startServices launches the metrics server and REST API.
-func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC string, health *metrics.HealthChecker, logger zerolog.Logger) {
+func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
 	// Prometheus metrics server
 	metricsServer := metrics.NewMetricsServer(metricsAddr, health)
 	go func() {
@@ -192,12 +197,40 @@ func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC string
 	badgerStore := app.GetBadgerStore()
 	restServer := rest.NewServer(cometRPC, pgStore, pgStore, badgerStore, health, logger, embedding.NewClient("", ""))
 	restServer.SetSuppCache(app.SuppCache)
-	go func() {
-		logger.Info().Str("addr", restAddr).Str("comet_rpc", cometRPC).Msg("starting REST server")
-		if err := restServer.Start(restAddr); err != nil && err != http.ErrServerClosed {
-			logger.Error().Err(err).Msg("REST server error")
+
+	if tlsCert != "" && tlsKey != "" {
+		// TLS mode: load certs and start HTTPS.
+		tlsCfg, err := buildTLSConfig(tlsCert, tlsKey, tlsCA, logger)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("failed to build TLS config")
 		}
-	}()
+		go func() {
+			logger.Info().Str("addr", restAddr).Str("comet_rpc", cometRPC).Msg("starting REST server (TLS)")
+			if err := restServer.StartTLS(restAddr, tlsCfg); err != nil && err != http.ErrServerClosed {
+				logger.Error().Err(err).Msg("REST TLS server error")
+			}
+		}()
+	} else {
+		go func() {
+			logger.Info().Str("addr", restAddr).Str("comet_rpc", cometRPC).Msg("starting REST server")
+			if err := restServer.Start(restAddr); err != nil && err != http.ErrServerClosed {
+				logger.Error().Err(err).Msg("REST server error")
+			}
+		}()
+	}
+}
+
+// buildTLSConfig creates a tls.Config from individual cert/key/CA file paths.
+func buildTLSConfig(certFile, keyFile, caFile string, logger zerolog.Logger) (*tls.Config, error) {
+	cfg, err := tlsca.ServerTLSConfigFromFiles(certFile, keyFile, caFile)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info().
+		Str("cert", certFile).
+		Str("ca", caFile).
+		Msg("TLS configured for REST API")
+	return cfg, nil
 }
 
 func healthLoop(app *sageabci.SageApp, cometNode *node.Node, health *metrics.HealthChecker) {

@@ -214,6 +214,7 @@ make down-clean    # Stop containers AND wipe all data (volumes, orphans)
 | REST API | `localhost:8080` | `localhost:8081` | `localhost:8082` | `localhost:8083` |
 | CometBFT RPC | `localhost:26657` | `localhost:26757` | `localhost:26857` | `localhost:26957` |
 | CometBFT P2P | `localhost:26656` | `localhost:26756` | `localhost:26856` | `localhost:26956` |
+| TLS REST API (quorum) | `localhost:8443` | — | — | — |
 | Prometheus metrics (ABCI) | `localhost:2112` | `localhost:2113` | `localhost:2114` | `localhost:2115` |
 | CometBFT Prometheus | `:26660` | `:26761` | `:26862` | `:26963` |
 
@@ -225,6 +226,21 @@ make down-clean    # Stop containers AND wipe all data (volumes, orphans)
 | Ollama | `localhost:11434` | Shared embedding model server |
 | Grafana | `localhost:3000` | Only with `make up-full` |
 | Prometheus | `localhost:9191` | Only with `make up-full` |
+
+### Transport Security (v6.5)
+
+| Layer | Encryption | Protocol |
+|-------|-----------|----------|
+| CometBFT P2P (26656) | **Encrypted** — SecretConnection (X25519 DH + ChaCha20-Poly1305) | STS protocol, built into CometBFT v0.38.15 |
+| REST API (8443, quorum mode) | **TLS 1.3** — per-quorum ECDSA P-256 CA, node certs with IP/DNS SANs | `internal/tlsca/` package |
+| REST API (8080, localhost) | Plain HTTP | Localhost only, for dashboard/MCP |
+| ABCI (26658, Docker) | Plain TCP | Docker bridge network isolation |
+
+**Certificate lifecycle:**
+- `sage-gui quorum-init` generates the quorum CA + this node's TLS cert
+- `sage-gui quorum-join` receives CA via manifest, generates joining node's cert
+- Certs stored in `~/.sage/certs/{ca.crt, ca.key, node.crt, node.key}`
+- `sage-gui cert-status` shows expiry dates and fingerprints
 
 ### Container Relationships
 

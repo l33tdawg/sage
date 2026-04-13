@@ -1,0 +1,50 @@
+# SAGE v6.5 Test Override — remaps ports to avoid conflicts with local sage-gui
+# Usage: docker compose -f docker-compose.yml -f docker-compose.test.yml up -d
+#
+# REST APIs: 18080-18083 (instead of 8080-8083)
+# CometBFT RPC: 36657-36957 (instead of 26657-26957, ALL exposed for testing)
+
+services:
+  abci0:
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:12112:2112"
+
+  abci1:
+    ports:
+      - "127.0.0.1:18081:8080"
+      - "127.0.0.1:12113:2112"
+
+  abci2:
+    ports:
+      - "127.0.0.1:18082:8080"
+      - "127.0.0.1:12114:2112"
+
+  abci3:
+    ports:
+      - "127.0.0.1:18083:8080"
+      - "127.0.0.1:12115:2112"
+
+  cometbft0:
+    ports:
+      - "36656:26656"
+      - "36657:26657"
+      - "36660:26660"
+
+  cometbft1:
+    ports:
+      - "36756:26656"
+      - "36757:26657"
+      - "36761:26660"
+
+  cometbft2:
+    ports:
+      - "36856:26656"
+      - "36857:26657"
+      - "36862:26660"
+
+  cometbft3:
+    ports:
+      - "36956:26656"
+      - "36957:26657"
+      - "36963:26660"

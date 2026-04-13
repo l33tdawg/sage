@@ -13,12 +13,16 @@ import (
 	"github.com/cometbft/cometbft/privval"
 	cmttypes "github.com/cometbft/cometbft/types"
 	cmttime "github.com/cometbft/cometbft/types/time"
+
+	"github.com/l33tdawg/sage/internal/tlsca"
 )
 
 // QuorumManifest is the portable file shared between nodes to form a quorum.
 type QuorumManifest struct {
 	ChainID     string              `json:"chain_id"`
 	GenesisTime string              `json:"genesis_time,omitempty"` // RFC3339 — set by initiator
+	CACert      string              `json:"ca_cert,omitempty"`      // PEM-encoded CA certificate for TLS
+	CAKey       string              `json:"ca_key,omitempty"`       // PEM-encoded CA key (LAN quorum setup only)
 	Validators  []ManifestValidator `json:"validators"`
 	Peers       []QuorumPeer        `json:"peers"`
 }
@@ -103,9 +107,37 @@ func runQuorumInit() error {
 	pubKeyB64 := base64.StdEncoding.EncodeToString(pv.Key.PubKey.Bytes())
 	genesisTime := cmttime.Now()
 
+	// Generate TLS CA and node certificate for encrypted quorum communication.
+	certsDir := filepath.Join(home, "certs")
+	caCert, caKey, err := tlsca.LoadOrGenerateCA(certsDir, "sage-quorum")
+	if err != nil {
+		return fmt.Errorf("generate TLS CA: %w", err)
+	}
+
+	host := tlsca.ParseHostPort(address)
+	nodeCert, nodeKey2, err := tlsca.GenerateNodeCert(caCert, caKey, string(nodeKey.ID()), []string{host})
+	if err != nil {
+		return fmt.Errorf("generate node TLS cert: %w", err)
+	}
+	if err := tlsca.WriteCert(filepath.Join(certsDir, tlsca.NodeCertFile), nodeCert); err != nil {
+		return fmt.Errorf("write node cert: %w", err)
+	}
+	if err := tlsca.WriteKey(filepath.Join(certsDir, tlsca.NodeKeyFile), nodeKey2); err != nil {
+		return fmt.Errorf("write node key: %w", err)
+	}
+
+	// Encode CA cert and key for manifest (shared with peers during LAN setup).
+	caCertPEM := tlsca.EncodeCertPEM(caCert)
+	caKeyPEM, err := tlsca.EncodeKeyPEM(caKey)
+	if err != nil {
+		return fmt.Errorf("encode CA key: %w", err)
+	}
+
 	manifest := QuorumManifest{
 		ChainID:     "sage-quorum",
 		GenesisTime: genesisTime.Format(time.RFC3339Nano),
+		CACert:      caCertPEM,
+		CAKey:       caKeyPEM,
 		Validators: []ManifestValidator{
 			{
 				Address: fmt.Sprintf("%X", pv.Key.PubKey.Address()),
@@ -137,6 +169,8 @@ func runQuorumInit() error {
 	fmt.Printf("  File:    %s\n", outPath)
 	fmt.Printf("  Node:    %s (%s)\n", name, nodeKey.ID())
 	fmt.Printf("  Address: %s\n", address)
+	fmt.Printf("  TLS CA:  %s\n", filepath.Join(certsDir, tlsca.CACertFile))
+	fmt.Printf("  TLS Cert: %s\n", filepath.Join(certsDir, tlsca.NodeCertFile))
 	fmt.Println()
 	fmt.Println("Send this file to peer nodes, then run:")
 	fmt.Println("  sage-gui quorum-join --manifest <peer-manifest.json> --name <this-node> --address <this-host:port>")
@@ -295,6 +329,46 @@ func runQuorumJoin() error {
 		os.MkdirAll(badgerPath, 0700) //nolint:errcheck
 	}
 
+	// Set up TLS certificates from the peer manifest's CA.
+	certsDir := filepath.Join(home, "certs")
+	if peerManifest.CACert != "" && peerManifest.CAKey != "" {
+		if mkErr := os.MkdirAll(certsDir, 0700); mkErr != nil {
+			return fmt.Errorf("create certs directory: %w", mkErr)
+		}
+
+		// Write the shared CA cert and key from the manifest.
+		caCert, caErr := tlsca.DecodeCertPEM(peerManifest.CACert)
+		if caErr != nil {
+			return fmt.Errorf("decode CA cert from manifest: %w", caErr)
+		}
+		caKey, keyErr := tlsca.DecodeKeyPEM(peerManifest.CAKey)
+		if keyErr != nil {
+			return fmt.Errorf("decode CA key from manifest: %w", keyErr)
+		}
+
+		if writeErr := tlsca.WriteCert(filepath.Join(certsDir, tlsca.CACertFile), caCert); writeErr != nil {
+			return fmt.Errorf("write CA cert: %w", writeErr)
+		}
+		if writeErr := tlsca.WriteKey(filepath.Join(certsDir, tlsca.CAKeyFile), caKey); writeErr != nil {
+			return fmt.Errorf("write CA key: %w", writeErr)
+		}
+
+		// Generate this node's TLS certificate signed by the quorum CA.
+		host := tlsca.ParseHostPort(address)
+		nodeCert, nodeKeyTLS, certErr := tlsca.GenerateNodeCert(caCert, caKey, string(nodeKey.ID()), []string{host})
+		if certErr != nil {
+			return fmt.Errorf("generate node TLS cert: %w", certErr)
+		}
+		if writeErr := tlsca.WriteCert(filepath.Join(certsDir, tlsca.NodeCertFile), nodeCert); writeErr != nil {
+			return fmt.Errorf("write node cert: %w", writeErr)
+		}
+		if writeErr := tlsca.WriteKey(filepath.Join(certsDir, tlsca.NodeKeyFile), nodeKeyTLS); writeErr != nil {
+			return fmt.Errorf("write node key: %w", writeErr)
+		}
+
+		fmt.Printf("  TLS:        certificates generated from quorum CA\n")
+	}
+
 	// Update config.yaml with quorum settings
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -306,10 +380,13 @@ func runQuorumJoin() error {
 		return fmt.Errorf("save config: %w", err)
 	}
 
-	// Export our manifest so the peer can do the same
+	// Export our manifest so the peer can do the same.
+	// Include CA cert/key so both nodes share the same trust root.
 	ourPubKeyB64 := base64.StdEncoding.EncodeToString(pv.Key.PubKey.Bytes())
 	ourManifest := QuorumManifest{
 		ChainID: peerManifest.ChainID,
+		CACert:  peerManifest.CACert,
+		CAKey:   peerManifest.CAKey,
 		Validators: []ManifestValidator{
 			{
 				Address: fmt.Sprintf("%X", pv.Key.PubKey.Address()),

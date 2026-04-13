@@ -51,10 +51,15 @@ class AsyncSageClient:
         base_url: str,
         identity: AgentIdentity,
         timeout: float = 30.0,
+        ca_cert: str | bool | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._identity = identity
-        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout)
+        if ca_cert is None:
+            verify: bool | str = True
+        else:
+            verify = ca_cert
+        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout, verify=verify)
 
     async def _request(
         self,

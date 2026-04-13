@@ -10,8 +10,9 @@ import (
 	"github.com/l33tdawg/sage/internal/store"
 )
 
-// GenerateBundle creates a ZIP bundle for an agent containing keys and config.
-func GenerateBundle(bundleDir string, agent *store.AgentEntry, seed []byte, primaryAddr string) (string, error) {
+// GenerateBundle creates a ZIP bundle for an agent containing keys, config, and CA cert.
+// If caCertPEM is non-empty, the quorum CA certificate is included for TLS verification.
+func GenerateBundle(bundleDir string, agent *store.AgentEntry, seed []byte, primaryAddr string, caCertPEM ...string) (string, error) {
 	if err := os.MkdirAll(bundleDir, 0700); err != nil {
 		return "", fmt.Errorf("create bundle dir: %w", err)
 	}
@@ -46,18 +47,22 @@ quorum:
 		return "", err
 	}
 
-	// .mcp.json
-	mcpJSON := `{
+	// .mcp.json — use HTTPS if CA cert is included (quorum mode with TLS).
+	apiURL := "http://localhost:8080"
+	if len(caCertPEM) > 0 && caCertPEM[0] != "" {
+		apiURL = "https://localhost:8443"
+	}
+	mcpJSON := fmt.Sprintf(`{
   "mcpServers": {
     "sage": {
       "command": "sage-gui",
       "args": ["mcp"],
       "env": {
-        "SAGE_API_URL": "http://localhost:8080"
+        "SAGE_API_URL": "%s"
       }
     }
   }
-}`
+}`, apiURL)
 	if err := addToZip(zw, prefix+".mcp.json", []byte(mcpJSON)); err != nil {
 		return "", err
 	}
@@ -84,6 +89,13 @@ to include this agent in the validator set.
 		clearanceLabel(agent.Clearance), primaryAddr)
 	if err := addToZip(zw, prefix+"SETUP.txt", []byte(setupTxt)); err != nil {
 		return "", err
+	}
+
+	// Include quorum CA certificate for TLS verification (v6.5+).
+	if len(caCertPEM) > 0 && caCertPEM[0] != "" {
+		if err := addToZip(zw, prefix+"ca.crt", []byte(caCertPEM[0])); err != nil {
+			return "", err
+		}
 	}
 
 	if err := zw.Close(); err != nil {

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -13,7 +14,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/tlsca"
 )
 
 // JSON-RPC types.
@@ -72,9 +77,11 @@ type Server struct {
 }
 
 // NewServer creates a new MCP server instance.
+// If baseURL is empty, defaults to https://localhost:8443 when TLS certs exist
+// (quorum mode), otherwise http://localhost:8080 (personal mode).
 func NewServer(baseURL string, agentKey ed25519.PrivateKey) *Server {
 	if baseURL == "" {
-		baseURL = "http://localhost:8080"
+		baseURL = defaultBaseURL()
 	}
 	pub, _ := agentKey.Public().(ed25519.PublicKey) //nolint:errcheck
 	s := &Server{
@@ -82,7 +89,7 @@ func NewServer(baseURL string, agentKey ed25519.PrivateKey) *Server {
 		agentKey:   agentKey,
 		agentID:    hex.EncodeToString(pub),
 		provider:   os.Getenv("SAGE_PROVIDER"),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: mcpHTTPClient(baseURL),
 		version:    "dev",
 	}
 	s.tools = s.registerTools()
@@ -474,4 +481,67 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 		return json.Unmarshal(respBody, out)
 	}
 	return nil
+}
+
+// defaultBaseURL returns the default SAGE API URL based on whether TLS certs exist.
+// Quorum mode (certs present) → https://localhost:8443
+// Personal mode (no certs) → http://localhost:8080
+func defaultBaseURL() string {
+	home := os.Getenv("SAGE_HOME")
+	if home == "" {
+		if userHome, err := os.UserHomeDir(); err == nil {
+			home = filepath.Join(userHome, ".sage")
+		}
+	}
+	if home != "" {
+		if tlsca.CertsExist(filepath.Join(home, "certs")) {
+			return "https://localhost:8443"
+		}
+	}
+	return "http://localhost:8080"
+}
+
+// mcpHTTPClient returns an *http.Client configured for TLS if the baseURL uses https://.
+// For plain http:// URLs, returns a simple client with a timeout.
+// Checks SAGE_CA_CERT env var first, then ~/.sage/certs/, then falls back to system CAs.
+func mcpHTTPClient(baseURL string) *http.Client {
+	if !strings.HasPrefix(baseURL, "https://") {
+		return &http.Client{Timeout: 30 * time.Second}
+	}
+
+	// Try SAGE_CA_CERT env var first (explicit CA path).
+	if caPath := os.Getenv("SAGE_CA_CERT"); caPath != "" {
+		tlsCfg, err := tlsca.ClientTLSConfigFromCA(caPath)
+		if err == nil {
+			return &http.Client{
+				Timeout:   30 * time.Second,
+				Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			}
+		}
+		fmt.Fprintf(os.Stderr, "SAGE MCP: SAGE_CA_CERT=%s failed to load: %v (falling back)\n", caPath, err)
+	}
+
+	// Try certs directory (~/.sage/certs/ or $SAGE_HOME/certs/).
+	home := os.Getenv("SAGE_HOME")
+	if home == "" {
+		if userHome, err := os.UserHomeDir(); err == nil {
+			home = filepath.Join(userHome, ".sage")
+		}
+	}
+	if home != "" {
+		certsDir := filepath.Join(home, "certs")
+		tlsCfg, err := tlsca.ClientTLSConfig(certsDir)
+		if err == nil {
+			return &http.Client{
+				Timeout:   30 * time.Second,
+				Transport: &http.Transport{TLSClientConfig: tlsCfg},
+			}
+		}
+	}
+
+	// Fall back to system CAs — works with properly-signed certs (e.g. Let's Encrypt).
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13}},
+	}
 }

@@ -315,5 +315,6 @@ func doSignedHTTP(method, url string, body []byte, agentID string, priv ed25519.
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
 	req.Header.Set("X-Signature", hex.EncodeToString(sig))
 
-	return http.DefaultClient.Do(req) //nolint:gosec // internal API call
+	client := tlsAwareClient(url)
+	return client.Do(req) //nolint:gosec // internal API call
 }

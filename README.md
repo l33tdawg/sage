@@ -57,13 +57,22 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What’s New in v6.0
+## What’s New in v6.5
+
+- **Encrypted Node-to-Node Communication** — REST API TLS support for quorum mode. Per-quorum ECDSA P-256 certificate authority, auto-generated during `quorum-init`/`quorum-join`. Dual-listener pattern: TLS on `:8443` for network traffic, plain HTTP on `localhost:8080` for dashboard/MCP.
+- **CometBFT P2P Already Encrypted** — Verified that CometBFT v0.38.15 encrypts all validator-to-validator gossip via SecretConnection (X25519 DH + ChaCha20-Poly1305). No plaintext memories on the wire.
+- **TLS Certificate Infrastructure** — New `internal/tlsca/` package: CA generation, node cert generation, PEM I/O, TLS config builders. Certificates distributed via quorum manifest during pairing.
+- **TLS-Aware Clients** — Go internal clients (MCP server, seed, vault, CLI) auto-detect `https://` URLs and load quorum CA. Python SDK v6.1.0 adds `ca_cert` parameter. `SAGE_CA_CERT` env var for explicit CA path.
+- **`cert-status` CLI** — `sage-gui cert-status` shows CA/node cert expiry, fingerprints, 30-day warnings.
+- **Docker TLS Support** — `amid` binary supports `--tls-cert`, `--tls-key`, `--tls-ca` flags. Production compose mounts cert volumes per node.
+- **Foundation for v7.0** — Certificates include `ExtKeyUsageClientAuth` for future mTLS. Per-quorum CA model supports cross-quorum federation by exchanging CA certs.
+
+### v6.0 Highlights
 
 - **Dynamic Validator Governance** — Validators can now be added, removed, and have their power updated **without stopping the chain**. Admin agents submit governance proposals, validators vote on-chain with 2/3 BFT quorum, and CometBFT applies validator set changes at consensus level. Zero downtime.
 - **On-Chain Governance Engine** — New `internal/governance/` package with deterministic integer-only quorum math, proposal lifecycle (voting → executed/rejected/expired/cancelled), proposer cooldown, min voting period, and power constraints. All state in BadgerDB, included in AppHash.
 - **Governance Dashboard** — New Governance section in the CEREBRUM Network page. Active proposal cards with vote tally, quorum progress bar, expiry countdown, and one-click voting. Proposal history with status badges. "New Proposal" wizard for admins.
 - **Security Constraints** — 1/3 max power for new validators (prevents single-add takeover), min 2 validators after removal, 50-block proposer cooldown (prevents grief), 500-block max proposal TTL (prevents governance lockup), admin-only proposals, validator-only voting.
-- **Foundation for v6.5/v7.0** — This governance layer is required before encrypted node-to-node tunnels (v6.5) and internet federation (v7.0). Without hot validator eviction, internet-facing nodes would require full chain restart to remove bad actors.
 
 ### v5.x Highlights
 

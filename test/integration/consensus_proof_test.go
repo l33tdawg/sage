@@ -3,13 +3,20 @@
 package integration
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// uniqueDomain returns a test domain name with a timestamp suffix to avoid RBAC conflicts.
+func uniqueDomain(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano()%1000000)
+}
 
 func TestConsensusAgreement(t *testing.T) {
 	requireNetwork(t)
@@ -19,7 +26,7 @@ func TestConsensusAgreement(t *testing.T) {
 	// Submit a memory to node 0's REST API.
 	result, status := submitMemory(t, agent,
 		"Consensus agreement test: all nodes should see this memory",
-		"consensus_test", "fact", 0.9)
+		uniqueDomain("consensus"), "fact", 0.9)
 	require.Equal(t, http.StatusCreated, status)
 
 	memoryID, ok := result["memory_id"].(string)
@@ -107,7 +114,7 @@ func TestStateConsistencyAfterTx(t *testing.T) {
 	// Submit memory and wait for it to propagate.
 	result, status := submitMemory(t, agent,
 		"State consistency test memory",
-		"state_test", "observation", 0.8)
+		uniqueDomain("state"), "observation", 0.8)
 	require.Equal(t, http.StatusCreated, status)
 
 	memoryID := result["memory_id"].(string)
@@ -149,7 +156,7 @@ func TestFaultTolerance(t *testing.T) {
 	// Step 1: Submit memories and verify they commit with all 4 nodes up.
 	result, status := submitMemory(t, agent,
 		"Fault tolerance baseline memory",
-		"fault_test", "fact", 0.85)
+		uniqueDomain("fault"), "fact", 0.85)
 	require.Equal(t, http.StatusCreated, status)
 	baselineID := result["memory_id"].(string)
 	t.Logf("Baseline memory submitted: %s", baselineID)
@@ -170,7 +177,7 @@ func TestFaultTolerance(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		result, status := submitMemory(t, agent,
 			"Fault tolerance load test memory",
-			"fault_test", "observation", 0.7)
+			uniqueDomain("fault-load"), "observation", 0.7)
 		assert.Equal(t, http.StatusCreated, status, "submit %d should succeed", i)
 		assert.NotEmpty(t, result["memory_id"])
 	}

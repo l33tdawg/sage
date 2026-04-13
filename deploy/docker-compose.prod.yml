@@ -10,7 +10,7 @@
 #
 # Prerequisites:
 #   - Set POSTGRES_PASSWORD to a strong, unique secret (not default)
-#   - Generate TLS certificates and mount them if enabling inter-node TLS
+#   - Generate TLS certificates via quorum-init/join and mount them (see v6.5 docs)
 #   - Set CORS_ALLOWED_ORIGINS to your actual frontend domain(s)
 
 services:
@@ -30,33 +30,53 @@ services:
     environment:
       POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=require"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS:?Set CORS_ALLOWED_ORIGINS for production}"
+      TLS_CERT: "/certs/node.crt"
+      TLS_KEY: "/certs/node.key"
+      TLS_CA: "/certs/ca.crt"
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - ./certs/node0:/certs:ro
 
   abci1:
     environment:
       POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=require"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
+      TLS_CERT: "/certs/node.crt"
+      TLS_KEY: "/certs/node.key"
+      TLS_CA: "/certs/ca.crt"
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - ./certs/node1:/certs:ro
 
   abci2:
     environment:
       POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=require"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
+      TLS_CERT: "/certs/node.crt"
+      TLS_KEY: "/certs/node.key"
+      TLS_CA: "/certs/ca.crt"
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - ./certs/node2:/certs:ro
 
   abci3:
     environment:
       POSTGRES_URL: "postgres://sage:${POSTGRES_PASSWORD}@postgres:5432/sage?sslmode=require"
       CORS_ALLOWED_ORIGINS: "${CORS_ALLOWED_ORIGINS}"
+      TLS_CERT: "/certs/node.crt"
+      TLS_KEY: "/certs/node.key"
+      TLS_CA: "/certs/ca.crt"
     read_only: true
     tmpfs:
       - /tmp
+    volumes:
+      - ./certs/node3:/certs:ro
 
   # Bind CometBFT RPC to internal network only — prevents external bypass of REST auth
   cometbft0:

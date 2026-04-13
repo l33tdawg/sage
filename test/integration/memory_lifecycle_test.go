@@ -3,8 +3,10 @@
 package integration
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,7 +29,7 @@ func TestFullMemoryLifecycle(t *testing.T) {
 	// Step 1: Submit memory — should start in Proposed status.
 	result, status := submitMemory(t, proposer,
 		"Flask web challenges with SQLi require prepared statements bypass",
-		"challenge_generation", "fact", 0.85)
+		fmt.Sprintf("challenge-%d", time.Now().UnixNano()%1000000), "fact", 0.85)
 	require.Equal(t, http.StatusCreated, status, "submit should return 201")
 
 	memoryID, ok := result["memory_id"].(string)
@@ -45,7 +47,7 @@ func TestFullMemoryLifecycle(t *testing.T) {
 	assert.Equal(t, memoryID, detail["memory_id"])
 	assert.Equal(t, "proposed", detail["status"])
 	assert.Equal(t, "fact", detail["memory_type"])
-	assert.Equal(t, "challenge_generation", detail["domain_tag"])
+	assert.Contains(t, detail["domain_tag"], "challenge-")
 	assert.NotEmpty(t, detail["content_hash"])
 
 	// Step 3: Cast votes via different nodes so each has a distinct validator identity.
@@ -108,7 +110,14 @@ func TestMemorySubmitBatch(t *testing.T) {
 	memoryIDs := make([]string, 0, 5)
 
 	// Submit 5 memories across different domains.
-	domains := []string{"crypto", "web", "forensics", "reversing", "pwn"}
+	ts := time.Now().UnixNano() % 1000000
+	domains := []string{
+		fmt.Sprintf("crypto-%d", ts),
+		fmt.Sprintf("web-%d", ts),
+		fmt.Sprintf("forensics-%d", ts),
+		fmt.Sprintf("reversing-%d", ts),
+		fmt.Sprintf("pwn-%d", ts),
+	}
 	for i, domain := range domains {
 		result, status := submitMemory(t, agent,
 			"Batch integration test memory content for "+domain,

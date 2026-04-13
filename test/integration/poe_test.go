@@ -3,8 +3,10 @@
 package integration
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,7 +30,7 @@ func TestPoEScoreDivergence(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		result, status := submitMemory(t, proposer,
 			"High quality PoE test fact with strong evidence",
-			"crypto", "fact", 0.9)
+			fmt.Sprintf("crypto-%d", time.Now().UnixNano()%1000000), "fact", 0.9)
 		require.Equal(t, http.StatusCreated, status)
 		memID := result["memory_id"].(string)
 		goodMemories = append(goodMemories, memID)
@@ -38,7 +40,7 @@ func TestPoEScoreDivergence(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		result, status := submitMemory(t, proposer,
 			"Low quality unverified claim",
-			"crypto", "inference", 0.2)
+			fmt.Sprintf("crypto-%d", time.Now().UnixNano()%1000000), "inference", 0.2)
 		require.Equal(t, http.StatusCreated, status)
 		memID := result["memory_id"].(string)
 		badMemories = append(badMemories, memID)
@@ -166,7 +168,7 @@ func TestPoEEpochBoundary(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		result, status := submitMemory(t, agent,
 			"PoE epoch boundary test memory",
-			"crypto", "observation", 0.75)
+			fmt.Sprintf("crypto-%d", time.Now().UnixNano()%1000000), "observation", 0.75)
 		assert.Equal(t, http.StatusCreated, status, "submit %d should succeed", i)
 		assert.NotEmpty(t, result["memory_id"])
 	}

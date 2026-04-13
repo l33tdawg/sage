@@ -3,6 +3,7 @@ package rest
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -300,6 +301,21 @@ func (s *Server) Start(addr string) error {
 	}
 	s.logger.Info().Str("addr", addr).Msg("starting REST API server")
 	return s.httpServer.ListenAndServe()
+}
+
+// StartTLS begins listening with TLS on the given address.
+// Certificates are loaded from the provided tls.Config (not from file paths).
+func (s *Server) StartTLS(addr string, tlsConfig *tls.Config) error {
+	s.httpServer = &http.Server{
+		Addr:         addr,
+		Handler:      s.router,
+		TLSConfig:    tlsConfig,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+	s.logger.Info().Str("addr", addr).Msg("starting REST API server (TLS)")
+	return s.httpServer.ListenAndServeTLS("", "") // Certs from TLSConfig.
 }
 
 // Shutdown gracefully shuts down the server.

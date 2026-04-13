@@ -9,30 +9,40 @@ import (
 	"io"
 	"net/http"
 	neturl "net/url"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/auth"
 )
 
-const (
-	defaultAPIURL    = "http://localhost:8080"
-	defaultCometRPC0 = "http://localhost:26657"
-	defaultCometRPC1 = "http://localhost:26757"
-	defaultCometRPC2 = "http://localhost:26857"
-	defaultCometRPC3 = "http://localhost:26957"
+// Port defaults — overridable via SAGE_TEST_API_PORT and SAGE_TEST_RPC_PORT
+// for running tests against a Docker cluster that uses non-standard ports
+// (e.g., when local sage-gui is already running on 8080/26657).
+var (
+	defaultAPIURL    = envOrDefault("SAGE_TEST_API_URL", "http://localhost:8080")
+	defaultCometRPC0 = envOrDefault("SAGE_TEST_RPC0", "http://localhost:26657")
+	defaultCometRPC1 = envOrDefault("SAGE_TEST_RPC1", "http://localhost:26757")
+	defaultCometRPC2 = envOrDefault("SAGE_TEST_RPC2", "http://localhost:26857")
+	defaultCometRPC3 = envOrDefault("SAGE_TEST_RPC3", "http://localhost:26957")
 
 	cometRPCCount = 4
 )
 
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 // allAPIURLs returns REST API URLs for all 4 validator nodes.
 func allAPIURLs() []string {
-	return []string{
-		"http://localhost:8080",
-		"http://localhost:8081",
-		"http://localhost:8082",
-		"http://localhost:8083",
-	}
+	base0 := envOrDefault("SAGE_TEST_API0", defaultAPIURL)
+	base1 := envOrDefault("SAGE_TEST_API1", "http://localhost:8081")
+	base2 := envOrDefault("SAGE_TEST_API2", "http://localhost:8082")
+	base3 := envOrDefault("SAGE_TEST_API3", "http://localhost:8083")
+	return []string{base0, base1, base2, base3}
 }
 
 // allCometRPCs returns all validator RPC URLs.

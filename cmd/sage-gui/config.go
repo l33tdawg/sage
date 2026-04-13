@@ -36,6 +36,7 @@ type QuorumConfig struct {
 	Enabled bool     `yaml:"enabled"`           // Enable quorum mode (multi-validator)
 	Peers   []string `yaml:"peers,omitempty"`    // Persistent peers (nodeID@host:port)
 	P2PAddr string   `yaml:"p2p_addr,omitempty"` // P2P listen address (default: tcp://0.0.0.0:26656)
+	TLSAddr string   `yaml:"tls_addr,omitempty"` // TLS REST listen address (default: 0.0.0.0:8443)
 }
 
 // EncryptionConfig controls AES-256-GCM encryption of memory content at rest.

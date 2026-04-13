@@ -572,7 +572,8 @@ func claimAgentIdentity(sageHome, token, keyPath string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec // internal API call
+	client := tlsAwareClient(baseURL)
+	resp, err := client.Do(req) //nolint:gosec // internal API call
 	if err != nil {
 		return fmt.Errorf("connect to SAGE: %w (is sage-gui serve running?)", err)
 	}

@@ -36,6 +36,7 @@ import (
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/orchestrator"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/tlsca"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
 	"github.com/l33tdawg/sage/web"
@@ -427,6 +428,40 @@ func runServe() error {
 		}
 	}
 
+	// TLS listener for quorum mode: encrypted REST on a separate port.
+	// Plain HTTP stays on localhost for dashboard/MCP backward compatibility.
+	var tlsServer *http.Server
+	if cfg.Quorum.Enabled {
+		certsDir := filepath.Join(SageHome(), "certs")
+		if tlsca.CertsExist(certsDir) {
+			tlsCfg, tlsErr := tlsca.ServerTLSConfig(certsDir)
+			if tlsErr != nil {
+				logger.Warn().Err(tlsErr).Msg("TLS certs found but failed to load — running without TLS")
+			} else {
+				tlsAddr := cfg.Quorum.TLSAddr
+				if tlsAddr == "" {
+					tlsAddr = "0.0.0.0:8443"
+				}
+				tlsServer = &http.Server{
+					Addr:         tlsAddr,
+					Handler:      r,
+					TLSConfig:    tlsCfg,
+					ReadTimeout:  15 * time.Second,
+					WriteTimeout: 15 * time.Second,
+					IdleTimeout:  60 * time.Second,
+				}
+				go func() {
+					logger.Info().Str("addr", tlsAddr).Msg("TLS REST API server starting")
+					if tlsServeErr := tlsServer.ListenAndServeTLS("", ""); tlsServeErr != nil && tlsServeErr != http.ErrServerClosed {
+						logger.Error().Err(tlsServeErr).Msg("TLS server error")
+					}
+				}()
+			}
+		} else {
+			logger.Warn().Msg("quorum mode but no TLS certs found — run quorum-init/join to generate certificates")
+		}
+	}
+
 	go func() {
 		logger.Info().
 			Str("addr", cfg.RESTAddr).
@@ -435,7 +470,11 @@ func runServe() error {
 
 		fmt.Fprintf(os.Stderr, "\n  SAGE Personal is running!\n")
 		fmt.Fprintf(os.Stderr, "  CEREBRUM:  http://%s/ui/\n", displayAddr)
-		fmt.Fprintf(os.Stderr, "  REST API:  http://%s/v1/\n\n", displayAddr)
+		fmt.Fprintf(os.Stderr, "  REST API:  http://%s/v1/\n", displayAddr)
+		if tlsServer != nil {
+			fmt.Fprintf(os.Stderr, "  TLS API:   https://%s/v1/\n", tlsServer.Addr)
+		}
+		fmt.Fprintf(os.Stderr, "\n")
 
 		// Auto-open dashboard in browser (unless suppressed by tray app)
 		if os.Getenv("SAGE_NO_BROWSER") == "" {
@@ -488,6 +527,9 @@ func runServe() error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if tlsServer != nil {
+		_ = tlsServer.Shutdown(shutdownCtx)
+	}
 	return httpServer.Shutdown(shutdownCtx)
 }
 

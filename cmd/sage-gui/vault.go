@@ -81,7 +81,8 @@ func runExport() error {
 	for {
 		listURL := fmt.Sprintf("%s/v1/dashboard/memory/list?limit=%d&offset=%d&sort=oldest", baseURL, limit, offset)
 		listReq, _ := http.NewRequestWithContext(context.Background(), "GET", listURL, nil) //nolint:gosec // listURL built from config baseURL
-		resp, doErr := http.DefaultClient.Do(listReq) //nolint:gosec // internal API call
+		client := tlsAwareClient(baseURL)
+		resp, doErr := client.Do(listReq) //nolint:gosec // internal API call
 		if doErr != nil {
 			return fmt.Errorf("fetch memories (is sage-gui serve running?): %w", doErr)
 		}
@@ -291,7 +292,8 @@ func doSignedRequest(baseURL string, key ed25519.PrivateKey, method, path string
 	req.Header.Set("X-Signature", fmt.Sprintf("%x", sig))
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
 
-	resp, err := http.DefaultClient.Do(req) //nolint:gosec // internal API call
+	client := tlsAwareClient(baseURL)
+	resp, err := client.Do(req) //nolint:gosec // internal API call
 	if err != nil {
 		return nil, err
 	}
