@@ -814,6 +814,11 @@ func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore sto
 	time.Sleep(3 * time.Second)
 	logger.Info().Int("count", 4).Msg("app validators started — BFT memory consensus active")
 
+	// Track memories already voted on this session to prevent re-voting.
+	// Without this, stuck memories (e.g. 2-2 ties) trigger 4 vote txs every
+	// tick forever, flooding the chain with redundant transactions.
+	voted := make(map[string]bool)
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -827,6 +832,9 @@ func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore sto
 				continue
 			}
 			for _, mem := range pending {
+				if voted[mem.MemoryID] {
+					continue
+				}
 				contentHash := hex.EncodeToString(mem.ContentHash)
 				for _, v := range validators {
 					decision, rationale := v.validate(mem.Content, contentHash, mem.DomainTag, string(mem.MemoryType), mem.ConfidenceScore)
@@ -857,6 +865,7 @@ func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore sto
 					// Broadcast to CometBFT
 					broadcastVoteTx(cometRPC, encoded, logger)
 				}
+				voted[mem.MemoryID] = true
 			}
 		}
 	}

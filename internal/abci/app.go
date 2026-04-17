@@ -862,6 +862,29 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 				At:       blockTime,
 			},
 		})
+	} else if len(votes) >= len(validators) && len(validators) > 0 {
+		// All validators voted but quorum not reached (e.g. 2-2 tie) — deprecate.
+		// Without this, the memory stays "proposed" forever and the validator
+		// ticker resubmits votes every 2 seconds, flooding the chain.
+		if err := app.badgerStore.SetMemoryHash(memoryID, nil, string(memory.StatusDeprecated)); err == nil {
+			app.logger.Info().
+				Str("memory_id", memoryID).
+				Int64("height", height).
+				Float64("accept_weight", acceptWeight).
+				Float64("total_weight", totalWeight).
+				Int("votes", len(votes)).
+				Int("validators", len(validators)).
+				Msg("memory rejected — all validators voted, quorum not reached")
+		}
+
+		app.pendingWrites = append(app.pendingWrites, pendingWrite{
+			writeType: "status_update",
+			data: &statusUpdate{
+				MemoryID: memoryID,
+				Status:   memory.StatusDeprecated,
+				At:       blockTime,
+			},
+		})
 	}
 }
 
