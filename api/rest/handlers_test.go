@@ -505,6 +505,72 @@ func TestVoteMemory_InvalidDecision(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
+func TestForgetMemory_Success(t *testing.T) {
+	var capturedTxHex string
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedTxHex = r.URL.Query().Get("tx")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{"code": 0, "hash": "FORGETHASH", "log": ""},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, memStore, _ := newTestServer(t, cometMock.URL)
+	memStore.memories["target"] = &memory.MemoryRecord{
+		MemoryID:   "target",
+		MemoryType: memory.TypeObservation,
+		DomainTag:  "general",
+		Status:     memory.StatusCommitted,
+		CreatedAt:  time.Now(),
+	}
+
+	body := []byte(`{"reason":"duplicate of target-2"}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/target/forget", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+	var resp ForgetResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "FORGETHASH", resp.TxHash)
+	assert.NotEmpty(t, capturedTxHex, "broadcast should have been invoked")
+}
+
+func TestForgetMemory_DefaultReasonWhenOmitted(t *testing.T) {
+	// The endpoint accepts an empty body and substitutes a default reason —
+	// unlike challenge which requires a non-empty reason.
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{"code": 0, "hash": "FORGETHASH2"},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, memStore, _ := newTestServer(t, cometMock.URL)
+	memStore.memories["target"] = &memory.MemoryRecord{
+		MemoryID: "target",
+		Status:   memory.StatusCommitted,
+	}
+
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/target/forget", []byte(`{}`))
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+}
+
+func TestForgetMemory_NotFound(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/missing/forget", []byte(`{}`))
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
 func TestGetAgent(t *testing.T) {
 	srv, _, scoreStore := newTestServer(t, "")
 

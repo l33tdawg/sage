@@ -167,6 +167,10 @@ class CorroborateRequest(BaseModel):
     evidence: str | None = None
 
 
+class ForgetRequest(BaseModel):
+    reason: str | None = None
+
+
 # --- Agent Models ---
 
 class AgentProfile(BaseModel):

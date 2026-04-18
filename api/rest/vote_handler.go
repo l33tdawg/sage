@@ -41,6 +41,19 @@ type ChallengeResponse struct {
 	TxHash  string `json:"tx_hash"`
 }
 
+// ForgetRequest is the JSON body for POST /v1/memory/{memory_id}/forget.
+// Thin semantic alias for challenge — "forget" is the user-facing verb used
+// across MCP (sage_forget), dashboard events, and now REST.
+type ForgetRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// ForgetResponse is the JSON body for a successful forget.
+type ForgetResponse struct {
+	Message string `json:"message"`
+	TxHash  string `json:"tx_hash"`
+}
+
 // CorroborateRequest is the JSON body for POST /v1/memory/{memory_id}/corroborate.
 type CorroborateRequest struct {
 	Evidence string `json:"evidence,omitempty"`
@@ -223,6 +236,82 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, ChallengeResponse{
 		Message: "Challenge submitted successfully.",
+		TxHash:  txHash,
+	})
+}
+
+// handleForgetMemory handles POST /v1/memory/{memory_id}/forget.
+// Semantic alias for challenge — delegates to the same MemoryChallenge tx path
+// with a default reason when the caller doesn't supply one. Lets SDK/REST
+// consumers use the same "forget" verb already exposed via MCP (sage_forget)
+// and dashboard events.
+func (s *Server) handleForgetMemory(w http.ResponseWriter, r *http.Request) {
+	memoryID := chi.URLParam(r, "memory_id")
+	if memoryID == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing memory ID", "memory_id path parameter is required.")
+		return
+	}
+
+	var req ForgetRequest
+	var err error
+	if err = decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+
+	reason := req.Reason
+	if reason == "" {
+		reason = "deprecated by user"
+	}
+
+	if _, err = s.store.GetMemory(r.Context(), memoryID); err != nil {
+		writeProblem(w, http.StatusNotFound, "Memory not found",
+			fmt.Sprintf("No memory found with ID %s.", memoryID))
+		return
+	}
+
+	challengeTx := &tx.ParsedTx{
+		Type:      tx.TxTypeMemoryChallenge,
+		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Timestamp: time.Now(),
+		MemoryChallenge: &tx.MemoryChallenge{
+			MemoryID: memoryID,
+			Reason:   reason,
+		},
+	}
+
+	embedAgentAuth(r.Context(), challengeTx)
+
+	if err = tx.SignTx(challengeTx, s.signingKey); err != nil {
+		s.logger.Error().Err(err).Msg("failed to sign forget tx")
+		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
+		return
+	}
+
+	encoded, err := tx.EncodeTx(challengeTx)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to encode forget tx")
+		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
+		return
+	}
+
+	txHash, err := s.broadcastTx(encoded)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to broadcast forget tx")
+		writeProblem(w, http.StatusInternalServerError, "Broadcast error", "Failed to broadcast transaction to CometBFT.")
+		return
+	}
+
+	metrics.ChallengesTotal.Inc()
+
+	if s.OnEvent != nil {
+		s.OnEvent("forget", memoryID, "", reason, map[string]any{
+			"tx_hash": txHash,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, ForgetResponse{
+		Message: "Memory forgotten.",
 		TxHash:  txHash,
 	})
 }

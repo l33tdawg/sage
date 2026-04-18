@@ -56,6 +56,27 @@ def test_vote(client, mock_api):
     assert result["message"] == "vote recorded"
 
 
+def test_forget_with_reason(client, mock_api):
+    memory_id = "550e8400-e29b-41d4-a716-446655440000"
+    route = mock_api.post(f"/v1/memory/{memory_id}/forget").mock(
+        return_value=httpx.Response(200, json={"message": "Memory forgotten.", "tx_hash": "FORGETHASH"})
+    )
+    result = client.forget(memory_id, reason="duplicate")
+    assert result["tx_hash"] == "FORGETHASH"
+    assert route.calls.last.request.read() == b'{"reason":"duplicate"}'
+
+
+def test_forget_without_reason(client, mock_api):
+    # Caller can omit reason; server substitutes a default. SDK sends empty body.
+    memory_id = "550e8400-e29b-41d4-a716-446655440000"
+    route = mock_api.post(f"/v1/memory/{memory_id}/forget").mock(
+        return_value=httpx.Response(200, json={"message": "Memory forgotten.", "tx_hash": "FORGETHASH2"})
+    )
+    result = client.forget(memory_id)
+    assert result["tx_hash"] == "FORGETHASH2"
+    assert route.calls.last.request.read() == b'{}'
+
+
 def test_error_handling(client, mock_api, sample_error_response):
     from sage_sdk.exceptions import SageNotFoundError
     mock_api.get("/v1/memory/nonexistent").mock(

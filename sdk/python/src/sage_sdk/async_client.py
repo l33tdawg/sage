@@ -14,6 +14,7 @@ from sage_sdk.models import (
     AgentRegistration,
     ChallengeRequest,
     CorroborateRequest,
+    ForgetRequest,
     EpochInfo,
     GovCancelRequest,
     GovCancelResponse,
@@ -296,6 +297,25 @@ class AsyncSageClient:
         resp = await self._request(
             "POST",
             f"/v1/memory/{memory_id}/corroborate",
+            json=req.model_dump(exclude_none=True),
+        )
+        return resp.json()
+
+    async def forget(
+        self,
+        memory_id: str,
+        reason: str | None = None,
+    ) -> dict:
+        """Forget (deprecate) a memory by ID.
+
+        Thin wrapper over POST /v1/memory/{id}/forget. The server substitutes
+        a default reason when none is supplied. Returns the tx hash; the
+        memory is deprecated once the challenge tx is committed.
+        """
+        req = ForgetRequest(reason=reason)
+        resp = await self._request(
+            "POST",
+            f"/v1/memory/{memory_id}/forget",
             json=req.model_dump(exclude_none=True),
         )
         return resp.json()
