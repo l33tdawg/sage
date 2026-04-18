@@ -509,3 +509,38 @@ func TestProcessAgentSetPermissionAdminOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, uint8(1), agent.Clearance, "clearance should remain at default INTERNAL (1)")
 }
+
+// Regression for Level Up bug 1: setting visible_agents="*" (bare-string wildcard)
+// must persist end-to-end — badger on-chain AND offchain pending write — so the
+// REST query path can return seeAll=true.
+func TestProcessAgentSetPermission_WildcardVisibleAgents_PersistsThroughStack(t *testing.T) {
+	app := setupTestApp(t)
+	admin := newAgentKey(t)
+	target := newAgentKey(t)
+
+	registerAgent(t, app, admin, "admin-agent", "admin")
+	registerAgent(t, app, target, "target-agent", "member")
+
+	// Bare-string "*" is the wildcard sentinel the read path recognises —
+	// not a JSON array like ["*"] which would be treated as a literal agent-id list.
+	ptx := makeAgentSetPermissionTx(t, admin, target.id, 1, "", "*", "", "")
+	result := app.processAgentSetPermission(ptx, 2, time.Now())
+	require.Equal(t, uint32(0), result.Code, "set permission should succeed: %s", result.Log)
+
+	// Assert 1: on-chain (BadgerDB) carries the bare wildcard verbatim.
+	onChain, err := app.badgerStore.GetRegisteredAgent(target.id)
+	require.NoError(t, err)
+	assert.Equal(t, "*", onChain.VisibleAgents, "BadgerDB must store the bare-string wildcard")
+
+	// Assert 2: the offchain pending write carries it too, so flushPendingWrites
+	// will sync it to SQLite/Postgres for dashboard read paths.
+	var permWrite *agentPermissionData
+	for _, pw := range app.pendingWrites {
+		if d, ok := pw.data.(*agentPermissionData); ok && d.AgentID == target.id {
+			permWrite = d
+			break
+		}
+	}
+	require.NotNil(t, permWrite, "expected agent_permission pending write for target")
+	assert.Equal(t, "*", permWrite.VisibleAgents, "pending SQLite write must carry the wildcard")
+}
