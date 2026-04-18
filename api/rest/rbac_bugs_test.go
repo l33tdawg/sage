@@ -116,26 +116,6 @@ func seedMemory(t *testing.T, memStore *rbacMockMemoryStore, id, submitter, doma
 	}
 }
 
-// queryAsAgent issues a POST /v1/memory/query signed by the agent's key.
-func queryAsAgent(t *testing.T, srv *Server, domain string) (int, QueryMemoryResponse, string) {
-	t.Helper()
-	embedding := make([]float32, 8)
-	for i := range embedding {
-		embedding[i] = 0.1
-	}
-	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, DomainTag: domain, TopK: 10})
-	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
-
-	rr := httptest.NewRecorder()
-	srv.Router().ServeHTTP(rr, req)
-
-	var resp QueryMemoryResponse
-	if rr.Code == http.StatusOK {
-		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-	}
-	return rr.Code, resp, agentID
-}
-
 // ---------------------------------------------------------------------------
 // Bug 1: visible_agents = "*" must grant cross-agent visibility
 // ---------------------------------------------------------------------------
