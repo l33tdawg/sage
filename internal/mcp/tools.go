@@ -1212,7 +1212,7 @@ func (s *Server) toolRegister(ctx context.Context, params map[string]any) (any, 
 		Name           string `json:"name"`
 		RegisteredName string `json:"registered_name"`
 		Status         string `json:"status"`
-		RegisteredAt   int64  `json:"registered_at"`
+		OnChainHeight  int64  `json:"on_chain_height"`
 	}
 	if err := s.doSignedJSON(ctx, "POST", "/v1/agent/register", body, &resp); err != nil {
 		return nil, fmt.Errorf("register agent: %w", err)
@@ -1223,7 +1223,7 @@ func (s *Server) toolRegister(ctx context.Context, params map[string]any) (any, 
 		"name":            resp.Name,
 		"registered_name": resp.RegisteredName,
 		"status":          resp.Status,
-		"registered_at":   resp.RegisteredAt,
+		"on_chain_height": resp.OnChainHeight,
 	}, nil
 }
 

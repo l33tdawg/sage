@@ -60,7 +60,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 				"role":            existing.Role,
 				"provider":        existing.Provider,
 				"status":          "already_registered",
-				"registered_at":   existing.RegisteredAt,
+				"on_chain_height": existing.RegisteredAt,
 			})
 			return
 		}

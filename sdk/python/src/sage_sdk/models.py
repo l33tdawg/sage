@@ -186,7 +186,7 @@ class AgentRegistration(BaseModel):
     role: str | None = None
     provider: str | None = None
     status: str
-    registered_at: str | None = None
+    on_chain_height: int | None = None
     tx_hash: str | None = None
 
 

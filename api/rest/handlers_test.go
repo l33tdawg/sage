@@ -1014,6 +1014,16 @@ func TestAgentRegister_Idempotent_ReturnsOnChainName(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, "already_registered", resp["status"])
 	assert.Equal(t, "claude-code/sage", resp["name"])
+	// on_chain_height is the block-height field on the already_registered
+	// path; earlier versions mis-named it "registered_at" (causing SDK
+	// pydantic validation errors because the model declared a string type
+	// while the server sent an int). Guard against regression.
+	_, hasLegacy := resp["registered_at"]
+	assert.False(t, hasLegacy, "response must not use the legacy registered_at key")
+	height, ok := resp["on_chain_height"]
+	require.True(t, ok, "response must include on_chain_height")
+	// JSON unmarshal gives float64 for numbers.
+	assert.Equal(t, float64(1), height)
 }
 
 func TestAgentRegister_Reconcile_SQLiteNameDiffersFromOnChain(t *testing.T) {

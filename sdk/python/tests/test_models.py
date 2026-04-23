@@ -58,3 +58,41 @@ def test_vote_request():
     from sage_sdk.models import VoteRequest
     vote = VoteRequest(decision="accept", rationale="Verified correct")
     assert vote.decision == "accept"
+
+
+def test_agent_registration_parses_already_registered_response():
+    # Guards the wire format for the /v1/agent/register idempotent path.
+    # Earlier versions declared `registered_at: str` while the server sent
+    # an int (block height), producing pydantic validation errors on every
+    # re-register. The field is now `on_chain_height: int | None`.
+    from sage_sdk.models import AgentRegistration
+
+    reg = AgentRegistration.model_validate({
+        "agent_id": "abc123",
+        "name": "my-agent",
+        "registered_name": "my-agent",
+        "role": "member",
+        "provider": "test",
+        "status": "already_registered",
+        "on_chain_height": 92,
+    })
+    assert reg.on_chain_height == 92
+    assert reg.status == "already_registered"
+
+
+def test_agent_registration_fresh_register_has_no_height():
+    # Fresh-register path returns tx_hash and no on_chain_height (the block
+    # hasn't committed yet). Must still parse cleanly.
+    from sage_sdk.models import AgentRegistration
+
+    reg = AgentRegistration.model_validate({
+        "agent_id": "abc123",
+        "name": "my-agent",
+        "registered_name": "my-agent",
+        "role": "member",
+        "provider": "test",
+        "status": "registered",
+        "tx_hash": "DEADBEEF",
+    })
+    assert reg.on_chain_height is None
+    assert reg.tx_hash == "DEADBEEF"
