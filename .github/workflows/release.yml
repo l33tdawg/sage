@@ -270,6 +270,53 @@ jobs:
           git commit -m "ci: update server.json to v${{ steps.version.outputs.version }}"
           git push origin HEAD:main
 
+  pypi-publish:
+    name: Publish Python SDK to PyPI
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.deploy_pages_only }}
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify SDK version matches tag
+        # Drift guard: the SDK must be bumped in lockstep (the chore commit
+        # that normally follows the fix). If pyproject.toml still reads the
+        # prior version the publish would either collide or ship stale code.
+        # Fail fast here so the release pipeline doesn't partially-land.
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SDK_VERSION=$(grep '^version =' sdk/python/pyproject.toml | head -1 | sed -E 's/version = "(.+)"/\1/')
+          INIT_VERSION=$(grep '^__version__' sdk/python/src/sage_sdk/__init__.py | sed -E 's/__version__ = "(.+)"/\1/')
+          echo "tag=${VERSION} pyproject=${SDK_VERSION} __init__=${INIT_VERSION}"
+          if [ "${VERSION}" != "${SDK_VERSION}" ] || [ "${VERSION}" != "${INIT_VERSION}" ]; then
+            echo "::error::SDK version drift — bump sdk/python/pyproject.toml and sdk/python/src/sage_sdk/__init__.py to ${VERSION} before tagging"
+            exit 1
+          fi
+
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: '3.12'
+
+      - name: Install build backend
+        run: python -m pip install --upgrade build
+
+      - name: Build wheel + sdist
+        run: |
+          cd sdk/python
+          rm -rf dist
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4
+        with:
+          packages-dir: sdk/python/dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+
   deploy-pages:
     name: Deploy Landing Page
     runs-on: ubuntu-latest
