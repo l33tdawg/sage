@@ -36,6 +36,10 @@ type SubmitMemoryRequest struct {
 	ParentHash       string                   `json:"parent_hash,omitempty"`
 	TaskStatus       string                   `json:"task_status,omitempty"`
 	LinkedMemories   []string                 `json:"linked_memories,omitempty"`
+	// Tags are user-defined labels attached after consensus commit. They're
+	// node-local metadata (not part of the on-chain tx), queryable via the
+	// `tags` filter on /v1/memory/query and /v1/memory/search.
+	Tags []string `json:"tags,omitempty"`
 }
 
 // SubmitMemoryResponse is the JSON body for a successful submission.
@@ -54,6 +58,9 @@ type QueryMemoryRequest struct {
 	StatusFilter  string    `json:"status_filter,omitempty"`
 	TopK          int       `json:"top_k,omitempty"`
 	Cursor        string    `json:"cursor,omitempty"`
+	// Tags, when non-empty, restricts results to memories tagged with ANY
+	// of the listed values (OR semantics). SQLite-only.
+	Tags []string `json:"tags,omitempty"`
 }
 
 // QueryMemoryResponse is the JSON body for a successful query.
@@ -406,6 +413,16 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 
 	metrics.MemoriesTotal.WithLabelValues(req.MemoryType, req.DomainTag, string(memory.StatusProposed)).Inc()
 
+	// Attach user-defined tags after the block is committed. Tags are
+	// non-consensus metadata (node-local), so we set them via the store
+	// rather than folding them into the tx. broadcastTxCommit has already
+	// returned after Commit flushed the memory, so SetTags will find it.
+	if len(req.Tags) > 0 {
+		if setErr := s.store.SetTags(r.Context(), memoryID, req.Tags); setErr != nil {
+			s.logger.Warn().Err(setErr).Str("memory_id", memoryID).Msg("failed to set tags on committed memory")
+		}
+	}
+
 	// Update agent's last activity timestamp
 	if agentID != "" && s.agentStore != nil {
 		if updateErr := s.agentStore.UpdateAgentLastSeen(r.Context(), agentID, time.Now()); updateErr != nil {
@@ -513,6 +530,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		StatusFilter:  req.StatusFilter,
 		TopK:          req.TopK,
 		Cursor:        req.Cursor,
+		Tags:          req.Tags,
 	}
 	if !seeAll {
 		opts.SubmittingAgents = allowedAgents
@@ -605,12 +623,13 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 
 // SearchMemoryRequest is the JSON body for POST /v1/memory/search.
 type SearchMemoryRequest struct {
-	Query         string  `json:"query"`
-	DomainTag     string  `json:"domain_tag,omitempty"`
-	Provider      string  `json:"provider,omitempty"`
-	MinConfidence float64 `json:"min_confidence,omitempty"`
-	StatusFilter  string  `json:"status_filter,omitempty"`
-	TopK          int     `json:"top_k,omitempty"`
+	Query         string   `json:"query"`
+	DomainTag     string   `json:"domain_tag,omitempty"`
+	Provider      string   `json:"provider,omitempty"`
+	MinConfidence float64  `json:"min_confidence,omitempty"`
+	StatusFilter  string   `json:"status_filter,omitempty"`
+	TopK          int      `json:"top_k,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
 }
 
 // handleSearchMemory handles POST /v1/memory/search — FTS5 full-text search.
@@ -684,6 +703,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		MinConfidence: req.MinConfidence,
 		StatusFilter:  req.StatusFilter,
 		TopK:          req.TopK,
+		Tags:          req.Tags,
 	}
 	if !seeAll {
 		opts.SubmittingAgents = allowedAgents

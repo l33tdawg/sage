@@ -182,6 +182,8 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		}
 		query += " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
 	}
+	// opts.Tags is ignored on PostgresStore — tags are a SQLite-only feature
+	// (PostgresStore.SetTags is a no-op, so no tagged memories can exist).
 
 	query += fmt.Sprintf(" ORDER BY embedding <=> $1 LIMIT $%d", argIdx)
 	args = append(args, opts.TopK)

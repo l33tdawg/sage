@@ -135,6 +135,53 @@ func TestQuerySimilar(t *testing.T) {
 	assert.Equal(t, "msec", results[0].MemoryID)
 }
 
+func TestQuerySimilar_TagFilter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Three memories, different tag sets.
+	for i, tags := range [][]string{{"alpha"}, {"beta"}, {"alpha", "gamma"}} {
+		id := fmt.Sprintf("m%d", i)
+		rec := testMemory(id, "agent1", fmt.Sprintf("content %d", i), "general")
+		rec.Embedding = []float32{0.5, 0.5, 0.5}
+		require.NoError(t, s.InsertMemory(ctx, rec))
+		require.NoError(t, s.SetTags(ctx, id, tags))
+	}
+	// A fourth memory with no tags — must never match a tag filter.
+	rec := testMemory("m3", "agent1", "untagged", "general")
+	rec.Embedding = []float32{0.5, 0.5, 0.5}
+	require.NoError(t, s.InsertMemory(ctx, rec))
+
+	query := []float32{0.5, 0.5, 0.5}
+
+	// Single-tag filter — expect the two memories with "alpha".
+	results, err := s.QuerySimilar(ctx, query, QueryOptions{TopK: 10, Tags: []string{"alpha"}})
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, r := range results {
+		ids[r.MemoryID] = true
+	}
+	assert.True(t, ids["m0"])
+	assert.True(t, ids["m2"])
+	assert.False(t, ids["m1"])
+	assert.False(t, ids["m3"], "untagged memory must not match")
+
+	// Multi-tag filter is OR — expect all three tagged memories.
+	results, err = s.QuerySimilar(ctx, query, QueryOptions{TopK: 10, Tags: []string{"alpha", "beta"}})
+	require.NoError(t, err)
+	assert.Len(t, results, 3)
+
+	// Non-matching tag — expect empty.
+	results, err = s.QuerySimilar(ctx, query, QueryOptions{TopK: 10, Tags: []string{"nonexistent"}})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+
+	// Empty Tags slice must not filter at all.
+	results, err = s.QuerySimilar(ctx, query, QueryOptions{TopK: 10, Tags: nil})
+	require.NoError(t, err)
+	assert.Len(t, results, 4)
+}
+
 func TestInsertTriples(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

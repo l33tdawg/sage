@@ -843,6 +843,15 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		}
 		query += " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
 	}
+	if len(opts.Tags) > 0 {
+		placeholders := make([]string, len(opts.Tags))
+		for i, t := range opts.Tags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		query += " AND memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
+			strings.Join(placeholders, ",") + "))"
+	}
 
 	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -961,6 +970,15 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 			args = append(args, a)
 		}
 		sqlStr += " AND m.submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
+	}
+	if len(opts.Tags) > 0 {
+		placeholders := make([]string, len(opts.Tags))
+		for i, t := range opts.Tags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		sqlStr += " AND m.memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
+			strings.Join(placeholders, ",") + "))"
 	}
 
 	sqlStr += " ORDER BY rank LIMIT ?"

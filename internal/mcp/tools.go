@@ -382,25 +382,7 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		return nil, fmt.Errorf("get embedding: %w", err)
 	}
 
-	// Submit memory.
-	submitReq, _ := json.Marshal(map[string]any{
-		"content":          content,
-		"memory_type":      memType,
-		"domain_tag":       domain,
-		"provider":         s.provider,
-		"confidence_score": confidence,
-		"embedding":        embedResp.Embedding,
-	})
-	var submitResp struct {
-		MemoryID string `json:"memory_id"`
-		Status   string `json:"status"`
-		TxHash   string `json:"tx_hash"`
-	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/submit", submitReq, &submitResp); err != nil {
-		return nil, fmt.Errorf("submit memory: %w", err)
-	}
-
-	// Apply tags if provided.
+	// Collect optional user-defined tags from the MCP call args.
 	var tags []string
 	if rawTags, ok := params["tags"]; ok {
 		if tagArr, ok := rawTags.([]any); ok {
@@ -411,10 +393,27 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 			}
 		}
 	}
-	if len(tags) > 0 && submitResp.MemoryID != "" {
-		tagReq, _ := json.Marshal(map[string]any{"tags": tags})
-		var tagResp map[string]any
-		_ = s.doSignedJSON(ctx, "PUT", "/v1/dashboard/memory/"+submitResp.MemoryID+"/tags", tagReq, &tagResp)
+
+	// Submit memory. Tags are attached server-side after commit, so one call.
+	submitBody := map[string]any{
+		"content":          content,
+		"memory_type":      memType,
+		"domain_tag":       domain,
+		"provider":         s.provider,
+		"confidence_score": confidence,
+		"embedding":        embedResp.Embedding,
+	}
+	if len(tags) > 0 {
+		submitBody["tags"] = tags
+	}
+	submitReq, _ := json.Marshal(submitBody)
+	var submitResp struct {
+		MemoryID string `json:"memory_id"`
+		Status   string `json:"status"`
+		TxHash   string `json:"tx_hash"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/submit", submitReq, &submitResp); err != nil {
+		return nil, fmt.Errorf("submit memory: %w", err)
 	}
 
 	result := map[string]any{

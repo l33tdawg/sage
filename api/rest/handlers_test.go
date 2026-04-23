@@ -30,6 +30,10 @@ type mockMemoryStore struct {
 	votes          map[string][]*store.ValidationVote
 	corroborations map[string][]*store.Corroboration
 	pendingRecords []*memory.MemoryRecord
+	// setTagsCalls captures tag writes per memory_id for test assertions.
+	setTagsCalls map[string][]string
+	// lastQueryTags captures the Tags slice from the most recent QuerySimilar call.
+	lastQueryTags []string
 }
 
 func newMockMemoryStore() *mockMemoryStore {
@@ -37,6 +41,7 @@ func newMockMemoryStore() *mockMemoryStore {
 		memories:       make(map[string]*memory.MemoryRecord),
 		votes:          make(map[string][]*store.ValidationVote),
 		corroborations: make(map[string][]*store.Corroboration),
+		setTagsCalls:   make(map[string][]string),
 	}
 }
 
@@ -63,6 +68,7 @@ func (m *mockMemoryStore) UpdateStatus(_ context.Context, memoryID string, statu
 }
 
 func (m *mockMemoryStore) QuerySimilar(_ context.Context, embedding []float32, opts store.QueryOptions) ([]*memory.MemoryRecord, error) {
+	m.lastQueryTags = opts.Tags
 	results := make([]*memory.MemoryRecord, 0, len(m.memories))
 	for _, rec := range m.memories {
 		results = append(results, rec)
@@ -181,7 +187,10 @@ func (m *mockMemoryStore) GetAllTasks(_ context.Context, _ string, _ int) ([]*me
 	return tasks, nil
 }
 
-func (m *mockMemoryStore) SetTags(_ context.Context, _ string, _ []string) error { return nil }
+func (m *mockMemoryStore) SetTags(_ context.Context, memoryID string, tags []string) error {
+	m.setTagsCalls[memoryID] = tags
+	return nil
+}
 func (m *mockMemoryStore) GetTags(_ context.Context, _ string) ([]string, error) { return nil, nil }
 func (m *mockMemoryStore) ListAllTags(_ context.Context) ([]store.TagCount, error) {
 	return nil, nil
@@ -342,6 +351,89 @@ func TestSubmitMemory(t *testing.T) {
 	// Note: memory is no longer stored directly by the REST handler.
 	// It is written by ABCI Commit after consensus finalizes the block.
 	// This test verifies the REST layer correctly broadcasts and returns.
+}
+
+func TestSubmitMemory_AttachesTagsAfterCommit(t *testing.T) {
+	// Tags are attached post-commit via store.SetTags — the REST handler
+	// should forward them unchanged after the tx is broadcast.
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"check_tx":  map[string]interface{}{"code": 0},
+				"tx_result": map[string]interface{}{"code": 0},
+				"hash":      "TAGGEDTX",
+				"height":    "1",
+			},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, memStore, _ := newTestServer(t, cometMock.URL)
+
+	body := []byte(`{
+		"content": "tagged memory",
+		"memory_type": "fact",
+		"domain_tag": "crypto",
+		"confidence_score": 0.9,
+		"tags": ["project-x", "follow-up"]
+	}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	var resp SubmitMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.MemoryID)
+
+	// SetTags should have been called once, keyed on the returned MemoryID,
+	// with the exact tag slice from the request.
+	tags, ok := memStore.setTagsCalls[resp.MemoryID]
+	require.True(t, ok, "SetTags should have been called for the submitted memory")
+	assert.Equal(t, []string{"project-x", "follow-up"}, tags)
+}
+
+func TestSubmitMemory_NoTags_SkipsSetTags(t *testing.T) {
+	// When the client submits without a tags field, the handler must not
+	// call SetTags at all (would clear any existing tags otherwise).
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{
+				"check_tx":  map[string]interface{}{"code": 0},
+				"tx_result": map[string]interface{}{"code": 0},
+				"hash":      "NOTAGS",
+				"height":    "1",
+			},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, memStore, _ := newTestServer(t, cometMock.URL)
+
+	body := []byte(`{"content":"plain","memory_type":"fact","domain_tag":"crypto","confidence_score":0.5}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	assert.Empty(t, memStore.setTagsCalls, "SetTags must not be called when no tags are supplied")
+}
+
+func TestQueryMemory_PlumbsTagsThroughToStore(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+
+	body := []byte(`{"embedding":[0.1,0.2,0.3],"top_k":5,"tags":["alpha","beta"]}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	assert.Equal(t, []string{"alpha", "beta"}, memStore.lastQueryTags,
+		"QueryOptions.Tags must carry the tags field from the request")
 }
 
 func TestSubmitMemory_ValidationErrors(t *testing.T) {

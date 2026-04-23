@@ -75,6 +75,7 @@ class MemorySubmitRequest(BaseModel):
     embedding: list[float] | None = None
     knowledge_triples: list[KnowledgeTriple] | None = None
     parent_hash: str | None = None
+    tags: list[str] | None = None
 
 
 class MemorySubmitResponse(BaseModel):
@@ -90,6 +91,7 @@ class MemoryQueryRequest(BaseModel):
     status_filter: str | None = None
     top_k: int = 10
     cursor: str | None = None
+    tags: list[str] | None = None
 
 
 class MemoryQueryResponse(BaseModel):

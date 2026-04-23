@@ -74,6 +74,7 @@ type QueryOptions struct {
 	TopK            int      `json:"top_k"`
 	Cursor          string   `json:"cursor,omitempty"`
 	SubmittingAgents []string `json:"submitting_agents,omitempty"` // RBAC: restrict to these agent IDs
+	Tags             []string `json:"tags,omitempty"`              // any-match filter on user-defined tags (SQLite-only)
 }
 
 // ListOptions defines parameters for listing memories.

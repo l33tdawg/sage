@@ -30,12 +30,64 @@ def test_propose_memory(client, mock_api, sample_submit_response):
     assert result.memory_id == sample_submit_response["memory_id"]
 
 
+def test_propose_memory_with_tags(client, mock_api, sample_submit_response):
+    import json
+    route = mock_api.post("/v1/memory/submit").mock(
+        return_value=httpx.Response(201, json=sample_submit_response)
+    )
+    client.propose(
+        content="Tagged memory",
+        memory_type="fact",
+        domain_tag="crypto",
+        confidence=0.8,
+        tags=["project-x", "follow-up"],
+    )
+    body = json.loads(route.calls.last.request.read())
+    assert body["tags"] == ["project-x", "follow-up"]
+
+
+def test_propose_memory_without_tags_omits_field(client, mock_api, sample_submit_response):
+    import json
+    route = mock_api.post("/v1/memory/submit").mock(
+        return_value=httpx.Response(201, json=sample_submit_response)
+    )
+    client.propose(
+        content="Plain memory",
+        memory_type="fact",
+        domain_tag="crypto",
+        confidence=0.8,
+    )
+    body = json.loads(route.calls.last.request.read())
+    # exclude_none + optional None default → field must not appear on the wire.
+    assert "tags" not in body
+
+
 def test_query_memories(client, mock_api, sample_query_response):
     mock_api.post("/v1/memory/query").mock(
         return_value=httpx.Response(200, json=sample_query_response)
     )
     result = client.query(embedding=[0.1] * 768, domain_tag="crypto")
     assert len(result.results) == 1
+
+
+def test_query_memories_with_tags(client, mock_api, sample_query_response):
+    import json
+    route = mock_api.post("/v1/memory/query").mock(
+        return_value=httpx.Response(200, json=sample_query_response)
+    )
+    client.query(embedding=[0.1] * 768, domain_tag="crypto", tags=["alpha"])
+    body = json.loads(route.calls.last.request.read())
+    assert body["tags"] == ["alpha"]
+
+
+def test_query_memories_without_tags_omits_field(client, mock_api, sample_query_response):
+    import json
+    route = mock_api.post("/v1/memory/query").mock(
+        return_value=httpx.Response(200, json=sample_query_response)
+    )
+    client.query(embedding=[0.1] * 768, domain_tag="crypto")
+    body = json.loads(route.calls.last.request.read())
+    assert "tags" not in body
 
 
 def test_get_memory(client, mock_api, sample_memory):

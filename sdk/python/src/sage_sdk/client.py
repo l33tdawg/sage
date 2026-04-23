@@ -120,8 +120,14 @@ class SageClient:
         embedding: list[float] | None = None,
         knowledge_triples: list[KnowledgeTriple] | None = None,
         parent_hash: str | None = None,
+        tags: list[str] | None = None,
     ) -> MemorySubmitResponse:
-        """Submit a new memory proposal."""
+        """Submit a new memory proposal.
+
+        tags: optional user-defined labels attached after consensus commit.
+        Stored as node-local metadata (not part of the on-chain tx) and
+        queryable via the `tags` argument on :meth:`query`.
+        """
         req = MemorySubmitRequest(
             content=content,
             memory_type=MemoryType(memory_type),
@@ -130,6 +136,7 @@ class SageClient:
             embedding=embedding,
             knowledge_triples=knowledge_triples,
             parent_hash=parent_hash,
+            tags=tags,
         )
         resp = self._request("POST", "/v1/memory/submit", json=req.model_dump(mode="json", exclude_none=True, by_alias=True))
         return MemorySubmitResponse.model_validate(resp.json())
@@ -142,8 +149,13 @@ class SageClient:
         top_k: int = 10,
         status_filter: str | None = None,
         cursor: str | None = None,
+        tags: list[str] | None = None,
     ) -> MemoryQueryResponse:
-        """Query memories by vector similarity."""
+        """Query memories by vector similarity.
+
+        tags: when non-empty, restricts results to memories tagged with ANY
+        of the listed values (OR semantics).
+        """
         body: dict[str, Any] = {"embedding": embedding, "top_k": top_k}
         if domain_tag is not None:
             body["domain_tag"] = domain_tag
@@ -153,6 +165,8 @@ class SageClient:
             body["status_filter"] = status_filter
         if cursor is not None:
             body["cursor"] = cursor
+        if tags:
+            body["tags"] = tags
 
         resp = self._request("POST", "/v1/memory/query", json=body)
         return MemoryQueryResponse.model_validate(resp.json())

@@ -230,6 +230,14 @@ components:
         parent_hash:
           type: string
           description: Hash of a parent memory for lineage tracking.
+        tags:
+          type: array
+          items:
+            type: string
+          description: >-
+            Optional user-defined labels attached after consensus commit.
+            Stored as node-local metadata (not part of the on-chain tx);
+            queryable via `tags` on /v1/memory/query and /v1/memory/search.
 
     MemoryQueryRequest:
       type: object
@@ -264,6 +272,14 @@ components:
         cursor:
           type: string
           description: Opaque pagination cursor from a previous response.
+        tags:
+          type: array
+          items:
+            type: string
+          description: >-
+            Optional filter — when non-empty, restricts results to memories
+            tagged with ANY of the listed values (OR semantics). SQLite-only;
+            ignored on PostgresStore.
 
     MemoryQueryResponse:
       type: object
