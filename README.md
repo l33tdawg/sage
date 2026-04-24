@@ -57,15 +57,45 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What’s New in v6.5
+## What’s New in v6.6
 
-- **Encrypted Node-to-Node Communication** — REST API TLS support for quorum mode. Per-quorum ECDSA P-256 certificate authority, auto-generated during `quorum-init`/`quorum-join`. Dual-listener pattern: TLS on `:8443` for network traffic, plain HTTP on `localhost:8080` for dashboard/MCP.
-- **CometBFT P2P Already Encrypted** — Verified that CometBFT v0.38.15 encrypts all validator-to-validator gossip via SecretConnection (X25519 DH + ChaCha20-Poly1305). No plaintext memories on the wire.
-- **TLS Certificate Infrastructure** — New `internal/tlsca/` package: CA generation, node cert generation, PEM I/O, TLS config builders. Certificates distributed via quorum manifest during pairing.
-- **TLS-Aware Clients** — Go internal clients (MCP server, seed, vault, CLI) auto-detect `https://` URLs and load quorum CA. Python SDK v6.1.0 adds `ca_cert` parameter. `SAGE_CA_CERT` env var for explicit CA path.
-- **`cert-status` CLI** — `sage-gui cert-status` shows CA/node cert expiry, fingerprints, 30-day warnings.
-- **Docker TLS Support** — `amid` binary supports `--tls-cert`, `--tls-key`, `--tls-ca` flags. Production compose mounts cert volumes per node.
-- **Foundation for v7.0** — Certificates include `ExtKeyUsageClientAuth` for future mTLS. Per-quorum CA model supports cross-quorum federation by exchanging CA certs.
+- **Tags on propose + tag-filtered semantic recall (6.6.0)** — `POST /v1/memory/submit` now accepts `tags`, and `/v1/memory/query` and `/search` accept a `tags` filter (any-match / OR semantics). MCP `toolRemember` drops the old 2-step tag dance — single atomic submit. Python SDK: `propose(tags=...)` and `query(tags=...)`.
+- **Offchain SQLITE_BUSY silent-drop fix (6.6.1)** — Under sustained SQLite lock contention, the offchain `Commit()` flush could exhaust its retry budget, log CRITICAL, and silently clear pending writes while BadgerDB had already advanced — CometBFT then skipped replay on restart and the writes were lost invisibly. Now: flush runs *before* BadgerDB state is saved, retry budget raised to 30 attempts, panic on exhaustion so CometBFT replays the block. First surfaced by Level Up: 521 accepted submits with zero new visible memories across 96 hours on 6.5.5.
+- **Silent-filter observability (6.6.2)** — `/v1/memory/list`, `/query`, `/search` now set an `X-SAGE-Filter-Applied` header and a `filtered` JSON envelope whenever either silent-hide filter ran. `/list` includes `total_before_filter` + `visible` counts; `/query`/`/search` include `hidden_count`. Empty-domain vs RBAC-filtered is finally distinguishable.
+- **Org-clearance-as-seeAll (6.6.2)** — TopSecret (clearance=4) org members bypass the `submitting_agents` RBAC filter automatically. Per-domain access control and per-record classification gates still apply. Closes the `visible_agents="*"` boilerplate for single-org deployments.
+- **Admin bootstrap playbook (6.6.2)** — New `docs/ADMIN_BOOTSTRAP.md` documents three deployment patterns (single-org, multi-org federated, homogeneous-trust legacy) with setup commands and the chain-reset visibility gotcha.
+- **ABCI healthcheck + chain-bootstrap-window doc (6.6.3)** — `deploy/Dockerfile.abci` ships a HEALTHCHECK with `start_period=5m` to cover the ~3min CometBFT cold-start window on fresh data dirs, so Docker doesn't false-flag containers as unhealthy during normal bootstrap. Doc adds the 503-vs-connection-refused diagnostic and orchestrator guidance for Kubernetes `startupProbe`.
+
+<details>
+<summary>Full v6.6.x changelog</summary>
+
+- v6.6.3: ABCI HEALTHCHECK + chain-bootstrap-window doc
+- v6.6.2: Silent-filter observability + org-clearance-as-seeAll + admin bootstrap docs
+- v6.6.1: Offchain SQLITE_BUSY silent-drop fix (correctness; flush-before-badger reorder)
+- v6.6.0: Tags on propose/query + `/v1/agent/register` response field rename to `on_chain_height`
+
+</details>
+
+### v6.5 Highlights
+
+- **Encrypted Node-to-Node Communication (6.5.0)** — REST API TLS support for quorum mode. Per-quorum ECDSA P-256 certificate authority, auto-generated during `quorum-init`/`quorum-join`. Dual-listener pattern: TLS on `:8443` for network traffic, plain HTTP on `localhost:8080` for dashboard/MCP.
+- **CometBFT P2P Already Encrypted (6.5.0)** — Verified that CometBFT v0.38.15 encrypts all validator-to-validator gossip via SecretConnection (X25519 DH + ChaCha20-Poly1305). No plaintext memories on the wire.
+- **TLS Certificate Infrastructure (6.5.0)** — New `internal/tlsca/` package: CA generation, node cert generation, PEM I/O, TLS config builders. `sage-gui cert-status` CLI for expiry monitoring. Python SDK v6.1.0 adds `ca_cert` parameter.
+- **Stuck-proposed deprecation + vote dedup (6.5.1)** — When all validators voted but quorum (2/3) wasn't reached (e.g. 2-2 tie), memories stayed in `proposed` forever and the validator ticker re-voted every 2 seconds (~1.4M redundant txs over 8 days for one stuck memory). Now: deprecate the memory when votes are in but quorum is missed, and track per-session voted memories to prevent re-vote.
+- **`/v1/memory/{id}/forget` + SDK `forget()` (6.5.4)** — Closes a semantic gap where "forget" was the user-facing verb across MCP/dashboard/docs but only `/challenge` existed. New endpoint is a thin alias for challenge with an optional reason (defaults to "deprecated by user" — `challenge` requires a non-empty reason, `forget` is forgiving for dedup callers).
+- **RBAC ownership theft fix + real broadcast errors (6.5.5)** — Two bugs masqueraded as generic "Failed to broadcast" errors when CometBFT was fine and FinalizeBlock was returning "access denied". Fix: reserve `general` and `self` as shared catch-all domains (never auto-registered), make `RegisterDomain` check-and-set instead of silent overwrite, add `TransferDomain` for explicit admin transfers, and surface the real broadcast error from REST handlers (403 on access-denied instead of generic 500).
+
+<details>
+<summary>Full v6.5.x changelog</summary>
+
+- v6.5.5: RBAC ownership theft fix; real broadcast error surfacing
+- v6.5.4: `/v1/memory/{id}/forget` endpoint + SDK `forget()` method
+- v6.5.3: RBAC regression test backfill for Level Up bug reports
+- v6.5.2: CI workaround for GitHub Pages duplicate-artifact errors (reverted in 6.5.3)
+- v6.5.1: Deprecate stuck proposed memories when quorum cannot be reached; per-session vote dedup
+- v6.5.0: TLS everywhere — encrypted REST API for quorum mode, per-quorum CA
+
+</details>
 
 ### v6.0 Highlights
 
