@@ -31,4 +31,10 @@ USER sage
 
 EXPOSE 8080 2112 26658
 
+# /health requires postgres + cometbft healthy. On a fresh data dir CometBFT
+# bootstrap can take several minutes — start_period covers this so the container
+# doesn't flap to "unhealthy" during normal cold start.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=5m --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1
+
 CMD ["./amid"]

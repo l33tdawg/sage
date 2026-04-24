@@ -157,6 +157,34 @@ can leave the wildcard in place - `visible_agents="*"` short-circuits
 `resolveVisibleAgents` before the TopSecret check, so the two mechanisms
 compose cleanly.
 
+## Chain-bootstrap window on fresh data dir
+
+On a fresh data directory (first deploy, or after a chain reset), CometBFT
+performs an init pass before the first block is committed. During this window
+`/health` returns 503 because `cometbftOK` flips to true only once the node is
+running. On modest hardware this can take **several minutes** — observed ~3 min
+on a single-node post-migration redeploy.
+
+What this looks like in practice:
+
+- Container shows `unhealthy` in `docker ps` for the first ~3 min.
+- REST server *is* bound on `:8080` — `curl /health` returns 503 with
+  `{"status":"unhealthy"}` (not connection refused).
+- After CometBFT finishes bootstrap, `/health` flips to 200 and the container
+  goes `healthy`.
+
+**Don't roll back during this window.** The fix is on your orchestrator side:
+
+- **Docker compose / Docker**: the official `deploy/Dockerfile.abci` ships a
+  HEALTHCHECK with `start_period=5m` to cover the bootstrap window. If you
+  override this in your own compose, keep `start_period` ≥ 5 min.
+- **Kubernetes**: set `startupProbe` with `failureThreshold` × `periodSeconds`
+  ≥ 300s (e.g. `failureThreshold: 30, periodSeconds: 10`), and let `liveness` /
+  `readiness` only run after that.
+- **Confirming it's actually bootstrap, not a hang**: `curl localhost:8080/health`
+  from inside the container — 503 with body means REST bound, just waiting for
+  CometBFT. Connection refused means something else is wrong.
+
 ## Chain-reset visibility gotcha
 
 If you reset the chain state (e.g., `rm -rf ~/.sage/badger/` or equivalent
