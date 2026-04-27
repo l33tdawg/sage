@@ -44,6 +44,15 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 		return nil, fmt.Errorf("backfill agent_orgs index: %w", backfillErr)
 	}
 
+	// Backfill the name→orgIDs reverse index from the authoritative org:*
+	// forward entries. Idempotent — required for in-place upgrades from
+	// pre-v6.6.9 binaries that didn't maintain it, so GET /v1/org/by-name
+	// works against existing chain state without a reset.
+	if backfillErr := store.EnsureOrgNameIndex(); backfillErr != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("backfill org_name index: %w", backfillErr)
+	}
+
 	return store, nil
 }
 
@@ -723,6 +732,24 @@ func orgKey(orgID string) []byte {
 	return []byte("org:" + orgID)
 }
 
+// orgNameKey returns the BadgerDB key for the one-to-many name→orgIDs reverse
+// index. An entry exists for every (human-readable name, orgID) pair. Org
+// names are NOT unique on-chain — `processOrgRegister` derives orgID from
+// sha256(adminID + ":" + name + ":" + height), so two admins (or the same
+// admin at different heights) can both register an org named "levelup" and
+// each lands in a distinct orgID slot. Iterate by prefix
+// "org_name:<name>:" to enumerate every orgID with that name. Value is
+// empty — the key suffix is the membership marker.
+func orgNameKey(name, orgID string) []byte {
+	return []byte("org_name:" + name + ":" + orgID)
+}
+
+// orgNamePrefix returns the BadgerDB scan prefix for orgs registered under
+// the given human-readable name.
+func orgNamePrefix(name string) []byte {
+	return []byte("org_name:" + name + ":")
+}
+
 // orgMemberKey returns the BadgerDB key for an org membership.
 func orgMemberKey(orgID, agentID string) []byte {
 	return []byte("org_member:" + orgID + ":" + agentID)
@@ -762,6 +789,10 @@ func memClassKey(memoryID string) []byte {
 
 // RegisterOrg registers an organization in BadgerDB.
 // Encoding: name (length-prefixed) + description (length-prefixed) + adminAgent (length-prefixed) + height (8 bytes).
+// Maintains the name→orgIDs reverse index (org_name:<name>:<orgID>) so the
+// SDK and operators can look up an org by its human-readable name without
+// scanning every org entry on-chain. Names are not unique — see
+// orgNameKey for why the index is one-to-many.
 func (s *BadgerStore) RegisterOrg(orgID, name, description, adminAgent string, height int64) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		val := make([]byte, 4+len(name)+4+len(description)+4+len(adminAgent)+8)
@@ -769,7 +800,11 @@ func (s *BadgerStore) RegisterOrg(orgID, name, description, adminAgent string, h
 		offset = encodeString(val, offset, description)
 		offset = encodeString(val, offset, adminAgent)
 		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return txn.Set(orgKey(orgID), val)
+		if err := txn.Set(orgKey(orgID), val); err != nil {
+			return err
+		}
+		// Reverse index — empty value, suffix is the orgID marker.
+		return txn.Set(orgNameKey(name, orgID), nil)
 	})
 }
 
@@ -923,6 +958,116 @@ func (s *BadgerStore) EnsureAgentOrgsIndex() error {
 			orgID := suffix[:colon]
 			agentID := suffix[colon+1:]
 			if err := txn.Set(agentOrgsMemberKey(agentID, orgID), nil); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ListOrgsByName returns every organization registered with the given
+// human-readable name. Names are not enforced unique on-chain — the same
+// "levelup" name can map to many distinct orgIDs from different admins (or
+// the same admin at different heights). Returns an empty slice (not an
+// error) when no orgs match. Each entry includes orgID, name, description,
+// adminAgentID, and createdHeight; createdAt is left zero because the
+// authoritative timestamp lives in the offchain store, not BadgerDB.
+func (s *BadgerStore) ListOrgsByName(name string) ([]OrgEntry, error) {
+	if name == "" {
+		return nil, fmt.Errorf("org name is required")
+	}
+	var entries []OrgEntry
+	err := s.db.View(func(txn *badger.Txn) error {
+		prefix := orgNamePrefix(name)
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			orgID := string(it.Item().Key()[len(prefix):])
+			item, getErr := txn.Get(orgKey(orgID))
+			if getErr == badger.ErrKeyNotFound {
+				// Stale reverse index entry pointing at a deleted org —
+				// skip silently. Backfill on next open will reconcile.
+				continue
+			}
+			if getErr != nil {
+				return getErr
+			}
+			var (
+				orgName    string
+				orgDesc    string
+				orgAdmin   string
+				orgHeight  int64
+				decodeErr  error
+			)
+			err := item.Value(func(val []byte) error {
+				var offset int
+				orgName, offset, decodeErr = decodeString(val, 0)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				orgDesc, offset, decodeErr = decodeString(val, offset)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				orgAdmin, offset, decodeErr = decodeString(val, offset)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				if offset+8 > len(val) {
+					return fmt.Errorf("invalid org entry: missing height")
+				}
+				orgHeight = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- block height fits in int64
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			entries = append(entries, OrgEntry{
+				OrgID:         orgID,
+				Name:          orgName,
+				Description:   orgDesc,
+				AdminAgentID:  orgAdmin,
+				CreatedHeight: orgHeight,
+			})
+		}
+		return nil
+	})
+	return entries, err
+}
+
+// EnsureOrgNameIndex backfills the one-to-many name→orgIDs reverse index
+// from the authoritative org:* forward entries. Idempotent — safe to call
+// on every store open. Required for in-place upgrades from pre-v6.6.9
+// binaries that didn't maintain it, so GET /v1/org/by-name resolves
+// existing chain state without a reset.
+func (s *BadgerStore) EnsureOrgNameIndex() error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		prefix := []byte("org:")
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			orgID := string(it.Item().Key()[len(prefix):])
+			var orgName string
+			err := it.Item().Value(func(val []byte) error {
+				name, _, decErr := decodeString(val, 0)
+				if decErr != nil {
+					return decErr
+				}
+				orgName = name
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			if orgName == "" {
+				continue
+			}
+			if err := txn.Set(orgNameKey(orgName, orgID), nil); err != nil {
 				return err
 			}
 		}

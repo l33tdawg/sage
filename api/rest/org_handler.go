@@ -134,6 +134,47 @@ func (s *Server) handleGetOrg(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, org)
 }
 
+// handleGetOrgByName handles GET /v1/org/by-name/{name}.
+//
+// Org names are NOT enforced unique on-chain — the same human-readable name
+// can map to multiple distinct orgIDs registered by different admins (or
+// the same admin at different heights). This endpoint returns every match
+// so the caller can disambiguate. An empty result is a valid answer and
+// returns HTTP 200 with `{"orgs": []}` rather than 404 — the SDK uses that
+// signal to raise a clear "no such org" error.
+func (s *Server) handleGetOrgByName(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing org name", "name path parameter is required")
+		return
+	}
+
+	if s.badgerStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "State store unavailable",
+			"On-chain state store is not configured.")
+		return
+	}
+
+	entries, err := s.badgerStore.ListOrgsByName(name)
+	if err != nil {
+		s.logger.Error().Err(err).Str("name", name).Msg("failed to list orgs by name")
+		writeProblem(w, http.StatusInternalServerError, "Query error", "Failed to query organizations by name.")
+		return
+	}
+
+	orgs := make([]map[string]string, 0, len(entries))
+	for _, e := range entries {
+		orgs = append(orgs, map[string]string{
+			"org_id":         e.OrgID,
+			"name":           e.Name,
+			"admin_agent_id": e.AdminAgentID,
+			"description":    e.Description,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"orgs": orgs})
+}
+
 // handleListOrgMembers handles GET /v1/org/{org_id}/members.
 func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	orgID := chi.URLParam(r, "org_id")

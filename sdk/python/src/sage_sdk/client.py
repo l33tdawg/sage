@@ -44,6 +44,21 @@ from sage_sdk.models import (
 )
 
 
+# OrgIDs are derived server-side as ``hex(sha256(adminID + ":" + name +
+# ":" + height)[:16])`` — a 32-char lowercase hex string. Anything else
+# (e.g. "levelup", "Acme Corp") is treated as a human-readable name and
+# routed through the by-name lookup. Conservative match: only treat
+# unambiguous orgIDs as IDs to avoid false positives on hex-looking names.
+_ORG_ID_HEX_LEN = 32
+
+
+def _looks_like_org_id(identifier: str) -> bool:
+    """Heuristic: treat 32-char lowercase hex strings as orgIDs."""
+    if len(identifier) != _ORG_ID_HEX_LEN:
+        return False
+    return all(c in "0123456789abcdef" for c in identifier)
+
+
 class SageClient:
     """Synchronous SAGE API client."""
 
@@ -591,10 +606,44 @@ class SageClient:
         resp = self._request("POST", "/v1/org/register", json=body)
         return resp.json()
 
-    def get_org(self, org_id: str) -> dict:
-        """Get organization info."""
-        resp = self._request("GET", f"/v1/org/{org_id}")
-        return resp.json()
+    def get_org(self, identifier: str) -> dict:
+        """Get organization info by orgID or human-readable name.
+
+        ``identifier`` is treated as an orgID when it looks like a 32-char
+        lowercase hex string (matching the server's
+        ``hex(sha256(...)[:16])`` derivation). Anything else is resolved
+        against ``GET /v1/org/by-name/{name}`` and the single match is
+        returned. Raises ``SageAPIError`` if no orgs match the name, and a
+        ``ValueError`` if multiple do — the caller must then disambiguate
+        by orgID via ``list_orgs_by_name``.
+        """
+        if _looks_like_org_id(identifier):
+            resp = self._request("GET", f"/v1/org/{identifier}")
+            return resp.json()
+        orgs = self.list_orgs_by_name(identifier)
+        if not orgs:
+            raise SageAPIError(
+                status_code=404,
+                detail=f"no organization registered with name {identifier!r}",
+            )
+        if len(orgs) > 1:
+            org_ids = ", ".join(o.get("org_id", "?") for o in orgs)
+            raise ValueError(
+                f"multiple organizations registered as {identifier!r}: "
+                f"{org_ids}. Pass an orgID to disambiguate."
+            )
+        return orgs[0]
+
+    def list_orgs_by_name(self, name: str) -> list[dict]:
+        """List every organization registered with the given human-readable name.
+
+        Names are not enforced unique on-chain, so this can return zero,
+        one, or many entries. Each entry has keys ``org_id``, ``name``,
+        ``admin_agent_id``, and ``description``.
+        """
+        resp = self._request("GET", f"/v1/org/by-name/{name}")
+        body = resp.json()
+        return list(body.get("orgs", []))
 
     def list_org_members(self, org_id: str) -> list[dict]:
         """List all members of an organization."""

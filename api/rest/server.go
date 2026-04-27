@@ -233,6 +233,7 @@ func (s *Server) setupRouter() chi.Router {
 
 		// Organization endpoints
 		r.Post("/v1/org/register", s.handleOrgRegister)
+		r.Get("/v1/org/by-name/{name}", s.handleGetOrgByName)
 		r.Get("/v1/org/{org_id}", s.handleGetOrg)
 		r.Get("/v1/org/{org_id}/members", s.handleListOrgMembers)
 		r.Post("/v1/org/{org_id}/member", s.handleOrgAddMember)

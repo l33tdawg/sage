@@ -24,6 +24,20 @@ func writeLegacyMembership(bs *BadgerStore, orgID, agentID string, clearance uin
 	})
 }
 
+// writeLegacyOrg writes only the org:* forward entry — no org_name:* reverse
+// index — so backfill tests can mimic the schema produced by pre-v6.6.9
+// binaries that didn't maintain the name→orgIDs index.
+func writeLegacyOrg(bs *BadgerStore, orgID, name, description, adminAgent string, height int64) error {
+	return bs.db.Update(func(txn *badger.Txn) error {
+		val := make([]byte, 4+len(name)+4+len(description)+4+len(adminAgent)+8)
+		offset := encodeString(val, 0, name)
+		offset = encodeString(val, offset, description)
+		offset = encodeString(val, offset, adminAgent)
+		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is non-negative
+		return txn.Set(orgKey(orgID), val)
+	})
+}
+
 // v6.6.8 regression: an agent that joins a second org used to lose visibility
 // into memories from their original org because agent_org:<agent> was a
 // single-slot reverse lookup that AddOrgMember silently overwrote, and
@@ -193,4 +207,146 @@ func TestMultiOrg_EnsureAgentOrgsIndex_BackfillsLegacyData(t *testing.T) {
 	require.NoError(t, err)
 	sort.Strings(orgs)
 	assert.Equal(t, []string{orgA, orgB}, orgs)
+}
+
+// v6.6.9 regression: the Python SDK's get_org() passed an org NAME straight
+// into GET /v1/org/{org_id} and 404'd because BadgerStore had no name→orgID
+// reverse index. ListOrgsByName + the backfill close the gap; org names
+// remain non-unique on-chain (orgID = sha256(adminID+name+height)) so the
+// lookup is deliberately one-to-many.
+
+func TestListOrgsByName_EmptyResult(t *testing.T) {
+	bs := newTestBadger(t)
+
+	orgs, err := bs.ListOrgsByName("never-registered")
+	require.NoError(t, err)
+	assert.Empty(t, orgs, "missing name must return empty slice, not error")
+}
+
+func TestListOrgsByName_SingleMatch(t *testing.T) {
+	bs := newTestBadger(t)
+
+	const orgID = "0aaa11111111111111111111111111aa"
+	const admin = "admin0000000000000000000000000000000000000000000000000000000adm"
+	require.NoError(t, bs.RegisterOrg(orgID, "levelup", "Level Up org", admin, 7))
+
+	orgs, err := bs.ListOrgsByName("levelup")
+	require.NoError(t, err)
+	require.Len(t, orgs, 1, "single registration must yield exactly one result")
+	assert.Equal(t, orgID, orgs[0].OrgID)
+	assert.Equal(t, "levelup", orgs[0].Name)
+	assert.Equal(t, "Level Up org", orgs[0].Description)
+	assert.Equal(t, admin, orgs[0].AdminAgentID)
+	assert.Equal(t, int64(7), orgs[0].CreatedHeight)
+
+	// Empty name is a programmer error — surface it explicitly.
+	_, err = bs.ListOrgsByName("")
+	assert.Error(t, err, "empty name must error")
+}
+
+func TestListOrgsByName_MultipleAdminsSameName(t *testing.T) {
+	bs := newTestBadger(t)
+
+	// Two admins both pick the name "levelup". processOrgRegister derives
+	// orgID = hex(sha256(adminID+":"+name+":"+height)[:16]), so they land
+	// in distinct orgIDs — name uniqueness is NOT enforced on-chain.
+	const orgIDA = "0aaa11111111111111111111111111aa"
+	const orgIDB = "0bbb22222222222222222222222222bb"
+	const adminA = "adminA00000000000000000000000000000000000000000000000000000aaaa"
+	const adminB = "adminB00000000000000000000000000000000000000000000000000000bbbb"
+
+	require.NoError(t, bs.RegisterOrg(orgIDA, "levelup", "first tenant", adminA, 1))
+	require.NoError(t, bs.RegisterOrg(orgIDB, "levelup", "second tenant", adminB, 2))
+
+	// A third org with a different name must NOT show up under "levelup".
+	const orgIDC = "0ccc33333333333333333333333333cc"
+	require.NoError(t, bs.RegisterOrg(orgIDC, "acme", "unrelated", adminA, 3))
+
+	orgs, err := bs.ListOrgsByName("levelup")
+	require.NoError(t, err)
+	require.Len(t, orgs, 2, "both registrations under the same name must surface")
+
+	gotIDs := []string{orgs[0].OrgID, orgs[1].OrgID}
+	sort.Strings(gotIDs)
+	assert.Equal(t, []string{orgIDA, orgIDB}, gotIDs)
+
+	// Each entry must carry its own admin so callers can disambiguate.
+	byID := map[string]OrgEntry{}
+	for _, e := range orgs {
+		byID[e.OrgID] = e
+	}
+	assert.Equal(t, adminA, byID[orgIDA].AdminAgentID)
+	assert.Equal(t, adminB, byID[orgIDB].AdminAgentID)
+
+	// "acme" remains a separate, single-match lookup.
+	acme, err := bs.ListOrgsByName("acme")
+	require.NoError(t, err)
+	require.Len(t, acme, 1)
+	assert.Equal(t, orgIDC, acme[0].OrgID)
+}
+
+func TestEnsureOrgNameIndex_BackfillsLegacyData(t *testing.T) {
+	bs := newTestBadger(t)
+
+	// Two orgs share a name, written via the legacy path so only the
+	// org:* forward entries exist — mirroring the schema from pre-v6.6.9
+	// binaries before the reverse index existed.
+	const orgIDA = "0aaa11111111111111111111111111aa"
+	const orgIDB = "0bbb22222222222222222222222222bb"
+	const adminA = "adminA00000000000000000000000000000000000000000000000000000aaaa"
+	const adminB = "adminB00000000000000000000000000000000000000000000000000000bbbb"
+
+	require.NoError(t, writeLegacyOrg(bs, orgIDA, "levelup", "tenant A", adminA, 1))
+	require.NoError(t, writeLegacyOrg(bs, orgIDB, "levelup", "tenant B", adminB, 2))
+
+	// Sanity check: GetOrg still works against the forward index.
+	gotName, gotAdmin, err := bs.GetOrg(orgIDA)
+	require.NoError(t, err)
+	assert.Equal(t, "levelup", gotName)
+	assert.Equal(t, adminA, gotAdmin)
+
+	// Before backfill, the reverse index is empty, so the by-name lookup
+	// is blind to legacy data — exactly the prod gap this fix closes.
+	orgs, err := bs.ListOrgsByName("levelup")
+	require.NoError(t, err)
+	assert.Empty(t, orgs, "precondition: legacy orgs have no reverse-index entries")
+
+	require.NoError(t, bs.EnsureOrgNameIndex())
+
+	orgs, err = bs.ListOrgsByName("levelup")
+	require.NoError(t, err)
+	require.Len(t, orgs, 2, "backfill must rebuild the reverse index from org:* entries")
+	gotIDs := []string{orgs[0].OrgID, orgs[1].OrgID}
+	sort.Strings(gotIDs)
+	assert.Equal(t, []string{orgIDA, orgIDB}, gotIDs)
+
+	// Idempotent — second call must not duplicate or error.
+	require.NoError(t, bs.EnsureOrgNameIndex())
+	orgs, err = bs.ListOrgsByName("levelup")
+	require.NoError(t, err)
+	assert.Len(t, orgs, 2)
+}
+
+func TestNewBadgerStore_RunsOrgNameBackfill(t *testing.T) {
+	dir := t.TempDir()
+
+	const orgID = "0aaa11111111111111111111111111aa"
+	const admin = "admin0000000000000000000000000000000000000000000000000000000adm"
+
+	// First open: write the legacy schema (forward entry only, no reverse).
+	bs1, err := NewBadgerStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, writeLegacyOrg(bs1, orgID, "levelup", "", admin, 9))
+	require.NoError(t, bs1.CloseBadger())
+
+	// Second open: NewBadgerStore must run EnsureOrgNameIndex so the
+	// by-name lookup works without an explicit migration step.
+	bs2, err := NewBadgerStore(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs2.CloseBadger() })
+
+	orgs, err := bs2.ListOrgsByName("levelup")
+	require.NoError(t, err)
+	require.Len(t, orgs, 1, "store open must auto-backfill the org_name index")
+	assert.Equal(t, orgID, orgs[0].OrgID)
 }

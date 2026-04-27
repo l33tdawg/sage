@@ -7,6 +7,7 @@ from typing import Any, Literal
 import httpx
 
 from sage_sdk.auth import AgentIdentity
+from sage_sdk.client import _looks_like_org_id
 from sage_sdk.exceptions import SageAPIError
 from sage_sdk.models import (
     AgentInfo,
@@ -591,10 +592,41 @@ class AsyncSageClient:
         resp = await self._request("POST", "/v1/org/register", json=body)
         return resp.json()
 
-    async def get_org(self, org_id: str) -> dict:
-        """Get organization info."""
-        resp = await self._request("GET", f"/v1/org/{org_id}")
-        return resp.json()
+    async def get_org(self, identifier: str) -> dict:
+        """Get organization info by orgID or human-readable name.
+
+        See :meth:`SageClient.get_org` for the routing rules. Raises
+        ``SageAPIError`` (404) if no orgs match the name and ``ValueError``
+        if multiple do — the caller must then disambiguate by orgID via
+        ``list_orgs_by_name``.
+        """
+        if _looks_like_org_id(identifier):
+            resp = await self._request("GET", f"/v1/org/{identifier}")
+            return resp.json()
+        orgs = await self.list_orgs_by_name(identifier)
+        if not orgs:
+            raise SageAPIError(
+                status_code=404,
+                detail=f"no organization registered with name {identifier!r}",
+            )
+        if len(orgs) > 1:
+            org_ids = ", ".join(o.get("org_id", "?") for o in orgs)
+            raise ValueError(
+                f"multiple organizations registered as {identifier!r}: "
+                f"{org_ids}. Pass an orgID to disambiguate."
+            )
+        return orgs[0]
+
+    async def list_orgs_by_name(self, name: str) -> list[dict]:
+        """List every organization registered with the given human-readable name.
+
+        Names are not enforced unique on-chain, so this can return zero,
+        one, or many entries. Each entry has keys ``org_id``, ``name``,
+        ``admin_agent_id``, and ``description``.
+        """
+        resp = await self._request("GET", f"/v1/org/by-name/{name}")
+        body = resp.json()
+        return list(body.get("orgs", []))
 
     async def list_org_members(self, org_id: str) -> list[dict]:
         """List all members of an organization."""
