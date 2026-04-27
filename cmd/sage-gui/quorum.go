@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cometbft/cometbft/crypto/ed25519"
@@ -18,13 +20,23 @@ import (
 )
 
 // QuorumManifest is the portable file shared between nodes to form a quorum.
+//
+// Security: the CA private key is shipped as CAKeyEncrypted — an Argon2id +
+// AES-256-GCM envelope keyed by a passphrase the user must communicate
+// out-of-band (separate channel from the manifest itself). A plaintext CAKey
+// field is no longer accepted; legacy manifests must be regenerated.
 type QuorumManifest struct {
-	ChainID     string              `json:"chain_id"`
-	GenesisTime string              `json:"genesis_time,omitempty"` // RFC3339 — set by initiator
-	CACert      string              `json:"ca_cert,omitempty"`      // PEM-encoded CA certificate for TLS
-	CAKey       string              `json:"ca_key,omitempty"`       // PEM-encoded CA key (LAN quorum setup only)
-	Validators  []ManifestValidator `json:"validators"`
-	Peers       []QuorumPeer        `json:"peers"`
+	ChainID         string              `json:"chain_id"`
+	GenesisTime     string              `json:"genesis_time,omitempty"`      // RFC3339 — set by initiator
+	CACert          string              `json:"ca_cert,omitempty"`           // PEM-encoded CA certificate for TLS
+	CAKeyEncrypted  string              `json:"ca_key_encrypted,omitempty"`  // base64(EncryptCAKey envelope)
+	Validators      []ManifestValidator `json:"validators"`
+	Peers           []QuorumPeer        `json:"peers"`
+
+	// LegacyCAKey is read for the sole purpose of detecting and rejecting
+	// pre-encryption manifests. Receiving this field triggers a hard error
+	// and a regeneration prompt — we never use it.
+	LegacyCAKey string `json:"ca_key,omitempty"`
 }
 
 // ManifestValidator is a JSON-portable validator (avoids CometBFT's amino interface).
@@ -60,6 +72,11 @@ type QuorumPeer struct {
 // It exports this node's validator info into a manifest file that peers import.
 //
 // Usage: sage-gui quorum-init [--name NAME] [--address HOST:PORT]
+//
+// The CA private key embedded in the manifest is encrypted with a passphrase.
+// Provide it via the SAGE_QUORUM_PASSPHRASE env var or interactive prompt;
+// share the passphrase with peers OUT-OF-BAND (Signal, voice, anything that
+// isn't the same channel that carried the manifest).
 func runQuorumInit() error {
 	home := SageHome()
 	cometHome := filepath.Join(home, "data", "cometbft")
@@ -85,6 +102,12 @@ func runQuorumInit() error {
 
 	if address == "" {
 		return fmt.Errorf("--address HOST:PORT is required (your LAN address for P2P)")
+	}
+
+	passphrase, err := readQuorumPassphrase("Set a passphrase to encrypt the CA private key in the manifest.\n" +
+		"Share this passphrase with peers OUT-OF-BAND (different channel from the manifest file).")
+	if err != nil {
+		return fmt.Errorf("read passphrase: %w", err)
 	}
 
 	// Ensure CometBFT is initialized
@@ -126,18 +149,24 @@ func runQuorumInit() error {
 		return fmt.Errorf("write node key: %w", writeErr)
 	}
 
-	// Encode CA cert and key for manifest (shared with peers during LAN setup).
+	// Encode CA cert (PEM) and encrypt CA key with the operator passphrase.
+	// The plaintext key never lands on disk inside the manifest — only the
+	// authenticated-encryption envelope does.
 	caCertPEM := tlsca.EncodeCertPEM(caCert)
 	caKeyPEM, err := tlsca.EncodeKeyPEM(caKey)
 	if err != nil {
 		return fmt.Errorf("encode CA key: %w", err)
 	}
+	caKeyEncrypted, err := tlsca.EncryptCAKey(caKeyPEM, passphrase)
+	if err != nil {
+		return fmt.Errorf("encrypt CA key: %w", err)
+	}
 
 	manifest := QuorumManifest{
-		ChainID:     "sage-quorum",
-		GenesisTime: genesisTime.Format(time.RFC3339Nano),
-		CACert:      caCertPEM,
-		CAKey:       caKeyPEM,
+		ChainID:        "sage-quorum",
+		GenesisTime:    genesisTime.Format(time.RFC3339Nano),
+		CACert:         caCertPEM,
+		CAKeyEncrypted: caKeyEncrypted,
 		Validators: []ManifestValidator{
 			{
 				Address: fmt.Sprintf("%X", pv.Key.PubKey.Address()),
@@ -172,7 +201,9 @@ func runQuorumInit() error {
 	fmt.Printf("  TLS CA:  %s\n", filepath.Join(certsDir, tlsca.CACertFile))
 	fmt.Printf("  TLS Cert: %s\n", filepath.Join(certsDir, tlsca.NodeCertFile))
 	fmt.Println()
-	fmt.Println("Send this file to peer nodes, then run:")
+	fmt.Println("CA private key in the manifest is ENCRYPTED with your passphrase.")
+	fmt.Println("Send the manifest file AND share the passphrase OUT-OF-BAND.")
+	fmt.Println("Peers run:")
 	fmt.Println("  sage-gui quorum-join --manifest <peer-manifest.json> --name <this-node> --address <this-host:port>")
 
 	return nil
@@ -226,6 +257,28 @@ func runQuorumJoin() error {
 	var peerManifest QuorumManifest
 	if unmarshalErr := json.Unmarshal(data, &peerManifest); unmarshalErr != nil {
 		return fmt.Errorf("parse manifest: %w", unmarshalErr)
+	}
+
+	// Refuse pre-encryption manifests outright. Plaintext CA keys in transit
+	// were the credential-leak surface this flow was rebuilt to close.
+	if peerManifest.LegacyCAKey != "" {
+		return fmt.Errorf("manifest contains a plaintext ca_key field — this format is no longer accepted. " +
+			"Re-run sage-gui quorum-init on the initiator to produce an encrypted manifest, then retry quorum-join")
+	}
+
+	// Decrypt the CA private key with the operator passphrase, but only if
+	// the manifest actually carries one (the initiator's own follow-up call
+	// re-uses an already-decrypted CA on disk).
+	var decryptedCAKeyPEM string
+	if peerManifest.CAKeyEncrypted != "" {
+		passphrase, ppErr := readQuorumPassphrase("Enter the quorum passphrase that was shared out-of-band by the initiator.")
+		if ppErr != nil {
+			return fmt.Errorf("read passphrase: %w", ppErr)
+		}
+		decryptedCAKeyPEM, ppErr = tlsca.DecryptCAKey(peerManifest.CAKeyEncrypted, passphrase)
+		if ppErr != nil {
+			return fmt.Errorf("decrypt CA key: %w", ppErr)
+		}
 	}
 
 	// Ensure CometBFT is initialized
@@ -331,7 +384,7 @@ func runQuorumJoin() error {
 
 	// Set up TLS certificates from the peer manifest's CA.
 	certsDir := filepath.Join(home, "certs")
-	if peerManifest.CACert != "" && peerManifest.CAKey != "" {
+	if peerManifest.CACert != "" && decryptedCAKeyPEM != "" {
 		if mkErr := os.MkdirAll(certsDir, 0700); mkErr != nil {
 			return fmt.Errorf("create certs directory: %w", mkErr)
 		}
@@ -341,7 +394,7 @@ func runQuorumJoin() error {
 		if caErr != nil {
 			return fmt.Errorf("decode CA cert from manifest: %w", caErr)
 		}
-		caKey, keyErr := tlsca.DecodeKeyPEM(peerManifest.CAKey)
+		caKey, keyErr := tlsca.DecodeKeyPEM(decryptedCAKeyPEM)
 		if keyErr != nil {
 			return fmt.Errorf("decode CA key from manifest: %w", keyErr)
 		}
@@ -380,13 +433,14 @@ func runQuorumJoin() error {
 		return fmt.Errorf("save config: %w", err)
 	}
 
-	// Export our manifest so the peer can do the same.
-	// Include CA cert/key so both nodes share the same trust root.
+	// Export our manifest so the peer can do the same. Re-share the
+	// initiator's encrypted CA-key envelope verbatim — only someone with
+	// the out-of-band passphrase can use it. Never re-emit a plaintext key.
 	ourPubKeyB64 := base64.StdEncoding.EncodeToString(pv.Key.PubKey.Bytes())
 	ourManifest := QuorumManifest{
-		ChainID: peerManifest.ChainID,
-		CACert:  peerManifest.CACert,
-		CAKey:   peerManifest.CAKey,
+		ChainID:        peerManifest.ChainID,
+		CACert:         peerManifest.CACert,
+		CAKeyEncrypted: peerManifest.CAKeyEncrypted,
 		Validators: []ManifestValidator{
 			{
 				Address: fmt.Sprintf("%X", pv.Key.PubKey.Address()),
@@ -431,4 +485,41 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return os.WriteFile(dst, data, 0600) //nolint:gosec // dst is server-controlled path
+}
+
+// readQuorumPassphrase returns the operator's passphrase used to wrap the CA
+// key in a quorum manifest. SAGE_QUORUM_PASSPHRASE wins over the prompt so
+// scripted installs and DMG launchers (no terminal) keep working.
+//
+// The minimum length below is a UX guardrail, not a strength claim — Argon2id
+// does the heavy lifting. A short passphrase still buys you authenticated
+// encryption against a passive observer; a strong one buys you survival
+// against an offline attacker who got the manifest.
+func readQuorumPassphrase(prompt string) (string, error) {
+	const minLen = 8
+
+	if env := strings.TrimSpace(os.Getenv("SAGE_QUORUM_PASSPHRASE")); env != "" {
+		if len(env) < minLen {
+			return "", fmt.Errorf("SAGE_QUORUM_PASSPHRASE must be at least %d characters", minLen)
+		}
+		return env, nil
+	}
+
+	if prompt != "" {
+		fmt.Println(prompt)
+	}
+	fmt.Print("Passphrase: ")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("no passphrase provided")
+	}
+	pass := strings.TrimSpace(scanner.Text())
+	if len(pass) < minLen {
+		return "", fmt.Errorf("passphrase must be at least %d characters", minLen)
+	}
+	return pass, nil
 }
