@@ -207,7 +207,30 @@ func (s *Server) reconcileAgentName(agentID, name, bio string) {
 }
 
 // handleAgentSetPermission handles PUT /v1/agent/{id}/permission.
-// Admin only — sets clearance, domain access, visible agents on target agent.
+//
+// Auth model (v6.6.9 — see also processAgentSetPermission in
+// internal/abci/app.go which is the consensus-side source of truth):
+//
+//   - Self-set: the caller is the target agent.
+//   - Global admin: caller's on-chain Role == "admin" (legacy
+//     deployment-admin identity established at genesis bootstrap or
+//     initial register).
+//   - Org admin: caller is an org member with role="admin" in any org the
+//     target also belongs to.
+//
+// Anything else is rejected with HTTP 403 BEFORE broadcasting the tx, and
+// the ABCI handler re-checks the same auth model on-chain so the gate
+// holds even when REST is bypassed (direct CometBFT broadcast, GUI, etc).
+//
+// Prior to v6.6.9 this endpoint:
+//  1. used broadcast_tx_sync (only checks CheckTx code, not FinalizeBlock),
+//  2. had no REST-side auth check, and
+//  3. the ABCI handler hard-gated on global Role=="admin",
+//
+// so a non-admin caller would get 200 + a real tx_hash for a tx that
+// FinalizeBlock then rejected with code=67 — the SQL row was never
+// updated, but the API said success. That silent-failure is the bug fixed
+// here (Bug B from the v6.6.8 Level Up follow-up).
 func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request) {
 	targetID := chi.URLParam(r, "id")
 	if targetID == "" {
@@ -225,6 +248,23 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
+	}
+
+	// Pre-flight RBAC: bail out fast with 403 so callers don't get a
+	// 200+tx_hash for a write the chain will refuse. The ABCI handler
+	// re-verifies this in consensus — REST is just the user-friendly
+	// fail-fast path, not the trust boundary.
+	if s.badgerStore != nil {
+		callerID := middleware.ContextAgentID(r.Context())
+		if callerID == "" {
+			writeProblem(w, http.StatusUnauthorized, "Authentication required", "agent identity required to set permissions.")
+			return
+		}
+		if !s.callerCanSetPermission(callerID, targetID) {
+			writeProblem(w, http.StatusForbidden, "Access denied",
+				"caller is not authorized to set permissions on this agent: must be self, a global admin, or an org admin of the target's org.")
+			return
+		}
 	}
 
 	clearance := uint8(1)
@@ -267,10 +307,15 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	txHash, err := s.broadcastTx(encoded)
+	// Use broadcast_tx_commit (NOT _sync) so a FinalizeBlock rejection is
+	// surfaced as an error to the REST caller. Sync only inspects CheckTx
+	// (signature/nonce) and would happily return a tx_hash for a tx that
+	// the consensus handler later rejects — the v6.6.8-and-prior silent
+	// failure mode.
+	txHash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast agent set permission tx")
-		writeProblem(w, http.StatusInternalServerError, "Broadcast error", err.Error())
+		writeProblem(w, broadcastErrorStatus(err), "Broadcast error", err.Error())
 		return
 	}
 
@@ -279,6 +324,35 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 		"status":   "permissions_updated",
 		"tx_hash":  txHash,
 	})
+}
+
+// callerCanSetPermission mirrors the consensus-side auth check in
+// processAgentSetPermission. Keep these two implementations in sync —
+// the ABCI handler is the trust boundary, this is the fail-fast UX layer.
+func (s *Server) callerCanSetPermission(callerID, targetID string) bool {
+	if callerID == "" {
+		return false
+	}
+	// 1. Self-set.
+	if callerID == targetID {
+		return true
+	}
+	// 2. Global admin (legacy deployment-admin identity).
+	if caller, err := s.badgerStore.GetRegisteredAgent(callerID); err == nil && caller != nil && caller.Role == "admin" {
+		return true
+	}
+	// 3. Org admin in any org the target belongs to.
+	orgs, err := s.badgerStore.ListAgentOrgs(targetID)
+	if err != nil {
+		return false
+	}
+	for _, orgID := range orgs {
+		_, role, mErr := s.badgerStore.GetMemberClearance(orgID, callerID)
+		if mErr == nil && role == "admin" {
+			return true
+		}
+	}
+	return false
 }
 
 // handleGetRegisteredAgent handles GET /v1/agent/{id}.

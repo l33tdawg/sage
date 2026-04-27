@@ -499,16 +499,65 @@ func TestProcessAgentSetPermissionAdminOnly(t *testing.T) {
 	registerAgent(t, app, member, "member-agent", "member")
 	registerAgent(t, app, target, "target-agent", "member")
 
-	// Non-admin tries to set permissions
+	// Non-admin tries to set permissions on someone else (not self, not org admin) — denied.
 	ptx := makeAgentSetPermissionTx(t, member, target.id, 4, `["*"]`, `["*"]`, "", "")
 	result := app.processAgentSetPermission(ptx, 3, time.Now())
-	assert.Equal(t, uint32(67), result.Code, "non-admin should fail with code 67")
-	assert.Contains(t, result.Log, "not an admin")
+	assert.Equal(t, uint32(67), result.Code, "non-admin cross-agent set should fail with code 67")
+	assert.Contains(t, result.Log, "access denied")
 
 	// Verify target's permissions were not changed
 	agent, err := app.badgerStore.GetRegisteredAgent(target.id)
 	require.NoError(t, err)
 	assert.Equal(t, uint8(1), agent.Clearance, "clearance should remain at default INTERNAL (1)")
+}
+
+// v6.6.9: a non-admin agent must be able to set permissions on themselves.
+// Prior to v6.6.9 this returned ABCI code 67 ("not an admin") and REST
+// returned 200+tx_hash with no SQL update — silent failure. Self-set is
+// the most common configuration path (an agent declaring its own RBAC
+// surface) and must succeed.
+func TestProcessAgentSetPermission_SelfSet_Succeeds(t *testing.T) {
+	app := setupTestApp(t)
+	self := newAgentKey(t)
+	registerAgent(t, app, self, "self-agent", "member")
+
+	ptx := makeAgentSetPermissionTx(t, self, self.id, 3, "", "*", "", "")
+	result := app.processAgentSetPermission(ptx, 2, time.Now())
+	require.Equal(t, uint32(0), result.Code, "self-set should succeed: %s", result.Log)
+
+	agent, err := app.badgerStore.GetRegisteredAgent(self.id)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(3), agent.Clearance, "self-set must update clearance")
+	assert.Equal(t, "*", agent.VisibleAgents, "self-set must update visible_agents")
+}
+
+// v6.6.9: org admins must be able to set permissions on members of an org
+// they admin. Verifies the multi-org auth widening that lets non-global
+// admins manage their org's agents without forging the deployment-admin
+// identity.
+func TestProcessAgentSetPermission_OrgAdmin_Succeeds(t *testing.T) {
+	app := setupTestApp(t)
+	orgAdmin := newAgentKey(t)
+	member := newAgentKey(t)
+
+	// Both registered as plain "member" on-chain — neither is the
+	// global deployment admin. The auth comes from org-membership role.
+	registerAgent(t, app, orgAdmin, "org-admin", "member")
+	registerAgent(t, app, member, "member-agent", "member")
+
+	orgID := "test-org-9999"
+	require.NoError(t, app.badgerStore.RegisterOrg(orgID, "Test Org", "desc", orgAdmin.id, 1))
+	require.NoError(t, app.badgerStore.AddOrgMember(orgID, orgAdmin.id, 4, "admin", 1))
+	require.NoError(t, app.badgerStore.AddOrgMember(orgID, member.id, 1, "member", 1))
+
+	ptx := makeAgentSetPermissionTx(t, orgAdmin, member.id, 2, "", "*", "", "")
+	result := app.processAgentSetPermission(ptx, 5, time.Now())
+	require.Equal(t, uint32(0), result.Code, "org-admin cross-member set should succeed: %s", result.Log)
+
+	agent, err := app.badgerStore.GetRegisteredAgent(member.id)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(2), agent.Clearance)
+	assert.Equal(t, "*", agent.VisibleAgents)
 }
 
 // Regression for Level Up bug 1: setting visible_agents="*" (bare-string wildcard)

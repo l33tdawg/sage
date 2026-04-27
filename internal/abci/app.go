@@ -1865,24 +1865,51 @@ func (app *SageApp) processAgentSetPermission(parsedTx *tx.ParsedTx, height int6
 		return &abcitypes.ExecTxResult{Code: 66, Log: "missing agent set permission payload"}
 	}
 
-	// Verify sender is admin — only admins can set permissions on other agents.
+	// Verify sender's on-chain identity (Ed25519 proof embedded in tx).
 	senderID, err := verifyAgentIdentity(parsedTx)
 	if err != nil {
 		return &abcitypes.ExecTxResult{Code: 66, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
-	// Check sender is registered and is an admin
+	// Sender must be registered.
 	senderAgent, senderErr := app.badgerStore.GetRegisteredAgent(senderID)
 	if senderErr != nil {
 		return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("sender agent %s not registered", senderID[:16])}
 	}
-	if senderAgent.Role != "admin" {
-		return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("access denied: %s is not an admin", senderID[:16])}
-	}
 
-	// Target agent must be registered
+	// Target agent must be registered (read first so we can compute auth against its org).
 	if !app.badgerStore.IsAgentRegistered(perm.AgentID) {
 		return &abcitypes.ExecTxResult{Code: 68, Log: fmt.Sprintf("target agent %s not registered", perm.AgentID[:16])}
+	}
+
+	// Auth model (v6.6.9): a caller may write `agent_set_permission` on a
+	// target agent if any of these hold:
+	//   1. Self-set — the caller IS the target.
+	//   2. Global admin — caller's on-chain `Role == "admin"` (legacy
+	//      deployment-admin identity from genesis bootstrap / register).
+	//   3. Org admin — caller is an org member with role="admin" in any org
+	//      the target also belongs to.
+	// Anything else is an access-denied error surfaced as a non-zero ABCI
+	// code so REST/CLI callers see a real failure (NOT a silent 200+tx_hash
+	// for a write that never lands).
+	authorized := senderID == perm.AgentID || senderAgent.Role == "admin"
+	if !authorized {
+		// Check org-admin: enumerate orgs the target belongs to and see if
+		// the caller is an admin in any of them. Uses the multi-org reverse
+		// index added in v6.6.8.
+		targetOrgs, listErr := app.badgerStore.ListAgentOrgs(perm.AgentID)
+		if listErr == nil {
+			for _, orgID := range targetOrgs {
+				_, role, mErr := app.badgerStore.GetMemberClearance(orgID, senderID)
+				if mErr == nil && role == "admin" {
+					authorized = true
+					break
+				}
+			}
+		}
+	}
+	if !authorized {
+		return &abcitypes.ExecTxResult{Code: 67, Log: fmt.Sprintf("access denied: %s cannot set permissions on %s (not self, global admin, or org admin)", senderID[:16], perm.AgentID[:16])}
 	}
 
 	// Update permissions on-chain
