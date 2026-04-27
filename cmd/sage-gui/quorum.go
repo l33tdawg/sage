@@ -111,7 +111,7 @@ func runQuorumInit() error {
 	}
 
 	// Ensure CometBFT is initialized
-	if err := initCometBFTConfig(cometHome); err != nil {
+	if err = initCometBFTConfig(cometHome); err != nil {
 		return fmt.Errorf("init CometBFT: %w", err)
 	}
 

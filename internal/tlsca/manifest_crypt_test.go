@@ -73,7 +73,7 @@ func TestDecryptCAKey_TamperedCiphertextRejected(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	var env encryptedCAKey
-	if err := json.Unmarshal(raw, &env); err != nil {
+	if err = json.Unmarshal(raw, &env); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(env.Ciphertext) == 0 {

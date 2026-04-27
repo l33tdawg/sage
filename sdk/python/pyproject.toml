@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sage-agent-sdk"
-version = "6.6.6"
+version = "6.6.7"
 description = "Python SDK for SAGE — Sovereign Agent Governed Experience. Persistent, consensus-validated memory for AI agents."
 readme = "README.md"
 authors = [{name = "Dhillon Andrew Kannabhiran", email = "dhillon@levelupctf.com"}]

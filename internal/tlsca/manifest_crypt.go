@@ -69,7 +69,7 @@ func EncryptCAKey(caKeyPEM, passphrase string) (string, error) {
 	}
 
 	nonce := make([]byte, manifestNonceLen)
-	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+	if _, err = io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", fmt.Errorf("generate nonce: %w", err)
 	}
 
@@ -100,7 +100,7 @@ func DecryptCAKey(encrypted, passphrase string) (string, error) {
 		return "", fmt.Errorf("decode base64: %w", err)
 	}
 	var envelope encryptedCAKey
-	if err := json.Unmarshal(raw, &envelope); err != nil {
+	if err = json.Unmarshal(raw, &envelope); err != nil {
 		return "", fmt.Errorf("parse envelope: %w", err)
 	}
 	if envelope.Version != 1 {
