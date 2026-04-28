@@ -24,15 +24,46 @@ type EmbedInfoResponse struct {
 	Ready     bool   `json:"ready"`
 }
 
+// vaultStatusReporter is satisfied by stores that can report whether content
+// is encrypted at rest. SQLiteStore implements this; PostgresStore does not
+// (it has its own data-at-rest story). We type-assert at request time so the
+// REST package doesn't need to import the concrete sqlite type.
+type vaultStatusReporter interface {
+	VaultActive() bool
+}
+
 // handleEmbedInfo returns metadata about the active embedding provider.
 // Clients use this to decide between vector similarity and FTS5 text search.
+//
+// v6.6.10: when the store reports vault-active (content encrypted at rest),
+// FTS5 cannot text-index the data, so we MUST report semantic=true regardless
+// of the embedder's actual capability. Otherwise MCP clients route to the
+// /v1/memory/search FTS5 path and hit a hard "text search unavailable" error
+// they cannot recover from. This pairs with the belt-and-braces retry in
+// internal/mcp/tools.go that re-runs the semantic path if the FTS5 path
+// returns the encryption marker (covers older nodes lying about semantic).
 func (s *Server) handleEmbedInfo(w http.ResponseWriter, r *http.Request) {
+	semantic := s.embedder.Semantic()
 	provider := "hash"
-	if s.embedder.Semantic() {
+	if semantic {
 		provider = "ollama"
 	}
+
+	// Vault-active forces semantic-only mode. Even if no embedder is
+	// configured (semantic=false from the embedder), we still report
+	// semantic=true so callers don't take the FTS5 branch — the embed
+	// call itself will fail with a clearer "embedder not configured"
+	// error downstream rather than the cryptic vault-encrypted error
+	// from SearchByText.
+	if vsr, ok := s.store.(vaultStatusReporter); ok && vsr.VaultActive() {
+		semantic = true
+		if provider == "hash" {
+			provider = "vault-encrypted"
+		}
+	}
+
 	writeJSON(w, http.StatusOK, EmbedInfoResponse{
-		Semantic:  s.embedder.Semantic(),
+		Semantic:  semantic,
 		Provider:  provider,
 		Dimension: s.embedder.Dimension(),
 		Ready:     s.embedder.Ready(),

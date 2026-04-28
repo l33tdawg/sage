@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/vault"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1116,5 +1118,46 @@ func TestSetTags_ConcurrentWithInserts(t *testing.T) {
 		if assert.Len(t, records, 1) {
 			assert.Equal(t, fmt.Sprintf("concurrent-m%d", i), records[0].MemoryID)
 		}
+	}
+}
+
+// TestSearchByText_VaultActiveErrors confirms the v6.6.10 fix: when the store
+// has an attached vault (content encrypted at rest), SearchByText must return
+// the canonical "text search unavailable: content is vault-encrypted" error
+// instead of attempting to FTS5-match encrypted ciphertext. The MCP retry
+// path in internal/mcp/tools.go relies on this exact substring marker.
+func TestSearchByText_VaultActiveErrors(t *testing.T) {
+	s := newTestStore(t)
+
+	// Spin up a vault and attach it to the store.
+	dir := t.TempDir()
+	keyFile := filepath.Join(dir, "vault.key")
+	require.NoError(t, vault.Init(keyFile, "test-passphrase"))
+	v, err := vault.Open(keyFile, "test-passphrase")
+	require.NoError(t, err)
+	s.SetVault(v)
+
+	require.True(t, s.VaultActive(), "VaultActive() should be true after SetVault")
+
+	_, err = s.SearchByText(context.Background(), "anything", QueryOptions{TopK: 5})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "text search unavailable: content is vault-encrypted",
+		"error must contain the marker substring the MCP retry path watches for")
+	assert.True(t, strings.Contains(err.Error(), ErrTextSearchVaultEncryptedMsg),
+		"error must equal/contain the canonical ErrTextSearchVaultEncryptedMsg")
+}
+
+// TestSearchByText_VaultInactiveAllowed sanity-checks that when no vault is
+// attached, SearchByText runs through to the FTS5 path (no encryption error).
+// The query may legitimately return no rows on an empty store — the assertion
+// is that it does NOT return the vault-encrypted error.
+func TestSearchByText_VaultInactiveAllowed(t *testing.T) {
+	s := newTestStore(t)
+	require.False(t, s.VaultActive(), "VaultActive() should be false on a fresh store")
+
+	_, err := s.SearchByText(context.Background(), "hello", QueryOptions{TopK: 5})
+	if err != nil {
+		assert.NotContains(t, err.Error(), "vault-encrypted",
+			"vault-encrypted error must not appear when no vault is attached")
 	}
 }

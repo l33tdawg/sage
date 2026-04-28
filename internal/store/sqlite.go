@@ -71,10 +71,28 @@ func (s *SQLiteStore) beginTxLocked(ctx context.Context) (*sql.Tx, func(), error
 // encPrefix marks content as encrypted (prepended to base64 ciphertext).
 const encPrefix = "enc::"
 
+// ErrTextSearchVaultEncrypted is returned by SearchByText when the store has
+// an attached vault. Content is AES-256-GCM encrypted at rest, which means
+// FTS5 cannot text-index it. The fix is upstream: REST callers should pick
+// semantic search via /v1/embed/info (which now reports semantic=true while
+// the vault is active). This error remains for direct REST clients that
+// hit /v1/memory/search anyway, and for the MCP belt-and-braces retry path
+// in internal/mcp/tools.go which detects this marker substring.
+const ErrTextSearchVaultEncryptedMsg = "text search unavailable: content is vault-encrypted; this node is in semantic-only mode"
+
 // SetVault attaches an encryption vault to the store.
 // When set, memory content is encrypted on write and decrypted on read.
 func (s *SQLiteStore) SetVault(v *vault.Vault) {
 	s.vault = v
+}
+
+// VaultActive reports whether content is encrypted at rest by an attached
+// vault. When true, FTS5 text search is unavailable (encrypted content can't
+// be text-indexed) and callers MUST use semantic similarity search instead.
+// REST handlers like /v1/embed/info use this to force semantic mode on for
+// vault-active nodes so MCP clients don't get routed to the broken FTS5 path.
+func (s *SQLiteStore) VaultActive() bool {
+	return s.vault != nil
 }
 
 // VaultExpected marks that encryption should be active. When true and the vault
@@ -963,7 +981,7 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 // Falls back gracefully when vault is active (encrypted content can't be FTS-indexed).
 func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts QueryOptions) ([]*memory.MemoryRecord, error) {
 	if s.vault != nil {
-		return nil, fmt.Errorf("text search unavailable: content is encrypted — use semantic search with Ollama")
+		return nil, fmt.Errorf("%s", ErrTextSearchVaultEncryptedMsg)
 	}
 	if query == "" {
 		return nil, fmt.Errorf("search query is required")

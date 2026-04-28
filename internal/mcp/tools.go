@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -430,6 +431,17 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 	return result, nil
 }
 
+// vaultEncryptedSearchMarker is a substring of the SearchByText error returned
+// by SQLiteStore when the vault is active. The MCP handler watches for this
+// marker so it can transparently fall back to semantic search if it routed to
+// the FTS5 path on a vault-active node (e.g. an older node where /v1/embed/info
+// hadn't been patched yet, or one where the response is otherwise misleading).
+// Keep this in lockstep with internal/store/sqlite.go's
+// ErrTextSearchVaultEncryptedMsg — the constant lives there because that's
+// where the error is produced; this is just the substring we look for in the
+// HTTP error returned by /v1/memory/search.
+const vaultEncryptedSearchMarker = "text search unavailable: content is vault-encrypted"
+
 func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, error) {
 	query, _ := params["query"].(string)
 	if query == "" {
@@ -444,39 +456,11 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 	minConf := floatParam(params, "min_confidence", defaultMinConf)
 
 	// Response type shared by both paths.
-	var queryResp struct {
-		Results []struct {
-			MemoryID        string  `json:"memory_id"`
-			Content         string  `json:"content"`
-			DomainTag       string  `json:"domain_tag"`
-			ConfidenceScore float64 `json:"confidence_score"`
-			MemoryType      string  `json:"memory_type"`
-			Status          string  `json:"status"`
-			CreatedAt       string  `json:"created_at"`
-		} `json:"results"`
-		TotalCount int `json:"total_count"`
-	}
+	var queryResp recallResp
 
 	if s.isSemanticMode(ctx) {
-		// Semantic path: embed query → cosine similarity search.
-		embedReq, _ := json.Marshal(map[string]string{"text": query})
-		var embedResp struct {
-			Embedding []float32 `json:"embedding"`
-		}
-		if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
-			return nil, fmt.Errorf("get embedding: %w", err)
-		}
-
-		queryReq, _ := json.Marshal(map[string]any{
-			"embedding":      embedResp.Embedding,
-			"domain_tag":     domain,
-			"provider":       s.provider,
-			"min_confidence": minConf,
-			"status_filter":  "committed",
-			"top_k":          topK,
-		})
-		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, &queryResp); err != nil {
-			return nil, fmt.Errorf("query memories: %w", err)
+		if err := s.recallSemantic(ctx, query, domain, topK, minConf, &queryResp); err != nil {
+			return nil, err
 		}
 	} else {
 		// FTS5 path: full-text search when embeddings aren't semantic.
@@ -488,8 +472,23 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 			"status_filter":  "committed",
 			"top_k":          topK,
 		})
-		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, &queryResp); err != nil {
-			return nil, fmt.Errorf("search memories: %w", err)
+		if searchErr := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, &queryResp); searchErr != nil {
+			// Belt-and-braces: if the node turned out to be vault-encrypted
+			// (e.g. older node where /v1/embed/info hasn't been patched, or
+			// the cache lied), the FTS5 path returns this marker. Retry the
+			// semantic path with the same params and warm the cache so future
+			// calls take the right path.
+			if strings.Contains(searchErr.Error(), vaultEncryptedSearchMarker) {
+				fmt.Fprintf(os.Stderr, "SAGE MCP: /v1/memory/search reports vault-encrypted; retrying with semantic path\n")
+				semanticTrue := true
+				s.semanticMode = &semanticTrue
+				s.semanticCacheAge = time.Now()
+				if retryErr := s.recallSemantic(ctx, query, domain, topK, minConf, &queryResp); retryErr != nil {
+					return nil, retryErr
+				}
+			} else {
+				return nil, fmt.Errorf("search memories: %w", searchErr)
+			}
 		}
 	}
 
@@ -510,6 +509,49 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 		"memories":    memories,
 		"total_count": queryResp.TotalCount,
 	}, nil
+}
+
+// recallResp is the response shape returned by both /v1/memory/query (semantic
+// path) and /v1/memory/search (FTS5 path). Pulled out as a named type so the
+// semantic path can be invoked from both the primary branch and the
+// belt-and-braces retry-on-vault-encryption branch in toolRecall.
+type recallResp struct {
+	Results []struct {
+		MemoryID        string  `json:"memory_id"`
+		Content         string  `json:"content"`
+		DomainTag       string  `json:"domain_tag"`
+		ConfidenceScore float64 `json:"confidence_score"`
+		MemoryType      string  `json:"memory_type"`
+		Status          string  `json:"status"`
+		CreatedAt       string  `json:"created_at"`
+	} `json:"results"`
+	TotalCount int `json:"total_count"`
+}
+
+// recallSemantic runs the embedding + cosine-similarity recall path. Used by
+// the primary semantic branch in toolRecall and by the belt-and-braces retry
+// when the FTS5 path returns the vault-encrypted marker.
+func (s *Server) recallSemantic(ctx context.Context, query, domain string, topK int, minConf float64, out *recallResp) error {
+	embedReq, _ := json.Marshal(map[string]string{"text": query})
+	var embedResp struct {
+		Embedding []float32 `json:"embedding"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
+		return fmt.Errorf("get embedding: %w", err)
+	}
+
+	queryReq, _ := json.Marshal(map[string]any{
+		"embedding":      embedResp.Embedding,
+		"domain_tag":     domain,
+		"provider":       s.provider,
+		"min_confidence": minConf,
+		"status_filter":  "committed",
+		"top_k":          topK,
+	})
+	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, out); err != nil {
+		return fmt.Errorf("query memories: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) toolForget(ctx context.Context, params map[string]any) (any, error) {

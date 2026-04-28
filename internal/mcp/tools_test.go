@@ -572,3 +572,202 @@ func TestStoreMemoryPreValidateAccept(t *testing.T) {
 	err := s.storeMemory(context.Background(), "Valid observation about Go debugging patterns", "go-debugging", "observation", 0.85)
 	assert.NoError(t, err)
 }
+
+// TestSageRecall_VaultActiveForcesSemantic exercises the v6.6.10 primary fix:
+// when /v1/embed/info reports semantic=true (which it now does on any
+// vault-active node, regardless of whether an Ollama embedder is configured),
+// toolRecall MUST take the semantic path — POST /v1/embed then
+// POST /v1/memory/query — and MUST NOT fall through to /v1/memory/search,
+// which on a vault-active node returns the "text search unavailable" error.
+//
+// This guards against future regressions where someone adds another condition
+// to isSemanticMode (e.g. requiring a specific provider name) and inadvertently
+// reroutes vault nodes to the broken FTS5 path.
+func TestSageRecall_VaultActiveForcesSemantic(t *testing.T) {
+	mux := http.NewServeMux()
+
+	// /v1/embed/info reports semantic=true with an unusual provider —
+	// the test should NOT special-case "ollama"; it should trust the
+	// semantic flag (which v6.6.10 forces true when the vault is active).
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic":  true,
+			"provider":  "vault-encrypted",
+			"dimension": 768,
+			"ready":     true,
+		})
+	})
+
+	semanticPathHit := false
+	ftsPathHit := false
+
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		semanticPathHit = true
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding": []float32{0.1, 0.2, 0.3},
+		})
+	})
+
+	mux.HandleFunc("/v1/memory/query", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{
+				"memory_id":        "mem-vault-1",
+				"content":          "secret recovered via semantic recall",
+				"domain_tag":       "ops",
+				"confidence_score": 0.91,
+				"memory_type":      "fact",
+				"status":           "committed",
+				"created_at":       "2026-04-27T00:00:00Z",
+			}},
+			"total_count": 1,
+		})
+	})
+
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		ftsPathHit = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"title":  "Search error",
+			"detail": "text search unavailable: content is vault-encrypted; this node is in semantic-only mode",
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRecall(context.Background(), map[string]any{
+		"query": "what is the secret",
+	})
+	require.NoError(t, err, "toolRecall must succeed via semantic path on a vault-active node")
+
+	assert.True(t, semanticPathHit, "semantic path /v1/embed must be hit when /v1/embed/info reports semantic=true")
+	assert.False(t, ftsPathHit, "FTS5 /v1/memory/search must NOT be hit when semantic=true")
+
+	m := result.(map[string]any)
+	memories := m["memories"].([]map[string]any)
+	require.Len(t, memories, 1)
+	assert.Equal(t, "mem-vault-1", memories[0]["memory_id"])
+}
+
+// TestSageRecall_RetriesSemanticOnVaultEncryptedFTSError exercises the v6.6.10
+// belt-and-braces retry: if /v1/embed/info LIES (semantic=false) but
+// /v1/memory/search reveals the truth by returning the vault-encrypted marker
+// (e.g. an older node where embed_handler.go isn't patched), toolRecall must
+// detect the marker substring, log a warning, and silently retry the semantic
+// path with the same query and params. This protects mixed-version networks.
+func TestSageRecall_RetriesSemanticOnVaultEncryptedFTSError(t *testing.T) {
+	mux := http.NewServeMux()
+
+	// Lie: claim semantic=false even though the node is vault-active.
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic":  false,
+			"provider":  "hash",
+			"dimension": 768,
+			"ready":     true,
+		})
+	})
+
+	embedHits := 0
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		embedHits++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"embedding": []float32{0.7, 0.8, 0.9},
+		})
+	})
+
+	queryHits := 0
+	mux.HandleFunc("/v1/memory/query", func(w http.ResponseWriter, r *http.Request) {
+		queryHits++
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{
+				"memory_id":        "mem-retry-ok",
+				"content":          "fetched via fallback retry",
+				"domain_tag":       "ops",
+				"confidence_score": 0.88,
+				"memory_type":      "observation",
+				"status":           "committed",
+				"created_at":       "2026-04-27T00:00:00Z",
+			}},
+			"total_count": 1,
+		})
+	})
+
+	searchHits := 0
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		searchHits++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"title":  "Search error",
+			"detail": "text search unavailable: content is vault-encrypted; this node is in semantic-only mode",
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRecall(context.Background(), map[string]any{
+		"query": "anything",
+	})
+	require.NoError(t, err, "toolRecall must recover via semantic retry when FTS path returns vault-encrypted marker")
+
+	assert.Equal(t, 1, searchHits, "FTS5 path should have been tried exactly once before retry")
+	assert.Equal(t, 1, embedHits, "semantic /v1/embed should have been hit by the retry")
+	assert.Equal(t, 1, queryHits, "semantic /v1/memory/query should have been hit by the retry")
+
+	m := result.(map[string]any)
+	memories := m["memories"].([]map[string]any)
+	require.Len(t, memories, 1)
+	assert.Equal(t, "mem-retry-ok", memories[0]["memory_id"])
+}
+
+// TestSageRecall_NonVaultErrorPropagates confirms the retry only triggers for
+// the specific vault-encrypted marker. Other /v1/memory/search errors (e.g.
+// network 500s, validation failures) MUST NOT silently retry and mask real
+// problems — they should propagate to the caller.
+func TestSageRecall_NonVaultErrorPropagates(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"semantic": false, "provider": "hash", "dimension": 768, "ready": true,
+		})
+	})
+	embedHits := 0
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		embedHits++
+	})
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"title": "Search error", "detail": "database is locked",
+		})
+	})
+
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	_, err := s.toolRecall(context.Background(), map[string]any{"query": "x"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "database is locked",
+		"non-vault errors must propagate, not silently retry")
+	assert.Equal(t, 0, embedHits, "semantic retry must NOT trigger on non-vault errors")
+}
