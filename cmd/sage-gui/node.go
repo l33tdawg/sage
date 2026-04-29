@@ -419,6 +419,20 @@ func runServe() error {
 	// mcp_tokens table. Tokens are SHA-256-hashed before storage.
 	mountMCPHTTPTransport(r, sqliteStore, cfg, logger)
 
+	// OAuth 2.0 + PKCE wrapper around bearer auth (v6.7.2). ChatGPT's MCP
+	// connector requires Auth URL + Token URL form fields; static-bearer
+	// auth doesn't fit that flow. We expose:
+	//   GET  /.well-known/oauth-authorization-server  RFC 8414 metadata
+	//   GET  /oauth/authorize  consent screen (gated by dashboard session)
+	//   POST /oauth/authorize  consent submission → mints bearer + auth code
+	//   POST /oauth/token      auth code → bearer (PKCE-verified)
+	// The bearer the OAuth flow yields is a normal mcp_tokens row — same
+	// /v1/mcp/sse endpoint, same revocation surface. No changes to the
+	// bearer-auth middleware itself.
+	oauthHandler := rest.NewOAuthHandler(sqliteStore, dashboard.IsRequestAuthenticated, nil)
+	rest.MountOAuthRoutes(r, oauthHandler)
+	logger.Info().Msg("OAuth 2.0 + PKCE wrapper enabled (/.well-known/oauth-authorization-server, /oauth/authorize, /oauth/token)")
+
 	// Start background memory cleanup loop
 	memory.StartCleanupLoop(ctx, sqliteStore)
 

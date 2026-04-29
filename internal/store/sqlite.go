@@ -548,6 +548,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// Migration: add mcp_tokens table for HTTP MCP transport bearer auth.
 	s.migrateMCPTokens(ctx)
 
+	// Migration: add mcp_auth_codes table for the OAuth 2.0 + PKCE wrapper
+	// in front of bearer auth (v6.7.2 — ChatGPT MCP connector compat).
+	s.migrateMCPAuthCodes(ctx)
+
 	// FTS5 full-text search index on memory content.
 	// Used as a fallback when semantic embeddings are unavailable (hash mode).
 	_, _ = s.writeExecContext(ctx, `

@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -533,6 +534,28 @@ func (h *DashboardHandler) handleAuthCheck(w http.ResponseWriter, r *http.Reques
 	authenticated := err == nil && h.validSession(cookie.Value)
 
 	writeJSONResp(w, http.StatusOK, map[string]any{"auth_required": true, "authenticated": authenticated})
+}
+
+// IsRequestAuthenticated reports whether `r` carries a valid dashboard
+// session, considering encryption state. Used by the OAuth /authorize
+// endpoint (api/rest) to gate the consent screen with the existing
+// dashboard session — no separate auth implementation.
+//
+// Returns (true, "") when no auth is required (encryption off) or when the
+// session cookie is valid. Returns (false, redirectURL) otherwise; the
+// caller should 302 the user to redirectURL so the dashboard SPA can run
+// the login dance and round-trip back via `?next=...`.
+func (h *DashboardHandler) IsRequestAuthenticated(r *http.Request) (bool, string) {
+	if !h.Encrypted.Load() {
+		return true, ""
+	}
+	if cookie, err := r.Cookie(sessionCookieName); err == nil && h.validSession(cookie.Value) {
+		return true, ""
+	}
+	// Build a redirect to the SPA carrying `next=<original URL>` so the
+	// frontend can redirect back here once the operator unlocks the vault.
+	next := r.URL.RequestURI()
+	return false, "/ui/?next=" + url.QueryEscape(next)
 }
 
 func (h *DashboardHandler) validSession(token string) bool {
