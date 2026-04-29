@@ -5946,6 +5946,10 @@ function ChatGPTSetupWizard({ agents, onClose }) {
     // Step 4: zone + subdomain
     const [zone, setZone] = useState('');
     const [subdomain, setSubdomain] = useState('sage');
+    // Populated from /login-status when cert.pem is decoded successfully
+    // and the Cloudflare API returns the user's zones. Empty list means we
+    // fall back to a free-text input. Each zone is {id, name}.
+    const [zoneOptions, setZoneOptions] = useState([]);
 
     // Step 5: tunnel create progress
     const [tunnelLog, setTunnelLog] = useState('');
@@ -5976,6 +5980,13 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                 const s = await wizardLoginStatus();
                 if (s.authenticated) {
                     setLoginAuthenticated(true);
+                    if (Array.isArray(s.zones) && s.zones.length > 0) {
+                        setZoneOptions(s.zones);
+                        // If a zone hasn't been picked yet, pre-select the first
+                        // — keeps the dropdown's "current value" matching what the
+                        // user sees, and saves a click for single-zone accounts.
+                        setZone(prev => prev || s.zones[0].name);
+                    }
                     clearInterval(loginPollRef.current);
                     loginPollRef.current = null;
                 }
@@ -6139,11 +6150,22 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                             </div>
                             <div class="wizard-field">
                                 <label>Domain (must be on your Cloudflare account)</label>
-                                <input class="wizard-input" value=${zone} onInput=${e => setZone(e.target.value)} placeholder="example.com" />
-                                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
-                                    Don't have one yet? Add a domain at
-                                    <a href="https://dash.cloudflare.com/?to=/:account/add-site" target="_blank" rel="noopener" style="color:var(--accent);">dash.cloudflare.com</a>.
-                                </div>
+                                ${zoneOptions.length > 0 ? html`
+                                    <select class="wizard-input" value=${zone} onChange=${e => setZone(e.target.value)}>
+                                        ${zoneOptions.map(z => html`<option value=${z.name}>${z.name}</option>`)}
+                                    </select>
+                                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                                        Showing ${zoneOptions.length} zone${zoneOptions.length === 1 ? '' : 's'} from your Cloudflare account.
+                                        Need another? Add a domain at
+                                        <a href="https://dash.cloudflare.com/?to=/:account/add-site" target="_blank" rel="noopener" style="color:var(--accent);">dash.cloudflare.com</a>.
+                                    </div>
+                                ` : html`
+                                    <input class="wizard-input" value=${zone} onInput=${e => setZone(e.target.value)} placeholder="example.com" />
+                                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                                        Couldn't auto-list your zones — type the domain name manually. Don't have one yet? Add a domain at
+                                        <a href="https://dash.cloudflare.com/?to=/:account/add-site" target="_blank" rel="noopener" style="color:var(--accent);">dash.cloudflare.com</a>.
+                                    </div>
+                                `}
                             </div>
                             <div style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:12px;color:var(--text);">
                                 Public URL preview: <strong style="color:var(--accent);">https://${subdomain || 'sage'}.${zone || 'example.com'}</strong>

@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	stdb64 "encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -467,4 +468,116 @@ func TestWizard_URLRegex_StripsPunctuation(t *testing.T) {
 	parsed, err := url.Parse("https://dash.cloudflare.com/argotunnel?x=1")
 	require.NoError(t, err)
 	assert.Equal(t, "dash.cloudflare.com", parsed.Host)
+}
+
+// ─── v6.7.4: Cloudflare zone enumeration ────────────────────────────────────
+
+// validCertPEM builds a synthetic cloudflared cert.pem whose embedded JSON
+// token decodes to the given fields. The format MUST match what cloudflared
+// itself writes — `BEGIN`/`END` markers + base64 JSON wrapped at 64 chars.
+func validCertPEM(t *testing.T, zoneID, accountID, apiToken string) []byte {
+	t.Helper()
+	payload, err := json.Marshal(map[string]string{
+		"zoneID":    zoneID,
+		"accountID": accountID,
+		"apiToken":  apiToken,
+	})
+	require.NoError(t, err)
+	encoded := stdb64.StdEncoding.EncodeToString(payload)
+	var wrapped strings.Builder
+	for i := 0; i < len(encoded); i += 64 {
+		end := i + 64
+		if end > len(encoded) {
+			end = len(encoded)
+		}
+		wrapped.WriteString(encoded[i:end])
+		if end < len(encoded) {
+			wrapped.WriteString("\n")
+		}
+	}
+	return []byte("-----BEGIN ARGO TUNNEL TOKEN-----\n" + wrapped.String() + "\n-----END ARGO TUNNEL TOKEN-----\n")
+}
+
+func TestDecodeCloudflaredCert_HappyPath(t *testing.T) {
+	pem := validCertPEM(t, "z-1", "acct-1", "tok-XYZ")
+	tok, err := decodeCloudflaredCert(pem)
+	require.NoError(t, err)
+	assert.Equal(t, "z-1", tok.ZoneID)
+	assert.Equal(t, "acct-1", tok.AccountID)
+	assert.Equal(t, "tok-XYZ", tok.APIToken)
+}
+
+func TestDecodeCloudflaredCert_MissingMarkers(t *testing.T) {
+	_, err := decodeCloudflaredCert([]byte("not a pem"))
+	assert.Error(t, err)
+}
+
+func TestDecodeCloudflaredCert_EmptyAPIToken(t *testing.T) {
+	pem := validCertPEM(t, "z-1", "acct-1", "")
+	_, err := decodeCloudflaredCert(pem)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "apiToken empty")
+}
+
+func TestFetchCloudflareZones_Pagination(t *testing.T) {
+	// Mock the Cloudflare API: page 1 returns 2 zones with total_pages=2,
+	// page 2 returns 1 zone. Verify all 3 surface in sorted order.
+	calls := 0
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Header.Get("Authorization") != "Bearer tok-XYZ" {
+			http.Error(w, "bad bearer", http.StatusUnauthorized)
+			return
+		}
+		page := r.URL.Query().Get("page")
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			_, _ = w.Write([]byte(`{"result":[{"id":"z2","name":"beta.example.com"},{"id":"z1","name":"alpha.example.com"}],"result_info":{"page":1,"total_pages":2}}`))
+		case "2":
+			_, _ = w.Write([]byte(`{"result":[{"id":"z3","name":"charlie.example.com"}],"result_info":{"page":2,"total_pages":2}}`))
+		default:
+			http.Error(w, "unexpected page", http.StatusBadRequest)
+		}
+	}))
+	defer mock.Close()
+
+	// Override the API base URL via test seam.
+	prev := cloudflareAPIBase
+	cloudflareAPIBase = mock.URL
+	t.Cleanup(func() { cloudflareAPIBase = prev })
+
+	zones, err := fetchCloudflareZones("tok-XYZ")
+	require.NoError(t, err)
+	require.Len(t, zones, 3)
+	// Sorted by name.
+	assert.Equal(t, "alpha.example.com", zones[0]["name"])
+	assert.Equal(t, "beta.example.com", zones[1]["name"])
+	assert.Equal(t, "charlie.example.com", zones[2]["name"])
+	assert.Equal(t, 2, calls)
+}
+
+func TestFetchCloudflareZones_BadBearer(t *testing.T) {
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+	}))
+	defer mock.Close()
+
+	prev := cloudflareAPIBase
+	cloudflareAPIBase = mock.URL
+	t.Cleanup(func() { cloudflareAPIBase = prev })
+
+	_, err := fetchCloudflareZones("bad-token")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "401")
+}
+
+func TestListCloudflareZones_NoCertReturnsEmpty(t *testing.T) {
+	// Point cloudflaredHome at a tempdir that has no cert.pem — the wrapper
+	// should swallow the error and return an empty list.
+	prev := cloudflaredHomeOverride
+	cloudflaredHomeOverride = t.TempDir()
+	t.Cleanup(func() { cloudflaredHomeOverride = prev })
+	zones := listCloudflareZones()
+	assert.Empty(t, zones)
 }

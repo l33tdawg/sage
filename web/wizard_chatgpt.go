@@ -21,6 +21,7 @@ package web
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"text/template"
@@ -64,11 +66,21 @@ func browserOpenBin() (string, []string) {
 
 // cloudflaredHome is where cloudflared stores cert.pem, tunnel credentials,
 // and config.yml. Always ~/.cloudflared/ — that's what cloudflared itself
-// uses regardless of platform.
+// uses regardless of platform. Tests override via cloudflaredHomeOverride.
 func cloudflaredHome() string {
+	if cloudflaredHomeOverride != "" {
+		return cloudflaredHomeOverride
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cloudflared")
 }
+
+// Test seams — set by wizard_chatgpt_test.go to point at fixtures, NEVER set
+// in production code paths.
+var (
+	cloudflaredHomeOverride string
+	cloudflareAPIBase       = "https://api.cloudflare.com"
+)
 
 // loginCapture holds the in-flight `cloudflared tunnel login` subprocess
 // state. Created on POST /login, cleared once cert.pem materializes.
@@ -399,17 +411,133 @@ func (h *DashboardHandler) handleWizardLoginStatus(w http.ResponseWriter, r *htt
 	writeJSONResp(w, http.StatusOK, resp)
 }
 
-// listCloudflareZones tries to enumerate zones via `cloudflared tunnel list`-
-// style helpers. In practice cloudflared doesn't expose a zone-list command,
-// so we surface the cert.pem-derived fingerprint and let the frontend prompt
-// the user to enter the zone name manually. Future enhancement: parse the
-// PEM, extract the apiToken, and call api.cloudflare.com/v4/zones directly.
+// listCloudflareZones decodes the apiToken embedded in cert.pem and calls the
+// Cloudflare API to enumerate zones the user has access to, so the wizard can
+// render a dropdown instead of a free-text input.
 //
-// For v6.7.3 we return an empty list — the UI prompts the user for the
-// zone name and validates it client-side. This avoids embedding any
-// Cloudflare API client in the wizard while still enabling the happy path.
+// cert.pem layout:
+//
+//	-----BEGIN ARGO TUNNEL TOKEN-----
+//	<base64-encoded JSON: {"zoneID":"…","accountID":"…","apiToken":"…"}>
+//	-----END ARGO TUNNEL TOKEN-----
+//
+// The apiToken is a Cloudflare-issued bearer scoped to tunnel + DNS operations
+// for the user's zones — exactly what we need. Failure modes return an empty
+// list so the frontend falls back to the manual-entry input.
 func listCloudflareZones() []map[string]string {
-	return []map[string]string{}
+	certPath := filepath.Join(cloudflaredHome(), "cert.pem")
+	pem, err := os.ReadFile(certPath)
+	if err != nil {
+		return []map[string]string{}
+	}
+	tok, err := decodeCloudflaredCert(pem)
+	if err != nil {
+		return []map[string]string{}
+	}
+	zones, err := fetchCloudflareZones(tok.APIToken)
+	if err != nil {
+		return []map[string]string{}
+	}
+	return zones
+}
+
+// cloudflaredCertToken is the JSON payload embedded in cert.pem.
+type cloudflaredCertToken struct {
+	ZoneID    string `json:"zoneID"`
+	AccountID string `json:"accountID"`
+	APIToken  string `json:"apiToken"`
+}
+
+// decodeCloudflaredCert extracts and decodes the JSON token from a PEM-wrapped
+// cloudflared cert. Tolerant of leading/trailing whitespace and base64 padding
+// drift (older cloudflared versions sometimes drop the `=` padding).
+func decodeCloudflaredCert(pem []byte) (cloudflaredCertToken, error) {
+	const begin = "-----BEGIN ARGO TUNNEL TOKEN-----"
+	const end = "-----END ARGO TUNNEL TOKEN-----"
+	s := string(pem)
+	bi := strings.Index(s, begin)
+	if bi < 0 {
+		return cloudflaredCertToken{}, errors.New("cert.pem: BEGIN ARGO TUNNEL TOKEN marker missing")
+	}
+	rest := s[bi+len(begin):]
+	ei := strings.Index(rest, end)
+	if ei < 0 {
+		return cloudflaredCertToken{}, errors.New("cert.pem: END ARGO TUNNEL TOKEN marker missing")
+	}
+	b64 := strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
+			return -1
+		}
+		return r
+	}, rest[:ei])
+	// Pad to a multiple of 4 chars — base64 may be unpadded.
+	if pad := len(b64) % 4; pad != 0 {
+		b64 += strings.Repeat("=", 4-pad)
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return cloudflaredCertToken{}, fmt.Errorf("cert.pem: base64 decode: %w", err)
+	}
+	var tok cloudflaredCertToken
+	if jerr := json.Unmarshal(raw, &tok); jerr != nil {
+		return cloudflaredCertToken{}, fmt.Errorf("cert.pem: json decode: %w", jerr)
+	}
+	if tok.APIToken == "" {
+		return cloudflaredCertToken{}, errors.New("cert.pem: apiToken empty")
+	}
+	return tok, nil
+}
+
+// fetchCloudflareZones pages through GET /client/v4/zones with the given
+// bearer and returns each active zone as {id, name}. Returns up to ~200 zones
+// (4 pages × 50). Network/API errors surface to the caller; the public
+// listCloudflareZones helper swallows them so the wizard can degrade.
+func fetchCloudflareZones(apiToken string) ([]map[string]string, error) {
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	out := []map[string]string{}
+	for page := 1; page <= 4; page++ {
+		url := fmt.Sprintf("%s/client/v4/zones?per_page=50&page=%d&status=active", cloudflareAPIBase, page)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+apiToken)
+		req.Header.Set("Accept", "application/json")
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("cloudflare api call: %w", err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		cancel()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("cloudflare api status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		var page1 struct {
+			Result []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"result"`
+			ResultInfo struct {
+				Page       int `json:"page"`
+				TotalPages int `json:"total_pages"`
+			} `json:"result_info"`
+		}
+		if jerr := json.Unmarshal(body, &page1); jerr != nil {
+			return nil, fmt.Errorf("cloudflare api json: %w", jerr)
+		}
+		for _, z := range page1.Result {
+			out = append(out, map[string]string{"id": z.ID, "name": z.Name})
+		}
+		if page1.ResultInfo.Page >= page1.ResultInfo.TotalPages {
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i]["name"] < out[j]["name"] })
+	return out, nil
 }
 
 // ─── /create-tunnel ──────────────────────────────────────────────────────
@@ -517,11 +645,13 @@ func (h *DashboardHandler) handleWizardCreateTunnel(w http.ResponseWriter, r *ht
 		writeLine("config", "wrote "+configPath)
 	}
 
-	// Step 4: install autostart.
+	// Step 4: install autostart. NON-FATAL — the tunnel still works for
+	// this session; only auto-respawn on reboot is impacted. CI runners
+	// (GitHub Actions linux without a systemd user instance) trigger this
+	// path and shouldn't fail the whole wizard. Surface as a warning the
+	// frontend can render, but keep going.
 	if aerr := wizardInstallAutostart(r.Context(), tunnelUUID, writeLine); aerr != nil {
-		writeLine("error", "autostart: "+aerr.Error())
-		writeLine("done", "1")
-		return
+		writeLine("warn", "autostart skipped: "+aerr.Error()+" — tunnel still works for this session, but won't auto-respawn on reboot. You can re-run the wizard later or wire autostart manually.")
 	}
 
 	// Step 5: verify reachability.
