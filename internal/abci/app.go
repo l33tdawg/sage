@@ -785,11 +785,16 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		})
 	}
 
-	// Store memory classification on-chain
+	// Store memory classification on-chain. v6.8.6: caller's classification
+	// is honored verbatim — a submitted value of 0 means PUBLIC (cross-org
+	// readable subject to domain-access checks), not "missing → INTERNAL".
+	// Prior versions silently bumped 0→INTERNAL here, which combined with
+	// the per-record classification gate in handleQueryMemory to drop every
+	// cross-agent read where the reader had no shared org with the writer —
+	// even when visible_agents="*" had been granted. Wire-format backward
+	// compat for old txs that omit the classification byte still defaults
+	// to INTERNAL in tx/codec.go decodeMemorySubmit.
 	classification := uint8(submit.Classification)
-	if classification == 0 {
-		classification = uint8(tx.ClearanceInternal) // Default to INTERNAL
-	}
 	if classErr := app.badgerStore.SetMemoryClassification(memoryID, classification); classErr != nil {
 		app.logger.Error().Err(classErr).Str("memory_id", memoryID).Msg("failed to set memory classification")
 	}

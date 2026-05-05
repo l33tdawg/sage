@@ -400,11 +400,12 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		embeddingHash = h.Sum(nil)
 	}
 
-	// Build the on-chain transaction.
+	// Build the on-chain transaction. v6.8.6: REST passes the caller's
+	// classification through verbatim — 0 means PUBLIC. The prior
+	// 0→INTERNAL bump here turned an absent or explicitly-public submission
+	// into INTERNAL on the wire, which then triggered the per-record
+	// classification gate in handleQueryMemory for every cross-agent read.
 	classification := req.Classification
-	if classification == 0 {
-		classification = 1 // Default to INTERNAL
-	}
 
 	submitTx := &tx.ParsedTx{
 		Type:  tx.TxTypeMemorySubmit,
@@ -629,6 +630,19 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 				if domErr == nil && domainOwner != "" {
 					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
 					if !hasAccess && rec.SubmittingAgent != queryAgentID {
+						// v6.8.6 observability: log every hide so operators can
+						// detect missing org-bootstrap (the failure mode is silent
+						// otherwise — the response carries `filtered.by` but
+						// server logs gave no per-record reason). Info-level so
+						// it survives default log config.
+						s.logger.Info().
+							Str("memory_id", rec.MemoryID).
+							Str("domain", rec.DomainTag).
+							Str("submitter", rec.SubmittingAgent[:16]).
+							Str("querier", queryAgentID[:16]).
+							Str("domain_owner", domainOwner[:16]).
+							Uint8("classification", memClass).
+							Msg("classification gate hid memory: querier has no shared-org path to writer at required clearance")
 						hiddenByClassification++
 						continue // Skip memories the agent can't access
 					}
@@ -830,6 +844,14 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 				if domErr == nil && domainOwner != "" {
 					hasAccess, _ := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, queryAgentID, memClass, now)
 					if !hasAccess && rec.SubmittingAgent != queryAgentID {
+						s.logger.Info().
+							Str("memory_id", rec.MemoryID).
+							Str("domain", rec.DomainTag).
+							Str("submitter", rec.SubmittingAgent[:16]).
+							Str("querier", queryAgentID[:16]).
+							Str("domain_owner", domainOwner[:16]).
+							Uint8("classification", memClass).
+							Msg("classification gate hid memory: querier has no shared-org path to writer at required clearance")
 						hiddenByClassification++
 						continue
 					}

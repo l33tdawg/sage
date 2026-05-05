@@ -279,3 +279,101 @@ func TestFilterObservability_Query_NoFilter(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Nil(t, resp.Filtered)
 }
+
+// TestClassificationGate_PublicMemoryCrossesAgentBoundary is the v6.8.6
+// regression for the silent classification default-bump that broke cross-
+// agent visibility for any memory submitted without explicit classification.
+//
+// Pre-fix: processMemorySubmit and the REST submit handler both bumped the
+// caller's Classification=0 to INTERNAL(1). Combined with the per-record
+// gate at memory_handler.go:627, this filtered out every cross-agent read
+// where the reader had no shared-org path to the writer — even with
+// visible_agents="*" granted. Symptom: HTTP 200 + total_count=0 +
+// `filtered:{by:["classification"]}`. (Surfaced by the LevelUp pipeline on
+// 2026-05-05: 10 agents granted visible_agents="*", reader still got 0 mems
+// on cross-agent calibration.* recall.)
+//
+// Post-fix: a memory written with classification=0 stays PUBLIC, the gate
+// is skipped (`if memClass > 0` short-circuit), and the cross-agent reader
+// gets the record without needing any org bootstrapping.
+func TestClassificationGate_PublicMemoryCrossesAgentBoundary(t *testing.T) {
+	srv, memStore, bs, _ := newRBACTestServer(t)
+
+	embedding := make([]float32, 8)
+	for i := range embedding {
+		embedding[i] = 0.1
+	}
+	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, DomainTag: "calibration.ir_triage", TopK: 10})
+	req, readerID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+
+	// Reader has visible_agents="*" but is NOT in any org — exactly the
+	// bridge's "_register_and_grant_visibility" terminal state when org
+	// add_member silently failed but the bridge logged success anyway.
+	require.NoError(t, bs.RegisterAgent(readerID, "designer", "member", "", "test", "", 1))
+	require.NoError(t, bs.SetAgentPermission(readerID, 4, "", "*", "", ""))
+
+	// Writer is a different agent; their write auto-registers the domain
+	// to themselves on first submission (mirrors processMemorySubmit's
+	// auto-register path). Writer has no shared org with the reader.
+	writerID := "0000000000000000000000000000000000000000000000000000000000000099"
+	require.NoError(t, bs.RegisterAgent(writerID, "calibrator", "member", "", "test", "", 1))
+	require.NoError(t, bs.RegisterDomain("calibration.ir_triage", writerID, "", 1))
+
+	// Seed the writer's memory and pin classification=0 (PUBLIC) — this
+	// is what v6.8.6 actually writes; pre-v6.8.6 ABCI would have written 1.
+	seedMemory(t, memStore, "m-public", writerID, "calibration.ir_triage", "ir triage signals")
+	require.NoError(t, bs.SetMemoryClassification("m-public", uint8(tx.ClearancePublic)))
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+	assert.Empty(t, rr.Header().Get(filterHeader),
+		"PUBLIC memory must not engage the classification filter")
+
+	var resp QueryMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Nil(t, resp.Filtered, "no filter envelope expected for cross-agent PUBLIC read")
+	require.Len(t, resp.Results, 1, "writer's PUBLIC memory must be visible to a cross-agent reader with visible_agents='*'")
+	assert.Equal(t, "m-public", resp.Results[0].MemoryID)
+}
+
+// TestClassificationGate_InternalMemoryStillGated locks in the other half
+// of v6.8.6: when a writer explicitly classifies a memory as INTERNAL or
+// higher, the per-record gate STILL fires for cross-agent reads without a
+// shared-org path. The fix is "Public-by-default", not "classification
+// disabled".
+func TestClassificationGate_InternalMemoryStillGated(t *testing.T) {
+	srv, memStore, bs, _ := newRBACTestServer(t)
+
+	embedding := make([]float32, 8)
+	for i := range embedding {
+		embedding[i] = 0.1
+	}
+	body, _ := json.Marshal(QueryMemoryRequest{Embedding: embedding, DomainTag: "calibration.ir_triage", TopK: 10})
+	req, readerID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+
+	require.NoError(t, bs.RegisterAgent(readerID, "designer", "member", "", "test", "", 1))
+	require.NoError(t, bs.SetAgentPermission(readerID, 4, "", "*", "", ""))
+
+	writerID := "0000000000000000000000000000000000000000000000000000000000000099"
+	require.NoError(t, bs.RegisterAgent(writerID, "calibrator", "member", "", "test", "", 1))
+	require.NoError(t, bs.RegisterDomain("calibration.ir_triage", writerID, "", 1))
+
+	seedMemory(t, memStore, "m-internal", writerID, "calibration.ir_triage", "internal-only signals")
+	require.NoError(t, bs.SetMemoryClassification("m-internal", uint8(tx.ClearanceInternal)))
+
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+	assert.Equal(t, filterByClassification, rr.Header().Get(filterHeader),
+		"INTERNAL memory must still engage the classification filter for cross-agent readers without a shared org")
+
+	var resp QueryMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Filtered)
+	assert.Equal(t, []string{filterByClassification}, resp.Filtered.By)
+	require.NotNil(t, resp.Filtered.HiddenCount)
+	assert.Equal(t, 1, *resp.Filtered.HiddenCount)
+}

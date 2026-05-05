@@ -1058,3 +1058,62 @@ func TestCommitPanicsOnExhaustedBUSYAndDoesNotAdvanceBadger(t *testing.T) {
 		"BadgerDB height must NOT advance when the offchain flush fails — "+
 			"advancing here is what produced the 6.5.5 on-chain/offchain divergence")
 }
+
+// TestProcessMemorySubmit_ClassificationZeroIsPublic is the v6.8.6 regression
+// for the silent 0→INTERNAL bump in processMemorySubmit. Pre-fix, every
+// memory submitted without an explicit Classification was stored on chain as
+// INTERNAL, which then engaged the per-record classification gate in
+// handleQueryMemory for every cross-agent read where the reader had no
+// shared-org path to the writer — even if visible_agents="*" had been
+// granted. Post-fix the caller's value rides through verbatim, so a
+// submission with Classification=0 stays PUBLIC and the gate is skipped
+// (memory_handler.go's `if memClass > 0` short-circuit).
+func TestProcessMemorySubmit_ClassificationZeroIsPublic(t *testing.T) {
+	app := setupTestApp(t)
+	writer := newAgentKey(t)
+
+	res := app.processMemorySubmit(makeMemorySubmitTx(t, writer, "calibration.demo", "obs"), 1, time.Now())
+	require.Equal(t, uint32(0), res.Code, "submit must succeed: %s", res.Log)
+
+	memoryID := string(res.Data)
+	class, err := app.badgerStore.GetMemoryClassification(memoryID)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(tx.ClearancePublic), class,
+		"caller's classification=0 must round-trip as Public, not silently bumped to Internal")
+}
+
+// TestProcessMemorySubmit_ClassificationExplicitInternalIsHonored is the
+// other half of the v6.8.6 contract: when callers want INTERNAL they must
+// pass Classification=1 explicitly. Honor that without rounding.
+func TestProcessMemorySubmit_ClassificationExplicitInternalIsHonored(t *testing.T) {
+	app := setupTestApp(t)
+	writer := newAgentKey(t)
+
+	body := []byte("explicit-internal" + "calibration.demo")
+	pubKey, sig, bodyHash, ts := signAgentProof(t, writer, body)
+	contentHash := sha256.Sum256([]byte("explicit-internal"))
+	parsed := &tx.ParsedTx{
+		Type: tx.TxTypeMemorySubmit,
+		MemorySubmit: &tx.MemorySubmit{
+			ContentHash:     contentHash[:],
+			MemoryType:      tx.MemoryTypeObservation,
+			DomainTag:       "calibration.demo",
+			ConfidenceScore: 0.8,
+			Content:         "explicit-internal",
+			Classification:  tx.ClearanceInternal,
+		},
+		AgentPubKey:    pubKey,
+		AgentSig:       sig,
+		AgentBodyHash:  bodyHash,
+		AgentTimestamp: ts,
+	}
+
+	res := app.processMemorySubmit(parsed, 1, time.Now())
+	require.Equal(t, uint32(0), res.Code, "submit must succeed: %s", res.Log)
+
+	memoryID := string(res.Data)
+	class, err := app.badgerStore.GetMemoryClassification(memoryID)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(tx.ClearanceInternal), class,
+		"explicit Classification=1 must persist as INTERNAL")
+}
