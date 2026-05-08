@@ -724,6 +724,23 @@ func createEmbeddingProvider(cfg *Config, logger zerolog.Logger) embedding.Provi
 	case "ollama":
 		logger.Info().Str("url", cfg.Embedding.BaseURL).Msg("using Ollama embeddings")
 		return embedding.NewClient(cfg.Embedding.BaseURL, cfg.Embedding.Model)
+	case "openai-compatible":
+		dim := cfg.Embedding.Dimension
+		if dim <= 0 {
+			dim = 1536 // OpenAI text-embedding-3-small default
+		}
+		logger.Info().
+			Str("url", cfg.Embedding.BaseURL).
+			Str("model", cfg.Embedding.Model).
+			Int("dimension", dim).
+			Bool("authenticated", cfg.Embedding.APIKey != "").
+			Msg("using OpenAI-compatible embeddings")
+		return embedding.NewOpenAICompatibleClient(
+			cfg.Embedding.BaseURL,
+			cfg.Embedding.Model,
+			cfg.Embedding.APIKey,
+			dim,
+		)
 	default:
 		dim := cfg.Embedding.Dimension
 		if dim <= 0 {

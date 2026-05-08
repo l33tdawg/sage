@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -45,12 +46,17 @@ type EncryptionConfig struct {
 }
 
 // EmbeddingConfig configures the embedding provider.
+//
+// Provider values:
+//   - "hash"              — built-in deterministic non-semantic embeddings
+//   - "ollama"            — local Ollama (POST /api/embed)
+//   - "openai-compatible" — OpenAI / vLLM / LiteLLM / TEI (POST /v1/embeddings)
 type EmbeddingConfig struct {
-	Provider  string `yaml:"provider"` // "ollama" or "hash"
+	Provider  string `yaml:"provider"` // "hash", "ollama", or "openai-compatible"
 	APIKey    string `yaml:"api_key,omitempty"`
 	Model     string `yaml:"model,omitempty"`
 	Dimension int    `yaml:"dimension,omitempty"`
-	BaseURL   string `yaml:"base_url,omitempty"` // For Ollama
+	BaseURL   string `yaml:"base_url,omitempty"` // Ollama or OpenAI-compatible base
 }
 
 // DefaultConfig returns the default configuration.
@@ -89,22 +95,7 @@ func LoadConfig() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// REST_ADDR env var override (for Docker: REST_ADDR=0.0.0.0:8080)
-			if envAddr := os.Getenv("REST_ADDR"); envAddr != "" {
-				cfg.RESTAddr = envAddr
-			}
-			// SAGE_EMBEDDING_PROVIDER env var override (for Docker: SAGE_EMBEDDING_PROVIDER=ollama)
-			if envProvider := os.Getenv("SAGE_EMBEDDING_PROVIDER"); envProvider != "" {
-				cfg.Embedding.Provider = envProvider
-			}
-			// OLLAMA_URL env var override (for Docker: OLLAMA_URL=http://ollama:11434)
-			if envURL := os.Getenv("OLLAMA_URL"); envURL != "" {
-				cfg.Embedding.BaseURL = envURL
-			}
-			// OLLAMA_MODEL env var override (for Docker: OLLAMA_MODEL=nomic-embed-text)
-			if envModel := os.Getenv("OLLAMA_MODEL"); envModel != "" {
-				cfg.Embedding.Model = envModel
-			}
+			applyEnvOverrides(cfg)
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -114,23 +105,7 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// REST_ADDR env var override (for Docker: REST_ADDR=0.0.0.0:8080)
-	if envAddr := os.Getenv("REST_ADDR"); envAddr != "" {
-		cfg.RESTAddr = envAddr
-	}
-
-	// SAGE_EMBEDDING_PROVIDER env var override (for Docker: SAGE_EMBEDDING_PROVIDER=ollama)
-	if envProvider := os.Getenv("SAGE_EMBEDDING_PROVIDER"); envProvider != "" {
-		cfg.Embedding.Provider = envProvider
-	}
-	// OLLAMA_URL env var override (for Docker: OLLAMA_URL=http://ollama:11434)
-	if envURL := os.Getenv("OLLAMA_URL"); envURL != "" {
-		cfg.Embedding.BaseURL = envURL
-	}
-	// OLLAMA_MODEL env var override (for Docker: OLLAMA_MODEL=nomic-embed-text)
-	if envModel := os.Getenv("OLLAMA_MODEL"); envModel != "" {
-		cfg.Embedding.Model = envModel
-	}
+	applyEnvOverrides(cfg)
 
 	// Expand ~ and ensure absolute paths
 	cfg.DataDir = expandHome(cfg.DataDir)
@@ -143,6 +118,47 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// applyEnvOverrides applies environment-variable overrides to cfg in place.
+//
+// Backward-compat: REST_ADDR, SAGE_EMBEDDING_PROVIDER, OLLAMA_URL, OLLAMA_MODEL
+// keep their original meanings.
+//
+// New (for the openai-compatible provider): SAGE_EMBEDDING_BASE_URL,
+// SAGE_EMBEDDING_MODEL, SAGE_EMBEDDING_API_KEY, SAGE_EMBEDDING_DIMENSION.
+// The SAGE_EMBEDDING_* names take precedence over OLLAMA_* when both are set,
+// because the OLLAMA_* names are misleading once a non-Ollama backend is in
+// use (e.g. vLLM at /v1/embeddings).
+func applyEnvOverrides(cfg *Config) {
+	if envAddr := os.Getenv("REST_ADDR"); envAddr != "" {
+		cfg.RESTAddr = envAddr
+	}
+	if envProvider := os.Getenv("SAGE_EMBEDDING_PROVIDER"); envProvider != "" {
+		cfg.Embedding.Provider = envProvider
+	}
+	// Ollama-named overrides (legacy).
+	if envURL := os.Getenv("OLLAMA_URL"); envURL != "" {
+		cfg.Embedding.BaseURL = envURL
+	}
+	if envModel := os.Getenv("OLLAMA_MODEL"); envModel != "" {
+		cfg.Embedding.Model = envModel
+	}
+	// Provider-agnostic overrides — preferred for openai-compatible deployments.
+	if envURL := os.Getenv("SAGE_EMBEDDING_BASE_URL"); envURL != "" {
+		cfg.Embedding.BaseURL = envURL
+	}
+	if envModel := os.Getenv("SAGE_EMBEDDING_MODEL"); envModel != "" {
+		cfg.Embedding.Model = envModel
+	}
+	if envKey := os.Getenv("SAGE_EMBEDDING_API_KEY"); envKey != "" {
+		cfg.Embedding.APIKey = envKey
+	}
+	if envDim := os.Getenv("SAGE_EMBEDDING_DIMENSION"); envDim != "" {
+		if n, err := strconv.Atoi(envDim); err == nil && n > 0 {
+			cfg.Embedding.Dimension = n
+		}
+	}
 }
 
 // expandHome replaces a leading ~ with the user's home directory.
