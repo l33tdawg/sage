@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -111,4 +112,48 @@ func TestHandleEmbedInfo_NoVaultAPIPreservesLegacyBehavior(t *testing.T) {
 	// so the response should reflect the embedder unchanged: semantic=false.
 	assert.False(t, resp.Semantic)
 	assert.Equal(t, "hash", resp.Provider)
+}
+
+// namedSemanticEmbedder is a minimal Provider that implements the optional
+// embedding.Named interface so we can assert /v1/embed/info uses the embedder's
+// own name rather than always reporting "ollama" for any semantic provider.
+type namedSemanticEmbedder struct {
+	name string
+	dim  int
+}
+
+func (n *namedSemanticEmbedder) Embed(_ context.Context, _ string) ([]float32, error) {
+	return make([]float32, n.dim), nil
+}
+func (n *namedSemanticEmbedder) Dimension() int { return n.dim }
+func (n *namedSemanticEmbedder) Ready() bool    { return true }
+func (n *namedSemanticEmbedder) Semantic() bool { return true }
+func (n *namedSemanticEmbedder) Name() string   { return n.name }
+
+// TestHandleEmbedInfo_NamedProviderOverridesOllama confirms that semantic
+// providers other than the legacy Ollama client (e.g. the openai-compatible
+// provider) report their own name through /v1/embed/info instead of being
+// silently labeled "ollama".
+func TestHandleEmbedInfo_NamedProviderOverridesOllama(t *testing.T) {
+	emb := &namedSemanticEmbedder{name: "openai-compatible", dim: 1536}
+
+	memStore := newMockMemoryStore()
+	scoreStore := newMockScoreStore()
+	health := metrics.NewHealthChecker()
+	health.SetPostgresHealth(true)
+	health.SetCometBFTHealth(true)
+
+	srv := NewServer("", memStore, scoreStore, nil, health, zerolog.Nop(), emb)
+
+	req, _ := signedRequest(t, http.MethodGet, "/v1/embed/info", nil)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp EmbedInfoResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+
+	assert.True(t, resp.Semantic)
+	assert.Equal(t, "openai-compatible", resp.Provider)
+	assert.Equal(t, 1536, resp.Dimension)
 }

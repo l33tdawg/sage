@@ -102,9 +102,11 @@ func handleWizardPage(w http.ResponseWriter, r *http.Request) {
 func handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB max
 	var req struct {
-		Provider string `json:"provider"`
-		APIKey   string `json:"api_key"`
-		BaseURL  string `json:"base_url"`
+		Provider  string `json:"provider"`
+		APIKey    string `json:"api_key"`
+		BaseURL   string `json:"base_url"`
+		Model     string `json:"model"`
+		Dimension int    `json:"dimension"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"ok":false,"error":"invalid request"}`, http.StatusBadRequest)
@@ -117,6 +119,12 @@ func handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		provider = embedding.NewClient(req.BaseURL, "")
 	case "hash":
 		provider = embedding.NewHashProvider(768)
+	case "openai-compatible":
+		dim := req.Dimension
+		if dim <= 0 {
+			dim = 1536
+		}
+		provider = embedding.NewOpenAICompatibleClient(req.BaseURL, req.Model, req.APIKey, dim)
 	default:
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "unknown provider"})
 		return

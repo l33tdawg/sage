@@ -14,3 +14,11 @@ type Provider interface {
 	// Hash-based providers return false — cosine similarity is meaningless.
 	Semantic() bool
 }
+
+// Named is an optional interface a Provider can implement to expose its
+// canonical name. Operator-facing surfaces (e.g. /v1/embed/info) prefer this
+// over inferring "ollama" vs "hash" from Semantic() alone, so providers other
+// than the original two don't get mislabeled.
+type Named interface {
+	Name() string
+}

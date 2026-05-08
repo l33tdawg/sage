@@ -2,6 +2,8 @@ package rest
 
 import (
 	"net/http"
+
+	"github.com/l33tdawg/sage/internal/embedding"
 )
 
 // EmbedRequest is the request body for POST /v1/embed.
@@ -46,7 +48,15 @@ func (s *Server) handleEmbedInfo(w http.ResponseWriter, r *http.Request) {
 	semantic := s.embedder.Semantic()
 	provider := "hash"
 	if semantic {
+		// Default semantic name is "ollama" for backward compat with clients
+		// that pre-date the multi-provider patch. Providers may override by
+		// implementing the optional Named interface (e.g. openai-compatible).
 		provider = "ollama"
+		if named, ok := s.embedder.(embedding.Named); ok {
+			if n := named.Name(); n != "" {
+				provider = n
+			}
+		}
 	}
 
 	// Vault-active forces semantic-only mode. Even if no embedder is
