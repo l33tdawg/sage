@@ -102,6 +102,82 @@ function confidenceColor(v) {
     return '#ef4444';
 }
 
+// describeEmbedder normalizes the /v1/dashboard/health embedder block into the
+// shape the status pill + system-status row need. Handles three server tiers:
+//   1. v6.8.8+:   health.embedder = { provider, model, dimension, ready,
+//                                     semantic, online }
+//   2. v6.8.7:    health.ollama only ("running" | "offline"). Treat as Ollama
+//                 even though that may be wrong — pre-fix server can't tell us
+//                 otherwise, and the misreport this exists to fix is exactly
+//                 this case. Once upstream ships the fix this branch becomes
+//                 dead code for new deployments.
+//   3. degraded:  no health at all → unknown.
+function describeEmbedder(health) {
+    // displayName is the short noun the System Status row renders as the
+    // dependency name (the "Ollama" column equivalent). It's deliberately not
+    // derived from shortLabel.split(' ')[0] — that worked for "Ollama" /
+    // "Hash" / "OpenAI-compatible" but produced "No" for the
+    // "No embedder configured" case.
+    const displayName = {
+        'ollama': 'Ollama',
+        'openai-compatible': 'OpenAI-compatible',
+        'hash': 'Hash provider',
+        'none': 'Embedder',
+        'unknown': 'Embedder',
+    };
+    const emb = health?.embedder;
+    if (emb && emb.provider) {
+        const p = emb.provider;
+        const online = !!emb.online;
+        let label;
+        switch (p) {
+            case 'ollama':
+                label = `Ollama ${online ? 'connected' : 'offline'}`;
+                break;
+            case 'openai-compatible':
+                label = `OpenAI-compatible ${online ? 'connected' : 'offline'}`;
+                break;
+            case 'hash':
+                // Hash has no upstream and no semantic meaning. Make the
+                // operator-facing label say so loudly — it's a test/fallback
+                // mode and a long-running deployment on it is almost always
+                // a misconfiguration.
+                label = 'Hash provider (no semantic search)';
+                break;
+            case 'none':
+                label = 'No embedder configured';
+                break;
+            default:
+                label = `${p} ${online ? 'connected' : 'offline'}`;
+        }
+        // Append model + dimension when known. Hash and "none" don't get a
+        // model suffix — they don't talk to anything.
+        const detailParts = [];
+        if (emb.model && p !== 'hash' && p !== 'none') detailParts.push(emb.model);
+        if (emb.dimension && p !== 'none') detailParts.push(`${emb.dimension}-dim`);
+        const detail = detailParts.length ? ` (${detailParts.join(', ')})` : '';
+        return {
+            provider: p,
+            online,
+            label: label + detail,
+            shortLabel: label,
+            displayName: displayName[p] || p,
+            detail: detailParts.join(', '),
+        };
+    }
+    // Pre-v6.8.8 fallback: only the legacy ollama string is available. The
+    // value "n/a" means a newer server explicitly told us not to use this
+    // field — treat as unknown so we don't paint a false Ollama status.
+    const legacy = health?.ollama;
+    if (legacy === 'running') {
+        return { provider: 'ollama', online: true, label: 'Ollama connected', shortLabel: 'Ollama connected', displayName: displayName.ollama, detail: '' };
+    }
+    if (legacy === 'offline') {
+        return { provider: 'ollama', online: false, label: 'Ollama offline', shortLabel: 'Ollama offline', displayName: displayName.ollama, detail: '' };
+    }
+    return { provider: 'unknown', online: false, label: 'Embedder status unknown', shortLabel: 'Embedder unknown', displayName: displayName.unknown, detail: '' };
+}
+
 // SVG Icons
 const icons = {
     brain: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2C9.5 2 7.5 3.5 7 5.5C5.5 5.5 4 7 4 9c0 1.5.8 2.8 2 3.5C5.5 13.5 5 15 5.5 16.5c.5 1 1.5 2 3 2.5l.5 1c.3.6 1 1 1.7 1h2.6c.7 0 1.4-.4 1.7-1l.5-1c1.5-.5 2.5-1.5 3-2.5.5-1.5 0-3-.5-4C19.2 11.8 20 10.5 20 9c0-2-1.5-3.5-3-3.5C16.5 3.5 14.5 2 12 2z"/><path d="M12 2v19" opacity="0.3"/><path d="M8 8c-1 0-2 .5-2 1.5" opacity="0.5"/><path d="M16 8c1 0 2 .5 2 1.5" opacity="0.5"/></svg>`,
@@ -3017,7 +3093,10 @@ function SettingsPage() {
     const ver = health?.version || 'dev';
     const encrypted = health?.encrypted || false;
     const chain = health?.chain || null;
-    const ollama = health?.ollama || 'unknown';
+    // Embedder status. v6.8.8+ servers return a structured `embedder` block;
+    // older servers only set the `ollama` string. Derive a normalized view
+    // so the row below this can render any provider without branching twice.
+    const embedderStatus = describeEmbedder(health);
     const uptimeRaw = health?.uptime || '';
     const uptimeBaseSec = useRef(0);
     const [uptimeOffset, setUptimeOffset] = useState(0);
@@ -3140,7 +3219,7 @@ function SettingsPage() {
                         <div class="settings-section">
                             <h3>System Status</h3>
                             <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:#10b981">Running</span></div>
-                            <div class="settings-row"><span class="label">${statusDot(ollama === 'running')} Ollama</span><span class="value" style="color: ${ollama === 'running' ? '#10b981' : '#6b7280'}">${ollama === 'running' ? 'Connected' : 'Offline'}</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} ${embedderStatus.displayName}</span><span class="value" style="color: ${embedderStatus.online ? '#10b981' : '#6b7280'}" title="${embedderStatus.detail || ''}">${embedderStatus.online ? (embedderStatus.detail ? embedderStatus.detail : 'Connected') : 'Offline'}</span></div>
                             <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span><span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">${encrypted ? 'AES-256-GCM' : 'Off'}</span></div>
                             <div class="settings-row"><span class="label">Version</span><span class="value">${ver}</span></div>
                             <div class="settings-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>
@@ -3944,15 +4023,15 @@ function HealthBar() {
 
     if (!health) return null;
 
-    const ollamaOk = health.ollama === 'running';
+    const embedderStatus = describeEmbedder(health);
     const totalMem = health.memories?.total_memories || 0;
     const domains = health.memories?.by_domain ? Object.keys(health.memories.by_domain).length : 0;
 
     return html`
         <div class="health-bar">
-            <div class="health-item">
-                <div class="health-dot ${ollamaOk ? 'ok' : 'err'}"></div>
-                <span>Ollama ${ollamaOk ? 'connected' : 'offline'}</span>
+            <div class="health-item" title="${embedderStatus.detail || ''}">
+                <div class="health-dot ${embedderStatus.online ? 'ok' : 'err'}"></div>
+                <span>${embedderStatus.label}</span>
             </div>
             <div class="health-sep"></div>
             <div class="health-item">

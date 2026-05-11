@@ -22,3 +22,22 @@ type Provider interface {
 type Named interface {
 	Name() string
 }
+
+// Modeler is an optional interface a Provider can implement to expose the
+// model identifier it serves. The CEREBRUM dashboard surfaces this in the
+// embedder status pill so operators running multi-model stacks (vLLM /
+// LiteLLM / Ollama with several embedding models loaded) can confirm at a
+// glance which one SAGE actually talks to. Providers that don't implement
+// this simply don't get a model label in the UI.
+type Modeler interface {
+	Model() string
+}
+
+// Pinger is an optional interface a Provider can implement to expose a
+// cheap liveness check. The dashboard health endpoint prefers Ping over
+// Ready when present, because Ready is a sticky "has-ever-succeeded" flag
+// — useful for /v1/embed/info but unhelpful for a real-time operator pill
+// where the upstream embed server may have gone away after boot.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}

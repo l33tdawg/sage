@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/l33tdawg/sage/internal/auth"
+	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -41,9 +42,24 @@ type PreferencesStore interface {
 	DeprecateMemories(ctx context.Context, memoryIDs []string) (int, error)
 }
 
-// Embedder generates vector embeddings for text content.
+// Embedder generates vector embeddings for text content. The dashboard
+// imports + task-planning paths only need Embed; the optional methods below
+// let /v1/dashboard/health report which provider is configured and whether
+// it is reachable. Any value satisfying embedding.Provider (Ollama, OpenAI-
+// compatible, Hash) plugs in unchanged via SetEmbedder.
 type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
+// embedderProvider is the dashboard-side view of the optional methods an
+// embedding.Provider exposes. handleHealth type-asserts h.embedder to this
+// interface so the status pill can dispatch on the actual configured
+// provider (Ollama vs openai-compatible vs hash) instead of hard-coding an
+// Ollama probe at localhost:11434 — the bug this exists to fix.
+type embedderProvider interface {
+	Dimension() int
+	Ready() bool
+	Semantic() bool
 }
 
 // DashboardHandler serves the CEREBRUM dashboard UI and its API endpoints.
@@ -1324,16 +1340,110 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 		"uptime":       time.Since(startTime).String(),
 	}
 
-	// Check Ollama
-	client := &http.Client{Timeout: 2 * time.Second}
-	ollamaReq, _ := http.NewRequestWithContext(r.Context(), "GET", "http://localhost:11434/api/tags", nil)
-	resp, err := client.Do(ollamaReq)
-	if err != nil {
-		health["ollama"] = "offline"
-	} else {
-		resp.Body.Close()
-		health["ollama"] = "running"
+	// Embedder status. Before v6.8.8 the dashboard hard-coded an Ollama probe
+	// to localhost:11434, which painted "Ollama offline" any time the operator
+	// had selected the openai-compatible or hash provider — cosmetic only, but
+	// confusing because SAGE was actually embedding fine through the configured
+	// path. We now dispatch on the configured provider: type-assert h.embedder
+	// to the optional interfaces in internal/embedding (Named / Modeler /
+	// Pinger / the Dimension+Ready+Semantic trio from Provider) and report a
+	// structured embedder block.
+	//
+	// The legacy "ollama" string field is still populated so older builds of
+	// the dashboard JS keep showing something sensible during version skew:
+	//   - provider == "ollama": "running" iff the configured client pings ok
+	//   - provider != "ollama": "n/a" — the old key is no longer meaningful,
+	//     but we don't reuse it to signal openai-compatible state because old
+	//     clients would mis-render that as "Ollama running".
+	provider, model := "", ""
+	dimension := 0
+	ready := false
+	semantic := false
+	probeAttempted := false
+	probeOK := false
+
+	if h.embedder != nil {
+		if ep, ok := h.embedder.(embedderProvider); ok {
+			dimension = ep.Dimension()
+			ready = ep.Ready()
+			semantic = ep.Semantic()
+		}
+		if named, ok := h.embedder.(embedding.Named); ok {
+			provider = named.Name()
+		} else if semantic {
+			// Pre-Named providers in the wild are Ollama; hash exposes
+			// Semantic()=false. Mirror api/rest/embed_handler.go's fallback.
+			provider = "ollama"
+		} else {
+			provider = "hash"
+		}
+		if modeler, ok := h.embedder.(embedding.Modeler); ok {
+			model = modeler.Model()
+		}
+		if pinger, ok := h.embedder.(embedding.Pinger); ok {
+			probeAttempted = true
+			pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			if err := pinger.Ping(pingCtx); err == nil {
+				probeOK = true
+			}
+			cancel()
+		}
 	}
+
+	// Legacy field, kept for backward compatibility with pre-v6.8.8 dashboards
+	// that read health.ollama directly.
+	switch provider {
+	case "ollama":
+		if probeAttempted {
+			if probeOK {
+				health["ollama"] = "running"
+			} else {
+				health["ollama"] = "offline"
+			}
+		} else {
+			// No Pinger on this Ollama client (shouldn't happen in current
+			// builds, but keep the legacy probe as a fallback so the field
+			// stays accurate).
+			client := &http.Client{Timeout: 2 * time.Second}
+			ollamaReq, _ := http.NewRequestWithContext(r.Context(), "GET", "http://localhost:11434/api/tags", nil)
+			if resp, err := client.Do(ollamaReq); err != nil {
+				health["ollama"] = "offline"
+			} else {
+				resp.Body.Close()
+				health["ollama"] = "running"
+			}
+		}
+	default:
+		// "n/a" signals to legacy clients that this field doesn't describe
+		// the active embedder. New clients ignore it and read health.embedder.
+		health["ollama"] = "n/a"
+	}
+
+	embedderInfo := map[string]any{
+		"provider":  provider,
+		"dimension": dimension,
+		"ready":     ready,
+		"semantic":  semantic,
+	}
+	if model != "" {
+		embedderInfo["model"] = model
+	}
+	// online: best-effort liveness for the operator pill. Prefer Pinger
+	// (real-time), fall back to Ready() (sticky has-ever-succeeded). Hash
+	// is always online — it has no upstream.
+	switch {
+	case probeAttempted:
+		embedderInfo["online"] = probeOK
+	case provider == "hash":
+		embedderInfo["online"] = true
+	default:
+		embedderInfo["online"] = ready
+	}
+	if h.embedder == nil {
+		embedderInfo["provider"] = "none"
+		embedderInfo["online"] = false
+	}
+	health["embedder"] = embedderInfo
 
 	// Get memory stats
 	stats, err := h.store.GetStats(r.Context())

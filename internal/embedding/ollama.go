@@ -134,6 +134,12 @@ func (c *Client) Name() string {
 	return "ollama"
 }
 
+// Model implements embedding.Modeler so the CEREBRUM status pill can show
+// which Ollama model is currently bound (e.g. "nomic-embed-text").
+func (c *Client) Model() string {
+	return c.model
+}
+
 // Ping checks if Ollama is reachable.
 func (c *Client) Ping(ctx context.Context) error {
 	httpReq, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/api/tags", nil)

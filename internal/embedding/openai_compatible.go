@@ -160,6 +160,13 @@ func (c *OpenAICompatibleClient) Name() string {
 	return "openai-compatible"
 }
 
+// Model implements embedding.Modeler so the CEREBRUM status pill can show
+// which upstream model identifier this client sends in its embed requests
+// (e.g. "Alibaba-NLP/gte-Qwen2-1.5B-instruct").
+func (c *OpenAICompatibleClient) Model() string {
+	return c.model
+}
+
 // Ping checks whether the configured endpoint is reachable. The OpenAI
 // embeddings spec doesn't define a dedicated health endpoint, so we issue
 // a minimal embed request — most servers will return a fast response or a
