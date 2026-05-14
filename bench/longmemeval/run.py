@@ -338,6 +338,12 @@ def main() -> int:
         default=None,
         help="restrict to one question_type for focused runs.",
     )
+    parser.add_argument(
+        "--per-type",
+        type=int,
+        default=0,
+        help="sample N questions from each question_type for a balanced cross-section.",
+    )
     args = parser.parse_args()
 
     if not os.environ.get("OPENAI_API_KEY"):
@@ -354,6 +360,18 @@ def main() -> int:
     if args.question_type:
         questions = [q for q in questions if q.get("question_type") == args.question_type]
         print(f"filtered to {len(questions)} {args.question_type} questions")
+
+    if args.per_type > 0:
+        by_type: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+        for q in questions:
+            by_type[q.get("question_type", "unknown")].append(q)
+        sampled: list[dict[str, Any]] = []
+        for t in sorted(by_type):
+            head = by_type[t][: args.per_type]
+            sampled.extend(head)
+            print(f"  sampled {len(head)} from {t}")
+        questions = sampled
+        print(f"per-type sampling: {len(questions)} questions total")
 
     if args.limit > 0:
         questions = questions[: args.limit]
