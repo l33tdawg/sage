@@ -89,7 +89,7 @@ Compare to previous runs by diffing `summary.overall` between two JSONs in `benc
 
 ## Tuning knobs that affect the score
 
-SAGE v7.0's hybrid recall exposes four env tunables — all read by the SAGE node, not by this script. Set them in the SAGE node's environment, then re-run:
+SAGE v7.0's hybrid recall exposes four env tunables, all read by the SAGE node, not by this script. Set them in the SAGE node's environment, then re-run:
 
 | Var | Default | Effect |
 |---|---|---|
@@ -99,3 +99,49 @@ SAGE v7.0's hybrid recall exposes four env tunables — all read by the SAGE nod
 | `SAGE_HYBRID_OVERSAMPLE` | 2 | each stream samples `TopK * N` before merging |
 
 Run a baseline first, then bisect.
+
+## v7.1: cross-encoder reranker (optional)
+
+v7.1 adds a post-RRF rerank pass via an external HTTP service. The default is off; turn it on by setting both `SAGE_RERANK_ENABLED=1` and `SAGE_RERANK_URL=<tei-endpoint>` in the SAGE node's environment:
+
+| Var | Default | Effect |
+|---|---|---|
+| `SAGE_RERANK_ENABLED` | `0` | gate; must be `1`/`true`/`yes`/`on` to activate |
+| `SAGE_RERANK_URL` | *(unset)* | base URL of a TEI-compatible reranker (`/rerank` endpoint) |
+| `SAGE_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | informational; surfaces in logs |
+| `SAGE_RERANK_TIMEOUT_MS` | `2000` | per-call timeout; reranker failure falls back to RRF ordering |
+| `SAGE_RERANK_OVERSAMPLE` | `2` | candidate pool size factor: RRF returns `TopK * N` for the reranker |
+
+### Running TEI alongside SAGE
+
+The easiest way to deploy is HuggingFace's [Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference). A minimal Docker invocation:
+
+```bash
+docker run -d --name tei-reranker -p 8090:80 \
+  ghcr.io/huggingface/text-embeddings-inference:latest \
+  --model-id BAAI/bge-reranker-v2-m3
+```
+
+Then start the SAGE node with:
+
+```bash
+SAGE_RERANK_ENABLED=1 \
+SAGE_RERANK_URL=http://localhost:8090 \
+  sage-gui serve
+```
+
+The reranker model footprint is ~2.3 GB on disk and ~4 GB RAM. CPU-only is fine for personal-mode SAGE; expect ~100-200 ms added per recall.
+
+### What the bench JSON records
+
+The harness captures the operator-side env state so v7.0 baselines stay distinguishable from v7.1 reranker runs:
+
+```json
+{
+  "rerank_enabled_env": true,
+  "rerank_url_env": "http://localhost:8090",
+  ...
+}
+```
+
+When comparing two result files, that pair of fields tells you which pipeline produced the number.

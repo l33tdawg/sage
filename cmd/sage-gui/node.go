@@ -94,6 +94,22 @@ func runServe() error {
 	}
 	defer func() { _ = sqliteStore.Close() }()
 
+	// Optional cross-encoder reranker on the hybrid recall path. Off by
+	// default; operator turns it on with SAGE_RERANK_ENABLED=1 and
+	// SAGE_RERANK_URL=<tei-endpoint>. v7.1 ships this as additive polish
+	// over the v7.0 hybrid baseline.
+	if rerankCfg := embedding.ResolveRerankerConfig(); rerankCfg.Enabled && rerankCfg.URL != "" {
+		if rr := embedding.BuildReranker(rerankCfg); rr != nil {
+			sqliteStore.SetReranker(rr, rerankCfg.Oversample)
+			logger.Info().
+				Str("url", rerankCfg.URL).
+				Str("model", rerankCfg.Model).
+				Int("oversample", rerankCfg.Oversample).
+				Int("timeout_ms", rerankCfg.TimeoutMS).
+				Msg("hybrid recall reranker enabled")
+		}
+	}
+
 	// Unlock encryption vault if enabled
 	vaultKeyPath := filepath.Join(SageHome(), "vault.key")
 

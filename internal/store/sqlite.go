@@ -18,6 +18,7 @@ import (
 
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 
+	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/vault"
 )
@@ -39,6 +40,13 @@ type SQLiteStore struct {
 	vaultExpected     bool         // true = encryption should be active; reject writes if vault nil
 	decryptWarnOnce   sync.Once    // gates the one-time decryption failure warning
 	writeMu           sync.Mutex   // serializes ALL writes to prevent SQLITE_BUSY
+
+	// Optional cross-encoder reranker; nil = skip the rerank pass and return
+	// the RRF-sorted candidates directly. Wired at server startup via
+	// SetReranker after ResolveRerankerConfig+BuildReranker, so the store
+	// stays agnostic to whether an operator turned the reranker on.
+	reranker           embedding.Reranker
+	rerankerOversample int // RRF candidate pool size factor when reranker is active
 }
 
 // writeExecContext wraps ExecContext with writeMu for standalone (non-tx) writes.
@@ -84,6 +92,19 @@ const ErrTextSearchVaultEncryptedMsg = "text search unavailable: content is vaul
 // When set, memory content is encrypted on write and decrypted on read.
 func (s *SQLiteStore) SetVault(v *vault.Vault) {
 	s.vault = v
+}
+
+// SetReranker attaches an optional cross-encoder reranker used by
+// SearchHybrid to refine the top-K ordering. Pass nil to disable; the
+// hybrid path falls back to plain RRF ordering when no reranker is set.
+// `oversample` is the multiplier applied to TopK when sizing the candidate
+// pool fed to the reranker; values <= 0 fall through to the default 2.
+func (s *SQLiteStore) SetReranker(r embedding.Reranker, oversample int) {
+	s.reranker = r
+	if oversample <= 0 {
+		oversample = 2
+	}
+	s.rerankerOversample = oversample
 }
 
 // VaultActive reports whether content is encrypted at rest by an attached
@@ -1100,6 +1121,8 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 // two ranked lists via weighted Reciprocal Rank Fusion. When the vault is
 // active the FTS path is unavailable; we fall back to QuerySimilar alone so
 // recall still works. When the query is empty we degrade to vector-only.
+// If a reranker is attached, RRF returns an oversampled candidate pool that
+// the reranker rescores into the final top-K.
 func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding []float32, opts QueryOptions) ([]*memory.MemoryRecord, error) {
 	if len(embedding) == 0 && query == "" {
 		return nil, fmt.Errorf("hybrid search requires either a query or an embedding")
@@ -1111,10 +1134,23 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 		requestedTopK = 10
 	}
 
+	// When the reranker is active we ask RRF for more candidates than the
+	// caller wants back, so the cross-encoder has a real pool to choose from.
+	// Without a reranker, RRF trims directly to requestedTopK.
+	rerankPool := requestedTopK
+	rerankActive := s.reranker != nil && query != ""
+	if rerankActive {
+		os := s.rerankerOversample
+		if os <= 0 {
+			os = 2
+		}
+		rerankPool = requestedTopK * os
+	}
+
 	// Each underlying index oversamples so the fusion has enough overlap to
 	// rank fairly when the two lists diverge near the tail.
 	subOpts := opts
-	subOpts.TopK = requestedTopK * params.OversampleMul
+	subOpts.TopK = rerankPool * params.OversampleMul
 	if subOpts.TopK > 100 {
 		subOpts.TopK = 100
 	}
@@ -1136,8 +1172,62 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 		vectorResults = r
 	}
 
-	merged := RRFMerge(bm25Results, vectorResults, requestedTopK, params)
-	return merged, nil
+	merged := RRFMerge(bm25Results, vectorResults, rerankPool, params)
+
+	if !rerankActive || len(merged) == 0 {
+		// No reranker configured, or no candidates to rescore. Trim to the
+		// caller's requested top-K (RRF already did this when rerankPool ==
+		// requestedTopK, but keep the safety in case oversample was applied
+		// elsewhere) and return.
+		if len(merged) > requestedTopK {
+			merged = merged[:requestedTopK]
+		}
+		return merged, nil
+	}
+
+	return s.applyReranker(ctx, query, merged, requestedTopK)
+}
+
+// applyReranker rescores `candidates` against `query` using the attached
+// reranker and returns the top-K. Failures fall back to the RRF-sorted
+// candidates so a flaky reranker upstream never blocks recall.
+func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidates []*memory.MemoryRecord, topK int) ([]*memory.MemoryRecord, error) {
+	texts := make([]string, len(candidates))
+	for i, c := range candidates {
+		texts[i] = c.Content
+	}
+
+	scored, err := s.reranker.Rerank(ctx, query, texts)
+	if err != nil || len(scored) == 0 {
+		// Best-effort: if the reranker is unreachable or returns nothing
+		// useful, surface the RRF ordering rather than fail the whole recall.
+		if len(candidates) > topK {
+			candidates = candidates[:topK]
+		}
+		return candidates, nil
+	}
+
+	// TEI returns results sorted by score descending; we still sort by score
+	// defensively so callers don't depend on an undocumented contract from
+	// whatever reranker the operator wired in.
+	sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
+
+	out := make([]*memory.MemoryRecord, 0, topK)
+	seen := make(map[int]struct{}, len(scored))
+	for _, r := range scored {
+		if r.Index < 0 || r.Index >= len(candidates) {
+			continue
+		}
+		if _, dup := seen[r.Index]; dup {
+			continue
+		}
+		seen[r.Index] = struct{}{}
+		out = append(out, candidates[r.Index])
+		if len(out) >= topK {
+			break
+		}
+	}
+	return out, nil
 }
 
 // ftsEscapeQuery wraps individual words in double quotes to escape FTS5 special characters.

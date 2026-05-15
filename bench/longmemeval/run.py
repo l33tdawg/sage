@@ -408,10 +408,17 @@ def main() -> int:
 
     total_seconds = time.time() - t_total
     summary = aggregate(per_q)
+    # Reranker on/off is a server-side decision (SAGE_RERANK_ENABLED on the
+    # SAGE node). Recording the operator-side env values lets future diffs
+    # tell apart "v7.0 stock" runs from "v7.1 reranker enabled" runs.
+    rerank_url = os.environ.get("SAGE_RERANK_URL", "")
+    rerank_enabled = os.environ.get("SAGE_RERANK_ENABLED", "").lower() in {"1", "true", "yes", "on"}
     payload = {
         "git_sha": git_sha(),
         "sage_url": BASE_URL,
         "embed_model": OPENAI_MODEL,
+        "rerank_enabled_env": rerank_enabled,
+        "rerank_url_env": rerank_url,
         "top_k": args.top_k,
         "limit": args.limit,
         "n_total": len(per_q),
