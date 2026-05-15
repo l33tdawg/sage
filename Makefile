@@ -79,6 +79,12 @@ bench-longmemeval-smoke: ## Smoke-test the LongMemEval-S harness against a runni
 bench-longmemeval: ## Run full LongMemEval-S benchmark - slow (hours); writes bench/results/longmemeval-<sha>.json
 	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python bench/longmemeval/run.py
 
+bench-locomo-smoke: ## Smoke-test the LoCoMo harness against a running SAGE node (5 questions)
+	pip install -q -r bench/locomo/requirements.txt && PYTHONUNBUFFERED=1 python bench/locomo/run.py --limit 5
+
+bench-locomo: ## Run full LoCoMo benchmark; writes bench/results/locomo-<sha>.json
+	pip install -q -r bench/locomo/requirements.txt && PYTHONUNBUFFERED=1 python bench/locomo/run.py
+
 sdk-test: ## Run Python SDK tests
 	cd sdk/python && pip install -e ".[dev]" && pytest -v
 
