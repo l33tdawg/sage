@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -236,6 +237,11 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListGrants handles GET /v1/access/grants/{agent_id}.
+//
+// Reconciles the off-chain accessStore mirror against Badger (chain truth)
+// — a row that survives in the mirror after a chain reset / Badger wipe
+// can't actually be exercised, and surfacing it would mislead callers into
+// believing they hold access the chain doesn't honour.
 func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agent_id")
 	if agentID == "" {
@@ -253,6 +259,18 @@ func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error().Err(err).Str("agent_id", agentID).Msg("failed to get grants")
 		writeProblem(w, http.StatusInternalServerError, "Query error", "Failed to query access grants.")
 		return
+	}
+
+	if s.badgerStore != nil {
+		live := grants[:0]
+		for _, g := range grants {
+			if _, _, _, gErr := s.badgerStore.GetAccessGrant(g.Domain, g.GranteeID); gErr == nil {
+				live = append(live, g)
+			} else {
+				s.logger.Warn().Str("domain", g.Domain).Str("grantee", g.GranteeID).Msg("dropping stale mirror grant absent from chain")
+			}
+		}
+		grants = live
 	}
 
 	writeJSON(w, http.StatusOK, grants)
@@ -317,6 +335,14 @@ func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetDomain handles GET /v1/domain/{name}.
+//
+// Ownership comes from BadgerDB (chain-authoritative). The off-chain
+// accessStore mirror is only consulted to enrich description and created_at
+// — fields not stored on chain. Returning the mirror's owner_agent_id
+// directly would let stale mirrors (e.g. chain reset that didn't drop the
+// accessStore tables) tell callers they own a domain the chain rejects on,
+// producing the classic "submit_observation passes, grant_access fails with
+// code 34" footgun.
 func (s *Server) handleGetDomain(w http.ResponseWriter, r *http.Request) {
 	name := chi.URLParam(r, "name")
 	if name == "" {
@@ -324,18 +350,35 @@ func (s *Server) handleGetDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.accessStore == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "Access store unavailable",
-			"Access control storage is not configured.")
+	if s.badgerStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Chain store unavailable",
+			"On-chain state is not configured.")
 		return
 	}
 
-	domain, err := s.accessStore.GetDomain(r.Context(), name)
+	ownerID, parent, height, err := s.badgerStore.GetDomainOwnerAndMeta(name)
 	if err != nil {
 		writeProblem(w, http.StatusNotFound, "Domain not found",
 			fmt.Sprintf("No domain found with name %s", name))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, domain)
+	resp := &store.DomainEntry{
+		DomainName:    name,
+		OwnerAgentID:  ownerID,
+		ParentDomain:  parent,
+		CreatedHeight: height,
+	}
+
+	if s.accessStore != nil {
+		if mirror, mirrorErr := s.accessStore.GetDomain(r.Context(), name); mirrorErr == nil && mirror != nil {
+			if mirror.OwnerAgentID != "" && mirror.OwnerAgentID != ownerID {
+				s.logger.Warn().Str("domain", name).Str("chain_owner", ownerID).Str("mirror_owner", mirror.OwnerAgentID).Msg("accessStore mirror disagrees with chain on domain owner — serving chain value")
+			}
+			resp.Description = mirror.Description
+			resp.CreatedAt = mirror.CreatedAt
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }

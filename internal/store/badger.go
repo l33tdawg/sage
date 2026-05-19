@@ -636,6 +636,41 @@ func (s *BadgerStore) GetDomainOwner(name string) (string, error) {
 	return ownerID, err
 }
 
+// GetDomainOwnerAndMeta returns owner, parent, and registered block height
+// for a domain in a single read. Use this in any read path that informs a
+// later grant/revoke/register tx — those handlers validate against Badger,
+// so off-chain mirrors that disagree (e.g. chain reset without dropping
+// the accessStore tables) will mislead callers into Code-34 rejections.
+func (s *BadgerStore) GetDomainOwnerAndMeta(name string) (ownerID, parent string, height int64, err error) {
+	err = s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(domainKey(name))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			owner, off, decErr := decodeString(val, 0)
+			if decErr != nil {
+				return decErr
+			}
+			p, off, decErr := decodeString(val, off)
+			if decErr != nil {
+				return decErr
+			}
+			if len(val) < off+8 {
+				return fmt.Errorf("invalid domain entry: short height")
+			}
+			ownerID = owner
+			parent = p
+			height = int64(binary.BigEndian.Uint64(val[off : off+8])) // #nosec G115 -- height non-negative
+			return nil
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return "", "", 0, fmt.Errorf("domain not found: %s", name)
+	}
+	return
+}
+
 // IsDomainOwnerOrAncestor checks if agentID owns the given domain or any ancestor.
 // Walks up the hierarchy by splitting on ".".
 func (s *BadgerStore) IsDomainOwnerOrAncestor(domain, agentID string) (bool, error) {
