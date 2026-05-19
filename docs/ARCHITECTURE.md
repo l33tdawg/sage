@@ -588,6 +588,74 @@ Access to a memory requires passing three checks, evaluated in order:
 
 ---
 
+## Upgrade Machinery (v7.5)
+
+SAGE v7.5 ships the substrate for hands-off in-place chain upgrades. Existing chains can move forward across consensus-rule changes without a chain reset, without operator-typed commands, and without losing accumulated memory. The substrate has four moving parts:
+
+### 1. Scheduled snapshots
+
+Every committed block triggers `internal/abci/snapshot_sched.go::SnapshotScheduler.Tick`. The scheduler decides whether to fire `internal/snapshot.Take` based on cadence — by default every 10,000 blocks AND every 6 hours. Snapshots land at `~/.sage/data/snapshots/<height>/` containing:
+
+- `manifest.json` — height, AppHash, binary version, chunk hashes
+- `badger.backup` — full `(*badger.DB).Backup` stream
+- `sage.db` — VACUUM INTO of the offchain mirror
+- `cometbft-data.tar.zst` — blockstore/state/tx_index/evidence
+- `config.tar.zst` — genesis + node key + validator key + vault.key
+- `binary/sage-gui-<version>` — the running binary, bundled for rollback
+- `OK` — zero-byte sentinel written last under fsync
+
+Atomicity: stage in `.staging-<height>-<reason>/`, fsync, rename. Boot's `SweepStaging` removes any incomplete staging directories. Retention: K=5 newest + one anchor per distinct `BinaryVersion` (powers downgrade).
+
+Snapshot encryption inherits the vault posture. If the Synaptic Ledger vault is unlocked at boot, snapshots are wrapped in a streaming Argon2id + AES-256-GCM envelope keyed off the vault passphrase. Plaintext otherwise.
+
+### 2. Upgrade proposal and activation
+
+A new chain has app version 1. The running binary embeds an `upgradeTargetAppVersion` constant. When the binary boots and the chain's app version is less than the embedded target, the `upgrade_watchdog` goroutine in `cmd/sage-gui/upgrade_watchdog.go`:
+
+1. Signs an `UpgradePropose` tx using the node operator's agent key (`~/.sage/agent.key`)
+2. Broadcasts it through CometBFT's `/broadcast_tx_sync` RPC
+3. Stops on success or on "already pending" (terminal conditions)
+
+`processUpgradePropose` in `internal/abci/app.go` persists the proposal as an `UpgradePlanRecord` in BadgerDB keyed at `upgrade:plan`. The activation height is **chain-computed deterministically** at proposal-execution time as `req.Height + max(payload.UpgradeDelayBlocks, defaultUpgradeDelayBlocks=200)`. Every validator sees the same inputs and computes the same activation height — no multi-validator drift.
+
+At the activation height, `FinalizeBlock` reads the pending plan, emits `ResponseFinalizeBlock.ConsensusParamUpdates.Version.App = TargetAppVersion`, and calls `MarkUpgradeApplied` (which atomically clears the pending plan and writes an audit record at `upgrade:applied:<name>`). CometBFT applies the new app version at H+1 across every replica.
+
+At-most-one pending plan is enforced: a propose arriving while another is pending returns code 47 "already pending". A pre-activation `UpgradeCancel` (signed by any agent) clears the plan; post-activation cancel returns code 48 "too late".
+
+### 3. Halt detection
+
+If the chain binary panics (e.g. an upgrade handler failure), `cmd/sage-gui/halt_writer.go::haltOnPanic` runs in `runServe`'s deferred recover. It writes `~/.sage/data/HALT` atomically with the failed version, an optional rollback target (empty by default — the launcher picks the latest non-failed anchor), and the panic message. The deferred handler re-panics so the original stack still reaches stderr and the process exits non-zero.
+
+### 4. Supervised rollback
+
+`cmd/sage-launcher` runs in `--supervise` mode as the parent process of the chain binary. On child exit it:
+
+1. Reads `~/.sage/data/HALT`. Absent → propagate exit code (healthy path); present → enter rollback.
+2. Resolves the rollback anchor: `findLatestRollbackAnchor` scans `~/.sage/data/snapshots/` newest-first by mtime, picks the first directory whose `manifest.BinaryVersion != HALT.FailedVersion`.
+3. Locates the rollback binary at `<anchor>/binary/sage-gui-<version>`.
+4. Calls the injected `Restorer` (production: `internal/snapshot.Restore`) which Verify-gates the anchor (chunk hashes + SQLite integrity check + badger backup replayed into a tmpdir with `ComputeAppHash` comparison) before atomically swapping in BadgerDB, SQLite, and CometBFT data.
+5. Writes a `ROLLBACK_TRIGGERED` event to `~/.sage/launcher.log`.
+6. Clears the HALT sentinel.
+7. `syscall.Exec`s the rollback binary, replacing the launcher process. PID continuity preserved so outer supervisors (launchd / systemd) keep the same PID through the swap.
+
+Crash-loop circuit breaker: 3 non-HALT crashes within a 60s sliding window halts the supervisor with a clear error — better to surface "this binary cannot start" than to thrash in a restart loop.
+
+### Operator behaviour
+
+For sovereign single-machine users (the dominant deployment), the entire substrate is invisible. Drop a v7.5+ binary into `~/.sage/bin/`, restart `sage-gui`, and it just works:
+
+- No `sage-cli` subcommand is introduced.
+- The existing detached-launcher flow (used by macOS `.app` / Windows `.exe` double-click) is preserved. `--supervise` is opt-in.
+- Snapshots are taken in the background and consume disk under `~/.sage/data/snapshots/`. Retention is bounded.
+
+For federated multi-validator deployments, the chain-computed activation height guarantees byte-identical state transitions across replicas without operator coordination.
+
+### Wire format contracts
+
+The HALT sentinel field names (`failed_version`, `rollback_to`, `failure_message`, `timestamp`) are stable wire format between the chain binary's `cmd/sage-gui/halt_writer.go::haltSignal` and the launcher's `cmd/sage-launcher/halt_sentinel.go::HaltSignal`. The manifest's `taken_at` is an RFC3339 string (Go's default JSON encoding of `time.Time`), NOT a unix-epoch int64.
+
+---
+
 ## Agent Management & Network Topology
 
 SAGE v3.0 introduced a built-in agent management system for multi-agent networks. **v3.5 makes agent identity a first-class on-chain concept** — registration, updates, and permission changes go through CometBFT consensus for auditability and tamper resistance.
