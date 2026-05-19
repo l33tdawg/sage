@@ -32,6 +32,14 @@ const (
 	TxTypeGovPropose         TxType = 24
 	TxTypeGovVote            TxType = 25
 	TxTypeGovCancel          TxType = 26
+	// v7.5: auto-upgrade machinery — see docs/ROADMAP.md and design doc
+	// /tmp/sage-roadmap/upgrade-machinery.md. These are quorum-gated txs that
+	// schedule, abort, or roll back a chain-wide app-version bump. v7.5 ships
+	// stub handlers (codec + dispatch round-trip only); the watchdog + UpgradePlan
+	// state wiring lands in a later commit.
+	TxTypeUpgradePropose TxType = 27
+	TxTypeUpgradeCancel  TxType = 28
+	TxTypeUpgradeRevert  TxType = 29
 )
 
 // GovProposalOp identifies the governance operation being proposed.
@@ -273,6 +281,36 @@ type GovCancel struct {
 	ProposalID string
 }
 
+// UpgradePropose proposes a chain-wide app-version bump. Quorum-gated by the
+// same 2/3 governance primitive used for validator-set changes. The chain
+// derives ActivationHeight deterministically at execution time, so validators
+// only race to propose — they don't pick the height.
+type UpgradePropose struct {
+	Name               string // e.g. "v7.5.0"
+	TargetAppVersion   uint64 // bumps consensus_params.version.app
+	BinarySHA256       string // optional, may be empty — pinned digest for verification
+	ProposerID         string // agent_id of the validator that seeded this proposal
+	UpgradeDelayBlocks int64  // suggested delay before activation; chain may override
+}
+
+// UpgradeCancel aborts a pending upgrade plan before its ActivationHeight.
+// Quorum-gated; no-op once the upgrade has already executed.
+type UpgradeCancel struct {
+	Name        string
+	CancellerID string
+	Reason      string
+}
+
+// UpgradeRevert rolls back to a prior app version after an upgrade has
+// activated. Quorum-gated; intended for emergency recovery only. See the
+// design doc's "Rollback story" section for the caveats.
+type UpgradeRevert struct {
+	Name                string
+	TargetAppVersion    uint64 // version to revert TO (must be < current)
+	RevertingFromHeight int64  // height at which the revert was authored
+	ProposerID          string
+}
+
 // AgentSetPermission sets permissions on an agent (admin only).
 type AgentSetPermission struct {
 	AgentID       string
@@ -312,6 +350,9 @@ type ParsedTx struct {
 	GovPropose         *GovPropose
 	GovVote            *GovVote
 	GovCancel          *GovCancel
+	UpgradePropose     *UpgradePropose
+	UpgradeCancel      *UpgradeCancel
+	UpgradeRevert      *UpgradeRevert
 	Signature          []byte // Node validator Ed25519 signature (64 bytes)
 	PublicKey          []byte // Node validator Ed25519 public key (32 bytes)
 	Nonce              uint64

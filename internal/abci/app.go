@@ -613,6 +613,12 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 		return app.processGovVote(parsedTx, height, blockTime)
 	case tx.TxTypeGovCancel:
 		return app.processGovCancel(parsedTx, height, blockTime)
+	case tx.TxTypeUpgradePropose:
+		return app.processUpgradePropose(parsedTx, height, blockTime)
+	case tx.TxTypeUpgradeCancel:
+		return app.processUpgradeCancel(parsedTx, height, blockTime)
+	case tx.TxTypeUpgradeRevert:
+		return app.processUpgradeRevert(parsedTx, height, blockTime)
 	default:
 		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
 	}
@@ -2827,6 +2833,122 @@ func (app *SageApp) processGovCancel(parsedTx *tx.ParsedTx, height int64, _ time
 	})
 
 	return &abcitypes.ExecTxResult{Code: 0, Log: "proposal cancelled"}
+}
+
+// ---------------------------------------------------------------------------
+// v7.5 auto-upgrade machinery — STUB HANDLERS
+//
+// These three handlers (UpgradePropose / UpgradeCancel / UpgradeRevert)
+// are intentionally stubs for v7.5 task #0. They prove that the codec and
+// the ABCI dispatch switch can round-trip the new tx types end-to-end:
+//   - identity verification runs
+//   - payload validation runs
+//   - the action is logged
+//   - the tx is accepted with code 0
+//
+// They DO NOT mutate ABCI state (no BadgerDB writes, no pendingWrites,
+// no governance.Engine calls, no consensus param updates). State wiring
+// — UpgradePlan persistence, the upgrade-watchdog goroutine, the
+// FinalizeBlock activation check, the rollback snapshot — lands in a
+// later commit alongside the watchdog. See:
+//   - docs/ROADMAP.md (v7.5/v8 section)
+//   - /tmp/sage-roadmap/upgrade-machinery.md (full design)
+//
+// Error code allocation: codes 47, 48, 49 (each handler reuses its single
+// code for both missing-payload and identity-verification failures, in
+// line with the processOrgRegister / processOrgAddMember pattern).
+
+// processUpgradePropose handles a TxTypeUpgradePropose transaction (stub).
+func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+	prop := parsedTx.UpgradePropose
+	if prop == nil {
+		return &abcitypes.ExecTxResult{Code: 47, Log: "missing upgrade propose payload"}
+	}
+
+	// Verify agent identity on-chain via embedded Ed25519 proof.
+	proposerID, err := verifyAgentIdentity(parsedTx)
+	if err != nil {
+		return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
+	}
+
+	// Validate required fields.
+	if prop.Name == "" {
+		return &abcitypes.ExecTxResult{Code: 47, Log: "upgrade propose: name is required"}
+	}
+	if prop.TargetAppVersion == 0 {
+		return &abcitypes.ExecTxResult{Code: 47, Log: "upgrade propose: target_app_version must be > 0"}
+	}
+
+	app.logger.Info().
+		Str("name", prop.Name).
+		Uint64("target_app_version", prop.TargetAppVersion).
+		Str("binary_sha256", prop.BinarySHA256).
+		Str("proposer_id", proposerID).
+		Str("payload_proposer_id", prop.ProposerID).
+		Int64("upgrade_delay_blocks", prop.UpgradeDelayBlocks).
+		Int64("height", height).
+		Msg("upgrade propose received (pre-fork stub — no state mutation)")
+
+	return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
+}
+
+// processUpgradeCancel handles a TxTypeUpgradeCancel transaction (stub).
+func (app *SageApp) processUpgradeCancel(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+	cancel := parsedTx.UpgradeCancel
+	if cancel == nil {
+		return &abcitypes.ExecTxResult{Code: 48, Log: "missing upgrade cancel payload"}
+	}
+
+	// Verify agent identity on-chain via embedded Ed25519 proof.
+	cancellerID, err := verifyAgentIdentity(parsedTx)
+	if err != nil {
+		return &abcitypes.ExecTxResult{Code: 48, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
+	}
+
+	// Validate required fields.
+	if cancel.Name == "" {
+		return &abcitypes.ExecTxResult{Code: 48, Log: "upgrade cancel: name is required"}
+	}
+
+	app.logger.Info().
+		Str("name", cancel.Name).
+		Str("canceller_id", cancellerID).
+		Str("payload_canceller_id", cancel.CancellerID).
+		Str("reason", cancel.Reason).
+		Int64("height", height).
+		Msg("upgrade cancel received (pre-fork stub — no state mutation)")
+
+	return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
+}
+
+// processUpgradeRevert handles a TxTypeUpgradeRevert transaction (stub).
+func (app *SageApp) processUpgradeRevert(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+	revert := parsedTx.UpgradeRevert
+	if revert == nil {
+		return &abcitypes.ExecTxResult{Code: 49, Log: "missing upgrade revert payload"}
+	}
+
+	// Verify agent identity on-chain via embedded Ed25519 proof.
+	proposerID, err := verifyAgentIdentity(parsedTx)
+	if err != nil {
+		return &abcitypes.ExecTxResult{Code: 49, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
+	}
+
+	// Validate required fields.
+	if revert.Name == "" {
+		return &abcitypes.ExecTxResult{Code: 49, Log: "upgrade revert: name is required"}
+	}
+
+	app.logger.Info().
+		Str("name", revert.Name).
+		Uint64("target_app_version", revert.TargetAppVersion).
+		Int64("reverting_from_height", revert.RevertingFromHeight).
+		Str("proposer_id", proposerID).
+		Str("payload_proposer_id", revert.ProposerID).
+		Int64("height", height).
+		Msg("upgrade revert received (pre-fork stub — no state mutation)")
+
+	return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
 }
 
 // applyGovernanceProposal applies an executed governance proposal to the validator set

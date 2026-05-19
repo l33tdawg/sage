@@ -341,6 +341,21 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 			return nil, fmt.Errorf("GovCancel is nil for gov cancel tx")
 		}
 		return encodeGovCancel(tx.GovCancel), nil
+	case TxTypeUpgradePropose:
+		if tx.UpgradePropose == nil {
+			return nil, fmt.Errorf("UpgradePropose is nil for upgrade propose tx")
+		}
+		return encodeUpgradePropose(tx.UpgradePropose), nil
+	case TxTypeUpgradeCancel:
+		if tx.UpgradeCancel == nil {
+			return nil, fmt.Errorf("UpgradeCancel is nil for upgrade cancel tx")
+		}
+		return encodeUpgradeCancel(tx.UpgradeCancel), nil
+	case TxTypeUpgradeRevert:
+		if tx.UpgradeRevert == nil {
+			return nil, fmt.Errorf("UpgradeRevert is nil for upgrade revert tx")
+		}
+		return encodeUpgradeRevert(tx.UpgradeRevert), nil
 	default:
 		return nil, ErrUnknownTxType
 	}
@@ -529,6 +544,27 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 			return err
 		}
 		tx.GovCancel = g
+		return nil
+	case TxTypeUpgradePropose:
+		u, err := decodeUpgradePropose(data)
+		if err != nil {
+			return err
+		}
+		tx.UpgradePropose = u
+		return nil
+	case TxTypeUpgradeCancel:
+		u, err := decodeUpgradeCancel(data)
+		if err != nil {
+			return err
+		}
+		tx.UpgradeCancel = u
+		return nil
+	case TxTypeUpgradeRevert:
+		u, err := decodeUpgradeRevert(data)
+		if err != nil {
+			return err
+		}
+		tx.UpgradeRevert = u
 		return nil
 	default:
 		return ErrUnknownTxType
@@ -1817,4 +1853,147 @@ func decodeGovCancel(data []byte) (*GovCancel, error) {
 	g.ProposalID = string(b)
 
 	return g, nil
+}
+
+// --- uint64 helper (used by upgrade tx encodings) ---
+
+func readUint64(data []byte, off int) (uint64, int, error) {
+	if off+8 > len(data) {
+		return 0, 0, ErrInvalidTxData
+	}
+	v := binary.BigEndian.Uint64(data[off : off+8])
+	return v, off + 8, nil
+}
+
+// --- UpgradePropose ---
+//
+// Field order mirrors the AccessGrant pattern: length-prefixed strings via
+// appendBytes, fixed-width integers via appendUint64/appendInt64. No new
+// encoding primitives are introduced — TargetAppVersion is the first uint64
+// payload field in any tx type, so we add a matching readUint64 above.
+
+func encodeUpgradePropose(u *UpgradePropose) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(u.Name))
+	buf = appendUint64(buf, u.TargetAppVersion)
+	buf = appendBytes(buf, []byte(u.BinarySHA256))
+	buf = appendBytes(buf, []byte(u.ProposerID))
+	buf = appendInt64(buf, u.UpgradeDelayBlocks)
+	return buf
+}
+
+func decodeUpgradePropose(data []byte) (*UpgradePropose, error) {
+	u := &UpgradePropose{}
+	var err error
+	var b []byte
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	u.Name = string(b)
+
+	u.TargetAppVersion, off, err = readUint64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	u.BinarySHA256 = string(b)
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	u.ProposerID = string(b)
+
+	u.UpgradeDelayBlocks, _, err = readInt64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	return u, nil
+}
+
+// --- UpgradeCancel ---
+
+func encodeUpgradeCancel(u *UpgradeCancel) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(u.Name))
+	buf = appendBytes(buf, []byte(u.CancellerID))
+	buf = appendBytes(buf, []byte(u.Reason))
+	return buf
+}
+
+func decodeUpgradeCancel(data []byte) (*UpgradeCancel, error) {
+	u := &UpgradeCancel{}
+	var err error
+	var b []byte
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	u.Name = string(b)
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	u.CancellerID = string(b)
+
+	b, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	u.Reason = string(b)
+
+	return u, nil
+}
+
+// --- UpgradeRevert ---
+
+func encodeUpgradeRevert(u *UpgradeRevert) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(u.Name))
+	buf = appendUint64(buf, u.TargetAppVersion)
+	buf = appendInt64(buf, u.RevertingFromHeight)
+	buf = appendBytes(buf, []byte(u.ProposerID))
+	return buf
+}
+
+func decodeUpgradeRevert(data []byte) (*UpgradeRevert, error) {
+	u := &UpgradeRevert{}
+	var err error
+	var b []byte
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	u.Name = string(b)
+
+	u.TargetAppVersion, off, err = readUint64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	u.RevertingFromHeight, off, err = readInt64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	b, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	u.ProposerID = string(b)
+
+	return u, nil
 }
