@@ -46,11 +46,16 @@ import (
 	"github.com/l33tdawg/sage/web"
 )
 
-func runServe() error {
+func runServe() (rerr error) {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+
+	// v7.5: catch panics, write HALT sentinel so the launcher's
+	// --supervise mode can roll back. Re-panics so the original
+	// stack still reaches stderr and the process exits non-zero.
+	defer haltOnPanic(cfg.DataDir)
 
 	logger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: time.RFC3339}).
 		With().Timestamp().Str("service", "sage-gui").Logger()

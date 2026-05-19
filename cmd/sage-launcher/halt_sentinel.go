@@ -56,10 +56,12 @@ var ErrNoHaltSentinel = errors.New("no HALT sentinel present")
 // path the caller hands in). Returns ErrNoHaltSentinel wrapped if
 // the file is absent, or a parsing error if the JSON is malformed.
 //
-// The function performs minimal validation: FailedVersion and
-// RollbackTo must both be non-empty. The launcher refuses to act on
-// a sentinel that lacks a rollback target — better to crash-loop and
-// alert than to silently re-exec into nothing.
+// The function performs minimal validation: FailedVersion must be
+// non-empty. RollbackTo MAY be empty, in which case the caller is
+// expected to resolve a rollback target by scanning available anchor
+// snapshots (see findLatestRollbackAnchor in rollback.go) — this lets
+// the chain binary write a HALT sentinel before it has any knowledge
+// of which anchors exist on disk.
 func ReadHaltSignal(path string) (*HaltSignal, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -76,9 +78,6 @@ func ReadHaltSignal(path string) (*HaltSignal, error) {
 
 	if sig.FailedVersion == "" {
 		return nil, fmt.Errorf("HALT sentinel %s: failed_version is empty", path)
-	}
-	if sig.RollbackTo == "" {
-		return nil, fmt.Errorf("HALT sentinel %s: rollback_to is empty", path)
 	}
 
 	return &sig, nil

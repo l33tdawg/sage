@@ -130,14 +130,31 @@ func HandleHalt(ctx RollbackContext, sig *HaltSignal) error {
 	ctx.Logf("ROLLBACK_TRIGGERED failed=%s rollback_to=%s reason=%q",
 		sig.FailedVersion, sig.RollbackTo, sig.FailureMessage)
 
-	snapDir, manifest, err := findAnchorSnapshot(ctx.SnapshotsDir, sig.RollbackTo)
-	if err != nil {
-		return fmt.Errorf("locate anchor snapshot for %s: %w", sig.RollbackTo, err)
+	var (
+		snapDir  string
+		manifest *snapshotManifest
+		err      error
+	)
+	if sig.RollbackTo != "" {
+		snapDir, manifest, err = findAnchorSnapshot(ctx.SnapshotsDir, sig.RollbackTo)
+		if err != nil {
+			return fmt.Errorf("locate anchor snapshot for %s: %w", sig.RollbackTo, err)
+		}
+	} else {
+		// Empty rollback_to: chain binary didn't pick a target (e.g.
+		// it crashed before it could enumerate available anchors).
+		// Pick the newest anchor whose BinaryVersion differs from
+		// the failed version — that's "the last known-good code".
+		snapDir, manifest, err = findLatestRollbackAnchor(ctx.SnapshotsDir, sig.FailedVersion)
+		if err != nil {
+			return fmt.Errorf("locate fallback anchor (exclude %s): %w", sig.FailedVersion, err)
+		}
+		ctx.Logf("rollback_to was empty; selected latest anchor binary_version=%s", manifest.BinaryVersion)
 	}
 	ctx.Logf("rollback snapshot selected: %s (height=%d binary_version=%s)",
 		snapDir, manifest.Height, manifest.BinaryVersion)
 
-	binaryName := "sage-gui-" + sig.RollbackTo
+	binaryName := "sage-gui-" + manifest.BinaryVersion
 	if runtime.GOOS == "windows" {
 		binaryName += ".exe"
 	}
@@ -263,6 +280,69 @@ func findAnchorSnapshot(snapshotsDir, rollbackTo string) (string, *snapshotManif
 		return "", nil, fmt.Errorf("no anchor snapshot for %s (last parse error: %v)", rollbackTo, lastErr)
 	}
 	return "", nil, fmt.Errorf("no anchor snapshot for %s in %s", rollbackTo, snapshotsDir)
+}
+
+// findLatestRollbackAnchor scans snapshots newest-first and returns
+// the first whose BinaryVersion is non-empty AND not equal to
+// excludeVersion. Used when the HALT sentinel didn't specify a
+// rollback target — we pick "anything but the version that just
+// failed". Matches findAnchorSnapshot's directory layout and
+// OK-sentinel gating.
+func findLatestRollbackAnchor(snapshotsDir, excludeVersion string) (string, *snapshotManifest, error) {
+	entries, err := os.ReadDir(snapshotsDir)
+	if err != nil {
+		return "", nil, fmt.Errorf("read snapshots dir %s: %w", snapshotsDir, err)
+	}
+
+	type candidate struct {
+		name  string
+		mtime time.Time
+	}
+	var candidates []candidate
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) >= 1 && name[0] == '.' {
+			continue
+		}
+		info, infoErr := e.Info()
+		if infoErr != nil {
+			continue
+		}
+		candidates = append(candidates, candidate{name: name, mtime: info.ModTime()})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].mtime.After(candidates[j].mtime)
+	})
+
+	var lastErr error
+	for _, c := range candidates {
+		dir := filepath.Join(snapshotsDir, c.name)
+		if _, statErr := os.Stat(filepath.Join(dir, "OK")); statErr != nil {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(dir, "manifest.json"))
+		if readErr != nil {
+			lastErr = readErr
+			continue
+		}
+		var m snapshotManifest
+		if jsonErr := json.Unmarshal(raw, &m); jsonErr != nil {
+			lastErr = jsonErr
+			continue
+		}
+		if m.BinaryVersion == "" || m.BinaryVersion == excludeVersion {
+			continue
+		}
+		return dir, &m, nil
+	}
+
+	if lastErr != nil {
+		return "", nil, fmt.Errorf("no anchor snapshot excluding %s (last parse error: %v)", excludeVersion, lastErr)
+	}
+	return "", nil, fmt.Errorf("no anchor snapshot excluding %s in %s", excludeVersion, snapshotsDir)
 }
 
 // rollbackEvent is the JSON record appended to launcher.log when a

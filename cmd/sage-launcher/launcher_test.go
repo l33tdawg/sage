@@ -181,11 +181,14 @@ func TestHaltSignal_RejectsMissingFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "HALT")
 
-	// Empty rollback_to -> error.
+	// Empty rollback_to is VALID — caller resolves via
+	// findLatestRollbackAnchor. ReadHaltSignal must accept it.
 	raw, _ := json.Marshal(HaltSignal{FailedVersion: "v7.5.0"})
 	_ = os.WriteFile(path, raw, 0o644)
-	if _, err := ReadHaltSignal(path); err == nil {
-		t.Fatal("expected error for empty rollback_to")
+	if sig, err := ReadHaltSignal(path); err != nil {
+		t.Fatalf("ReadHaltSignal with empty rollback_to should succeed: %v", err)
+	} else if sig.FailedVersion != "v7.5.0" || sig.RollbackTo != "" {
+		t.Fatalf("ReadHaltSignal returned %+v", sig)
 	}
 
 	// Empty failed_version -> error.
