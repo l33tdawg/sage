@@ -320,6 +320,13 @@ func runServe() (rerr error) {
 	// Auto-seed network_agents from existing chain state (v3 upgrade path)
 	seedNetworkAgents(ctx, sqliteStore, cometHome, cometNode, logger)
 
+	// Ensure an operator-specified admin agent is provisioned in SQL on
+	// every boot. The on-chain admin role is materialized on first admin
+	// op via bootstrapAdminFromSQL (internal/abci/app.go) — this just
+	// guarantees the SQL trust row exists so post-reset deployments don't
+	// have to re-bootstrap admin manually.
+	ensureInitialAdmin(ctx, sqliteStore, logger)
+
 	// CometBFT RPC URL for tx broadcast
 	cometRPC := "http://127.0.0.1:26657"
 
