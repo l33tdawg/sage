@@ -889,6 +889,89 @@ func (s *BadgerStore) GetOrg(orgID string) (name, adminAgent string, err error) 
 	return
 }
 
+// GetOrgWithMeta returns name, description, adminAgent, and registered
+// block height for an org in a single read. Use this in any read path
+// that informs a later admin op — those handlers validate against Badger,
+// so off-chain mirrors that disagree (mirror has org row, chain doesn't)
+// produce false "I'm org admin" answers and Code-54 rejections.
+func (s *BadgerStore) GetOrgWithMeta(orgID string) (name, description, adminAgent string, height int64, err error) {
+	err = s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(orgKey(orgID))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			n, off, decErr := decodeString(val, 0)
+			if decErr != nil {
+				return decErr
+			}
+			d, off, decErr := decodeString(val, off)
+			if decErr != nil {
+				return decErr
+			}
+			a, off, decErr := decodeString(val, off)
+			if decErr != nil {
+				return decErr
+			}
+			if len(val) < off+8 {
+				return fmt.Errorf("invalid org entry: short height")
+			}
+			name = n
+			description = d
+			adminAgent = a
+			height = int64(binary.BigEndian.Uint64(val[off : off+8])) // #nosec G115 -- height non-negative
+			return nil
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return "", "", "", 0, fmt.Errorf("org not found: %s", orgID)
+	}
+	return
+}
+
+// ListOrgMembers returns every member of an org from Badger by scanning
+// the org_member:<orgID>: prefix. Each entry decodes to (agentID,
+// clearance, role, registeredHeight). Chain-authoritative — operators
+// downstream of off-chain accessStore reads should use this when the
+// answer needs to match what the ABCI handlers will see.
+func (s *BadgerStore) ListOrgMembers(orgID string) ([]OrgMemberEntry, error) {
+	prefix := []byte("org_member:" + orgID + ":")
+	var out []OrgMemberEntry
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			agentID := string(item.Key()[len(prefix):])
+			var entry OrgMemberEntry
+			entry.OrgID = orgID
+			entry.AgentID = agentID
+			if valErr := item.Value(func(val []byte) error {
+				if len(val) < 1+4 {
+					return fmt.Errorf("invalid org_member entry for %s/%s", orgID, agentID)
+				}
+				entry.Clearance = ClearanceLevel(val[0])
+				role, off, decErr := decodeString(val, 1)
+				if decErr != nil {
+					return decErr
+				}
+				entry.Role = role
+				if len(val) >= off+8 {
+					entry.CreatedHeight = int64(binary.BigEndian.Uint64(val[off : off+8])) // #nosec G115 -- height non-negative
+				}
+				return nil
+			}); valErr != nil {
+				return valErr
+			}
+			out = append(out, entry)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // AddOrgMember adds a member to an organization in BadgerDB.
 // Encoding: clearance (1 byte) + role (length-prefixed) + height (8 bytes).
 // Maintains both the legacy single-slot agent_org reverse lookup (last add

@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -112,6 +113,15 @@ func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetOrg handles GET /v1/org/{org_id}.
+//
+// Chain-authoritative — same pattern as handleGetDomain (v7.5.3). Owner,
+// name, parent and created_height come from BadgerDB; the off-chain
+// orgStore mirror is only consulted to enrich created_at (and serves as
+// a divergence sensor: a WARN logs when the mirror disagrees with chain).
+// Returning the mirror's admin_agent_id directly would let stale rows
+// (chain reset that didn't drop accessStore tables) tell callers they own
+// an org the chain doesn't recognise, producing Code-54 "is not admin of
+// org" rejections on the next add_org_member.
 func (s *Server) handleGetOrg(w http.ResponseWriter, r *http.Request) {
 	orgID := chi.URLParam(r, "org_id")
 	if orgID == "" {
@@ -119,20 +129,40 @@ func (s *Server) handleGetOrg(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.orgStore == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "Org store unavailable",
-			"Organization storage is not configured.")
+	if s.badgerStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Chain store unavailable",
+			"On-chain state is not configured.")
 		return
 	}
 
-	org, err := s.orgStore.GetOrg(r.Context(), orgID)
+	name, description, adminAgent, height, err := s.badgerStore.GetOrgWithMeta(orgID)
 	if err != nil {
 		writeProblem(w, http.StatusNotFound, "Organization not found",
 			fmt.Sprintf("No organization found with ID %s", orgID))
 		return
 	}
 
-	writeJSON(w, http.StatusOK, org)
+	resp := &store.OrgEntry{
+		OrgID:         orgID,
+		Name:          name,
+		Description:   description,
+		AdminAgentID:  adminAgent,
+		CreatedHeight: height,
+	}
+
+	if s.orgStore != nil {
+		if mirror, mirrorErr := s.orgStore.GetOrg(r.Context(), orgID); mirrorErr == nil && mirror != nil {
+			if mirror.AdminAgentID != "" && mirror.AdminAgentID != adminAgent {
+				s.logger.Warn().Str("org_id", orgID).Str("chain_admin", adminAgent).Str("mirror_admin", mirror.AdminAgentID).Msg("orgStore mirror disagrees with chain on org admin — serving chain value")
+			}
+			resp.CreatedAt = mirror.CreatedAt
+			if resp.Description == "" {
+				resp.Description = mirror.Description
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleGetOrgByName handles GET /v1/org/by-name/{name}.
@@ -177,6 +207,12 @@ func (s *Server) handleGetOrgByName(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleListOrgMembers handles GET /v1/org/{org_id}/members.
+//
+// Reads from Badger (chain-authoritative) and uses the off-chain orgStore
+// mirror only to enrich created_at on each member. A row that exists in
+// the mirror but not on chain is silently dropped — surfacing it would
+// mislead callers into believing they have admin access the chain won't
+// honour (Code-54 rejections on add_org_member / set_clearance / etc.).
 func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 	orgID := chi.URLParam(r, "org_id")
 	if orgID == "" {
@@ -184,20 +220,39 @@ func (s *Server) handleListOrgMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.orgStore == nil {
-		writeProblem(w, http.StatusServiceUnavailable, "Org store unavailable",
-			"Organization storage is not configured.")
+	if s.badgerStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Chain store unavailable",
+			"On-chain state is not configured.")
 		return
 	}
 
-	members, err := s.orgStore.GetOrgMembers(r.Context(), orgID)
+	chainMembers, err := s.badgerStore.ListOrgMembers(orgID)
 	if err != nil {
-		s.logger.Error().Err(err).Str("org_id", orgID).Msg("failed to get org members")
+		s.logger.Error().Err(err).Str("org_id", orgID).Msg("failed to list org members from chain")
 		writeProblem(w, http.StatusInternalServerError, "Query error", "Failed to query organization members.")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, members)
+	mirrorByAgent := map[string]*store.OrgMemberEntry{}
+	if s.orgStore != nil {
+		if mirror, mirrorErr := s.orgStore.GetOrgMembers(r.Context(), orgID); mirrorErr == nil {
+			for _, m := range mirror {
+				mirrorByAgent[m.AgentID] = m
+			}
+		}
+	}
+
+	out := make([]*store.OrgMemberEntry, 0, len(chainMembers))
+	for i := range chainMembers {
+		m := chainMembers[i]
+		if mm := mirrorByAgent[m.AgentID]; mm != nil {
+			m.CreatedAt = mm.CreatedAt
+			m.RemovedAt = mm.RemovedAt
+		}
+		out = append(out, &m)
+	}
+
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleOrgAddMember handles POST /v1/org/{org_id}/member.
