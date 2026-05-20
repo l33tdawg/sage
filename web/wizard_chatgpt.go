@@ -653,11 +653,12 @@ func fetchCloudflareZones(apiToken string) ([]map[string]string, error) {
 // ─── /create-tunnel ──────────────────────────────────────────────────────
 
 // handleWizardCreateTunnel runs:
-//   1. cloudflared tunnel create sage   (idempotent — uses existing if present)
-//   2. cloudflared tunnel route dns sage <hostname>
-//   3. write ~/.cloudflared/config.yml with path-restricted ingress
-//   4. install launchd plist (macOS) or systemd user unit (linux)
-//   5. verify tunnel reachable via HTTPS health probe
+//  1. cloudflared tunnel create sage   (idempotent — uses existing if present)
+//  2. cloudflared tunnel route dns sage <hostname>
+//  3. write ~/.cloudflared/config.yml with path-restricted ingress
+//  4. install launchd plist (macOS) or systemd user unit (linux)
+//  5. verify tunnel reachable via HTTPS health probe
+//
 // Streams progress to the frontend as text/plain "step: msg" lines.
 //
 // SAFETY: when a config.yml or tunnel named "sage" already exists, we DO NOT
@@ -912,7 +913,7 @@ func wizardWriteConfig(configPath, tunnelUUID, credPath, hostname string) error 
 	}
 	defer f.Close()
 	return configTemplate.Execute(f, map[string]string{
-		"Version":         "v7.5.10",
+		"Version":         "v7.6.0",
 		"TunnelUUID":      tunnelUUID,
 		"CredentialsFile": credPath,
 		"Hostname":        hostname,

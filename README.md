@@ -57,6 +57,15 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
+## What's New in v7.6
+
+Direct-write hooks across Claude Code and Codex. Sessions boot SAGE without depending on the agent to remember `sage_inception` on its own — the local SAGE node is queried directly by lifecycle hooks, recent committed memories land as initial context, and a session-lifecycle observation is written on exit. One unified install path for both agents.
+
+- **`sage-gui hook session-start | session-end`.** New Go subcommand bundled with sage-gui. Loads the agent's Ed25519 key with the same priority chain as the MCP server (SAGE_IDENTITY_PATH → SAGE_AGENT_KEY → per-project key → default), signs REST calls against the local SAGE node, and prints a recent-memories context block on stdout (which Claude Code / Codex inject into the agent's prompt). Soft-fails with non-zero exit so the shell wrapper falls back to a static nudge when the node is unreachable.
+- **`sage-gui mcp install` now ships 5 direct-write scripts** (`sage-session-start.sh`, `sage-session-end.sh`, `sage-pre-compact.sh`, `sage-user-prompt.sh`, `sage-stop.sh`) instead of the legacy 2-script nudge set. The session-start/end scripts shell out to `sage-gui hook ...` via an absolute binary path substituted at install time — no `$PATH` lookup, no Python dependency, no pynacl. All scripts respect `~/.sage/memory_mode` (full / bookend / on-demand). The hook block uses `${CLAUDE_PROJECT_DIR}` so paths resolve correctly even when Claude Code starts from a subdir.
+- **`sage-gui codex install` mirrors the install for Codex.** Writes `.codex/config.toml` (MCP server registration), `.codex/hooks.json` (hook lifecycle wiring with absolute paths because Codex doesn't expand env vars in hook commands), the same 5 hook scripts under `.codex/hooks/`, and an `AGENTS.md` boot reminder. The hook scripts are identical to the Claude side — same Go binary, same signed REST protocol, same memory_mode semantics. Two agents, one substrate.
+- **Self-heal migrates older installs.** Every MCP server start runs `selfHealProject`, which now detects legacy 2-script installs (sage-boot.sh / sage-turn.sh) and rewrites them to the new 5-script set, refreshes scripts when the sage-gui binary moves to a new location (a stale `__SAGE_GUI_BIN__` path triggers re-templating), and repairs missing `hooks.json` on Codex installs. No user action required after upgrading.
+
 ## What's New in v7.5
 
 Migration substrate. Hands-off in-place chain upgrades across consensus-rule changes — no chain reset, no operator commands, no accumulated memory lost. v7.5 itself ships zero consensus-rule changes; the entire release is the plumbing that makes every subsequent release safe to land on existing chains.
