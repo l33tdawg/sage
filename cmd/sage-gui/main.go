@@ -28,6 +28,15 @@ func main() {
 		} else {
 			err = runMCP()
 		}
+	case "hook":
+		err = runHook()
+	case "codex":
+		if len(os.Args) > 2 && os.Args[2] == "install" {
+			err = runCodexInstall()
+		} else {
+			fmt.Fprintln(os.Stderr, "Usage: sage-gui codex install")
+			os.Exit(1)
+		}
 	case "setup":
 		err = runSetup()
 	case "seed":
@@ -94,5 +103,12 @@ Environment:
 
 MCP Subcommands:
   mcp             Run as MCP server (stdio)
-  mcp install     Install .mcp.json in the current project directory`)
+  mcp install     Install .mcp.json + Claude Code hooks in the current project
+
+Hook Subcommands (invoked by .claude/hooks/*.sh or .codex/hooks/*.sh):
+  hook session-start   Pre-fetch recent memories; emit context block on stdout
+  hook session-end     Post a session-lifecycle observation
+
+Codex Subcommands:
+  codex install     Install .codex/config.toml + hooks + AGENTS.md in the current project`)
 }

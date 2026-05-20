@@ -94,6 +94,10 @@ deploy/scripts/backups/
 CLAUDE.md
 .claude/
 
+# Codex
+AGENTS.md
+.codex/
+
 # Docs — ignore internal stuff but allow public-facing docs
 docs/*
 !docs/ARCHITECTURE.md

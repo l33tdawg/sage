@@ -20,42 +20,98 @@ import (
 	"github.com/l33tdawg/sage/internal/mcp"
 )
 
-// Embedded hook scripts deployed by `sage-gui mcp install`.
-// Both scripts check ~/.sage/memory_mode to adapt behavior.
-const sageBootScript = `#!/bin/bash
-# SAGE Boot Sequence Enforcement
-# Fires on SessionStart (startup, resume, compact).
+// Hook scripts deployed by `sage-gui mcp install`. The session-start and
+// session-end scripts shell out to `sage-gui hook ...` (substituted at
+// install time via __SAGE_GUI_BIN__) which performs signed REST calls
+// against the local SAGE node — pre-fetching recent memories on
+// SessionStart and posting a lifecycle observation on SessionEnd.
+//
+// All scripts check ~/.sage/memory_mode to adapt behavior:
+//
+//	full      — default; full automation (sage_inception, sage_turn nudges)
+//	bookend   — only sage_reflect reminders; no per-turn nudges
+//	on-demand — silent; user drives SAGE manually
+const sageSessionStartTemplate = `#!/bin/bash
+# SAGE SessionStart hook — pre-fetch recent committed memories from the local
+# SAGE node and emit them as context. Falls back to a soft nudge if the node
+# is unreachable, the agent key is missing, or sage-gui isn't executable.
 SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
 MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
+SAGE_GUI_BIN="${SAGE_GUI_BIN:-__SAGE_GUI_BIN__}"
 
 if [ "$MODE" = "on-demand" ]; then
-    # On-demand mode: no automatic SAGE calls. User triggers manually.
-    echo "SAGE is available in on-demand mode. Use sage_recall to retrieve memories and sage_reflect to save learnings. No automatic memory calls will be made."
-else
-    echo "MANDATORY: Call sage_inception (or sage_red_pill) NOW, before responding to the user. This is a new session — your brain needs to boot. Do NOT skip this step, even if you have a context continuation summary. Those summaries do NOT replace your SAGE memory."
-    if [ "$MODE" = "bookend" ]; then
-        echo "SAGE MODE: bookend — Do NOT call sage_turn every turn. Only call sage_reflect at the end of the conversation when the user says 'reflect' or you finish a significant task."
-    fi
-fi
-`
-
-const sageTurnScript = `#!/bin/bash
-# SAGE Turn Reminder
-# Fires on PreCompact (sync), Stop, SubagentStop, and PostToolUse (async).
-# Respects memory mode: skips reminders in bookend and on-demand modes.
-SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
-MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
-
-if [ "$MODE" = "on-demand" ]; then
-    # On-demand mode: completely silent. User triggers SAGE manually.
+    echo "SAGE is in on-demand mode. Use sage_recall to retrieve memories and sage_reflect to save learnings. No automatic memory calls will be made."
     exit 0
-elif [ "$MODE" = "bookend" ]; then
-    # Bookend mode: only remind on significant events (PreCompact, Stop)
-    echo "SAGE REMINDER (bookend mode): If you just completed a significant task, call sage_reflect with dos and don'ts. Do NOT call sage_turn — bookend mode is active."
-else
-    echo "SAGE REMINDER: Call sage_turn with the current topic and a brief observation of what just happened. This saves your experience and recalls relevant memories. If you just completed a significant task, also call sage_reflect with dos and don'ts."
+fi
+
+if [ -x "$SAGE_GUI_BIN" ] && "$SAGE_GUI_BIN" hook session-start 2>/dev/null; then
+    if [ "$MODE" = "bookend" ]; then
+        echo "SAGE MODE: bookend — Do NOT call sage_turn every turn. Only call sage_reflect at the end of significant tasks."
+    fi
+    exit 0
+fi
+
+# Direct-write failed — fall back to the soft nudge so the agent still boots.
+echo "MANDATORY: Call sage_inception (or sage_red_pill) NOW, before responding to the user. This is a new session — your brain needs to boot. Do NOT skip this step, even if you have a context continuation summary. Those summaries do NOT replace your SAGE memory."
+if [ "$MODE" = "bookend" ]; then
+    echo "SAGE MODE: bookend — Do NOT call sage_turn every turn. Only call sage_reflect at the end of significant tasks."
 fi
 `
+
+const sageSessionEndTemplate = `#!/bin/bash
+# SAGE SessionEnd hook — post a lifecycle observation to the local SAGE node.
+# Soft-fails silently if the node is unreachable. Never blocks agent exit.
+SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
+MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
+SAGE_GUI_BIN="${SAGE_GUI_BIN:-__SAGE_GUI_BIN__}"
+
+if [ "$MODE" = "on-demand" ]; then
+    exit 0
+fi
+if [ -x "$SAGE_GUI_BIN" ]; then
+    "$SAGE_GUI_BIN" hook session-end 2>/dev/null
+fi
+exit 0
+`
+
+const sagePreCompactScript = `#!/bin/bash
+# SAGE PreCompact hook — fires right before Claude Code compacts the
+# conversation. Compaction discards turn-level detail; this is the last
+# chance to crystallise what was learned this session.
+SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
+MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
+if [ "$MODE" = "on-demand" ]; then
+    exit 0
+fi
+echo "MANDATORY before compaction: Call sage_reflect with a concise summary of (dos, don'ts) from this session, then sage_remember for any durable facts you want to keep. Once the context compacts, the per-turn detail is gone — only what you've committed to SAGE will survive."
+`
+
+const sageUserPromptScript = `#!/bin/bash
+# SAGE UserPromptSubmit hook — fires when the user submits a new prompt.
+# Soft nudge so the agent calls sage_turn early in its response.
+SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
+MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
+if [ "$MODE" = "on-demand" ] || [ "$MODE" = "bookend" ]; then
+    exit 0
+fi
+echo "Reminder: call sage_turn early in your response with the topic + an observation of what just happened. Memories you don't store don't survive."
+`
+
+const sageStopScript = `#!/bin/bash
+# SAGE Stop / SubagentStop hook — silent. Per-turn memory commits are the
+# agent's responsibility (via sage_turn); this hook is reserved for future
+# end-of-response checks without adding chatter today.
+exit 0
+`
+
+// Legacy script names kept for migration detection only. selfHealProject
+// removes references to these from settings.json when it finds them, but
+// leaves the files in place so a user who hand-edited them isn't lost
+// data.
+const (
+	legacyBootScriptName = "sage-boot.sh"
+	legacyTurnScriptName = "sage-turn.sh"
+)
 
 func runMCP() error {
 	home := os.Getenv("SAGE_HOME")
@@ -336,21 +392,30 @@ func runMCPInstall() error {
 // installClaudeHooks creates .claude/hooks/ scripts and merges hook config +
 // permissions into .claude/settings.json. This ensures SAGE tools fire reliably
 // across long agentic runs, context compactions, and subagent lifecycles.
+//
+// Scripts are templated with the absolute path of the sage-gui binary
+// invoking the install — the session-start/session-end scripts shell out
+// to that path for signed REST calls. Falling back to a $PATH lookup would
+// break for users who installed sage-gui outside the standard locations.
 func installClaudeHooks(projectDir string) error {
 	hookDir := filepath.Join(projectDir, ".claude", "hooks")
 	if err := os.MkdirAll(hookDir, 0755); err != nil {
 		return fmt.Errorf("create hooks dir: %w", err)
 	}
 
-	// Write hook scripts
-	scripts := map[string]string{
-		"sage-boot.sh": sageBootScript,
-		"sage-turn.sh": sageTurnScript,
+	binPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find sage-gui binary: %w", err)
 	}
-	for name, content := range scripts {
+	if resolved, symErr := filepath.EvalSymlinks(binPath); symErr == nil {
+		binPath = resolved
+	}
+
+	for name, tpl := range hookScriptSet() {
+		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", binPath)
 		path := filepath.Join(hookDir, name)
-		if err := os.WriteFile(path, []byte(content), 0755); err != nil { //nolint:gosec // hook scripts must be executable
-			return fmt.Errorf("write %s: %w", name, err)
+		if writeErr := os.WriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
+			return fmt.Errorf("write %s: %w", name, writeErr)
 		}
 	}
 
@@ -358,23 +423,116 @@ func installClaudeHooks(projectDir string) error {
 	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
 	settings := make(map[string]any)
 
-	if existing, err := os.ReadFile(settingsPath); err == nil {
+	if existing, statErr := os.ReadFile(settingsPath); statErr == nil {
 		_ = json.Unmarshal(existing, &settings)
 	}
 
-	settings["hooks"] = sageHooksConfig()
+	settings["hooks"] = sageHooksConfig("${CLAUDE_PROJECT_DIR}/.claude/hooks")
 	settings["permissions"] = sagePermissionsConfig(settings)
 
 	data, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal settings: %w", err)
 	}
-	if err := os.WriteFile(settingsPath, append(data, '\n'), 0600); err != nil {
-		return fmt.Errorf("write settings: %w", err)
+	if writeErr := os.WriteFile(settingsPath, append(data, '\n'), 0600); writeErr != nil {
+		return fmt.Errorf("write settings: %w", writeErr)
 	}
 
 	fmt.Printf("  ✓ .claude/hooks/: installed (%s)\n", hookDir)
 	fmt.Printf("  ✓ .claude/settings.json: updated (%s)\n", settingsPath)
+	return nil
+}
+
+// hookScriptSet returns the set of hook scripts that ship with the current
+// installer, keyed by their on-disk filename.
+func hookScriptSet() map[string]string {
+	return map[string]string{
+		"sage-session-start.sh": sageSessionStartTemplate,
+		"sage-session-end.sh":   sageSessionEndTemplate,
+		"sage-pre-compact.sh":   sagePreCompactScript,
+		"sage-user-prompt.sh":   sageUserPromptScript,
+		"sage-stop.sh":          sageStopScript,
+	}
+}
+
+// healHooks brings a project's .claude/hooks/ + .claude/settings.json up to
+// the current installer's 5-script direct-write set.
+//
+// Decision matrix:
+//   - Any expected script missing OR every existing script lacks the current
+//     binary path → re-write the full set and re-wire settings.json.
+//   - All expected scripts present AND at least one references the right
+//     binary path → leave alone.
+//
+// We compare against the *current* binary path because users upgrade
+// sage-gui by replacing it in place, but also by installing a new version
+// in a different location (e.g. ~/go/bin → /usr/local/bin). The hooks need
+// to follow whichever copy is actually running.
+func healHooks(projectDir, hookDir string) error {
+	binPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("find sage-gui binary: %w", err)
+	}
+	if resolved, symErr := filepath.EvalSymlinks(binPath); symErr == nil {
+		binPath = resolved
+	}
+
+	expected := hookScriptSet()
+	needsRewrite := false
+	hasBinRef := false
+	for name := range expected {
+		path := filepath.Join(hookDir, name)
+		data, readErr := os.ReadFile(path) //nolint:gosec // path is inside project's .claude/hooks
+		if readErr != nil {
+			needsRewrite = true
+			continue
+		}
+		if strings.Contains(string(data), binPath) {
+			hasBinRef = true
+		}
+	}
+
+	// Legacy install (only the old two-script set) — treat as needing rewrite.
+	legacyDetected := false
+	for _, name := range []string{legacyBootScriptName, legacyTurnScriptName} {
+		if _, statErr := os.Stat(filepath.Join(hookDir, name)); statErr == nil {
+			legacyDetected = true
+			break
+		}
+	}
+
+	if !needsRewrite && hasBinRef && !legacyDetected {
+		return nil
+	}
+
+	for name, tpl := range expected {
+		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", binPath)
+		path := filepath.Join(hookDir, name)
+		if writeErr := os.WriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
+			return fmt.Errorf("write %s: %w", name, writeErr)
+		}
+	}
+
+	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
+	settings := make(map[string]any)
+	if existing, readErr := os.ReadFile(settingsPath); readErr == nil {
+		_ = json.Unmarshal(existing, &settings)
+	}
+	settings["hooks"] = sageHooksConfig("${CLAUDE_PROJECT_DIR}/.claude/hooks")
+	settings["permissions"] = sagePermissionsConfig(settings)
+	data, marshalErr := json.MarshalIndent(settings, "", "  ")
+	if marshalErr != nil {
+		return fmt.Errorf("marshal settings: %w", marshalErr)
+	}
+	if writeErr := os.WriteFile(settingsPath, append(data, '\n'), 0600); writeErr != nil {
+		return fmt.Errorf("write settings: %w", writeErr)
+	}
+
+	if legacyDetected {
+		fmt.Fprintf(os.Stderr, "SAGE: migrated legacy 2-script hooks to direct-write 5-script set\n")
+	} else {
+		fmt.Fprintf(os.Stderr, "SAGE: refreshed Claude Code hook scripts\n")
+	}
 	return nil
 }
 
@@ -452,53 +610,60 @@ func installClaudeMD(projectDir string) error {
 }
 
 // sageHooksConfig returns the hooks configuration for reliable SAGE integration.
-func sageHooksConfig() map[string]any {
-	bootHook := []any{
-		map[string]any{
-			"type":    "command",
-			"command": "bash .claude/hooks/sage-boot.sh",
-			"timeout": 5,
-		},
-	}
-	turnHook := []any{
-		map[string]any{
-			"type":    "command",
-			"command": "bash .claude/hooks/sage-turn.sh",
-			"timeout": 5,
-		},
-	}
-	turnHookAsync := []any{
-		map[string]any{
-			"type":    "command",
-			"command": "bash .claude/hooks/sage-turn.sh",
-			"timeout": 5,
-		},
+//
+// The wiring uses Claude Code's full lifecycle: SessionStart pre-fetches
+// memories, UserPromptSubmit nudges per turn (replacing the noisier
+// PostToolUse on every Edit/Write/Bash), PreCompact crystallises before
+// detail is lost, SessionEnd writes a lifecycle observation, and Stop /
+// SubagentStop are wired silent (placeholder for future per-response checks).
+//
+// hookDirExpr is the directory expression used to root each script's bash
+// invocation. Claude Code installs pass `${CLAUDE_PROJECT_DIR}/.claude/hooks`
+// (the env var is expanded by Claude Code at hook firing time); Codex
+// installs pass the absolute path because Codex doesn't expand its own env
+// vars in hook commands.
+func sageHooksConfig(hookDirExpr string) map[string]any {
+	cmd := func(script string) []any {
+		return []any{
+			map[string]any{
+				"type":    "command",
+				"command": "bash \"" + hookDirExpr + "/" + script + "\"",
+				"timeout": 5,
+			},
+		}
 	}
 
+	sessionStart := cmd("sage-session-start.sh")
+	sessionEnd := cmd("sage-session-end.sh")
+	preCompact := cmd("sage-pre-compact.sh")
+	userPrompt := cmd("sage-user-prompt.sh")
+	stop := cmd("sage-stop.sh")
+
 	return map[string]any{
-		// Boot: ensure sage_inception fires on every session lifecycle event
+		// Boot: prefetch memories and remind about sage_inception
 		"SessionStart": []any{
-			map[string]any{"matcher": "startup", "hooks": bootHook},
-			map[string]any{"matcher": "resume", "hooks": bootHook},
-			map[string]any{"matcher": "compact", "hooks": bootHook},
+			map[string]any{"matcher": "startup", "hooks": sessionStart},
+			map[string]any{"matcher": "resume", "hooks": sessionStart},
+			map[string]any{"matcher": "compact", "hooks": sessionStart},
 		},
-		// PreCompact: flush memories BEFORE context gets summarized (synchronous!)
+		// SessionEnd: post a session-lifecycle observation
+		"SessionEnd": []any{
+			map[string]any{"hooks": sessionEnd},
+		},
+		// PreCompact: flush memories BEFORE context gets summarized (synchronous)
 		"PreCompact": []any{
-			map[string]any{"hooks": turnHook},
+			map[string]any{"hooks": preCompact},
 		},
-		// Stop/SubagentStop: remind to reflect after completing work
+		// UserPromptSubmit: remind once per user turn (less noisy than PostToolUse)
+		"UserPromptSubmit": []any{
+			map[string]any{"hooks": userPrompt},
+		},
+		// Stop / SubagentStop: silent placeholders
 		"Stop": []any{
-			map[string]any{"hooks": turnHookAsync},
+			map[string]any{"hooks": stop},
 		},
 		"SubagentStop": []any{
-			map[string]any{"hooks": turnHookAsync},
-		},
-		// PostToolUse: periodic turn reminders during long runs
-		"PostToolUse": []any{
-			map[string]any{
-				"matcher": "Edit|Write|Bash",
-				"hooks":   turnHookAsync,
-			},
+			map[string]any{"hooks": stop},
 		},
 	}
 }
@@ -622,42 +787,35 @@ func claimAgentIdentity(sageHome, token, keyPath string) error {
 
 // selfHealProject silently patches outdated hooks and missing CLAUDE.md in the
 // project directory. Called on every MCP session start so that existing users
-// automatically get new features (like memory mode support) after upgrading
-// without needing to re-run `sage-gui mcp install`.
+// automatically get new features after upgrading without needing to re-run
+// `sage-gui mcp install`.
 //
 // This is intentionally quiet — all output goes to stderr so it doesn't pollute
 // the MCP stdio protocol. Only patches if something is actually stale.
+//
+// Migration path:
+//   - Legacy installs have only sage-boot.sh + sage-turn.sh — these get the
+//     new 5-script direct-write set written alongside, settings.json rewired
+//     to point at them, and the legacy files left in place (in case the user
+//     hand-edited them).
+//   - Current installs missing one of the 5 expected scripts get the missing
+//     file repaired.
+//   - Current installs whose direct-write scripts reference a stale
+//     __SAGE_GUI_BIN__ path (e.g. user upgraded sage-gui to a new location)
+//     get re-templated.
 func selfHealProject(projectDir, sageHome string) {
 	hookDir := filepath.Join(projectDir, ".claude", "hooks")
-
-	// Check if hooks exist and need updating by checking for the memory_mode marker
-	turnScript := filepath.Join(hookDir, "sage-turn.sh")
-	needsHookUpdate := false
-
-	if data, err := os.ReadFile(turnScript); err == nil {
-		// Hook exists but doesn't have memory_mode support — needs patching
-		if !strings.Contains(string(data), "memory_mode") {
-			needsHookUpdate = true
-		}
-	}
-	// If hooks dir doesn't exist at all, this project may not have SAGE installed
-	// via `mcp install` — don't create hooks uninvited.
+	hookDirExists := true
 	if _, err := os.Stat(hookDir); os.IsNotExist(err) {
-		// No hooks dir = never installed. Only patch CLAUDE.md and flag file.
-		// Don't create hooks — user may have intentionally not installed them.
-	} else if needsHookUpdate {
-		// Silently update hook scripts with new versions
-		for name, content := range map[string]string{
-			"sage-boot.sh": sageBootScript,
-			"sage-turn.sh": sageTurnScript,
-		} {
-			path := filepath.Join(hookDir, name)
-			if err := os.WriteFile(path, []byte(content), 0755); err != nil { //nolint:gosec // hook scripts must be executable
-				fmt.Fprintf(os.Stderr, "SAGE: could not update hook %s: %v\n", name, err)
-			}
-		}
-		fmt.Fprintf(os.Stderr, "SAGE: updated hook scripts with memory mode support\n")
+		hookDirExists = false
 	}
+
+	if hookDirExists {
+		if err := healHooks(projectDir, hookDir); err != nil {
+			fmt.Fprintf(os.Stderr, "SAGE: hook self-heal: %v\n", err)
+		}
+	}
+	selfHealCodex(projectDir, sageHome)
 
 	// Ensure CLAUDE.md has the SAGE section
 	mdPath := filepath.Join(projectDir, "CLAUDE.md")

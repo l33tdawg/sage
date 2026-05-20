@@ -107,22 +107,48 @@ func TestSyncMemoryModeFlag_PreservesExisting(t *testing.T) {
 }
 
 func TestHookScripts_BookendModeCheck(t *testing.T) {
-	assert.Contains(t, sageTurnScript, "memory_mode")
-	assert.Contains(t, sageTurnScript, "bookend")
-	assert.Contains(t, sageBootScript, "memory_mode")
-	assert.Contains(t, sageBootScript, "bookend")
+	// Bookend mode is respected by session-start (extra reminder) and
+	// user-prompt (suppressed) — the per-turn nudges only fire in full mode.
+	assert.Contains(t, sageSessionStartTemplate, "memory_mode")
+	assert.Contains(t, sageSessionStartTemplate, "bookend")
+	assert.Contains(t, sageUserPromptScript, "memory_mode")
+	assert.Contains(t, sageUserPromptScript, "bookend")
 }
 
 func TestHookScripts_OnDemandModeCheck(t *testing.T) {
-	assert.Contains(t, sageTurnScript, "on-demand")
-	assert.Contains(t, sageBootScript, "on-demand")
-	// Turn script should exit silently in on-demand mode
-	assert.Contains(t, sageTurnScript, "exit 0")
+	// All speaking scripts must honor on-demand mode by exiting/suppressing
+	// output. The Stop script is silent unconditionally so it's exempt.
+	for _, s := range []string{
+		sageSessionStartTemplate,
+		sageSessionEndTemplate,
+		sagePreCompactScript,
+		sageUserPromptScript,
+	} {
+		assert.Contains(t, s, "on-demand")
+	}
 }
 
 func TestHookScripts_FullModeDefault(t *testing.T) {
-	assert.Contains(t, sageTurnScript, `echo "full"`)
-	assert.Contains(t, sageBootScript, `echo "full"`)
+	// Every memory-mode-aware script must default to "full" when the flag
+	// file is missing.
+	for _, s := range []string{
+		sageSessionStartTemplate,
+		sageSessionEndTemplate,
+		sagePreCompactScript,
+		sageUserPromptScript,
+	} {
+		assert.Contains(t, s, `echo "full"`)
+	}
+}
+
+func TestHookScripts_DirectWriteShellOut(t *testing.T) {
+	// session-start and session-end must shell out to `sage-gui hook ...`
+	// via the templated binary path. The placeholder gets substituted at
+	// install time so production scripts never contain it.
+	assert.Contains(t, sageSessionStartTemplate, "__SAGE_GUI_BIN__")
+	assert.Contains(t, sageSessionStartTemplate, "hook session-start")
+	assert.Contains(t, sageSessionEndTemplate, "__SAGE_GUI_BIN__")
+	assert.Contains(t, sageSessionEndTemplate, "hook session-end")
 }
 
 func TestSageClaudeMDBlock_ContainsEssentials(t *testing.T) {
@@ -134,42 +160,82 @@ func TestSageClaudeMDBlock_ContainsEssentials(t *testing.T) {
 
 // ─── Self-Heal Tests ───
 
-func TestSelfHeal_PatchesOldHooks(t *testing.T) {
+func TestSelfHeal_MigratesLegacyTwoScriptInstall(t *testing.T) {
 	projectDir := t.TempDir()
 	sageHome := t.TempDir()
 
-	// Create old-style hooks (without memory_mode support)
+	// Create legacy 2-script install
 	hookDir := filepath.Join(projectDir, ".claude", "hooks")
 	require.NoError(t, os.MkdirAll(hookDir, 0755))
-	oldTurnScript := "#!/bin/bash\necho \"call sage_turn\"\n"
-	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "sage-turn.sh"), []byte(oldTurnScript), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "sage-boot.sh"), []byte("#!/bin/bash\necho boot\n"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "sage-turn.sh"), []byte("#!/bin/bash\necho turn\n"), 0755))
 
 	selfHealProject(projectDir, sageHome)
 
-	// Verify hooks were updated with memory_mode support
-	data, err := os.ReadFile(filepath.Join(hookDir, "sage-turn.sh"))
+	// All 5 direct-write scripts should now exist
+	for _, name := range []string{
+		"sage-session-start.sh",
+		"sage-session-end.sh",
+		"sage-pre-compact.sh",
+		"sage-user-prompt.sh",
+		"sage-stop.sh",
+	} {
+		_, err := os.Stat(filepath.Join(hookDir, name))
+		assert.NoError(t, err, "%s should be installed during migration", name)
+	}
+
+	// Settings.json should be rewired
+	settingsData, err := os.ReadFile(filepath.Join(projectDir, ".claude", "settings.json"))
 	require.NoError(t, err)
-	assert.Contains(t, string(data), "memory_mode", "hook should be patched with memory_mode support")
+	settings := string(settingsData)
+	assert.Contains(t, settings, "sage-session-start.sh")
+	assert.Contains(t, settings, "SessionEnd")
+	assert.NotContains(t, settings, "sage-boot.sh", "legacy hook should not be referenced in new config")
 }
 
-func TestSelfHeal_DoesNotPatchCurrentHooks(t *testing.T) {
+func TestSelfHeal_DoesNotRewriteCurrentHooks(t *testing.T) {
 	projectDir := t.TempDir()
 	sageHome := t.TempDir()
 
-	// Create hooks that already have memory_mode support
+	binPath, err := os.Executable()
+	require.NoError(t, err)
+	if resolved, symErr := filepath.EvalSymlinks(binPath); symErr == nil {
+		binPath = resolved
+	}
+
 	hookDir := filepath.Join(projectDir, ".claude", "hooks")
 	require.NoError(t, os.MkdirAll(hookDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "sage-turn.sh"), []byte(sageTurnScript), 0755))
+	for name, tpl := range hookScriptSet() {
+		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", binPath)
+		require.NoError(t, os.WriteFile(filepath.Join(hookDir, name), []byte(content), 0755))
+	}
 
-	// Get mod time before
-	infoBefore, _ := os.Stat(filepath.Join(hookDir, "sage-turn.sh"))
+	infoBefore, _ := os.Stat(filepath.Join(hookDir, "sage-session-start.sh"))
 
 	selfHealProject(projectDir, sageHome)
 
-	// File should not have been touched (mod time unchanged)
-	infoAfter, _ := os.Stat(filepath.Join(hookDir, "sage-turn.sh"))
+	infoAfter, _ := os.Stat(filepath.Join(hookDir, "sage-session-start.sh"))
 	assert.Equal(t, infoBefore.ModTime(), infoAfter.ModTime(), "current hooks should not be re-written")
+}
+
+func TestSelfHeal_RewritesStaleBinaryPath(t *testing.T) {
+	projectDir := t.TempDir()
+	sageHome := t.TempDir()
+
+	hookDir := filepath.Join(projectDir, ".claude", "hooks")
+	require.NoError(t, os.MkdirAll(hookDir, 0755))
+	// Plant scripts referencing a stale path (a leftover from an old install location).
+	staleBin := "/old/path/to/sage-gui"
+	for name, tpl := range hookScriptSet() {
+		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", staleBin)
+		require.NoError(t, os.WriteFile(filepath.Join(hookDir, name), []byte(content), 0755))
+	}
+
+	selfHealProject(projectDir, sageHome)
+
+	data, err := os.ReadFile(filepath.Join(hookDir, "sage-session-start.sh"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), staleBin, "stale binary path should have been rewritten")
 }
 
 func TestSelfHeal_CreatesClaudeMD_WhenMCPExists(t *testing.T) {
