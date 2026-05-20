@@ -14,38 +14,94 @@ import (
 
 const versionFile = "version.txt"
 
-// migrateOnUpgrade checks if the binary version has changed since last run.
-// If so, it backs up the SQLite database and resets chain state (BadgerDB +
-// CometBFT) so the fresh chain can re-validate existing memories.
-// This ensures drag-and-drop upgrades just work for end users.
+// migrateOnUpgrade reconciles persisted chain state with the running binary.
+// It performs the destructive reset (back up SQLite, wipe BadgerDB + CometBFT
+// blocks/state) ONLY when the on-disk consensus fork tag differs from the
+// binary's ConsensusForkVersion — i.e. the new release made existing chain
+// state incompatible at the encoding/protocol level.
+//
+// Pre-v7.5.5 behaviour was to reset on ANY version-string change, which
+// silently destroyed operator state — domain registry, access grants, org
+// memberships, validator set — on every patch and minor bump. See the
+// ConsensusForkVersion docstring for why this gate exists.
+//
+// Returns migrated=true ONLY when the reset actually ran. Same-fork upgrades
+// (patches, minor bumps, RC tags) return false even when the version string
+// changed: state is preserved and only version.txt is re-stamped for
+// operator diagnostics.
 func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 	versionPath := filepath.Join(SageHome(), versionFile)
+	forkPath := filepath.Join(SageHome(), forkVersionFile)
 	cometHome := filepath.Join(dataDir, "cometbft")
 	badgerPath := filepath.Join(dataDir, "badger")
 	sqlitePath := filepath.Join(dataDir, "sage.db")
 
-	// Read last-run version
+	// Dev builds: never touch state.
+	if version == "dev" {
+		return false, nil
+	}
+
 	lastVersion := ""
 	if data, readErr := os.ReadFile(versionPath); readErr == nil {
 		lastVersion = strings.TrimSpace(string(data))
 	}
+	onDiskFork := readForkVersion(forkPath)
 
-	// If same version (or "dev" builds), skip migration
-	if lastVersion == version || version == "dev" {
-		return false, nil
-	}
-
-	// First run ever — no migration needed, just stamp version
-	if lastVersion == "" {
+	// Fresh install — no prior state. Stamp both files and return.
+	if lastVersion == "" && onDiskFork == 0 {
+		if stampErr := stampForkVersion(forkPath, ConsensusForkVersion); stampErr != nil {
+			return false, stampErr
+		}
 		return false, stampVersion(versionPath)
 	}
 
-	// Version changed — need migration
-	fmt.Fprintf(os.Stderr, "\n  Upgrading SAGE from %s → %s\n", lastVersion, version)
+	// Legacy install (version.txt exists but no fork-version.txt) — predates
+	// the gate. Adopt the current fork without resetting. The upgrade that
+	// introduces the gate itself must not produce a spurious reset.
+	if onDiskFork == 0 {
+		if stampErr := stampForkVersion(forkPath, ConsensusForkVersion); stampErr != nil {
+			return false, stampErr
+		}
+		if lastVersion != version {
+			fmt.Fprintf(os.Stderr, "\n  Upgrading SAGE from %s → %s (chain state preserved — adopting consensus fork %d)\n\n", lastVersion, version, ConsensusForkVersion)
+		}
+		return false, stampVersion(versionPath)
+	}
 
+	// Same fork — patch/minor upgrade that doesn't touch consensus state.
+	if onDiskFork == ConsensusForkVersion {
+		if lastVersion != version {
+			fmt.Fprintf(os.Stderr, "\n  Upgrading SAGE from %s → %s (chain state preserved — same consensus fork %d)\n\n", lastVersion, version, ConsensusForkVersion)
+		}
+		return false, stampVersion(versionPath)
+	}
+
+	// Fork transition — chain state is incompatible. Run the reset.
+	fmt.Fprintf(os.Stderr, "\n  Upgrading SAGE from %s → %s (consensus fork %d → %d — chain state will reset, memories preserved)\n", lastVersion, version, onDiskFork, ConsensusForkVersion)
+	if resetErr := resetChainState(dataDir, badgerPath, cometHome, sqlitePath, lastVersion); resetErr != nil {
+		return false, resetErr
+	}
+
+	if stampErr := stampForkVersion(forkPath, ConsensusForkVersion); stampErr != nil {
+		return false, stampErr
+	}
+	if stampErr := stampVersion(versionPath); stampErr != nil {
+		return false, stampErr
+	}
+
+	fmt.Fprintf(os.Stderr, "  Upgrade complete — your memories are safe, chain will rebuild\n\n")
+	return true, nil
+}
+
+// resetChainState performs the destructive part of a fork-transition upgrade:
+// back up the vault key + SQLite, wipe BadgerDB, wipe CometBFT block/state DBs,
+// and run the noisy-memory cleanup. Extracted from migrateOnUpgrade so the
+// fork-version gate can call it conditionally rather than on every version
+// string change.
+func resetChainState(dataDir, badgerPath, cometHome, sqlitePath, lastVersion string) error {
 	// Step 0: Protect the vault key — back it up before touching anything.
 	// The vault key is irreplaceable: if lost, all encrypted memories become
-	// permanently unrecoverable. We back it up on every upgrade as a safety net.
+	// permanently unrecoverable.
 	vaultKeyPath := filepath.Join(SageHome(), "vault.key")
 	if _, vkErr := os.Stat(vaultKeyPath); vkErr == nil {
 		backupDir := filepath.Join(SageHome(), "backups")
@@ -66,7 +122,6 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 		for _, suffix := range []string{"-wal", "-shm"} {
 			walPath := sqlitePath + suffix
 			if _, walErr := os.Stat(walPath); walErr == nil {
-				// Checkpoint WAL into main DB first, then remove
 				if cpErr := checkpointWAL(sqlitePath); cpErr != nil {
 					fmt.Fprintf(os.Stderr, "  Warning: WAL checkpoint failed: %v (removing stale WAL)\n", cpErr)
 				}
@@ -76,22 +131,20 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 
 		backupDir := filepath.Join(SageHome(), "backups")
 		if mkErr := os.MkdirAll(backupDir, 0700); mkErr != nil {
-			return false, fmt.Errorf("create backup dir: %w", mkErr)
+			return fmt.Errorf("create backup dir: %w", mkErr)
 		}
 		ts := time.Now().Format("2006-01-02T15-04-05")
 		backupPath := filepath.Join(backupDir, fmt.Sprintf("sage-pre-upgrade-%s-%s.db", lastVersion, ts))
 
-		// Use VACUUM INTO with a 30-second timeout to prevent indefinite hangs.
 		vacuumErr := vacuumBackup(sqlitePath, backupPath)
 		if vacuumErr != nil {
-			// Fallback to file copy if VACUUM INTO fails or times out
 			fmt.Fprintf(os.Stderr, "  VACUUM INTO failed (%v), falling back to file copy\n", vacuumErr)
 			src, readErr := os.ReadFile(sqlitePath)
 			if readErr != nil {
-				return false, fmt.Errorf("read sqlite for backup: %w", readErr)
+				return fmt.Errorf("read sqlite for backup: %w", readErr)
 			}
 			if writeErr := os.WriteFile(backupPath, src, 0600); writeErr != nil { //nolint:gosec // backupPath is server-controlled
-				return false, fmt.Errorf("write backup: %w", writeErr)
+				return fmt.Errorf("write backup: %w", writeErr)
 			}
 		}
 		fmt.Fprintf(os.Stderr, "  Backed up memories to %s\n", backupPath)
@@ -100,28 +153,24 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 	// Step 2: Wipe BadgerDB (on-chain state — will be rebuilt)
 	if _, statErr := os.Stat(badgerPath); statErr == nil {
 		if removeErr := os.RemoveAll(badgerPath); removeErr != nil {
-			return false, fmt.Errorf("remove badger: %w", removeErr)
+			return fmt.Errorf("remove badger: %w", removeErr)
 		}
 		if mkErr := os.MkdirAll(badgerPath, 0700); mkErr != nil {
-			return false, fmt.Errorf("recreate badger dir: %w", mkErr)
+			return fmt.Errorf("recreate badger dir: %w", mkErr)
 		}
 		fmt.Fprintf(os.Stderr, "  Reset on-chain state (BadgerDB)\n")
 	}
 
-	// Step 3: Wipe CometBFT data (blocks/state — incompatible with new chain)
-	// Keep config (genesis, keys) but remove block/state databases
+	// Step 3: Wipe CometBFT data (blocks/state — incompatible with new chain).
+	// Keep config (genesis, keys); remove block/state databases and consensus WAL.
 	cometDataDir := filepath.Join(cometHome, "data")
 	if _, statErr := os.Stat(cometDataDir); statErr == nil {
-		// Remove the block/state DBs and consensus WAL but keep priv_validator_state.json.
-		// The consensus WAL (cs.wal/) MUST be removed — stale WAL from a previous version
-		// causes CometBFT to hang during replay when the block databases are gone.
 		for _, dbName := range []string{"blockstore.db", "state.db", "tx_index.db", "evidence.db", "cs.wal"} {
 			dbPath := filepath.Join(cometDataDir, dbName)
 			if removeErr := os.RemoveAll(dbPath); removeErr != nil {
 				fmt.Fprintf(os.Stderr, "  Warning: could not remove %s: %v\n", dbName, removeErr)
 			}
 		}
-		// Reset validator state to height 0
 		pvStatePath := filepath.Join(cometDataDir, "priv_validator_state.json")
 		pvState := []byte(`{"height":"0","round":0,"step":0}`)
 		if writeErr := os.WriteFile(pvStatePath, pvState, 0600); writeErr != nil {
@@ -130,8 +179,7 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 		fmt.Fprintf(os.Stderr, "  Reset blockchain state (CometBFT)\n")
 	}
 
-	// Step 4: Clean up low-quality and duplicate memories in SQLite
-	// v4.0.0 introduces memory quality validators — clean up existing noise
+	// Step 4: Clean up low-quality and duplicate memories in SQLite.
 	if _, statErr := os.Stat(sqlitePath); statErr == nil {
 		cleaned := cleanupNoisyMemories(sqlitePath)
 		if cleaned > 0 {
@@ -139,13 +187,7 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 		}
 	}
 
-	// Step 5: Stamp new version
-	if stampErr := stampVersion(versionPath); stampErr != nil {
-		return false, stampErr
-	}
-
-	fmt.Fprintf(os.Stderr, "  Upgrade complete — your memories are safe, chain will rebuild\n\n")
-	return true, nil
+	return nil
 }
 
 // cleanupNoisyMemories deprecates duplicate boot safeguards, noise observations,
