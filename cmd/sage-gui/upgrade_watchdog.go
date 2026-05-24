@@ -39,7 +39,7 @@ import (
 // v7.1.x → v7.5.0 keeps app version at 1 because v7.5 is the migration
 // substrate itself (no consensus rules change). The first version bump
 // happens at v8.0 when access-control fixes land.
-const upgradeTargetAppVersion uint64 = 1
+const upgradeTargetAppVersion uint64 = 2
 
 // upgradeWatchdogConfig is everything the watchdog needs. Constructed
 // in runServe after the agent key is loaded and CometBFT is up.

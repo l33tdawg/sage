@@ -260,6 +260,51 @@ type SageApp struct {
 	// disables scheduled snapshots; SetSnapshotScheduler wires one
 	// in after construction so existing NewSageApp callers don't break.
 	snapshotScheduler *SnapshotScheduler
+
+	// v8AppliedHeight is the block at which the v8.0 access-control fork
+	// activated. Zero means not yet activated — handlers must take the
+	// pre-fork (v7.1.1-equivalent) branch. Populated from the persisted
+	// AppliedUpgradeRecord on boot, refreshed in FinalizeBlock when the
+	// v8 plan activates. Pre-fork blocks replay byte-identical to v7.1.1
+	// because every fork-gated handler reads this field deterministically.
+	v8AppliedHeight int64
+}
+
+// v8UpgradeName is the canonical name for the v8.0 activation record. The
+// v7.5 watchdog names upgrade plans "app-v<TargetAppVersion>" so the lookup
+// must match. Centralised here to keep the fork-gate accessors honest.
+const v8UpgradeName = "app-v2"
+
+// postV8Fork is the consensus-side fork-gate predicate. Use it inside
+// processTx and other height-aware paths. Strict greater-than mirrors
+// CometBFT's "applied at H+1" semantic — the fork takes effect on the
+// block immediately following the activation block.
+func (app *SageApp) postV8Fork(height int64) bool {
+	return app.v8AppliedHeight > 0 && height > app.v8AppliedHeight
+}
+
+// IsPostV8Fork is the off-consensus accessor used by REST handlers and
+// other callers that don't carry a deterministic block height. It reads
+// the cached AppState.Height — sufficient for advisory access checks
+// outside the consensus pipeline.
+func (app *SageApp) IsPostV8Fork() bool {
+	return app.v8AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8AppliedHeight
+}
+
+// refreshV8Fork populates v8AppliedHeight from the persisted upgrade
+// audit trail. Called on boot (so a node restarting on a post-fork chain
+// picks up the gate without waiting for activation) and after the
+// activation block in FinalizeBlock.
+func (app *SageApp) refreshV8Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(v8UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", v8UpgradeName).Msg("read v8 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.v8AppliedHeight = rec.AppliedHeight
 }
 
 // defaultFlushMaxRetries caps Commit's SQLITE_BUSY retry loop. At 30 tries
@@ -306,6 +351,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		SuppCache:       NewSupplementaryCache(),
 		flushMaxRetries: defaultFlushMaxRetries,
 	}
+	app.refreshV8Fork()
 
 	// Reload persisted validators from BadgerDB (survives restart)
 	persistedVals, err := bs.LoadValidators()
@@ -349,6 +395,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 		SuppCache:       NewSupplementaryCache(),
 		flushMaxRetries: defaultFlushMaxRetries,
 	}
+	app.refreshV8Fork()
 
 	persistedVals, err := bs.LoadValidators()
 	if err != nil {
@@ -561,6 +608,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 				Uint64("target_app_version", plan.TargetAppVersion).
 				Int64("height", req.Height).
 				Msg("failed to mark upgrade applied — chain state will be inconsistent with audit trail")
+		}
+		if plan.Name == v8UpgradeName {
+			app.v8AppliedHeight = req.Height
 		}
 		app.logger.Info().
 			Str("name", plan.Name).
