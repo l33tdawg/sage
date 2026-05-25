@@ -1264,7 +1264,7 @@ func (app *SageApp) processAccessGrant(parsedTx *tx.ParsedTx, height int64, bloc
 			}
 			// Unowned. Shared domains are never auto-registered —
 			// granting on them is a category error, reject explicitly.
-			if isSharedDomain(grant.Domain) {
+			if app.isSharedDomain(grant.Domain, height) {
 				return &abcitypes.ExecTxResult{Code: 50, Log: fmt.Sprintf("shared domain not ownable: %s", grant.Domain)}
 			}
 			// Auto-register the granter as owner of this unowned,
