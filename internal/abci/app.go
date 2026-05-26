@@ -3528,6 +3528,15 @@ func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, 
 
 		return &abcitypes.ValidatorUpdate{PubKey: protoKey, Power: proposal.TargetPower}, nil
 
+	case governance.OpDomainReassign:
+		// No validator-set effect at acceptance — the actual reassignment
+		// runs in a follow-up TxTypeDomainReassign that the admin submits
+		// after the proposal reaches Status=Executed. Returning (nil, nil)
+		// keeps FinalizeBlock from emitting a spurious "failed to apply
+		// governance proposal" log on every successful 3/4 supermajority
+		// for a domain-reassign proposal.
+		return nil, nil
+
 	default:
 		return nil, fmt.Errorf("unknown governance operation: %d", proposal.Operation)
 	}
@@ -3553,6 +3562,8 @@ func opToString(op governance.ProposalOp) string {
 		return "remove_validator"
 	case governance.OpUpdatePower:
 		return "update_power"
+	case governance.OpDomainReassign:
+		return "domain_reassign"
 	default:
 		return fmt.Sprintf("unknown_%d", op)
 	}

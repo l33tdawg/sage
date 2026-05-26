@@ -882,10 +882,23 @@ func (s *BadgerStore) GetDomainOwnerAndMeta(name string) (ownerID, parent string
 
 // IsDomainOwnerOrAncestor checks if agentID owns the given domain or any ancestor.
 // Walks up the hierarchy by splitting on ".".
+//
+// Shared-domain barrier: candidates that are reserved shared domains (see
+// IsSharedDomainName) are skipped — a hypothetical "general" ownership entry
+// must never cascade into "x.general" inferring the same owner. Mirrors the
+// barrier already in HasAccessOrAncestor and ResolveOwningAncestor; without
+// it the three walks would disagree on what counts as an inheritable ancestor.
+// Today this is defence in depth (auto-register paths refuse shared domains
+// so the row should never exist), but the asymmetry would bite the first time
+// a future code path writes such a row.
 func (s *BadgerStore) IsDomainOwnerOrAncestor(domain, agentID string) (bool, error) {
 	parts := strings.Split(domain, ".")
 	for i := len(parts); i > 0; i-- {
 		ancestor := strings.Join(parts[:i], ".")
+		if IsSharedDomainName(ancestor) {
+			// Cascade barrier — shared domains do not act as ancestors.
+			continue
+		}
 		owner, err := s.GetDomainOwner(ancestor)
 		if err != nil {
 			// Domain not registered at this level, continue up

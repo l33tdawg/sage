@@ -200,6 +200,48 @@ func TestResolveOwningAncestor_SharedDomainBarrier(t *testing.T) {
 	assert.Equal(t, "", owned, "shared domain must not be the owning ancestor")
 }
 
+// Bonus: IsDomainOwnerOrAncestor — shared-domain barrier alignment with the
+// other two walks. Without the barrier, a hypothetical "general" ownership
+// row (which the ABCI auto-register paths refuse to create, but which could
+// land via legacy data or a future code path) would cascade as inherited
+// ownership of every "*.general" descendant — silently authorizing the same
+// agent to grant/revoke on those children. The fix skips reserved shared
+// names from the ancestor walk, matching HasAccessOrAncestor and
+// ResolveOwningAncestor.
+func TestIsDomainOwnerOrAncestor_SharedDomainBarrier(t *testing.T) {
+	bs := newTestBadger(t)
+
+	// Direct-write the shared-domain ownership row by bypassing the ABCI
+	// gate. RegisterDomain is the store-level primitive and doesn't refuse
+	// shared names — the refusal lives in isSharedDomain at the ABCI layer.
+	require.NoError(t, bs.RegisterDomain("general", ancAgent, "", 1))
+
+	// "pipeline.general" must NOT inherit ancAgent's ownership.
+	ok, err := bs.IsDomainOwnerOrAncestor("pipeline.general", ancAgent)
+	require.NoError(t, err)
+	assert.False(t, ok, "shared domain 'general' must not cascade ownership to descendants")
+
+	// sage-* prefix is also a shared family.
+	require.NoError(t, bs.RegisterDomain("sage-debugging", ancAgent, "", 1))
+	ok, err = bs.IsDomainOwnerOrAncestor("pipeline.sage-debugging", ancAgent)
+	require.NoError(t, err)
+	assert.False(t, ok, "shared 'sage-' prefix must not cascade ownership")
+
+	// Even direct ownership of a shared domain is barriered — consistent
+	// with HasAccessOrAncestor's leaf-level skip. Shared domains are
+	// non-ownable by design; if a row exists it's a data anomaly and the
+	// walk must not honour it for any descendant including the leaf.
+	ok, err = bs.IsDomainOwnerOrAncestor("general", ancAgent)
+	require.NoError(t, err)
+	assert.False(t, ok, "direct ownership of a shared domain must be barriered too")
+
+	// Sanity: non-shared ownership still cascades normally.
+	require.NoError(t, bs.RegisterDomain("corp", ancAgent, "", 1))
+	ok, err = bs.IsDomainOwnerOrAncestor("corp.eng.builds", ancAgent)
+	require.NoError(t, err)
+	assert.True(t, ok, "non-shared ancestor must still cascade")
+}
+
 // Bonus: ResolveOwningAncestor — nearest registered ancestor wins.
 func TestResolveOwningAncestor_NearestAncestor(t *testing.T) {
 	bs := newTestBadger(t)
