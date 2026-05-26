@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -18,7 +19,7 @@ import (
 
 func setupTestStore(t *testing.T) *PostgresStore {
 	ctx := context.Background()
-	store, err := NewPostgresStore(ctx, "postgres://sage:sage_dev_password@localhost:5432/sage?sslmode=disable")
+	store, err := NewPostgresStore(ctx, agentTestDSN()) // honors SAGE_TEST_POSTGRES_DSN
 	require.NoError(t, err)
 	t.Cleanup(func() { store.Close() })
 	return store
@@ -29,7 +30,7 @@ func TestInsertGetMemory(t *testing.T) {
 	ctx := context.Background()
 
 	record := &memory.MemoryRecord{
-		MemoryID:        "test-" + time.Now().Format("20060102150405"),
+		MemoryID:        uuid.NewString(), // memory_id is a UUID column
 		SubmittingAgent: "agent-test",
 		Content:         "test memory content",
 		ContentHash:     memory.ComputeContentHash("test memory content"),
@@ -54,7 +55,7 @@ func TestPostgresUpdateStatus(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	id := "status-test-" + time.Now().Format("20060102150405")
+	id := uuid.NewString()
 	record := &memory.MemoryRecord{
 		MemoryID:        id,
 		SubmittingAgent: "agent-test",
@@ -80,7 +81,7 @@ func TestVotes(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	memID := "vote-test-" + time.Now().Format("20060102150405")
+	memID := uuid.NewString()
 	record := &memory.MemoryRecord{
 		MemoryID:        memID,
 		SubmittingAgent: "agent-test",

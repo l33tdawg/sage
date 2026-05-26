@@ -65,6 +65,14 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 		return nil, fmt.Errorf("ensure agent schema: %w", err)
 	}
 
+	// Same rationale as the agents mirror: the governance_proposals /
+	// governance_votes tables are written by the abci flush, so a deployment
+	// whose init.sql predates them must self-heal on boot.
+	if err := s.ensureGovSchema(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ensure governance schema: %w", err)
+	}
+
 	return s, nil
 }
 
@@ -157,6 +165,52 @@ func (s *PostgresStore) ensureAgentSchema(ctx context.Context) error {
 		for _, stmt := range stmts {
 			if _, err := ps.db.Exec(ctx, stmt); err != nil {
 				return fmt.Errorf("migrate agents schema: %w", err)
+			}
+		}
+		return nil
+	})
+}
+
+// govSchemaLockKey serializes concurrent governance-table migrations across
+// quorum nodes (distinct from agentSchemaLockKey).
+const govSchemaLockKey int64 = 0x5341_4745_474F_56FF // "SAGEGOV"
+
+// ensureGovSchema creates the governance mirror tables if absent. Idempotent and
+// serialized via a transaction-scoped advisory lock, mirroring ensureAgentSchema.
+// Must stay in sync with the governance tables in deploy/init.sql.
+func (s *PostgresStore) ensureGovSchema(ctx context.Context) error {
+	return s.RunInTx(ctx, func(tx OffchainStore) error {
+		ps := tx.(*PostgresStore)
+		if _, err := ps.db.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, govSchemaLockKey); err != nil {
+			return fmt.Errorf("acquire governance schema lock: %w", err)
+		}
+		stmts := []string{
+			`CREATE TABLE IF NOT EXISTS governance_proposals (
+				proposal_id     TEXT        PRIMARY KEY,
+				operation       TEXT        NOT NULL,
+				target_agent_id TEXT        NOT NULL,
+				target_pubkey   TEXT        NOT NULL DEFAULT '',
+				target_power    BIGINT      NOT NULL DEFAULT 0,
+				proposer_id     TEXT        NOT NULL,
+				status          TEXT        NOT NULL DEFAULT 'voting',
+				created_height  BIGINT      NOT NULL,
+				expiry_height   BIGINT      NOT NULL,
+				executed_height BIGINT,
+				reason          TEXT        NOT NULL DEFAULT '',
+				created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_gov_proposals_status ON governance_proposals (status, created_height DESC)`,
+			`CREATE TABLE IF NOT EXISTS governance_votes (
+				proposal_id  TEXT   NOT NULL,
+				validator_id TEXT   NOT NULL,
+				decision     TEXT   NOT NULL,
+				height       BIGINT NOT NULL,
+				PRIMARY KEY (proposal_id, validator_id)
+			)`,
+		}
+		for _, stmt := range stmts {
+			if _, err := ps.db.Exec(ctx, stmt); err != nil {
+				return fmt.Errorf("create governance schema: %w", err)
 			}
 		}
 		return nil
@@ -1766,22 +1820,128 @@ func (s *PostgresStore) PurgePipelines(_ context.Context, _ time.Time) (int, err
 	return 0, fmt.Errorf("PurgePipelines not implemented for PostgresStore")
 }
 
-// GovernanceStore stubs — PostgresStore does not yet implement governance.
-func (s *PostgresStore) InsertGovProposal(_ context.Context, _ *GovProposal) error {
-	return nil // no-op
+// --- GovernanceStore (mirrors SQLiteStore against the governance_* tables) ---
+
+// govProposalColumns is the SELECT projection shared by GetGovProposal and
+// ListGovProposals; keep in lockstep with scanGovProposal.
+const govProposalColumns = `proposal_id, operation, target_agent_id, target_pubkey,
+	target_power, proposer_id, status, created_height, expiry_height,
+	executed_height, reason, created_at`
+
+// scanGovProposal reads one governance_proposals row in govProposalColumns
+// order. created_at is rendered as RFC3339 to match the SQLite store's string.
+func scanGovProposal(row interface{ Scan(...any) error }) (*GovProposal, error) {
+	var p GovProposal
+	var createdAt time.Time
+	if err := row.Scan(&p.ProposalID, &p.Operation, &p.TargetAgentID, &p.TargetPubkey,
+		&p.TargetPower, &p.ProposerID, &p.Status, &p.CreatedHeight, &p.ExpiryHeight,
+		&p.ExecutedHeight, &p.Reason, &createdAt); err != nil {
+		return nil, err
+	}
+	p.CreatedAt = createdAt.UTC().Format(time.RFC3339Nano)
+	return &p, nil
 }
-func (s *PostgresStore) GetGovProposal(_ context.Context, _ string) (*GovProposal, error) {
-	return nil, fmt.Errorf("governance not implemented for PostgresStore")
+
+// InsertGovProposal mirrors a governance proposal. ON CONFLICT DO NOTHING + a nil
+// return keeps the abci flush replay-safe: a duplicate proposal_id on block
+// replay must not error, which would abort the flush transaction and panic the
+// node. Status changes flow through UpdateGovProposalStatus, so the original row
+// is never overwritten here.
+func (s *PostgresStore) InsertGovProposal(ctx context.Context, p *GovProposal) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO governance_proposals (proposal_id, operation, target_agent_id, target_pubkey,
+			target_power, proposer_id, status, created_height, expiry_height, executed_height, reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		ON CONFLICT (proposal_id) DO NOTHING`,
+		p.ProposalID, p.Operation, p.TargetAgentID, p.TargetPubkey,
+		p.TargetPower, p.ProposerID, p.Status, p.CreatedHeight,
+		p.ExpiryHeight, p.ExecutedHeight, p.Reason)
+	if err != nil {
+		return fmt.Errorf("insert gov proposal: %w", err)
+	}
+	return nil
 }
-func (s *PostgresStore) UpdateGovProposalStatus(_ context.Context, _, _ string, _ *int64) error {
-	return nil // no-op
+
+func (s *PostgresStore) GetGovProposal(ctx context.Context, proposalID string) (*GovProposal, error) {
+	p, err := scanGovProposal(s.db.QueryRow(ctx, `SELECT `+govProposalColumns+`
+		FROM governance_proposals WHERE proposal_id = $1`, proposalID))
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, fmt.Errorf("gov proposal not found: %s", proposalID)
+		}
+		return nil, fmt.Errorf("get gov proposal: %w", err)
+	}
+	return p, nil
 }
-func (s *PostgresStore) ListGovProposals(_ context.Context, _ string) ([]*GovProposal, error) {
-	return make([]*GovProposal, 0), nil
+
+func (s *PostgresStore) UpdateGovProposalStatus(ctx context.Context, proposalID, status string, executedHeight *int64) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE governance_proposals SET status = $1, executed_height = $2
+		WHERE proposal_id = $3`, status, executedHeight, proposalID)
+	if err != nil {
+		return fmt.Errorf("update gov proposal status: %w", err)
+	}
+	return nil
 }
-func (s *PostgresStore) InsertGovVote(_ context.Context, _ *GovVote) error {
-	return nil // no-op
+
+func (s *PostgresStore) ListGovProposals(ctx context.Context, status string) ([]*GovProposal, error) {
+	query := `SELECT ` + govProposalColumns + ` FROM governance_proposals`
+	var args []any
+	if status != "" {
+		query += ` WHERE status = $1`
+		args = append(args, status)
+	}
+	query += ` ORDER BY created_height DESC`
+
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list gov proposals: %w", err)
+	}
+	defer rows.Close()
+
+	proposals := make([]*GovProposal, 0)
+	for rows.Next() {
+		p, scanErr := scanGovProposal(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan gov proposal: %w", scanErr)
+		}
+		proposals = append(proposals, p)
+	}
+	return proposals, rows.Err()
 }
-func (s *PostgresStore) GetGovVotes(_ context.Context, _ string) ([]*GovVote, error) {
-	return make([]*GovVote, 0), nil
+
+// InsertGovVote mirrors SQLite's INSERT OR REPLACE: a validator may revise its
+// vote and replays must be idempotent, so upsert on the (proposal_id,
+// validator_id) PK rather than erroring on conflict.
+func (s *PostgresStore) InsertGovVote(ctx context.Context, v *GovVote) error {
+	_, err := s.db.Exec(ctx, `
+		INSERT INTO governance_votes (proposal_id, validator_id, decision, height)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (proposal_id, validator_id) DO UPDATE SET
+			decision = EXCLUDED.decision, height = EXCLUDED.height`,
+		v.ProposalID, v.ValidatorID, v.Decision, v.Height)
+	if err != nil {
+		return fmt.Errorf("insert gov vote: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) GetGovVotes(ctx context.Context, proposalID string) ([]*GovVote, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT proposal_id, validator_id, decision, height
+		FROM governance_votes WHERE proposal_id = $1 ORDER BY validator_id`, proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("get gov votes: %w", err)
+	}
+	defer rows.Close()
+
+	votes := make([]*GovVote, 0)
+	for rows.Next() {
+		var v GovVote
+		if scanErr := rows.Scan(&v.ProposalID, &v.ValidatorID, &v.Decision, &v.Height); scanErr != nil {
+			return nil, fmt.Errorf("scan gov vote: %w", scanErr)
+		}
+		votes = append(votes, &v)
+	}
+	return votes, rows.Err()
 }

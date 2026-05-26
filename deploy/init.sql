@@ -308,6 +308,36 @@ CREATE TABLE IF NOT EXISTS dept_members (
 CREATE INDEX IF NOT EXISTS idx_dept_members_agent ON dept_members(agent_id) WHERE removed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_dept_members_dept ON dept_members(org_id, dept_id) WHERE removed_at IS NULL;
 
+-- ============================================================
+-- 19. governance_proposals / governance_votes
+-- ============================================================
+-- Off-chain mirror of validator-governance state. The abci flush writes here on
+-- every gov_proposal / gov_vote / gov_status_update tx (app.go). Mirrors SQLite's
+-- governance_proposals / governance_votes. Keep in sync with PostgresStore.ensureGovSchema.
+CREATE TABLE IF NOT EXISTS governance_proposals (
+    proposal_id     TEXT        PRIMARY KEY,
+    operation       TEXT        NOT NULL,
+    target_agent_id TEXT        NOT NULL,
+    target_pubkey   TEXT        NOT NULL DEFAULT '',
+    target_power    BIGINT      NOT NULL DEFAULT 0,
+    proposer_id     TEXT        NOT NULL,
+    status          TEXT        NOT NULL DEFAULT 'voting',
+    created_height  BIGINT      NOT NULL,
+    expiry_height   BIGINT      NOT NULL,
+    executed_height BIGINT,
+    reason          TEXT        NOT NULL DEFAULT '',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_gov_proposals_status ON governance_proposals (status, created_height DESC);
+
+CREATE TABLE IF NOT EXISTS governance_votes (
+    proposal_id  TEXT   NOT NULL,
+    validator_id TEXT   NOT NULL,
+    decision     TEXT   NOT NULL,
+    height       BIGINT NOT NULL,
+    PRIMARY KEY (proposal_id, validator_id)
+);
+
 -- Add classification column to memories table
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS classification SMALLINT NOT NULL DEFAULT 1;
 
