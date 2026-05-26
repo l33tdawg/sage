@@ -136,13 +136,39 @@ CREATE TABLE domains (
 -- ============================================================
 -- 8. agents
 -- ============================================================
+-- Mirrors SQLite's network_agents — the v8 access-control model. The buffered
+-- offchain flush in app.go writes the full AgentEntry here on every
+-- agent_register / agent_update / agent_permission tx, so every column the
+-- SQLite store carries must exist here too or Commit panics (offchain flush
+-- failure halts consensus). Keep this in sync with PostgresStore.ensureAgentSchema.
 CREATE TABLE agents (
-    agent_id      TEXT        PRIMARY KEY,
-    display_name  TEXT,
-    organization  TEXT,
-    domains       TEXT[],
-    registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    agent_id         TEXT        PRIMARY KEY,
+    name             TEXT        NOT NULL DEFAULT '',
+    registered_name  TEXT        NOT NULL DEFAULT '',
+    role             TEXT        NOT NULL DEFAULT 'member',
+    avatar           TEXT        NOT NULL DEFAULT '',
+    boot_bio         TEXT        NOT NULL DEFAULT '',
+    validator_pubkey TEXT        NOT NULL DEFAULT '',
+    node_id          TEXT        NOT NULL DEFAULT '',
+    p2p_address      TEXT        NOT NULL DEFAULT '',
+    status           TEXT        NOT NULL DEFAULT 'pending',
+    clearance        INTEGER     NOT NULL DEFAULT 1,
+    org_id           TEXT        NOT NULL DEFAULT '',
+    dept_id          TEXT        NOT NULL DEFAULT '',
+    domain_access    TEXT        NOT NULL DEFAULT '',
+    bundle_path      TEXT        NOT NULL DEFAULT '',
+    on_chain_height  BIGINT      NOT NULL DEFAULT 0,
+    visible_agents   TEXT        NOT NULL DEFAULT '',
+    provider         TEXT        NOT NULL DEFAULT '',
+    claim_token      TEXT        NOT NULL DEFAULT '',
+    claim_expires_at TIMESTAMPTZ,
+    first_seen       TIMESTAMPTZ,
+    last_seen        TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    removed_at       TIMESTAMPTZ
 );
+CREATE INDEX IF NOT EXISTS idx_agents_name ON agents (name) WHERE status != 'removed';
+CREATE INDEX IF NOT EXISTS idx_agents_org ON agents (org_id) WHERE org_id != '';
 
 -- ============================================================
 -- 9. domain_registry (federation ACL)

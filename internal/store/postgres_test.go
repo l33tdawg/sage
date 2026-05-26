@@ -50,7 +50,7 @@ func TestInsertGetMemory(t *testing.T) {
 	assert.Equal(t, record.MemoryType, got.MemoryType)
 }
 
-func TestUpdateStatus(t *testing.T) {
+func TestPostgresUpdateStatus(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 

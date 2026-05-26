@@ -2,6 +2,10 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -49,7 +53,114 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
-	return &PostgresStore{db: pool, pool: pool}, nil
+	s := &PostgresStore{db: pool, pool: pool}
+
+	// Self-heal the agents schema. init.sql only runs on first DB init
+	// (docker-entrypoint-initdb.d), so pre-v8 deployments carry the legacy
+	// 5-column skeleton that lacks the access-control columns the offchain
+	// flush writes. Mirror SQLite's ALTER-on-boot migration (sqlite.go) so an
+	// agent_register tx can't panic Commit with a missing-column error.
+	if err := s.ensureAgentSchema(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ensure agent schema: %w", err)
+	}
+
+	return s, nil
+}
+
+// agentSchemaLockKey is an arbitrary stable 64-bit key for the advisory lock
+// that serializes concurrent agents-table migrations across quorum nodes.
+const agentSchemaLockKey int64 = 0x5341_4745_4147_4E54 // "SAGEAGNT"
+
+// ensureAgentSchema brings the agents table up to the v8 access-control shape.
+// Idempotent: a no-op against a schema already created by the current init.sql,
+// and an in-place migration for the legacy (agent_id, display_name,
+// organization, domains, registered_at) skeleton. Must stay in sync with the
+// agents table in deploy/init.sql and the columns CreateAgent/UpdateAgent write.
+//
+// The whole migration runs inside one transaction holding a transaction-scoped
+// advisory lock, so that when N quorum nodes cold-boot against a shared,
+// not-yet-migrated database, only one performs the DDL and the rest block then
+// observe no-ops — avoiding a lost CREATE/ALTER race that would fail a node's
+// boot. The lock releases automatically on commit. On an already-current schema
+// every statement is a no-op and the lock is uncontended. RunInTx runs inline
+// when the store is already tx-scoped (pool == nil).
+func (s *PostgresStore) ensureAgentSchema(ctx context.Context) error {
+	return s.RunInTx(ctx, func(tx OffchainStore) error {
+		ps := tx.(*PostgresStore)
+
+		if _, err := ps.db.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, agentSchemaLockKey); err != nil {
+			return fmt.Errorf("acquire agents schema lock: %w", err)
+		}
+
+		if _, err := ps.db.Exec(ctx, `
+			CREATE TABLE IF NOT EXISTS agents (
+				agent_id         TEXT        PRIMARY KEY,
+				name             TEXT        NOT NULL DEFAULT '',
+				registered_name  TEXT        NOT NULL DEFAULT '',
+				role             TEXT        NOT NULL DEFAULT 'member',
+				avatar           TEXT        NOT NULL DEFAULT '',
+				boot_bio         TEXT        NOT NULL DEFAULT '',
+				validator_pubkey TEXT        NOT NULL DEFAULT '',
+				node_id          TEXT        NOT NULL DEFAULT '',
+				p2p_address      TEXT        NOT NULL DEFAULT '',
+				status           TEXT        NOT NULL DEFAULT 'pending',
+				clearance        INTEGER     NOT NULL DEFAULT 1,
+				org_id           TEXT        NOT NULL DEFAULT '',
+				dept_id          TEXT        NOT NULL DEFAULT '',
+				domain_access    TEXT        NOT NULL DEFAULT '',
+				bundle_path      TEXT        NOT NULL DEFAULT '',
+				on_chain_height  BIGINT      NOT NULL DEFAULT 0,
+				visible_agents   TEXT        NOT NULL DEFAULT '',
+				provider         TEXT        NOT NULL DEFAULT '',
+				claim_token      TEXT        NOT NULL DEFAULT '',
+				claim_expires_at TIMESTAMPTZ,
+				first_seen       TIMESTAMPTZ,
+				last_seen        TIMESTAMPTZ,
+				created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+				removed_at       TIMESTAMPTZ
+			)`); err != nil {
+			return fmt.Errorf("create agents table: %w", err)
+		}
+
+		// ADD COLUMN IF NOT EXISTS upgrades the legacy skeleton in place; each is
+		// a no-op on a fresh table. The trailing CREATE INDEX statements mirror
+		// deploy/init.sql so a migrated legacy DB gets the same indexes a fresh
+		// install does. Listed in struct order for auditability.
+		stmts := []string{
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS name             TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS registered_name  TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS role             TEXT        NOT NULL DEFAULT 'member'`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar           TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS boot_bio         TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS validator_pubkey TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS node_id          TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS p2p_address      TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS status           TEXT        NOT NULL DEFAULT 'pending'`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS clearance        INTEGER     NOT NULL DEFAULT 1`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS org_id           TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS dept_id          TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS domain_access    TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS bundle_path      TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS on_chain_height  BIGINT      NOT NULL DEFAULT 0`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS visible_agents   TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS provider         TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS claim_token      TEXT        NOT NULL DEFAULT ''`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS first_seen       TIMESTAMPTZ`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_seen        TIMESTAMPTZ`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+			`ALTER TABLE agents ADD COLUMN IF NOT EXISTS removed_at       TIMESTAMPTZ`,
+			`CREATE INDEX IF NOT EXISTS idx_agents_name ON agents (name) WHERE status != 'removed'`,
+			`CREATE INDEX IF NOT EXISTS idx_agents_org ON agents (org_id) WHERE org_id != ''`,
+		}
+		for _, stmt := range stmts {
+			if _, err := ps.db.Exec(ctx, stmt); err != nil {
+				return fmt.Errorf("migrate agents schema: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryRecord) error {
@@ -1274,66 +1385,319 @@ func (s *PostgresStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) e
 	return tx.Commit(ctx)
 }
 
-// --- AgentStore stubs (PostgreSQL implementation TODO) ---
+// --- AgentStore (mirrors SQLiteStore against the agents table) ---
 
-func (s *PostgresStore) ListAgents(_ context.Context) ([]*AgentEntry, error) {
-	return nil, fmt.Errorf("ListAgents not implemented for PostgresStore")
+// agentColumns is the SELECT projection shared by ListAgents / GetAgent /
+// GetAgentByName. memory_count is derived live from the memories table (cast to
+// int4 to scan into AgentEntry.MemoryCount). Keep the order in lockstep with
+// scanAgent.
+const agentColumns = `
+	a.agent_id, a.name, a.registered_name, a.role, a.avatar, a.boot_bio,
+	a.validator_pubkey, a.node_id, a.p2p_address, a.status, a.clearance,
+	a.org_id, a.dept_id, a.domain_access, a.bundle_path,
+	a.first_seen, a.last_seen, a.created_at, a.removed_at,
+	a.on_chain_height, a.visible_agents, a.provider,
+	COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0)::int,
+	a.claim_token, a.claim_expires_at`
+
+// scanAgent reads one agents row in agentColumns order. Satisfied by both
+// pgx.Row (QueryRow) and pgx.Rows (after Next).
+func scanAgent(row interface{ Scan(...any) error }) (*AgentEntry, error) {
+	a := &AgentEntry{}
+	if err := row.Scan(
+		&a.AgentID, &a.Name, &a.RegisteredName, &a.Role, &a.Avatar, &a.BootBio,
+		&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
+		&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
+		&a.FirstSeen, &a.LastSeen, &a.CreatedAt, &a.RemovedAt,
+		&a.OnChainHeight, &a.VisibleAgents, &a.Provider, &a.MemoryCount,
+		&a.ClaimToken, &a.ClaimExpiresAt,
+	); err != nil {
+		return nil, err
+	}
+	if a.RegisteredName == "" {
+		a.RegisteredName = a.Name // backfill for pre-existing agents
+	}
+	return a, nil
 }
 
-func (s *PostgresStore) GetAgent(_ context.Context, _ string) (*AgentEntry, error) {
-	return nil, fmt.Errorf("GetAgent not implemented for PostgresStore")
+func (s *PostgresStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+agentColumns+`
+		FROM agents a WHERE a.status != 'removed' ORDER BY a.created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list agents: %w", err)
+	}
+	defer rows.Close()
+
+	var agents []*AgentEntry
+	for rows.Next() {
+		a, scanErr := scanAgent(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan agent: %w", scanErr)
+		}
+		agents = append(agents, a)
+	}
+	return agents, rows.Err()
 }
 
-func (s *PostgresStore) GetAgentByName(_ context.Context, _ string) (*AgentEntry, error) {
-	return nil, fmt.Errorf("GetAgentByName not implemented for PostgresStore")
+func (s *PostgresStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry, error) {
+	a, err := scanAgent(s.db.QueryRow(ctx, `SELECT `+agentColumns+`
+		FROM agents a WHERE a.agent_id = $1`, agentID))
+	if err != nil {
+		return nil, fmt.Errorf("get agent: %w", err)
+	}
+	return a, nil
 }
 
-func (s *PostgresStore) CreateAgent(_ context.Context, _ *AgentEntry) error {
-	return fmt.Errorf("CreateAgent not implemented for PostgresStore")
+func (s *PostgresStore) GetAgentByName(ctx context.Context, name string) (*AgentEntry, error) {
+	a, err := scanAgent(s.db.QueryRow(ctx, `SELECT `+agentColumns+`
+		FROM agents a WHERE a.name = $1 AND a.status != 'removed'`, name))
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return nil, nil // not found — return nil, nil per interface contract
+		}
+		return nil, fmt.Errorf("get agent by name: %w", err)
+	}
+	return a, nil
 }
 
-func (s *PostgresStore) UpdateAgent(_ context.Context, _ *AgentEntry) error {
-	return fmt.Errorf("UpdateAgent not implemented for PostgresStore")
+func (s *PostgresStore) CreateAgent(ctx context.Context, agent *AgentEntry) error {
+	now := time.Now().UTC()
+	firstSeen := now
+	if agent.FirstSeen != nil {
+		firstSeen = *agent.FirstSeen
+	}
+	createdAt := now
+	if !agent.CreatedAt.IsZero() {
+		createdAt = agent.CreatedAt
+	}
+	// ON CONFLICT DO NOTHING — NOT a bare INSERT. The agent_register flush path
+	// relies on a conflict signalling "already exists" so it can fall back to
+	// UpdateAgent. A raw PK-conflict error would abort the surrounding pgx
+	// transaction (the flush runs inside one), and the fallback UpdateAgent would
+	// then fail with "current transaction is aborted" and panic the node on any
+	// re-registration or block replay. DO NOTHING resolves the conflict without
+	// poisoning the tx; we surface it via RowsAffected()==0 so the caller still
+	// falls back to UpdateAgent.
+	tag, err := s.db.Exec(ctx, `
+		INSERT INTO agents (agent_id, name, registered_name, role, avatar, boot_bio, validator_pubkey,
+			node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, bundle_path,
+			on_chain_height, visible_agents, provider, claim_token, claim_expires_at,
+			first_seen, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		ON CONFLICT (agent_id) DO NOTHING`,
+		agent.AgentID, agent.Name, agent.RegisteredName, agent.Role, agent.Avatar, agent.BootBio, agent.ValidatorPubkey,
+		agent.NodeID, agent.P2PAddress, agent.Status, agent.Clearance, agent.OrgID, agent.DeptID,
+		agent.DomainAccess, agent.BundlePath, agent.OnChainHeight, agent.VisibleAgents, agent.Provider,
+		agent.ClaimToken, agent.ClaimExpiresAt, firstSeen, createdAt)
+	if err != nil {
+		return fmt.Errorf("create agent: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("create agent: agent %s already exists", agent.AgentID)
+	}
+	return nil
 }
 
-func (s *PostgresStore) RemoveAgent(_ context.Context, _ string) error {
-	return fmt.Errorf("RemoveAgent not implemented for PostgresStore")
+func (s *PostgresStore) UpdateAgent(ctx context.Context, agent *AgentEntry) error {
+	// Mirrors SQLite: registered_name, validator_pubkey, node_id, status,
+	// first_seen and created_at are intentionally not overwritten here.
+	_, err := s.db.Exec(ctx, `
+		UPDATE agents SET name=$1, role=$2, avatar=$3, boot_bio=$4, clearance=$5,
+			org_id=$6, dept_id=$7, domain_access=$8, p2p_address=$9,
+			on_chain_height=$10, visible_agents=$11, provider=$12,
+			claim_token=$13, claim_expires_at=$14
+		WHERE agent_id=$15`,
+		agent.Name, agent.Role, agent.Avatar, agent.BootBio, agent.Clearance,
+		agent.OrgID, agent.DeptID, agent.DomainAccess, agent.P2PAddress,
+		agent.OnChainHeight, agent.VisibleAgents, agent.Provider,
+		agent.ClaimToken, agent.ClaimExpiresAt, agent.AgentID)
+	if err != nil {
+		return fmt.Errorf("update agent: %w", err)
+	}
+	return nil
 }
 
-func (s *PostgresStore) UpdateAgentStatus(_ context.Context, _, _ string) error {
-	return fmt.Errorf("UpdateAgentStatus not implemented for PostgresStore")
+func (s *PostgresStore) RemoveAgent(ctx context.Context, agentID string) error {
+	_, err := s.db.Exec(ctx, `UPDATE agents SET status='removed', removed_at=NOW() WHERE agent_id=$1`, agentID)
+	if err != nil {
+		return fmt.Errorf("remove agent: %w", err)
+	}
+	return nil
 }
 
-func (s *PostgresStore) UpdateAgentLastSeen(_ context.Context, _ string, _ time.Time) error {
-	return fmt.Errorf("UpdateAgentLastSeen not implemented for PostgresStore")
+func (s *PostgresStore) UpdateAgentStatus(ctx context.Context, agentID, status string) error {
+	_, err := s.db.Exec(ctx, `UPDATE agents SET status=$1 WHERE agent_id=$2`, status, agentID)
+	if err != nil {
+		return fmt.Errorf("update agent status: %w", err)
+	}
+	return nil
 }
 
-func (s *PostgresStore) BackfillFirstSeen(_ context.Context, _ string, _ time.Time) error {
-	return fmt.Errorf("BackfillFirstSeen not implemented for PostgresStore")
+func (s *PostgresStore) UpdateAgentLastSeen(ctx context.Context, agentID string, lastSeen time.Time) error {
+	_, err := s.db.Exec(ctx, `UPDATE agents SET last_seen=$1, status='active' WHERE agent_id=$2`, lastSeen.UTC(), agentID)
+	if err != nil {
+		return fmt.Errorf("update agent last seen: %w", err)
+	}
+	return nil
 }
 
-func (s *PostgresStore) RotateAgentKey(_ context.Context, _ string) (string, []byte, error) {
-	return "", nil, fmt.Errorf("RotateAgentKey not implemented for PostgresStore")
+func (s *PostgresStore) BackfillFirstSeen(ctx context.Context, agentID string, firstSeen time.Time) error {
+	_, err := s.db.Exec(ctx, `UPDATE agents SET first_seen=$1 WHERE agent_id=$2 AND first_seen IS NULL`, firstSeen.UTC(), agentID)
+	if err != nil {
+		return fmt.Errorf("backfill first_seen: %w", err)
+	}
+	return nil
 }
 
-func (s *PostgresStore) ReassignMemories(_ context.Context, _, _ string) (int64, error) {
-	return 0, fmt.Errorf("ReassignMemories not implemented for PostgresStore")
+func (s *PostgresStore) RotateAgentKey(ctx context.Context, oldAgentID string) (string, []byte, error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", nil, fmt.Errorf("generate key: %w", err)
+	}
+	newAgentID := hex.EncodeToString(pub)
+	newValidatorPubkey := base64.StdEncoding.EncodeToString(pub)
+	seed := priv.Seed()
+
+	// Atomic: new agent row + memory re-attribution + retire old. No
+	// redeployment_log write — that table is SQLite/personal-mode only.
+	err = s.RunInTx(ctx, func(tx OffchainStore) error {
+		ps := tx.(*PostgresStore)
+
+		// 1. Verify old agent exists and is not removed.
+		var status string
+		if scanErr := ps.db.QueryRow(ctx, `SELECT status FROM agents WHERE agent_id=$1`, oldAgentID).Scan(&status); scanErr != nil {
+			return fmt.Errorf("agent not found: %s", oldAgentID)
+		}
+		if status == "removed" {
+			return fmt.Errorf("cannot rotate key for removed agent %s", oldAgentID)
+		}
+
+		// 2. Insert new agent row (copy of old, with new keys). Mirrors the
+		// SQLite column subset — uncopied columns take table defaults.
+		if _, err2 := ps.db.Exec(ctx, `
+			INSERT INTO agents (agent_id, name, role, avatar, boot_bio, validator_pubkey,
+				node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, bundle_path, first_seen, created_at)
+			SELECT $1, name, role, avatar, boot_bio, $2,
+				node_id, p2p_address, status, clearance, org_id, dept_id, domain_access, '',
+				first_seen, created_at
+			FROM agents WHERE agent_id=$3`,
+			newAgentID, newValidatorPubkey, oldAgentID); err2 != nil {
+			return fmt.Errorf("insert rotated agent: %w", err2)
+		}
+
+		// 3. Re-attribute all memories to the new agent ID.
+		if _, err2 := ps.db.Exec(ctx, `UPDATE memories SET submitting_agent=$1 WHERE submitting_agent=$2`, newAgentID, oldAgentID); err2 != nil {
+			return fmt.Errorf("re-attribute memories: %w", err2)
+		}
+
+		// 4. Retire the old agent.
+		if _, err2 := ps.db.Exec(ctx, `UPDATE agents SET status='removed', removed_at=NOW() WHERE agent_id=$1`, oldAgentID); err2 != nil {
+			return fmt.Errorf("retire old agent: %w", err2)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return newAgentID, seed, nil
+}
+
+func (s *PostgresStore) ReassignMemories(ctx context.Context, sourceAgentID, targetAgentID string) (int64, error) {
+	var count int64
+	err := s.RunInTx(ctx, func(tx OffchainStore) error {
+		ps := tx.(*PostgresStore)
+
+		var status string
+		if scanErr := ps.db.QueryRow(ctx, `SELECT status FROM agents WHERE agent_id=$1`, targetAgentID).Scan(&status); scanErr != nil {
+			return fmt.Errorf("target agent not found: %s", targetAgentID)
+		}
+		if status == "removed" {
+			return fmt.Errorf("cannot reassign to removed agent %s", targetAgentID)
+		}
+		if scanErr := ps.db.QueryRow(ctx, `SELECT COUNT(*) FROM memories WHERE submitting_agent=$1`, sourceAgentID).Scan(&count); scanErr != nil {
+			return fmt.Errorf("count source memories: %w", scanErr)
+		}
+		if count == 0 {
+			return nil
+		}
+		if _, execErr := ps.db.Exec(ctx, `UPDATE memories SET submitting_agent=$1 WHERE submitting_agent=$2`, targetAgentID, sourceAgentID); execErr != nil {
+			return fmt.Errorf("reassign memories: %w", execErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *PostgresStore) ListAgentTags(_ context.Context, _ string) ([]TagCount, error) {
-	return nil, fmt.Errorf("ListAgentTags not implemented for PostgresStore")
+	// Tags are a SQLite/personal-mode feature; Postgres deployments carry none.
+	return nil, nil
 }
 
-func (s *PostgresStore) ListAgentDomains(_ context.Context, _ string) ([]string, error) {
-	return nil, fmt.Errorf("ListAgentDomains not implemented for PostgresStore")
+func (s *PostgresStore) ListAgentDomains(ctx context.Context, agentID string) ([]string, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT domain_tag FROM memories
+		WHERE submitting_agent = $1 AND domain_tag != ''
+		GROUP BY domain_tag
+		ORDER BY COUNT(*) DESC, domain_tag ASC`, agentID)
+	if err != nil {
+		return nil, fmt.Errorf("list agent domains: %w", err)
+	}
+	defer rows.Close()
+
+	var domains []string
+	for rows.Next() {
+		var domain string
+		if scanErr := rows.Scan(&domain); scanErr != nil {
+			return nil, fmt.Errorf("scan agent domain: %w", scanErr)
+		}
+		domains = append(domains, domain)
+	}
+	return domains, rows.Err()
 }
 
-func (s *PostgresStore) ReassignMemoriesByTag(_ context.Context, _, _, _ string) (int64, error) {
-	return 0, fmt.Errorf("ReassignMemoriesByTag not implemented for PostgresStore")
+func (s *PostgresStore) ReassignMemoriesByTag(ctx context.Context, _, targetAgentID, _ string) (int64, error) {
+	// No tagged memories exist in Postgres (tags are SQLite-only), so this
+	// validates the target like SQLite and reassigns nothing.
+	var status string
+	if err := s.db.QueryRow(ctx, `SELECT status FROM agents WHERE agent_id=$1`, targetAgentID).Scan(&status); err != nil {
+		return 0, fmt.Errorf("target agent not found: %s", targetAgentID)
+	}
+	if status == "removed" {
+		return 0, fmt.Errorf("cannot reassign to removed agent %s", targetAgentID)
+	}
+	return 0, nil
 }
 
-func (s *PostgresStore) ReassignMemoriesByDomain(_ context.Context, _, _, _ string) (int64, error) {
-	return 0, fmt.Errorf("ReassignMemoriesByDomain not implemented for PostgresStore")
+func (s *PostgresStore) ReassignMemoriesByDomain(ctx context.Context, sourceAgentID, targetAgentID, domain string) (int64, error) {
+	var count int64
+	err := s.RunInTx(ctx, func(tx OffchainStore) error {
+		ps := tx.(*PostgresStore)
+
+		var status string
+		if scanErr := ps.db.QueryRow(ctx, `SELECT status FROM agents WHERE agent_id=$1`, targetAgentID).Scan(&status); scanErr != nil {
+			return fmt.Errorf("target agent not found: %s", targetAgentID)
+		}
+		if status == "removed" {
+			return fmt.Errorf("cannot reassign to removed agent %s", targetAgentID)
+		}
+		if scanErr := ps.db.QueryRow(ctx, `SELECT COUNT(*) FROM memories WHERE submitting_agent=$1 AND domain_tag=$2`, sourceAgentID, domain).Scan(&count); scanErr != nil {
+			return fmt.Errorf("count domain memories: %w", scanErr)
+		}
+		if count == 0 {
+			return nil
+		}
+		if _, execErr := ps.db.Exec(ctx, `UPDATE memories SET submitting_agent=$1 WHERE submitting_agent=$2 AND domain_tag=$3`, targetAgentID, sourceAgentID, domain); execErr != nil {
+			return fmt.Errorf("reassign domain memories: %w", execErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *PostgresStore) AcquireRedeployLock(_ context.Context, _, _ string, _ time.Duration) error {
