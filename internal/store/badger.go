@@ -224,36 +224,25 @@ func (s *BadgerStore) ComputeAppHash() ([]byte, error) {
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
-		// Collect all keys for sorting (BadgerDB iterates in sorted order by default,
-		// but we make it explicit for safety)
-		type kv struct {
-			key, val []byte
-		}
-		var entries []kv
-
+		// BadgerDB's default forward iterator yields keys in lexicographic
+		// byte order — exactly the order the app hash requires (it matches a
+		// `string(a) < string(b)` sort). So we stream each key+value straight
+		// into the digest in iteration order. This is byte-identical to the
+		// previous collect-into-slice-then-sort approach (same input → same
+		// hash, so no consensus change), but avoids allocating the entire DB
+		// into a Go slice on every FinalizeBlock — that per-block allocation
+		// made GC pressure (and thus CPU) grow linearly with chain height.
+		// See issue #26. h.Write consumes the key/value synchronously, so the
+		// iterator's borrowed slices stay valid for the duration of the call.
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
-			k := make([]byte, len(item.Key()))
-			copy(k, item.Key())
-			valErr := item.Value(func(v []byte) error {
-				val := make([]byte, len(v))
-				copy(val, v)
-				entries = append(entries, kv{key: k, val: val})
+			h.Write(item.Key())
+			if valErr := item.Value(func(v []byte) error {
+				h.Write(v)
 				return nil
-			})
-			if valErr != nil {
+			}); valErr != nil {
 				return valErr
 			}
-		}
-
-		// Sort by key for determinism
-		sort.Slice(entries, func(i, j int) bool {
-			return string(entries[i].key) < string(entries[j].key)
-		})
-
-		for _, e := range entries {
-			h.Write(e.key)
-			h.Write(e.val)
 		}
 
 		return nil
