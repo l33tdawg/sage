@@ -76,6 +76,9 @@ class MemorySubmitRequest(BaseModel):
     knowledge_triples: list[KnowledgeTriple] | None = None
     parent_hash: str | None = None
     tags: list[str] | None = None
+    # Per-record clearance level 0-4 (PUBLIC, INTERNAL, CONFIDENTIAL, SECRET,
+    # TOP SECRET). When omitted the server stores the memory as PUBLIC (0).
+    classification: int | None = None
 
 
 class MemorySubmitResponse(BaseModel):

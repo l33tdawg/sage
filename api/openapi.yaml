@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 3.5.0
+  version: 8.1.1
   description: >-
     (Sovereign) Agent Governed Experience — REST API for memory submission,
     validation, and query.
@@ -61,6 +61,7 @@ components:
         - fact
         - observation
         - inference
+        - task
       description: Classification of the memory object.
 
     MemoryStatus:
@@ -144,11 +145,22 @@ components:
           minimum: 0
           maximum: 1
           description: Confidence score assigned by the proposing agent.
+        classification:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: >-
+            Per-record clearance level: 0=PUBLIC, 1=INTERNAL, 2=CONFIDENTIAL,
+            3=SECRET, 4=TOPSECRET.
         status:
           $ref: "#/components/schemas/MemoryStatus"
         parent_hash:
           type: string
           description: Hash of the parent memory (for lineage), if any.
+        task_status:
+          type: string
+          description: >-
+            For task-type memories: planned, in_progress, done, or dropped.
         knowledge_triples:
           type: array
           items:
@@ -182,6 +194,11 @@ components:
                 type: string
                 format: date-time
           description: Corroborations supporting this memory.
+        linked_memories:
+          type: array
+          items:
+            type: object
+          description: Memories linked to this one.
         created_at:
           type: string
           format: date-time
@@ -214,14 +231,19 @@ components:
           minimum: 0
           maximum: 1
           description: Agent-assigned confidence (0–1).
+        classification:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: >-
+            Per-record clearance: 0=PUBLIC, 1=INTERNAL, 2=CONFIDENTIAL,
+            3=SECRET, 4=TOPSECRET. Omitting or sending 0 stores as PUBLIC.
         embedding:
           type: array
           items:
             type: number
             format: float
-          minItems: 1536
-          maxItems: 1536
-          description: Optional 1536-float embedding vector.
+          description: Optional precomputed embedding vector; stored off-chain via supplementary cache.
         knowledge_triples:
           type: array
           items:
@@ -230,6 +252,10 @@ components:
         parent_hash:
           type: string
           description: Hash of a parent memory for lineage tracking.
+        task_status:
+          type: string
+          description: >-
+            For task-type memories: planned, in_progress, done, or dropped.
         tags:
           type: array
           items:
@@ -238,6 +264,9 @@ components:
             Optional user-defined labels attached after consensus commit.
             Stored as node-local metadata (not part of the on-chain tx);
             queryable via `tags` on /v1/memory/query and /v1/memory/search.
+        provider:
+          type: string
+          description: Stored off-chain only; not on-chain.
 
     MemoryQueryRequest:
       type: object
@@ -249,12 +278,13 @@ components:
           items:
             type: number
             format: float
-          minItems: 1536
-          maxItems: 1536
-          description: 1536-float query embedding for similarity search.
+          description: Query embedding for similarity search.
         domain_tag:
           type: string
           description: Optional domain filter.
+        provider:
+          type: string
+          description: Optional provider filter.
         min_confidence:
           type: number
           format: double
@@ -281,6 +311,109 @@ components:
             tagged with ANY of the listed values (OR semantics). SQLite-only;
             ignored on PostgresStore.
 
+    MemorySearchRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          description: Full-text search query.
+        domain_tag:
+          type: string
+          description: Optional domain filter.
+        provider:
+          type: string
+          description: Optional provider filter.
+        min_confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        status_filter:
+          $ref: "#/components/schemas/MemoryStatus"
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+        tags:
+          type: array
+          items:
+            type: string
+          description: OR-filter by tag; SQLite only.
+
+    HybridExpansion:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Paraphrase variant text.
+        embedding:
+          type: array
+          items:
+            type: number
+            format: float
+          description: Precomputed embedding for this variant.
+
+    MemoryHybridRequest:
+      type: object
+      description: >-
+        At least one of `query` or `embedding` is required.
+      properties:
+        query:
+          type: string
+          description: Text query for the FTS5 arm.
+        embedding:
+          type: array
+          items:
+            type: number
+            format: float
+          description: Vector for the similarity arm.
+        expansions:
+          type: array
+          items:
+            $ref: "#/components/schemas/HybridExpansion"
+          description: Paraphrase variants for multi-variant RRF recall.
+        domain_tag:
+          type: string
+        provider:
+          type: string
+        min_confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+        status_filter:
+          $ref: "#/components/schemas/MemoryStatus"
+        top_k:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+        tags:
+          type: array
+          items:
+            type: string
+
+    FilterInfo:
+      type: object
+      description: Surfaces server-side filters that hid data from the caller.
+      properties:
+        by:
+          type: array
+          items:
+            type: string
+          description: >-
+            Filter identifiers applied. Values: rbac_submitting_agents,
+            classification.
+        total_before_filter:
+          type: integer
+        visible:
+          type: integer
+        hidden_count:
+          type: integer
+
     MemoryQueryResponse:
       type: object
       required:
@@ -297,6 +430,110 @@ components:
         total_count:
           type: integer
           description: Total number of matching memories.
+        filtered:
+          $ref: "#/components/schemas/FilterInfo"
+
+    MemoryLinkRequest:
+      type: object
+      required:
+        - source_id
+        - target_id
+      properties:
+        source_id:
+          type: string
+        target_id:
+          type: string
+        link_type:
+          type: string
+          default: related
+          description: Relationship type; defaults to "related".
+
+    MemoryLinkResponse:
+      type: object
+      properties:
+        source_id:
+          type: string
+        target_id:
+          type: string
+        link_type:
+          type: string
+
+    PreValidateRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+        domain:
+          type: string
+        type:
+          type: string
+        confidence:
+          type: number
+          format: double
+
+    PreValidateVote:
+      type: object
+      properties:
+        validator:
+          type: string
+        decision:
+          type: string
+        reason:
+          type: string
+
+    PreValidateResponse:
+      type: object
+      properties:
+        accepted:
+          type: boolean
+        quorum:
+          type: string
+          example: "3/4"
+        votes:
+          type: array
+          items:
+            $ref: "#/components/schemas/PreValidateVote"
+
+    TaskStatusUpdateRequest:
+      type: object
+      required:
+        - task_status
+      properties:
+        task_status:
+          type: string
+          enum:
+            - planned
+            - in_progress
+            - done
+            - dropped
+
+    TaskStatusUpdateResponse:
+      type: object
+      properties:
+        memory_id:
+          type: string
+        task_status:
+          type: string
+
+    ForgetRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Optional reason; defaults to "deprecated by user" if omitted.
+
+    ForgetResponse:
+      type: object
+      required:
+        - message
+        - tx_hash
+      properties:
+        message:
+          type: string
+        tx_hash:
+          type: string
 
     VoteRequest:
       type: object
@@ -349,12 +586,13 @@ components:
       type: object
       required:
         - message
-        - vote_id
+        - tx_hash
       properties:
         message:
           type: string
-        vote_id:
+        tx_hash:
           type: string
+          description: CometBFT transaction hash (hex-encoded).
 
     ChallengeResponse:
       type: object
@@ -426,12 +664,18 @@ components:
         name:
           type: string
           description: Human-readable agent name.
+        role:
+          type: string
+          description: "One of: admin, member, observer. Defaults to member."
         boot_bio:
           type: string
           description: Agent bio / system prompt description.
         provider:
           type: string
           description: MCP provider identifier (e.g., "claude-code", "cursor").
+        p2p_address:
+          type: string
+          description: Peer-to-peer address.
 
     AgentUpdateRequest:
       type: object
@@ -450,7 +694,9 @@ components:
           type: integer
           minimum: 0
           maximum: 4
-          description: Clearance tier (0=Guest, 1=Internal, 2=Confidential, 3=Secret, 4=TopSecret).
+          description: >-
+            Clearance tier (0=PUBLIC, 1=INTERNAL, 2=CONFIDENTIAL, 3=SECRET,
+            4=TOPSECRET). Preserved if omitted (PATCH semantics).
         domain_access:
           type: string
           description: JSON-encoded domain access map.
@@ -536,7 +782,6 @@ components:
       required:
         - epoch_num
         - block_height
-        - started_at
         - scores
       properties:
         epoch_num:
@@ -546,9 +791,6 @@ components:
           type: integer
           format: int64
           description: Block height at epoch start.
-        started_at:
-          type: string
-          format: date-time
         scores:
           type: array
           items:
@@ -566,7 +808,69 @@ components:
         next_cursor:
           type: string
 
-    # -- Governance ----------------------------------------------------------
+    # -- Access Control -------------------------------------------------------
+    AccessRequestBody:
+      type: object
+      required:
+        - target_domain
+      properties:
+        target_domain:
+          type: string
+        justification:
+          type: string
+        requested_level:
+          type: integer
+          description: 1=read, 2=read+write. Defaults to 1.
+
+    AccessGrantRequest:
+      type: object
+      required:
+        - grantee_id
+        - domain
+      properties:
+        grantee_id:
+          type: string
+          description: Hex agent ID of the grantee.
+        domain:
+          type: string
+        level:
+          type: integer
+          description: 1=read, 2=read+write. Defaults to 1.
+        expires_at:
+          type: integer
+          format: int64
+          description: Unix timestamp; 0=permanent.
+        request_id:
+          type: string
+          description: Links to originating access request.
+
+    AccessRevokeRequest:
+      type: object
+      required:
+        - grantee_id
+        - domain
+      properties:
+        grantee_id:
+          type: string
+        domain:
+          type: string
+        reason:
+          type: string
+
+    # -- Domains ---------------------------------------------------------------
+    DomainRegisterRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parent:
+          type: string
+
+    # -- Governance (v8.0 payload-aware) ----------------------------------------
     GovProposeRequest:
       type: object
       required:
@@ -632,6 +936,54 @@ components:
           type: string
           example: voting
 
+    GovVoteRequest:
+      type: object
+      required:
+        - proposal_id
+        - decision
+      properties:
+        proposal_id:
+          type: string
+          description: From the propose response.
+        decision:
+          type: string
+          enum:
+            - accept
+            - reject
+            - abstain
+
+    GovVoteResponse:
+      type: object
+      required:
+        - tx_hash
+        - status
+      properties:
+        tx_hash:
+          type: string
+        status:
+          type: string
+          example: recorded
+
+    GovCancelRequest:
+      type: object
+      required:
+        - proposal_id
+      properties:
+        proposal_id:
+          type: string
+
+    GovCancelResponse:
+      type: object
+      required:
+        - tx_hash
+        - status
+      properties:
+        tx_hash:
+          type: string
+        status:
+          type: string
+          example: cancelled
+
     # -- Domain reassign (v8.0) ---------------------------------------------
     DomainReassignRequest:
       type: object
@@ -681,6 +1033,265 @@ components:
             flipped. The previous owner's chain-of-trust does not survive
             the reassign — operators audit this count to confirm the blast
             radius of recovery.
+
+    # -- Orgs / Federation ---------------------------------------------------
+    OrgRegisterRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+
+    OrgAddMemberRequest:
+      type: object
+      required:
+        - agent_id
+      properties:
+        agent_id:
+          type: string
+        clearance:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: Defaults to 1 (INTERNAL).
+        role:
+          type: string
+          description: "admin, member, or observer. Defaults to member."
+
+    OrgSetClearanceRequest:
+      type: object
+      required:
+        - agent_id
+        - clearance
+      properties:
+        agent_id:
+          type: string
+        clearance:
+          type: integer
+          minimum: 0
+          maximum: 4
+
+    FederationProposeRequest:
+      type: object
+      required:
+        - target_org_id
+      properties:
+        target_org_id:
+          type: string
+        allowed_domains:
+          type: array
+          items:
+            type: string
+          description: '["*"] means all domains.'
+        allowed_depts:
+          type: array
+          items:
+            type: string
+        max_clearance:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: Ceiling clearance; defaults to 2 (CONFIDENTIAL).
+        expires_at:
+          type: integer
+          format: int64
+          description: Unix timestamp; 0=permanent.
+        requires_approval:
+          type: boolean
+
+    FederationRevokeRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+
+    # -- Departments ---------------------------------------------------------
+    DeptRegisterRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parent_dept:
+          type: string
+
+    DeptAddMemberRequest:
+      type: object
+      required:
+        - agent_id
+      properties:
+        agent_id:
+          type: string
+        clearance:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: Defaults to 1.
+        role:
+          type: string
+          description: Defaults to member.
+
+    # -- Pipeline ------------------------------------------------------------
+    PipeSendRequest:
+      type: object
+      required:
+        - payload
+      properties:
+        to_agent:
+          type: string
+          description: Target agent_id (direct). One of to_agent or to_provider required.
+        to_provider:
+          type: string
+          description: Provider name or agent name; resolves to agent_id if unambiguous.
+        intent:
+          type: string
+          description: Human description of the work.
+        payload:
+          type: string
+          description: Arbitrary content.
+        ttl_minutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+          description: Defaults to 60.
+
+    PipeResultRequest:
+      type: object
+      required:
+        - result
+      properties:
+        result:
+          type: string
+
+    PipelineMessage:
+      type: object
+      properties:
+        pipe_id:
+          type: string
+        from_agent:
+          type: string
+        from_provider:
+          type: string
+        to_agent:
+          type: string
+        to_provider:
+          type: string
+        intent:
+          type: string
+        payload:
+          type: string
+        status:
+          type: string
+          description: pending, claimed, completed.
+        result:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        claimed_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    # -- Embeddings ----------------------------------------------------------
+    EmbedRequest:
+      type: object
+      required:
+        - text
+      properties:
+        text:
+          type: string
+
+    EmbedResponse:
+      type: object
+      properties:
+        embedding:
+          type: array
+          items:
+            type: number
+            format: float
+        model:
+          type: string
+        dimension:
+          type: integer
+
+    EmbedInfoResponse:
+      type: object
+      properties:
+        semantic:
+          type: boolean
+          description: >-
+            True when a real embedding provider is available (or vault is
+            active — in that case FTS5 cannot index encrypted content).
+        provider:
+          type: string
+          description: Active embedding provider name (e.g. ollama, hash).
+        dimension:
+          type: integer
+        ready:
+          type: boolean
+
+    # -- MCP Tokens ----------------------------------------------------------
+    MCPTokenIssueRequest:
+      type: object
+      required:
+        - agent_id
+      properties:
+        name:
+          type: string
+          description: Human label, e.g. "chatgpt-laptop".
+        agent_id:
+          type: string
+          description: 64-char hex Ed25519 pubkey to mint for.
+
+    MCPTokenIssueResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Public token ID used for revocation.
+        name:
+          type: string
+        agent_id:
+          type: string
+        token:
+          type: string
+          description: Base64url(32 random bytes). Shown ONCE — never stored in plaintext.
+        created_at:
+          type: string
+          format: date-time
+        use_hint:
+          type: string
+
+    MCPTokenSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        agent_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
 
     HealthResponse:
       type: object
@@ -818,7 +1429,7 @@ paths:
   /v1/memory/query:
     post:
       operationId: queryMemories
-      summary: Perform a similarity search over memories.
+      summary: Perform a vector similarity search over memories.
       tags:
         - Memory
       requestBody:
@@ -840,6 +1451,283 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /v1/memory/search:
+    post:
+      operationId: searchMemories
+      summary: Full-text search over memories (FTS5/BM25).
+      description: >-
+        Not available when vault (content encryption) is active — use
+        GET /v1/embed/info to check; route to /v1/memory/query instead when
+        semantic=true.
+      tags:
+        - Memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemorySearchRequest"
+      responses:
+        "200":
+          description: Search results. Same shape as /v1/memory/query response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryQueryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/memory/hybrid:
+    post:
+      operationId: hybridSearchMemories
+      summary: Fused FTS5 + vector search via Reciprocal Rank Fusion.
+      description: >-
+        At least one of `query` or `embedding` is required. Supports query
+        expansions for multi-variant recall.
+      tags:
+        - Memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryHybridRequest"
+      responses:
+        "200":
+          description: Hybrid search results. Same shape as /v1/memory/query response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryQueryResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/memory/list:
+    get:
+      operationId: listMemories
+      summary: Paginated memory list with RBAC agent isolation.
+      tags:
+        - Memory
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 200
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: tag
+          in: query
+          schema:
+            type: string
+        - name: provider
+          in: query
+          schema:
+            type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+        - name: sort
+          in: query
+          schema:
+            type: string
+        - name: agent
+          in: query
+          schema:
+            type: string
+          description: Filter by submitting agent ID.
+      responses:
+        "200":
+          description: Paginated list of memories.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memories:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MemoryRecord"
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+                  filtered:
+                    $ref: "#/components/schemas/FilterInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/memory/timeline:
+    get:
+      operationId: getMemoryTimeline
+      summary: Memory creation counts grouped by time bucket.
+      tags:
+        - Memory
+      parameters:
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: bucket
+          in: query
+          schema:
+            type: string
+            default: hour
+          description: Time bucket size.
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start time (RFC3339). Defaults to now-24h.
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: End time (RFC3339). Defaults to now.
+      responses:
+        "200":
+          description: Timeline buckets.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  buckets:
+                    type: array
+                    items:
+                      type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/memory/tasks:
+    get:
+      operationId: getOpenTasks
+      summary: Open task memories (type=task, status != done/dropped).
+      tags:
+        - Memory
+      parameters:
+        - name: domain
+          in: query
+          schema:
+            type: string
+        - name: provider
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Open tasks.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tasks:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        memory_id:
+                          type: string
+                        content:
+                          type: string
+                        domain_tag:
+                          type: string
+                        task_status:
+                          type: string
+                        confidence_score:
+                          type: number
+                          format: double
+                        created_at:
+                          type: string
+                  total:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/memory/link:
+    post:
+      operationId: linkMemories
+      summary: Link two memories with a relationship type (off-chain, no tx).
+      tags:
+        - Memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryLinkRequest"
+      responses:
+        "200":
+          description: Link created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryLinkResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/memory/pre-validate:
+    post:
+      operationId: preValidateMemory
+      summary: Dry-run the 4 app validators without submitting on-chain.
+      tags:
+        - Memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PreValidateRequest"
+      responses:
+        "200":
+          description: Per-validator decisions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreValidateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Pre-validation not configured on this node.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
 
   /v1/memory/{memory_id}:
     get:
@@ -925,6 +1813,36 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/memory/{memory_id}/forget:
+    post:
+      operationId: forgetMemory
+      summary: Semantic alias for challenge — submits a TxTypeMemoryChallenge with reason "deprecated by user".
+      tags:
+        - Memory
+      parameters:
+        - $ref: "#/components/parameters/memoryId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgetRequest"
+      responses:
+        "200":
+          description: Memory forgotten.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForgetResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /v1/memory/{memory_id}/corroborate:
     post:
       operationId: corroborateMemory
@@ -955,7 +1873,61 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/memory/{memory_id}/task-status:
+    put:
+      operationId: updateTaskStatus
+      summary: Update task status for a task-type memory (off-chain only, no tx).
+      tags:
+        - Memory
+      parameters:
+        - $ref: "#/components/parameters/memoryId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskStatusUpdateRequest"
+      responses:
+        "200":
+          description: Task status updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStatusUpdateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # -- Agent ---------------------------------------------------------------
+  /v1/agents:
+    get:
+      operationId: listRegisteredAgents
+      summary: List all registered agents. No auth required.
+      tags:
+        - Agent
+      security: []
+      responses:
+        "200":
+          description: List of agents.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RegisteredAgent"
+                  total:
+                    type: integer
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /v1/agent/me:
     get:
       operationId: getAgentProfile
@@ -971,6 +1943,148 @@ paths:
                 $ref: "#/components/schemas/AgentProfile"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/agent/register:
+    post:
+      operationId: registerAgent
+      summary: Register an agent on-chain via CometBFT consensus.
+      description: >-
+        Idempotent — returns existing record (HTTP 200) if agent is already
+        registered. Returns HTTP 201 for new registrations.
+      tags:
+        - Agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentRegisterRequest"
+      responses:
+        "201":
+          description: Agent registered (new registration).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisteredAgent"
+        "200":
+          description: Agent already registered (idempotent response).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisteredAgent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/agent/update:
+    put:
+      operationId: updateAgent
+      summary: Update the authenticated agent's name and bio.
+      description: Self-update only — agents can only modify their own metadata.
+      tags:
+        - Agent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentUpdateRequest"
+      responses:
+        "200":
+          description: Agent updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent_id:
+                    type: string
+                  name:
+                    type: string
+                  status:
+                    type: string
+                    example: updated
+                  tx_hash:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/agent/{id}:
+    get:
+      operationId: getRegisteredAgent
+      summary: Get a registered agent by ID.
+      tags:
+        - Agent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Agent's hex-encoded Ed25519 public key.
+      responses:
+        "200":
+          description: Agent record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisteredAgent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/agent/{id}/permission:
+    put:
+      operationId: setAgentPermission
+      summary: >-
+        Set an agent's clearance, domain access, and visibility. Self-set OR
+        global admin OR org admin in any org the target belongs to.
+      description: >-
+        PATCH semantics — omitted fields preserve their on-chain value.
+      tags:
+        - Agent
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Target agent's hex-encoded Ed25519 public key.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentSetPermissionRequest"
+      responses:
+        "200":
+          description: Permissions updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  agent_id:
+                    type: string
+                  status:
+                    type: string
+                    example: permissions_updated
+                  tx_hash:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -1033,66 +2147,32 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  # -- Operational ---------------------------------------------------------
-  /health:
-    get:
-      operationId: healthCheck
-      summary: Liveness probe.
-      tags:
-        - Operational
-      security: []
-      responses:
-        "200":
-          description: Service is alive.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/HealthResponse"
-
-  /ready:
-    get:
-      operationId: readinessCheck
-      summary: Readiness probe — checks PostgreSQL and CometBFT connectivity.
-      tags:
-        - Operational
-      security: []
-      responses:
-        "200":
-          description: Service is ready to accept traffic.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReadinessResponse"
-        "503":
-          description: Service is not ready.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ReadinessResponse"
-
-  # -- Agent Identity (v3.5) ------------------------------------------------
-  /v1/agent/register:
+  # -- Access Control -------------------------------------------------------
+  /v1/access/request:
     post:
-      operationId: registerAgent
-      summary: Register an agent on-chain via CometBFT consensus.
-      description: >-
-        Idempotent — returns existing record if agent is already registered.
-        Agents auto-call this on first MCP connection.
+      operationId: accessRequest
+      summary: Request read or read+write access to a domain.
       tags:
-        - Agent
+        - Access
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/AgentRegisterRequest"
+              $ref: "#/components/schemas/AccessRequestBody"
       responses:
-        "200":
-          description: Agent registered (or already exists).
+        "201":
+          description: Access request submitted.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/RegisteredAgent"
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: pending
+                  tx_hash:
+                    type: string
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1100,146 +2180,31 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  /v1/agent/update:
-    put:
-      operationId: updateAgent
-      summary: Update the authenticated agent's name and bio.
-      description: Self-update only — agents can only modify their own metadata.
-      tags:
-        - Agent
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AgentUpdateRequest"
-      responses:
-        "200":
-          description: Agent updated.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: updated
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /v1/agent/{id}/permission:
-    put:
-      operationId: setAgentPermission
-      summary: Set an agent's clearance, domain access, and visibility (admin only).
-      tags:
-        - Agent
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: Target agent's hex-encoded Ed25519 public key.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AgentSetPermissionRequest"
-      responses:
-        "200":
-          description: Permissions updated.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: permission_set
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          description: Not an admin.
-          content:
-            application/problem+json:
-              schema:
-                $ref: "#/components/schemas/ProblemDetails"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /v1/agent/{id}:
-    get:
-      operationId: getRegisteredAgent
-      summary: Get a registered agent by ID.
-      tags:
-        - Agent
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: Agent's hex-encoded Ed25519 public key.
-      responses:
-        "200":
-          description: Agent record.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/RegisteredAgent"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /v1/agents:
-    get:
-      operationId: listRegisteredAgents
-      summary: List all registered agents.
-      tags:
-        - Agent
-      responses:
-        "200":
-          description: List of agents.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  agents:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/RegisteredAgent"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  # -- Governance (v8.0 payload-aware) ----------------------------------------
-  /v1/governance/propose:
+  /v1/access/grant:
     post:
-      operationId: proposeGovernance
-      summary: Submit a governance proposal (validator-set ops or v8.0 domain_reassign).
+      operationId: accessGrant
+      summary: Grant domain access. Caller must own the domain or be admin.
       tags:
-        - Governance
+        - Access
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/GovProposeRequest"
+              $ref: "#/components/schemas/AccessGrantRequest"
       responses:
-        "200":
-          description: Proposal submitted, voting open.
+        "201":
+          description: Access granted.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GovProposeResponse"
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: granted
+                  tx_hash:
+                    type: string
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -1249,7 +2214,147 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
-  # -- Domain reassign (v8.0) ----------------------------------------------
+  /v1/access/revoke:
+    post:
+      operationId: accessRevoke
+      summary: Revoke domain access.
+      tags:
+        - Access
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AccessRevokeRequest"
+      responses:
+        "200":
+          description: Access revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: revoked
+                  tx_hash:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/access/grants/{agent_id}:
+    get:
+      operationId: listAccessGrants
+      summary: List active grants for an agent.
+      tags:
+        - Access
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Hex-encoded agent ID.
+      responses:
+        "200":
+          description: Array of grant objects.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -- Domains ---------------------------------------------------------------
+  /v1/domain/register:
+    post:
+      operationId: domainRegister
+      summary: Register a domain. Caller becomes owner.
+      tags:
+        - Domain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DomainRegisterRequest"
+      responses:
+        "201":
+          description: Domain registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: registered
+                  tx_hash:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/domain/{name}:
+    get:
+      operationId: getDomain
+      summary: Get domain metadata.
+      description: >-
+        Ownership served from BadgerDB (chain-authoritative); description/created_at
+        enriched from off-chain mirror.
+      tags:
+        - Domain
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Dotted-path domain name.
+      responses:
+        "200":
+          description: Domain metadata.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  domain_name:
+                    type: string
+                  owner_agent_id:
+                    type: string
+                  parent_domain:
+                    type: string
+                  created_height:
+                    type: integer
+                    format: int64
+                  description:
+                    type: string
+                  created_at:
+                    type: string
+                    format: date-time
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /v1/domain/reassign:
     post:
       operationId: reassignDomain
@@ -1286,3 +2391,1231 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  # -- Orgs ---------------------------------------------------------------
+  /v1/org/register:
+    post:
+      operationId: orgRegister
+      summary: Register an organization. Calling agent becomes admin.
+      description: >-
+        org_id is deterministic: hex(SHA256(agentID + name)[:16]).
+      tags:
+        - Org
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgRegisterRequest"
+      responses:
+        "201":
+          description: Organization registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: registered
+                  org_id:
+                    type: string
+                  tx_hash:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/by-name/{name}:
+    get:
+      operationId: getOrgByName
+      summary: Look up orgs by name. Returns all matches (names are not unique on-chain).
+      tags:
+        - Org
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Matching organizations (empty list if none found, not 404).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  orgs:
+                    type: array
+                    items:
+                      type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}:
+    get:
+      operationId: getOrg
+      summary: Get org. Chain-authoritative from BadgerDB; description/created_at enriched from mirror.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Organization record.
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/members:
+    get:
+      operationId: listOrgMembers
+      summary: List org members from chain.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of org members.
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/member:
+    post:
+      operationId: orgAddMember
+      summary: Add agent to org. Admin only on-chain.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgAddMemberRequest"
+      responses:
+        "201":
+          description: Member added.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: added
+                  tx_hash:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/member/{agent_id}:
+    delete:
+      operationId: orgRemoveMember
+      summary: Remove agent from org. Admin only on-chain.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Member removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: removed
+                  tx_hash:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/clearance:
+    post:
+      operationId: orgSetClearance
+      summary: Change an agent's clearance within the org. Admin only on-chain.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgSetClearanceRequest"
+      responses:
+        "200":
+          description: Clearance updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: updated
+                  tx_hash:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -- Departments -------------------------------------------------------
+  /v1/org/{org_id}/dept:
+    post:
+      operationId: deptRegister
+      summary: Register a department. dept_id is deterministic hex(SHA256(orgID + name)[:8]).
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeptRegisterRequest"
+      responses:
+        "201":
+          description: Department registered.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: registered
+                  dept_id:
+                    type: string
+                  tx_hash:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/dept/{dept_id}:
+    get:
+      operationId: getDept
+      summary: Get department.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: dept_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Department record.
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/depts:
+    get:
+      operationId: listOrgDepts
+      summary: List all departments in an org.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of departments.
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/dept/{dept_id}/member:
+    post:
+      operationId: deptAddMember
+      summary: Add agent to department.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: dept_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeptAddMemberRequest"
+      responses:
+        "201":
+          description: Member added.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: added
+                  tx_hash:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/dept/{dept_id}/member/{agent_id}:
+    delete:
+      operationId: deptRemoveMember
+      summary: Remove agent from department.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: dept_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Member removed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: removed
+                  tx_hash:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/dept/{dept_id}/members:
+    get:
+      operationId: listDeptMembers
+      summary: List department members.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: dept_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of department members.
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -- Federation -------------------------------------------------------
+  /v1/federation/propose:
+    post:
+      operationId: federationPropose
+      summary: Propose a bilateral federation agreement.
+      description: >-
+        Proposer's org is resolved from chain state automatically.
+        Caller must be in an org on-chain.
+      tags:
+        - Federation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FederationProposeRequest"
+      responses:
+        "201":
+          description: Federation proposed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: proposed
+                  tx_hash:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/federation/{fed_id}/approve:
+    post:
+      operationId: federationApprove
+      summary: Approve a pending federation. Caller must be in an org.
+      tags:
+        - Federation
+      parameters:
+        - name: fed_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Federation approved.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: approved
+                  tx_hash:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/federation/{fed_id}/revoke:
+    post:
+      operationId: federationRevoke
+      summary: Revoke an active federation.
+      tags:
+        - Federation
+      parameters:
+        - name: fed_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FederationRevokeRequest"
+      responses:
+        "200":
+          description: Federation revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: revoked
+                  tx_hash:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/federation/{fed_id}:
+    get:
+      operationId: getFederation
+      summary: Get federation by ID.
+      tags:
+        - Federation
+      parameters:
+        - name: fed_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Federation record.
+          content:
+            application/json:
+              schema:
+                type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/federation/active/{org_id}:
+    get:
+      operationId: listFederations
+      summary: List active federations for an org.
+      tags:
+        - Federation
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Active federations.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -- Governance ---------------------------------------------------------
+  /v1/governance/propose:
+    post:
+      operationId: proposeGovernance
+      summary: Submit a governance proposal (validator-set ops or v8.0 domain_reassign).
+      tags:
+        - Governance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GovProposeRequest"
+      responses:
+        "200":
+          description: Proposal submitted, voting open.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GovProposeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/governance/vote:
+    post:
+      operationId: voteGovernance
+      summary: Vote on a governance proposal. Only validators can cast effective votes.
+      tags:
+        - Governance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GovVoteRequest"
+      responses:
+        "200":
+          description: Vote recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GovVoteResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/governance/cancel:
+    post:
+      operationId: cancelGovernance
+      summary: Cancel a pending governance proposal. Proposer or admin.
+      tags:
+        - Governance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GovCancelRequest"
+      responses:
+        "200":
+          description: Proposal cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GovCancelResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -- Embeddings ---------------------------------------------------------
+  /v1/embed:
+    post:
+      operationId: generateEmbedding
+      summary: Generate a vector embedding via the node's local provider.
+      tags:
+        - Embeddings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmbedRequest"
+      responses:
+        "200":
+          description: Embedding generated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmbedResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Embedder not ready.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+
+  /v1/embed/info:
+    get:
+      operationId: getEmbedInfo
+      summary: Report the active embedding provider's capabilities.
+      description: >-
+        Clients use this to decide between vector query and FTS5 search paths.
+        When vault (at-rest encryption) is active, semantic is forced true even
+        if no embedder is configured.
+      tags:
+        - Embeddings
+      responses:
+        "200":
+          description: Embedding provider info.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmbedInfoResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # -- MCP Tokens ---------------------------------------------------------
+  /v1/mcp/tokens:
+    post:
+      operationId: issueMCPToken
+      summary: Issue a bearer token for MCP clients that cannot sign Ed25519 requests.
+      description: >-
+        Ed25519 auth required (admin use). Token plaintext shown ONCE — not
+        stored, only SHA-256 digest persisted.
+      tags:
+        - MCP Tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MCPTokenIssueRequest"
+      responses:
+        "201":
+          description: Token issued. Save the token value — it is never shown again.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MCPTokenIssueResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: MCP tokens not supported on this backend.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+    get:
+      operationId: listMCPTokens
+      summary: List issued tokens as summaries (no token values returned).
+      tags:
+        - MCP Tokens
+      responses:
+        "200":
+          description: Token summaries.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MCPTokenSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: MCP tokens not supported on this backend.
+
+  /v1/mcp/tokens/{id}:
+    delete:
+      operationId: revokeMCPToken
+      summary: Revoke a token by ID. Idempotent.
+      tags:
+        - MCP Tokens
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Token UUID.
+      responses:
+        "204":
+          description: Token revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # -- Pipeline -----------------------------------------------------------
+  /v1/pipe/send:
+    post:
+      operationId: pipeSend
+      summary: Send a pipeline message to another agent or provider.
+      tags:
+        - Pipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PipeSendRequest"
+      responses:
+        "201":
+          description: Pipeline message queued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipe_id:
+                    type: string
+                  status:
+                    type: string
+                    example: pending
+                  expires_at:
+                    type: string
+                    format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/pipe/inbox:
+    get:
+      operationId: pipeInbox
+      summary: Fetch pending messages for the authenticated agent. Auto-claims all returned items.
+      tags:
+        - Pipeline
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 5
+      responses:
+        "200":
+          description: Inbox items.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PipelineMessage"
+                  count:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/pipe/results:
+    get:
+      operationId: pipeResults
+      summary: Completed pipeline messages sent by the authenticated agent.
+      tags:
+        - Pipeline
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 5
+      responses:
+        "200":
+          description: Completed pipeline messages.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PipelineMessage"
+                  count:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/pipe/{pipe_id}:
+    get:
+      operationId: pipeStatus
+      summary: Get current status of a pipeline message.
+      tags:
+        - Pipeline
+      parameters:
+        - name: pipe_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pipeline message status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PipelineMessage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/pipe/{pipe_id}/claim:
+    put:
+      operationId: pipeClaim
+      summary: Atomically claim a pipeline message (prevents double-processing).
+      tags:
+        - Pipeline
+      parameters:
+        - name: pipe_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Message claimed.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pipe_id:
+                    type: string
+                  status:
+                    type: string
+                    example: claimed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/pipe/{pipe_id}/result:
+    put:
+      operationId: pipeResult
+      summary: Submit result for a claimed message. Triggers auto-journal.
+      description: >-
+        Inserts an `observation` memory in domain `agent-pipeline` via
+        off-chain insert.
+      tags:
+        - Pipeline
+      parameters:
+        - name: pipe_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PipeResultRequest"
+      responses:
+        "200":
+          description: Result submitted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: completed
+                  journal_id:
+                    type: string
+                    description: memory_id of the auto-journal entry, or empty string.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # -- OAuth (root-level, no /v1/ prefix) ----------------------------------
+  /.well-known/oauth-authorization-server:
+    get:
+      operationId: oauthDiscovery
+      summary: RFC 8414 OAuth 2.0 Authorization Server Metadata.
+      description: Discovery document for ChatGPT MCP connector compatibility.
+      tags:
+        - OAuth
+      security: []
+      responses:
+        "200":
+          description: Authorization server metadata document.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /.well-known/oauth-protected-resource:
+    get:
+      operationId: oauthProtectedResource
+      summary: RFC 9728 Protected Resource Metadata.
+      tags:
+        - OAuth
+      security: []
+      responses:
+        "200":
+          description: Protected resource metadata document.
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /oauth/register:
+    post:
+      operationId: oauthClientRegister
+      summary: RFC 7591 Dynamic Client Registration (10 reqs/IP/hour).
+      tags:
+        - OAuth
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: Client registered.
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          description: Rate limit exceeded.
+
+  /oauth/authorize:
+    get:
+      operationId: oauthAuthorizeGet
+      summary: Render PKCE consent screen.
+      tags:
+        - OAuth
+      security: []
+      parameters:
+        - name: response_type
+          in: query
+          schema:
+            type: string
+        - name: client_id
+          in: query
+          schema:
+            type: string
+        - name: redirect_uri
+          in: query
+          schema:
+            type: string
+        - name: code_challenge
+          in: query
+          schema:
+            type: string
+        - name: code_challenge_method
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Consent screen HTML.
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      operationId: oauthAuthorizePost
+      summary: Submit consent; mints bearer + issues auth code; redirects to redirect_uri.
+      tags:
+        - OAuth
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+      responses:
+        "302":
+          description: Redirect to redirect_uri with authorization code.
+
+  /oauth/token:
+    post:
+      operationId: oauthToken
+      summary: Exchange auth code for bearer (grant_type=authorization_code only).
+      description: >-
+        The access_token returned is accepted as Authorization: Bearer <token>
+        on /v1/mcp/sse and /v1/mcp/streamable. Token lifetime is controlled by
+        revocation (DELETE /v1/mcp/tokens/{id}), not expiry — expires_in=0.
+      tags:
+        - OAuth
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                grant_type:
+                  type: string
+                  enum:
+                    - authorization_code
+                code:
+                  type: string
+                redirect_uri:
+                  type: string
+                client_id:
+                  type: string
+                code_verifier:
+                  type: string
+      responses:
+        "200":
+          description: Token response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  token_type:
+                    type: string
+                    example: Bearer
+                  expires_in:
+                    type: integer
+                    example: 0
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  # -- Operational ---------------------------------------------------------
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Liveness probe.
+      tags:
+        - Operational
+      security: []
+      responses:
+        "200":
+          description: Service is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /ready:
+    get:
+      operationId: readinessCheck
+      summary: Readiness probe — checks PostgreSQL and CometBFT connectivity.
+      tags:
+        - Operational
+      security: []
+      responses:
+        "200":
+          description: Service is ready to accept traffic.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          description: Service is not ready.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"

@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **Compatible with SAGE v5.0.1+** | **TLS support since v6.1.0** | **v8.0 — domain reassign recovery**
+**Requires Python 3.10+** | **Compatible with SAGE v5.0.1+** | **TLS support since v6.1.0** | **v8.0 — domain reassign recovery** | **v8.1 — per-record `classification` on `propose()`**
 
 ## Installation
 
@@ -83,13 +83,16 @@ identity = AgentIdentity.from_file("agent.key")
 identity = AgentIdentity.from_seed(b"\x00" * 32)
 ```
 
-Request signing is handled automatically by the client. Each request includes three headers:
+Request signing is handled automatically by the client. Each request includes four headers:
 
 | Header | Description |
 |--------|-------------|
 | `X-Agent-ID` | Hex-encoded public verify key |
-| `X-Signature` | Ed25519 signature of `SHA256(method + path + body) \|\| timestamp` |
+| `X-Signature` | Ed25519 signature of `SHA256(method + " " + path + "\n" + body) \|\| int64(timestamp) \|\| nonce` |
 | `X-Timestamp` | Unix timestamp (seconds) |
+| `X-Nonce` | 8 random bytes (hex), prevents signature collisions for identical method+path+body within the same second |
+
+> If you sign requests by hand instead of using the SDK, **include the nonce** (`auth.py`). The server still accepts the legacy nonce-less form for backward compatibility, but new integrations should send `X-Nonce`.
 
 ## Complete API Reference
 
@@ -151,6 +154,7 @@ result = client.propose(
         KnowledgeTriple(subject="SQLi", predicate="bypasses", object_="prepared_statements")
     ],
     parent_hash="abc123",         # Optional: link to parent memory
+    classification=3,             # Optional: per-record clearance 0-4 (3=Secret); omitted = PUBLIC(0)
 )
 # Returns: MemorySubmitResponse(memory_id, tx_hash, status)
 
@@ -754,7 +758,9 @@ def hash_embed(text: str, dim: int = 768) -> list[float]:
 |--------|----------|------------|
 | `POST` | `/v1/memory/submit` | `propose()` |
 | `POST` | `/v1/memory/query` | `query()` |
+| `POST` | `/v1/memory/hybrid` | `hybrid()` |
 | `GET` | `/v1/memory/{id}` | `get_memory()` |
+| `POST` | `/v1/memory/{id}/forget` | `forget()` |
 | `GET` | `/v1/memory/list` | `list_memories()` |
 | `GET` | `/v1/memory/timeline` | `timeline()` |
 | `POST` | `/v1/memory/link` | `link_memories()` |
@@ -806,6 +812,7 @@ def hash_embed(text: str, dim: int = 768) -> list[float]:
 |--------|----------|------------|
 | `POST` | `/v1/org/register` | `register_org()` |
 | `GET` | `/v1/org/{org_id}` | `get_org()` |
+| `GET` | `/v1/org/by-name/{name}` | `list_orgs_by_name()` |
 | `POST` | `/v1/org/{org_id}/member` | `add_org_member()` |
 | `DELETE` | `/v1/org/{org_id}/member/{agent_id}` | `remove_org_member()` |
 | `POST` | `/v1/org/{org_id}/clearance` | `set_org_clearance()` |

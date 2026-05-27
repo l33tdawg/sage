@@ -102,17 +102,17 @@ CLAUDE.md
 AGENTS.md
 .codex/
 
-# Docs — ignore internal stuff but allow public-facing docs
+# Docs — docs/ is the central documentation resource. Ignore internal drafts
+# (whitepapers, comms, arxiv, medium, figures) but allow the public docs.
+# NOTE: the landing site (index.html etc.) now lives on the gh-pages branch.
 docs/*
+!docs/README.md
 !docs/ARCHITECTURE.md
 !docs/GETTING_STARTED.md
 !docs/ADMIN_BOOTSTRAP.md
-!docs/index.html
-!docs/connect.html
-!docs/og-image.png
-!docs/brain-dashboard.png
-!docs/sage-brain.svg
-!docs/privacy.html
+!docs/HOOKS.md
+# Agent-facing code reference (public)
+!docs/reference/
 
 # Node.js (Playwright e2e tests)
 node_modules/

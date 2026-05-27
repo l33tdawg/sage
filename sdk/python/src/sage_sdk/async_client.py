@@ -124,12 +124,18 @@ class AsyncSageClient:
         knowledge_triples: list[KnowledgeTriple] | None = None,
         parent_hash: str | None = None,
         tags: list[str] | None = None,
+        classification: int | None = None,
     ) -> MemorySubmitResponse:
         """Submit a new memory proposal.
 
         tags: optional user-defined labels attached after consensus commit.
         Stored as node-local metadata (not part of the on-chain tx) and
         queryable via the `tags` argument on :meth:`query`.
+
+        classification: per-record clearance level 0-4 (PUBLIC, INTERNAL,
+        CONFIDENTIAL, SECRET, TOP SECRET). When omitted the server stores
+        the memory as PUBLIC (0); pass an explicit level to classify (e.g.
+        3 for SECRET, 4 for TOP SECRET).
         """
         req = MemorySubmitRequest(
             content=content,
@@ -140,6 +146,7 @@ class AsyncSageClient:
             knowledge_triples=knowledge_triples,
             parent_hash=parent_hash,
             tags=tags,
+            classification=classification,
         )
         resp = await self._request("POST", "/v1/memory/submit", json=req.model_dump(mode="json", exclude_none=True, by_alias=True))
         return MemorySubmitResponse.model_validate(resp.json())

@@ -62,6 +62,39 @@ def test_propose_memory_without_tags_omits_field(client, mock_api, sample_submit
     assert "tags" not in body
 
 
+def test_propose_memory_with_classification(client, mock_api, sample_submit_response):
+    import json
+    route = mock_api.post("/v1/memory/submit").mock(
+        return_value=httpx.Response(201, json=sample_submit_response)
+    )
+    client.propose(
+        content="Classified memory",
+        memory_type="fact",
+        domain_tag="audit",
+        confidence=0.9,
+        classification=3,  # SECRET
+    )
+    body = json.loads(route.calls.last.request.read())
+    assert body["classification"] == 3
+
+
+def test_propose_memory_without_classification_omits_field(client, mock_api, sample_submit_response):
+    import json
+    route = mock_api.post("/v1/memory/submit").mock(
+        return_value=httpx.Response(201, json=sample_submit_response)
+    )
+    client.propose(
+        content="Plain memory",
+        memory_type="fact",
+        domain_tag="crypto",
+        confidence=0.8,
+    )
+    body = json.loads(route.calls.last.request.read())
+    # Omitted classification must not appear on the wire — server defaults to
+    # PUBLIC (0), not INTERNAL (the v6.8.6 server-side behavior).
+    assert "classification" not in body
+
+
 def test_query_memories(client, mock_api, sample_query_response):
     mock_api.post("/v1/memory/query").mock(
         return_value=httpx.Response(200, json=sample_query_response)
