@@ -220,7 +220,13 @@ func (s *BadgerStore) ComputeAppHash() ([]byte, error) {
 
 	err := s.db.View(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = true
+		// PrefetchValues=false: the loop consumes each value immediately via
+		// h.Write inside the .Value() callback, so Badger's prefetch buffer
+		// would only hold values we discard at once. Lazy per-value reads cut
+		// per-block allocation by ~another order of magnitude (issue #26
+		// follow-up from @ihubanov). The hash is identical either way — same
+		// bytes, just read lazily (pinned by TestComputeAppHash_ByteIdentical*).
+		opts.PrefetchValues = false
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
