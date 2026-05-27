@@ -448,3 +448,54 @@ func TestDomainReassign_PreFork_CheckTx_Code10(t *testing.T) {
 	assert.Equal(t, uint32(10), resp.Code, "pre-fork CheckTx must reject DomainReassign with Code 10")
 	assert.Contains(t, resp.Log, "unknown tx type")
 }
+
+// TestApplyGovernanceProposal_OpDomainReassign_NoValidatorUpdate pins the
+// contract that an executed OpDomainReassign proposal must NOT produce a
+// ValidatorUpdate at acceptance. The actual reassignment runs in the
+// follow-up TxTypeDomainReassign tx; treating acceptance as a validator-set
+// event would (a) emit a spurious "failed to apply governance proposal"
+// log line on every successful 3/4 supermajority, and (b) risk a wrong
+// ValidatorUpdate from the fallback path if the switch's default branch
+// were ever wired to produce one.
+func TestApplyGovernanceProposal_OpDomainReassign_NoValidatorUpdate(t *testing.T) {
+	app, admin, _, _ := setupReassignTestApp(t)
+
+	proposal := &governance.ProposalState{
+		ProposalID: "deadbeefdeadbeefdeadbeefdeadbeef",
+		Operation:  governance.OpDomainReassign,
+		// TargetID must still be a 32-byte hex string — applyGovernanceProposal
+		// validates pubkey length up front, before the switch. Use the admin's
+		// own pubkey, which is convenient and unambiguously well-formed.
+		TargetID:      admin.id,
+		ProposerID:    admin.id,
+		Status:        governance.StatusExecuted,
+		CreatedHeight: 50,
+		ExpiryHeight:  50 + governance.DefaultExpiryBlocks,
+		Reason:        "test recovery",
+	}
+
+	update, err := app.applyGovernanceProposal(proposal, 100)
+	require.NoError(t, err, "OpDomainReassign acceptance must succeed without error")
+	assert.Nil(t, update, "OpDomainReassign acceptance must return nil ValidatorUpdate — actual reassignment runs in follow-up TxTypeDomainReassign")
+}
+
+// TestOpToString_OpDomainReassign pins the human-readable string for
+// OpDomainReassign so the off-chain gov_proposal.operation column gets
+// "domain_reassign" rather than the "unknown_4" the fallback path would
+// emit. Operators and dashboards key on this string.
+func TestOpToString_OpDomainReassign(t *testing.T) {
+	tests := []struct {
+		op   governance.ProposalOp
+		want string
+	}{
+		{governance.OpAddValidator, "add_validator"},
+		{governance.OpRemoveValidator, "remove_validator"},
+		{governance.OpUpdatePower, "update_power"},
+		{governance.OpDomainReassign, "domain_reassign"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.want, func(t *testing.T) {
+			assert.Equal(t, tc.want, opToString(tc.op))
+		})
+	}
+}
