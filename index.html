@@ -121,6 +121,18 @@ nav {
   text-decoration: none; transition: all 0.2s; cursor: pointer;
 }
 .nav-cta:hover { background: rgba(124,58,237,0.25); border-color: var(--accent); }
+.nav-hamburger {
+  display: none; flex-direction: column; justify-content: center; gap: 5px;
+  width: 40px; height: 40px; padding: 9px; margin-left: 8px; flex-shrink: 0;
+  background: none; border: none; cursor: pointer;
+}
+.nav-hamburger span {
+  display: block; width: 22px; height: 2px; border-radius: 2px;
+  background: var(--accent); transition: transform 0.25s ease, opacity 0.2s ease;
+}
+.nav-hamburger.open span:nth-child(1) { transform: translateY(7px) rotate(45deg); }
+.nav-hamburger.open span:nth-child(2) { opacity: 0; }
+.nav-hamburger.open span:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
 
 /* ─── Tab Content ─── */
 .tab-content { display: none; padding-top: 56px; min-height: 100vh; }
@@ -473,8 +485,24 @@ footer a:hover { text-decoration: underline; }
   .new-features { grid-template-columns: 1fr; }
   .paper { grid-template-columns: auto 1fr; }
   .paper-arrow { display: none; }
-  .nav-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  .nav-tab { padding: 0 12px; font-size: 0.8rem; }
+  .nav-hamburger { display: flex; }
+  .nav-tabs {
+    position: absolute; top: 56px; left: 0; right: 0;
+    flex-direction: column; height: auto; gap: 0;
+    background: rgba(6,2,14,0.98); backdrop-filter: blur(20px);
+    border-bottom: 1px solid rgba(167,139,250,0.12);
+    max-height: 0; overflow: hidden; transition: max-height 0.3s ease;
+  }
+  .nav-tabs.open { max-height: calc(100vh - 56px); overflow-y: auto; }
+  .nav-tab {
+    width: 100%; height: auto; padding: 15px 24px; font-size: 0.95rem;
+    justify-content: flex-start; border-bottom: 1px solid rgba(167,139,250,0.06);
+  }
+  .nav-tab.active {
+    border-bottom-color: rgba(167,139,250,0.06);
+    border-left: 3px solid var(--accent); padding-left: 21px;
+    background: rgba(124,58,237,0.08);
+  }
   h1 { font-size: 2.2rem; }
   .hero-split { flex-direction: column; gap: 28px; text-align: center; }
   .hero-icon { flex: none; }
@@ -493,7 +521,7 @@ footer a:hover { text-decoration: underline; }
   .container { padding: 0 16px; }
   h2 { font-size: 1.8rem; }
   .value-grid { grid-template-columns: 1fr; }
-  .nav-tab { padding: 0 10px; font-size: 0.75rem; }
+  .nav-tab { padding: 14px 20px; font-size: 0.9rem; }
 }
 </style>
 </head>
@@ -508,8 +536,8 @@ footer a:hover { text-decoration: underline; }
 <!-- Nav -->
 <nav>
   <div class="nav-inner">
-    <a href="#" class="nav-logo" onclick="switchTab('home');return false;">SAGE <span>GUI</span></a>
-    <div class="nav-tabs">
+    <a href="#" class="nav-logo" onclick="switchTab('home');closeMobileNav();return false;">SAGE <span>GUI</span></a>
+    <div class="nav-tabs" id="nav-tabs">
       <button class="nav-tab active" data-tab="home">Home</button>
       <button class="nav-tab" data-tab="features">Features</button>
       <button class="nav-tab" data-tab="connect">Connect</button>
@@ -520,6 +548,9 @@ footer a:hover { text-decoration: underline; }
     <div class="nav-actions">
       <a href="https://github.com/l33tdawg/sage" class="nav-cta">GitHub</a>
     </div>
+    <button class="nav-hamburger" aria-label="Toggle menu" aria-expanded="false" aria-controls="nav-tabs" onclick="toggleMobileNav(this)">
+      <span></span><span></span><span></span>
+    </button>
   </div>
 </nav>
 
@@ -1030,7 +1061,28 @@ function switchTab(name) {
 }
 
 document.querySelectorAll('.nav-tab').forEach(btn => {
-  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+  btn.addEventListener('click', () => { switchTab(btn.dataset.tab); closeMobileNav(); });
+});
+
+// ─── Mobile hamburger menu ───
+function toggleMobileNav(btn) {
+  const tabs = document.getElementById('nav-tabs');
+  if (!tabs) return;
+  const open = tabs.classList.toggle('open');
+  btn.classList.toggle('open', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+function closeMobileNav() {
+  const tabs = document.getElementById('nav-tabs');
+  const ham = document.querySelector('.nav-hamburger');
+  if (tabs) tabs.classList.remove('open');
+  if (ham) { ham.classList.remove('open'); ham.setAttribute('aria-expanded', 'false'); }
+}
+// Tap outside the nav closes the open menu
+document.addEventListener('click', (e) => {
+  const nav = document.querySelector('nav');
+  const tabs = document.getElementById('nav-tabs');
+  if (tabs && tabs.classList.contains('open') && nav && !nav.contains(e.target)) closeMobileNav();
 });
 
 // Handle hash on load
