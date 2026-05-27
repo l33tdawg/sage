@@ -72,13 +72,13 @@ All authenticated REST endpoints use an Ed25519 signed-request scheme. The signe
 
 ---
 
-## Known-stale sources (do not trust over this reference)
+## Related docs (reconciled to v8.1.1)
 
-These older docs predate parts of the v8 codebase. They are flagged here so you know to prefer `docs/reference/`:
+These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 
-- **`api/openapi.yaml`** — 18+ live endpoints are missing entirely; `classification` is absent from the `MemorySubmitRequest` schema; clearance-0 is mislabeled "Guest" (code: "PUBLIC"); `VoteResponse` declares `vote_id` but the handler returns `tx_hash`; `/v1/agent/register` is documented as `200` but returns `201` for new agents. Use [`rest-api.md`](rest-api.md).
-- **`docs/ARCHITECTURE.md`** — its clearance table documents only the *operational* meaning (None/Read/Write/Validate/Admin) and omits the *data-classification* meaning; it describes the PoE weight formula as if fully wired into quorum (Phase 1 hardcodes validator weights to 1.0); it references SQLite `network_agents` as authoritative where BadgerDB is now the source of truth. Use [`concepts/`](concepts/).
-- **`sdk/python/README.md`** — omits the `X-Nonce`/nonce from the signing description; omits the `classification` param on `propose()`; missing `hybrid()`, `forget()`, and `list_orgs_by_name()` from its API tables. Use [`python-sdk.md`](python-sdk.md).
+- **`api/openapi.yaml`** — the machine-readable spec, now reconciled to v8.1.1 (70 operations matching `server.go`; `classification` added to `MemorySubmitRequest`; `MemoryType` gained `task`; `VoteResponse` uses `tx_hash`; clearance-0 labeled PUBLIC; `/v1/agent/register` documents 201-new / 200-idempotent). [`rest-api.md`](rest-api.md) remains the human-readable narrative. *(A few org/federation/dept GET responses are typed as generic objects — their store models live outside the REST package; fill in later if needed.)*
+- **`docs/ARCHITECTURE.md`** — accurate: it documents *both* the operational and data-classification meanings of the 0–4 integer, and treats BadgerDB as authoritative with SQLite as legacy fallback. Carries a Phase-1 note that the quorum check uses equal validator weights (1.0), not full PoE weighting. For precise per-record gate logic with file:line, prefer [`concepts/`](concepts/).
+- **`sdk/python/README.md`** — reconciled: signing docs now include the nonce/`X-Nonce`, `propose()` documents `classification`, and `hybrid()`/`forget()`/`list_orgs_by_name()` are in the tables. [`python-sdk.md`](python-sdk.md) is the fuller reference.
 
 ---
 

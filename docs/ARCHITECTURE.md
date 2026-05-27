@@ -1238,6 +1238,8 @@ results = client.query("your query", status_filter="committed")
 
 New memories start as `proposed` and only become `committed` after reaching quorum (>= 2/3 weighted validator votes).
 
+> **Phase 1 note:** the quorum check currently assigns every validator an **equal weight of 1.0** (`internal/abci/app.go:1055`), so quorum is effectively a 2/3 *majority*. The PoE engine computes per-validator weights (and epoch accuracy/domain/corroboration scores), but those are **not yet applied** to the quorum decision — domain score is fixed at 0.5 and corroboration at a default in Phase 1 (`app.go:2493,2510`). Treat the "weighted vote" wording above as the Phase-2 target, not current behavior.
+
 ### Data reset
 
 To wipe all data and start fresh:
