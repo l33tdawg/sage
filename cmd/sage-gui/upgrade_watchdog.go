@@ -38,8 +38,10 @@ import (
 //
 // v7.1.x → v7.5.0 keeps app version at 1 because v7.5 is the migration
 // substrate itself (no consensus rules change). v8.0 bumped to 2 for the
-// access-control fixes. v8.2 bumps to 3 for the PoE-weighted quorum.
-const upgradeTargetAppVersion uint64 = 3
+// access-control fixes. v8.2 bumps to 3 for the PoE-weighted quorum. v8.3
+// bumps to 4 for the real PoE signals (verdict-correctness EWMA accuracy +
+// per-validator corroboration count, persisted in 56-byte vstats: records).
+const upgradeTargetAppVersion uint64 = 4
 
 // upgradeWatchdogConfig is everything the watchdog needs. Constructed
 // in runServe after the agent key is loaded and CometBFT is up.

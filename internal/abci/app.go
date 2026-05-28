@@ -276,6 +276,15 @@ type SageApp struct {
 	// persisted poew:<id> weights via postV8_2Fork's strict-greater-than
 	// gate.
 	v8_2AppliedHeight int64
+
+	// v8_3AppliedHeight is the block at which the v8.3 PoE-signal fork
+	// activated. Same semantics as v8_2AppliedHeight: zero means pre-fork
+	// (Phase-1 accuracy = cold-start accept-ratio blend, corroboration = 0,
+	// vstats:<id> records stay 24 bytes, byte-identical to v8.2.x); non-zero
+	// means blocks after this height feed verdict-correctness EWMA and a real
+	// per-validator corroboration count into processEpoch, and grow vstats:<id>
+	// to 56 bytes. Gated by postV8_3Fork's strict-greater-than.
+	v8_3AppliedHeight int64
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -286,6 +295,10 @@ const v8UpgradeName = "app-v2"
 // v8_2UpgradeName is the canonical name for the v8.2 activation record.
 // Same naming discipline as v8UpgradeName: "app-v<TargetAppVersion>".
 const v8_2UpgradeName = "app-v3"
+
+// v8_3UpgradeName is the canonical name for the v8.3 activation record.
+// Same naming discipline: "app-v<TargetAppVersion>".
+const v8_3UpgradeName = "app-v4"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -375,6 +388,51 @@ func recordV8_2Branch(postFork bool) {
 		branch = "post"
 	}
 	metrics.ForkBranchTotal.WithLabelValues("v8.2", branch).Inc()
+}
+
+// postV8_3Fork is the consensus-side fork-gate predicate for the v8.3
+// PoE-signal activation (verdict-correctness EWMA accuracy + real
+// corroboration count + 56-byte vstats: records). Strict greater-than
+// mirrors postV8_2Fork: the activation block H_act itself still runs the
+// pre-fork branch (Phase-1 accuracy/corroboration, 24-byte vstats writes,
+// no verdict-match crediting) so the only AppHash delta at H_act is the
+// MarkUpgradeApplied write. Blocks H > H_act feed the real signals.
+func (app *SageApp) postV8_3Fork(height int64) bool {
+	return app.v8_3AppliedHeight > 0 && height > app.v8_3AppliedHeight
+}
+
+// IsPostV8_3Fork is the off-consensus accessor reserved for any future
+// REST surface that wants to query the live fork state. Reads the cached
+// AppState.Height, advisory only — never use this in the consensus path.
+func (app *SageApp) IsPostV8_3Fork() bool {
+	return app.v8_3AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8_3AppliedHeight
+}
+
+// refreshV8_3Fork populates v8_3AppliedHeight from the persisted upgrade
+// audit trail. Called on boot (so a node restarting on a post-fork chain
+// picks up the gate without waiting for activation) and after the
+// activation block in FinalizeBlock.
+func (app *SageApp) refreshV8_3Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(v8_3UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", v8_3UpgradeName).Msg("read v8.3 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.v8_3AppliedHeight = rec.AppliedHeight
+}
+
+// recordV8_3Branch is the v8.3 sibling of recordV8_2Branch. Same metric
+// name (sage_fork_branch_total) with fork="v8.3" so dashboards can plot
+// all three activations side by side.
+func recordV8_3Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("v8.3", branch).Inc()
 }
 
 // refreshPoEWeights hydrates each validator's in-memory PoEWeight from the
@@ -482,6 +540,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	}
 	app.refreshV8Fork()
 	app.refreshV8_2Fork()
+	app.refreshV8_3Fork()
 
 	// Reload persisted validators from BadgerDB (survives restart)
 	persistedVals, err := bs.LoadValidators()
@@ -528,6 +587,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	}
 	app.refreshV8Fork()
 	app.refreshV8_2Fork()
+	app.refreshV8_3Fork()
 
 	persistedVals, err := bs.LoadValidators()
 	if err != nil {
@@ -755,6 +815,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		}
 		if plan.Name == v8_2UpgradeName {
 			app.v8_2AppliedHeight = req.Height
+		}
+		if plan.Name == v8_3UpgradeName {
+			app.v8_3AppliedHeight = req.Height
 		}
 		app.logger.Info().
 			Str("name", plan.Name).
