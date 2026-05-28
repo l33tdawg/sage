@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -388,6 +389,187 @@ func (s *BadgerStore) GetAllValidatorStats() (map[string]*ValidatorStats, error)
 		return nil, fmt.Errorf("scan validator stats: %w", err)
 	}
 	return result, nil
+}
+
+// --- PoE epoch weights (v8.2) ---
+
+// poeWeightsPrefix is the BadgerDB key prefix for per-validator PoE epoch
+// weights (`poew:<validatorID>`). The literal "poew:current" key under the
+// same prefix is reserved as the epoch-number marker — readers MUST skip it
+// when iterating the prefix as if it were a validator entry.
+const poeWeightsPrefix = "poew:"
+
+// poeWeightsCurrentKey holds the uvarint-encoded epoch number that
+// SetEpochWeights last persisted. Its presence is the "an epoch has run"
+// sentinel; cold boot uses it to distinguish "no epoch has run yet" from
+// "epoch has run, validator absent" — see docs/v8.2-PLAN.md.
+var poeWeightsCurrentKey = []byte("poew:current")
+
+// poeWeightKey returns the BadgerDB key for a validator's PoE epoch weight.
+func poeWeightKey(validatorID string) []byte {
+	return []byte(poeWeightsPrefix + validatorID)
+}
+
+// SetEpochWeights atomically persists the normalized PoE weight set for an
+// epoch. Writes `poew:current` (uvarint epoch number) and one
+// `poew:<validatorID>` (IEEE-754 float64, big-endian, 8 bytes) per entry in
+// `weights`. Pre-existing `poew:<id>` keys whose validator ID is not in
+// `weights` are deleted in the same transaction so a validator removed via
+// governance leaves no stale weight behind for the boot loader to apply
+// (test W3).
+//
+// Validator IDs are written in sorted order — belt-and-braces even though
+// BadgerDB's commit log doesn't depend on per-key write order. The empty
+// string is rejected as a validator ID before opening the txn so the failure
+// mode is "either all keys land, or none" (test W5 — atomicity).
+//
+// The on-chain encoding (uvarint epoch, big-endian float64 weight) is
+// consensus-critical and pinned by test W4. Do NOT change it without a fork
+// gate.
+func (s *BadgerStore) SetEpochWeights(epoch uint64, weights map[string]float64) error {
+	// Validate up front so a malformed call cannot leave a half-written
+	// epoch. We open the txn only after every input has been checked.
+	ids := make([]string, 0, len(weights))
+	for id := range weights {
+		if id == "" {
+			return fmt.Errorf("set epoch weights: empty validator id")
+		}
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+
+	return s.db.Update(func(txn *badger.Txn) error {
+		// 1. Collect existing poew:<id> keys so we can drop any that aren't
+		//    in the new weight set (stale-validator pruning, test W3).
+		stale := make(map[string]struct{})
+		prefix := []byte(poeWeightsPrefix)
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			key := it.Item().Key()
+			// Skip the epoch marker — it is not a validator entry.
+			if string(key) == string(poeWeightsCurrentKey) {
+				continue
+			}
+			id := string(key[len(poeWeightsPrefix):])
+			stale[id] = struct{}{}
+		}
+		it.Close()
+
+		// 2. Write poew:current — uvarint epoch number.
+		epochBuf := make([]byte, binary.MaxVarintLen64)
+		n := binary.PutUvarint(epochBuf, epoch)
+		if err := txn.Set(append([]byte(nil), poeWeightsCurrentKey...), epochBuf[:n]); err != nil {
+			return err
+		}
+
+		// 3. Write poew:<id> for every validator in sorted order. Removing
+		//    each written id from `stale` so what remains is exactly the
+		//    pruning set.
+		for _, id := range ids {
+			buf := make([]byte, 8)
+			binary.BigEndian.PutUint64(buf, math.Float64bits(weights[id]))
+			if err := txn.Set(poeWeightKey(id), buf); err != nil {
+				return err
+			}
+			delete(stale, id)
+		}
+
+		// 4. Delete any validator entries that survived from a prior epoch
+		//    but are absent from the new set.
+		for id := range stale {
+			if err := txn.Delete(poeWeightKey(id)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// GetEpochWeights loads the most recently persisted PoE weight set.
+// Returns (nil, false, nil) on a fresh store where SetEpochWeights has never
+// been called (no `poew:current` marker exists). When the marker is present,
+// iterates every `poew:<id>` key (skipping the marker itself) and decodes the
+// 8-byte big-endian IEEE-754 float64 into the returned map.
+//
+// The epoch number is intentionally NOT returned here — boot-time hydration
+// only needs the weight map. Tests and operators that want the epoch number
+// use GetEpochNumber.
+func (s *BadgerStore) GetEpochWeights() (weights map[string]float64, ok bool, err error) {
+	err = s.db.View(func(txn *badger.Txn) error {
+		// Marker check — if poew:current is absent, no epoch has run.
+		if _, getErr := txn.Get(poeWeightsCurrentKey); getErr != nil {
+			if errors.Is(getErr, badger.ErrKeyNotFound) {
+				return nil
+			}
+			return getErr
+		}
+
+		weights = make(map[string]float64)
+		prefix := []byte(poeWeightsPrefix)
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = true
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			key := item.Key()
+			// Skip the epoch marker — it is not a validator entry.
+			if string(key) == string(poeWeightsCurrentKey) {
+				continue
+			}
+			id := string(key[len(poeWeightsPrefix):])
+			valErr := item.Value(func(val []byte) error {
+				if len(val) != 8 {
+					return fmt.Errorf("invalid poe weight for %s: expected 8 bytes, got %d", id, len(val))
+				}
+				weights[id] = math.Float64frombits(binary.BigEndian.Uint64(val))
+				return nil
+			})
+			if valErr != nil {
+				return valErr
+			}
+		}
+		ok = true
+		return nil
+	})
+	if err != nil {
+		return nil, false, fmt.Errorf("get epoch weights: %w", err)
+	}
+	return weights, ok, nil
+}
+
+// GetEpochNumber returns the epoch number that the most recent
+// SetEpochWeights call persisted. Returns (0, false, nil) on a fresh store
+// where the `poew:current` marker has never been written. Exposed primarily
+// for tests and operator tooling (`badger get poew:current` equivalent);
+// boot-time hydration only needs the weight map and uses GetEpochWeights.
+func (s *BadgerStore) GetEpochNumber() (epoch uint64, ok bool, err error) {
+	err = s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(poeWeightsCurrentKey)
+		if getErr != nil {
+			if errors.Is(getErr, badger.ErrKeyNotFound) {
+				return nil
+			}
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			decoded, n := binary.Uvarint(val)
+			if n <= 0 {
+				return fmt.Errorf("invalid poew:current uvarint payload (%d bytes)", len(val))
+			}
+			epoch = decoded
+			ok = true
+			return nil
+		})
+	})
+	if err != nil {
+		return 0, false, fmt.Errorf("get epoch number: %w", err)
+	}
+	return epoch, ok, nil
 }
 
 // SaveValidators persists the validator set to BadgerDB.
