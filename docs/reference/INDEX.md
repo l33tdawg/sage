@@ -1,4 +1,4 @@
-<!-- Verified against code at SAGE v8.1.1 (commit 2ca50ba) -->
+<!-- Verified against code at SAGE v8.1.1 (commit 2ca50ba). EXCEPTION: concepts/consensus-confidence-decay.md re-verified at v8.4.0 (PoE weight system through the app-v2…app-v5 forks). The REST/SDK/MCP surface is unchanged across v8.2–v8.4, so those files remain accurate; the v8.1.1 pin reflects their last full re-verification, not stale behavior. -->
 
 # SAGE Reference — Agent Integration Index
 

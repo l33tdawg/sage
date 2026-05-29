@@ -1,8 +1,8 @@
-<!-- Verified against code at SAGE v8.1.1 (commit 2ca50ba) -->
+<!-- Verified against code at SAGE v8.4.0 (the PoE weight system re-verified through the app-v2…app-v5 forks) -->
 
 # Consensus, Confidence, and Decay
 
-Verified against code at SAGE v8.1.1 (commit 2ca50ba).
+Verified against code at SAGE v8.4.0. The PoE weight system below is fork-gated: the "Phase 1" equal-weight / stubbed-factor behavior described historically is the **pre-fork** path, retained only so old blocks replay byte-identical. The **post-fork** behavior (PoE-weighted quorum at `app-v3`/v8.2, real verdict-correctness accuracy + corroboration at `app-v4`/v8.3, real domain factor at `app-v5`/v8.4) is what live chains run today.
 
 ## Overview
 
@@ -73,7 +73,12 @@ const QuorumThreshold = 2.0 / 3.0
 acceptWeight / totalWeight >= 2/3
 ```
 
-In Phase 1 all validators use **equal weight = 1.0** (`app.go:1055`): `weights[v.ID] = 1.0`. PoE weights computed at epoch boundaries are stored in `ValidatorInfo.PoEWeight` but not yet used for quorum decisions in Phase 1.
+**Quorum weighting is fork-gated** (`checkAndApplyQuorum`, `app.go`):
+- **Pre-`app-v3` (v8.1.x and earlier):** all validators use **equal weight = 1.0** — quorum is a 2/3 *majority*. Retained for byte-identical replay of pre-fork blocks.
+- **Post-`app-v3` (v8.2+, `postV8_2Fork`):** quorum consults each validator's persisted PoE weight (`v.PoEWeight`), with a `1/N` bootstrap fallback (`poeWeightOrFallback`) for validators with no weight yet — a 2/3 *weighted* vote.
+- **Post-`app-v5` (v8.4+, `postV8_4Fork`):** for a memory in a non-shared domain `D`, the weight is computed *per-memory* as `ComputeWeight(globalAccuracy, domainAccuracy(v,D), recency, corroboration)` — domain-conditional, read live from `vstats_domain:<v>:<D>` + `vstats:<v>`. Shared (`general`/`self`) and unknown-domain memories fall back to the v8.2 scalar weight.
+
+`HasQuorum` stays ratio-only (`acceptWeight/totalWeight >= 2/3`) across all three, so the gate never moves the threshold itself.
 
 ### Vote Lifecycle
 
@@ -111,7 +116,7 @@ In single-node personal mode (`sage-gui serve`), four in-process app validators 
 
 ## Proof of Experience (PoE) Weight System
 
-PoE weights are computed at epoch boundaries and influence future vote weighting (currently stored but not yet used for quorum in Phase 1).
+PoE weights are computed at epoch boundaries and (post-`app-v3`) drive quorum vote weighting. All four `ComputeWeight` factors below are real on a current chain — accuracy and corroboration since `app-v4` (v8.3), the domain factor since `app-v5` (v8.4). The "Phase 1" fixed/stub values noted per-factor are the pre-fork path only.
 
 ### Epoch Boundaries
 
@@ -138,15 +143,16 @@ Where:
 
 ### Component Definitions
 
-**Accuracy (A)** — accept ratio with cold-start blending (`app.go:2479-2491`):
+**Accuracy (A)** — **verdict-correctness EWMA** since `app-v4`/v8.3 (`poe.EWMATracker.Accuracy()`, fed by `UpdateVerdictStats`). When a memory reaches a terminal verdict, each voting validator is credited `1.0` if its vote matched the final committed/deprecated verdict, else `0.0`, into an exponentially-weighted moving average (η=0.9) persisted in `vstats:<validatorID>`:
 ```
-realAccuracy = AcceptVotes / TotalVotes
-blendFactor = min(TotalVotes / 10, 1.0)   // full weight at K_min=10
-A = blendFactor * realAccuracy + (1 - blendFactor) * 0.5   // 0.5 = cold-start prior
+EWMA.Update(match ? 1.0 : 0.0)         // η=0.9 decay
+realAccuracy = WeightedSum / WeightDenom
+blendFactor  = min(Count / 10, 1.0)    // full weight at K_min=10
+A = blendFactor * realAccuracy + (1 - blendFactor) * 0.5   // 0.5 cold-start prior
 ```
-Cold-start: validators with < 10 votes are blended toward 0.5.
+So accuracy measures *being right* (voting with the eventual consensus), not propensity to accept. *Pre-`app-v4` (legacy/replay path):* `A` was an accept-ratio blend `AcceptVotes/TotalVotes` toward 0.5.
 
-**Domain score (D)** — Phase 1 uses a fixed value of `0.5` for all validators (`app.go:2493-2494`). Per-domain tracking is deferred.
+**Domain score (D)** — **real per-memory** since `app-v5`/v8.4. When quorum runs on a memory in a non-shared domain `D`, `domainAccuracy(v, D)` is the verdict-correctness EWMA of validator `v` *restricted to `D`*, persisted at `vstats_domain:<v>:<D>` (same codec as `vstats:`), cold-starting at 0.5. The memory's domain is recorded at submit in `memdomain:<memoryID>`. The per-epoch *scalar* `domain_score` in `processEpoch` stays `0.5` by design — it is only the fallback weight for shared/unknown-domain memories; the real domain factor is applied per-memory in `checkAndApplyQuorum`. *Pre-`app-v5`:* `D` was a flat `0.5` everywhere.
 
 **Recency (T)** — `poe.RecencyScore(lastActive, now)` (`epoch.go:29-36`):
 ```
@@ -155,11 +161,13 @@ T = exp(-λ * Δt_hours)
 ```
 Hours are approximated from block height difference: `blocksSinceLast * 3.0 / 3600.0` (assuming 3 s/block). A validator that voted 100 blocks ago (~5 min) has `T ≈ 0.999`; 1000 blocks ago (~50 min) `T ≈ 0.995`.
 
-**Corroboration score (S)** — Phase 1 uses `poe.CorroborationScore(0, CorrMax)` (fixed, `app.go:2511`). Per-validator corroboration count tracking is deferred.
+**Corroboration score (S)** — **real lifetime count** since `app-v4`/v8.3: `poe.CorroborationScore(CorrCount, CorrMax)` = `log(1+CorrCount) / log(1+CorrMax)`, where `CorrCount` (persisted in `vstats:<validatorID>`) increments each time the validator's vote matched a terminal verdict. *Pre-`app-v4`:* fixed `CorroborationScore(0, CorrMax) = 0`.
 
 ### Reputation Cap
 
-`poe.NormalizeWeights` (`engine.go:37-82`) applies a 10% cap (`RepCap = 0.10`): no single validator can hold more than 10% of total normalized weight. Applied iteratively until stable, then normalized to sum to 1.0.
+`poe.NormalizeWeights` applies a 10% cap (`RepCap = 0.10`): no single validator can hold more than 10% of total normalized weight. Applied iteratively until stable, then normalized to sum to 1.0. (With < 10 validators the cap can't bind, so the set collapses to equal `1/N` — which is why small devnets behave like equal-weight quorum even post-`app-v3`.)
+
+Since `app-v5`/v8.4, `processEpoch` uses `poe.NormalizeWeightsDeterministic`, which performs the weight-total summations in **sorted-key order**. The legacy `NormalizeWeights` summed a Go map in randomized iteration order; IEEE-754 addition is non-associative, so the `total` (and thus every persisted `poew:<id>` float64 bit, which feeds the AppHash) could differ across honest replicas for heterogeneous weight sets — a latent consensus-split risk. The deterministic variant is fork-gated; the legacy one is retained for pre-`app-v5` replay (bit-identical on equal weights).
 
 ### Weight Storage
 
