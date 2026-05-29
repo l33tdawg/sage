@@ -1,8 +1,10 @@
 package abci
 
 import (
+	"context"
 	"testing"
 
+	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +34,37 @@ func TestV8Fork_PredicateBoundary(t *testing.T) {
 	assert.False(t, app.postV8Fork(100), "at activation block: still pre-fork (H+1 semantic)")
 	assert.True(t, app.postV8Fork(101), "first post-activation block: post-fork")
 	assert.True(t, app.postV8Fork(1_000_000), "far future: post-fork")
+}
+
+// TestInfo_AppVersionReflectsActivatedFork asserts Info() reports the consensus
+// app version matching the highest activated PoE fork, instead of a hardcoded
+// 1. FinalizeBlock bumps consensus_params.version.app to plan.TargetAppVersion
+// on activation (app-vN → N); a node restarting on a post-fork chain that still
+// reported AppVersion=1 here would hand CometBFT an app-version regression
+// against the committed consensus params. The activations are cumulative,
+// mirroring a real chain progressing app-v2 → app-v5 in order.
+func TestInfo_AppVersionReflectsActivatedFork(t *testing.T) {
+	app := setupTestApp(t)
+
+	info := func() uint64 {
+		resp, err := app.Info(context.TODO(), &abcitypes.RequestInfo{})
+		require.NoError(t, err)
+		return resp.AppVersion
+	}
+
+	assert.Equal(t, uint64(1), info(), "fresh chain (no fork) reports app version 1")
+
+	app.v8AppliedHeight = 10
+	assert.Equal(t, uint64(2), info(), "app-v2 (v8.0 access-control) → version 2")
+
+	app.v8_2AppliedHeight = 20
+	assert.Equal(t, uint64(3), info(), "app-v3 (v8.2 PoE-weighted quorum) → version 3")
+
+	app.v8_3AppliedHeight = 30
+	assert.Equal(t, uint64(4), info(), "app-v4 (v8.3 PoE signals) → version 4")
+
+	app.v8_4AppliedHeight = 40
+	assert.Equal(t, uint64(5), info(), "app-v5 (v8.4 domain-factor) → version 5")
 }
 
 // TestV8Fork_RefreshFromPersisted asserts refreshV8Fork pulls the height

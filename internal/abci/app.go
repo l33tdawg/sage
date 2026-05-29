@@ -746,6 +746,33 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	return app, nil
 }
 
+// currentAppVersion reports the consensus app version this node announces to
+// CometBFT in Info(): the highest activated PoE fork's target version, or 1 if
+// none has activated. FinalizeBlock bumps consensus_params.version.app to
+// plan.TargetAppVersion when a fork activates, so a node restarting on a
+// post-fork chain MUST report the same version here or the CometBFT handshake
+// sees an app-version regression against the committed consensus params.
+//
+// The fork gates activate in order (reconcilePoEForkMonotonicity guarantees a
+// higher fork implies every lower one is applied too), so a top-down check
+// returns the current version. The fields are populated by the refreshV8*Fork
+// calls in NewSageApp before CometBFT ever calls Info(). A new fork must add
+// its case here, mirroring the v8*UpgradeName constants (app-vN → version N).
+func (app *SageApp) currentAppVersion() uint64 {
+	switch {
+	case app.v8_4AppliedHeight > 0:
+		return 5 // app-v5 (v8.4 domain-factor)
+	case app.v8_3AppliedHeight > 0:
+		return 4 // app-v4 (v8.3 PoE signals)
+	case app.v8_2AppliedHeight > 0:
+		return 3 // app-v3 (v8.2 PoE-weighted quorum)
+	case app.v8AppliedHeight > 0:
+		return 2 // app-v2 (v8.0 access-control)
+	default:
+		return 1
+	}
+}
+
 // Info returns application info for CometBFT handshake.
 func (app *SageApp) Info(_ context.Context, req *abcitypes.RequestInfo) (*abcitypes.ResponseInfo, error) {
 	ver := app.Version
@@ -755,7 +782,7 @@ func (app *SageApp) Info(_ context.Context, req *abcitypes.RequestInfo) (*abcity
 	return &abcitypes.ResponseInfo{
 		Data:             "sage",
 		Version:          ver,
-		AppVersion:       1,
+		AppVersion:       app.currentAppVersion(),
 		LastBlockHeight:  app.state.Height,
 		LastBlockAppHash: app.state.AppHash,
 	}, nil
