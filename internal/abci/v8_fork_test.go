@@ -22,6 +22,7 @@ func TestUpgradeNameConstantsAreCanonical(t *testing.T) {
 	assert.Equal(t, tx.CanonicalUpgradeName(3), v8_2UpgradeName)
 	assert.Equal(t, tx.CanonicalUpgradeName(4), v8_3UpgradeName)
 	assert.Equal(t, tx.CanonicalUpgradeName(5), v8_4UpgradeName)
+	assert.Equal(t, tx.CanonicalUpgradeName(6), v8_5UpgradeName) // "app-v6"
 
 	// Couple the OTHER half too: the version a fork activates under (app-v<N>,
 	// matched by name in FinalizeBlock) must equal the version currentAppVersion()
@@ -38,6 +39,8 @@ func TestUpgradeNameConstantsAreCanonical(t *testing.T) {
 	assert.Equal(t, uint64(4), app.currentAppVersion(), "v8_3UpgradeName is app-v4")
 	app.v8_4AppliedHeight = 40
 	assert.Equal(t, uint64(5), app.currentAppVersion(), "v8_4UpgradeName is app-v5")
+	app.v8_5AppliedHeight = 50
+	assert.Equal(t, uint64(6), app.currentAppVersion(), "v8_5UpgradeName is app-v6")
 }
 
 // TestV8Fork_DefaultZero asserts a freshly-created app reports zero fork
@@ -96,6 +99,9 @@ func TestInfo_AppVersionReflectsActivatedFork(t *testing.T) {
 
 	app.v8_4AppliedHeight = 40
 	assert.Equal(t, uint64(5), info(), "app-v5 (v8.4 domain-factor) → version 5")
+
+	app.v8_5AppliedHeight = 50
+	assert.Equal(t, uint64(6), info(), "app-v6 (v8.5 upgrade-machinery hardening) → version 6")
 }
 
 // TestV8Fork_RefreshFromPersisted asserts refreshV8Fork pulls the height

@@ -295,6 +295,17 @@ type SageApp struct {
 	// quorum vote on a non-shared-domain memory by its live verdict-correctness
 	// IN that domain. Gated by postV8_4Fork's strict-greater-than.
 	v8_4AppliedHeight int64
+
+	// v8_5AppliedHeight is the block at which the v8.5 / app-v6 fork
+	// (upgrade-machinery hardening) activated. Zero means pre-fork:
+	// processUpgradePropose accepts non-canonical plan names and version
+	// regressions (byte-identical to v8.4.x), and processUpgradeRevert is the
+	// Code-0 no-op stub. Non-zero means blocks after this height (a) reject a
+	// propose whose Name != CanonicalUpgradeName(TargetAppVersion), (b) reject
+	// a propose whose TargetAppVersion <= currentAppVersion(), and (c) reject
+	// an upgrade revert outright (in-band downgrade is replay-unsafe). Gated by
+	// postV8_5Fork's strict-greater-than.
+	v8_5AppliedHeight int64
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -313,6 +324,10 @@ const v8_3UpgradeName = "app-v4"
 // v8_4UpgradeName is the canonical name for the v8.4 activation record.
 // Same naming discipline: "app-v<TargetAppVersion>".
 const v8_4UpgradeName = "app-v5"
+
+// v8_5UpgradeName is the canonical name for the v8.5 / app-v6 activation
+// record. Same naming discipline: "app-v<TargetAppVersion>".
+const v8_5UpgradeName = "app-v6"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -495,6 +510,51 @@ func recordV8_4Branch(postFork bool) {
 	metrics.ForkBranchTotal.WithLabelValues("v8.4", branch).Inc()
 }
 
+// postV8_5Fork is the consensus-side fork-gate predicate for the v8.5 / app-v6
+// upgrade-machinery hardening (processUpgradePropose canonical-name + version-
+// regression guards, processUpgradeRevert rejection). Strict greater-than
+// mirrors postV8_4Fork: the activation block H_act itself still runs the
+// pre-fork branch (lenient propose, no-op revert stub) so the only AppHash
+// delta at H_act is the MarkUpgradeApplied write. Blocks H > H_act enforce the
+// guards.
+func (app *SageApp) postV8_5Fork(height int64) bool {
+	return app.v8_5AppliedHeight > 0 && height > app.v8_5AppliedHeight
+}
+
+// IsPostV8_5Fork is the off-consensus accessor reserved for any future
+// REST surface that wants to query the live fork state. Reads the cached
+// AppState.Height, advisory only — never use this in the consensus path.
+func (app *SageApp) IsPostV8_5Fork() bool {
+	return app.v8_5AppliedHeight > 0 && app.state != nil && app.state.Height > app.v8_5AppliedHeight
+}
+
+// refreshV8_5Fork populates v8_5AppliedHeight from the persisted upgrade
+// audit trail. Called on boot (so a node restarting on a post-fork chain
+// picks up the gate without waiting for activation) and after the
+// activation block in FinalizeBlock.
+func (app *SageApp) refreshV8_5Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(v8_5UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", v8_5UpgradeName).Msg("read v8.5 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.v8_5AppliedHeight = rec.AppliedHeight
+}
+
+// recordV8_5Branch is the v8.5 sibling of recordV8_4Branch. Same metric
+// name (sage_fork_branch_total) with fork="v8.5" so dashboards can plot
+// all five activations side by side.
+func recordV8_5Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("v8.5", branch).Inc()
+}
+
 // reconcilePoEForkMonotonicity makes the v8.x PoE fork gates monotonic: a higher
 // fork being active implies every lower one is too. If an upgrade jumps straight
 // to a higher app version (e.g. app-v2 → app-v5, skipping app-v3/app-v4), the
@@ -514,11 +574,11 @@ func recordV8_4Branch(postFork bool) {
 func (app *SageApp) reconcilePoEForkMonotonicity() {
 	// Gates ordered low→high. Walk from the top down, carrying the height of the
 	// nearest SET gate above; an unset gate inherits that height. This keeps the
-	// activation heights non-decreasing (v8 ≤ v8_2 ≤ v8_3 ≤ v8_4) so each lower
-	// fork is active wherever a higher one is — backfilling a skipped gate to the
-	// NEAREST higher activation, not the topmost (which would wrongly push a low
+	// activation heights non-decreasing (v8 ≤ v8_2 ≤ v8_3 ≤ v8_4 ≤ v8_5) so each
+	// lower fork is active wherever a higher one is — backfilling a skipped gate to
+	// the NEAREST higher activation, not the topmost (which would wrongly push a low
 	// gate's activation later than an already-set intermediate gate's).
-	gates := []*int64{&app.v8AppliedHeight, &app.v8_2AppliedHeight, &app.v8_3AppliedHeight, &app.v8_4AppliedHeight}
+	gates := []*int64{&app.v8AppliedHeight, &app.v8_2AppliedHeight, &app.v8_3AppliedHeight, &app.v8_4AppliedHeight, &app.v8_5AppliedHeight}
 	var nearestAbove int64
 	for i := len(gates) - 1; i >= 0; i-- {
 		if *gates[i] > 0 {
@@ -678,6 +738,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshV8_2Fork()
 	app.refreshV8_3Fork()
 	app.refreshV8_4Fork()
+	app.refreshV8_5Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -727,6 +788,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshV8_2Fork()
 	app.refreshV8_3Fork()
 	app.refreshV8_4Fork()
+	app.refreshV8_5Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -760,6 +822,8 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // its case here, mirroring the v8*UpgradeName constants (app-vN → version N).
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.v8_5AppliedHeight > 0:
+		return 6 // app-v6 (v8.5 upgrade-machinery hardening)
 	case app.v8_4AppliedHeight > 0:
 		return 5 // app-v5 (v8.4 domain-factor)
 	case app.v8_3AppliedHeight > 0:
@@ -988,6 +1052,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		}
 		if plan.Name == v8_4UpgradeName {
 			app.v8_4AppliedHeight = req.Height
+		}
+		if plan.Name == v8_5UpgradeName {
+			app.v8_5AppliedHeight = req.Height
 		}
 		// Keep the PoE fork gates monotonic if this activation jumped past an
 		// intermediate version (e.g. straight to app-v5) — backfill any unset
@@ -3746,6 +3813,46 @@ func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, b
 		return &abcitypes.ExecTxResult{Code: 47, Log: "upgrade propose: target_app_version must be > 0"}
 	}
 
+	// app-v6 (postV8_5Fork): self-defending consensus guards on the proposal.
+	// Pre-fork this entire block is skipped, so historical blocks — which
+	// accepted non-canonical names / regressions with Code 0 — replay
+	// byte-identically. At this point Name != "" (rejected above) and
+	// TargetAppVersion != 0 are already guaranteed, so CanonicalUpgradeName(0)
+	// is never compared. recordV8_5Branch fires once here for the whole
+	// handler, mirroring processDomainReassign's single recordV8Branch call.
+	postV85 := app.postV8_5Fork(height)
+	recordV8_5Branch(postV85)
+	if postV85 {
+		// Change 1: the plan Name MUST be the canonical fork-gate activation
+		// key for its TargetAppVersion. A mismatch (e.g. a human binary label
+		// "v8.5.0" instead of "app-v6") bumps the CometBFT app version at
+		// activation but leaves every postV8_*Fork gate false forever,
+		// silently disabling the consensus rules the upgrade was meant to
+		// enable. The watchdog already derives Name from CanonicalUpgradeName;
+		// this defends the chain against any other proposer that does not.
+		if want := tx.CanonicalUpgradeName(prop.TargetAppVersion); prop.Name != want {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: non-canonical name %q for target_app_version=%d (want %q)",
+				prop.Name, prop.TargetAppVersion, want)}
+		}
+
+		// Change 2: regression / no-op guard. CometBFT offers no protection
+		// against a plan that bumps consensus_params.version.app DOWNWARD
+		// (a fatal app-version regression at the handshake) or re-proposes the
+		// current version (a no-op that burns the single pending-plan slot).
+		// currentAppVersion() is the chain's committed version — the same value
+		// Info() announces and FinalizeBlock bumps version.app to — derived
+		// deterministically from the activated fork gates, so every replica
+		// evaluates this identically at this height. <= rejects equality too
+		// (the no-op case); skip-ahead stays legal (reconcile backfills gates).
+		cur := app.currentAppVersion()
+		if prop.TargetAppVersion <= cur {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: target_app_version %d must exceed current committed app version %d (regression/no-op rejected)",
+				prop.TargetAppVersion, cur)}
+		}
+	}
+
 	// Refuse if another plan is already pending. At-most-one semantics
 	// keep the FinalizeBlock activation check deterministic and avoid
 	// the question of "which plan wins" when two arrive in the same block.
@@ -3839,7 +3946,17 @@ func (app *SageApp) processUpgradeCancel(parsedTx *tx.ParsedTx, height int64, _ 
 	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("upgrade plan %q cancelled", cancel.Name)}
 }
 
-// processUpgradeRevert handles a TxTypeUpgradeRevert transaction (stub).
+// processUpgradeRevert handles a TxTypeUpgradeRevert transaction.
+//
+// Pre-app-v6 (postV8_5Fork false) this is a byte-identical Code-0 no-op stub —
+// every block on every chain that exists today replays unchanged. Post-app-v6
+// it is an EXPLICIT REJECT (Code 90): a live in-band downgrade is replay-unsafe
+// by construction. Clearing a fork gate retroactively flips the execution
+// branch of committed blocks H_act+1..H_revert, so their AppHashes no longer
+// reproduce on replay → CometBFT halt. True rollback is a forward upgrade plus
+// an off-chain snapshot rewind, not a consensus-rule tx. The identity + payload
+// validation (Code 49) runs on BOTH branches, before the fork gate, so those
+// failures stay byte-identical pre- and post-fork.
 func (app *SageApp) processUpgradeRevert(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
 	revert := parsedTx.UpgradeRevert
 	if revert == nil {
@@ -3857,16 +3974,36 @@ func (app *SageApp) processUpgradeRevert(parsedTx *tx.ParsedTx, height int64, _ 
 		return &abcitypes.ExecTxResult{Code: 49, Log: "upgrade revert: name is required"}
 	}
 
-	app.logger.Info().
+	postFork := app.postV8_5Fork(height)
+	recordV8_5Branch(postFork)
+
+	if !postFork {
+		// Pre-app-v6: byte-identical no-op stub (Code 0, no state mutation).
+		app.logger.Info().
+			Str("name", revert.Name).
+			Uint64("target_app_version", revert.TargetAppVersion).
+			Int64("reverting_from_height", revert.RevertingFromHeight).
+			Str("proposer_id", proposerID).
+			Str("payload_proposer_id", revert.ProposerID).
+			Int64("height", height).
+			Msg("upgrade revert received (pre-fork stub — no state mutation)")
+
+		return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
+	}
+
+	// Post-app-v6: reject. An in-band downgrade is replay-unsafe — clearing a
+	// fork gate retroactively flips the execution branch of committed blocks
+	// H_act+1..H_revert, so their AppHashes no longer reproduce on replay.
+	// True rollback = forward upgrade + off-chain snapshot rewind, not a tx.
+	app.logger.Warn().
 		Str("name", revert.Name).
 		Uint64("target_app_version", revert.TargetAppVersion).
 		Int64("reverting_from_height", revert.RevertingFromHeight).
 		Str("proposer_id", proposerID).
-		Str("payload_proposer_id", revert.ProposerID).
 		Int64("height", height).
-		Msg("upgrade revert received (pre-fork stub — no state mutation)")
+		Msg("upgrade revert rejected: in-band downgrade is replay-unsafe; use a forward upgrade + snapshot rollback")
 
-	return &abcitypes.ExecTxResult{Code: 0, Log: "upgrade tx accepted (pre-fork stub — no state mutation)"}
+	return &abcitypes.ExecTxResult{Code: 90, Log: "upgrade revert: in-band downgrade unsupported (replay-unsafe); use a forward upgrade and off-chain snapshot rollback"}
 }
 
 // ---------------------------------------------------------------------------

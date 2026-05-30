@@ -44,7 +44,13 @@ import (
 // v8.4 bumps to 5 for the real Domain factor: a validator's quorum weight on a
 // domain-D memory is conditioned on its verdict-correctness IN D (per-domain
 // EWMA persisted in vstats_domain:<v>:<D>, the memory's domain in memdomain:<id>).
-const upgradeTargetAppVersion uint64 = 5
+// v8.5 bumps to 6 for the upgrade-machinery hardening (app-v6): post-fork,
+// processUpgradePropose rejects non-canonical plan names and version
+// regressions/no-ops, and processUpgradeRevert rejects in-band downgrades
+// (replay-unsafe). The plan name is derived from CanonicalUpgradeName below —
+// never name a plan after the binary version; that is the bug class app-v6's
+// canonical-name guard defends against.
+const upgradeTargetAppVersion uint64 = 6
 
 // upgradeWatchdogConfig is everything the watchdog needs. Constructed
 // in runServe after the agent key is loaded and CometBFT is up.

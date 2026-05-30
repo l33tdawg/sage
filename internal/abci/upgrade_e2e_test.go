@@ -192,3 +192,77 @@ func TestV75_EndToEnd_CancelBeforeActivation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, applied, "applied audit record must not exist for cancelled plan")
 }
+
+// TestV85_EndToEnd_AppV6ActivationAndGuards drives a full canonical app-v6
+// activation through real processTx/FinalizeBlock, then exercises all three
+// app-v6 guards end-to-end against the live consensus-param version:
+//
+//	(a) a non-canonical propose → Code 47, no plan (Change 1);
+//	(b) a downgrade propose to 5 → Code 47 while Info().AppVersion stays 6 (Change 2);
+//	(c) a revert above activation → Code 90 (Change 3);
+//	(d) a canonical app-v7/7 → Code 0 + activation (proves app-v6 didn't self-block).
+func TestV85_EndToEnd_AppV6ActivationAndGuards(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	// A real chain reaches app-v6 only after the lower forks. Seed v8..v8.4 so
+	// FinalizeBlock's reconcile yields a coherent currentAppVersion()==5 before
+	// the app-v6 activation, and the app-v6 propose isn't a regression.
+	activateV85(app, 5)
+	app.v8_5AppliedHeight = 0 // drive the app-v6 gate via real activation below
+	require.Equal(t, uint64(5), app.currentAppVersion())
+
+	// 1. Propose canonical app-v6 (pre-fork, so the guards don't block its own
+	//    activation — the self-bootstrapping case).
+	proposeTx := makeUpgradeProposeTx(t, ak, v8_5UpgradeName, 6, "", 0)
+	require.Equal(t, uint32(0), app.processTx(proposeTx, 100, time.Now()).Code)
+	plan, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	actH := plan.ActivationHeight // 100 + 200 floor
+
+	// 2. FinalizeBlock at activation height flips the gate and bumps version.app.
+	respAt, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{Height: actH, Time: time.Now()})
+	require.NoError(t, err)
+	require.NotNil(t, respAt.ConsensusParamUpdates)
+	require.NotNil(t, respAt.ConsensusParamUpdates.Version)
+	require.Equal(t, uint64(6), respAt.ConsensusParamUpdates.Version.App)
+	require.Equal(t, actH, app.v8_5AppliedHeight, "app-v6 gate must flip on activation")
+
+	// Guards engage at H_act+1. Use a post-activation height for the rest.
+	postH := actH + 10
+	require.True(t, app.postV8_5Fork(postH))
+
+	// (a) non-canonical propose → Code 47, no plan.
+	nonCanon := makeUpgradeProposeTx(t, ak, "v8.6.0", 7, "", 0)
+	resA := app.processTx(nonCanon, postH, time.Now())
+	assert.Equal(t, uint32(47), resA.Code)
+	assert.Contains(t, resA.Log, "non-canonical name")
+	_, errA := app.badgerStore.GetUpgradePlan()
+	assert.ErrorIs(t, errA, store.ErrNoUpgradePlan, "non-canonical propose must persist no plan")
+
+	// (b) downgrade propose to 5 → Code 47; Info().AppVersion stays 6.
+	downgrade := makeUpgradeProposeTx(t, ak, "app-v5", 5, "", 0)
+	resB := app.processTx(downgrade, postH, time.Now())
+	assert.Equal(t, uint32(47), resB.Code)
+	assert.Contains(t, resB.Log, "regression/no-op rejected")
+	info, err := app.Info(context.Background(), &abcitypes.RequestInfo{})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(6), info.AppVersion, "downgrade reject must not drop the live app version")
+
+	// (c) revert above activation → Code 90.
+	revert := makeUpgradeRevertTx(t, ak, "app-v6", 6, actH)
+	resC := app.processTx(revert, postH, time.Now())
+	assert.Equal(t, uint32(90), resC.Code)
+	assert.Contains(t, resC.Log, "in-band downgrade unsupported")
+
+	// (d) canonical app-v7/7 → Code 0 + persisted plan (app-v6 didn't self-block).
+	forward := makeUpgradeProposeTx(t, ak, "app-v7", 7, "", 0)
+	resD := app.processTx(forward, postH, time.Now())
+	require.Equal(t, uint32(0), resD.Code, "canonical forward upgrade must be accepted: %s", resD.Log)
+	planD, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	require.NotNil(t, planD)
+	assert.Equal(t, "app-v7", planD.Name)
+	assert.Equal(t, uint64(7), planD.TargetAppVersion)
+}

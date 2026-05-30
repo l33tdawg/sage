@@ -116,38 +116,42 @@ func TestAuditFix_ReSubmitAllowedPreV84(t *testing.T) {
 // NEAREST set gate above it, so a version jump can't leave a higher fork active
 // while a lower one stays off.
 func TestAuditFix_PoEForkMonotonicReconcile(t *testing.T) {
-	// Jump straight to app-v5: only v8_4 set → all lower gates backfill to it.
+	// Jump straight to app-v6: only v8_5 set → all lower gates backfill to it.
 	app := setupTestApp(t)
-	app.v8_4AppliedHeight = 500
+	app.v8_5AppliedHeight = 500
 	app.reconcilePoEForkMonotonicity()
 	assert.Equal(t, int64(500), app.v8AppliedHeight)
 	assert.Equal(t, int64(500), app.v8_2AppliedHeight)
 	assert.Equal(t, int64(500), app.v8_3AppliedHeight)
+	assert.Equal(t, int64(500), app.v8_4AppliedHeight)
 
-	// Partial skip: v8_2=200 and v8_4=500 set, v8 + v8_3 unset. v8 must inherit the
-	// NEAREST set gate above (v8_2=200), NOT the top (v8_4=500) — keeps heights
-	// non-decreasing so postV8Fork ⊇ postV8_2Fork.
+	// Partial skip: v8_2=200 and v8_5=500 set, v8 + v8_3 + v8_4 unset. v8 must
+	// inherit the NEAREST set gate above (v8_2=200), NOT the top (v8_5=500) —
+	// keeps heights non-decreasing so postV8Fork ⊇ postV8_2Fork.
 	app2 := setupTestApp(t)
 	app2.v8_2AppliedHeight = 200
-	app2.v8_4AppliedHeight = 500
+	app2.v8_5AppliedHeight = 500
 	app2.reconcilePoEForkMonotonicity()
-	assert.Equal(t, int64(200), app2.v8AppliedHeight, "v8 inherits nearest-above v8_2 (200), not v8_4")
+	assert.Equal(t, int64(200), app2.v8AppliedHeight, "v8 inherits nearest-above v8_2 (200), not v8_5")
 	assert.Equal(t, int64(200), app2.v8_2AppliedHeight)
 	assert.Equal(t, int64(500), app2.v8_3AppliedHeight)
 	assert.Equal(t, int64(500), app2.v8_4AppliedHeight)
+	assert.Equal(t, int64(500), app2.v8_5AppliedHeight)
 
 	// Sequential chain (every real chain): each gate set with its own height → untouched.
 	app3 := setupTestApp(t)
-	app3.v8AppliedHeight, app3.v8_2AppliedHeight, app3.v8_3AppliedHeight, app3.v8_4AppliedHeight = 100, 200, 300, 400
+	app3.v8AppliedHeight, app3.v8_2AppliedHeight, app3.v8_3AppliedHeight, app3.v8_4AppliedHeight, app3.v8_5AppliedHeight = 100, 200, 300, 400, 500
 	app3.reconcilePoEForkMonotonicity()
 	assert.Equal(t, int64(100), app3.v8AppliedHeight)
 	assert.Equal(t, int64(200), app3.v8_2AppliedHeight)
 	assert.Equal(t, int64(300), app3.v8_3AppliedHeight)
 	assert.Equal(t, int64(400), app3.v8_4AppliedHeight)
+	assert.Equal(t, int64(500), app3.v8_5AppliedHeight)
 
 	// No forks active → no-op.
 	app4 := setupTestApp(t)
 	app4.reconcilePoEForkMonotonicity()
 	assert.Zero(t, app4.v8AppliedHeight)
 	assert.Zero(t, app4.v8_4AppliedHeight)
+	assert.Zero(t, app4.v8_5AppliedHeight)
 }

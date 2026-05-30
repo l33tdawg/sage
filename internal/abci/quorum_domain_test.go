@@ -38,6 +38,18 @@ func activateV84(app *SageApp, height int64) {
 	app.v8_4AppliedHeight = height
 }
 
+// activateV85 marks the v8.2..v8.5 forks active at a single height — a coherent
+// post-app-v6 gate set (currentAppVersion()==6). app-v6 ships only after the
+// earlier activations on a real chain, so all gates are set together. The app-v6
+// handler guards key on postV8_5Fork(height) (strict >), so a tx at height>height
+// is post-fork. Mirrors activateV84.
+func activateV85(app *SageApp, height int64) {
+	app.v8_2AppliedHeight = height
+	app.v8_3AppliedHeight = height
+	app.v8_4AppliedHeight = height
+	app.v8_5AppliedHeight = height
+}
+
 // seedDomainExpertise drives n verdict credits (all correct or all wrong) into a
 // validator's per-domain EWMA via the real store path. n>=10 saturates the
 // cold-start blend, so correct→accuracy≈1.0 and wrong→accuracy≈0.0.

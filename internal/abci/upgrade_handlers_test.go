@@ -301,6 +301,119 @@ func TestProcessUpgradeRevert_MissingName(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// app-v6 Change 3: post-fork revert is an EXPLICIT REJECT (Code 90).
+//
+// A live in-band downgrade is replay-unsafe by construction — clearing a fork
+// gate retroactively flips committed blocks' execution branch. Post-fork the
+// handler returns Code 90 with no state mutation; pre-fork it stays the
+// byte-identical Code-0 stub (TestProcessUpgradeRevert_HappyPath above is the
+// pre-fork assertion). Validation (Code 49) precedes the gate on both branches.
+// ---------------------------------------------------------------------------
+
+// TestProcessUpgradeRevert_PostFork_Rejects: gate active, revert above it →
+// Code 90, no applied-upgrade record touched, currentAppVersion() unchanged.
+func TestProcessUpgradeRevert_PostFork_Rejects(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	activateV85(app, 1) // gate at 1, cur=6
+	verBefore := app.currentAppVersion()
+	require.Equal(t, uint64(6), verBefore)
+
+	ptx := makeUpgradeRevertTx(t, ak, "app-v6", 6, 150)
+	result := app.processUpgradeRevert(ptx, 200, time.Now()) // 200 > 1 → post-fork
+
+	assert.Equal(t, uint32(90), result.Code)
+	assert.Contains(t, result.Log, "in-band downgrade unsupported")
+
+	// No applied-upgrade record was deleted, gates intact, version unchanged.
+	applied, err := app.badgerStore.GetAppliedUpgrade(v8_5UpgradeName)
+	require.NoError(t, err)
+	assert.Nil(t, applied, "no app-v6 record was written by setup, and revert must not create one")
+	assert.Equal(t, verBefore, app.currentAppVersion(), "revert reject must not change the committed version")
+}
+
+// TestProcessUpgradeRevert_PreFork_StillNoOpStub: gate 0 (or height<=gate) →
+// the byte-identical Code-0 stub, with the pre-fork log.
+func TestProcessUpgradeRevert_PreFork_StillNoOpStub(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	ptx := makeUpgradeRevertTx(t, ak, "v7.4.0-recovery", 6, 12345)
+	result := app.processUpgradeRevert(ptx, 100, time.Now()) // gate 0 → pre-fork
+
+	assert.Equal(t, uint32(0), result.Code, "log: %s", result.Log)
+	assert.Contains(t, result.Log, "pre-fork stub")
+}
+
+// TestProcessUpgradeRevert_PostFork_NoStateMutation snapshots the full AppHash
+// keyspace, runs the post-fork reject, and asserts the digest is byte-identical
+// afterward — the reject path writes nothing.
+func TestProcessUpgradeRevert_PostFork_NoStateMutation(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	activateV85(app, 1)
+
+	hBefore, err := ComputeAppHash(app.badgerStore)
+	require.NoError(t, err)
+
+	ptx := makeUpgradeRevertTx(t, ak, "app-v6", 6, 150)
+	result := app.processUpgradeRevert(ptx, 200, time.Now())
+	require.Equal(t, uint32(90), result.Code)
+
+	hAfter, err := ComputeAppHash(app.badgerStore)
+	require.NoError(t, err)
+	assert.Equal(t, hBefore, hAfter, "post-fork revert reject must not mutate the AppHash keyspace")
+}
+
+// TestProcessUpgradeRevert_ForkBoundary_AtActivationHeight pins the strict->
+// boundary: at height==gate the stub still runs (Code 0); at gate+1 it rejects
+// (Code 90).
+func TestProcessUpgradeRevert_ForkBoundary_AtActivationHeight(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	activateV85(app, 100) // gate at 100
+
+	atTx := makeUpgradeRevertTx(t, ak, "app-v6", 6, 50)
+	resAt := app.processUpgradeRevert(atTx, 100, time.Now()) // height==gate → pre-fork
+	assert.Equal(t, uint32(0), resAt.Code, "at activation height: pre-fork stub")
+	assert.Contains(t, resAt.Log, "pre-fork stub")
+
+	aboveTx := makeUpgradeRevertTx(t, ak, "app-v6", 6, 50)
+	resAbove := app.processUpgradeRevert(aboveTx, 101, time.Now()) // gate+1 → post-fork
+	assert.Equal(t, uint32(90), resAbove.Code, "at gate+1: explicit reject")
+	assert.Contains(t, resAbove.Log, "in-band downgrade unsupported")
+}
+
+// TestProcessUpgradeRevert_PostFork_ValidationCodesUnchanged confirms the Code-49
+// validation (missing payload / bad sig / missing name) runs BEFORE the fork gate
+// and so stays Code 49 even post-fork — byte-identical to the pre-fork path.
+func TestProcessUpgradeRevert_PostFork_ValidationCodesUnchanged(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+	activateV85(app, 1)
+	const h = int64(200) // post-fork
+
+	missing := &tx.ParsedTx{Type: tx.TxTypeUpgradeRevert}
+	resMissing := app.processUpgradeRevert(missing, h, time.Now())
+	assert.Equal(t, uint32(49), resMissing.Code)
+	assert.Contains(t, resMissing.Log, "missing upgrade revert payload")
+
+	badSig := makeUpgradeRevertTx(t, ak, "app-v6", 6, 150)
+	badSig.AgentSig = make([]byte, len(badSig.AgentSig))
+	resSig := app.processUpgradeRevert(badSig, h, time.Now())
+	assert.Equal(t, uint32(49), resSig.Code)
+	assert.Contains(t, resSig.Log, "agent identity verification failed")
+
+	noName := makeUpgradeRevertTx(t, ak, "", 6, 150)
+	resName := app.processUpgradeRevert(noName, h, time.Now())
+	assert.Equal(t, uint32(49), resName.Code)
+	assert.Contains(t, resName.Log, "name is required")
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch: ensure processTx routes the new tx types to the new handlers.
 // ---------------------------------------------------------------------------
 
@@ -400,6 +513,45 @@ func TestFinalizeBlock_CanonicalActivation_FlipsGateAndInfo(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, committed, infoAfter.AppVersion,
 		"Info().AppVersion must equal the committed consensus param after a canonical activation")
+}
+
+// TestFinalizeBlock_CanonicalActivation_AppV6FlipsGateAndInfo is the app-v6
+// sibling of the app-v2 activation test: a canonical "app-v6"/6 plan must, on
+// activation, flip v8_5AppliedHeight to the activation height and make
+// Info().AppVersion report 6. Mirrors the v8_5 FinalizeBlock activation arm.
+func TestFinalizeBlock_CanonicalActivation_AppV6FlipsGateAndInfo(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	// A real chain reaches app-v6 only after the lower forks; seed them so the
+	// proposal is not rejected and the version arm reports a coherent 6.
+	activateV85(app, 10)
+	// app-v6 is already gated at 10 from activateV85; clear it so this test
+	// drives the gate via a real FinalizeBlock activation instead.
+	app.v8_5AppliedHeight = 0
+	require.Equal(t, uint64(5), app.currentAppVersion(), "pre-activation: app-v5")
+
+	prop := makeUpgradeProposeTx(t, ak, v8_5UpgradeName, 6, "", 0)
+	require.Equal(t, uint32(0), app.processUpgradePropose(prop, 100, time.Now()).Code)
+	plan, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	actH := plan.ActivationHeight // 100 + 200 floor
+
+	assert.False(t, app.postV8_5Fork(actH))
+
+	respAt, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{Height: actH, Time: time.Now()})
+	require.NoError(t, err)
+	require.NotNil(t, respAt.ConsensusParamUpdates)
+	require.NotNil(t, respAt.ConsensusParamUpdates.Version)
+	assert.Equal(t, uint64(6), respAt.ConsensusParamUpdates.Version.App)
+
+	// The canonical name flipped the app-v6 gate...
+	assert.Equal(t, actH, app.v8_5AppliedHeight, "canonical app-v6 activation must set v8_5AppliedHeight")
+	// ...and Info() now reports 6.
+	infoAfter, err := app.Info(context.Background(), &abcitypes.RequestInfo{})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(6), infoAfter.AppVersion)
 }
 
 // TestFinalizeBlock_NonCanonicalName_BumpsVersionButNotGate pins the actual bug
