@@ -22,6 +22,22 @@ func TestUpgradeNameConstantsAreCanonical(t *testing.T) {
 	assert.Equal(t, tx.CanonicalUpgradeName(3), v8_2UpgradeName)
 	assert.Equal(t, tx.CanonicalUpgradeName(4), v8_3UpgradeName)
 	assert.Equal(t, tx.CanonicalUpgradeName(5), v8_4UpgradeName)
+
+	// Couple the OTHER half too: the version a fork activates under (app-v<N>,
+	// matched by name in FinalizeBlock) must equal the version currentAppVersion()
+	// reports for that gate. Without this, the name→gate arm and the gate→version
+	// arm could drift apart — a new fork half-landing silently (gate flips but
+	// Info under-reports, or vice-versa).
+	app := setupTestApp(t)
+	assert.Equal(t, uint64(1), app.currentAppVersion(), "no gate ⇒ genesis version 1")
+	app.v8AppliedHeight = 10
+	assert.Equal(t, uint64(2), app.currentAppVersion(), "v8UpgradeName is app-v2")
+	app.v8_2AppliedHeight = 20
+	assert.Equal(t, uint64(3), app.currentAppVersion(), "v8_2UpgradeName is app-v3")
+	app.v8_3AppliedHeight = 30
+	assert.Equal(t, uint64(4), app.currentAppVersion(), "v8_3UpgradeName is app-v4")
+	app.v8_4AppliedHeight = 40
+	assert.Equal(t, uint64(5), app.currentAppVersion(), "v8_4UpgradeName is app-v5")
 }
 
 // TestV8Fork_DefaultZero asserts a freshly-created app reports zero fork

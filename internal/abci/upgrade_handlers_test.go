@@ -361,6 +361,82 @@ func TestFinalizeBlock_ActivatesUpgradeAtHeight(t *testing.T) {
 		"post-activation block should not emit ConsensusParamUpdates")
 }
 
+// TestFinalizeBlock_CanonicalActivation_FlipsGateAndInfo ties the two halves of
+// the upgrade fix together end-to-end: a plan named canonically (app-v2) must,
+// on activation, (1) flip the fork gate and (2) make Info().AppVersion equal the
+// committed consensus param. The pre-existing activation test above asserts only
+// the consensus-param bump — it uses a NON-canonical name, so it never exercised
+// the gate/Info coupling, which is exactly how the watchdog naming bug survived.
+func TestFinalizeBlock_CanonicalActivation_FlipsGateAndInfo(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	// Canonical app-v2 plan (the v8.0 access-control fork).
+	prop := makeUpgradeProposeTx(t, ak, v8UpgradeName, 2, "", 0)
+	require.Equal(t, uint32(0), app.processUpgradePropose(prop, 100, time.Now()).Code)
+	plan, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	require.NotNil(t, plan)
+	actH := plan.ActivationHeight // 100 + 200 floor
+
+	// Pre-activation: gate off, Info reports the genesis app version (1).
+	assert.False(t, app.postV8Fork(actH))
+	infoBefore, err := app.Info(context.Background(), &abcitypes.RequestInfo{})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), infoBefore.AppVersion)
+
+	respAt, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{Height: actH, Time: time.Now()})
+	require.NoError(t, err)
+	require.NotNil(t, respAt.ConsensusParamUpdates)
+	require.NotNil(t, respAt.ConsensusParamUpdates.Version)
+	committed := respAt.ConsensusParamUpdates.Version.App
+	assert.Equal(t, uint64(2), committed)
+
+	// The whole point of FIX 1: the canonical name flipped the gate...
+	assert.Equal(t, actH, app.v8AppliedHeight, "canonical app-v2 activation must set v8AppliedHeight")
+	// ...and FIX 2: Info() now reports the same version the consensus param committed,
+	// so a restarting node never under-reports against the committed app version.
+	infoAfter, err := app.Info(context.Background(), &abcitypes.RequestInfo{})
+	require.NoError(t, err)
+	assert.Equal(t, committed, infoAfter.AppVersion,
+		"Info().AppVersion must equal the committed consensus param after a canonical activation")
+}
+
+// TestFinalizeBlock_NonCanonicalName_BumpsVersionButNotGate pins the actual bug
+// so it can never silently return: a plan named after the binary version
+// ("8.2.1") instead of canonical app-v3 still bumps the CometBFT app version
+// (TargetAppVersion drives that independently), but the fork gate stays OFF and
+// the audit record lands under the wrong key — so a reboot's canonical-name
+// lookup can't recover the gate. This is the production state the watchdog used
+// to produce; FIX 1 (canonical naming) is what prevents it.
+func TestFinalizeBlock_NonCanonicalName_BumpsVersionButNotGate(t *testing.T) {
+	app := setupTestApp(t)
+	ak := newAgentKey(t)
+
+	prop := makeUpgradeProposeTx(t, ak, "8.2.1", 3, "", 0) // wrong name, v8.2 target
+	require.Equal(t, uint32(0), app.processUpgradePropose(prop, 100, time.Now()).Code)
+	plan, err := app.badgerStore.GetUpgradePlan()
+	require.NoError(t, err)
+	actH := plan.ActivationHeight
+
+	respAt, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{Height: actH, Time: time.Now()})
+	require.NoError(t, err)
+	require.NotNil(t, respAt.ConsensusParamUpdates)
+	// The app version DOES bump — name is irrelevant to TargetAppVersion.
+	assert.Equal(t, uint64(3), respAt.ConsensusParamUpdates.Version.App)
+	// ...but the v8.2 gate stays OFF because "8.2.1" != "app-v3".
+	assert.Equal(t, int64(0), app.v8_2AppliedHeight,
+		"non-canonical name must NOT flip the gate — the bug FIX 1 prevents")
+	// The audit record is keyed by the wrong name, so canonical lookup misses it:
+	// a restart can't recover the gate, leaving Info() under the committed param.
+	byCanonical, err := app.badgerStore.GetAppliedUpgrade(v8_2UpgradeName) // "app-v3"
+	require.NoError(t, err)
+	assert.Nil(t, byCanonical, "record stored under wrong name; canonical lookup misses it")
+	info, err := app.Info(context.Background(), &abcitypes.RequestInfo{})
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), info.AppVersion, "gate off ⇒ Info under-reports vs committed param 3")
+}
+
 func TestProcessTx_RoutesUpgradeTypes(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
