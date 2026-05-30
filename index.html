@@ -707,14 +707,14 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v8.2.0</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v8.2 activates <strong>Proof-of-Engagement quorum</strong>. The PoE engine has been computing per-validator engagement scores every epoch since v6.x &mdash; accuracy, recency, domain coverage, corroboration &mdash; but the actual quorum vote ignored them and treated every validator as equal. v8.2 wires PoE weights into the quorum decision via a single fork-gated swap. Existing v8.1.x chains upgrade in place at <code>app-v3</code>; pre-fork blocks replay byte-identical to v8.1.2.</p>
+        <h3>What's new in <span id="whats-new-version">v8.5.0</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">The v8.3&ndash;v8.5 line finishes <strong>Phase-2 Proof-of-Engagement</strong> and then hardens the machinery that ships it. v8.2 wired PoE weights into quorum, but two of the four weight factors were still cold-start placeholders &mdash; v8.3 and v8.4 turn all four into real, earned signals. Then v8.4.1 surfaced that the on-chain fork gates had never actually been activating (the upgrade watchdog was naming plans after the binary version instead of the canonical fork name), and v8.4.2&ndash;v8.5 lock the whole propose/apply path down so it can't recur. Existing v8.2.x chains upgrade in place across <code>app-v4</code> &rarr; <code>app-v5</code> &rarr; <code>app-v6</code>; pre-fork blocks replay byte-identical.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>PoE-weighted quorum (post-fork)</h4><p>Quorum now consults each validator's persisted PoE weight instead of a hardcoded <code>1.0</code>. A validator with stronger recent accuracy and recency carries more weight on the 2/3-quorum threshold; a stale or low-accuracy validator carries less. RepCap (0.10 ceiling) prevents single-validator dominance. Pre-fork blocks keep the equal-weight branch so v8.1.x chains and the activation block itself replay byte-identical.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>On-chain weight persistence</h4><p>Normalized weights are written atomically every epoch boundary as <code>poew:&lt;validatorID&gt;</code> (IEEE-754 BE float64) plus a <code>poew:current</code> epoch marker. A node restart between epoch boundaries rehydrates <code>PoEWeight</code> from BadgerDB on boot &mdash; two peers restarting at different points between the same two boundaries never diverge consensus. Validators removed via governance are pruned from <code>poew:*</code> in the same transaction; no stale weight survives a set change.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Bootstrap fallback (1/N)</h4><p>Three transition cases get an equal-share fallback: pre-first-epoch chain (no weights persisted yet), mid-epoch governance add (validator joined between boundaries), and defensive guard for a missing entry. <code>1/N</code> keeps the fallback in the same numeric range as the RepCap-capped output &mdash; a fresh validator isn't silently disenfranchised for up to 100 blocks, but they also don't out-weigh peers who've earned a real score.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>CometBFT v0.38.15 &rarr; v0.38.23</h4><p>Backward-compatible patch series bundled into the v8.2 release for hygiene &mdash; GHSA-hrhf-2vcr-ghch (v0.38.19), blocksync / nil-vote / ABCI-socket hardening, configurable <code>max-snapshot-chunks</code> (v0.38.21). Independent of the PoE fork-gate; no ABCI API changes, no consensus-rule changes.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Verified by 16 new tests + live devnet</h4><p>Store-side W1&ndash;W5 pin the on-chain encoding and atomicity contract. Quorum F1&ndash;F6 cover every branch (pre-fork, post-fork, cold-boot, mid-epoch add, gate flip at H+1, normalized ratio). Lifecycle L1&ndash;L3 prove validator restart parity. Replay R1&ndash;R2 prove pre-fork blocks produce no <code>poew:*</code> keys. A live 4-validator devnet held byte-identical AppHash across all 4 nodes for 160+ blocks and two epoch boundaries on the v8.2-dev binary.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>PoE accuracy from real consensus history (v8.3)</h4><p>The accuracy factor &mdash; 40% of a validator's weight &mdash; now measures whether each vote matched the final committed verdict, as an exponentially-weighted moving average, replacing the v8.2 cold-start accept-ratio. Corroboration (15%) becomes a validator's lifetime verdict-match count instead of a hardcoded zero. Both are credited once per terminal verdict and persisted on-chain in <code>vstats:&lt;id&gt;</code>; length-dispatch decode keeps every legacy record valid. Behind the <code>app-v4</code> gate &mdash; pre-fork blocks replay byte-identical to v8.2.x.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--teal);"></div><div><h4>Domain factor &mdash; Phase-2 PoE complete (v8.4)</h4><p>The domain-coverage factor (30%) is now computed per-memory from real on-chain data (<code>vstats_domain:&lt;v&gt;:&lt;D&gt;</code> + <code>memdomain:&lt;id&gt;</code>) rather than a flat <code>0.5</code> stub. As of <code>app-v5</code>, <strong>none of the four weight factors &mdash; accuracy, recency, domain, corroboration &mdash; remain placeholders.</strong> Epoch-weight normalization is made deterministic at the same fork, with a drift-audit pass hardening the path.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>The fork gates that never fired (v8.4.1)</h4><p>A quiet but serious bug: the upgrade watchdog named each on-chain upgrade plan after the running binary version (e.g. <code>8.4.0</code>) instead of the canonical fork name (<code>app-v5</code>), so the height-gated activation match never succeeded &mdash; the v8.x consensus forks were proposing but never switching on. The watchdog now emits the canonical plan name, and v8.4.2 adds regression guards that pin propose behavior so the mismatch can't silently return.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Upgrade-machinery hardening (v8.5, app-v6)</h4><p>The on-chain propose/apply path gains three fork-gated guards: a proposal whose target height is at or below the current block height is rejected (no stale or past-height upgrades), a no-op proposal whose target version equals the running version is rejected, and the plan name is canonicalized on apply so the watchdog's activation match is always exact. All three sit behind the <code>app-v6</code> gate; pre-fork blocks replay byte-identical to v8.4.2.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot"></div><div><h4>Verified across every fork + SDK 8.5.0</h4><p>Each activation (<code>app-v4</code>, <code>app-v5</code>, <code>app-v6</code>) ships with replay suites proving the pre-fork AppHash stays byte-identical, plus end-to-end upgrade and regression tests across the v8.5 fork boundary &mdash; the same discipline that caught the watchdog naming bug. <code>pip install sage-agent-sdk&gt;=8.5.0</code> for the matching SDK; no client API changes.</p></div></div>
         </div>
       </div>
 
@@ -1038,6 +1038,16 @@ footer a:hover { text-decoration: underline; }
 
 <script>
 // ─── Tab Navigation ───
+// Scroll-reveal observer — declared before switchTab() so that a #hash deep-link
+// (e.g. reloading the page while on #features) does not call switchTab() before
+// `observer` is initialized. Previously `observer` was a const declared lower in
+// the file, so the init-time switchTab(initHash) hit a Temporal Dead Zone
+// ReferenceError that aborted the whole script and left every .reveal at opacity:0.
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => { if (entry.isIntersecting) entry.target.classList.add('visible'); });
+}, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
 function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
@@ -1132,10 +1142,8 @@ if (initHash && document.getElementById('tab-' + initHash)) {
 })();
 
 // ─── Scroll Reveal ───
-const observer = new IntersectionObserver((entries) => {
-  entries.forEach(entry => { if (entry.isIntersecting) entry.target.classList.add('visible'); });
-}, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
-document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+// (the scroll-reveal observer is declared at the top of this script, before switchTab,
+//  so a #hash deep-link reload doesn't call switchTab() before `observer` exists — see TDZ fix)
 
 // ─── Copy Prompt ───
 function copyPrompt(box) {
@@ -1153,7 +1161,7 @@ function copyPrompt(box) {
   // This floor guarantees the counter NEVER drops below the known peak,
   // regardless of browser, device, or localStorage state.
   // To update: set to the current counter value at time of commit.
-  // Last updated: 2026-05-28 (v8.2.0)
+  // Last updated: 2026-05-30 (v8.5.0)
   const HWM_FLOOR = 734;
 
   // GITHUB_AT_FLOOR: what GitHub reported when HWM_FLOOR was recorded.
