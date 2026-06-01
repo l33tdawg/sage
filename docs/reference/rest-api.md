@@ -469,7 +469,11 @@ Self-update only. Agent can only update its own name and bio. Broadcasts `TxType
 
 ### `GET /v1/agent/me`
 
-Authenticated agent's profile including PoE weight and EWMA accuracy.
+Authenticated agent's profile, including the on-chain Proof-of-Experience
+quorum-weight factors. Since v8.6.0 the response also exposes the lifetime
+corroboration count and per-domain expertise; `accuracy`, `corr_count`, and
+`domain_expertise` are read from the authoritative on-chain `vstats:` /
+`vstats_domain:` records (not the off-chain mirror).
 
 **Response** (HTTP 200):
 
@@ -481,9 +485,15 @@ Authenticated agent's profile including PoE weight and EWMA accuracy.
   "poe_weight": 0.82,
   "vote_count": 127,
   "accuracy": 0.91,
+  "corr_count": 34,
+  "domain_expertise": { "go-debugging": 0.88, "sage-development": 0.71 },
   "on_chain_height": 42
 }
 ```
+
+- `accuracy` — global verdict-correctness EWMA (the α factor of the quorum weight).
+- `corr_count` — lifetime count of votes that matched a terminal verdict (the δ factor). **(v8.6.0+)**
+- `domain_expertise` — per-domain verdict-correctness EWMA (the β factor, from `vstats_domain:`), keyed by domain. Only present for domains the agent has actually voted in; omitted otherwise. **(v8.6.0+)**
 
 ---
 

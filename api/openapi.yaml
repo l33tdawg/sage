@@ -650,7 +650,17 @@ components:
           format: double
           minimum: 0
           maximum: 1
-          description: Cold-start-blended EWMA accuracy score (0.5 prior, transitions toward the real score after K_min=10 observations).
+          description: Global verdict-correctness EWMA — the alpha factor of the PoE quorum weight. Cold-start-blended (0.5 prior, transitions toward the real score after K_min=10 observations). Since v8.6.0 read from the authoritative on-chain vstats record.
+        corr_count:
+          type: integer
+          format: int64
+          description: "Lifetime count of votes that matched a terminal verdict (the delta corroboration factor). Read from the on-chain vstats record. (v8.6.0+)"
+        domain_expertise:
+          type: object
+          additionalProperties:
+            type: number
+            format: double
+          description: "Per-domain verdict-correctness EWMA (the beta factor, from vstats_domain), keyed by domain tag. Only present for domains the agent has voted in. (v8.6.0+)"
         on_chain_height:
           type: integer
           format: int64

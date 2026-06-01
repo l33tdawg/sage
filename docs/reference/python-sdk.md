@@ -459,7 +459,13 @@ get_profile() -> AgentProfile
 
 `GET /v1/agent/me`
 
-Returns `AgentProfile(agent_id, poe_weight, vote_count)`.
+Returns an `AgentProfile`. Core fields: `agent_id`, `poe_weight`, `vote_count`.
+Optional fields (present when the server provides them): `display_name`,
+`domains`, `accuracy` (global verdict-correctness EWMA), and — since v8.6.0 —
+`corr_count` (lifetime corroboration) and `domain_expertise`
+(`dict[str, float]`, per-domain expertise keyed by domain tag), plus
+`on_chain_height`. The new fields are `Optional` with `None` defaults, so the
+model still validates against an older server that omits them.
 
 ---
 
