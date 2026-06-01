@@ -81,7 +81,11 @@ func waitAllReachedHeight(t *testing.T, rpcs []string, target int64, timeout tim
 // they are not byte-identical. Returns the agreed hash.
 func assertAppHashAgreement(t *testing.T, rpcs []string, height int64) string {
 	t.Helper()
-	waitAllReachedHeight(t, rpcs, height, 90*time.Second)
+	// The devnet runs at ~3s/block (timeout_commit), so reaching the first epoch
+	// boundary at height 100 from genesis takes ~5 min; give each checkpoint a
+	// generous ceiling. The chain only moves forward, so later checkpoints that
+	// are already committed return immediately.
+	waitAllReachedHeight(t, rpcs, height, 10*time.Minute)
 
 	agreed := ""
 	for i, rpc := range rpcs {

@@ -65,9 +65,12 @@ if [ "${healthy}" -ne 4 ]; then
   exit 1
 fi
 
-SHORT_FLAG=()
+# Plain string, not an array: macOS bash 3.2 + `set -u` errors on an empty
+# array's "${arr[@]}" expansion. An unquoted empty string simply expands to no
+# argument, which is exactly what we want here (a single optional flag).
+SHORT_FLAG=
 if [ "${DET_SHORT:-0}" = "1" ]; then
-  SHORT_FLAG=(-short)
+  SHORT_FLAG=-short
   echo "--- DET_SHORT=1: epoch-boundary phase only (skipping fork activation) ---"
 fi
 
@@ -78,6 +81,6 @@ SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
 SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
 SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
   go test ./test/integration/ -run TestAppHashDeterminism_FourValidators \
-  -tags=integration -count=1 -v -timeout 1800s "${SHORT_FLAG[@]}"
+  -tags=integration -count=1 -v -timeout 1800s $SHORT_FLAG
 
 echo "=== DETERMINISM RUN PASSED: AppHash byte-identical across all 4 nodes ==="
