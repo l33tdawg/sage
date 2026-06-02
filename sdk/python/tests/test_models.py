@@ -9,6 +9,25 @@ def test_memory_record_validation(sample_memory):
     assert record.confidence_score == 0.85
 
 
+def test_memory_record_parses_provider(sample_memory):
+    # The server emits `provider` (the submitter's provenance tag, e.g.
+    # "claude-code") on every memory record, and list_memories()/query()
+    # already accept it as a filter. The model must read it back so a caller
+    # who filters by provider can also see which provider a record carried.
+    from sage_sdk.models import MemoryRecord
+    record = MemoryRecord(**{**sample_memory, "provider": "claude-code"})
+    assert record.provider == "claude-code"
+
+
+def test_memory_record_tolerates_missing_provider(sample_memory):
+    # An older server (or a record submitted without a provider) omits the
+    # field; the additive Optional defaults to None so the model still
+    # validates (forward/back compat).
+    from sage_sdk.models import MemoryRecord
+    record = MemoryRecord(**sample_memory)
+    assert record.provider is None
+
+
 def test_memory_record_invalid_type():
     from sage_sdk.models import MemoryRecord
     with pytest.raises(Exception):  # ValidationError
