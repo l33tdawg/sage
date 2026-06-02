@@ -65,6 +65,13 @@ class MemoryRecord(BaseModel):
     votes: list | None = None
     corroborations: list | None = None
     similarity_score: float | None = None
+    # Provenance tag the submitter attached to the memory (e.g. "claude-code",
+    # "chatgpt"). The server emits it as `provider` (json:"provider,omitempty")
+    # on every record and list_memories()/query() already accept it as a
+    # filter, but the model dropped it on read — so a caller could filter by
+    # provider yet never see which provider a returned record carried.
+    # Additive Optional: older servers omit it, so it defaults to None.
+    provider: str | None = None
 
 
 class MemorySubmitRequest(BaseModel):
