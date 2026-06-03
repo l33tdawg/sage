@@ -2351,8 +2351,9 @@ func (app *SageApp) processMemoryCorroborate(parsedTx *tx.ParsedTx, height int64
 	// app-v10 has no memauthor: record (author == ""), so the self-check is skipped
 	// for it. The corrob: dedup marker is written in the consensus path (immediate,
 	// not buffered) so two same-agent corroborations in ONE block are caught.
-	if app.postAppV10Fork(height) {
-		recordAppV10Branch(true)
+	postV10 := app.postAppV10Fork(height)
+	recordAppV10Branch(postV10) // both branches counted so the dashboard sees the pre/post split
+	if postV10 {
 		// The memory must already exist on-chain. memoryID is client-supplied, and
 		// without this an attacker corroborates an ID it controls BEFORE submitting
 		// it: the author is empty so the self-check is skipped, a corrob: marker is
@@ -3319,10 +3320,13 @@ func (app *SageApp) processAgentRegister(parsedTx *tx.ParsedTx, height int64, bl
 	// operator admin still arrives via the operator-blessed bootstrapAdminFromSQL
 	// path (processAgentSetPermission). Org-scoped roles are set elsewhere
 	// (processOrgAddMember, gated by org-admin) and are untouched.
-	if app.postAppV9Rules(height) && role == "admin" {
-		recordAppV9Branch(true)
-		app.logger.Warn().Str("agent_id", regAgentID[:16]).Msg("app-v9: wire-supplied role=admin on self-registration downgraded to member")
-		role = "member"
+	if role == "admin" {
+		postV9 := app.postAppV9Rules(height)
+		recordAppV9Branch(postV9) // both branches counted so the dashboard sees the pre/post split
+		if postV9 {
+			app.logger.Warn().Str("agent_id", regAgentID[:16]).Msg("app-v9: wire-supplied role=admin on self-registration downgraded to member")
+			role = "member"
+		}
 	}
 	if regErr := app.badgerStore.RegisterAgent(regAgentID, reg.Name, role, reg.BootBio, reg.Provider, reg.P2PAddress, height); regErr != nil {
 		return &abcitypes.ExecTxResult{Code: 61, Log: fmt.Sprintf("badger write error: %v", regErr)}
