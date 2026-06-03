@@ -57,7 +57,21 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v9.1.0
+## What's New in v9.2.0
+
+**Corroboration integrity and an on-chain author field.** v9.2.0 activates a new independent `app-v10` consensus fork that makes corroboration a trustworthy multi-agent signal, and exposes corroboration on the MCP surface. Like every SAGE fork it is replay-safe by construction: no existing chain has activated `app-v10`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
+
+- **Corroboration is now guarded in consensus.** Corroboration is the signal that moves a memory from attributed toward consensus, so it must come from independent agents. Post-`app-v10`, `FinalizeBlock` rejects a self-corroboration (an agent backing its own memory), a duplicate corroboration (the same agent backing a memory twice), and a corroboration of a memory that was never submitted. Previously none of these was checked, so a single agent could inflate a memory's corroboration weight. The checks read only on-chain state, so every validator reaches the same verdict.
+- **The memory author is now an on-chain field.** A memory's submitting agent was recorded only in the off-chain SQL mirror; it is surfaced through the REST API and the Python SDK, but it was not part of consensus state. Post-`app-v10`, the author is written on-chain at submit time, immutably (the first writer wins, so a re-submission of the same id by a different agent cannot displace it). This is the authoritative source the corroboration guard checks. The guard is forward-looking: memories submitted before the fork have no on-chain author, so the self-corroboration check applies only to memories created after activation.
+- **Corroborate is exposed on the MCP surface.** `sage_corroborate` joins the memory-lifecycle tools (remember, recall, forget, list), so an MCP-only client can reinforce a memory it has independently verified without dropping to signed REST. It wraps the existing endpoint and inherits the app-v10 guarantees. Thanks to [@ihubanov](https://github.com/ihubanov), who proposed and prototyped it (issue #31).
+- **Independent, halt-safe fork.** `app-v10` ranks highest in the committed app version and subsumes the lower forks' rules, so a chain cannot activate `app-v10` and silently lose `app-v8`/`app-v9`'s guarantees. The upgrade watchdog stays targeted at `app-v6`, so `app-v10` never auto-fires; it activates only via an explicit governance upgrade plan.
+
+SDK 9.2.0.
+
+## Older releases
+
+<details>
+<summary>v9.1.0 — consensus-path nonce/replay enforcement + defense-in-depth hardening</summary>
 
 **Consensus-path nonce/replay enforcement and defense-in-depth hardening.** v9.1.0 activates a new independent `app-v9` consensus fork that closes the replay boundary v9.0.0 flagged and tightens two more authorization seams. Like every SAGE fork it is replay-safe by construction: no existing chain has activated `app-v9`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
 
@@ -68,7 +82,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 SDK 9.1.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v9.0.0 — governance-gated upgrades + consensus-path signature verification</summary>
