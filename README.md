@@ -57,7 +57,22 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v8.9.0
+## What's New in v9.0.0
+
+**Governance-gated upgrades and consensus-path signature verification.** v9.0.0 activates a new independent `app-v8` consensus fork that hardens how the chain authorizes high-value actions. It is replay-safe by construction: no existing chain has activated `app-v8`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
+
+- **Upgrades now require a 2/3 governance quorum.** Pre-`app-v8`, a single Ed25519-verified `UpgradePropose` self-activated a chain-wide app-version bump, so any well-formed key could schedule a fork. Post-`app-v8`, that tx no longer self-activates: it must come from an admin agent and only creates a governance `OpUpgrade` proposal, reusing the existing governance engine. The upgrade plan is persisted and scheduled only after a 2/3 validator-power supermajority accepts. This is the real authority gate the v8.9.0 `UpgradePropose` doc note flagged as future work.
+- **Transaction signatures are now verified in the consensus path.** `tx.VerifyTx` (the outer Ed25519 check) runs inside `FinalizeBlock`, not only at mempool admission (`CheckTx`). `CheckTx` is advisory: a Byzantine block proposer can include txs that never passed an honest node's mempool. Without this, a forged `UpgradePropose` or `GovVote` bearing a victim's public key (signed by the attacker) would execute, letting one proposer fabricate the very 2/3 quorum the upgrade gate relies on. The gate covers every tx type, so all governance (validator-set changes, memory votes, access control) is now authenticated in consensus, not just at the mempool.
+- **Independent, halt-safe fork.** `app-v8` is decoupled from the PoE fork ladder (like `app-v7`) and ranks highest in the committed app version. The upgrade watchdog stays targeted at `app-v6`, so `app-v8` never auto-fires; it activates only via an explicit governance upgrade plan.
+
+Known boundary (tracked for a future fork): consensus-path nonce/replay is still enforced only at `CheckTx`. The tx handlers absorb a replayed signed tx idempotently (duplicate-vote rejection, the single-active-proposal slot, content-hash dedup), so it is safe in practice.
+
+Also: `MemoryRecord` in the Python SDK now reads back the `provider` provenance tag the server emits (thanks to [@ihubanov](https://github.com/ihubanov), #30). SDK 9.0.0.
+
+## Older releases
+
+<details>
+<summary>v8.9.0 — fail-safe content-validation routing + consensus-pure enforcement</summary>
 
 **Hardened the Layer-2 content-validation seam so the gate cannot fail open, and made its enforcement a pure function of consensus state.** Three fixes to the generic, deployment-agnostic content gate from v8.7.0/v8.8.0. All are AppHash-neutral for existing chains: the gate only runs once a chain activates the `app-v7` fork, and a stock build (no validators compiled in) stays byte-identical to v8.8.1.
 
@@ -68,7 +83,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 SDK 8.9.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v8.8.1 — /v1/embed reports the actual embedding model</summary>
