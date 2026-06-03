@@ -1645,12 +1645,42 @@ func (s *SQLiteStore) DeleteMemory(ctx context.Context, memoryID string) error {
 	return nil
 }
 
-// BackfillFTS populates the FTS5 index from existing memories that aren't yet indexed.
-// Only works when vault is nil (plaintext available). Call after vault setup.
+// BackfillFTS populates the FTS5 index from existing memories that aren't yet
+// indexed. Only works when vault is nil (plaintext available). Call after vault
+// setup, and ASYNCHRONOUSLY (see the call site) — on a large chain the initial
+// index build is a CPU-bound SQLite sort that must never block node startup.
+//
+// A cheap COUNT gate short-circuits when the index already covers every active
+// memory, so a restart does NOT re-run the expensive work. This matters because
+// memories_fts is an FTS5 virtual table whose columns are NOT B-tree indexed for
+// equality: the `LEFT JOIN memories_fts ON memory_id = memory_id` anti-join below
+// forces SQLite to materialize and sort the whole index (minutes of pegged CPU on
+// an 830k-row chain). Pre-gate, that ran on every boot — even with nothing to
+// insert — and wedged startup before the first block was produced. Every
+// store/update/deprecate path keeps FTS in sync incrementally, so once the initial
+// backfill completes the gate makes subsequent boots a sub-second no-op.
 func (s *SQLiteStore) BackfillFTS(ctx context.Context) error {
 	if s.vault != nil {
 		return nil // Can't index encrypted content
 	}
+
+	// Cheap gate (reads only — no writeMu, so it never blocks the block-mirror
+	// writer): skip when the index already covers the active set. count(*) on
+	// memories_fts scans the FTS5 content shadow table (no tokenization/sort);
+	// count on memories uses idx_memories_status. Deprecation removes the row from
+	// FTS too, so ftsCount tracks active-indexed rows — ftsCount >= activeCount
+	// means every active memory is already indexed.
+	var ftsCount, activeCount int64
+	if err := s.conn.QueryRowContext(ctx, `SELECT count(*) FROM memories_fts`).Scan(&ftsCount); err != nil {
+		return fmt.Errorf("backfill FTS: count index: %w", err)
+	}
+	if err := s.conn.QueryRowContext(ctx, `SELECT count(*) FROM memories WHERE status != 'deprecated'`).Scan(&activeCount); err != nil {
+		return fmt.Errorf("backfill FTS: count memories: %w", err)
+	}
+	if ftsCount >= activeCount {
+		return nil // index already complete — skip the expensive anti-join
+	}
+
 	_, err := s.writeExecContext(ctx, `
 		INSERT INTO memories_fts(memory_id, content, domain_tag)
 		SELECT m.memory_id, m.content, m.domain_tag

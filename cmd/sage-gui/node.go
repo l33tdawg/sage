@@ -217,10 +217,22 @@ func runServe() (rerr error) {
 		logger.Info().Msg("v7.5 snapshot scheduler armed")
 	}
 
-	// Backfill FTS5 index for existing memories (only when vault is not active).
-	if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
-		logger.Warn().Err(ftsErr).Msg("FTS5 backfill failed — text search may be incomplete")
-	}
+	// Backfill the FTS5 text-search index for any pre-existing memories that
+	// predate incremental indexing. Runs ASYNC: on a large chain the initial build
+	// is a CPU-bound SQLite sort, and running it synchronously here wedged startup
+	// before the first block was ever produced (health dead, no consensus).
+	// BackfillFTS self-gates with a cheap count check, so this is a fast no-op once
+	// the index is current; a genuinely-needed build proceeds in the background
+	// (off the consensus path — it only touches the off-chain SQLite mirror) while
+	// the node boots and produces blocks. No-op when the vault is active.
+	go func() {
+		start := time.Now()
+		if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
+			logger.Warn().Err(ftsErr).Msg("FTS5 backfill failed — text search may be incomplete")
+			return
+		}
+		logger.Info().Dur("elapsed", time.Since(start)).Msg("FTS5 backfill complete (or already current)")
+	}()
 
 	// Create embedding provider
 	embedProvider := createEmbeddingProvider(cfg, logger)
