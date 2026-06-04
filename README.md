@@ -57,7 +57,20 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v9.2.0
+## What's New in v9.2.1
+
+**Startup and liveness hardening — no consensus change.** v9.2.1 is a non-fork patch on top of v9.2.0's `app-v10`: the committed app version stays 10 and all three fixes live off the consensus path, so every historical block replays byte-identically. It clears a startup wedge on large chains, completes the fork-activation metrics, and lifts the last cross-restart limits on the nonce allocator.
+
+- **FTS5 backfill no longer wedges node startup on large chains.** The full-text-search backfill ran a full anti-join against the `memories_fts` table on *every* boot, synchronously, before the node produced its first block — and because FTS5 columns aren't B-tree indexed, that forced SQLite to materialize and sort the entire index (minutes of one-core-pegged CPU on an 830k-row chain) even when there was nothing to insert. Boot wedged: health dead, no consensus, until the sort finished. v9.2.1 adds a cheap count gate that skips the anti-join entirely when the index already covers every active memory (instant restart), and runs a genuinely-needed build asynchronously in the background while the node boots and produces blocks. It touches only the off-chain SQLite mirror — no consensus or AppHash involvement — and the bug predates v9.2.0.
+- **Fork-activation metrics now record both sides of the split.** The `app-v9`/`app-v10` branch counters were only ever incremented inside the post-fork path, so the activation dashboard's "pre" label stayed empty and couldn't plot the pre/post ratio. v9.2.1 records the actual fork boolean on every relevant op. The "post" counts are byte-identical to before; only the previously-dead "pre" label now populates. Metrics-only — never part of the AppHash.
+- **The nonce allocator seeds from the chain's committed nonce.** The `app-v9` consensus gate rejects any tx whose nonce is at or below the signer's highest committed nonce. The in-process `MonotonicNonce` allocator previously trusted the wall clock to exceed that on a fresh or post-restart process, with documented liveness-only limits. It now seeds each key's floor — once, on first use — from the highest nonce already committed on-chain (via `max()`, so it can only raise the floor, never regress a value an allocation already set). This lifts the cross-restart and cross-process liveness limits with no consensus rule, no fork, and no AppHash impact.
+
+SDK 9.2.1.
+
+## Older releases
+
+<details>
+<summary>v9.2.0 — app-v10 corroboration integrity guard + on-chain author field</summary>
 
 **Corroboration integrity and an on-chain author field.** v9.2.0 activates a new independent `app-v10` consensus fork that makes corroboration a trustworthy multi-agent signal, and exposes corroboration on the MCP surface. Like every SAGE fork it is replay-safe by construction: no existing chain has activated `app-v10`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
 
@@ -68,7 +81,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 SDK 9.2.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v9.1.0 — consensus-path nonce/replay enforcement + defense-in-depth hardening</summary>
