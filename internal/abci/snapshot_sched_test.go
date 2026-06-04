@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -187,6 +188,106 @@ func TestSnapshotScheduler_ConcurrentTicksCoalesce(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected exactly 1 coalesced snapshot, got %d", count)
+	}
+}
+
+func TestSnapshotScheduler_KeepLastDefaults(t *testing.T) {
+	dataDir, db := seedTestDataDir(t)
+	defer func() { _ = db.Close() }()
+
+	// Unset KeepLast (zero value) must resolve to the package default.
+	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
+		DataDir:        dataDir,
+		BinaryVersion:  "v7.5.0-test",
+		HeightInterval: 5,
+		LiveBadger:     db,
+	}, zerolog.Nop())
+	if sched == nil {
+		t.Fatal("expected scheduler, got nil")
+	}
+	if sched.cfg.KeepLast != defaultSnapshotKeepLast {
+		t.Fatalf("KeepLast default: got %d want %d", sched.cfg.KeepLast, defaultSnapshotKeepLast)
+	}
+
+	// An explicit value is honored verbatim.
+	sched2 := NewSnapshotScheduler(SnapshotSchedulerConfig{
+		DataDir:        dataDir,
+		BinaryVersion:  "v7.5.0-test",
+		HeightInterval: 5,
+		KeepLast:       3,
+		LiveBadger:     db,
+	}, zerolog.Nop())
+	if sched2.cfg.KeepLast != 3 {
+		t.Fatalf("KeepLast explicit: got %d want 3", sched2.cfg.KeepLast)
+	}
+}
+
+// TestSnapshotScheduler_RetentionPrunesAfterTake seeds three stale snapshots,
+// fires one real Take with KeepLast=2, and asserts the scheduler pruned all
+// but the 2 newest once the snapshot goroutine (which runs retention) drains.
+// The stale dirs carry no manifest (binaryVersion="") so none is pinned as an
+// anchor — making the kept set deterministic.
+func TestSnapshotScheduler_RetentionPrunesAfterTake(t *testing.T) {
+	dataDir, db := seedTestDataDir(t)
+	defer func() { _ = db.Close() }()
+
+	snaps := filepath.Join(dataDir, "snapshots")
+	for _, h := range []int{10, 20, 30} {
+		d := filepath.Join(snaps, strconv.Itoa(h))
+		if mkErr := os.MkdirAll(d, 0o700); mkErr != nil {
+			t.Fatalf("mkdir stale %d: %v", h, mkErr)
+		}
+		// "OK" sentinel makes it a real (prunable) snapshot to KeepLast.
+		if wErr := os.WriteFile(filepath.Join(d, "OK"), nil, 0o600); wErr != nil {
+			t.Fatalf("OK %d: %v", h, wErr)
+		}
+	}
+
+	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
+		DataDir:        dataDir,
+		BinaryVersion:  "v7.5.0-test",
+		HeightInterval: 5,
+		KeepLast:       2,
+		LiveBadger:     db,
+	}, zerolog.Nop())
+	if sched == nil {
+		t.Fatal("expected scheduler, got nil")
+	}
+
+	// Fire a real snapshot at height 100. lastHeight=0, interval=5 → fires.
+	sched.Tick(100, []byte{0x64})
+
+	// Wait for runTake (Take + retention) to fully drain.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if !sched.inFlight.Load() {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if sched.inFlight.Load() {
+		t.Fatal("runTake never finished (inFlight still set)")
+	}
+
+	// The new snapshot must exist...
+	if _, err := os.Stat(filepath.Join(snaps, "100", "OK")); err != nil {
+		t.Fatalf("snapshot at height 100 missing: %v", err)
+	}
+	// ...and retention must have kept exactly the 2 newest {100, 30},
+	// removing the older {10, 20}.
+	entries, err := os.ReadDir(snaps)
+	if err != nil {
+		t.Fatalf("read snapshots: %v", err)
+	}
+	got := map[string]bool{}
+	for _, e := range entries {
+		if e.IsDir() && e.Name()[0] != '.' {
+			got[e.Name()] = true
+		}
+	}
+	want := map[string]bool{"100": true, "30": true}
+	if len(got) != len(want) || !got["100"] || !got["30"] {
+		t.Fatalf("retention kept %v, want %v", got, want)
 	}
 }
 

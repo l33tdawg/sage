@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,6 +41,7 @@ import (
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/orchestrator"
+	"github.com/l33tdawg/sage/internal/snapshot"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -220,6 +222,18 @@ func runServe() (rerr error) {
 	// — better than skipping snapshots entirely, since rollback is
 	// only possible if anchors exist on disk.
 	snapEncrypted := vaultUnlocked && vaultPassphrase != ""
+	// Snapshot retention: keep the N newest snapshots (plus one anchor per
+	// binary version, which is never pruned). Override with SAGE_SNAPSHOT_KEEP
+	// (must be >=1); default 5. Before v9.2.2 retention was never wired, so
+	// long-lived nodes accumulated snapshots unbounded.
+	snapKeep := 5
+	if v := os.Getenv("SAGE_SNAPSHOT_KEEP"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			snapKeep = n
+		} else {
+			logger.Warn().Str("value", v).Int("using", snapKeep).Msg("ignoring invalid SAGE_SNAPSHOT_KEEP (want integer >= 1)")
+		}
+	}
 	if sched := sageabci.NewSnapshotScheduler(sageabci.SnapshotSchedulerConfig{
 		DataDir:         cfg.DataDir,
 		BinaryVersion:   version,
@@ -228,11 +242,31 @@ func runServe() (rerr error) {
 		VaultPassphrase: vaultPassphrase,
 		HeightInterval:  10_000,
 		TimeInterval:    6 * time.Hour,
+		KeepLast:        snapKeep,
 		LiveBadger:      badgerStore.DB(),
 	}, logger); sched != nil {
 		app.SetSnapshotScheduler(sched)
 		logger.Info().Msg("v7.5 snapshot scheduler armed")
 	}
+
+	// Snapshot housekeeping (off the consensus path — touches only
+	// DataDir/snapshots/). Runs ASYNC so a large backlog doesn't delay boot:
+	// reap .staging-* dirs left by crashed Takes, then prune all but the
+	// newest snapshots (plus per-version anchors). This is what clears the
+	// unbounded accumulation that existed before v9.2.2 wired retention; the
+	// scheduler keeps it bounded thereafter by pruning after each Take.
+	go func() {
+		if swept, sErr := snapshot.SweepStaging(cfg.DataDir); sErr != nil {
+			logger.Warn().Err(sErr).Msg("snapshot staging sweep hit an error")
+		} else if swept > 0 {
+			logger.Info().Int("removed", swept).Msg("reaped crashed snapshot staging dirs")
+		}
+		if pruned, pErr := snapshot.KeepLast(cfg.DataDir, snapKeep); pErr != nil {
+			logger.Warn().Err(pErr).Int("keep_last", snapKeep).Msg("snapshot retention (KeepLast) hit an error at boot")
+		} else if pruned > 0 {
+			logger.Info().Int("removed", pruned).Int("keep_last", snapKeep).Msg("snapshot retention pruned old snapshots at boot")
+		}
+	}()
 
 	// Backfill the FTS5 text-search index for any pre-existing memories that
 	// predate incremental indexing. Runs ASYNC: on a large chain the initial build

@@ -49,6 +49,8 @@ func main() {
 		err = runImport()
 	case "backup":
 		err = runBackup()
+	case "snapshot":
+		err = runSnapshot(os.Args[2:])
 	case "recover":
 		err = runRecover()
 	case "quorum-init":
@@ -88,6 +90,7 @@ Commands:
   export    Export memories to a .vault file (optionally encrypted)
   import    Import memories from a .vault file
   backup    Create a timestamped backup of the memory database
+  snapshot  List or prune on-disk chain snapshots (list | prune [--keep N])
   recover   Reset vault passphrase using your recovery key
   quorum-init   Initialize a quorum network (generates shared genesis)
   quorum-join   Join a quorum network (imports genesis from another node)
@@ -100,6 +103,7 @@ Environment:
   SAGE_HOME       Data directory (default: ~/.sage)
   SAGE_API_URL    REST API base URL (default: http://localhost:8080)
   SAGE_AGENT_KEY  Explicit agent key path (overrides per-project derivation)
+  SAGE_SNAPSHOT_KEEP  Snapshots to retain (newest N + per-version anchors; default 5)
 
 MCP Subcommands:
   mcp             Run as MCP server (stdio)
