@@ -1285,7 +1285,7 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 	if h.CometBFTRPC != "" && h.SigningKey != nil {
 		submitTx := &tx.ParsedTx{
 			Type:      tx.TxTypeMemorySubmit,
-			Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+			Nonce:     tx.MonotonicNonce(h.SigningKey),
 			Timestamp: time.Now(),
 			MemorySubmit: &tx.MemorySubmit{
 				MemoryID:        memoryID,

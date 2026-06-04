@@ -112,7 +112,7 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 
 	proposeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeGovPropose,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		GovPropose: &tx.GovPropose{
 			Operation:    op,
@@ -186,7 +186,7 @@ func (s *Server) handleGovVote(w http.ResponseWriter, r *http.Request) {
 
 	voteTx := &tx.ParsedTx{
 		Type:      tx.TxTypeGovVote,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		GovVote: &tx.GovVote{
 			ProposalID: req.ProposalID,
@@ -248,7 +248,7 @@ func (s *Server) handleGovCancel(w http.ResponseWriter, r *http.Request) {
 
 	cancelTx := &tx.ParsedTx{
 		Type:      tx.TxTypeGovCancel,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		GovCancel: &tx.GovCancel{
 			ProposalID: req.ProposalID,

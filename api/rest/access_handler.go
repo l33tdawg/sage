@@ -67,7 +67,7 @@ func (s *Server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
 
 	accessTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAccessRequest,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		AccessRequest: &tx.AccessRequest{
 			RequesterID:    agentID,
@@ -132,7 +132,7 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 
 	grantTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAccessGrant,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		AccessGrant: &tx.AccessGrant{
 			GranterID: agentID,
@@ -196,7 +196,7 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 
 	revokeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAccessRevoke,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		AccessRevoke: &tx.AccessRevoke{
 			RevokerID: agentID,
@@ -294,7 +294,7 @@ func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 
 	domainTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDomainRegister,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		DomainRegister: &tx.DomainRegister{
 			DomainName:   req.Name,

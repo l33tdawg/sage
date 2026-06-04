@@ -78,6 +78,14 @@ func main() {
 	}
 	defer func() { _ = app.Close() }()
 
+	// Content-validation enforcement advisory (non-fatal): warn when the app-v7
+	// fork is active but this binary has no validator registry compiled in, so
+	// this node won't enforce the gate. A mixed fleet (some nodes wired, some
+	// not) would diverge — surface it so operators run a uniform build.
+	if warn := app.ContentValidationEnforcementWarning(); warn != "" {
+		logger.Warn().Msg(warn)
+	}
+
 	health.SetPostgresHealth(true)
 	logger.Info().Msg("SAGE ABCI application created")
 

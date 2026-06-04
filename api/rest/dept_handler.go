@@ -55,7 +55,7 @@ func (s *Server) handleDeptRegister(w http.ResponseWriter, r *http.Request) {
 
 	deptTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDeptRegister,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		DeptRegister: &tx.DeptRegister{
 			OrgID:       orgID,
@@ -172,7 +172,7 @@ func (s *Server) handleDeptAddMember(w http.ResponseWriter, r *http.Request) {
 
 	addTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDeptAddMember,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		DeptAddMember: &tx.DeptAddMember{
 			OrgID:     orgID,
@@ -223,7 +223,7 @@ func (s *Server) handleDeptRemoveMember(w http.ResponseWriter, r *http.Request) 
 
 	removeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDeptRemoveMember,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		DeptRemoveMember: &tx.DeptRemoveMember{
 			OrgID:   orgID,

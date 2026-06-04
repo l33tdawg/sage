@@ -171,7 +171,7 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 			go func() {
 				registerTx := &tx.ParsedTx{
 					Type:      tx.TxTypeAgentRegister,
-					Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
+					Nonce:     tx.MonotonicNonce(h.SigningKey),
 					Timestamp: time.Now(),
 					AgentRegister: &tx.AgentRegister{
 						AgentID:    agentID,
@@ -324,7 +324,7 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 					domainAccess := existing.DomainAccess
 					permTx := &tx.ParsedTx{
 						Type:      tx.TxTypeAgentSetPermission,
-						Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
+						Nonce:     tx.MonotonicNonce(h.SigningKey),
 						Timestamp: time.Now(),
 						AgentSetPermission: &tx.AgentSetPermission{
 							AgentID:       id,
@@ -774,7 +774,7 @@ func (h *DashboardHandler) handleMergeAgent(agentStore store.AgentStore) http.Ha
 			go func() {
 				reassignTx := &tx.ParsedTx{
 					Type:      tx.TxTypeMemoryReassign,
-					Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
+					Nonce:     tx.MonotonicNonce(h.SigningKey),
 					Timestamp: time.Now(),
 					MemoryReassign: &tx.MemoryReassign{
 						SourceAgentID: req.SourceAgentID,
@@ -858,7 +858,7 @@ func (h *DashboardHandler) handleTransferTag(agentStore store.AgentStore) http.H
 			go func() {
 				reassignTx := &tx.ParsedTx{
 					Type:      tx.TxTypeMemoryReassign,
-					Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive
+					Nonce:     tx.MonotonicNonce(h.SigningKey),
 					Timestamp: time.Now(),
 					MemoryReassign: &tx.MemoryReassign{
 						SourceAgentID: req.SourceAgentID,
@@ -927,7 +927,7 @@ func (h *DashboardHandler) handleTransferDomain(agentStore store.AgentStore) htt
 			go func() {
 				reassignTx := &tx.ParsedTx{
 					Type:      tx.TxTypeMemoryReassign,
-					Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
+					Nonce:     tx.MonotonicNonce(h.SigningKey),
 					Timestamp: time.Now(),
 					MemoryReassign: &tx.MemoryReassign{
 						SourceAgentID: req.SourceAgentID,
@@ -1128,7 +1128,7 @@ This agent will connect to the primary node's network.
 func (h *DashboardHandler) broadcastAgentUpdate(agentID, name, bio string) error {
 	updateTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAgentUpdate,
-		Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(h.SigningKey),
 		Timestamp: time.Now(),
 		AgentUpdateTx: &tx.AgentUpdate{
 			AgentID: agentID,

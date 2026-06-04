@@ -492,6 +492,7 @@ func TestOpToString_OpDomainReassign(t *testing.T) {
 		{governance.OpRemoveValidator, "remove_validator"},
 		{governance.OpUpdatePower, "update_power"},
 		{governance.OpDomainReassign, "domain_reassign"},
+		{governance.OpUpgrade, "upgrade"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.want, func(t *testing.T) {

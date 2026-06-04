@@ -34,6 +34,7 @@ import (
 	"github.com/l33tdawg/sage/api/rest"
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	sageabci "github.com/l33tdawg/sage/internal/abci"
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/mcp"
 	"github.com/l33tdawg/sage/internal/memory"
@@ -175,6 +176,22 @@ func runServe() (rerr error) {
 	}
 	defer badgerStore.CloseBadger() //nolint:errcheck
 
+	// Seed the replay-nonce allocator from the chain's committed nonces. The
+	// app-v9 consensus gate rejects any tx whose nonce <= the signer's highest
+	// committed nonce, so on a fresh process / post-restart every in-process
+	// producer (REST, web, watchdog, validator txs — all on the shared node key)
+	// must resume ABOVE the chain instead of trusting the wall clock to exceed it.
+	// Local badger read, keyed exactly like the consensus path
+	// (auth.PublicKeyToAgentID), consulted at most once per key. Liveness-only,
+	// never in the AppHash. GetNonce returns 0 for an unseen key -> no-op seed.
+	tx.SetNonceFloorFunc(func(pub ed25519.PublicKey) (uint64, bool) {
+		n, gerr := badgerStore.GetNonce(auth.PublicKeyToAgentID(pub))
+		if gerr != nil || n == 0 {
+			return 0, false
+		}
+		return n, true
+	})
+
 	// Create SAGE ABCI app with SQLite backend
 	app, err := sageabci.NewSageAppWithStores(badgerStore, sqliteStore, logger)
 	if err != nil {
@@ -182,6 +199,15 @@ func runServe() (rerr error) {
 	}
 	app.Version = version
 	defer func() { _ = app.Close() }()
+
+	// Content-validation enforcement advisory (non-fatal): warn when the app-v7
+	// fork is active on this chain but this binary has no validator registry
+	// compiled in, so this node won't enforce the Layer-2 gate. Bootable by
+	// design — a generic-only fleet is valid — but a MIXED fleet (some nodes
+	// wired, some not) would diverge the AppHash, so surface it loudly.
+	if warn := app.ContentValidationEnforcementWarning(); warn != "" {
+		logger.Warn().Msg(warn)
+	}
 
 	// v7.5 snapshot scheduler: anchor every 10k blocks and every 6h
 	// of wall time. Snapshots include the live binary so a rollback
@@ -208,10 +234,22 @@ func runServe() (rerr error) {
 		logger.Info().Msg("v7.5 snapshot scheduler armed")
 	}
 
-	// Backfill FTS5 index for existing memories (only when vault is not active).
-	if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
-		logger.Warn().Err(ftsErr).Msg("FTS5 backfill failed — text search may be incomplete")
-	}
+	// Backfill the FTS5 text-search index for any pre-existing memories that
+	// predate incremental indexing. Runs ASYNC: on a large chain the initial build
+	// is a CPU-bound SQLite sort, and running it synchronously here wedged startup
+	// before the first block was ever produced (health dead, no consensus).
+	// BackfillFTS self-gates with a cheap count check, so this is a fast no-op once
+	// the index is current; a genuinely-needed build proceeds in the background
+	// (off the consensus path — it only touches the off-chain SQLite mirror) while
+	// the node boots and produces blocks. No-op when the vault is active.
+	go func() {
+		start := time.Now()
+		if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
+			logger.Warn().Err(ftsErr).Msg("FTS5 backfill failed — text search may be incomplete")
+			return
+		}
+		logger.Info().Dur("elapsed", time.Since(start)).Msg("FTS5 backfill complete (or already current)")
+	}()
 
 	// Create embedding provider
 	embedProvider := createEmbeddingProvider(cfg, logger)
@@ -907,6 +945,7 @@ func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore sto
 	type valConfig struct {
 		name     string
 		key      ed25519.PrivateKey
+		id       string // hex(pubkey) — matches the validator-set id and the on-chain vote key
 		validate func(content, hash, domain, memType string, conf float64) (string, string) // decision, reason
 	}
 
@@ -916,7 +955,8 @@ func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore sto
 	for i, name := range names {
 		keySeed := sha256.Sum256(append(seed[:], []byte("sage-validator-"+name)...))
 		key := ed25519.NewKeyFromSeed(keySeed[:])
-		validators[i] = valConfig{name: name, key: key}
+		pubKey := key.Public().(ed25519.PublicKey)
+		validators[i] = valConfig{name: name, key: key, id: hex.EncodeToString(pubKey)}
 	}
 
 	// Sentinel — baseline accept (permissive, ensures liveness)
@@ -990,6 +1030,12 @@ func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore sto
 	// tick forever, flooding the chain with redundant transactions.
 	voted := make(map[string]bool)
 
+	// app-v9 (#4): track unsupported upgrade proposals we've already warned about,
+	// so the 2s tick doesn't re-log the same warning every cycle. (Supported
+	// proposals are NOT suppressed by a local map — the auto-voter re-votes until
+	// the vote is confirmed on-chain, so a dropped broadcast self-heals.)
+	warnedProposals := make(map[string]bool)
+
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -1013,7 +1059,7 @@ func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore sto
 					// Create and sign vote transaction
 					voteTx := &tx.ParsedTx{
 						Type:      tx.TxTypeMemoryVote,
-						Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec
+						Nonce:     tx.MonotonicNonce(v.key), // strictly increasing per validator (app-v9 consensus nonce gate)
 						Timestamp: time.Now(),
 						MemoryVote: &tx.MemoryVote{
 							MemoryID:  mem.MemoryID,
@@ -1037,6 +1083,66 @@ func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore sto
 					broadcastVoteTx(cometRPC, encoded, logger)
 				}
 				voted[mem.MemoryID] = true
+			}
+
+			// app-v9 (#4): auto-vote on an active app-version upgrade proposal.
+			// Under app-v8 an UpgradePropose routes through the 2/3 governance
+			// quorum, but the in-process app-validators only auto-vote on
+			// memories — so without this an operator's upgrade proposal expires
+			// unvoted. Readiness gate: each validator votes ACCEPT only if this
+			// binary supports the target app version; an unsupported upgrade is
+			// left to expire rather than drawing this node toward a quorum it
+			// cannot execute (the liveness-layer guard against the
+			// maxSupportedAppVersion halt footgun). Votes are signed by the
+			// validators' consensus identities (v.key), the same power that
+			// counts toward the quorum.
+			//
+			// TOPOLOGY NOTE: the readiness gate keeps an unsupported upgrade from
+			// reaching quorum on the assumption that the upgrade PROPOSER is not
+			// itself a power-holding validator (standard deployment: 4 app-
+			// validators + a non-validator operator/admin proposer). If an
+			// operator key is added to the validator set, its own auto-accept (the
+			// proposer vote) gains power and the abstaining app-validators no
+			// longer fully bound the outcome — provision upgrade-proposer keys
+			// outside the validator set.
+			//
+			// Self-healing: rather than suppressing after one fire-and-forget
+			// broadcast (which silently disenfranchises the node if the broadcast
+			// is dropped), each validator re-votes every tick until its vote is
+			// confirmed on-chain. The engine rejects duplicate votes idempotently.
+			if proposalID, target, supported, ok := app.ActiveUpgradeVote(); ok {
+				if !supported {
+					if !warnedProposals[proposalID] {
+						logger.Warn().Str("proposal_id", proposalID).Uint64("target_app_version", target).Msg("active upgrade proposal targets an app version this binary does not support — NOT auto-voting; upgrade this binary to participate")
+						warnedProposals[proposalID] = true
+					}
+				} else {
+					for _, v := range validators {
+						if app.UpgradeProposalHasVote(proposalID, v.id) {
+							continue // already recorded on-chain — don't re-broadcast
+						}
+						voteTx := &tx.ParsedTx{
+							Type:      tx.TxTypeGovVote,
+							Nonce:     tx.MonotonicNonce(v.key), // strictly increasing per validator (app-v9 consensus nonce gate)
+							Timestamp: time.Now(),
+							GovVote: &tx.GovVote{
+								ProposalID: proposalID,
+								Decision:   voteDecisionFromString("accept"),
+							},
+						}
+						if signErr := tx.SignTx(voteTx, v.key); signErr != nil {
+							logger.Debug().Err(signErr).Msg("failed to sign gov vote tx")
+							continue
+						}
+						encoded, encErr := tx.EncodeTx(voteTx)
+						if encErr != nil {
+							logger.Debug().Err(encErr).Msg("failed to encode gov vote tx")
+							continue
+						}
+						logger.Info().Str("proposal_id", proposalID).Str("validator", v.name).Uint64("target_app_version", target).Msg("app validator auto-voting ACCEPT on supported upgrade proposal")
+						broadcastVoteTx(cometRPC, encoded, logger)
+					}
+				}
 			}
 		}
 	}

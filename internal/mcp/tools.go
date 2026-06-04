@@ -295,6 +295,19 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolGovStatus,
 		},
+		"sage_corroborate": {
+			Name:        "sage_corroborate",
+			Description: "Corroborate an existing memory: independently back it as the calling agent to reinforce a memory you have verified or observed from a second source. Corroboration is the multi-agent trust signal: once two or more distinct agents back a memory it transitions from attributed to consensus. A node cannot corroborate its own memory.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_id": map[string]any{"type": "string", "description": "ID of the memory to corroborate"},
+					"evidence":  map[string]any{"type": "string", "description": "Optional supporting note or source backing the corroboration"},
+				},
+				"required": []string{"memory_id"},
+			},
+			Handler: s.toolCorroborate,
+		},
 	}
 	return tools
 }
@@ -1935,6 +1948,38 @@ func (s *Server) toolGovVote(ctx context.Context, params map[string]any) (any, e
 		"status":      resp.Status,
 		"proposal_id": proposalID,
 		"decision":    decision,
+	}, nil
+}
+
+// toolCorroborate wraps POST /v1/memory/{memory_id}/corroborate, the one
+// memory-lifecycle operation that was previously reachable only over signed REST.
+// It signs and broadcasts a TxTypeMemoryCorroborate as the calling node, feeding
+// the PoE corroboration weight + confidence boost. Corroboration integrity is
+// enforced in consensus by the app-v10 fork (processMemoryCorroborate): once a
+// chain activates app-v10, a node cannot corroborate its own memory or
+// corroborate the same memory twice, so the tool inherits those guarantees for
+// free. (Issue #31, proposed by @ihubanov.)
+func (s *Server) toolCorroborate(ctx context.Context, params map[string]any) (any, error) {
+	memoryID := stringParam(params, "memory_id", "")
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	evidence := stringParam(params, "evidence", "")
+
+	body, _ := json.Marshal(map[string]string{"evidence": evidence})
+
+	var resp struct {
+		TxHash string `json:"tx_hash"`
+	}
+	path := "/v1/memory/" + url.PathEscape(memoryID) + "/corroborate"
+	if err := s.doSignedJSON(ctx, "POST", path, body, &resp); err != nil {
+		return nil, fmt.Errorf("corroborate memory: %w", err)
+	}
+
+	return map[string]any{
+		"memory_id": memoryID,
+		"tx_hash":   resp.TxHash,
+		"status":    "corroborated",
 	}, nil
 }
 

@@ -219,7 +219,7 @@ func buildUpgradeProposeTx(cfg upgradeWatchdogConfig) (*tx.ParsedTx, error) {
 
 	ptx := &tx.ParsedTx{
 		Type:           tx.TxTypeUpgradePropose,
-		Nonce:          uint64(ts), // #nosec G115 -- ts non-negative
+		Nonce:          tx.MonotonicNonce(cfg.AgentKey), // strictly increasing per signing key (app-v9 consensus nonce gate)
 		Timestamp:      time.Unix(ts, 0),
 		AgentPubKey:    pub,
 		AgentSig:       sig,

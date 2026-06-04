@@ -177,7 +177,7 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 
 	proposeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeGovPropose,
-		Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(h.SigningKey),
 		Timestamp: time.Now(),
 		GovPropose: &tx.GovPropose{
 			Operation:    op,
@@ -254,7 +254,7 @@ func (h *DashboardHandler) handleDashboardGovVote(w http.ResponseWriter, r *http
 
 	voteTx := &tx.ParsedTx{
 		Type:      tx.TxTypeGovVote,
-		Nonce:     uint64(time.Now().UnixNano()), //nolint:gosec // G115: UnixNano is always positive // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(h.SigningKey),
 		Timestamp: time.Now(),
 		GovVote: &tx.GovVote{
 			ProposalID: req.ProposalID,

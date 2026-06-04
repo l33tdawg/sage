@@ -57,13 +57,68 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v8.8.1
+## What's New in v9.2.0
+
+**Corroboration integrity and an on-chain author field.** v9.2.0 activates a new independent `app-v10` consensus fork that makes corroboration a trustworthy multi-agent signal, and exposes corroboration on the MCP surface. Like every SAGE fork it is replay-safe by construction: no existing chain has activated `app-v10`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
+
+- **Corroboration is now guarded in consensus.** Corroboration is the signal that moves a memory from attributed toward consensus, so it must come from independent agents. Post-`app-v10`, `FinalizeBlock` rejects a self-corroboration (an agent backing its own memory), a duplicate corroboration (the same agent backing a memory twice), and a corroboration of a memory that was never submitted. Previously none of these was checked, so a single agent could inflate a memory's corroboration weight. The checks read only on-chain state, so every validator reaches the same verdict.
+- **The memory author is now an on-chain field.** A memory's submitting agent was recorded only in the off-chain SQL mirror; it is surfaced through the REST API and the Python SDK, but it was not part of consensus state. Post-`app-v10`, the author is written on-chain at submit time, immutably (the first writer wins, so a re-submission of the same id by a different agent cannot displace it). This is the authoritative source the corroboration guard checks. The guard is forward-looking: memories submitted before the fork have no on-chain author, so the self-corroboration check applies only to memories created after activation.
+- **Corroborate is exposed on the MCP surface.** `sage_corroborate` joins the memory-lifecycle tools (remember, recall, forget, list), so an MCP-only client can reinforce a memory it has independently verified without dropping to signed REST. It wraps the existing endpoint and inherits the app-v10 guarantees. Thanks to [@ihubanov](https://github.com/ihubanov), who proposed and prototyped it (issue #31).
+- **Independent, halt-safe fork.** `app-v10` ranks highest in the committed app version and subsumes the lower forks' rules, so a chain cannot activate `app-v10` and silently lose `app-v8`/`app-v9`'s guarantees. The upgrade watchdog stays targeted at `app-v6`, so `app-v10` never auto-fires; it activates only via an explicit governance upgrade plan.
+
+SDK 9.2.0.
+
+## Older releases
+
+<details>
+<summary>v9.1.0 — consensus-path nonce/replay enforcement + defense-in-depth hardening</summary>
+
+**Consensus-path nonce/replay enforcement and defense-in-depth hardening.** v9.1.0 activates a new independent `app-v9` consensus fork that closes the replay boundary v9.0.0 flagged and tightens two more authorization seams. Like every SAGE fork it is replay-safe by construction: no existing chain has activated `app-v9`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
+
+- **Nonce/replay is now enforced in the consensus path.** v9.0.0 verified tx signatures in `FinalizeBlock` but still checked nonces only at `CheckTx` (advisory). Post-`app-v9`, `FinalizeBlock` rejects a tx whose nonce was already consumed (and rejects the nonce-0 sentinel), so a Byzantine proposer can no longer replay a victim's previously-valid signed tx into a block. Because strict-monotonic nonces are now consensus-enforced, every in-process transaction producer (validators, REST/web handlers, the upgrade watchdog) moved onto a process-global, strictly-increasing nonce allocator keyed by signing identity, replacing wall-clock timestamps that could collide.
+- **Admin role can no longer be self-granted over the wire.** Pre-`app-v9`, `agent_register` took the role straight from the payload, so any key could register itself as `admin`. Post-fork a wire `role="admin"` is silently downgraded to `member` (the registration still succeeds). The real upgrade-authority gate remains the 2/3 quorum plus the v9.0.0 consensus signature verification; this just removes the cheap path to a privileged role. Operator admins are unaffected: existing admins are grandfathered, and the operator-blessed bootstrap path is untouched.
+- **Validators auto-vote on upgrades, gated on readiness.** Under `app-v8` an upgrade needs an explicit 2/3 governance vote, but nothing cast it automatically, so a proposal could expire unvoted. The in-process validators now auto-vote accept on an active upgrade proposal, but only if the running binary actually supports the target app version. An upgrade to a version the binary can't execute never draws a quorum, which neutralizes a halt footgun (committing an app version the binary doesn't understand) at the liveness layer, with no new consensus rule.
+- **Independent, halt-safe fork.** `app-v9` ranks highest in the committed app version, and a higher independent fork now subsumes the lower forks' rules, so a chain cannot activate `app-v9` and silently lose `app-v8`'s guarantees. The upgrade watchdog stays targeted at `app-v6`, so `app-v9` never auto-fires; it activates only via an explicit governance upgrade plan.
+
+SDK 9.1.0.
+
+</details>
+
+<details>
+<summary>v9.0.0 — governance-gated upgrades + consensus-path signature verification</summary>
+
+**Governance-gated upgrades and consensus-path signature verification.** v9.0.0 activates a new independent `app-v8` consensus fork that hardens how the chain authorizes high-value actions. It is replay-safe by construction: no existing chain has activated `app-v8`, so every historical block replays byte-identically, and the new rules apply only after an operator governance-activates the fork.
+
+- **Upgrades now require a 2/3 governance quorum.** Pre-`app-v8`, a single Ed25519-verified `UpgradePropose` self-activated a chain-wide app-version bump, so any well-formed key could schedule a fork. Post-`app-v8`, that tx no longer self-activates: it must come from an admin agent and only creates a governance `OpUpgrade` proposal, reusing the existing governance engine. The upgrade plan is persisted and scheduled only after a 2/3 validator-power supermajority accepts. This is the real authority gate the v8.9.0 `UpgradePropose` doc note flagged as future work.
+- **Transaction signatures are now verified in the consensus path.** `tx.VerifyTx` (the outer Ed25519 check) runs inside `FinalizeBlock`, not only at mempool admission (`CheckTx`). `CheckTx` is advisory: a Byzantine block proposer can include txs that never passed an honest node's mempool. Without this, a forged `UpgradePropose` or `GovVote` bearing a victim's public key (signed by the attacker) would execute, letting one proposer fabricate the very 2/3 quorum the upgrade gate relies on. The gate covers every tx type, so all governance (validator-set changes, memory votes, access control) is now authenticated in consensus, not just at the mempool.
+- **Independent, halt-safe fork.** `app-v8` is decoupled from the PoE fork ladder (like `app-v7`) and ranks highest in the committed app version. The upgrade watchdog stays targeted at `app-v6`, so `app-v8` never auto-fires; it activates only via an explicit governance upgrade plan.
+
+Also: `MemoryRecord` in the Python SDK now reads back the `provider` provenance tag the server emits (thanks to [@ihubanov](https://github.com/ihubanov), #30). SDK 9.0.0.
+
+</details>
+
+<details>
+<summary>v8.9.0 — fail-safe content-validation routing + consensus-pure enforcement</summary>
+
+**Hardened the Layer-2 content-validation seam so the gate cannot fail open, and made its enforcement a pure function of consensus state.** Three fixes to the generic, deployment-agnostic content gate from v8.7.0/v8.8.0. All are AppHash-neutral for existing chains: the gate only runs once a chain activates the `app-v7` fork, and a stock build (no validators compiled in) stays byte-identical to v8.8.1.
+
+- **Fail-safe routing (was fail-open).** The router that maps a memory body to its `(domain, outcome_class)` validator used to return the empty class on any JSON error, so a malformed sibling field (a float or string `schema_version`), an array-wrapped body, or a cross-class value routed to an unregistered key and committed unvalidated. `parseOutcomeClass` now reads `outcome_class` independently of sibling-field types and unwraps a single-element array, so a malformed neighbor can no longer null the route.
+- **Closed-domain registration.** New `RegisterClosedDomain(domain)` on the validator registry: once a domain has at least one registered validator, a submission whose `outcome_class` has no validator is rejected (`Code 18`) instead of passing through. Open domains keep the backward-compatible pass-through, so existing wiring is unaffected. With the router fix, all three bypass vectors above now reject rather than commit unvalidated.
+- **Enforcement is consensus state, not a per-node flag.** Removed the runtime `SetContentValidationEnabled` toggle (breaking: callers should drop it). The gate now fires purely on `postAppV7Fork(height) && contentValidators != nil`, so two nodes on one binary cannot disagree on whether the gate is live. A node on an `app-v7` chain with no validators compiled in logs a startup warning that it will not enforce (a mixed fleet would diverge) but stays bootable.
+- **Doc correctness: `UpgradePropose` is a single-signer authority op, not 2/3-quorum-gated.** The type comment claimed a quorum gate the code never implemented; it now documents the real model so operators protect the proposer key. A true authority gate is tracked for a future `app-v8`.
+
+SDK 8.9.0.
+
+</details>
+
+<details>
+<summary>v8.8.1 — /v1/embed reports the actual embedding model</summary>
 
 **`POST /v1/embed` now reports the model that actually produced the embedding.** The handler previously wrote `model: "nomic-embed-text"` into every response regardless of the configured provider, so a node running the `openai-compatible` embedder mislabeled its vectors (e.g. `Alibaba-NLP/gte-Qwen2-1.5B-instruct` was reported as `nomic-embed-text`). `handleEmbed` now feature-detects the optional `embedding.Modeler` interface and reports the provider's real model, mirroring how the sibling `/v1/embed/info` already resolves `provider`. It falls back to the legacy default only for providers that don't expose a model (the hash provider), so that path is unchanged. Read-path REST only: no tx, no consensus, no AppHash contribution. SDK 8.8.1.
 
 Thanks to [@ihubanov](https://github.com/ihubanov) for the fix (#29).
 
-## Older releases
+</details>
 
 <details>
 <summary>v8.8 — governance-activatable app-v7 content-validation + halt-safety floor</summary>

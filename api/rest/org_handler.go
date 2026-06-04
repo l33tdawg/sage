@@ -73,7 +73,7 @@ func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 
 	orgTx := &tx.ParsedTx{
 		Type:      tx.TxTypeOrgRegister,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		OrgRegister: &tx.OrgRegister{
 			OrgID:       orgID,
@@ -282,7 +282,7 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 
 	addTx := &tx.ParsedTx{
 		Type:      tx.TxTypeOrgAddMember,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		OrgAddMember: &tx.OrgAddMember{
 			OrgID:     orgID,
@@ -331,7 +331,7 @@ func (s *Server) handleOrgRemoveMember(w http.ResponseWriter, r *http.Request) {
 
 	removeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeOrgRemoveMember,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		OrgRemoveMember: &tx.OrgRemoveMember{
 			OrgID:   orgID,
@@ -388,7 +388,7 @@ func (s *Server) handleOrgSetClearance(w http.ResponseWriter, r *http.Request) {
 
 	clearanceTx := &tx.ParsedTx{
 		Type:      tx.TxTypeOrgSetClearance,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		OrgSetClearance: &tx.OrgSetClearance{
 			OrgID:     orgID,
@@ -460,7 +460,7 @@ func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request)
 
 	proposeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeFederationPropose,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		FederationPropose: &tx.FederationPropose{
 			ProposerOrgID:    proposerOrg,
@@ -526,7 +526,7 @@ func (s *Server) handleFederationApprove(w http.ResponseWriter, r *http.Request)
 
 	approveTx := &tx.ParsedTx{
 		Type:      tx.TxTypeFederationApprove,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		FederationApprove: &tx.FederationApprove{
 			FederationID:  fedID,
@@ -591,7 +591,7 @@ func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) 
 
 	revokeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeFederationRevoke,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		FederationRevoke: &tx.FederationRevoke{
 			FederationID: fedID,

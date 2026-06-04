@@ -15,10 +15,11 @@ import (
 // generic Layer-2 content gate end-to-end through processMemorySubmit using the
 // same registration API any deployment uses — a trivial stub validator stands in
 // for whatever schemas a deployment compiles into its own build (SAGE core ships
-// none). It proves: the gate is dormant unless BOTH the flag and the app-v7 fork
-// are on; a registered (domain, outcome_class) whose validator errors becomes an
-// on-chain Code 18 reject; an unregistered key passes through; and free-form
-// prose (no JSON envelope, so outcome_class "") passes through.
+// none). It proves: the gate is dormant unless BOTH a registry is wired and the
+// app-v7 fork is active (no separate enable flag); a registered (domain,
+// outcome_class) whose validator errors becomes an on-chain Code 18 reject; an
+// unregistered key passes through; and free-form prose (no JSON envelope, so
+// outcome_class "") passes through.
 func TestContentGate_EndToEnd_RegisteredValidatorRejectsOnChain(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
@@ -37,11 +38,11 @@ func TestContentGate_EndToEnd_RegisteredValidatorRejectsOnChain(t *testing.T) {
 	// Dormant by default (nothing wired): the blocked body passes through and
 	// auto-registers the domain to the submitter.
 	d0 := app.processMemorySubmit(makeMemorySubmitTx(t, ak, domain, blocked), 10, time.Now())
-	assert.Equal(t, uint32(0), d0.Code, "gate dormant (no registry/flag/fork): blocked body must pass through")
+	assert.Equal(t, uint32(0), d0.Code, "gate dormant (no registry/fork): blocked body must pass through")
 
-	// Arm the gate: registry + flag + activate app-v7 at height 100.
+	// Arm the gate: wire the registry + activate app-v7 at height 100. There is
+	// no separate enable flag — a compiled-in registry past the fork is enough.
 	app.SetContentValidators(reg)
-	app.SetContentValidationEnabled(true)
 	app.appV7AppliedHeight = 100 // postAppV7Fork(h) is true only for h > 100
 
 	// At the activation height the fork is still pre-active (strict > semantic).

@@ -69,7 +69,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 
 	registerTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAgentRegister,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		AgentRegister: &tx.AgentRegister{
 			AgentID:    agentID,
@@ -141,7 +141,7 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 
 	updateTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAgentUpdate,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		AgentUpdateTx: &tx.AgentUpdate{
 			AgentID: agentID,
@@ -185,7 +185,7 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) reconcileAgentName(agentID, name, bio string) {
 	updateTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAgentUpdate,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		AgentUpdateTx: &tx.AgentUpdate{
 			AgentID: agentID,
@@ -324,7 +324,7 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 
 	permTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAgentSetPermission,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		AgentSetPermission: &tx.AgentSetPermission{
 			AgentID:       targetID,

@@ -250,7 +250,7 @@ func (h *DashboardHandler) processImportRecords(w http.ResponseWriter, r *http.R
 		if h.CometBFTRPC != "" && h.SigningKey != nil {
 			submitTx := &tx.ParsedTx{
 				Type:      tx.TxTypeMemorySubmit,
-				Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+				Nonce:     tx.MonotonicNonce(h.SigningKey),
 				Timestamp: rec.CreatedAt,
 				MemorySubmit: &tx.MemorySubmit{
 					MemoryID:        rec.MemoryID,

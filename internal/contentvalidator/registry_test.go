@@ -148,6 +148,84 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// TestValidateClosedDomain covers RegisterClosedDomain: on a closed domain that
+// has at least one registered validator, an unregistered/empty outcome_class is a
+// HARD REJECT (closing the fail-open hole) — while open domains and zero-validator
+// closed domains keep the backward-compatible pass-through.
+func TestValidateClosedDomain(t *testing.T) {
+	const (
+		domain  = "events"
+		outcome = "action"
+	)
+
+	// closedWithValidator: domain marked closed AND one validator registered.
+	closedWithValidator := func() *ContentValidatorRegistry {
+		r := NewContentValidatorRegistry()
+		r.RegisterContentValidator(domain, outcome, passStub())
+		r.RegisterClosedDomain(domain)
+		return r
+	}
+
+	rec := &memory.MemoryRecord{Content: "anything"}
+
+	t.Run("closed domain rejects unregistered class", func(t *testing.T) {
+		r := closedWithValidator()
+		rejected, reason := r.Validate(domain, "other", rec)
+		assert.True(t, rejected)
+		assert.Equal(t, `unrecognized outcome_class "other" for closed domain "events"`, reason)
+	})
+
+	t.Run("closed domain rejects empty class", func(t *testing.T) {
+		// The empty class is what the router yields for a malformed/cross-class
+		// body — on a closed domain it must reject, not pass through.
+		r := closedWithValidator()
+		rejected, reason := r.Validate(domain, "", rec)
+		assert.True(t, rejected)
+		assert.Equal(t, `unrecognized outcome_class "" for closed domain "events"`, reason)
+	})
+
+	t.Run("closed domain still runs the registered class validator", func(t *testing.T) {
+		r := NewContentValidatorRegistry()
+		r.RegisterContentValidator(domain, outcome, errStub("schema violation"))
+		r.RegisterClosedDomain(domain)
+		// The registered class routes to its validator (hard reject), NOT to the
+		// closed-domain reason — closing a domain doesn't shadow its validators.
+		rejected, reason := r.Validate(domain, outcome, rec)
+		assert.True(t, rejected)
+		assert.Equal(t, "schema violation", reason)
+	})
+
+	t.Run("closed domain with zero validators is a no-op pass-through", func(t *testing.T) {
+		// Closing a domain you have not yet registered any validator for must not
+		// lock it out entirely — it stays pass-through until a validator exists.
+		r := NewContentValidatorRegistry()
+		r.RegisterClosedDomain(domain)
+		// A different domain has a validator so the registry isn't empty.
+		r.RegisterContentValidator("telemetry", "metric", passStub())
+		rejected, reason := r.Validate(domain, "anything", rec)
+		assert.False(t, rejected)
+		assert.Equal(t, "", reason)
+	})
+
+	t.Run("open domain unregistered class still passes through", func(t *testing.T) {
+		// Backward-compat: a domain that was never marked closed keeps the old
+		// pass-through-on-unregistered-key semantics.
+		r := NewContentValidatorRegistry()
+		r.RegisterContentValidator(domain, outcome, passStub())
+		rejected, reason := r.Validate(domain, "other", rec)
+		assert.False(t, rejected)
+		assert.Equal(t, "", reason)
+	})
+
+	t.Run("closed-domain reject is deterministic", func(t *testing.T) {
+		r := closedWithValidator()
+		rejected1, reason1 := r.Validate(domain, "other", rec)
+		rejected2, reason2 := r.Validate(domain, "other", rec)
+		assert.Equal(t, rejected1, rejected2)
+		assert.Equal(t, reason1, reason2)
+	})
+}
+
 // TestValidateDeterminism asserts (g): repeated Validate calls on identical input
 // return bit-identical (bool, string). Consensus correctness depends on this.
 func TestValidateDeterminism(t *testing.T) {

@@ -1161,3 +1161,48 @@ func TestSearchByText_VaultInactiveAllowed(t *testing.T) {
 			"vault-encrypted error must not appear when no vault is attached")
 	}
 }
+
+// TestBackfillFTS_IndexesGapIdempotentAndSkipsDeprecated covers the v9.2.1 hotfix:
+// BackfillFTS must (1) populate the FTS5 index for active memories missing from it,
+// (2) exclude deprecated memories, and (3) be idempotent — a second run (which now
+// hits the cheap count gate) inserts nothing and stays a no-op. The gate is what
+// stops the pathological full anti-join from re-running on every boot and wedging
+// startup on large chains.
+func TestBackfillFTS_IndexesGapIdempotentAndSkipsDeprecated(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	// Three active memories + one deprecated. InsertMemory auto-indexes FTS, so wipe
+	// the index afterward to simulate pre-existing rows that predate incremental
+	// indexing (exactly the state BackfillFTS exists to repair).
+	for i := 0; i < 3; i++ {
+		m := testMemory(fmt.Sprintf("mem-%d", i), "agent-x", fmt.Sprintf("alpha bravo charlie %d", i), "general")
+		require.NoError(t, s.InsertMemory(ctx, m))
+	}
+	dep := testMemory("mem-dep", "agent-x", "alpha bravo deprecated", "general")
+	dep.Status = memory.StatusDeprecated
+	require.NoError(t, s.InsertMemory(ctx, dep))
+	_, err := s.writeExecContext(ctx, `DELETE FROM memories_fts`)
+	require.NoError(t, err)
+
+	ftsCount := func() int64 {
+		var n int64
+		require.NoError(t, s.conn.QueryRowContext(ctx, `SELECT count(*) FROM memories_fts`).Scan(&n))
+		return n
+	}
+	require.Equal(t, int64(0), ftsCount(), "precondition: FTS index wiped")
+
+	// Backfill indexes the 3 active rows, skips the deprecated one.
+	require.NoError(t, s.BackfillFTS(ctx))
+	require.Equal(t, int64(3), ftsCount(), "backfill should index active memories and exclude deprecated")
+
+	// Idempotent: the count gate (ftsCount >= activeCount) makes a second run a
+	// no-op — no duplicates, no error.
+	require.NoError(t, s.BackfillFTS(ctx))
+	require.Equal(t, int64(3), ftsCount(), "second backfill must be a no-op (count gate)")
+
+	// The backfilled content is searchable.
+	res, err := s.SearchByText(ctx, "bravo", QueryOptions{TopK: 10})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "backfilled rows must be findable via FTS")
+}

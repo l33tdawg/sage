@@ -408,7 +408,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 
 	submitTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemorySubmit,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		MemorySubmit: &tx.MemorySubmit{
 			MemoryID:        memoryID,

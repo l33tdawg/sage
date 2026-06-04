@@ -84,6 +84,14 @@ func mockSageAPI(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("/v1/memory/{id}/corroborate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Corroboration recorded successfully.",
+			"tx_hash": "corr-tx-456",
+		})
+	})
+
 	mux.HandleFunc("/v1/memory/", func(w http.ResponseWriter, r *http.Request) {
 		// Handles /v1/memory/{id}/challenge
 		w.Header().Set("Content-Type", "application/json")
@@ -237,6 +245,34 @@ func TestSageForget_MissingID(t *testing.T) {
 	s := NewServer("http://localhost:9999", priv)
 
 	_, err := s.toolForget(context.Background(), map[string]any{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "memory_id is required")
+}
+
+func TestSageCorroborate(t *testing.T) {
+	ts := mockSageAPI(t)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolCorroborate(context.Background(), map[string]any{
+		"memory_id": "mem-123",
+		"evidence":  "independently observed in the upstream changelog",
+	})
+	require.NoError(t, err)
+
+	m := result.(map[string]any)
+	assert.Equal(t, "mem-123", m["memory_id"])
+	assert.Equal(t, "corroborated", m["status"])
+	assert.Equal(t, "corr-tx-456", m["tx_hash"])
+}
+
+func TestSageCorroborate_MissingID(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer("http://localhost:9999", priv)
+
+	_, err := s.toolCorroborate(context.Background(), map[string]any{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "memory_id is required")
 }

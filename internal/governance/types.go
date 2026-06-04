@@ -27,6 +27,14 @@ const (
 	// ThresholdFor) — stricter than the default 2/3 used for validator-set
 	// changes, because ownership reassignment is a recovery primitive.
 	OpDomainReassign ProposalOp = 4
+	// OpUpgrade (app-v8) authorizes a chain-wide app-version upgrade. Routed
+	// through the DEFAULT 2/3 quorum (ThresholdFor). The proposal Payload
+	// carries the JSON-encoded upgrade plan (name, target version, binary
+	// digest, delay); on quorum the ABCI layer persists the UpgradePlanRecord,
+	// which then activates at its chain-computed ActivationHeight. This is what
+	// turns UpgradePropose from a single-signer self-activating op (pre-app-v8)
+	// into a supermajority-gated one (post-app-v8).
+	OpUpgrade ProposalOp = 5
 )
 
 // ProposalStatus represents the current state of a governance proposal.

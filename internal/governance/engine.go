@@ -103,6 +103,14 @@ func (e *Engine) Propose(proposerID string, op ProposalOp, targetID string, targ
 		if len(payload) == 0 {
 			return "", fmt.Errorf("op_domain_reassign requires a non-empty payload")
 		}
+		// NOTE: OpUpgrade (app-v8) is DELIBERATELY not validated here. This engine
+		// is fork-unaware, and op==5 was an accepted no-op on pre-app-v8 chains
+		// (it fell through this switch and created an inert proposal). Adding a
+		// payload-required reject here would change that pre-fork result and
+		// diverge historical replay. The payload requirement is enforced where it
+		// is fork-aware: processUpgradePropose's post-fork branch always marshals a
+		// non-empty payload, and the generic GovPropose path rejects OpUpgrade
+		// post-fork (Code 72) so it never reaches here with an empty body.
 	}
 
 	// Validate expiry range.

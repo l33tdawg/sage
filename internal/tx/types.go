@@ -36,10 +36,12 @@ const (
 	TxTypeGovVote            TxType = 25
 	TxTypeGovCancel          TxType = 26
 	// v7.5: auto-upgrade machinery — see docs/ROADMAP.md and design doc
-	// /tmp/sage-roadmap/upgrade-machinery.md. These are quorum-gated txs that
-	// schedule, abort, or roll back a chain-wide app-version bump. v7.5 ships
-	// stub handlers (codec + dispatch round-trip only); the watchdog + UpgradePlan
-	// state wiring lands in a later commit.
+	// /tmp/sage-roadmap/upgrade-machinery.md. These are single-signer authority
+	// txs (Ed25519-verified, NOT 2/3 quorum-gated — see UpgradePropose) that
+	// schedule, abort, or roll back a chain-wide app-version bump. v7.5 shipped
+	// stub handlers; the watchdog + UpgradePlan state wiring has since landed —
+	// the handlers are live (processUpgradePropose et al.) and are how the
+	// app-v2..app-v7 forks activate today.
 	TxTypeUpgradePropose TxType = 27
 	TxTypeUpgradeCancel  TxType = 28
 	TxTypeUpgradeRevert  TxType = 29
@@ -311,10 +313,26 @@ type GovCancel struct {
 	ProposalID string
 }
 
-// UpgradePropose proposes a chain-wide app-version bump. Quorum-gated by the
-// same 2/3 governance primitive used for validator-set changes. The chain
-// derives ActivationHeight deterministically at execution time, so validators
-// only race to propose — they don't pick the height.
+// UpgradePropose proposes a chain-wide app-version bump.
+//
+// AUTHORITY MODEL (read before trusting the key handling) — FORK-CONDITIONAL:
+//
+//   - PRE-app-v8: SINGLE-SIGNER, NOT quorum-gated. processUpgradePropose
+//     persists a self-activating plan on one Ed25519-verified tx
+//     (verifyAgentIdentity checks the signature only — not registration, role,
+//     or validator-set membership), so any well-formed key can schedule a fork.
+//     From app-v6 (postV8_5Fork) the handler additionally enforces a canonical
+//     plan Name and rejects version regressions/no-ops, but there is still no vote.
+//
+//   - POST-app-v8 (postAppV8Fork): the same tx no longer self-activates. The
+//     proposer must be an admin agent, and the propose only CREATES a
+//     governance proposal (governance.OpUpgrade); the plan is persisted and
+//     scheduled only after a 2/3 validator-power quorum accepts. This is the
+//     authority gate that closes the lone-signer self-activation hole.
+//
+// Either way the chain derives ActivationHeight deterministically at execution
+// time, so a proposer cannot pick the height. Operators on pre-app-v8 chains
+// MUST still protect the proposer key accordingly.
 type UpgradePropose struct {
 	Name               string // fork-gate activation key — MUST be CanonicalUpgradeName(TargetAppVersion), NOT a human label
 	TargetAppVersion   uint64 // bumps consensus_params.version.app
@@ -341,7 +359,11 @@ func CanonicalUpgradeName(targetAppVersion uint64) string {
 }
 
 // UpgradeCancel aborts a pending upgrade plan before its ActivationHeight.
-// Quorum-gated; no-op once the upgrade has already executed.
+// No-op once the upgrade has already executed. Pre-app-v8 it is single-signer
+// (any Ed25519-verified key); post-app-v8 it requires an admin agent, so a 2/3-
+// quorum-approved plan cannot be torn down by a lone non-admin during its
+// activation delay. (A pending upgrade PROPOSAL — pre-quorum, no plan persisted
+// yet — is aborted with GovCancel by the proposer, not UpgradeCancel.)
 type UpgradeCancel struct {
 	Name        string
 	CancellerID string

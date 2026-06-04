@@ -566,6 +566,79 @@ func (s *BadgerStore) GetMemoryDomain(memoryID string) (string, error) {
 	return domain, nil
 }
 
+func memoryAuthorKey(memoryID string) []byte {
+	return []byte("memauthor:" + memoryID)
+}
+
+// SetMemoryAuthor records a memory's submitting agent (its author) on-chain.
+// Caller gates on postAppV10Fork so pre-fork blocks never write this key
+// (byte-identical replay). This is the consensus-authoritative author field, and
+// the source the app-v10 corroboration guard checks to reject self-corroboration.
+func (s *BadgerStore) SetMemoryAuthor(memoryID, agentID string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(memoryAuthorKey(memoryID), []byte(agentID))
+	})
+}
+
+// GetMemoryAuthor returns a memory's recorded author (submitting agent), or ""
+// if no memauthor: key exists (a memory submitted before app-v10 activated). A
+// missing key is not an error — the corroboration guard treats "" as "author
+// unknown on-chain" and does NOT reject (the forward-looking boundary).
+func (s *BadgerStore) GetMemoryAuthor(memoryID string) (string, error) {
+	var author string
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(memoryAuthorKey(memoryID))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			author = string(val)
+			return nil
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return author, nil
+}
+
+// corroborationKey is "corrob:<memoryID>:<agentID>". agentID is fixed-length hex
+// (auth.PublicKeyToAgentID), so the trailing segment is unambiguous even if a
+// memoryID contains ':' — distinct (memoryID, agentID) pairs never collide.
+func corroborationKey(memoryID, agentID string) []byte {
+	return []byte("corrob:" + memoryID + ":" + agentID)
+}
+
+// SetCorroborated marks on-chain that agentID has corroborated memoryID. Caller
+// gates on postAppV10Fork so pre-fork blocks never write this key.
+func (s *BadgerStore) SetCorroborated(memoryID, agentID string) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(corroborationKey(memoryID, agentID), []byte{1})
+	})
+}
+
+// HasCorroborated reports whether agentID has already corroborated memoryID (an
+// on-chain corrob: marker exists). The app-v10 dedup guard uses it so one agent
+// cannot inflate a memory's corroboration count by corroborating it twice.
+func (s *BadgerStore) HasCorroborated(memoryID, agentID string) (bool, error) {
+	found := false
+	err := s.db.View(func(txn *badger.Txn) error {
+		_, getErr := txn.Get(corroborationKey(memoryID, agentID))
+		if getErr == badger.ErrKeyNotFound {
+			return nil
+		}
+		if getErr != nil {
+			return getErr
+		}
+		found = true
+		return nil
+	})
+	return found, err
+}
+
 // GetValidatorDomainStats retrieves a validator's verdict-correctness stats for
 // one domain. Returns a zero-valued record (which reads as the EWMA cold-start
 // prior 0.5) when the validator has no history in that domain — so a generalist

@@ -133,7 +133,7 @@ func (s *Server) handleVoteMemory(w http.ResponseWriter, r *http.Request) {
 	// Build vote transaction.
 	voteTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemoryVote,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		MemoryVote: &tx.MemoryVote{
 			MemoryID:  memoryID,
@@ -209,7 +209,7 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 
 	challengeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemoryChallenge,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		MemoryChallenge: &tx.MemoryChallenge{
 			MemoryID: memoryID,
@@ -289,7 +289,7 @@ func (s *Server) handleForgetMemory(w http.ResponseWriter, r *http.Request) {
 
 	challengeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemoryChallenge,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		MemoryChallenge: &tx.MemoryChallenge{
 			MemoryID: memoryID,
@@ -358,7 +358,7 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 
 	corrTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemoryCorroborate,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		MemoryCorroborate: &tx.MemoryCorroborate{
 			MemoryID: memoryID,

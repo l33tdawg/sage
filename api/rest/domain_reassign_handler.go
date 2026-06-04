@@ -89,7 +89,7 @@ func (s *Server) handleDomainReassign(w http.ResponseWriter, r *http.Request) {
 
 	reassignTx := &tx.ParsedTx{
 		Type:      tx.TxTypeDomainReassign,
-		Nonce:     uint64(time.Now().UnixNano()), // #nosec G115 -- nonce from timestamp
+		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		DomainReassign: &tx.DomainReassign{
 			Domain:       req.Domain,
