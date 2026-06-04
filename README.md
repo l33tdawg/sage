@@ -57,7 +57,20 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v9.2.2
+## What's New in v9.2.3
+
+**Operator path to activate the app-v7…app-v10 forks.** v9.2.3 is a non-fork patch: the committed app version stays 10 and nothing here touches consensus, the AppHash, or block replay. It closes a gap reported in [#32](https://github.com/l33tdawg/sage/issues/32) by [@ihubanov](https://github.com/ihubanov). The upgrade machinery's voting and processing halves were complete — `processUpgradePropose` activates a plan deterministically and validators auto-vote ACCEPT — but nothing in the tree could *submit* a plan for the governance-gated forks. The only `UpgradePropose` constructor was the boot watchdog, frozen at the deployment-safe default, so on a long-lived chain app-v7 (content-validation), app-v8 (quorum-gated upgrades), app-v9 (nonce/replay) and app-v10 (corroboration integrity) were unreachable past app-v6.
+
+- **New `sage-gui upgrade` command.** `upgrade status` shows the chain's app version and the next fork; `upgrade propose --target N` submits a signed, admin-gated `UpgradePropose` that routes through the existing 2/3 governance quorum. Off-consensus: the tx is built and signed client-side, and `processUpgradePropose` is unchanged.
+- **Strictly sequential activation, by design.** Targets must be `current + 1`. The app-v7…app-v10 fork gates are independent, but `currentAppVersion()` reports the highest active one and the on-chain regression guard rejects anything at or below current — so a jump (e.g. app-v6 → app-v10) would activate only the top fork and permanently strand the ones it skipped. The command refuses jumps and points you at the correct next step.
+- **Honest result reporting.** The proposal is committed and the block-execution result is read back, so an already-pending plan or a non-admin proposer key surfaces as a failure rather than a false success.
+
+SDK 9.2.3.
+
+## Older releases
+
+<details>
+<summary>v9.2.2 — snapshot retention/pruning (KeepLast wired + boot staging sweep + snapshot CLI)</summary>
 
 **Snapshot retention — the node now bounds its own disk.** v9.2.2 is a non-fork patch: the committed app version stays 10 and nothing here touches consensus or the AppHash. SAGE has taken periodic chain snapshots since v7.5 (every 10k blocks / 6h, plus before every upgrade), but it never reaped them — the `KeepLast` retention policy and the crash-staging sweep both existed yet were wired into nothing, so on a long-lived node snapshots accumulated without bound.
 
@@ -67,7 +80,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 SDK 9.2.2.
 
-## Older releases
+</details>
 
 <details>
 <summary>v9.2.1 — FTS5 backfill startup hotfix + two-sided fork-branch metrics + on-chain nonce seed</summary>
