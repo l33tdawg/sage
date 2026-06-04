@@ -1146,13 +1146,21 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v9). It is the readiness ceiling for upgrade
+// fork gate for (currently app-v10). It is the readiness ceiling for upgrade
 // auto-voting: a validator must never vote to activate an upgrade it cannot
 // execute — doing so would commit consensus version.app=N while the binary
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
 const maxSupportedAppVersion uint64 = 10
+
+// MaxSupportedAppVersion returns the highest app version this binary has a
+// compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
+// reads it to refuse proposing a target this binary cannot execute — the same
+// readiness ceiling the auto-voter enforces via ActiveUpgradeVote. Exported
+// because cmd/sage-gui lives outside this package; see maxSupportedAppVersion
+// for the footgun this guards against.
+func MaxSupportedAppVersion() uint64 { return maxSupportedAppVersion }
 
 // ActiveUpgradeVote reports the currently active OpUpgrade governance proposal,
 // if any, for the in-process app-validators' auto-vote. It returns the proposal

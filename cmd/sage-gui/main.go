@@ -51,6 +51,8 @@ func main() {
 		err = runBackup()
 	case "snapshot":
 		err = runSnapshot(os.Args[2:])
+	case "upgrade":
+		err = runUpgrade(os.Args[2:])
 	case "recover":
 		err = runRecover()
 	case "quorum-init":
@@ -91,6 +93,7 @@ Commands:
   import    Import memories from a .vault file
   backup    Create a timestamped backup of the memory database
   snapshot  List or prune on-disk chain snapshots (list | prune [--keep N])
+  upgrade   Activate app-version consensus forks (status | propose --target N)
   recover   Reset vault passphrase using your recovery key
   quorum-init   Initialize a quorum network (generates shared genesis)
   quorum-join   Join a quorum network (imports genesis from another node)

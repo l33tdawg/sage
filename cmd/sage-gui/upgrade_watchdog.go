@@ -150,7 +150,7 @@ func maybeProposeUpgrade(ctx context.Context, cfg upgradeWatchdogConfig) bool {
 		return true
 	}
 
-	parsedTx, err := buildUpgradeProposeTx(cfg)
+	parsedTx, err := buildUpgradeProposeTx(cfg, upgradeTargetAppVersion)
 	if err != nil {
 		cfg.Logger.Error().Err(err).Msg("upgrade watchdog: build propose tx failed")
 		return false
@@ -187,10 +187,15 @@ func maybeProposeUpgrade(ctx context.Context, cfg upgradeWatchdogConfig) bool {
 	return false
 }
 
-// buildUpgradeProposeTx constructs and signs an UpgradePropose tx
-// using the operator's agent key. Mirrors signAgentProof's canonical
-// message format so verifyAgentIdentity accepts the embedded proof.
-func buildUpgradeProposeTx(cfg upgradeWatchdogConfig) (*tx.ParsedTx, error) {
+// buildUpgradeProposeTx constructs and signs an UpgradePropose tx for the given
+// target app version using the operator's agent key. Mirrors signAgentProof's
+// canonical message format so verifyAgentIdentity accepts the embedded proof.
+//
+// target is a parameter (not the upgradeTargetAppVersion const) so two callers
+// share one signing path: the watchdog passes the frozen const, while the
+// operator `upgrade propose` subcommand passes a validated, strictly-sequential
+// target to reach the governance-gated app-v7…app-v10 forks. See issue #32.
+func buildUpgradeProposeTx(cfg upgradeWatchdogConfig, target uint64) (*tx.ParsedTx, error) {
 	pub, ok := cfg.AgentKey.Public().(ed25519.PublicKey)
 	if !ok {
 		return nil, fmt.Errorf("agent key public type assertion failed")
@@ -204,8 +209,8 @@ func buildUpgradeProposeTx(cfg upgradeWatchdogConfig) (*tx.ParsedTx, error) {
 	// after cfg.BinaryVersion (e.g. "v8.4.0", or "dev" — main.version is
 	// never empty, so the old canonical fallback was dead code) bumped the
 	// app version while leaving every postV8_*Fork gate false forever. Always
-	// derive the name from the single source of truth.
-	name := tx.CanonicalUpgradeName(upgradeTargetAppVersion)
+	// derive the name from the target version, the single source of truth.
+	name := tx.CanonicalUpgradeName(target)
 	body := []byte(name)
 	bodyHash := sha256.Sum256(body)
 
@@ -227,7 +232,7 @@ func buildUpgradeProposeTx(cfg upgradeWatchdogConfig) (*tx.ParsedTx, error) {
 		AgentTimestamp: ts,
 		UpgradePropose: &tx.UpgradePropose{
 			Name:               name,
-			TargetAppVersion:   upgradeTargetAppVersion,
+			TargetAppVersion:   target,
 			BinarySHA256:       binarySHA,
 			ProposerID:         agentID,
 			UpgradeDelayBlocks: 0, // chain applies floor (200 blocks)
@@ -381,5 +386,86 @@ func broadcastTxSync(ctx context.Context, cometRPC string, txBytes []byte) (*bro
 		Hash:        out.Result.Hash,
 		CheckTxCode: uint32(out.Result.Code), // #nosec G115 -- CheckTx code fits uint32
 		CheckTxLog:  out.Result.Log,
+	}, nil
+}
+
+// broadcastCommitResp is the result of /broadcast_tx_commit: it carries BOTH the
+// CheckTx (mempool admission) and the TxResult (block-execution / FinalizeBlock)
+// outcomes. The interactive `upgrade propose` command needs the latter because
+// the meaningful UpgradePropose rejections — a non-admin proposer key, an
+// already-pending plan — are produced in processUpgradePropose under
+// FinalizeBlock and so never appear in the CheckTx-only result that the
+// fire-and-forget /broadcast_tx_sync (used by the watchdog) returns.
+type broadcastCommitResp struct {
+	Hash         string
+	Height       int64
+	CheckTxCode  uint32
+	CheckTxLog   string
+	TxResultCode uint32
+	TxResultLog  string
+}
+
+// broadcastTxCommit POSTs to /broadcast_tx_commit and blocks until the tx is
+// committed in a block (or CometBFT's broadcast-commit timeout fires), returning
+// both the CheckTx and the block-execution results so a silently-rejected
+// proposal is reported as a failure instead of a false success. The watchdog
+// deliberately uses the non-blocking sync variant; this is for the one-shot
+// operator command where the real outcome matters.
+func broadcastTxCommit(ctx context.Context, cometRPC string, txBytes []byte) (*broadcastCommitResp, error) {
+	url := fmt.Sprintf("%s/broadcast_tx_commit?tx=0x%s", strings.TrimRight(cometRPC, "/"), hex.EncodeToString(txBytes))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("broadcast_tx_commit: HTTP %d", resp.StatusCode)
+	}
+	var out struct {
+		Result struct {
+			Hash    string `json:"hash"`
+			Height  string `json:"height"` // CometBFT serializes int64 as a string
+			CheckTx struct {
+				Code uint32 `json:"code"`
+				Log  string `json:"log"`
+			} `json:"check_tx"`
+			TxResult struct {
+				Code uint32 `json:"code"`
+				Log  string `json:"log"`
+			} `json:"tx_result"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+			Data    string `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode broadcast_tx_commit: %w", err)
+	}
+	if out.Error != nil {
+		// CometBFT returns an RPC error if the tx isn't committed within its
+		// broadcast-commit timeout; the tx may still land in a later block.
+		if out.Error.Data != "" {
+			return nil, fmt.Errorf("rpc error: %s (%s)", out.Error.Message, out.Error.Data)
+		}
+		return nil, fmt.Errorf("rpc error: %s", out.Error.Message)
+	}
+	var height int64
+	if out.Result.Height != "" {
+		if _, err := fmt.Sscanf(out.Result.Height, "%d", &height); err != nil {
+			height = 0
+		}
+	}
+	return &broadcastCommitResp{
+		Hash:         out.Result.Hash,
+		Height:       height,
+		CheckTxCode:  out.Result.CheckTx.Code,
+		CheckTxLog:   out.Result.CheckTx.Log,
+		TxResultCode: out.Result.TxResult.Code,
+		TxResultLog:  out.Result.TxResult.Log,
 	}, nil
 }
