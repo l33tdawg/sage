@@ -1165,12 +1165,12 @@ function copyPrompt(box) {
   // both at time of commit. Do this every release — re-tagged assets reset
   // GitHub's per-asset download_count, which drops github_now below the old
   // floor and freezes the displayed number (the localStorage clamp pins it).
-  // Last updated: 2026-06-04 (verified at v9.2.2: githubNow still 4281, baseline current)
-  const HWM_FLOOR = 4654;
+  // Last updated: 2026-06-05 (re-baselined at v10.0.0: githubNow=4294, displayed total=4667)
+  const HWM_FLOOR = 4667;
 
   // GITHUB_AT_FLOOR: what GitHub reported when HWM_FLOOR was recorded.
   // New downloads = github_now - GITHUB_AT_FLOOR (only if positive).
-  const GITHUB_AT_FLOOR = 4281;
+  const GITHUB_AT_FLOOR = 4294;
 
   async function fetchAllReleases() {
     const all = [];
