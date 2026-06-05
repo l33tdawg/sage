@@ -57,7 +57,22 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v9.2.4
+## What's New in v10.0.0
+
+**Deterministic chain-admin + no more SQL-driven AppHash divergence (app-v11).** v10.0.0 is a **consensus-rule change** — the first fork since app-v10 — so it ships as a major version: every validator must run this binary before the app-v11 activation height (the auto-vote readiness gate enforces this on the governance path, so an unsupported upgrade never reaches quorum). It closes [#35](https://github.com/l33tdawg/sage/issues/35) and [#36](https://github.com/l33tdawg/sage/issues/36). Every existing chain replays byte-identically until activation (the fork gate is dormant at `appV11AppliedHeight==0`), and a node-by-node rolling upgrade is safe — a mixed v9.x / v10.0.0 cluster computes the identical AppHash while app-v11 is dormant.
+
+- **#36 — the multi-validator AppHash-divergence hazard is removed.** `bootstrapAdminFromSQL` materialized an admin on-chain from each node's *local* SQL mirror — a per-node-divergent BadgerDB write that fed the AppHash and could halt a multi-validator chain. Post-app-v11 it is disabled on the consensus path.
+- **#35 — the chain-admin is established deterministically at the activation block.** `materializeAppV11Admin` is a no-op when an admin already exists; otherwise it registers the lexicographically-smallest committed validator as admin — a pure function of committed consensus state, identical on every node, never per-node SQL.
+- **Verified across a live 4-validator cluster.** The activation seam produces a byte-identical AppHash on all nodes (`TestAppHashDeterminism_AppV11Activation`), on top of two independent adversarial consensus reviews and in-process determinism tests.
+
+**Upgrade note:** post-app-v11, new admins are established via on-chain admin ops (a `set_permission` by an existing admin), not by seeding SQL `role=admin` and relying on auto-materialization. Existing materialized admins are unaffected.
+
+SDK 10.0.0.
+
+## Older releases
+
+<details>
+<summary>v9.2.4 — sage-gui upgrade propose --agent-key for post-app-v8 chain-admin signing (closes #34)</summary>
 
 **`upgrade propose` can sign as the chain-admin identity.** v9.2.4 is a non-fork patch: the committed app version stays 10 and nothing here touches consensus, the AppHash, or block replay. It closes [#34](https://github.com/l33tdawg/sage/issues/34) — a follow-up to [#32](https://github.com/l33tdawg/sage/issues/32) — reported by [@ihubanov](https://github.com/ihubanov). Past app-v8, `processUpgradePropose` requires the proposer to be a chain-admin agent, but `sage-gui upgrade propose` only ever signed with `$SAGE_HOME/agent.key` — so on a node where that key isn't the materialized chain-admin, the command (and `upgrade status`'s printed next-step) couldn't climb past app-v8.
 
@@ -67,7 +82,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 SDK 9.2.4.
 
-## Older releases
+</details>
 
 <details>
 <summary>v9.2.3 — operator path to activate the app-v7…app-v10 forks (closes #32)</summary>
