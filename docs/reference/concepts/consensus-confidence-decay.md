@@ -102,9 +102,9 @@ checkAndApplyQuorum(memoryID, height, blockTime)
 
 **All-voted-no-quorum path** (`app.go:1664-1689`): when all validators have cast votes but the 2/3 threshold is not met (e.g. 2 accept, 2 reject in a 4-validator setup), the memory is **immediately deprecated**. Without this, the memory would remain `proposed` forever and the auto-validator ticker would flood the chain with re-votes.
 
-### In-Process App Validators (Personal Mode)
+### Per-Node Memory Auto-Voter (Personal Mode)
 
-In single-node personal mode (`sage-gui serve`), four in-process app validators (sentinel, dedup, quality, consistency) replace the multi-node validator set. They sign and broadcast `TxTypeMemoryVote` transactions autonomously via CometBFT RPC. From the perspective of `checkAndApplyQuorum` they are indistinguishable from network validators — their votes land in BadgerDB via the same tx path.
+In single-node personal mode (`sage-gui serve`), the node's own auto-voter (`internal/voter`) runs the validation checks (dedup, quality, consistency) and casts ONE `TxTypeMemoryVote`, signed with the node's own consensus key (`priv_validator_key.json`) — no validator-set replacement. On a multi-node chain every node votes the same way with its own key. From the perspective of `checkAndApplyQuorum` these votes are ordinary validator votes — they land in BadgerDB via the same tx path.
 
 ---
 

@@ -102,8 +102,8 @@ type DashboardHandler struct {
 	// pendingImports holds parsed records from preview, keyed by import ID.
 	pendingImports sync.Map // string -> *pendingImport
 
-	// PreValidateFunc runs the 4 app validators against proposed content without
-	// submitting it on-chain. Set during node startup to share validator logic.
+	// PreValidateFunc runs the per-node validation checks against proposed content
+	// without submitting it on-chain. Set during node startup to share the vote logic.
 	PreValidateFunc func(content, contentHash, domain, memType string, confidence float64) []PreValidateVote
 
 	// PostV8ForkFn is the off-consensus advisory accessor for the v8.0
@@ -190,9 +190,10 @@ func (h *DashboardHandler) SetEmbedder(e Embedder) {
 	h.embedder = e
 }
 
-// handlePreValidate runs the 4 app validators against proposed content
-// without actually submitting it on-chain. Returns per-validator results
-// and quorum outcome.
+// handlePreValidate runs the per-node validation checks (dedup, quality,
+// consistency) against proposed content without actually submitting it on-chain.
+// Returns per-check results and the would-be accept outcome (the node votes accept
+// iff all checks pass).
 func (h *DashboardHandler) handlePreValidate(w http.ResponseWriter, r *http.Request) {
 	if h.PreValidateFunc == nil {
 		http.Error(w, `{"error":"pre-validation not configured"}`, http.StatusServiceUnavailable)
@@ -226,9 +227,9 @@ func (h *DashboardHandler) handlePreValidate(w http.ResponseWriter, r *http.Requ
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"accepted": acceptCount >= 3, // BFT quorum: 3 of 4
+		"accepted": acceptCount == len(votes), // the node votes accept iff every check passes
 		"votes":    votes,
-		"quorum":   fmt.Sprintf("%d/4", acceptCount),
+		"quorum":   fmt.Sprintf("%d/%d", acceptCount, len(votes)),
 	})
 }
 
@@ -324,7 +325,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Post("/v1/dashboard/settings/ledger/change-passphrase", h.handleChangePassphrase)
 			r.Post("/v1/dashboard/settings/ledger/disable", h.handleDisableLedger)
 
-			// Pre-validate endpoint — dry-run the 4 app validators
+			// Pre-validate endpoint — dry-run the per-node validation checks
 			r.Post("/v1/memory/pre-validate", h.handlePreValidate)
 
 			// Pipeline — agent-to-agent message bus

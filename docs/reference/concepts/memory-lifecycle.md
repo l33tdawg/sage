@@ -75,7 +75,7 @@ CometBFT calls `CheckTx` (`internal/abci/app.go:504-537`). The ABCI app decodes 
 
 ### 5. Voting → Committed or Deprecated
 
-Each validator (in personal mode: 4 in-process app validators; in multi-node mode: validator nodes via REST `/v1/memory/{id}/vote`) broadcasts a `TxTypeMemoryVote` tx.
+Each validator (in personal mode: the single node's own auto-voter; in multi-node mode: every validator node, each voting with its own consensus key, plus agents via REST `/v1/memory/{id}/vote`) broadcasts a `TxTypeMemoryVote` tx.
 
 `processMemoryVote` (`app.go:991-1041`):
 - Rejects votes from non-validators.

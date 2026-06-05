@@ -56,8 +56,8 @@ type Server struct {
 	// Empty string disables the bypass entirely (preserves pre-v7.1 behaviour).
 	nodeOperatorID string
 
-	// PreValidateFunc runs the 4 app validators without on-chain submission.
-	// Set during node startup. Returns per-validator results.
+	// PreValidateFunc runs the per-node validation checks without on-chain submission.
+	// Set during node startup. Returns per-check results.
 	PreValidateFunc func(content, contentHash, domain, memType string, confidence float64) []PreValidateResult
 
 	// postV8ForkFn is the off-consensus advisory accessor for the v8.0

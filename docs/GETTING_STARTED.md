@@ -356,7 +356,7 @@ sage-gui serve  # Reinitializes automatically
 
 ## How It Works
 
-Under the hood, SAGE Personal runs a real BFT consensus engine (CometBFT) with 4 in-process application validators. Every memory goes through the full governance pipeline:
+Under the hood, SAGE Personal runs a real BFT consensus engine (CometBFT) with a per-node memory auto-voter that signs votes with the node's own consensus key. Every memory goes through the full governance pipeline:
 
 1. **Propose** — memory submitted via MCP or REST API
 2. **Pre-Validate** — 4 application validators vote independently:

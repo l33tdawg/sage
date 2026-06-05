@@ -370,7 +370,7 @@ Link two memories. Off-chain relation, no tx.
 
 ### `POST /v1/memory/pre-validate`
 
-Dry-run the 4 app validators without submitting on-chain. Returns per-validator decisions.
+Dry-run the per-node validation checks (dedup, quality, consistency) without submitting on-chain. Returns per-check decisions.
 
 **Request body:**
 
@@ -386,7 +386,7 @@ Dry-run the 4 app validators without submitting on-chain. Returns per-validator 
 ```json
 {
   "accepted": true,
-  "quorum": "3/4",
+  "quorum": "3/3",
   "votes": [
     {"validator": "...", "decision": "accept", "reason": "..."}
   ]

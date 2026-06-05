@@ -6,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -46,6 +45,7 @@ import (
 	"github.com/l33tdawg/sage/internal/tlsca"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
+	"github.com/l33tdawg/sage/internal/voter"
 	"github.com/l33tdawg/sage/web"
 )
 
@@ -94,8 +94,11 @@ func runServe() (rerr error) {
 		return fmt.Errorf("init CometBFT: %w", initErr)
 	}
 
-	// Create SQLite store
-	ctx := context.Background()
+	// Create SQLite store. ctx is cancelled on shutdown (below) so the long-lived
+	// goroutines that take it — the memory auto-voter, pipeline TTL cleanup — stop
+	// cleanly instead of leaking until process exit.
+	ctx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
 	sqliteStore, err := store.NewSQLiteStore(ctx, sqlitePath)
 	if err != nil {
 		return fmt.Errorf("open SQLite: %w", err)
@@ -489,55 +492,21 @@ func runServe() (rerr error) {
 		}
 	}()
 
-	// Wire pre-validate function into both dashboard and REST API.
-	// This shares the same 4 validator checks used by startAppValidators.
+	// Wire pre-validate function into both dashboard and REST API. This is the
+	// advisory pre-vote display; it delegates to voter.DecideVerbose so it shows the
+	// EXACT named checks (dedup/quality/consistency) the node's real vote applies —
+	// one rule set, no second drifting copy.
 	preValidate := func(content, contentHash, domain, memType string, confidence float64) []web.PreValidateVote {
-		type checker struct {
-			name     string
-			validate func() (string, string)
-		}
-		checks := []checker{
-			{"sentinel", func() (string, string) { return "accept", "baseline accept" }},
-			{"dedup", func() (string, string) {
-				exists, err := sqliteStore.FindByContentHash(ctx, contentHash)
-				if err == nil && exists {
-					return "reject", fmt.Sprintf("duplicate content (hash: %s)", contentHash[:8])
-				}
-				return "accept", "content is unique"
-			}},
-			{"quality", func() (string, string) {
-				if len(content) < 20 {
-					return "reject", fmt.Sprintf("content too short (%d chars, minimum 20)", len(content))
-				}
-				lower := strings.ToLower(content)
-				for _, p := range []string{"user said hi", "user greeted", "session started", "brain online", "brain is awake", "no action taken", "user said morning", "new session started"} {
-					if strings.Contains(lower, p) {
-						return "reject", "low-value observation: matches noise pattern"
-					}
-				}
-				if strings.HasPrefix(content, "[Task Reflection]") && len(content) < 60 {
-					return "reject", "empty reflection header without substance"
-				}
-				return "accept", "content passes quality check"
-			}},
-			{"consistency", func() (string, string) {
-				if confidence < 0.3 {
-					return "reject", fmt.Sprintf("confidence too low (%.2f)", confidence)
-				}
-				if memType == "fact" && confidence < 0.7 {
-					return "reject", fmt.Sprintf("facts require confidence >= 0.7 (got %.2f)", confidence)
-				}
-				if domain == "" {
-					return "reject", "domain required"
-				}
-				return "accept", "passes consistency check"
-			}},
-		}
-
+		_, checks := voter.DecideVerbose(ctx, sqliteStore, voter.MemoryInput{
+			Content: content, ContentHash: contentHash, Domain: domain, MemType: memType, Confidence: confidence,
+		})
 		votes := make([]web.PreValidateVote, len(checks))
 		for i, c := range checks {
-			decision, reason := c.validate()
-			votes[i] = web.PreValidateVote{Validator: c.name, Decision: decision, Reason: reason}
+			decision := "accept"
+			if !c.Pass {
+				decision = "reject"
+			}
+			votes[i] = web.PreValidateVote{Validator: c.Name, Decision: decision, Reason: c.Reason}
 		}
 		return votes
 	}
@@ -722,14 +691,24 @@ func runServe() (rerr error) {
 		}
 	}()
 
-	// Start app-level validators (4 in-process validators with BFT consensus)
-	// Derive deterministic seed from the node's signing key for reproducible validator keys.
-	var validatorSeed [32]byte
-	if sk := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); sk != nil {
-		h := sha256.Sum256(sk.Seed())
-		copy(validatorSeed[:], h[:])
+	// Start the per-node memory auto-voter: one node, one vote, signed with the
+	// node's OWN consensus validator key (priv_validator_key.json). No validator-set
+	// replacement — the genesis/quorum validator set already keys each node by this
+	// identity, so the node's votes count toward the same 2/3 quorum the chain tallies.
+	if selfKey := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); selfKey != nil {
+		selfID := hex.EncodeToString(selfKey.Public().(ed25519.PublicKey))
+		// Backward-compat: repair a legacy single-node chain that previously ran the
+		// retired 4-archetype RegisterAppValidators path (whose persisted set lacks
+		// this node's consensus key). The guard makes this impossible on a quorum chain.
+		if changed, rErr := app.ReconcileSelfValidator(selfID, deriveArchetypeIDs(selfKey), !cfg.Quorum.Enabled); rErr != nil {
+			logger.Warn().Err(rErr).Msg("legacy validator reconcile skipped")
+		} else if changed {
+			logger.Warn().Str("self", selfID[:16]).Msg("legacy app-validators replaced by node consensus key (single-node repair)")
+		}
+		go voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: 2 * time.Second}, logger)
+	} else {
+		logger.Warn().Msg("no consensus key — memory auto-voter disabled")
 	}
-	go startAppValidators(ctx, app, sqliteStore, cometRPC, validatorSeed, logger)
 	if cfg.Quorum.Enabled {
 		logger.Info().Msg("quorum mode — P2P consensus active, blocks validated by both nodes")
 	}
@@ -772,6 +751,7 @@ func runServe() (rerr error) {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
 	logger.Info().Str("signal", sig.String()).Msg("shutting down")
+	cancelRun() // stop the voter + background loops promptly, before draining HTTP
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -938,248 +918,22 @@ func handleEmbedPersonal(provider embedding.Provider) http.HandlerFunc {
 	}
 }
 
-// voteDecisionFromString converts a decision string to a tx.VoteDecision uint8.
-func voteDecisionFromString(s string) tx.VoteDecision {
-	switch s {
-	case "accept":
-		return tx.VoteDecisionAccept
-	case "reject":
-		return tx.VoteDecisionReject
-	case "abstain":
-		return tx.VoteDecisionAbstain
-	default:
-		return tx.VoteDecisionAccept
-	}
-}
-
-// broadcastVoteTx sends an encoded vote transaction to CometBFT via broadcast_tx_sync.
-func broadcastVoteTx(cometRPC string, encoded []byte, logger zerolog.Logger) {
-	txHex := hex.EncodeToString(encoded)
-	url := fmt.Sprintf("%s/broadcast_tx_sync?tx=0x%s", cometRPC, txHex)
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil) //nolint:gosec
-	if err != nil {
-		logger.Debug().Err(err).Msg("failed to create broadcast request")
-		return
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		logger.Debug().Err(err).Msg("failed to broadcast vote tx")
-		return
-	}
-	resp.Body.Close()
-}
-
-// startAppValidators runs 4 in-process application validators (sentinel, dedup,
-// quality, consistency) that vote on proposed memories through CometBFT consensus.
-// Each validator has a deterministic Ed25519 key derived from the node's seed.
-func startAppValidators(ctx context.Context, app *sageabci.SageApp, memStore store.MemoryStore,
-	cometRPC string, seed [32]byte, logger zerolog.Logger) {
-
-	// Generate 4 validator keys deterministically from the node seed
-	type valConfig struct {
-		name     string
-		key      ed25519.PrivateKey
-		id       string // hex(pubkey) — matches the validator-set id and the on-chain vote key
-		validate func(content, hash, domain, memType string, conf float64) (string, string) // decision, reason
-	}
-
-	validators := make([]valConfig, 4)
+// deriveArchetypeIDs reproduces the 4 seed-derived validator IDs that the retired
+// startAppValidators path persisted, so ReconcileSelfValidator can fingerprint a
+// legacy single-node chain and repair it. The derivation MUST match the old one
+// exactly: sha256(node-seed) -> sha256(seed + "sage-validator-"+name) -> ed25519 key.
+func deriveArchetypeIDs(selfKey ed25519.PrivateKey) []string {
+	var seed [32]byte
+	h := sha256.Sum256(selfKey.Seed())
+	copy(seed[:], h[:])
 	names := []string{"sentinel", "dedup", "quality", "consistency"}
-
-	for i, name := range names {
+	ids := make([]string, 0, len(names))
+	for _, name := range names {
 		keySeed := sha256.Sum256(append(seed[:], []byte("sage-validator-"+name)...))
 		key := ed25519.NewKeyFromSeed(keySeed[:])
-		pubKey := key.Public().(ed25519.PublicKey)
-		validators[i] = valConfig{name: name, key: key, id: hex.EncodeToString(pubKey)}
+		ids = append(ids, hex.EncodeToString(key.Public().(ed25519.PublicKey)))
 	}
-
-	// Sentinel — baseline accept (permissive, ensures liveness)
-	validators[0].validate = func(_, _, _, _ string, _ float64) (string, string) {
-		return "accept", "baseline accept"
-	}
-
-	// Dedup — reject duplicate content
-	validators[1].validate = func(_, hash, _, _ string, _ float64) (string, string) {
-		exists, err := memStore.FindByContentHash(ctx, hash)
-		if err == nil && exists {
-			return "reject", fmt.Sprintf("duplicate content (hash: %s)", hash[:8])
-		}
-		return "accept", "content is unique"
-	}
-
-	// Quality — reject low-quality or noise memories
-	validators[2].validate = func(content, _, _, _ string, _ float64) (string, string) {
-		if len(content) < 20 {
-			return "reject", fmt.Sprintf("content too short (%d chars, minimum 20)", len(content))
-		}
-		lower := strings.ToLower(content)
-		noisePatterns := []string{
-			"user said hi", "user greeted", "session started",
-			"brain online", "brain is awake", "no action taken",
-			"user said morning", "new session started",
-		}
-		for _, p := range noisePatterns {
-			if strings.Contains(lower, p) {
-				return "reject", "low-value observation: matches noise pattern"
-			}
-		}
-		if strings.HasPrefix(content, "[Task Reflection]") && len(content) < 60 {
-			return "reject", "empty reflection header without substance"
-		}
-		return "accept", "content passes quality check"
-	}
-
-	// Consistency — reject inconsistent metadata
-	validators[3].validate = func(_, _, domain, memType string, conf float64) (string, string) {
-		if conf < 0.3 {
-			return "reject", fmt.Sprintf("confidence too low (%.2f)", conf)
-		}
-		if memType == "fact" && conf < 0.7 {
-			return "reject", fmt.Sprintf("facts require confidence >= 0.7 (got %.2f)", conf)
-		}
-		if domain == "" {
-			return "reject", "domain required"
-		}
-		return "accept", "passes consistency check"
-	}
-
-	// Register all 4 in ABCI validator set
-	valMap := make(map[string]int64)
-	for _, v := range validators {
-		pubKey := v.key.Public().(ed25519.PublicKey)
-		agentID := hex.EncodeToString(pubKey)
-		valMap[agentID] = 10
-	}
-	if err := app.RegisterAppValidators(valMap); err != nil {
-		logger.Error().Err(err).Msg("failed to register app validators")
-		return
-	}
-
-	// Wait for node startup
-	time.Sleep(3 * time.Second)
-	logger.Info().Int("count", 4).Msg("app validators started — BFT memory consensus active")
-
-	// Track memories already voted on this session to prevent re-voting.
-	// Without this, stuck memories (e.g. 2-2 ties) trigger 4 vote txs every
-	// tick forever, flooding the chain with redundant transactions.
-	voted := make(map[string]bool)
-
-	// app-v9 (#4): track unsupported upgrade proposals we've already warned about,
-	// so the 2s tick doesn't re-log the same warning every cycle. (Supported
-	// proposals are NOT suppressed by a local map — the auto-voter re-votes until
-	// the vote is confirmed on-chain, so a dropped broadcast self-heals.)
-	warnedProposals := make(map[string]bool)
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			pending, err := memStore.GetPendingByDomain(ctx, "%", 20)
-			if err != nil {
-				continue
-			}
-			for _, mem := range pending {
-				if voted[mem.MemoryID] {
-					continue
-				}
-				contentHash := hex.EncodeToString(mem.ContentHash)
-				for _, v := range validators {
-					decision, rationale := v.validate(mem.Content, contentHash, mem.DomainTag, string(mem.MemoryType), mem.ConfidenceScore)
-
-					// Create and sign vote transaction
-					voteTx := &tx.ParsedTx{
-						Type:      tx.TxTypeMemoryVote,
-						Nonce:     tx.MonotonicNonce(v.key), // strictly increasing per validator (app-v9 consensus nonce gate)
-						Timestamp: time.Now(),
-						MemoryVote: &tx.MemoryVote{
-							MemoryID:  mem.MemoryID,
-							Decision:  voteDecisionFromString(decision),
-							Rationale: rationale,
-						},
-					}
-
-					if signErr := tx.SignTx(voteTx, v.key); signErr != nil {
-						logger.Debug().Err(signErr).Msg("failed to sign vote tx")
-						continue
-					}
-
-					encoded, encErr := tx.EncodeTx(voteTx)
-					if encErr != nil {
-						logger.Debug().Err(encErr).Msg("failed to encode vote tx")
-						continue
-					}
-
-					// Broadcast to CometBFT
-					broadcastVoteTx(cometRPC, encoded, logger)
-				}
-				voted[mem.MemoryID] = true
-			}
-
-			// app-v9 (#4): auto-vote on an active app-version upgrade proposal.
-			// Under app-v8 an UpgradePropose routes through the 2/3 governance
-			// quorum, but the in-process app-validators only auto-vote on
-			// memories — so without this an operator's upgrade proposal expires
-			// unvoted. Readiness gate: each validator votes ACCEPT only if this
-			// binary supports the target app version; an unsupported upgrade is
-			// left to expire rather than drawing this node toward a quorum it
-			// cannot execute (the liveness-layer guard against the
-			// maxSupportedAppVersion halt footgun). Votes are signed by the
-			// validators' consensus identities (v.key), the same power that
-			// counts toward the quorum.
-			//
-			// TOPOLOGY NOTE: the readiness gate keeps an unsupported upgrade from
-			// reaching quorum on the assumption that the upgrade PROPOSER is not
-			// itself a power-holding validator (standard deployment: 4 app-
-			// validators + a non-validator operator/admin proposer). If an
-			// operator key is added to the validator set, its own auto-accept (the
-			// proposer vote) gains power and the abstaining app-validators no
-			// longer fully bound the outcome — provision upgrade-proposer keys
-			// outside the validator set.
-			//
-			// Self-healing: rather than suppressing after one fire-and-forget
-			// broadcast (which silently disenfranchises the node if the broadcast
-			// is dropped), each validator re-votes every tick until its vote is
-			// confirmed on-chain. The engine rejects duplicate votes idempotently.
-			if proposalID, target, supported, ok := app.ActiveUpgradeVote(); ok {
-				if !supported {
-					if !warnedProposals[proposalID] {
-						logger.Warn().Str("proposal_id", proposalID).Uint64("target_app_version", target).Msg("active upgrade proposal targets an app version this binary does not support — NOT auto-voting; upgrade this binary to participate")
-						warnedProposals[proposalID] = true
-					}
-				} else {
-					for _, v := range validators {
-						if app.UpgradeProposalHasVote(proposalID, v.id) {
-							continue // already recorded on-chain — don't re-broadcast
-						}
-						voteTx := &tx.ParsedTx{
-							Type:      tx.TxTypeGovVote,
-							Nonce:     tx.MonotonicNonce(v.key), // strictly increasing per validator (app-v9 consensus nonce gate)
-							Timestamp: time.Now(),
-							GovVote: &tx.GovVote{
-								ProposalID: proposalID,
-								Decision:   voteDecisionFromString("accept"),
-							},
-						}
-						if signErr := tx.SignTx(voteTx, v.key); signErr != nil {
-							logger.Debug().Err(signErr).Msg("failed to sign gov vote tx")
-							continue
-						}
-						encoded, encErr := tx.EncodeTx(voteTx)
-						if encErr != nil {
-							logger.Debug().Err(encErr).Msg("failed to encode gov vote tx")
-							continue
-						}
-						logger.Info().Str("proposal_id", proposalID).Str("validator", v.name).Uint64("target_app_version", target).Msg("app validator auto-voting ACCEPT on supported upgrade proposal")
-						broadcastVoteTx(cometRPC, encoded, logger)
-					}
-				}
-			}
-		}
-	}
+	return ids
 }
 
 // autoImport checks for pending-import.json from the setup wizard and seeds memories.
@@ -1524,31 +1278,14 @@ func readNodeOperatorKey() (string, error) {
 	return hex.EncodeToString(pk), nil
 }
 
-// loadNodeSigningKey extracts the Ed25519 private key from CometBFT's priv_validator_key.json.
-// Returns nil if the key cannot be loaded (dashboard will skip on-chain broadcasts).
+// loadNodeSigningKey extracts the Ed25519 private key from CometBFT's
+// priv_validator_key.json, delegating to the shared voter.LoadPrivValidatorKey
+// parser. Returns nil if the key cannot be loaded (broadcasts/voting are skipped).
 func loadNodeSigningKey(keyFilePath string, logger zerolog.Logger) ed25519.PrivateKey {
-	data, err := os.ReadFile(keyFilePath)
+	key, err := voter.LoadPrivValidatorKey(keyFilePath)
 	if err != nil {
-		logger.Warn().Err(err).Msg("cannot load validator key for dashboard consensus — on-chain agent broadcasts disabled")
+		logger.Warn().Err(err).Msg("cannot load validator key — on-chain agent broadcasts / memory voting disabled")
 		return nil
 	}
-
-	var keyDoc struct {
-		PrivKey struct {
-			Type  string `json:"type"`
-			Value string `json:"value"`
-		} `json:"priv_key"`
-	}
-	if err = json.Unmarshal(data, &keyDoc); err != nil {
-		logger.Warn().Err(err).Msg("cannot parse validator key JSON for dashboard consensus")
-		return nil
-	}
-
-	keyBytes, err := base64.StdEncoding.DecodeString(keyDoc.PrivKey.Value)
-	if err != nil || len(keyBytes) != ed25519.PrivateKeySize {
-		logger.Warn().Err(err).Int("key_len", len(keyBytes)).Msg("invalid validator key for dashboard consensus")
-		return nil
-	}
-
-	return ed25519.PrivateKey(keyBytes)
+	return key
 }

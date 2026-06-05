@@ -22,7 +22,7 @@ Agent (Claude, ChatGPT, DeepSeek, Gemini, etc.)
   ▼
 sage-gui
   ├── ABCI App (validation, confidence, decay, Ed25519 sigs)
-  ├── App Validators (sentinel, dedup, quality, consistency — BFT 3/4 quorum)
+  ├── Memory Auto-Voter (dedup, quality, consistency — one vote per node, signed with the node's consensus key)
   ├── Governance Engine (on-chain validator proposals + voting)
   ├── CometBFT consensus (single-validator or multi-agent network)
   ├── SQLite + optional AES-256-GCM encryption
@@ -30,7 +30,7 @@ sage-gui
   └── Network Agent Manager (add/remove agents, key rotation, LAN pairing)
 ```
 
-Personal mode runs a real CometBFT node with 4 in-process application validators — every memory write goes through pre-validation, signed vote transactions, and BFT quorum before committing. Same consensus pipeline as multi-node deployments. Add more agents from the dashboard when you're ready.
+Personal mode runs a real CometBFT node with a per-node memory auto-voter — every memory write goes through pre-validation, a signed vote transaction, and the BFT quorum before committing. One node casts one vote; add more agents from the dashboard and each node votes with its own key, exactly the same consensus pipeline as a multi-node deployment.
 
 Full deployment guide (multi-agent networks, RBAC, federation, monitoring): **[Architecture docs](docs/ARCHITECTURE.md)**
 

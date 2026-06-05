@@ -490,7 +490,7 @@ components:
           type: boolean
         quorum:
           type: string
-          example: "3/4"
+          example: "3/3"
         votes:
           type: array
           items:
@@ -1712,7 +1712,7 @@ paths:
   /v1/memory/pre-validate:
     post:
       operationId: preValidateMemory
-      summary: Dry-run the 4 app validators without submitting on-chain.
+      summary: Dry-run the per-node validation checks without submitting on-chain.
       tags:
         - Memory
       requestBody:

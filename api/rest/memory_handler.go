@@ -1205,7 +1205,8 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePreValidate handles POST /v1/memory/pre-validate.
-// Runs the 4 app validators against proposed content without submitting on-chain.
+// Runs the per-node validation checks (dedup, quality, consistency) against
+// proposed content without submitting on-chain. The node votes accept iff all pass.
 func (s *Server) handlePreValidate(w http.ResponseWriter, r *http.Request) {
 	if s.PreValidateFunc == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "Not configured", "Pre-validation not configured on this node.")
@@ -1238,9 +1239,9 @@ func (s *Server) handlePreValidate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"accepted": acceptCount >= 3, // BFT quorum: 3 of 4
+		"accepted": acceptCount == len(votes), // the node votes accept iff every check passes
 		"votes":    votes,
-		"quorum":   fmt.Sprintf("%d/4", acceptCount),
+		"quorum":   fmt.Sprintf("%d/%d", acceptCount, len(votes)),
 	})
 }
 

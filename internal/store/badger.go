@@ -923,6 +923,45 @@ func (s *BadgerStore) SaveValidators(validators map[string]int64) error {
 	})
 }
 
+// ReplaceValidators atomically replaces the ENTIRE validator:* keyspace with the
+// given set: it deletes every existing validator:<id> key, then writes the supplied
+// map. Unlike SaveValidators (which only upserts), this removes validators that are
+// no longer in the set, so stale entries cannot resurrect as phantom non-voting
+// validators on restart (which would otherwise inflate totalPower and block the 2/3
+// quorum). Used by the single-node legacy-reconcile path; never call it on a
+// multi-validator chain (a local validator-set write forks the AppHash off-consensus).
+func (s *BadgerStore) ReplaceValidators(validators map[string]int64) error {
+	prefix := []byte("validator:")
+	// Single atomic Update txn: collect existing validator:* keys, delete them, then
+	// write the new set — so the delete-old + write-new is all-or-nothing and cannot
+	// interleave with another writer.
+	return s.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		var existing [][]byte
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			existing = append(existing, append([]byte{}, it.Item().Key()...))
+		}
+		it.Close() // must close before mutating within the same txn
+
+		for _, k := range existing {
+			if err := txn.Delete(k); err != nil {
+				return err
+			}
+		}
+		for id, power := range validators {
+			val := make([]byte, 8)
+			binary.BigEndian.PutUint64(val, uint64(power)) // #nosec G115 -- validator power is always non-negative
+			if err := txn.Set([]byte("validator:"+id), val); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // LoadValidators loads the persisted validator set from BadgerDB.
 func (s *BadgerStore) LoadValidators() (map[string]int64, error) {
 	result := make(map[string]int64)

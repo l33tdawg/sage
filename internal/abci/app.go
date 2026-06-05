@@ -1324,7 +1324,7 @@ func (app *SageApp) ActiveUpgradeVote() (proposalID string, targetVersion uint64
 }
 
 // UpgradeProposalHasVote reports whether voterID already has a recorded vote on
-// the given proposal. The upgrade auto-voter (startAppValidators) uses it to
+// the given proposal. The upgrade auto-voter (internal/voter) uses it to
 // make broadcasting self-healing: it re-votes every tick until the vote is
 // confirmed on-chain, instead of suppressing the vote for the proposal's
 // lifetime after a single fire-and-forget broadcast that may have been dropped
@@ -1383,37 +1383,90 @@ func (app *SageApp) InitChain(_ context.Context, req *abcitypes.RequestInitChain
 	return &abcitypes.ResponseInitChain{}, nil
 }
 
-// RegisterAppValidators replaces the validator set with application-level validators.
-// This removes the genesis personal validator (which no longer votes) so that only
-// the 4 app validators participate in quorum. Called from startAppValidators.
-func (app *SageApp) RegisterAppValidators(validators map[string]int64) error {
-	// Remove existing genesis validators that are NOT in the new app validator set.
-	// This prevents phantom validators that never vote from blocking quorum.
-	for _, existing := range app.validators.GetAll() {
-		if _, isAppValidator := validators[existing.ID]; !isAppValidator {
-			_ = app.validators.RemoveValidator(existing.ID)
-			app.logger.Info().Str("id", existing.ID[:16]).Msg("removed genesis validator (replaced by app validators)")
+// ValidatorIDs returns a snapshot of the current consensus validator-set IDs
+// (hex-encoded Ed25519 public keys). Read-only and safe to call from the voter
+// goroutine concurrently with FinalizeBlock — same contract as ActiveUpgradeVote.
+func (app *SageApp) ValidatorIDs() []string {
+	all := app.validators.GetAll()
+	ids := make([]string, 0, len(all))
+	for _, v := range all {
+		ids = append(ids, v.ID)
+	}
+	return ids
+}
+
+// ReconcileSelfValidator is a ONE-TIME, SINGLE-NODE-ONLY local repair for chains
+// that previously ran the retired RegisterAppValidators path (the 4-archetype
+// simulation). Those chains persisted 4 seed-derived "app validator" keys into the
+// validator:* keyspace and removed the node's own genesis consensus validator — so
+// under the per-node voter the node's votes are rejected (signer not in the set,
+// processMemoryVote Code 13) and memories stop committing.
+//
+// It re-adds selfID (the node's consensus key, power 10) and removes the archetype
+// keys via a LOCAL full-replace of the validator:* keyspace — the same keyspace the
+// old path wrote, which is folded into ComputeAppHash. Such a local, non-consensus
+// validator write is SAFE ONLY on a single-node chain (no peers to diverge from);
+// on a multi-validator chain it would fork the AppHash. The guard therefore refuses
+// unless ALL of the following hold:
+//
+//  1. selfID is NOT already in the set — otherwise the chain is already healthy
+//     (genesis-seeded or already reconciled): permanent no-op.
+//  2. the set is EXACTLY the supplied archetypeIDs and nothing else — the
+//     unambiguous fingerprint of "RegisterAppValidators ran on this node." A real
+//     N-validator genesis quorum never matches, so the repair cannot fire there.
+//  3. singleNode is true — the caller (cmd/sage-gui) asserts this node is not in
+//     quorum mode.
+//
+// archetypeIDs is supplied by the caller, which owns the seed→key derivation, so
+// this consensus package stays ignorant of that scheme. Returns (changed, error);
+// (false, nil) is the guard declining — the normal, healthy path.
+func (app *SageApp) ReconcileSelfValidator(selfID string, archetypeIDs []string, singleNode bool) (bool, error) {
+	if !singleNode || selfID == "" || len(archetypeIDs) == 0 {
+		return false, nil
+	}
+	current := app.validators.GetAll()
+
+	// (1) already healthy — selfID present?
+	for _, v := range current {
+		if v.ID == selfID {
+			return false, nil
+		}
+	}
+	// (2) the set must equal EXACTLY the archetype fingerprint (same size, same ids).
+	if len(current) != len(archetypeIDs) {
+		return false, nil
+	}
+	fingerprint := make(map[string]struct{}, len(archetypeIDs))
+	for _, id := range archetypeIDs {
+		fingerprint[id] = struct{}{}
+	}
+	for _, v := range current {
+		if _, ok := fingerprint[v.ID]; !ok {
+			return false, nil // a non-archetype validator is present → not a legacy single-node chain
 		}
 	}
 
-	for id, power := range validators {
-		info := &validator.ValidatorInfo{
-			ID:    id,
-			Power: power,
-		}
-		if err := app.validators.AddValidator(info); err != nil {
-			// Already exists is OK (restart case)
-			if !strings.Contains(err.Error(), "already exists") {
-				return fmt.Errorf("register app validator %s: %w", id[:16], err)
-			}
-		}
+	// All guards passed: this is a legacy single-node chain. Persist a clean
+	// validator:* set FIRST (full-replace drops the stale archetype keys so they
+	// cannot resurrect as phantom non-voting validators on restart). Only mutate the
+	// in-memory set AFTER the durable write succeeds, so a persist failure leaves
+	// in-memory and disk consistently un-repaired — safely retried on next restart
+	// rather than leaving the node voting with a key that isn't on disk.
+	if err := app.badgerStore.ReplaceValidators(map[string]int64{selfID: 10}); err != nil {
+		return false, fmt.Errorf("reconcile persist: %w", err)
 	}
-	// Persist updated validator set (app validators only)
-	valMap := make(map[string]int64)
-	for _, v := range app.validators.GetAll() {
-		valMap[v.ID] = v.Power
+	for _, id := range archetypeIDs {
+		_ = app.validators.RemoveValidator(id)
 	}
-	return app.badgerStore.SaveValidators(valMap)
+	if err := app.validators.AddValidator(&validator.ValidatorInfo{ID: selfID, Power: 10}); err != nil {
+		return false, fmt.Errorf("reconcile self validator: %w", err)
+	}
+	metrics.ValidatorCount.Set(float64(app.validators.Size()))
+	app.logger.Warn().
+		Str("self", selfID[:16]).
+		Int("removed_archetypes", len(archetypeIDs)).
+		Msg("legacy app-validators replaced by node consensus key (single-node repair)")
+	return true, nil
 }
 
 // CheckTx validates a transaction before it enters the mempool.

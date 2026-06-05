@@ -25,6 +25,7 @@ import (
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/tlsca"
+	"github.com/l33tdawg/sage/internal/voter"
 )
 
 // Set via ldflags at build time.
@@ -43,6 +44,7 @@ func main() {
 	badgerPath := flag.String("badger-path", envOrDefault("BADGER_PATH", "data/sage.db"), "BadgerDB data path")
 	abciAddr := flag.String("abci-addr", envOrDefault("ABCI_ADDR", ""), "ABCI server listen address (e.g. tcp://0.0.0.0:26658). If set, runs as standalone ABCI server; otherwise embeds CometBFT in-process")
 	cometRPC := flag.String("comet-rpc", envOrDefault("COMET_RPC", "http://127.0.0.1:26657"), "CometBFT RPC endpoint for REST API tx broadcast")
+	validatorKeyFile := flag.String("validator-key-file", os.Getenv("VALIDATOR_KEY_FILE"), "priv_validator_key.json for the memory auto-voter in socket mode (in-process mode uses the key under --home). If unset in socket mode, no voter runs")
 	tlsCert := flag.String("tls-cert", os.Getenv("TLS_CERT"), "TLS certificate file for REST API (PEM)")
 	tlsKey := flag.String("tls-key", os.Getenv("TLS_KEY"), "TLS private key file for REST API (PEM)")
 	tlsCA := flag.String("tls-ca", os.Getenv("TLS_CA"), "CA certificate for TLS verification (PEM)")
@@ -91,7 +93,7 @@ func main() {
 
 	if *abciAddr != "" {
 		// ── Standalone ABCI server mode (Docker: separate CometBFT container) ──
-		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *tlsCert, *tlsKey, *tlsCA, health, logger)
+		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *validatorKeyFile, *tlsCert, *tlsKey, *tlsCA, health, logger)
 	} else {
 		// ── In-process mode (single binary: ABCI + CometBFT embedded) ──
 		if *cometHome == "" {
@@ -101,8 +103,27 @@ func main() {
 	}
 }
 
+// startMemoryVoter launches the per-node memory auto-voter if a consensus key is
+// available. The voter signs MemoryVote/GovVote txs with the node's own validator
+// key (no validator-set replacement) so submitted memories reach the 2/3 quorum on
+// a real multi-node chain. keyFile empty or unreadable → logged and skipped.
+func startMemoryVoter(ctx context.Context, app *sageabci.SageApp, cometRPC, keyFile string, logger zerolog.Logger) {
+	if keyFile == "" {
+		logger.Warn().Msg("validator key not set — memory auto-voter disabled (set --validator-key-file / VALIDATOR_KEY_FILE)")
+		return
+	}
+	key, err := voter.LoadPrivValidatorKey(keyFile)
+	if err != nil {
+		logger.Warn().Err(err).Str("key_file", keyFile).Msg("cannot load validator key — memory auto-voter disabled")
+		return
+	}
+	go voter.Run(ctx, app, app.GetOffchainStore(), voter.Config{Key: key, CometRPC: cometRPC, PollInterval: 2 * time.Second}, logger)
+}
+
 // runABCIServer starts the ABCI app as a TCP server for an external CometBFT node.
-func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC, validatorKeyFile, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	cmtLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(os.Stdout))
 
 	srv, err := abciserver.NewServer(abciAddr, "socket", app)
@@ -126,12 +147,19 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 	// Start metrics + REST + health in background
 	startServices(app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
 
+	// Socket mode: the consensus key lives with the separate CometBFT process, so
+	// the voter needs it supplied explicitly (operator mounts priv_validator_key.json
+	// readable to amid via --validator-key-file). Absent → no voter.
+	startMemoryVoter(ctx, app, cometRPC, validatorKeyFile, logger)
+
 	// Wait for shutdown
 	waitForShutdown(nil, nil, health, logger)
 }
 
 // runInProcess embeds CometBFT in the same process as the ABCI app.
 func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	cometCfg, err := loadCometConfig(cometHome)
 	if err != nil {
 		logger.Warn().Err(err).Msg("failed to parse CometBFT config, using defaults")
@@ -182,6 +210,10 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCe
 	// In-process: CometBFT RPC is localhost
 	cometRPC := fmt.Sprintf("http://127.0.0.1%s", cometCfg.RPC.ListenAddress[len("tcp://0.0.0.0"):])
 	startServices(app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
+
+	// In-process: the consensus key is right here under --home; the voter signs
+	// memory votes with it (same key CometBFT validates blocks with).
+	startMemoryVoter(ctx, app, cometRPC, cometCfg.PrivValidatorKeyFile(), logger)
 
 	// Health checks with node status
 	go healthLoop(app, cometNode, health)

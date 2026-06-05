@@ -964,7 +964,7 @@ The Python SDK handles signing automatically. For raw HTTP access, compute `SHA-
 | `GET` | `/v1/agent/me` | Yes | Get authenticated agent's profile and PoE weight |
 | `GET` | `/v1/validator/pending` | Yes | List memories awaiting validator votes |
 | `GET` | `/v1/validator/epoch` | Yes | Current epoch info and validator scores |
-| `POST` | `/v1/memory/pre-validate` | No | Dry-run 4 app validators without on-chain submission |
+| `POST` | `/v1/memory/pre-validate` | No | Dry-run the per-node validation checks without on-chain submission |
 | `GET` | `/v1/memory/list` | Yes | List memories with filtering (domain, status, agent, sort) |
 | `GET` | `/v1/memory/timeline` | Yes | Time-bucketed memory history (hour/day/week granularity) |
 | `POST` | `/v1/memory/link` | Yes | Create a link between two related memories |
@@ -1006,7 +1006,7 @@ The Python SDK handles signing automatically. For raw HTTP access, compute `SHA-
 
 **`POST /v1/memory/link`** creates a directional relationship between two memories (e.g., a task linked to the journal entry that resulted from it). Both memory IDs must exist and the agent must have read access to both.
 
-**`POST /v1/memory/pre-validate`** performs a dry-run through all 4 app validators (sentinel, dedup, quality, consistency) without submitting on-chain. Useful for testing memory content before committing.
+**`POST /v1/memory/pre-validate`** performs a dry-run through the per-node validation checks (dedup, quality, consistency) without submitting on-chain. Useful for testing memory content before committing.
 
 ### Memory Lifecycle
 
@@ -1024,8 +1024,8 @@ stateDiagram-v2
 ```
 
 1. An agent submits a memory via `/v1/memory/submit` (status: `proposed`)
-2. In personal mode, 4 in-process app validators (sentinel, dedup, quality, consistency) each sign and broadcast a vote transaction through CometBFT
-3. In multi-node mode, validators vote via `/v1/memory/{id}/vote`
+2. Each node's memory auto-voter runs the validation checks (dedup, quality, consistency) and signs ONE vote transaction with the node's own consensus key, broadcast through CometBFT
+3. On a multi-node chain every node votes with its own key; agents can also vote via `/v1/memory/{id}/vote`
 4. When quorum is reached (>= 2/3 weighted vote), status advances to `committed`
 5. Other agents can corroborate (strengthens confidence) or challenge (triggers review)
 6. Challenged memories may be deprecated based on evidence
@@ -1266,7 +1266,7 @@ sage/
 │   └── sage-gui/                    # SAGE Personal (setup, serve, MCP)
 ├── internal/
 │   ├── abci/                         # ABCI 2.0 state machine (FinalizeBlock, Commit)
-│   ├── appvalidator/                 # 4 in-process validators (sentinel, dedup, quality, consistency)
+│   ├── voter/                        # per-node memory auto-voter (dedup, quality, consistency checks)
 │   ├── auth/                         # Ed25519 keypair, sign/verify requests
 │   ├── embedding/                    # Embedding providers (OpenAI, Ollama, hash)
 │   ├── mcp/                          # MCP server for Claude/ChatGPT integration
