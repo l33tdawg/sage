@@ -57,7 +57,22 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.0.0
+## What's New in v10.1.0
+
+**Multi-node-safe memory voting — memories now commit on a real multi-validator cluster.** v10.1.0 is a non-fork **minor** release: the committed app version stays at 11 and nothing here touches consensus, the AppHash, or block replay — a mixed v10.0.0 / v10.1.0 cluster computes the identical AppHash. It closes a gap reported by the TII Sentinel team standing up a real BFT cluster: submitted memories stayed `proposed` forever because `amid` had no memory auto-voter, and the only voter (`startAppValidators`) was a single-process simulation that replaced the validator set with 4 seed-derived keys — a local, non-consensus write that forked the AppHash on any chain with more than one node.
+
+- **One node, one vote.** A new `internal/voter` package signs `MemoryVote` / `GovVote` transactions with the node's **own** consensus key (`priv_validator_key.json`) — no validator-set replacement. The signer id is `hex(pubkey)` == the genesis validator id, so the vote counts toward the same 2/3 quorum the chain already tallies. The voter is a client of the chain (it broadcasts vote txs); the deterministic `FinalizeBlock` path is untouched, which is why this is not a consensus fork.
+- **`amid` gets a memory auto-voter** in both deployment modes (in-process and socket — socket mode reads the key from `--validator-key-file` / `VALIDATOR_KEY_FILE`). The single-process 4-archetype simulation (`RegisterAppValidators`) is retired, with a guarded, single-node-only auto-repair for legacy `sage-gui` chains that ran the old path.
+- **Verified** by an in-process 3-node AppHash-determinism gate (byte-identical committed state across nodes; a 2/3 supermajority commits, a lone vote stays proposed) and a 5-dimension adversarial agent review.
+
+**Operator note:** on a multi-node deployment each node votes with its own `priv_validator_key.json` (socket mode: mount it via `--validator-key-file`). The memory-voter set is the genesis/governance validator set — grow it through the existing 2/3 governance `add_validator` path, never a local write.
+
+SDK 10.1.0.
+
+## Older releases
+
+<details>
+<summary>v10.0.0 — app-v11 deterministic chain-admin + consensus-path SQL-admin-bootstrap disable (closes #35, #36)</summary>
 
 **Deterministic chain-admin + no more SQL-driven AppHash divergence (app-v11).** v10.0.0 is a **consensus-rule change** — the first fork since app-v10 — so it ships as a major version: every validator must run this binary before the app-v11 activation height (the auto-vote readiness gate enforces this on the governance path, so an unsupported upgrade never reaches quorum). It closes [#35](https://github.com/l33tdawg/sage/issues/35) and [#36](https://github.com/l33tdawg/sage/issues/36). Every existing chain replays byte-identically until activation (the fork gate is dormant at `appV11AppliedHeight==0`), and a node-by-node rolling upgrade is safe — a mixed v9.x / v10.0.0 cluster computes the identical AppHash while app-v11 is dormant.
 
@@ -69,7 +84,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 SDK 10.0.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v9.2.4 — sage-gui upgrade propose --agent-key for post-app-v8 chain-admin signing (closes #34)</summary>
