@@ -286,7 +286,7 @@ func TestAppV10_CorroborateAppHashGatedByFork(t *testing.T) {
 
 	t.Run("post-fork corroborate changes AppHash", func(t *testing.T) {
 		app := setupTestApp(t)
-		memID := submit(app)   // submitted at height 5 while dormant (no memauthor)
+		memID := submit(app)        // submitted at height 5 while dormant (no memauthor)
 		app.appV10AppliedHeight = 5 // activate; corroborate below is post-fork
 		before, err := ComputeAppHash(app.badgerStore)
 		require.NoError(t, err)

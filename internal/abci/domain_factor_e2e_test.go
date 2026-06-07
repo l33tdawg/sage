@@ -21,13 +21,13 @@ import (
 // + memory_vote txs into a NON-shared domain — across a pre-fork and a post-fork
 // verdict, and asserts the v8.4 surface is fully behind the app-v5 gate:
 //
-//   pre-fork  : no memdomain:<id> key is written at submit, and a terminal
-//               verdict credits NO per-domain stats (vstats_domain:<v>:<D>).
-//   activation: a real FinalizeBlock at the planned height bumps app version → 5.
-//   post-fork : submit writes memdomain:<id>, and a terminal verdict credits
-//               vstats_domain:<v>:<D> for the matchers (alongside the global
-//               v8.3 accumulator) — so the per-domain expertise signal is live
-//               end-to-end through the same handlers FinalizeBlock dispatches.
+//	pre-fork  : no memdomain:<id> key is written at submit, and a terminal
+//	            verdict credits NO per-domain stats (vstats_domain:<v>:<D>).
+//	activation: a real FinalizeBlock at the planned height bumps app version → 5.
+//	post-fork : submit writes memdomain:<id>, and a terminal verdict credits
+//	            vstats_domain:<v>:<D> for the matchers (alongside the global
+//	            v8.3 accumulator) — so the per-domain expertise signal is live
+//	            end-to-end through the same handlers FinalizeBlock dispatches.
 func TestV84_EndToEnd_DomainFactorAcrossActivation(t *testing.T) {
 	app := newAppWithLogger(t, zerolog.Nop())
 
