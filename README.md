@@ -57,7 +57,26 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.4.0
+## What's New in v10.4.2
+
+**Memories commit again on fresh installs — and the ones the bug buried come back automatically.** v10.4.2 is a non-fork patch release: it changes no consensus rule, transaction handler, or AppHash surface, so a mixed v10.4.x cluster computes identical state.
+
+- **The bug:** the per-node voter's dedup check matched the memory's own freshly-proposed row, so the node rejected every memory as a "duplicate" of itself. On a fresh single-validator install the unanimous reject deprecated every memory on arrival — memories appeared in search (the off-chain mirror) but the Cerebrum bubble view and stats showed 0, because both count committed memories only. On legacy multi-validator sets the same reject wedged memories at `proposed` instead. The check had been silently broken since the 4-archetype era; back then its perpetual reject was simply outvoted 3-1, and v10.1.0's one-node-one-vote collapse turned it into a veto.
+- **The fix:** the dedup lookup now scopes to committed memories only — its documented intent. Genuine duplicates of committed content are still rejected; unique memories pass.
+- **Automatic recovery:** on startup, a guarded single-node repair (same pattern as the v10.4.1 validator-set repair) finds memories whose only vote is the node's own "duplicate content" self-reject, restores them to `proposed`, and lets the fixed voter re-vote them into `committed` within seconds. No manual steps — upgrade, restart, and your brain comes back. The repair's fingerprint cannot match legitimately deprecated memories, and it refuses to run on multi-validator chains. Stuck-at-`proposed` memories on legacy chains are simply re-voted and commit on their own.
+
+SDK 10.4.2.
+
+## Older releases
+
+<details>
+<summary>v10.4.1 — mixed legacy validator-set repair</summary>
+
+**`ReconcileSelfValidator` also repairs the mixed `{node key + 4 archetypes}` legacy set** (#37), which under one-node-one-vote left governance quorum mathematically unreachable on affected single-node chains. Guarded LOCAL write on single-node boots only — no consensus surface changes. SDK 10.4.1.
+</details>
+
+<details>
+<summary>v10.4.0 — plain-language onboarding</summary>
 
 **Plain-language onboarding — the inception messaging no longer trips AI safety filters.** v10.4.0 is a non-fork minor release: it touches no consensus rule, transaction handler, or AppHash surface, so a mixed v10.3.0 / v10.4.0 cluster computes identical state. It is a wording-only sweep of every agent-facing instruction string.
 
@@ -66,8 +85,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 - **Backward compatible:** `sage_red_pill` stays registered as a deprecated alias with the same handler, so existing configs, permission allowlists, and previously generated `CLAUDE.md` files keep working. API-visible status strings (`awakened`, `inception_complete`) are unchanged.
 
 SDK 10.4.0.
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.3.0 — context-aware content-validator arming seam</summary>
