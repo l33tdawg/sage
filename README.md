@@ -57,17 +57,22 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.4.2
+## What's New in v10.4.3
 
-**Memories commit again on fresh installs — and the ones the bug buried come back automatically.** v10.4.2 is a non-fork patch release: it changes no consensus rule, transaction handler, or AppHash surface, so a mixed v10.4.x cluster computes identical state.
+**`sage-gui export` / `import` work on a stock install again.** v10.4.3 is a non-fork patch release: it touches only the client-side operator CLI — no consensus rule, transaction handler, or AppHash surface — so a mixed v10.4.x cluster computes identical state.
 
-- **The bug:** the per-node voter's dedup check matched the memory's own freshly-proposed row, so the node rejected every memory as a "duplicate" of itself. On a fresh single-validator install the unanimous reject deprecated every memory on arrival — memories appeared in search (the off-chain mirror) but the Cerebrum bubble view and stats showed 0, because both count committed memories only. On legacy multi-validator sets the same reject wedged memories at `proposed` instead. The check had been silently broken since the 4-archetype era; back then its perpetual reject was simply outvoted 3-1, and v10.1.0's one-node-one-vote collapse turned it into a veto.
-- **The fix:** the dedup lookup now scopes to committed memories only — its documented intent. Genuine duplicates of committed content are still rejected; unique memories pass.
-- **Automatic recovery:** on startup, a guarded single-node repair (same pattern as the v10.4.1 validator-set repair) finds memories whose only vote is the node's own "duplicate content" self-reject, restores them to `proposed`, and lets the fixed voter re-vote them into `committed` within seconds. No manual steps — upgrade, restart, and your brain comes back. The repair's fingerprint cannot match legitimately deprecated memories, and it refuses to run on multi-validator chains. Stuck-at-`proposed` memories on legacy chains are simply re-voted and commit on their own.
+- **The bug:** with `SAGE_API_URL` unset (the default), `sage-gui export` and `sage-gui import` built the node URL by concatenating `"http://localhost" + cfg.RESTAddr`. On the shipped default `RESTAddr` (`127.0.0.1:8080`) that produced `http://localhost127.0.0.1:8080` — an unconnectable host — so both commands failed with a misleading "is sage-gui serve running?" error even when the node was up.
+- **The fix:** both call sites now derive the URL through the existing `restBaseURL` helper, which prepends `localhost` only for the bare `:port` form and otherwise keeps the host as-is — matching the sibling `seed` and `mcp-token` commands, which already handled the unset-`SAGE_API_URL` fallback correctly (`vault.go` was the lone holdout). A new `TestRestBaseURL` pins the behaviour so the concat bug can't regress.
 
-SDK 10.4.2.
+Thanks to @ihubanov for the fix (#38). SDK 10.4.3.
 
 ## Older releases
+
+<details>
+<summary>v10.4.2 — memories commit again on fresh installs</summary>
+
+**The per-node voter's dedup check matched the memory's own freshly-proposed row**, so a fresh single-validator install deprecated every memory on arrival (empty Cerebrum bubble view / "0 memories" while search still showed them) and legacy multi-validator sets wedged them at `proposed`. The dedup lookup now scopes to committed memories only, and a guarded single-node startup repair restores the wrongly-deprecated memories so the fixed voter re-commits them automatically. No consensus surface changes. SDK 10.4.2.
+</details>
 
 <details>
 <summary>v10.4.1 — mixed legacy validator-set repair</summary>
