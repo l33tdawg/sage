@@ -64,6 +64,12 @@ class MemoryRecord(BaseModel):
     deprecated_at: datetime | None = None
     votes: list | None = None
     corroborations: list | None = None
+    # Memories linked to this one. The server emits `linked_memories` on the
+    # GET /v1/memory/{id} detail response (memory_handler.go), the OpenAPI
+    # MemoryRecord schema documents it, and link_memories() already lets a
+    # caller WRITE links — but the model dropped it on read, so links could be
+    # created yet never read back. Untyped list to match votes/corroborations.
+    linked_memories: list | None = None
     similarity_score: float | None = None
     # Provenance tag the submitter attached to the memory (e.g. "claude-code",
     # "chatgpt"). The server emits it as `provider` (json:"provider,omitempty")

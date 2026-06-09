@@ -28,6 +28,24 @@ def test_memory_record_tolerates_missing_provider(sample_memory):
     assert record.provider is None
 
 
+def test_memory_record_parses_linked_memories(sample_memory):
+    # The server emits `linked_memories` on the GET /v1/memory/{id} detail
+    # response and link_memories() lets a caller write links. The model must
+    # read them back so a caller who creates links can also see them.
+    from sage_sdk.models import MemoryRecord
+    links = [{"memory_id": "mem-2", "relation": "supports"}]
+    record = MemoryRecord(**{**sample_memory, "linked_memories": links})
+    assert record.linked_memories == links
+
+
+def test_memory_record_tolerates_missing_linked_memories(sample_memory):
+    # An older server (or a record with no links) omits the field; the additive
+    # Optional defaults to None so the model still validates (forward/back compat).
+    from sage_sdk.models import MemoryRecord
+    record = MemoryRecord(**sample_memory)
+    assert record.linked_memories is None
+
+
 def test_memory_record_invalid_type():
     from sage_sdk.models import MemoryRecord
     with pytest.raises(Exception):  # ValidationError
