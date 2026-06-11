@@ -57,7 +57,20 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.5.1
+## What's New in v10.5.2
+
+**A pending upgrade plan can no longer freeze a quiet chain.** At app-v12+ an idle chain mints no blocks (the #40 fix working as designed) — so a pending upgrade plan's activation height, ~200 blocks out, never arrived on its own. v10.5.1's heartbeat handled that only inside the auto-advance ladder, which stops at the chain-admin gate on established chains whose admin isn't the operator `agent.key`; a manual `upgrade propose` there pinned the chain at the propose block, looking exactly like a consensus hang (#41 — it isn't one; nothing is wedged or corrupted).
+
+- **Always-on pending-plan pump.** Whenever a plan is pending and the chain is quiescent below its activation height, the node heartbeats it forward — one idempotent tx per block — until the fork activates. Independent of auto-advance, admin roles, and `disable_auto_upgrade`. **Chains frozen by #41 recover by installing this binary and restarting; nothing else to do.**
+- **Auto-advance reads the pending plan directly** instead of inferring it from propose-rejection text (the admin gate fires before the already-pending check, so the old probe could never see "already pending" on an admin-gated chain). A restart mid-ladder now resumes the climb.
+- **`upgrade propose --wait`** stays attached and heartbeats the chain to activation interactively; without it, the success output at app-v12+ now carries the quiescence caveat.
+
+Thanks to @ihubanov for the exceptional report (#41). SDK 10.5.2 (lockstep, no SDK changes).
+
+## Older releases
+
+<details>
+<summary>v10.5.1 — app-v13 corrected AppHash rule + upgrade auto-advance</summary>
 
 **Updating the binary now brings the chain up to date too — and the v10.5.0 hash rule is corrected.** Two things our post-release adversarial review surfaced, both fixed here:
 
@@ -67,8 +80,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 - Also: snapshot verification works across all hash-rule eras; idle chains still take time-based snapshots; a crash replaying a fork-activation block no longer loses the version bump; `upgrade propose` no longer reports failure for a proposal that actually landed; the dashboard shows a quiet chain as "idle" instead of a stalled countdown; DMG/EXE release assets ship with `.sha256` files.
 
 SDK 10.5.1 (lockstep, no SDK changes).
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.5.0 — idle empty-block fix (app-v12) + block retention</summary>
