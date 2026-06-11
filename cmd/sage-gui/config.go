@@ -30,6 +30,15 @@ type Config struct {
 	RESTAddr   string           `yaml:"rest_addr"`
 	AgentKey   string           `yaml:"agent_key_file"`
 	BlockTime  string           `yaml:"block_time"` // e.g. "1s", "3s"
+
+	// RetainBlocks is the CometBFT block-retention window: Commit reports
+	// RetainHeight = height - RetainBlocks so blocks older than the most recent
+	// N are pruned from the blockstore. Memory content lives in BadgerDB/SQLite,
+	// not in old blocks, so pruning consensus history is safe on a personal
+	// node. 0 = mode default (personal: 100000; quorum: disabled — a fresh
+	// quorum peer block-syncs history from existing peers, so pruning there is
+	// opt-in). -1 = explicitly keep everything. See issue #40.
+	RetainBlocks int64 `yaml:"retain_blocks,omitempty"`
 }
 
 // QuorumConfig controls multi-validator consensus mode.

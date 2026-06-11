@@ -205,6 +205,21 @@ func runServe() (rerr error) {
 	app.Version = version
 	defer func() { _ = app.Close() }()
 
+	// Block-retention window (issue #40): bound blockstore growth by telling
+	// CometBFT it may prune blocks older than the window. Local node policy —
+	// never consensus state — so modes can default differently: personal nodes
+	// (single validator, no peers ever sync from them) prune by default;
+	// quorum nodes keep everything unless the operator opts in, because a
+	// fresh peer block-syncs history from the existing validators.
+	retainBlocks := cfg.RetainBlocks
+	if retainBlocks == 0 && !cfg.Quorum.Enabled {
+		retainBlocks = 100_000
+	}
+	if retainBlocks > 0 {
+		app.SetRetainBlocks(retainBlocks)
+		logger.Info().Int64("retain_blocks", retainBlocks).Msg("block retention armed — CometBFT will prune blocks older than the window")
+	}
+
 	// Content-validation enforcement advisory (non-fatal): warn when the app-v7
 	// fork is active on this chain but this binary has no validator registry
 	// compiled in, so this node won't enforce the Layer-2 gate. Bootable by

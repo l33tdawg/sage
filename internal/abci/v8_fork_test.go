@@ -59,15 +59,25 @@ func TestUpgradeNameConstantsAreCanonical(t *testing.T) {
 	assert.Equal(t, uint64(7), bare.currentAppVersion(), "app-v7 active with no PoE gate still reports 7")
 
 	// app-v11 (deterministic genesis admin + SQL-admin-bootstrap disable) is an
-	// INDEPENDENT gate and the highest version. Lock its canonical name and the
-	// gate→version coupling: a bare chain with only the app-v11 gate set must
-	// report 11 (its case ranks first in currentAppVersion), or FinalizeBlock's
-	// committed version.app=11 would outrun Info() and halt the next handshake.
-	// (Watchdog target stays at 6 — app-v11 is governance-activated only.)
+	// INDEPENDENT gate. Lock its canonical name and the gate→version coupling:
+	// a bare chain with only the app-v11 gate set must report 11, or
+	// FinalizeBlock's committed version.app=11 would outrun Info() and halt the
+	// next handshake. (Watchdog target stays at 6 — app-v11 is
+	// governance-activated only.)
 	assert.Equal(t, tx.CanonicalUpgradeName(11), appV11UpgradeName)
 	v11 := setupTestApp(t)
 	v11.appV11AppliedHeight = 70
-	assert.Equal(t, uint64(11), v11.currentAppVersion(), "app-v11 active with no lower gate still reports 11 (top case)")
+	assert.Equal(t, uint64(11), v11.currentAppVersion(), "app-v11 active with no lower gate still reports 11")
+
+	// app-v12 (state:-key AppHash exclusion, issue #40) is an INDEPENDENT gate
+	// and the highest version. Same lockstep: canonical name, and a bare chain
+	// with only the app-v12 gate set must report 12 (its case ranks first in
+	// currentAppVersion). (Watchdog target stays at 6 — app-v12 is
+	// governance-activated only.)
+	assert.Equal(t, tx.CanonicalUpgradeName(12), appV12UpgradeName)
+	v12 := setupTestApp(t)
+	v12.appV12AppliedHeight = 80
+	assert.Equal(t, uint64(12), v12.currentAppVersion(), "app-v12 active with no lower gate still reports 12 (top case)")
 }
 
 // TestV8Fork_DefaultZero asserts a freshly-created app reports zero fork

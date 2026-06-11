@@ -353,6 +353,29 @@ type SageApp struct {
 	// default, so every existing chain replays the pre-fork branches byte-identically.
 	// INDEPENDENT gate, like appV7/appV8/appV9/appV10.
 	appV11AppliedHeight int64 // 0 => fork dormant
+
+	// appV12AppliedHeight gates the app-v12 fork (issue #40: idle chain growth).
+	// Once set (> 0), FinalizeBlock computes the AppHash EXCLUDING the volatile
+	// state: keys (state:height / state:app_hash / state:epoch) that Commit's
+	// SaveState rewrites every block. Pre-fork those keys feed the hash, so the
+	// AppHash changes on EVERY block — including empty ones — and CometBFT's
+	// needProofBlock forces a new empty block each timeout_commit to sign the
+	// new hash, overriding CreateEmptyBlocks=false forever. Post-fork the hash
+	// is a pure function of real consensus state and reaches a fixed point when
+	// the chain is idle, so needProofBlock goes quiet and empty-block production
+	// stops. Zero by default, so every existing chain replays the pre-fork hash
+	// rule byte-identically. INDEPENDENT gate, like appV7..appV11.
+	appV12AppliedHeight int64 // 0 => fork dormant
+
+	// retainBlocks, when > 0, is the number of most-recent blocks Commit asks
+	// CometBFT to keep: ResponseCommit.RetainHeight = height - retainBlocks
+	// (clamped at 0 = keep everything). Pruning is LOCAL and advisory — it never
+	// enters consensus state or the AppHash, so nodes may safely disagree on it.
+	// Memory content lives in BadgerDB/SQLite, not in old blocks, so pruning old
+	// consensus history is safe; the window only needs to cover crash replay and
+	// (in quorum mode) peer catch-up + the evidence max-age. Set via
+	// SetRetainBlocks from operator config (issue #40).
+	retainBlocks int64
 }
 
 // v8UpgradeName is the canonical name for the v8.0 activation record. The
@@ -410,6 +433,15 @@ const appV10UpgradeName = "app-v10"
 // target stays at 6, so app-v11 activates only via an explicit governance plan
 // {Name:"app-v11", TargetAppVersion:11}.
 const appV11UpgradeName = "app-v11"
+
+// appV12UpgradeName is the canonical activation-record name for the app-v12 fork
+// (issue #40: AppHash excludes the volatile state: keys so an idle chain reaches
+// a hash fixed point and CometBFT stops forcing empty proof blocks). Same naming
+// discipline. Like app-v7..v11, an INDEPENDENT feature gate, NOT part of the
+// v8.x PoE monotonic chain. Governance-only — the watchdog target stays at 6, so
+// app-v12 activates only via an explicit governance plan {Name:"app-v12",
+// TargetAppVersion:12}.
+const appV12UpgradeName = "app-v12"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -690,6 +722,17 @@ func (app *SageApp) postAppV11Fork(height int64) bool {
 	return app.appV11AppliedHeight > 0 && height > app.appV11AppliedHeight
 }
 
+// postAppV12Fork is the consensus-side fork-gate predicate for the app-v12
+// activation (issue #40: state:-key exclusion from the AppHash). Strict
+// greater-than mirrors the other gates — the activation block H_act itself is
+// still hashed under the pre-fork rule, so the MarkUpgradeApplied write at
+// H_act lands in a hash every pre-upgrade replica can reproduce; the new rule
+// takes effect at H_act+1. Every existing chain (none has activated app-v12)
+// returns false, so historical blocks replay byte-identically.
+func (app *SageApp) postAppV12Fork(height int64) bool {
+	return app.appV12AppliedHeight > 0 && height > app.appV12AppliedHeight
+}
+
 // postAppV8Rules reports whether app-v8's consensus rules (consensus-path
 // signature verification + quorum/admin-gated upgrade governance) are in force
 // at this height. app-v7/v8/v9/v10 are INDEPENDENT gates — governance MAY
@@ -705,7 +748,7 @@ func (app *SageApp) postAppV11Fork(height int64) bool {
 // higher gates are 0, so this collapses to exactly postAppV8Fork and historical
 // blocks replay byte-identically.
 func (app *SageApp) postAppV8Rules(height int64) bool {
-	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height)
+	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height)
 }
 
 // postAppV9Rules reports whether app-v9's consensus rules (consensus-path
@@ -716,7 +759,7 @@ func (app *SageApp) postAppV8Rules(height int64) bool {
 // postAppV9Fork on every existing chain (appV10/appV11AppliedHeight==0), so replay
 // is byte-identical.
 func (app *SageApp) postAppV9Rules(height int64) bool {
-	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height)
+	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height)
 }
 
 // postAppV10Rules reports whether app-v10's consensus rules (corroboration
@@ -728,17 +771,28 @@ func (app *SageApp) postAppV9Rules(height int64) bool {
 // when app-v11 landed — app-v10 was the highest fork until then and needed no
 // subsumption helper.
 func (app *SageApp) postAppV10Rules(height int64) bool {
-	return app.postAppV10Fork(height) || app.postAppV11Fork(height)
+	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height)
 }
 
 // postAppV11Rules reports whether app-v11's consensus rules (the per-node
-// SQL-admin-bootstrap disable, #36) are in force at this height. app-v11 is the
-// highest independent gate today, so for now this is exactly postAppV11Fork; it
-// exists as a named helper so the NEXT fork can OR itself in here without touching
-// every callsite (the subsumption discipline that keeps a skip-ahead chain from
-// silently dropping the rule).
+// SQL-admin-bootstrap disable, #36) are in force at this height. Same
+// subsumption logic as the gates below it: app-v11's rules are active whenever
+// app-v11 OR any higher independent gate (app-v12) is, so an
+// app-v12-without-app-v11 chain still enforces them. Collapses to exactly
+// postAppV11Fork on every existing chain (appV12AppliedHeight==0), so
+// historical blocks replay byte-identically.
 func (app *SageApp) postAppV11Rules(height int64) bool {
-	return app.postAppV11Fork(height)
+	return app.postAppV11Fork(height) || app.postAppV12Fork(height)
+}
+
+// postAppV12Rules reports whether app-v12's consensus rules (the state:-key
+// AppHash exclusion, issue #40) are in force at this height. app-v12 is the
+// highest independent gate today, so for now this is exactly postAppV12Fork; it
+// exists as a named helper so the NEXT fork can OR itself in here without
+// touching every callsite (the subsumption discipline that keeps a skip-ahead
+// chain from silently dropping the rule).
+func (app *SageApp) postAppV12Rules(height int64) bool {
+	return app.postAppV12Fork(height)
 }
 
 // refreshAppV9Fork populates appV9AppliedHeight from the persisted upgrade
@@ -788,6 +842,22 @@ func (app *SageApp) refreshAppV11Fork() {
 		return
 	}
 	app.appV11AppliedHeight = rec.AppliedHeight
+}
+
+// refreshAppV12Fork populates appV12AppliedHeight from the persisted upgrade
+// audit trail. Called on boot and after the activation block in FinalizeBlock.
+// Returns nil-record on every existing chain (no "app-v12" record has ever been
+// written), so the gate stays dormant and replay is unaffected.
+func (app *SageApp) refreshAppV12Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV12UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV12UpgradeName).Msg("read app-v12 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.appV12AppliedHeight = rec.AppliedHeight
 }
 
 // recordAppV9Branch records which branch (pre/post app-v9) a gated handler took,
@@ -1182,6 +1252,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshAppV9Fork()
 	app.refreshAppV10Fork()
 	app.refreshAppV11Fork()
+	app.refreshAppV12Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -1235,6 +1306,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshAppV9Fork()
 	app.refreshAppV10Fork()
 	app.refreshAppV11Fork()
+	app.refreshAppV12Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1300,8 +1372,10 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV12AppliedHeight > 0:
+		return 12 // app-v12 (state:-key AppHash exclusion, issue #40) — independent gate, highest version, must rank first (12 > 11)
 	case app.appV11AppliedHeight > 0:
-		return 11 // app-v11 (activation-block deterministic chain-admin + SQL-admin-bootstrap disable) — independent gate, highest version, must rank first (11 > 10)
+		return 11 // app-v11 (activation-block deterministic chain-admin + SQL-admin-bootstrap disable) — independent gate, ranks above app-v10 (11 > 10)
 	case app.appV10AppliedHeight > 0:
 		return 10 // app-v10 (corroboration integrity guard + on-chain author) — independent gate, ranks above app-v9 (10 > 9)
 	case app.appV9AppliedHeight > 0:
@@ -1326,13 +1400,13 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v11). It is the readiness ceiling for upgrade
+// fork gate for (currently app-v12). It is the readiness ceiling for upgrade
 // auto-voting: a validator must never vote to activate an upgrade it cannot
 // execute — doing so would commit consensus version.app=N while the binary
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 11
+const maxSupportedAppVersion uint64 = 12
 
 // MaxSupportedAppVersion returns the highest app version this binary has a
 // compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
@@ -1766,6 +1840,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if plan.Name == appV10UpgradeName {
 			app.appV10AppliedHeight = req.Height
 		}
+		if plan.Name == appV12UpgradeName {
+			app.appV12AppliedHeight = req.Height
+		}
 		if plan.Name == appV11UpgradeName {
 			app.appV11AppliedHeight = req.Height
 			// app-v11 disables the per-node SQL admin bootstrap (#36). Establish a
@@ -1807,8 +1884,20 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 	// Update state
 	app.state.Height = req.Height
 
-	// Compute deterministic AppHash
-	appHash, err := ComputeAppHash(app.badgerStore)
+	// Compute deterministic AppHash. Post-app-v12 the volatile state: keys
+	// (height / last app hash / epoch — rewritten by Commit's SaveState every
+	// block) are excluded, so an idle chain's hash reaches a fixed point and
+	// CometBFT's needProofBlock stops forcing empty blocks (issue #40). The
+	// pre-fork branch keeps the legacy everything-included hash so historical
+	// blocks replay byte-identically; the activation block H_act itself is
+	// still pre-fork (strict-> gate), so the rule flips at H_act+1.
+	var appHash []byte
+	var err error
+	if app.postAppV12Rules(req.Height) {
+		appHash, err = app.badgerStore.ComputeAppHashExcludingState()
+	} else {
+		appHash, err = ComputeAppHash(app.badgerStore)
+	}
 	if err != nil {
 		app.logger.Error().Err(err).Msg("failed to compute app hash")
 		appHash = computeBlockHash(processedMemoryIDs, req.Height)
@@ -4301,7 +4390,28 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 		app.snapshotScheduler.Tick(app.state.Height, app.state.AppHash)
 	}
 
-	return &abcitypes.ResponseCommit{}, nil
+	// Ask CometBFT to prune blocks older than the retain window (issue #40).
+	// RetainHeight is advisory and LOCAL — it never enters the AppHash, so a
+	// node may prune (or not) independently of its peers. 0 means keep
+	// everything, which is also the pre-config default.
+	var retainHeight int64
+	if app.retainBlocks > 0 && app.state.Height > app.retainBlocks {
+		retainHeight = app.state.Height - app.retainBlocks
+	}
+
+	return &abcitypes.ResponseCommit{RetainHeight: retainHeight}, nil
+}
+
+// SetRetainBlocks configures the block-retention window Commit reports to
+// CometBFT via ResponseCommit.RetainHeight: blocks older than the most recent
+// n are eligible for pruning from the blockstore. n <= 0 disables pruning
+// (retain everything). Local node policy only — never consensus state. Call
+// before the node starts; it is not synchronized against a running Commit.
+func (app *SageApp) SetRetainBlocks(n int64) {
+	if n < 0 {
+		n = 0
+	}
+	app.retainBlocks = n
 }
 
 // flushPendingWrites executes all buffered writes against the given store (which

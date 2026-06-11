@@ -134,3 +134,66 @@ func BenchmarkComputeAppHash(b *testing.B) {
 		})
 	}
 }
+
+// TestComputeAppHashExcludingState_EqualsFullHashWithoutStateKeys is the
+// semantic pin for the app-v12 hash rule (issue #40): hashing a keyspace that
+// CONTAINS state: keys with ComputeAppHashExcludingState must be
+// byte-identical to hashing the SAME keyspace minus those keys with the
+// legacy ComputeAppHash. That equivalence is the whole rule — the new hash is
+// the old hash over the real consensus state, with only the volatile
+// SaveState bookkeeping removed.
+func TestComputeAppHashExcludingState_EqualsFullHashWithoutStateKeys(t *testing.T) {
+	withState := newTestBadger(t)
+	withoutState := newTestBadger(t)
+
+	// Identical real consensus keys in both stores.
+	for _, bs := range []*BadgerStore{withState, withoutState} {
+		require.NoError(t, bs.SetNonce("agent-a", 7))
+		require.NoError(t, bs.SetNonce("agent-b", 42))
+		require.NoError(t, bs.SaveValidators(map[string]int64{"val-1": 10}))
+	}
+
+	// The volatile bookkeeping keys exist only in the first store.
+	require.NoError(t, withState.SetState("height", []byte{0, 0, 0, 0, 0, 0, 0, 9}))
+	require.NoError(t, withState.SetState("app_hash", []byte("prevhash")))
+	require.NoError(t, withState.SetState("epoch", []byte{0, 0, 0, 0, 0, 0, 0, 1}))
+
+	got, err := withState.ComputeAppHashExcludingState()
+	require.NoError(t, err)
+	want, err := withoutState.ComputeAppHash()
+	require.NoError(t, err)
+	assert.Equal(t, want, got,
+		"excluding-state hash over {real keys + state:*} must equal the legacy hash over {real keys}")
+}
+
+// TestComputeAppHashExcludingState_StateWritesAreInert asserts the fixed-point
+// property the app-v12 fork relies on: rewriting state: keys (what Commit's
+// SaveState does every block) does NOT move the excluding-state hash, while a
+// real consensus write does — and the legacy ComputeAppHash keeps moving on
+// state: writes (the pre-fork replay behavior).
+func TestComputeAppHashExcludingState_StateWritesAreInert(t *testing.T) {
+	bs := newTestBadger(t)
+	require.NoError(t, bs.SetNonce("agent-a", 7))
+
+	h1, err := bs.ComputeAppHashExcludingState()
+	require.NoError(t, err)
+	legacy1, err := bs.ComputeAppHash()
+	require.NoError(t, err)
+
+	// Simulate SaveState after an empty block.
+	require.NoError(t, bs.SetState("height", []byte{0, 0, 0, 0, 0, 0, 0, 12}))
+	require.NoError(t, bs.SetState("app_hash", h1))
+
+	h2, err := bs.ComputeAppHashExcludingState()
+	require.NoError(t, err)
+	legacy2, err := bs.ComputeAppHash()
+	require.NoError(t, err)
+	assert.Equal(t, h1, h2, "state: rewrites must be inert under the app-v12 rule")
+	assert.NotEqual(t, legacy1, legacy2, "state: rewrites must keep moving the legacy hash (pre-fork replay)")
+
+	// A real consensus write still moves the new hash.
+	require.NoError(t, bs.SetNonce("agent-b", 1))
+	h3, err := bs.ComputeAppHashExcludingState()
+	require.NoError(t, err)
+	assert.NotEqual(t, h2, h3, "non-state writes must still enter the app-v12 hash")
+}

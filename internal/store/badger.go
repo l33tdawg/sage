@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -262,6 +263,57 @@ func (s *BadgerStore) ComputeAppHash() ([]byte, error) {
 
 	hash := h.Sum(nil)
 	return hash, nil
+}
+
+// ComputeAppHashExcludingState is the post-app-v12 AppHash rule: identical to
+// ComputeAppHash except keys in the "state:" namespace are skipped. Those keys
+// (state:height, state:app_hash, state:epoch) are LAST-block metadata that
+// Commit's SaveState rewrites after every block — hashing them makes the
+// AppHash change on every block (the hash literally includes the previous
+// hash plus the height, so it can never reach a fixed point), which keeps
+// CometBFT's needProofBlock minting empty blocks forever on an idle chain
+// (issue #40). They are bookkeeping for boot-time LoadState, not consensus
+// state in their own right: everything they describe is already determined by
+// the block being executed.
+//
+// CRITICAL: This must be deterministic and identical across all nodes, and is
+// CONSENSUS-BREAKING relative to ComputeAppHash — callers must fork-gate the
+// choice between the two (internal/abci postAppV12Rules). Any future feature
+// that stores REAL consensus state via SetState will silently fall out of the
+// post-fork hash — use a dedicated key prefix instead.
+func (s *BadgerStore) ComputeAppHashExcludingState() ([]byte, error) {
+	statePrefix := []byte("state:")
+	h := sha256.New()
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		// Same lazy-read iteration as ComputeAppHash (see the rationale there);
+		// the only difference is the state:-prefix skip.
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			if bytes.HasPrefix(item.Key(), statePrefix) {
+				continue
+			}
+			h.Write(item.Key())
+			if valErr := item.Value(func(v []byte) error {
+				h.Write(v)
+				return nil
+			}); valErr != nil {
+				return valErr
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("compute app hash (excluding state): %w", err)
+	}
+
+	return h.Sum(nil), nil
 }
 
 // validatorStatsKey returns the BadgerDB key for a validator's vote stats.
