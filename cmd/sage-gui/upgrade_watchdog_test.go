@@ -24,10 +24,15 @@ import (
 type fakeCometRPC struct {
 	server         *httptest.Server
 	currentVersion atomic.Uint64
-	broadcastCode  atomic.Int32
-	broadcastLog   atomic.Pointer[string]
-	broadcasts     atomic.Int32
-	lastTxHex      atomic.Pointer[string]
+	currentHeight  atomic.Int64
+	// mintOnBroadcast mimics CreateEmptyBlocks=false block production: each
+	// broadcast tx "mints" one block (currentHeight++). Pump tests use it to
+	// model a quiescent chain that only advances when heartbeaten.
+	mintOnBroadcast atomic.Bool
+	broadcastCode   atomic.Int32
+	broadcastLog    atomic.Pointer[string]
+	broadcasts      atomic.Int32
+	lastTxHex       atomic.Pointer[string]
 }
 
 func newFakeCometRPC(t *testing.T) *fakeCometRPC {
@@ -38,13 +43,17 @@ func newFakeCometRPC(t *testing.T) *fakeCometRPC {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"result": map[string]any{
 				"response": map[string]any{
-					"app_version": fmt.Sprintf("%d", f.currentVersion.Load()),
+					"app_version":       fmt.Sprintf("%d", f.currentVersion.Load()),
+					"last_block_height": fmt.Sprintf("%d", f.currentHeight.Load()),
 				},
 			},
 		})
 	})
 	mux.HandleFunc("/broadcast_tx_sync", func(w http.ResponseWriter, r *http.Request) {
 		f.broadcasts.Add(1)
+		if f.mintOnBroadcast.Load() {
+			f.currentHeight.Add(1)
+		}
 		txHex := strings.TrimPrefix(r.URL.Query().Get("tx"), "0x")
 		f.lastTxHex.Store(&txHex)
 		logStr := ""

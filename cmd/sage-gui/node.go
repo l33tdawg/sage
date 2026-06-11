@@ -454,6 +454,10 @@ func runServe() (rerr error) {
 		// the legacy target-6 watchdog; disable_auto_upgrade opts out.
 		PersonalMode: !cfg.Quorum.Enabled,
 		AutoAdvance:  !cfg.DisableAutoUpgrade,
+		// v10.5.2 (issue #41): in-process pending-plan accessor for the
+		// always-on pump and the auto-advance pre-check. GetUpgradePlan's
+		// ErrNoUpgradePlan is flattened to nil by readPendingPlan.
+		PendingPlan: badgerStore.GetUpgradePlan,
 	})
 
 	// Create REST server

@@ -97,6 +97,11 @@ propose flags:
   --rpc <url>       CometBFT RPC endpoint (default: $SAGE_COMET_RPC or
                     http://127.0.0.1:26657).
   --yes             Skip the confirmation prompt.
+  --wait            Stay attached after the propose lands and heartbeat the chain
+                    until the fork activates. At app-v12+ an idle chain mints no
+                    blocks, so on a quiescent node the plan's activation height
+                    never arrives by itself (issue #41); a v10.5.2+ node pumps a
+                    pending plan forward on its own, --wait does it interactively.
 
 The proposal is signed with $SAGE_HOME/agent.key (or the --agent-key file) and routed
 through the 2/3 governance quorum; validators auto-vote ACCEPT if they support the
@@ -162,6 +167,7 @@ func runUpgradePropose(args []string) error {
 	name := fs.String("name", "", "plan name (optional; defaults to the canonical app-v<target>)")
 	rpc := fs.String("rpc", defaultCometRPC(), "CometBFT RPC endpoint")
 	yes := fs.Bool("yes", false, "skip the confirmation prompt")
+	wait := fs.Bool("wait", false, "after the propose lands, heartbeat a quiescent chain until the fork activates (at app-v12+ an idle chain mints no blocks, so the activation height never arrives by itself)")
 	agentKeyPath := fs.String("agent-key", "", "sign with this key instead of $SAGE_HOME/agent.key (an agent.key seed or a CometBFT priv_validator_key.json); required past app-v8 where the proposer must be a chain-admin")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -262,7 +268,7 @@ func runUpgradePropose(args []string) error {
 		// accepted guidance.
 		fmt.Printf("✓ Proposed %s (target app version %d) — the plan is pending (the first broadcast landed despite the RPC error).\n", canonical, *target)
 		printProposeAcceptedGuidance(*target)
-		return nil
+		return finishProposeActivation(cfg, current, *wait)
 	}
 	if res.CheckTxCode != 0 {
 		return fmt.Errorf("rejected at CheckTx (code %d): %s", res.CheckTxCode, res.CheckTxLog)
@@ -295,6 +301,40 @@ func runUpgradePropose(args []string) error {
 	fmt.Printf("✓ Proposed %s (target app version %d) — accepted at height %d.\n", canonical, *target, res.Height)
 	fmt.Printf("  tx hash: %s\n", res.Hash)
 	printProposeAcceptedGuidance(*target)
+	return finishProposeActivation(cfg, current, *wait)
+}
+
+// finishProposeActivation is the post-acceptance tail of `upgrade propose`.
+// At app-v12+ an idle chain mints no blocks (the issue-#40 fix), so on a
+// quiescent node the plan's activation height never arrives by itself (issue
+// #41). With --wait, stay attached and heartbeat the chain to activation;
+// without it, surface the quiescence caveat so the operator isn't left
+// watching a "frozen" chain. current is the chain's app version at propose
+// time: below 12 the chain still mints empty blocks and activation arrives on
+// its own, so both tails are no-ops.
+func finishProposeActivation(cfg upgradeWatchdogConfig, current uint64, wait bool) error {
+	if current < 12 {
+		return nil
+	}
+	if !wait {
+		fmt.Println("  NOTE: at app-v12+ an idle chain mints no blocks, so on a quiescent node the activation")
+		fmt.Println("  height never arrives by itself. A v10.5.2+ node pumps a pending plan forward automatically;")
+		fmt.Println("  on older binaries keep the chain active (any txs mint blocks) or re-run propose with --wait.")
+		return nil
+	}
+	fmt.Println("Waiting for activation — heartbeating the chain forward while it is quiescent.")
+	fmt.Println("(Ctrl-C is safe: the plan stays pending, and a v10.5.2+ node's pending-plan pump finishes the climb.)")
+	var lastPrint time.Time
+	activated := waitForActivation(context.Background(), cfg, current, func(version uint64, height int64) {
+		if time.Since(lastPrint) >= 10*time.Second {
+			fmt.Printf("  height %d, chain at app-v%d…\n", height, version)
+			lastPrint = time.Now()
+		}
+	})
+	if !activated {
+		return fmt.Errorf("timed out waiting for activation (30m); the plan is still pending — check `sage-gui upgrade status`, or leave the climb to a v10.5.2+ node's pending-plan pump")
+	}
+	fmt.Println("✓ Fork activated.")
 	return nil
 }
 

@@ -29,6 +29,7 @@ import (
 	"github.com/rs/zerolog"
 
 	sageabci "github.com/l33tdawg/sage/internal/abci"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -82,6 +83,19 @@ type upgradeWatchdogConfig struct {
 	// "clicking update brings the chain up to date" fix, issue #40 follow-up).
 	// Wired from config: disable_auto_upgrade inverts it.
 	AutoAdvance bool
+
+	// PendingPlan reads the chain's pending UpgradePlan straight from the
+	// node's store: (nil, nil) when none is pending. Wired in-process by
+	// runServe; nil in CLI contexts, which only have the RPC surface. Two
+	// consumers (issue #41): the always-on pending-plan pump, and the
+	// auto-advance pre-check — the propose-rejection text can't signal
+	// "already pending" on an admin-gated chain because processUpgradePropose
+	// checks the admin gate before the at-most-one-pending invariant.
+	PendingPlan func() (*store.UpgradePlanRecord, error)
+
+	// PumpInterval overrides the pending-plan pump cadence. Zero means the
+	// 5s default; only tests set it.
+	PumpInterval time.Duration
 }
 
 // startUpgradeWatchdog launches the watchdog goroutine. Returns
@@ -97,6 +111,11 @@ func startUpgradeWatchdog(ctx context.Context, cfg upgradeWatchdogConfig) bool {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
+
+	// v10.5.2 pending-plan pump (issue #41): independent of every mode and
+	// gate below — a pending plan that can't reach its activation height on a
+	// quiescent chain is frozen governance regardless of how it was proposed.
+	startPendingPlanPump(ctx, cfg)
 
 	// v10.5.1 personal-mode auto-advance: walk the governance fork ladder to
 	// the binary's compiled ceiling instead of stopping at the legacy PoE
@@ -227,29 +246,46 @@ func runAutoAdvance(ctx context.Context, cfg upgradeWatchdogConfig, interval tim
 				return
 			}
 
-			// Open-door admin registration: by the time the chain reaches
-			// app-v8 the NEXT propose is admin-gated, and app-v9 closes the
-			// self-grant — so register the operator key as admin the moment
-			// the gate is relevant and the door is still open. Idempotent
-			// (Code 0 "already registered" if the key is known).
-			if !adminEnsured && current >= upgradeTargetAppVersion {
-				ensureOperatorAdminRegistered(ctx, cfg)
-				adminEnsured = true
-			}
-
-			switch proposeForAutoAdvance(ctx, cfg, target) {
-			case autoAdvanceProposed, autoAdvancePending:
-				if waitForActivation(ctx, cfg, current) {
+			// A plan may already be pending — a manual propose with the
+			// chain-admin key, or a restart mid-ladder. Don't infer that from
+			// the propose rejection: processUpgradePropose checks the admin
+			// gate BEFORE the at-most-one-pending invariant, so on a chain
+			// whose admin isn't agent.key the rejection reads "not admin"
+			// (terminal stop) instead of "already pending" (wait) — issue
+			// #41's freeze. Read the pending-plan slot directly and wait.
+			if plan := readPendingPlan(cfg); plan != nil {
+				cfg.Logger.Info().Str("plan", plan.Name).
+					Int64("activation_height", plan.ActivationHeight).
+					Msg("auto-advance: a plan is already pending — waiting for activation instead of proposing")
+				if waitForActivation(ctx, cfg, current, nil) {
 					continue // next rung immediately
 				}
-			case autoAdvanceAdminRejected:
-				cfg.Logger.Error().Uint64("target", target).
-					Msg("auto-advance: propose rejected by the chain-admin gate — this node's agent.key does not hold the on-chain admin role. " +
-						"Run `sage-gui upgrade propose --target " + fmt.Sprint(target) + " --agent-key <chain-admin-key>` with the admin identity, " +
-						"or perform any admin op with agent.key first, then restart. Auto-advance is stopping (it will retry on next boot).")
-				return
-			case autoAdvanceTransient:
-				// fall through to the next tick
+			} else {
+				// Open-door admin registration: by the time the chain reaches
+				// app-v8 the NEXT propose is admin-gated, and app-v9 closes the
+				// self-grant — so register the operator key as admin the moment
+				// the gate is relevant and the door is still open. Idempotent
+				// (Code 0 "already registered" if the key is known).
+				if !adminEnsured && current >= upgradeTargetAppVersion {
+					ensureOperatorAdminRegistered(ctx, cfg)
+					adminEnsured = true
+				}
+
+				switch proposeForAutoAdvance(ctx, cfg, target) {
+				case autoAdvanceProposed, autoAdvancePending:
+					if waitForActivation(ctx, cfg, current, nil) {
+						continue // next rung immediately
+					}
+				case autoAdvanceAdminRejected:
+					cfg.Logger.Error().Uint64("target", target).
+						Msg("auto-advance: propose rejected by the chain-admin gate — this node's agent.key does not hold the on-chain admin role. " +
+							"Run `sage-gui upgrade propose --target " + fmt.Sprint(target) + " --agent-key <chain-admin-key>` with the admin identity, " +
+							"or perform any admin op with agent.key first, then restart. Auto-advance is stopping (it will retry on next boot; " +
+							"a plan proposed manually still activates — the pending-plan pump carries it to its activation height).")
+					return
+				case autoAdvanceTransient:
+					// fall through to the next tick
+				}
 			}
 		}
 
@@ -312,9 +348,11 @@ func proposeForAutoAdvance(ctx context.Context, cfg upgradeWatchdogConfig, targe
 // waitForActivation polls until the chain's app version moves past
 // fromVersion (the pending plan activated), heartbeating the chain forward
 // when it is quiescent: post-app-v12/13 an idle chain mints no blocks, so
-// without txs the plan's ActivationHeight would never arrive. Returns true on
+// without txs the plan's ActivationHeight would never arrive. progress (may
+// be nil) is invoked after every successful probe — the interactive
+// `upgrade propose --wait` uses it to narrate the climb. Returns true on
 // activation, false on timeout/cancellation (caller re-enters the main loop).
-func waitForActivation(ctx context.Context, cfg upgradeWatchdogConfig, fromVersion uint64) bool {
+func waitForActivation(ctx context.Context, cfg upgradeWatchdogConfig, fromVersion uint64, progress func(version uint64, height int64)) bool {
 	const probeEvery = 2 * time.Second
 	deadline := time.Now().Add(30 * time.Minute)
 	lastHeight := int64(-1)
@@ -329,6 +367,9 @@ func waitForActivation(ctx context.Context, cfg upgradeWatchdogConfig, fromVersi
 		version, height, err := readChainAppVersionAndHeight(ctx, cfg.CometRPC)
 		if err != nil {
 			continue
+		}
+		if progress != nil {
+			progress(version, height)
 		}
 		if version > fromVersion {
 			cfg.Logger.Info().Uint64("chain_app_version", version).
@@ -346,6 +387,21 @@ func waitForActivation(ctx context.Context, cfg upgradeWatchdogConfig, fromVersi
 	}
 	cfg.Logger.Warn().Msg("auto-advance: timed out waiting for activation — will re-probe on next tick")
 	return false
+}
+
+// readPendingPlan resolves the pending UpgradePlan via cfg.PendingPlan,
+// flattening the no-plan and error cases to nil (the watchdog treats a
+// transient store read failure the same as "nothing pending" and re-probes
+// on its next tick).
+func readPendingPlan(cfg upgradeWatchdogConfig) *store.UpgradePlanRecord {
+	if cfg.PendingPlan == nil {
+		return nil
+	}
+	plan, err := cfg.PendingPlan()
+	if err != nil {
+		return nil
+	}
+	return plan
 }
 
 // ensureOperatorAdminRegistered registers the operator's agent.key on chain

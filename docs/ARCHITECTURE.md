@@ -622,6 +622,8 @@ At the activation height, `FinalizeBlock` reads the pending plan, emits `Respons
 
 At-most-one pending plan is enforced: a propose arriving while another is pending returns code 47 "already pending". A pre-activation `UpgradeCancel` (signed by any agent) clears the plan; post-activation cancel returns code 48 "too late".
 
+**Quiescent chains (app-v12+).** Once the issue-#40 idle fix is active, an idle chain mints no blocks — so a pending plan's activation height never arrives on its own. The always-on **pending-plan pump** (`cmd/sage-gui/upgrade_pump.go`, v10.5.2, issue #41) watches the `upgrade:plan` slot in-process: whenever a plan is pending and the height is stagnant below its activation height, it broadcasts idempotent heartbeat txs (operator re-registration, Code 0 "already registered") that each mint one block, carrying the chain to activation. It runs independently of auto-advance, admin roles, and `disable_auto_upgrade` — the plan already passed governance; the pump is execution, not an upgrade decision. Interactively, `sage-gui upgrade propose --wait` does the same climb attached to the terminal.
+
 ### 3. Halt detection
 
 If the chain binary panics (e.g. an upgrade handler failure), `cmd/sage-gui/halt_writer.go::haltOnPanic` runs in `runServe`'s deferred recover. It writes `~/.sage/data/HALT` atomically with the failed version, an optional rollback target (empty by default — the launcher picks the latest non-failed anchor), and the panic message. The deferred handler re-panics so the original stack still reaches stderr and the process exits non-zero.
