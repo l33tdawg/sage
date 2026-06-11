@@ -69,15 +69,22 @@ func TestUpgradeNameConstantsAreCanonical(t *testing.T) {
 	v11.appV11AppliedHeight = 70
 	assert.Equal(t, uint64(11), v11.currentAppVersion(), "app-v11 active with no lower gate still reports 11")
 
-	// app-v12 (state:-key AppHash exclusion, issue #40) is an INDEPENDENT gate
-	// and the highest version. Same lockstep: canonical name, and a bare chain
-	// with only the app-v12 gate set must report 12 (its case ranks first in
-	// currentAppVersion). (Watchdog target stays at 6 — app-v12 is
-	// governance-activated only.)
+	// app-v12 (whole-prefix state: AppHash exclusion, issue #40 — superseded
+	// by app-v13) is an INDEPENDENT gate. Same lockstep: canonical name, and a
+	// bare chain with only the app-v12 gate set must report 12.
 	assert.Equal(t, tx.CanonicalUpgradeName(12), appV12UpgradeName)
 	v12 := setupTestApp(t)
 	v12.appV12AppliedHeight = 80
-	assert.Equal(t, uint64(12), v12.currentAppVersion(), "app-v12 active with no lower gate still reports 12 (top case)")
+	assert.Equal(t, uint64(12), v12.currentAppVersion(), "app-v12 active with no lower gate still reports 12")
+
+	// app-v13 (corrected narrow AppHash exclusion, v10.5.1) is an INDEPENDENT
+	// gate and the highest version. Same lockstep: canonical name, and a bare
+	// chain with only the app-v13 gate set must report 13 (its case ranks
+	// first in currentAppVersion).
+	assert.Equal(t, tx.CanonicalUpgradeName(13), appV13UpgradeName)
+	v13 := setupTestApp(t)
+	v13.appV13AppliedHeight = 90
+	assert.Equal(t, uint64(13), v13.currentAppVersion(), "app-v13 active with no lower gate still reports 13 (top case)")
 }
 
 // TestV8Fork_DefaultZero asserts a freshly-created app reports zero fork

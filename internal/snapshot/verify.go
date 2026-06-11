@@ -169,16 +169,37 @@ func VerifyWithOptions(dir string, opts VerifyOptions) error {
 		if badgerSrc == "" {
 			return errors.New("verify: badger backup missing")
 		}
-		hasher := opts.AppHashComputer
-		if hasher == nil {
-			hasher = DefaultAppHashComputer
+		// The manifest's AppHash was computed under whichever consensus hash
+		// rule was in force when the snapshot was taken: legacy (all keys),
+		// app-v12 (whole state: prefix excluded), or app-v13 (the three
+		// SaveState bookkeeping keys excluded). The manifest carries no rule
+		// marker — pre-10.5.1 manifests predate the rules entirely — so the
+		// proof accepts a match under ANY rule. Still a strong proof: each
+		// candidate is a full-keyspace digest of the restored DB; an
+		// adversarial or corrupt backup matches none of them.
+		var candidates [][]byte
+		if opts.AppHashComputer != nil {
+			got, replayErr := replayBadgerAndHash(badgerSrc, opts.AppHashComputer)
+			if replayErr != nil {
+				return fmt.Errorf("verify: badger replay: %w", replayErr)
+			}
+			candidates = [][]byte{got}
+		} else {
+			all, replayErr := replayBadgerAndHash(badgerSrc, computeAppHashAllRulesStandalone)
+			if replayErr != nil {
+				return fmt.Errorf("verify: badger replay: %w", replayErr)
+			}
+			candidates = splitConcatenatedHashes(all)
 		}
-		got, replayErr := replayBadgerAndHash(badgerSrc, hasher)
-		if replayErr != nil {
-			return fmt.Errorf("verify: badger replay: %w", replayErr)
+		matched := false
+		for _, c := range candidates {
+			if bytes.Equal(c, m.AppHash) {
+				matched = true
+				break
+			}
 		}
-		if !bytes.Equal(got, m.AppHash) {
-			return fmt.Errorf("verify: AppHash mismatch (got %x want %x)", got, m.AppHash)
+		if !matched {
+			return fmt.Errorf("verify: AppHash mismatch under every hash rule (legacy/app-v12/app-v13): want %x", m.AppHash)
 		}
 	}
 
@@ -363,6 +384,83 @@ func computeAppHashStandalone(badgerPath string) ([]byte, error) {
 		h.Write(e.val)
 	}
 	return h.Sum(nil), nil
+}
+
+// appHashBookkeepingKeys mirrors internal/store's app-v13 exclusion set: the
+// three SaveState bookkeeping keys. Kept in sync by
+// TestStandaloneHashesMatchStore (the same parity pin computeAppHashStandalone
+// has against ComputeAppHash).
+var appHashBookkeepingKeys = [][]byte{
+	[]byte("state:height"),
+	[]byte("state:app_hash"),
+	[]byte("state:epoch"),
+}
+
+// computeAppHashAllRulesStandalone walks the restored BadgerDB ONCE and emits
+// the digest under each consensus hash-rule era, concatenated (3 × 32 bytes):
+// legacy (all keys — pre-app-v12), app-v12 (whole "state:" prefix excluded —
+// the superseded broad rule), app-v13 (the three bookkeeping keys excluded).
+// Shaped as an AppHashComputer so it rides replayBadgerAndHash's tmp-restore
+// plumbing; Verify splits the concatenation and accepts a match on any rule.
+func computeAppHashAllRulesStandalone(badgerPath string) ([]byte, error) {
+	opts := badger.DefaultOptions(badgerPath)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		return nil, fmt.Errorf("open badger: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	legacy, v12, v13 := sha256.New(), sha256.New(), sha256.New()
+	statePrefix := []byte("state:")
+	err = db.View(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			k := append([]byte(nil), item.Key()...)
+			if vErr := item.Value(func(v []byte) error {
+				legacy.Write(k)
+				legacy.Write(v)
+				if !bytes.HasPrefix(k, statePrefix) {
+					v12.Write(k)
+					v12.Write(v)
+				}
+				bookkeeping := false
+				for _, bk := range appHashBookkeepingKeys {
+					if bytes.Equal(k, bk) {
+						bookkeeping = true
+						break
+					}
+				}
+				if !bookkeeping {
+					v13.Write(k)
+					v13.Write(v)
+				}
+				return nil
+			}); vErr != nil {
+				return vErr
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := legacy.Sum(nil)
+	out = append(out, v12.Sum(nil)...)
+	out = append(out, v13.Sum(nil)...)
+	return out, nil
+}
+
+// splitConcatenatedHashes splits the 3×32-byte output of
+// computeAppHashAllRulesStandalone back into individual candidates.
+func splitConcatenatedHashes(all []byte) [][]byte {
+	var out [][]byte
+	for i := 0; i+sha256.Size <= len(all); i += sha256.Size {
+		out = append(out, all[i:i+sha256.Size])
+	}
+	return out
 }
 
 // tarHeaderWalk decompresses+walks a tar.zst, returning an error only

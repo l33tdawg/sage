@@ -197,3 +197,77 @@ func TestComputeAppHashExcludingState_StateWritesAreInert(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, h2, h3, "non-state writes must still enter the app-v12 hash")
 }
+
+// TestComputeAppHashExcludingBookkeeping_KeepsGovAndVoteState is the pin for
+// the v10.5.1 review finding that motivated app-v13: the v12 rule's
+// whole-prefix exclusion silently dropped REAL consensus state living under
+// SetState's "state:" namespace (governance proposals/votes, memory quorum
+// votes, shared-domain sentinels). The v13 rule must (a) still be a fixed
+// point under SaveState's three bookkeeping rewrites, and (b) MOVE when any
+// other state: key is written — the property v12 lost.
+func TestComputeAppHashExcludingBookkeeping_KeepsGovAndVoteState(t *testing.T) {
+	bs := newTestBadger(t)
+	require.NoError(t, bs.SetNonce("agent-a", 7))
+
+	h1, err := bs.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+
+	// (a) SaveState's bookkeeping rewrites are inert (the issue-#40 fixed point).
+	require.NoError(t, bs.SetState("height", []byte{0, 0, 0, 0, 0, 0, 0, 12}))
+	require.NoError(t, bs.SetState("app_hash", h1))
+	require.NoError(t, bs.SetState("epoch", []byte{0, 0, 0, 0, 0, 0, 0, 1}))
+	h2, err := bs.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+	assert.Equal(t, h1, h2, "bookkeeping rewrites must be inert under the app-v13 rule")
+
+	// (b) Every OTHER state: write is consensus state and must move the hash —
+	// the exact writes the broad v12 rule wrongly dropped.
+	cases := []struct{ key, label string }{
+		{"gov:proposal:p1", "governance proposal"},
+		{"gov:vote:p1:val1", "governance vote"},
+		{"vote:mem1:val1", "memory quorum vote"},
+		{"shared_domain:research", "shared-domain sentinel"},
+		{"gov:proposal:p1:consumed", "consumed-proposal marker"},
+	}
+	prev := h2
+	for _, c := range cases {
+		require.NoError(t, bs.SetState(c.key, []byte("x")))
+		cur, hErr := bs.ComputeAppHashExcludingBookkeeping()
+		require.NoError(t, hErr)
+		assert.NotEqual(t, prev, cur, "%s (state:%s) must move the app-v13 hash", c.label, c.key)
+
+		// Contrast pin: the same write is INVISIBLE to the flawed v12 rule.
+		v12, v12Err := bs.ComputeAppHashExcludingState()
+		require.NoError(t, v12Err)
+		v12Again, _ := bs.ComputeAppHashExcludingState()
+		assert.Equal(t, v12, v12Again)
+		prev = cur
+	}
+}
+
+// TestComputeAppHashExcludingBookkeeping_EqualsFullHashWithoutBookkeepingKeys
+// is the byte-parity pin for the v13 rule, mirroring the v12 one: hashing a
+// keyspace WITH the three bookkeeping keys under the v13 rule must equal the
+// legacy full hash over the SAME keyspace minus exactly those keys — and
+// unlike v12, other state: keys are present in both.
+func TestComputeAppHashExcludingBookkeeping_EqualsFullHashWithoutBookkeepingKeys(t *testing.T) {
+	withBk := newTestBadger(t)
+	withoutBk := newTestBadger(t)
+
+	for _, bs := range []*BadgerStore{withBk, withoutBk} {
+		require.NoError(t, bs.SetNonce("agent-a", 7))
+		require.NoError(t, bs.SaveValidators(map[string]int64{"val-1": 10}))
+		require.NoError(t, bs.SetState("gov:proposal:p1", []byte("payload")))
+		require.NoError(t, bs.SetState("vote:mem1:val1", []byte("accept")))
+	}
+	require.NoError(t, withBk.SetState("height", []byte{0, 0, 0, 0, 0, 0, 0, 9}))
+	require.NoError(t, withBk.SetState("app_hash", []byte("prevhash")))
+	require.NoError(t, withBk.SetState("epoch", []byte{0, 0, 0, 0, 0, 0, 0, 1}))
+
+	got, err := withBk.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+	want, err := withoutBk.ComputeAppHash()
+	require.NoError(t, err)
+	assert.Equal(t, want, got,
+		"v13 hash over {keys + bookkeeping} must equal legacy hash over {keys}")
+}

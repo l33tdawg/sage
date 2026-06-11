@@ -265,22 +265,26 @@ func (s *BadgerStore) ComputeAppHash() ([]byte, error) {
 	return hash, nil
 }
 
-// ComputeAppHashExcludingState is the post-app-v12 AppHash rule: identical to
-// ComputeAppHash except keys in the "state:" namespace are skipped. Those keys
-// (state:height, state:app_hash, state:epoch) are LAST-block metadata that
-// Commit's SaveState rewrites after every block — hashing them makes the
-// AppHash change on every block (the hash literally includes the previous
-// hash plus the height, so it can never reach a fixed point), which keeps
-// CometBFT's needProofBlock minting empty blocks forever on an idle chain
-// (issue #40). They are bookkeeping for boot-time LoadState, not consensus
-// state in their own right: everything they describe is already determined by
-// the block being executed.
+// ComputeAppHashExcludingState is the app-v12 AppHash rule: identical to
+// ComputeAppHash except EVERY key in the "state:" namespace is skipped.
 //
-// CRITICAL: This must be deterministic and identical across all nodes, and is
-// CONSENSUS-BREAKING relative to ComputeAppHash — callers must fork-gate the
-// choice between the two (internal/abci postAppV12Rules). Any future feature
-// that stores REAL consensus state via SetState will silently fall out of the
-// post-fork hash — use a dedicated key prefix instead.
+// KNOWN-FLAWED — SUPERSEDED BY app-v13 (ComputeAppHashExcludingBookkeeping).
+// The v12 rule was aimed at the three LAST-block bookkeeping keys SaveState
+// rewrites every block (state:height / state:app_hash / state:epoch), whose
+// inclusion made the hash unable to reach a fixed point and kept CometBFT's
+// needProofBlock minting empty blocks forever on an idle chain (issue #40).
+// But the whole-prefix skip ALSO drops real consensus state that lives under
+// SetState's "state:" namespace — the governance engine's proposals/votes
+// (state:gov:*), memory quorum votes (state:vote:*), consumed-proposal
+// markers, and shared-domain sentinels — gutting the AppHash's integrity
+// cover for exactly the subsystem that activates forks. app-v13 narrows the
+// exclusion to the three bookkeeping keys by exact match. This function is
+// retained ONLY so blocks executed on a chain while it was at app-v12 replay
+// byte-identically; nothing else may use it.
+//
+// CRITICAL: deterministic, identical across nodes, CONSENSUS-BREAKING
+// relative to ComputeAppHash — callers must fork-gate the choice
+// (internal/abci postAppV12Rules/postAppV13Rules).
 func (s *BadgerStore) ComputeAppHashExcludingState() ([]byte, error) {
 	statePrefix := []byte("state:")
 	h := sha256.New()
@@ -311,6 +315,71 @@ func (s *BadgerStore) ComputeAppHashExcludingState() ([]byte, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("compute app hash (excluding state): %w", err)
+	}
+
+	return h.Sum(nil), nil
+}
+
+// appHashBookkeepingKeys are the exact keys the app-v13 AppHash rule excludes:
+// the LAST-block metadata Commit's SaveState rewrites after every block
+// (internal/abci/state.go). Hashing them prevented the hash from ever reaching
+// a fixed point (the hash included the previous hash plus the height), which
+// kept CometBFT's needProofBlock minting empty blocks forever on an idle chain
+// (issue #40). They are bookkeeping for boot-time LoadState, not consensus
+// state in their own right: everything they describe is already determined by
+// the block being executed. Exact-match exclusion — every OTHER state: key
+// (gov:*, vote:*, shared_domain:*, …) stays in the hash, fixing app-v12's
+// whole-prefix flaw.
+var appHashBookkeepingKeys = [][]byte{
+	[]byte("state:height"),
+	[]byte("state:app_hash"),
+	[]byte("state:epoch"),
+}
+
+// ComputeAppHashExcludingBookkeeping is the post-app-v13 AppHash rule:
+// identical to ComputeAppHash except the three exact SaveState bookkeeping
+// keys (appHashBookkeepingKeys) are skipped. Unlike the superseded app-v12
+// rule it keeps the rest of the state: namespace — governance proposals and
+// votes, memory quorum votes, consumed-proposal markers, shared-domain
+// sentinels — committed to by the hash, while still letting an idle chain's
+// hash reach a fixed point (SaveState's three keys are the only state:
+// writes on an empty block).
+//
+// CRITICAL: deterministic, identical across nodes, CONSENSUS-BREAKING
+// relative to both ComputeAppHash and ComputeAppHashExcludingState — callers
+// must fork-gate the choice (internal/abci postAppV13Rules).
+func (s *BadgerStore) ComputeAppHashExcludingBookkeeping() ([]byte, error) {
+	h := sha256.New()
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		// Same lazy-read iteration as ComputeAppHash (see the rationale there);
+		// the only difference is the exact-key bookkeeping skip.
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+	scan:
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			for _, bk := range appHashBookkeepingKeys {
+				if bytes.Equal(item.Key(), bk) {
+					continue scan
+				}
+			}
+			h.Write(item.Key())
+			if valErr := item.Value(func(v []byte) error {
+				h.Write(v)
+				return nil
+			}); valErr != nil {
+				return valErr
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("compute app hash (excluding bookkeeping): %w", err)
 	}
 
 	return h.Sum(nil), nil
