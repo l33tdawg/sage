@@ -24,8 +24,13 @@ type OrgRegisterReq struct {
 
 // OrgAddMemberReq is the JSON body for POST /v1/org/{org_id}/member.
 type OrgAddMemberReq struct {
-	AgentID   string `json:"agent_id"`
-	Clearance int    `json:"clearance,omitempty"`
+	AgentID string `json:"agent_id"`
+	// Pointer so an explicit clearance of 0 (ClearancePublic — a valid level
+	// that gates reads) is distinguishable from an omitted field. A bare int
+	// can't tell "0" from "absent", which silently escalated PUBLIC members to
+	// INTERNAL. Mirrors the *int pattern on the agent-permission endpoint
+	// (see Bug 2, v6.8.4 hotfix, api/rest/agent_handler.go).
+	Clearance *int   `json:"clearance,omitempty"`
 	Role      string `json:"role,omitempty"`
 }
 
@@ -273,8 +278,11 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Missing agent ID", "agent_id is required")
 		return
 	}
-	if req.Clearance == 0 {
-		req.Clearance = 1 // Default to INTERNAL
+	// Only a missing clearance falls back to the safe INTERNAL default; an
+	// explicit 0 (ClearancePublic) is honored verbatim.
+	clearance := 1
+	if req.Clearance != nil {
+		clearance = *req.Clearance
 	}
 	if req.Role == "" {
 		req.Role = "member"
@@ -287,7 +295,7 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 		OrgAddMember: &tx.OrgAddMember{
 			OrgID:     orgID,
 			AgentID:   req.AgentID,
-			Clearance: tx.ClearanceLevel(req.Clearance), // #nosec G115 -- validated small int
+			Clearance: tx.ClearanceLevel(clearance), // #nosec G115 -- validated small int
 			Role:      req.Role,
 		},
 	}
