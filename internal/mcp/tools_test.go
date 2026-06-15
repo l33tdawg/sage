@@ -277,6 +277,71 @@ func TestSageCorroborate_MissingID(t *testing.T) {
 	assert.Contains(t, err.Error(), "memory_id is required")
 }
 
+func TestSageLink(t *testing.T) {
+	var linkBody map[string]string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/memory/link" {
+			_ = json.NewDecoder(r.Body).Decode(&linkBody)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "linked"})
+	}))
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolLink(context.Background(), map[string]any{
+		"source_id": "mem-a",
+		"target_id": "mem-b",
+		"link_type": "contradicts",
+	})
+	require.NoError(t, err)
+
+	m := result.(map[string]any)
+	assert.Equal(t, "mem-a", m["source_id"])
+	assert.Equal(t, "mem-b", m["target_id"])
+	assert.Equal(t, "contradicts", m["link_type"])
+	assert.Equal(t, "linked", m["status"])
+
+	// The typed link_type must reach the node verbatim — not be coerced to
+	// "related" the way sage_task's hardcoded link does.
+	assert.Equal(t, "contradicts", linkBody["link_type"])
+	assert.Equal(t, "mem-a", linkBody["source_id"])
+	assert.Equal(t, "mem-b", linkBody["target_id"])
+}
+
+func TestSageLink_DefaultsToRelated(t *testing.T) {
+	var linkBody map[string]string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/memory/link" {
+			_ = json.NewDecoder(r.Body).Decode(&linkBody)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "linked"})
+	}))
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	_, err := s.toolLink(context.Background(), map[string]any{
+		"source_id": "mem-a",
+		"target_id": "mem-b",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "related", linkBody["link_type"])
+}
+
+func TestSageLink_MissingIDs(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer("http://localhost:9999", priv)
+
+	_, err := s.toolLink(context.Background(), map[string]any{"source_id": "mem-a"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "required")
+}
+
 func TestSageList(t *testing.T) {
 	ts := mockSageAPI(t)
 	defer ts.Close()

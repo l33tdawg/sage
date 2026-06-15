@@ -308,6 +308,20 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolCorroborate,
 		},
+		"sage_link": {
+			Name:        "sage_link",
+			Description: "Create a typed relationship between two existing memories. Use this to build a knowledge graph over memory: record that one memory supports, contradicts, causes, precedes, or refines another. The link is directional (source → target). Common link_type values: related (default), supports, contradicts, causes, precedes, refines, duplicates — but any short relation label is accepted.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"source_id": map[string]any{"type": "string", "description": "ID of the source memory (the 'from' side of the relationship)"},
+					"target_id": map[string]any{"type": "string", "description": "ID of the target memory (the 'to' side of the relationship)"},
+					"link_type": map[string]any{"type": "string", "description": "Relationship type, e.g. supports, contradicts, causes, precedes, refines, related", "default": "related"},
+				},
+				"required": []string{"source_id", "target_id"},
+			},
+			Handler: s.toolLink,
+		},
 	}
 	return tools
 }
@@ -683,6 +697,35 @@ func (s *Server) toolForget(ctx context.Context, params map[string]any) (any, er
 		"memory_id": memoryID,
 		"status":    "challenged",
 		"reason":    reason,
+	}, nil
+}
+
+// toolLink creates a typed, directional relationship between two memories.
+// The /v1/memory/link endpoint already accepts a free-form link_type; this tool
+// is the MCP surface for it (sage_task only ever links as "related"), so agents
+// can record supports / contradicts / causes / precedes edges to build a graph.
+func (s *Server) toolLink(ctx context.Context, params map[string]any) (any, error) {
+	sourceID, _ := params["source_id"].(string)
+	targetID, _ := params["target_id"].(string)
+	if sourceID == "" || targetID == "" {
+		return nil, fmt.Errorf("source_id and target_id are required")
+	}
+	linkType := stringParam(params, "link_type", "related")
+
+	body, _ := json.Marshal(map[string]string{
+		"source_id": sourceID,
+		"target_id": targetID,
+		"link_type": linkType,
+	})
+	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/link", body, nil); err != nil {
+		return nil, fmt.Errorf("link memories: %w", err)
+	}
+
+	return map[string]any{
+		"source_id": sourceID,
+		"target_id": targetID,
+		"link_type": linkType,
+		"status":    "linked",
 	}, nil
 }
 
