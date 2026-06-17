@@ -100,6 +100,16 @@ func (b *SSEBroadcaster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
+	// SSE is a long-lived stream, but the http.Server has WriteTimeout set
+	// (15s). That timeout is an ABSOLUTE per-connection write deadline — the
+	// heartbeat below does NOT reset it — so without clearing it the server
+	// guillotines every SSE connection at 15s mid-stream, which the browser
+	// reports as ERR_INCOMPLETE_CHUNKED_ENCODING and then reconnects, producing
+	// a connect/drop/reconnect storm. Clear the write deadline so the heartbeat
+	// is what actually governs liveness.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{}) //nolint:errcheck // best-effort; unsupported writers keep prior behaviour
+
 	ch := b.Subscribe()
 	if ch == nil {
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
@@ -111,9 +121,10 @@ func (b *SSEBroadcaster) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, ": connected\n\n")
 	flusher.Flush()
 
-	// Heartbeat ticker — keeps the connection alive past the HTTP server's WriteTimeout.
-	// Without this, idle SSE connections get killed every WriteTimeout seconds,
-	// causing a connect/disconnect cycle in the chain activity log.
+	// Heartbeat ticker — periodic SSE comments so a dead/half-open client is
+	// detected (the Write fails, ctx cancels) and proxies don't idle-close the
+	// stream. (The WriteTimeout guillotine is handled above by clearing the
+	// write deadline; the heartbeat alone never cured it.)
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
 
