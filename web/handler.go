@@ -879,6 +879,10 @@ type graphNode struct {
 	CreatedAt  string   `json:"created_at"`
 	Agent      string   `json:"agent"`
 	Tags       []string `json:"tags,omitempty"`
+	// CorroborationCount drives consolidation visuals in the brain view (a
+	// well-corroborated memory glows/enlarges). Same value the recall paths
+	// surface as corroboration_count.
+	CorroborationCount int `json:"corroboration_count"`
 }
 
 // graphEdge connects two memories.
@@ -905,6 +909,11 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	if opts.Status == "" {
 		opts.Status = "committed"
 	}
+	// status=all opts into the full brain (incl. challenged/deprecated) — the
+	// MRI view uses it to render synaptic pruning.
+	if opts.Status == "all" {
+		opts.Status = ""
+	}
 	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
 	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
 		opts.SubmittingAgents = allowedAgents
@@ -929,16 +938,21 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	// Build domain groups for edge generation
 	domainMemories := make(map[string][]string)
 	for _, rec := range records {
+		corrCount := 0
+		if corrs, cErr := h.store.GetCorroborations(r.Context(), rec.MemoryID); cErr == nil {
+			corrCount = len(corrs)
+		}
 		nodes = append(nodes, graphNode{
-			ID:         rec.MemoryID,
-			Content:    truncate(rec.Content, 200),
-			Domain:     rec.DomainTag,
-			Confidence: rec.ConfidenceScore,
-			Status:     string(rec.Status),
-			MemoryType: string(rec.MemoryType),
-			CreatedAt:  rec.CreatedAt.Format(time.RFC3339),
-			Agent:      rec.SubmittingAgent,
-			Tags:       tagMap[rec.MemoryID],
+			ID:                 rec.MemoryID,
+			Content:            truncate(rec.Content, 200),
+			Domain:             rec.DomainTag,
+			Confidence:         rec.ConfidenceScore,
+			Status:             string(rec.Status),
+			MemoryType:         string(rec.MemoryType),
+			CreatedAt:          rec.CreatedAt.Format(time.RFC3339),
+			Agent:              rec.SubmittingAgent,
+			Tags:               tagMap[rec.MemoryID],
+			CorroborationCount: corrCount,
 		})
 		domainMemories[rec.DomainTag] = append(domainMemories[rec.DomainTag], rec.MemoryID)
 
@@ -958,6 +972,37 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 		_ = domain
 		for i := 1; i < len(ids); i++ {
 			edges = append(edges, graphEdge{Source: ids[i-1], Target: ids[i], Type: "domain"})
+		}
+	}
+
+	// Real typed links (sage_link): supports / contradicts / causes / precedes /
+	// refines / related. Only emit an edge when BOTH endpoints are in the
+	// RBAC-visible set — never surface a link to a memory the caller cannot see,
+	// which would leak a hidden memory's existence through the graph.
+	visible := make(map[string]bool, len(records))
+	for _, rec := range records {
+		visible[rec.MemoryID] = true
+	}
+	seenLink := make(map[string]bool)
+	for _, rec := range records {
+		typed, lErr := h.store.GetLinkedMemories(r.Context(), rec.MemoryID)
+		if lErr != nil {
+			continue
+		}
+		for _, l := range typed {
+			if !visible[l.SourceID] || !visible[l.TargetID] {
+				continue
+			}
+			key := l.SourceID + "\x00" + l.TargetID + "\x00" + l.LinkType
+			if seenLink[key] {
+				continue
+			}
+			seenLink[key] = true
+			lt := l.LinkType
+			if lt == "" {
+				lt = "related"
+			}
+			edges = append(edges, graphEdge{Source: l.SourceID, Target: l.TargetID, Type: lt})
 		}
 	}
 

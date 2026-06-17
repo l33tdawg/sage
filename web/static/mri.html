@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<!-- Standalone fullscreen MRI memory-brain. Shares the renderer with the
+     in-dashboard MRI mode (web/static/js/mri-brain.js). Synthetic-data
+     fallback if no live node. No embeddings/full content cross the wire. -->
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cerebrum · MRI</title>
+<script type="importmap">
+{ "imports": {
+  "three": "https://esm.sh/three@0.180.0",
+  "three/": "https://esm.sh/three@0.180.0/",
+  "3d-force-graph": "https://esm.sh/3d-force-graph@1.73.4?external=three"
+} }
+</script>
+<style>
+  html,body{margin:0;height:100%;background:#05070d;overflow:hidden}
+  #mount{position:fixed;inset:0}
+  a.back{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:9;
+    color:#5d7395;font:11px ui-monospace,monospace;text-decoration:none}
+  a.back:hover{color:#39d0ff}
+</style>
+</head>
+<body>
+<div id="mount"></div>
+<a class="back" href="/ui/">← back to dashboard</a>
+<script type="module">
+  import { mountMriBrain } from '/ui/js/mri-brain.js';
+  mountMriBrain(document.getElementById('mount'), {
+    fetchUrl: '/v1/dashboard/memory/graph?status=all&limit=500',
+    showScan: true,
+  });
+</script>
+</body>
+</html>

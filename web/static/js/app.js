@@ -2,9 +2,28 @@
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken } from './api.js';
 
+import { mountMriBrain } from './mri-brain.js';
+
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
 const html = window.html;
+
+// MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
+// X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
+// directly). Reads the same /v1/dashboard/memory/graph the 2D brain uses.
+function MriView({ sse }) {
+    const ref = useRef(null);
+    useEffect(() => {
+        if (!ref.current) return;
+        const cleanup = mountMriBrain(ref.current, {
+            fetchUrl: '/v1/dashboard/memory/graph?status=all&limit=500',
+            showScan: false,
+            sse,
+        });
+        return cleanup;
+    }, [sse]);
+    return html`<div class="mri-stage" ref=${ref}></div>`;
+}
 
 // Global tooltips state — persisted in localStorage
 const TooltipsContext = createContext(false);
@@ -6741,6 +6760,7 @@ function App() {
     const [authState, setAuthState] = useState('loading'); // loading | login | ready
     const [isEncrypted, setIsEncrypted] = useState(false);
     const [page, setPage] = useState('brain');
+    const [brainMode, setBrainMode] = useState('mri'); // 'mri' (3D MRI) default | '2d' (canvas)
     const [selectedMemory, setSelectedMemory] = useState(null);
     const [sseConnected, setSseConnected] = useState(false);
     const [timelineFilter, setTimelineFilter] = useState([]); // [{from, to}, ...]
@@ -6958,8 +6978,16 @@ function App() {
             <${ChainActivityLog} sse=${sseRef.current} />
 
             ${page === 'brain' && html`
-                <${BrainView} sse=${sseRef.current} onSelectMemory=${onSelectMemory} timelineFilter=${timelineFilter} />
-                <${TimelineBar} selectedRanges=${timelineFilter} onSelectRange=${setTimelineFilter} />
+                <div class="brain-mode-toggle">
+                    <button class=${brainMode === '2d' ? 'active' : ''} onClick=${() => setBrainMode('2d')}>2D</button>
+                    <button class=${brainMode === 'mri' ? 'active' : ''} onClick=${() => setBrainMode('mri')} title="3D MRI brain view">⬡ MRI</button>
+                </div>
+                ${brainMode === '2d'
+                    ? html`
+                        <${BrainView} sse=${sseRef.current} onSelectMemory=${onSelectMemory} timelineFilter=${timelineFilter} />
+                        <${TimelineBar} selectedRanges=${timelineFilter} onSelectRange=${setTimelineFilter} />
+                    `
+                    : html`<${MriView} sse=${sseRef.current} />`}
             `}
             ${page === 'search' && html`<${SearchPage} onSelectMemory=${onSelectMemory} />`}
             ${page === 'tasks' && html`<${TasksPage} />`}

@@ -47,8 +47,9 @@ export async function fetchMemories(params = {}) {
     return res.json();
 }
 
-export async function fetchGraph(limit = 500) {
-    const res = await fetch(`${API_BASE}/v1/dashboard/memory/graph?limit=${limit}`);
+export async function fetchGraph(limit = 500, status = '') {
+    const q = status ? `?limit=${limit}&status=${encodeURIComponent(status)}` : `?limit=${limit}`;
+    const res = await fetch(`${API_BASE}/v1/dashboard/memory/graph${q}`);
     return res.json();
 }
 
