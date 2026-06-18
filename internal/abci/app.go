@@ -382,6 +382,20 @@ type SageApp struct {
 	// appV7..appV12.
 	appV13AppliedHeight int64 // 0 => fork dormant
 
+	// appV14AppliedHeight gates the app-v14 fork (v10.7.0): the symmetric
+	// DEACTIVATION of the app-v7 Layer-2 content-validation gate. Once set (> 0),
+	// postAppV7Fork returns false for every block AFTER this height, so the
+	// content gate — armed by app-v7 — is turned OFF again chain-wide at a future
+	// governed height, without retroactively flipping any committed block. The
+	// gate is therefore live for exactly the window (appV7AppliedHeight,
+	// appV14AppliedHeight]. Zero by default, so every existing chain (none has
+	// activated app-v14) keeps the gate live indefinitely and replays
+	// byte-identically. INDEPENDENT gate, like appV7..appV13 — NOT part of the
+	// v8.x PoE monotonic ladder, and it changes NO AppHash rule (it only toggles
+	// the content gate), so snapshot/verify and the FinalizeBlock hash-rule
+	// switch are untouched.
+	appV14AppliedHeight int64 // 0 => fork dormant (content gate never deactivated)
+
 	// retainBlocks, when > 0, is the number of most-recent blocks Commit asks
 	// CometBFT to keep: ResponseCommit.RetainHeight = height - retainBlocks
 	// (clamped at 0 = keep everything). Pruning is LOCAL and advisory — it never
@@ -466,6 +480,16 @@ const appV12UpgradeName = "app-v12"
 // on personal nodes by the v10.5.1 watchdog auto-advance, or manually via
 // {Name:"app-v13", TargetAppVersion:13}.
 const appV13UpgradeName = "app-v13"
+
+// appV14UpgradeName is the canonical activation-record name for the app-v14
+// fork (v10.7.0: the symmetric DEACTIVATION of the app-v7 content-validation
+// gate). Same naming discipline. Like app-v7..v13, an INDEPENDENT feature gate,
+// NOT part of the v8.x PoE monotonic chain. Governance-activated on quorum
+// clusters via {Name:"app-v14", TargetAppVersion:14}; on personal nodes the
+// v10.5.1 auto-advance ladder reaches it once the binary supports it — harmless
+// there because a stock build wires no content-validator registry, so app-v7's
+// gate was always inert and app-v14 merely records its (no-op) deactivation.
+const appV14UpgradeName = "app-v14"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -660,8 +684,26 @@ func (app *SageApp) refreshV8_5Fork() {
 // pre-fork branch (gate dormant) so the only AppHash delta at H_act is the
 // MarkUpgradeApplied write. The gate only ever runs when this returns true
 // AND contentValidators != nil.
+//
+// app-v14 adds the symmetric DEACTIVATION boundary: once app-v14 is active the
+// gate turns OFF again for heights past the app-v14 activation height, so the
+// gate is live for exactly the window (appV7AppliedHeight, appV14AppliedHeight].
 func (app *SageApp) postAppV7Fork(height int64) bool {
-	return app.appV7AppliedHeight > 0 && height > app.appV7AppliedHeight
+	if app.appV7AppliedHeight == 0 || height <= app.appV7AppliedHeight {
+		return false // pre-app-v7, or the activation block itself: gate dormant.
+	}
+	// Content-validator gate DEACTIVATION (app-v14). Strict > mirrors the
+	// activation boundary above: the deactivation block H2 itself still runs
+	// gated (height <= H2) so its only AppHash delta is the MarkUpgradeApplied
+	// write, and enforcement stops at H2+1. Inert on every chain that has not
+	// activated app-v14 (appV14AppliedHeight == 0), so all existing history
+	// replays byte-identically. Replay-safe by construction: the live window is a
+	// pure function of two committed activation heights, re-derived identically
+	// on every replica from the upgrade audit trail.
+	if app.appV14AppliedHeight > 0 && height > app.appV14AppliedHeight {
+		return false
+	}
+	return true
 }
 
 // refreshAppV7Fork populates appV7AppliedHeight from the persisted
@@ -945,6 +987,24 @@ func (app *SageApp) refreshAppV13Fork() {
 		return
 	}
 	app.appV13AppliedHeight = rec.AppliedHeight
+}
+
+// refreshAppV14Fork populates appV14AppliedHeight from the persisted upgrade
+// audit trail. Called on boot and after the activation block in FinalizeBlock,
+// so a node restarting on a post-app-v14 chain re-derives the content-gate
+// DEACTIVATION height and stops enforcing past it without waiting for the
+// activation. Returns nil-record on every chain that has not activated app-v14,
+// so the deactivation stays dormant and replay is unaffected.
+func (app *SageApp) refreshAppV14Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV14UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV14UpgradeName).Msg("read app-v14 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.appV14AppliedHeight = rec.AppliedHeight
 }
 
 // recordAppV9Branch records which branch (pre/post app-v9) a gated handler took,
@@ -1341,6 +1401,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshAppV11Fork()
 	app.refreshAppV12Fork()
 	app.refreshAppV13Fork()
+	app.refreshAppV14Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -1396,6 +1457,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshAppV11Fork()
 	app.refreshAppV12Fork()
 	app.refreshAppV13Fork()
+	app.refreshAppV14Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1461,8 +1523,10 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV14AppliedHeight > 0:
+		return 14 // app-v14 (content-validator gate deactivation, v10.7.0) — independent gate, highest version, must rank first (14 > 13)
 	case app.appV13AppliedHeight > 0:
-		return 13 // app-v13 (corrected narrow AppHash exclusion, v10.5.1) — independent gate, highest version, must rank first (13 > 12)
+		return 13 // app-v13 (corrected narrow AppHash exclusion, v10.5.1) — independent gate, ranks above app-v12 (13 > 12)
 	case app.appV12AppliedHeight > 0:
 		return 12 // app-v12 (whole-prefix state: AppHash exclusion, issue #40 — superseded by app-v13) — independent gate, ranks above app-v11 (12 > 11)
 	case app.appV11AppliedHeight > 0:
@@ -1491,13 +1555,13 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v13). It is the readiness ceiling for upgrade
+// fork gate for (currently app-v14). It is the readiness ceiling for upgrade
 // auto-voting: a validator must never vote to activate an upgrade it cannot
 // execute — doing so would commit consensus version.app=N while the binary
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 13
+const maxSupportedAppVersion uint64 = 14
 
 // MaxSupportedAppVersion returns the highest app version this binary has a
 // compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
@@ -1928,6 +1992,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		}
 		if plan.Name == appV13UpgradeName {
 			app.appV13AppliedHeight = req.Height
+		}
+		if plan.Name == appV14UpgradeName {
+			app.appV14AppliedHeight = req.Height
 		}
 		if plan.Name == appV12UpgradeName {
 			app.appV12AppliedHeight = req.Height
