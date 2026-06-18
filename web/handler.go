@@ -879,6 +879,10 @@ type graphNode struct {
 	CreatedAt  string   `json:"created_at"`
 	Agent      string   `json:"agent"`
 	Tags       []string `json:"tags,omitempty"`
+	// CorroborationCount drives consolidation visuals in the brain view (a
+	// well-corroborated memory glows/enlarges). Same value the recall paths
+	// surface as corroboration_count.
+	CorroborationCount int `json:"corroboration_count"`
 }
 
 // graphEdge connects two memories.
@@ -891,9 +895,15 @@ type graphEdge struct {
 // handleGraph returns all memories with edges for force-directed layout.
 func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	// Node cap: default 500 (bounded client load). Operators can raise it for
+	// stress-testing / big-brain views via SAGE_GRAPH_MAX_NODES.
+	maxNodes := 500
+	if v, _ := strconv.Atoi(os.Getenv("SAGE_GRAPH_MAX_NODES")); v > 0 {
+		maxNodes = v
+	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 500 {
-		limit = 500
+	if limit <= 0 || limit > maxNodes {
+		limit = maxNodes
 	}
 
 	opts := store.ListOptions{
@@ -905,12 +915,50 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	if opts.Status == "" {
 		opts.Status = "committed"
 	}
+	// status=all opts into the full brain (incl. challenged/deprecated) — the
+	// MRI view uses it to render synaptic pruning.
+	if opts.Status == "all" {
+		opts.Status = ""
+	}
 	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
-	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
+	allowedAgents, seeAll := h.resolveAgentRBAC(r)
+	if !seeAll {
 		opts.SubmittingAgents = allowedAgents
 	}
+	// Drill-down: ?domain=X loads just that lobe's memories.
+	drillDomain := q.Get("domain")
+	if drillDomain != "" {
+		opts.DomainTag = drillDomain
+	}
 
-	records, _, err := h.store.ListMemories(r.Context(), opts)
+	// Scale aggregates — operator view only (no RBAC aggregate leak).
+	var grandTotal int
+	var domainCounts map[string]int
+	if seeAll {
+		if stats, sErr := h.store.GetStats(r.Context()); sErr == nil && stats != nil {
+			grandTotal = stats.TotalMemories
+			domainCounts = stats.ByDomain
+		}
+	}
+
+	// Node selection:
+	//   - drill-down: that domain, most-significant (highest-confidence) first;
+	//   - operator overview beyond the cap: a stratified importance sample — each
+	//     lobe gets a quota proportional to its true size, filled with its
+	//     highest-confidence memories, so lobe density stays faithful and the dots
+	//     shown are the meaningful ones;
+	//   - otherwise: newest within the cap.
+	var records []*memory.MemoryRecord
+	var err error
+	switch {
+	case drillDomain != "":
+		opts.Sort = "confidence"
+		records, _, err = h.store.ListMemories(r.Context(), opts)
+	case seeAll && grandTotal > limit && len(domainCounts) > 1:
+		records = h.stratifiedSample(r.Context(), opts, domainCounts, grandTotal, limit)
+	default:
+		records, _, err = h.store.ListMemories(r.Context(), opts)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -929,16 +977,21 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	// Build domain groups for edge generation
 	domainMemories := make(map[string][]string)
 	for _, rec := range records {
+		corrCount := 0
+		if corrs, cErr := h.store.GetCorroborations(r.Context(), rec.MemoryID); cErr == nil {
+			corrCount = len(corrs)
+		}
 		nodes = append(nodes, graphNode{
-			ID:         rec.MemoryID,
-			Content:    truncate(rec.Content, 200),
-			Domain:     rec.DomainTag,
-			Confidence: rec.ConfidenceScore,
-			Status:     string(rec.Status),
-			MemoryType: string(rec.MemoryType),
-			CreatedAt:  rec.CreatedAt.Format(time.RFC3339),
-			Agent:      rec.SubmittingAgent,
-			Tags:       tagMap[rec.MemoryID],
+			ID:                 rec.MemoryID,
+			Content:            truncate(rec.Content, 200),
+			Domain:             rec.DomainTag,
+			Confidence:         rec.ConfidenceScore,
+			Status:             string(rec.Status),
+			MemoryType:         string(rec.MemoryType),
+			CreatedAt:          rec.CreatedAt.Format(time.RFC3339),
+			Agent:              rec.SubmittingAgent,
+			Tags:               tagMap[rec.MemoryID],
+			CorroborationCount: corrCount,
 		})
 		domainMemories[rec.DomainTag] = append(domainMemories[rec.DomainTag], rec.MemoryID)
 
@@ -961,10 +1014,81 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSONResp(w, http.StatusOK, map[string]any{
+	// Real typed links (sage_link): supports / contradicts / causes / precedes /
+	// refines / related. Only emit an edge when BOTH endpoints are in the
+	// RBAC-visible set — never surface a link to a memory the caller cannot see,
+	// which would leak a hidden memory's existence through the graph.
+	visible := make(map[string]bool, len(records))
+	for _, rec := range records {
+		visible[rec.MemoryID] = true
+	}
+	seenLink := make(map[string]bool)
+	for _, rec := range records {
+		typed, lErr := h.store.GetLinkedMemories(r.Context(), rec.MemoryID)
+		if lErr != nil {
+			continue
+		}
+		for _, l := range typed {
+			if !visible[l.SourceID] || !visible[l.TargetID] {
+				continue
+			}
+			key := l.SourceID + "\x00" + l.TargetID + "\x00" + l.LinkType
+			if seenLink[key] {
+				continue
+			}
+			seenLink[key] = true
+			lt := l.LinkType
+			if lt == "" {
+				lt = "related"
+			}
+			edges = append(edges, graphEdge{Source: l.SourceID, Target: l.TargetID, Type: lt})
+		}
+	}
+
+	resp := map[string]any{
 		"nodes": nodes,
 		"edges": edges,
-	})
+	}
+	// Scale signal for the MRI view: the true memory total + per-domain counts so
+	// the brain can convey "showing N of M" and weight each lobe by its real size
+	// even when only a bounded sample of nodes is rendered. Operator view only —
+	// an RBAC-restricted agent must not see global aggregate counts.
+	if seeAll && domainCounts != nil {
+		resp["total"] = grandTotal
+		resp["domain_counts"] = domainCounts
+	}
+	writeJSONResp(w, http.StatusOK, resp)
+}
+
+// stratifiedSample draws a representative, importance-ranked sample for the
+// overview brain: each domain gets a quota proportional to its share of the
+// total, filled with that domain's highest-confidence memories. Keeps lobe
+// density faithful to reality and surfaces the most significant memories, while
+// never exceeding the cap. One bounded ListMemories call per domain.
+func (h *DashboardHandler) stratifiedSample(ctx context.Context, base store.ListOptions, domainCounts map[string]int, total, cap int) []*memory.MemoryRecord {
+	out := make([]*memory.MemoryRecord, 0, cap)
+	for domain, cnt := range domainCounts {
+		if cnt <= 0 {
+			continue
+		}
+		quota := (cap*cnt + total/2) / total // round(cap * cnt/total)
+		if quota < 1 {
+			quota = 1
+		}
+		o := base
+		o.DomainTag = domain
+		o.Sort = "confidence"
+		o.Limit = quota
+		recs, _, err := h.store.ListMemories(ctx, o)
+		if err != nil {
+			continue
+		}
+		out = append(out, recs...)
+	}
+	if len(out) > cap {
+		out = out[:cap]
+	}
+	return out
 }
 
 // handleStats returns aggregate statistics.

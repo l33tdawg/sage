@@ -3976,3 +3976,37 @@ input[type="range"]::-moz-range-thumb {
     margin-bottom: 8px;
     opacity: 0.5;
 }
+
+/* --- Brain view mode toggle (2D canvas <-> 3D MRI) --- */
+.brain-mode-toggle {
+    position: absolute;
+    top: 62px;
+    right: 16px;
+    z-index: 60;
+    display: flex;
+    gap: 3px;
+    background: rgba(10, 16, 28, 0.82);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 3px;
+    backdrop-filter: blur(8px);
+}
+.brain-mode-toggle button {
+    cursor: pointer;
+    border: 0;
+    background: transparent;
+    color: var(--text-dim);
+    font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 0.5px;
+    padding: 5px 14px;
+    border-radius: 7px;
+}
+.brain-mode-toggle button:hover { color: var(--text); }
+.brain-mode-toggle button.active { background: var(--primary-dim); color: var(--primary); }
+.mri-stage {
+    flex: 1;
+    width: 100%;
+    min-height: 0;
+    position: relative;
+    background: #05070d;
+}
