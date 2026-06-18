@@ -30,6 +30,7 @@ const LINK_TYPES = {
 };
 const PALETTE = ['#ff6b9d','#ffd166','#5ee2a0','#5ab0ff','#c08bff','#ff9f5a','#4dd6c4','#f7748a','#9ad14b','#7aa0ff'];
 function hexToRgb(h){ const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function fmtN(n){ n = n||0; return n >= 1000 ? (n/1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : '' + n; }
 
 // Minimal OBJ → BufferGeometry (positions + fan-triangulated faces). Lets us
 // drop a CC0 brain mesh at /ui/assets/brain.obj with no extra loader library.
@@ -145,7 +146,8 @@ async function loadGraph(fetchUrl) {
       nodes: g.nodes.map(n=>({ id:n.id, domain:n.domain||'unknown', label:n.content||n.id,
         status:n.status||'committed', corroboration_count:n.corroboration_count||0,
         confidence: typeof n.confidence==='number'?n.confidence:0.5, memory_type:n.memory_type||'' })),
-      links: (g.edges||[]).map(e=>({ source:e.source, target:e.target, link_type:e.type||'related' })) };
+      links: (g.edges||[]).map(e=>({ source:e.source, target:e.target, link_type:e.type||'related' })),
+      total: g.total||0, domainCounts: g.domain_counts||null };
   } catch (err) {
     console.warn('[mri] live graph unavailable, synthetic fallback:', err.message);
     return Object.assign(synthetic(), { live: false });
@@ -239,9 +241,15 @@ export function mountMriBrain(container, opts = {}) {
   }
 
   function refreshCounts(d){
-    $('.nn').textContent = d.nodes.length;
-    $('.ne').textContent = d.links.length;
-    $('.nc').textContent = d.nodes.filter(n=>(n.corroboration_count||0)>=4 && n.status==='committed').length;
+    // .nn shows the TRUE total (operator view), not just the rendered sample.
+    $('.nn').textContent = fmtN(d.total && d.total > d.nodes.length ? d.total : d.nodes.length);
+    $('.ne').textContent = fmtN(d.links.length);
+    $('.nc').textContent = fmtN(d.nodes.filter(n=>(n.corroboration_count||0)>=4 && n.status==='committed').length);
+    if (d.total && d.total > d.nodes.length) {
+      $('.flag').textContent = `showing ${d.nodes.length} of ${fmtN(d.total)} · most recent`;
+    } else {
+      $('.flag').textContent = d.live === false ? 'SYNTHETIC FALLBACK · no live data' : '';
+    }
   }
 
   loadGraph(fetchUrl).then(data => {
@@ -291,12 +299,12 @@ export function mountMriBrain(container, opts = {}) {
       }).catch(()=>{ /* no override — keep the procedural brain */ });
     } catch(e){ /* hull optional */ }
 
+    const dc = data.domainCounts || {};
     const lobes=$('.lobes'); [...new Set(data.nodes.map(n=>n.domain))].forEach(k=>lobes.insertAdjacentHTML('beforeend',
-      `<div class="row"><span class="dot" style="background:${domainColor(k)}"></span><div class="t"><b>${k}</b></div></div>`));
+      `<div class="row"><span class="dot" style="background:${domainColor(k)}"></span><div class="t"><b>${k}</b>${dc[k]?` <span style="color:#5d7395">· ${fmtN(dc[k])}</span>`:''}</div></div>`));
     const lt=$('.linktypes'); Object.values(LINK_TYPES).filter(t=>t.typed).forEach(t=>lt.insertAdjacentHTML('beforeend',
       `<div class="row"><span class="bar" style="background:${t.color}"></span><div class="t"><span>${t.label}</span></div></div>`));
     refreshCounts(data);
-    $('.flag').textContent = data.live ? '' : 'SYNTHETIC FALLBACK · no live data';
 
     // Frame the brain once, then gentle auto-rotate via OrbitControls.
     // autoRotate respects user zoom/pan/drag — unlike setting cameraPosition

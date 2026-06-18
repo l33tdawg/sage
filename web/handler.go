@@ -915,7 +915,8 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 		opts.Status = ""
 	}
 	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
-	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
+	allowedAgents, seeAll := h.resolveAgentRBAC(r)
+	if !seeAll {
 		opts.SubmittingAgents = allowedAgents
 	}
 
@@ -1006,10 +1007,21 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSONResp(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"nodes": nodes,
 		"edges": edges,
-	})
+	}
+	// Scale signal for the MRI view: the true memory total + per-domain counts so
+	// the brain can convey "showing N of M" and weight each lobe by its real size
+	// even when only a bounded sample of nodes is rendered. Operator view only —
+	// an RBAC-restricted agent must not see global aggregate counts.
+	if seeAll {
+		if stats, sErr := h.store.GetStats(r.Context()); sErr == nil && stats != nil {
+			resp["total"] = stats.TotalMemories
+			resp["domain_counts"] = stats.ByDomain
+		}
+	}
+	writeJSONResp(w, http.StatusOK, resp)
 }
 
 // handleStats returns aggregate statistics.
