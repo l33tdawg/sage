@@ -65,11 +65,11 @@ type embedderProvider interface {
 
 // DashboardHandler serves the CEREBRUM dashboard UI and its API endpoints.
 type DashboardHandler struct {
-	store       store.MemoryStore
-	prefStore   PreferencesStore
-	embedder    Embedder
-	SSE         *SSEBroadcaster
-	Version     string
+	store     store.MemoryStore
+	prefStore PreferencesStore
+	embedder  Embedder
+	SSE       *SSEBroadcaster
+	Version   string
 
 	// graphCache memoises the expensive /memory/graph response with a
 	// stale-while-revalidate policy: the first load computes synchronously, every
@@ -77,9 +77,9 @@ type DashboardHandler struct {
 	// it warm. Keyed by query params + RBAC scope so it never leaks across agents.
 	graphCacheMu sync.Mutex
 	graphCache   map[string]*graphCacheEntry
-	ExecPath    string // path to sage-gui binary, used by /v1/mcp-config
-	Encrypted   atomic.Bool
-	VaultLocked atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
+	ExecPath     string // path to sage-gui binary, used by /v1/mcp-config
+	Encrypted    atomic.Bool
+	VaultLocked  atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
 
 	// Auth — only active when Encrypted is true.
 	VaultKeyPath  string
@@ -941,7 +941,7 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 
 	if body := h.serveGraphFromCache(cacheKey, statusParam, drillDomain, limit, seeAll, allowedAgents); body != nil {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(body)
+		_, _ = w.Write(body) //nolint:gosec // G705: body is server-built JSON sent as application/json, not HTML — no XSS sink
 		return
 	}
 	body, err := h.computeGraphJSON(r.Context(), statusParam, drillDomain, limit, seeAll, allowedAgents)
@@ -951,7 +951,7 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	}
 	h.putGraphCache(cacheKey, body)
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(body)
+	_, _ = w.Write(body) //nolint:gosec // G705: body is server-built JSON sent as application/json, not HTML — no XSS sink
 }
 
 // serveGraphFromCache returns a cached graph body when one is fresh enough to
