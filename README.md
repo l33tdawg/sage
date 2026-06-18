@@ -57,15 +57,29 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.7.0
+## What's New in v10.8.0
+
+**A 3D "MRI" view of your memory brain, plus two dashboard streaming fixes.** A minor, non-breaking release: no consensus rule, AppHash surface, transaction handler, or key-encoding changes — replay is byte-identical and the SDK is a lockstep bump.
+
+- **3D MRI memory-brain (opt-in).** The dashboard brain page gains a `⬡ MRI` toggle that renders the memory graph in 3D alongside the existing 2D canvas, which stays the default. Memories are laid out anatomically — domain → lobe, corroboration → cortical depth — instanced for scale with a bloom "consolidation glow", and the edges are the real `sage_link` typed relationships (supports / contradicts / causes / precedes / refines). A typed edge is drawn only when **both** endpoints are RBAC-visible, so the connectome never reveals the existence of a memory you can't see; per-domain scale aggregates are operator-only. The brain hull is **procedurally generated** — no mesh asset ships, so the repo stays cleanly Apache-2.0 (drop a CC0 `brain.obj` in `web/static/assets/` to override). A node with no memories renders a blank brain, never placeholder data. Also available standalone at `/ui/mri`; the graph node cap is configurable via `SAGE_GRAPH_MAX_NODES`.
+- **SSE streams survive past `WriteTimeout`.** The dashboard's live event stream was being guillotined every 15s by the HTTP server's absolute `WriteTimeout` (heartbeats never reset it), surfacing as `ERR_INCOMPLETE_CHUNKED_ENCODING` and a connect/drop/reconnect storm in the activity log. The SSE handler now clears the per-connection write deadline so the heartbeat governs liveness.
+- **`sage_link` no longer trips the turn gate.** The MCP `sage_link` tool was missing from the never-block-for-turn allowlist, so building a knowledge-graph edge could be blocked pending a `sage_turn`. It now joins the other memory operations as a non-blocking call.
+
+Dashboard, streaming, and developer-experience only — no runtime consensus behavior changes. SDK 10.8.0 (lockstep, no SDK changes).
+
+> **Thanks to [@ihubanov](https://github.com/ihubanov)** — the 3D MRI brain, the SSE streaming fix, and the `sage_link` allowlist fix all came from his contributions. 🧠
+
+## Older releases
+
+<details>
+<summary>v10.7.0 — app-v14: replay-safe deactivation of the content-validator gate</summary>
 
 **A governed, replay-deterministic OFF-switch for the Layer-2 content-validation gate (`app-v14`).** app-v7 turns the content gate ON at an activation height; until now there was no replay-safe way to turn it back OFF — clearing it retroactively flips committed blocks and diverges the AppHash (a halt), and in-band downgrade is rejected (Code 90). v10.7.0 adds the symmetric counterpart so a gate that was activated at `H_act` can be deactivated at a future governed height `H2`, letting a deployment move content/schema policy off-chain instead of carrying a one-way door.
 
 - **`app-v14` — symmetric content-gate deactivation.** A deactivation height `H2` is set by the same governed `UpgradePlanRecord` path (2/3 quorum on a cluster) that activates every other fork, making the gate live for exactly the window `(H_act, H2]` and dormant again afterward. The on/off state is a pure function of two committed activation heights, re-derived identically on every replica from the upgrade audit trail — so new-node bootstrap, crash recovery, and state-sync all stay deterministic, the deactivation block's only AppHash delta is its `MarkUpgradeApplied` write, and a chain that never activates app-v14 replays byte-identically. It changes **no** AppHash rule, key encoding, or transaction shape, so existing chain state stays valid (`ConsensusForkVersion` stays 1); it bumps `app_version` / `maxSupportedAppVersion` to 14.
 
 This is a consensus fork: app-v14 activation requires every validator running the v10.7.0 binary and fully converged **before** the activation height (a normal, non-byte-identical binary bump) — do a clean fleet upgrade, then propose the plan. On personal/single-validator nodes the auto-advance ladder reaches app-v14 automatically and harmlessly (a stock build wires no content-validator registry, so app-v7's gate was always inert there). SDK 10.7.0 (lockstep, no SDK changes).
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.6.1 — environment-variable reference + sage-gui help pointer</summary>
