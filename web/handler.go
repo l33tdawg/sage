@@ -895,9 +895,15 @@ type graphEdge struct {
 // handleGraph returns all memories with edges for force-directed layout.
 func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	// Node cap: default 500 (bounded client load). Operators can raise it for
+	// stress-testing / big-brain views via SAGE_GRAPH_MAX_NODES.
+	maxNodes := 500
+	if v, _ := strconv.Atoi(os.Getenv("SAGE_GRAPH_MAX_NODES")); v > 0 {
+		maxNodes = v
+	}
 	limit, _ := strconv.Atoi(q.Get("limit"))
-	if limit <= 0 || limit > 500 {
-		limit = 500
+	if limit <= 0 || limit > maxNodes {
+		limit = maxNodes
 	}
 
 	opts := store.ListOptions{

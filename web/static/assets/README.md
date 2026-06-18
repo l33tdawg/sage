@@ -6,15 +6,16 @@ file is absent the view falls back to a procedurally-generated brain shape.
 
 ## Current mesh — attribution (required)
 
-`brain.obj` is a **decimated** merge (left + right pial hemispheres, ~2k faces,
+`brain.obj` is a **decimated** merge (left + right pial hemispheres, ~21k faces,
 re-oriented y-up) of the **"Brain for Blender"** model:
 
 - Source: Anderson M. Winkler — https://brainder.org/research/brain-for-blender/
 - License: **Creative Commons Attribution-ShareAlike 3.0 (CC BY-SA 3.0)**
-- Changes: merged hemispheres, vertex-cluster decimated 580k→~2k faces, axis-swapped.
+- Changes: merged hemispheres, vertex-cluster decimated 580k → ~21k faces, axis-swapped.
 
 Per CC BY-SA, this mesh file (and adaptations of it) must keep this attribution
-and remain CC BY-SA. It does not affect the licensing of the rest of the repo.
+and remain CC BY-SA. It is a separately-licensed asset and does not affect the
+Apache-2.0 license of the rest of the repository.
 
 ## Replacing it
 

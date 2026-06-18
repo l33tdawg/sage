@@ -214,7 +214,7 @@ export function mountMriBrain(container, opts = {}) {
   // inside a brain-shaped ellipsoid. Positions are pinned (fx/fy/fz), so there is
   // zero per-tick cost no matter how many nodes; the layout is a pure formula and
   // is stable across reloads (a node always lands in the same place).
-  const EX=165, EY=108, EZ=190;
+  const EX=205, EY=140, EZ=240;
   const hsh=(s,seed)=>{ s=s||''; let h=(seed>>>0)||1; for(let i=0;i<s.length;i++) h=Math.imul(h^s.charCodeAt(i),16777619); return ((h>>>0)%10000)/10000; };
   function placeNodes(nodes){
     const ds=[...new Set(nodes.map(n=>n.domain))], nd=Math.max(1,ds.length), di={};
@@ -222,7 +222,10 @@ export function mountMriBrain(container, opts = {}) {
     nodes.forEach(n=>{
       const az=((di[n.domain]||0)/nd)*Math.PI*2 + (hsh(n.id,1)-0.5)*(Math.PI*2/nd)*0.82;
       const el=(hsh(n.id,2)-0.5)*Math.PI*0.92;
-      const depth=0.33 + Math.min(1,(n.corroboration_count||0)/8)*0.60;
+      // radius FILLS the lobe volume (cube-root → uniform density, not a hollow
+      // shell), with corroboration pushing a memory outward toward the cortex.
+      const cons=Math.min(1,(n.corroboration_count||0)/8);
+      const depth=Math.min(0.97, 0.30 + Math.cbrt(hsh(n.id,3))*0.55 + cons*0.15);
       const ce=Math.cos(el);
       n.fx=n.x=EX*depth*ce*Math.cos(az);
       n.fy=n.y=EY*depth*Math.sin(el);
@@ -305,7 +308,7 @@ export function mountMriBrain(container, opts = {}) {
       .linkColor(l=>(LINK_TYPES[l.link_type]||LINK_TYPES.related).color)
       .linkWidth(l=> l.link_type==='contradicts'?0.6 : (LINK_TYPES[l.link_type]||{}).typed?0.35:0.18)
       .linkOpacity(0.3)
-      .linkDirectionalParticles(l=> flow&&(l.link_type==='causes'||l.link_type==='precedes')?2:0)
+      .linkDirectionalParticles(l=> flow&&(LINK_TYPES[l.link_type]||{}).typed?2:0)
       .linkDirectionalParticleWidth(1.1).linkDirectionalParticleSpeed(0.006)
       .warmupTicks(1).cooldownTicks(6)
       .onNodeHover(showTip)
@@ -349,9 +352,27 @@ export function mountMriBrain(container, opts = {}) {
     // Frame the brain once, then gentle auto-rotate via OrbitControls.
     // autoRotate respects user zoom/pan/drag — unlike setting cameraPosition
     // every frame, which previously clobbered all interaction.
-    Graph.cameraPosition({ x: 0, y: 120, z: 600 }); // frame the whole brain + cloud
+    Graph.cameraPosition({ x: 0, y: 60, z: 620 }); // frame the whole brain + cloud
     controls = Graph.controls();
     if (controls) { controls.autoRotate = scanning; controls.autoRotateSpeed = 0.45; }
+
+    // Centre the brain in the VISIBLE area. The legend panel (right, 270px) and the
+    // left nav rail make the canvas-centred scene look shoved to the right + low. A
+    // camera view-offset shifts the projection left/up WITHOUT rotating, so the brain
+    // sits centred and autoRotate still spins around it (no orbit-centre drift).
+    function centerView(){
+      if (disposed || !Graph) return;
+      try {
+        const cam = Graph.camera();
+        const W = root.clientWidth || 1280, H = root.clientHeight || 720;
+        cam.setViewOffset(W, H, -180, -100, W, H); // shift the brain left + up into the visible area
+        cam.updateProjectionMatrix();
+      } catch(e){ /* noop */ }
+    }
+    centerView();
+    const onResize = () => centerView();
+    window.addEventListener('resize', onResize);
+    subs.push(() => window.removeEventListener('resize', onResize));
 
     // Live population — re-pull on remember/forget. placeNodes() is deterministic,
     // so existing nodes keep their exact spot and new memories land in place; no
@@ -372,7 +393,7 @@ export function mountMriBrain(container, opts = {}) {
     tip.style.left=(e.clientX-r.left+14)+'px'; tip.style.top=(e.clientY-r.top+14)+'px'; } }
   root.addEventListener('mousemove', onMove);
   $('.b-rot').onclick=function(){ scanning=!scanning; if(controls) controls.autoRotate=scanning; this.textContent=scanning?'⏸ pause':'▶ scan'; };
-  $('.b-flow').onclick=function(){ flow=!flow; if(Graph) Graph.linkDirectionalParticles(l=>flow&&(l.link_type==='causes'||l.link_type==='precedes')?2:0); this.textContent=flow?'⚡ flow: on':'⚡ flow: off'; };
+  $('.b-flow').onclick=function(){ flow=!flow; if(Graph) Graph.linkDirectionalParticles(l=>flow&&(LINK_TYPES[l.link_type]||{}).typed?2:0); this.textContent=flow?'⚡ flow: on':'⚡ flow: off'; };
   $('.b-op').oninput=function(){ setHullOpacity(this.value/100); };
 
   return function cleanup(){
