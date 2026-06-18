@@ -257,6 +257,50 @@ func TestInsertCorroborationAndGetCorroborations(t *testing.T) {
 	assert.Equal(t, "I confirm this", corrs[0].Evidence)
 }
 
+func TestGetCorroborationCountsAndLinksAmong(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"m1", "m2", "m3", "m4"} {
+		require.NoError(t, s.InsertMemory(ctx, testMemory(id, "agent1", "content "+id, "general")))
+	}
+	// m1 corroborated twice, m2 once, m3/m4 zero.
+	require.NoError(t, s.InsertCorroboration(ctx, &Corroboration{MemoryID: "m1", AgentID: "a2", Evidence: "x", CreatedAt: time.Now().UTC()}))
+	require.NoError(t, s.InsertCorroboration(ctx, &Corroboration{MemoryID: "m1", AgentID: "a3", Evidence: "y", CreatedAt: time.Now().UTC()}))
+	require.NoError(t, s.InsertCorroboration(ctx, &Corroboration{MemoryID: "m2", AgentID: "a2", Evidence: "z", CreatedAt: time.Now().UTC()}))
+
+	counts, err := s.GetCorroborationCounts(ctx, []string{"m1", "m2", "m3"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, counts["m1"])
+	assert.Equal(t, 1, counts["m2"])
+	_, hasM3 := counts["m3"]
+	assert.False(t, hasM3, "zero-count memories should be absent from the map")
+
+	// Links: m1->m2 and m2->m3 are among the queried set; m1->m4 must be excluded
+	// because m4 is not in the queried (RBAC-visible) set.
+	require.NoError(t, s.LinkMemories(ctx, "m1", "m2", "supports"))
+	require.NoError(t, s.LinkMemories(ctx, "m2", "m3", "refines"))
+	require.NoError(t, s.LinkMemories(ctx, "m1", "m4", "related"))
+
+	links, err := s.GetLinksAmong(ctx, []string{"m1", "m2", "m3"})
+	require.NoError(t, err)
+	assert.Len(t, links, 2, "m1->m4 must be excluded (m4 outside the queried set)")
+	got := map[string]string{}
+	for _, l := range links {
+		got[l.SourceID+"->"+l.TargetID] = l.LinkType
+	}
+	assert.Equal(t, "supports", got["m1->m2"])
+	assert.Equal(t, "refines", got["m2->m3"])
+
+	// Empty input is a no-op, not an error.
+	ec, err := s.GetCorroborationCounts(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, ec)
+	el, err := s.GetLinksAmong(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, el)
+}
+
 func TestGetPendingByDomain(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

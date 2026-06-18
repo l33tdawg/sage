@@ -308,9 +308,43 @@ body {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
+    align-items: center;
     padding: 8px 20px;
     background: var(--bg-elevated);
     border-bottom: 1px solid var(--border);
+}
+/* Expanded, the strip can hold 200+ domain chips — cap its height and scroll so
+   it never shoves the brain canvas off-screen. Collapsed, it's a single row. */
+.domain-bar:not(.collapsed) {
+    max-height: 116px;
+    overflow-y: auto;
+}
+.domain-toggle {
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    border: 1px solid var(--border-light);
+    background: var(--bg-surface);
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.domain-toggle:hover { border-color: var(--text-muted); color: var(--text); }
+.domain-hint { color: var(--text-muted); font-size: 11px; font-style: italic; }
+.brain-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    color: var(--text-muted);
+    font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
 }
 
 .domain-pill {

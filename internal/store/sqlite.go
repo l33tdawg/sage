@@ -3250,6 +3250,93 @@ func (s *SQLiteStore) GetLinkedMemories(ctx context.Context, memoryID string) ([
 	return links, rows.Err()
 }
 
+// GetCorroborationCounts returns the corroboration count for each memory ID in a
+// single batched query (chunked to stay within SQLite's bound-parameter limit).
+func (s *SQLiteStore) GetCorroborationCounts(ctx context.Context, memoryIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(memoryIDs))
+	for start := 0; start < len(memoryIDs); start += 900 {
+		end := start + 900
+		if end > len(memoryIDs) {
+			end = len(memoryIDs)
+		}
+		chunk := memoryIDs[start:end]
+		ph := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			ph[i] = "?"
+			args[i] = id
+		}
+		rows, err := s.conn.QueryContext(ctx,
+			`SELECT memory_id, COUNT(*) FROM corroborations WHERE memory_id IN (`+strings.Join(ph, ",")+`) GROUP BY memory_id`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("get corroboration counts: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			var n int
+			if scanErr := rows.Scan(&id, &n); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan corroboration count: %w", scanErr)
+			}
+			counts[id] = n
+		}
+		rowsErr := rows.Err()
+		_ = rows.Close()
+		if rowsErr != nil {
+			return nil, rowsErr
+		}
+	}
+	return counts, nil
+}
+
+// GetLinksAmong returns typed links where BOTH endpoints are in memoryIDs, in one
+// query per chunk (vs. one GetLinkedMemories per memory). It queries by source_id
+// and filters target membership in Go, keeping each query within the parameter limit.
+func (s *SQLiteStore) GetLinksAmong(ctx context.Context, memoryIDs []string) ([]memory.MemoryLink, error) {
+	links := make([]memory.MemoryLink, 0)
+	if len(memoryIDs) == 0 {
+		return links, nil
+	}
+	inSet := make(map[string]bool, len(memoryIDs))
+	for _, id := range memoryIDs {
+		inSet[id] = true
+	}
+	for start := 0; start < len(memoryIDs); start += 900 {
+		end := start + 900
+		if end > len(memoryIDs) {
+			end = len(memoryIDs)
+		}
+		chunk := memoryIDs[start:end]
+		ph := make([]string, len(chunk))
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			ph[i] = "?"
+			args[i] = id
+		}
+		rows, err := s.conn.QueryContext(ctx,
+			`SELECT source_id, target_id, link_type, created_at FROM memory_links WHERE source_id IN (`+strings.Join(ph, ",")+`)`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("get links among: %w", err)
+		}
+		for rows.Next() {
+			var l memory.MemoryLink
+			if scanErr := rows.Scan(&l.SourceID, &l.TargetID, &l.LinkType, &l.CreatedAt); scanErr != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan link: %w", scanErr)
+			}
+			if inSet[l.TargetID] {
+				links = append(links, l)
+			}
+		}
+		rowsErr := rows.Err()
+		_ = rows.Close()
+		if rowsErr != nil {
+			return nil, rowsErr
+		}
+	}
+	return links, nil
+}
+
 // GetOpenTasks returns all task memories that are planned or in_progress.
 func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error) {
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,

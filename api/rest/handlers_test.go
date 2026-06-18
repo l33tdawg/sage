@@ -182,6 +182,14 @@ func (m *mockMemoryStore) GetLinkedMemories(_ context.Context, _ string) ([]memo
 	return nil, nil
 }
 
+func (m *mockMemoryStore) GetCorroborationCounts(_ context.Context, _ []string) (map[string]int, error) {
+	return map[string]int{}, nil
+}
+
+func (m *mockMemoryStore) GetLinksAmong(_ context.Context, _ []string) ([]memory.MemoryLink, error) {
+	return nil, nil
+}
+
 func (m *mockMemoryStore) GetOpenTasks(_ context.Context, _ string, _ string) ([]*memory.MemoryRecord, error) {
 	var tasks []*memory.MemoryRecord
 	for _, rec := range m.memories {

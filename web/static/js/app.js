@@ -231,6 +231,8 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
     const [stats, setStats] = useState(null);
     const [domains, setDomains] = useState([]);
     const [filterDomains, setFilterDomains] = useState(new Set());
+    const [domainsCollapsed, setDomainsCollapsed] = useState(true); // collapse the domain filter strip by default (it can be 200+ chips)
+    const [graphLoaded, setGraphLoaded] = useState(false); // first graph fetch done — gate a "synthesizing" hint so the canvas never just looks blank
     const [searchText, setSearchText] = useState('');
     const [searchOpen, setSearchOpen] = useState(false);
     const [tooltip, setTooltip] = useState(null);
@@ -293,6 +295,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             s.nodes = nodes;
             s.edges = graphData.edges || [];
             setStats(statsData);
+            setGraphLoaded(true);
 
             const domainSet = new Set(nodes.map(n => n.domain).filter(Boolean));
             setDomains([...domainSet].sort());
@@ -309,7 +312,10 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
             }
             setAgentList(merged);
         } catch (err) {
-            // retry on next interval
+            // retry on next interval; clear the loading hint so it doesn't stick
+            // forever on a transient error (an empty canvas is honest; the 30s
+            // interval and SSE events will repopulate).
+            setGraphLoaded(true);
         }
     }
 
@@ -1014,18 +1020,24 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                 `)}
             </div>
         `}
-        <div class="domain-bar">
+        <div class="domain-bar ${domainsCollapsed ? 'collapsed' : ''}">
+            <button class="domain-toggle" onClick=${() => setDomainsCollapsed(c => !c)}
+                    title=${domainsCollapsed ? 'Show domain filters' : 'Hide domain filters'}>
+                ${domainsCollapsed ? '▸' : '▾'} domains · ${domains.length}
+            </button>
             <${HelpTip} text="Click a domain to filter the graph. Click again to show all." />
-            ${domains.map(d => html`
+            ${(domainsCollapsed ? [...filterDomains] : domains).map(d => html`
                 <button class="domain-pill ${filterDomains.has(d) ? 'active' : ''}"
                         style="color: ${getDomainColor(d)}; ${filterDomains.has(d) ? `background: ${getDomainColor(d)}20` : ''}"
                         onClick=${() => toggleDomain(d)}>
                     ${d}
                 </button>
             `)}
+            ${domainsCollapsed && filterDomains.size === 0 ? html`<span class="domain-hint">click to filter by domain</span>` : ''}
         </div>
         <div class="brain-container">
             <canvas ref=${canvasRef} class="brain-canvas"></canvas>
+            ${!graphLoaded ? html`<div class="brain-loading">◍ synthesizing memory graph…</div>` : ''}
 
             <div class="nav-pad">
                 <button class="nav-btn nav-up" onClick=${() => { stateRef.current.camera.y += 60; }} title="Pan up">

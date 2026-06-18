@@ -973,14 +973,14 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 		memIDs[i] = rec.MemoryID
 	}
 	tagMap, _ := h.store.GetTagsBatch(r.Context(), memIDs)
+	// Batched corroboration counts for all rendered nodes — one query instead of
+	// one GetCorroborations per node (the per-node form was an N+1 that made the
+	// graph endpoint slow on large brains).
+	corrCounts, _ := h.store.GetCorroborationCounts(r.Context(), memIDs)
 
 	// Build domain groups for edge generation
 	domainMemories := make(map[string][]string)
 	for _, rec := range records {
-		corrCount := 0
-		if corrs, cErr := h.store.GetCorroborations(r.Context(), rec.MemoryID); cErr == nil {
-			corrCount = len(corrs)
-		}
 		nodes = append(nodes, graphNode{
 			ID:                 rec.MemoryID,
 			Content:            truncate(rec.Content, 200),
@@ -991,7 +991,7 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 			CreatedAt:          rec.CreatedAt.Format(time.RFC3339),
 			Agent:              rec.SubmittingAgent,
 			Tags:               tagMap[rec.MemoryID],
-			CorroborationCount: corrCount,
+			CorroborationCount: corrCounts[rec.MemoryID],
 		})
 		domainMemories[rec.DomainTag] = append(domainMemories[rec.DomainTag], rec.MemoryID)
 
@@ -1015,23 +1015,12 @@ func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Real typed links (sage_link): supports / contradicts / causes / precedes /
-	// refines / related. Only emit an edge when BOTH endpoints are in the
-	// RBAC-visible set — never surface a link to a memory the caller cannot see,
-	// which would leak a hidden memory's existence through the graph.
-	visible := make(map[string]bool, len(records))
-	for _, rec := range records {
-		visible[rec.MemoryID] = true
-	}
+	// refines / related. GetLinksAmong returns only links whose BOTH endpoints are
+	// in memIDs (the RBAC-visible set), so the connectome never surfaces a link to
+	// a memory the caller cannot see — and it is a single query, not one per node.
 	seenLink := make(map[string]bool)
-	for _, rec := range records {
-		typed, lErr := h.store.GetLinkedMemories(r.Context(), rec.MemoryID)
-		if lErr != nil {
-			continue
-		}
+	if typed, lErr := h.store.GetLinksAmong(r.Context(), memIDs); lErr == nil {
 		for _, l := range typed {
-			if !visible[l.SourceID] || !visible[l.TargetID] {
-				continue
-			}
 			key := l.SourceID + "\x00" + l.TargetID + "\x00" + l.LinkType
 			if seenLink[key] {
 				continue

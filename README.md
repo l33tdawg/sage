@@ -57,7 +57,20 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.8.0
+## What's New in v10.8.1
+
+**Performance + UX patch for the new brain views.** Server-side and dashboard only — no consensus rule, AppHash surface, transaction handler, or key-encoding change; replay is byte-identical and the SDK is a lockstep bump.
+
+- **Faster memory-graph endpoint (no more N+1).** `/v1/dashboard/memory/graph` was fetching corroboration counts and typed `sage_link` edges with one query *per node* — roughly a thousand extra queries for a 500-node graph, which made the 2D brain slow to first paint on large brains (5k+ memories, 200+ domains). Both are now single batched queries (`GetCorroborationCounts` / `GetLinksAmong`), so the graph loads in a fraction of the time. RBAC is unchanged — typed edges are still only emitted when **both** endpoints are visible to the caller.
+- **2D brain no longer looks blank while loading.** The 2D canvas shows a "synthesizing memory graph…" hint until the first data arrives (the 3D view already had its wireframe hull to show), so a slow first load never reads as broken.
+- **Collapsible domain filter.** With hundreds of domains the filter strip could grow to fill the view; it now collapses by default (still surfacing any active filters), expands on click, and is height-capped + scrollable when expanded so it never crowds out the graph.
+
+Dashboard and performance only. SDK 10.8.1 (lockstep, no SDK changes).
+
+## Older releases
+
+<details>
+<summary>v10.8.0 — 3D MRI memory-brain (opt-in) + SSE streaming fix + sage_link allowlist</summary>
 
 **A 3D "MRI" view of your memory brain, plus two dashboard streaming fixes.** A minor, non-breaking release: no consensus rule, AppHash surface, transaction handler, or key-encoding changes — replay is byte-identical and the SDK is a lockstep bump.
 
@@ -68,8 +81,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 Dashboard, streaming, and developer-experience only — no runtime consensus behavior changes. SDK 10.8.0 (lockstep, no SDK changes).
 
 > **Thanks to [@ihubanov](https://github.com/ihubanov)** — the 3D MRI brain, the SSE streaming fix, and the `sage_link` allowlist fix all came from his contributions. 🧠
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.7.0 — app-v14: replay-safe deactivation of the content-validator gate</summary>

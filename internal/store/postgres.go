@@ -1322,6 +1322,56 @@ func (s *PostgresStore) GetLinkedMemories(ctx context.Context, memoryID string) 
 	return links, rows.Err()
 }
 
+// GetCorroborationCounts returns the corroboration count for each memory ID in a
+// single batched query (avoids the N+1 of GetCorroborations per memory).
+func (s *PostgresStore) GetCorroborationCounts(ctx context.Context, memoryIDs []string) (map[string]int, error) {
+	counts := make(map[string]int, len(memoryIDs))
+	if len(memoryIDs) == 0 {
+		return counts, nil
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT memory_id, COUNT(*) FROM corroborations WHERE memory_id = ANY($1) GROUP BY memory_id`, memoryIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get corroboration counts: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("scan corroboration count: %w", err)
+		}
+		counts[id] = n
+	}
+	return counts, rows.Err()
+}
+
+// GetLinksAmong returns typed links where BOTH endpoints are in memoryIDs, in one
+// query (vs. one GetLinkedMemories per memory).
+func (s *PostgresStore) GetLinksAmong(ctx context.Context, memoryIDs []string) ([]memory.MemoryLink, error) {
+	links := make([]memory.MemoryLink, 0)
+	if len(memoryIDs) == 0 {
+		return links, nil
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT source_id, target_id, link_type, created_at FROM memory_links WHERE source_id = ANY($1) AND target_id = ANY($1)`,
+		memoryIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get links among: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var l memory.MemoryLink
+		var createdAt time.Time
+		if err := rows.Scan(&l.SourceID, &l.TargetID, &l.LinkType, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan link: %w", err)
+		}
+		l.CreatedAt = createdAt.Format(time.RFC3339)
+		links = append(links, l)
+	}
+	return links, rows.Err()
+}
+
 // GetOpenTasks returns all task memories that are planned or in_progress.
 func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error) {
 	query := `SELECT memory_id, submitting_agent, content, content_hash,

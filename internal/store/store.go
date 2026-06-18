@@ -125,6 +125,9 @@ type MemoryStore interface {
 	InsertChallenge(ctx context.Context, challenge *ChallengeEntry) error
 	InsertCorroboration(ctx context.Context, corr *Corroboration) error
 	GetCorroborations(ctx context.Context, memoryID string) ([]*Corroboration, error)
+	// GetCorroborationCounts returns the corroboration count for each of memoryIDs
+	// in a single batched query (avoids the N+1 of GetCorroborations per memory).
+	GetCorroborationCounts(ctx context.Context, memoryIDs []string) (map[string]int, error)
 	GetPendingByDomain(ctx context.Context, domainTag string, limit int) ([]*memory.MemoryRecord, error)
 	ListMemories(ctx context.Context, opts ListOptions) ([]*memory.MemoryRecord, int, error)
 	GetStats(ctx context.Context) (*StoreStats, error)
@@ -135,6 +138,9 @@ type MemoryStore interface {
 	UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error
 	LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error
 	GetLinkedMemories(ctx context.Context, memoryID string) ([]memory.MemoryLink, error)
+	// GetLinksAmong returns typed links where BOTH endpoints are in memoryIDs,
+	// batched into one query (avoids the N+1 of GetLinkedMemories per memory).
+	GetLinksAmong(ctx context.Context, memoryIDs []string) ([]memory.MemoryLink, error)
 	GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error)
 	GetAllTasks(ctx context.Context, domain string, limit int) ([]*memory.MemoryRecord, error)
 	// Tags
