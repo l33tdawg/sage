@@ -16,6 +16,7 @@
 
 import * as THREE from 'three';
 import ForceGraph3D from '3d-force-graph';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
 const LINK_TYPES = {
   supports:    { color: '#5ee2a0', label: 'supports',    typed: true },
@@ -28,6 +29,7 @@ const LINK_TYPES = {
   domain:      { color: '#1b2942', label: 'same domain', typed: false },
 };
 const PALETTE = ['#ff6b9d','#ffd166','#5ee2a0','#5ab0ff','#c08bff','#ff9f5a','#4dd6c4','#f7748a','#9ad14b','#7aa0ff'];
+function hexToRgb(h){ const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
 
 // Minimal OBJ → BufferGeometry (positions + fan-triangulated faces). Lets us
 // drop a CC0 brain mesh at /ui/assets/brain.obj with no extra loader library.
@@ -189,12 +191,42 @@ export function mountMriBrain(container, opts = {}) {
 
   const domainColors = {}; let seq = 0;
   const domainColor = k => { if(!k) k='unknown'; if(!domainColors[k]){ domainColors[k]=PALETTE[seq%PALETTE.length]; seq++; } return domainColors[k]; };
-  const nodeSize = n => 1.6 + (n.corroboration_count||0)*0.9 + (n.confidence||0)*1.4;
 
-  function haloTexture(){ const c=document.createElement('canvas'); c.width=c.height=64;
-    const g=c.getContext('2d'), grd=g.createRadialGradient(32,32,0,32,32,32);
-    grd.addColorStop(0,'rgba(255,255,255,0.95)'); grd.addColorStop(0.22,'rgba(255,255,255,0.55)');
-    grd.addColorStop(1,'rgba(255,255,255,0)'); g.fillStyle=grd; g.fillRect(0,0,64,64); return new THREE.CanvasTexture(c); }
+  // Instanced node styling — one draw call for ALL dots (scales to thousands),
+  // vs the old mesh+sprite per node. size = corroboration+confidence; colour =
+  // domain brightened toward white by corroboration (so the bloom pass makes
+  // consolidated memories glow); alpha = confidence (decay); challenged/
+  // deprecated greyed.
+  const nodeVal = n => 1.4 + (n.corroboration_count||0)*1.1 + (n.confidence||0)*0.8;
+  function nodeColorRGBA(n){
+    if(n.status==='deprecated') return 'rgba(108,120,145,0.30)';
+    if(n.status==='challenged') return 'rgba(150,162,185,0.55)';
+    const [r,g,b]=hexToRgb(domainColor(n.domain));
+    const boost=Math.min(1,(n.corroboration_count||0)/8);
+    const br=r+(255-r)*boost*0.5, bg=g+(255-g)*boost*0.5, bb=b+(255-b)*boost*0.5;
+    return `rgba(${br|0},${bg|0},${bb|0},${(0.6+(n.confidence||0)*0.4).toFixed(2)})`;
+  }
+
+  // Deterministic anatomical placement — NO force simulation. domain -> azimuthal
+  // lobe, consolidation -> radial depth (hippocampus centre -> cortex surface),
+  // inside a brain-shaped ellipsoid. Positions are pinned (fx/fy/fz), so there is
+  // zero per-tick cost no matter how many nodes; the layout is a pure formula and
+  // is stable across reloads (a node always lands in the same place).
+  const EX=165, EY=108, EZ=190;
+  const hsh=(s,seed)=>{ s=s||''; let h=(seed>>>0)||1; for(let i=0;i<s.length;i++) h=Math.imul(h^s.charCodeAt(i),16777619); return ((h>>>0)%10000)/10000; };
+  function placeNodes(nodes){
+    const ds=[...new Set(nodes.map(n=>n.domain))], nd=Math.max(1,ds.length), di={};
+    ds.forEach((k,i)=>{ di[k]=i; domainColor(k); });
+    nodes.forEach(n=>{
+      const az=((di[n.domain]||0)/nd)*Math.PI*2 + (hsh(n.id,1)-0.5)*(Math.PI*2/nd)*0.82;
+      const el=(hsh(n.id,2)-0.5)*Math.PI*0.92;
+      const depth=0.33 + Math.min(1,(n.corroboration_count||0)/8)*0.60;
+      const ce=Math.cos(el);
+      n.fx=n.x=EX*depth*ce*Math.cos(az);
+      n.fy=n.y=EY*depth*Math.sin(el);
+      n.fz=n.z=EZ*depth*ce*Math.sin(az);
+    });
+  }
 
   let Graph = null, controls = null, disposed = false, flow = true, scanning = true;
   let hullMat = null, brainMat = null, surfMat = null, curOpacity = 0.05;
@@ -215,61 +247,31 @@ export function mountMriBrain(container, opts = {}) {
   loadGraph(fetchUrl).then(data => {
     if (disposed) return;
     $('.boot').style.display = 'none';
-    const HALO = haloTexture();
+    placeNodes(data.nodes);
     Graph = ForceGraph3D({ controlType:'orbit' })($('.mrib-graph'))
       .backgroundColor('#05070d00')
-      .graphData(data).nodeId('id').nodeLabel(()=>'' ).nodeVal(nodeSize)
+      .graphData(data).nodeId('id').nodeLabel(()=>'' )
+      .nodeVal(nodeVal).nodeColor(nodeColorRGBA).nodeRelSize(2.4).nodeResolution(10).nodeOpacity(0.9)
       .linkColor(l=>(LINK_TYPES[l.link_type]||LINK_TYPES.related).color)
       .linkWidth(l=> l.link_type==='contradicts'?0.6 : (LINK_TYPES[l.link_type]||{}).typed?0.35:0.18)
       .linkOpacity(0.3)
       .linkDirectionalParticles(l=> flow&&(l.link_type==='causes'||l.link_type==='precedes')?2:0)
       .linkDirectionalParticleWidth(1.1).linkDirectionalParticleSpeed(0.006)
-      .warmupTicks(60).cooldownTime(8000)
+      .warmupTicks(1).cooldownTicks(6)
       .onNodeHover(showTip)
-      .onNodeClick(n=>{ const r=Math.hypot(n.x,n.y,n.z)||1, d=40; Graph.cameraPosition({x:n.x*(1+d/r),y:n.y*(1+d/r),z:n.z*(1+d/r)},n,900); })
-      .nodeThreeObject(n=>{
-        const group=new THREE.Group(), size=nodeSize(n), boost=Math.min(1,(n.corroboration_count||0)/9);
-        const col=new THREE.Color(domainColor(n.domain)).lerp(new THREE.Color(0xffffff), boost*0.5);
-        const opacity=n.status==='deprecated'?0.28:n.status==='challenged'?0.5:(0.5+(n.confidence||0)*0.5);
-        group.add(new THREE.Mesh(new THREE.SphereGeometry(size,16,16),
-          new THREE.MeshBasicMaterial({color:n.status==='committed'?col:new THREE.Color(0x6a7a93),transparent:true,opacity})));
-        if(n.status==='committed'&&(n.corroboration_count||0)>=3){
-          const halo=new THREE.Sprite(new THREE.SpriteMaterial({map:HALO,color:col,transparent:true,
-            opacity:Math.min(0.85,0.25+boost*0.8),blending:THREE.AdditiveBlending,depthWrite:false}));
-          const s=size*(3.2+boost*3.4); halo.scale.set(s,s,1); group.add(halo);
-        }
-        return group;
-      });
+      .onNodeClick(n=>{ const r=Math.hypot(n.x,n.y,n.z)||1, d=40; Graph.cameraPosition({x:n.x*(1+d/r),y:n.y*(1+d/r),z:n.z*(1+d/r)},n,900); });
 
-    // Anatomical layout (SAGE_AGI_BRAIN_ANALOGY.md): domain -> azimuthal lobe,
-    // consolidation (corroboration_count) -> radial depth. Fresh/uncorroborated
-    // sit deep/central (hippocampus); well-corroborated migrate out to the cortex
-    // (brain surface). Bounded inside a brain-shaped ellipsoid so nothing escapes.
-    Graph.d3Force('charge').strength(-13);
-    const linkF=Graph.d3Force('link'); if(linkF){ linkF.distance(22).strength(0.07); }
-    const EX=165, EY=108, EZ=190; // brain inner semi-axes (R-L, S-I, A-P)
-    const hsh=(s,seed)=>{ s=s||''; let h=(seed>>>0)||1; for(let i=0;i<s.length;i++) h=Math.imul(h^s.charCodeAt(i),16777619); return ((h>>>0)%10000)/10000; };
-    // Custom force WITH an initialize() hook so it always binds to the CURRENT
-    // node set — including nodes added later via SSE. (A closure over data.nodes
-    // would leave new nodes uncontained and they'd escape the hull on updates.)
-    let lobeNodes=[], lobeDomIdx={}, lobeND=1;
-    const lobeForce=(alpha)=>{ lobeNodes.forEach(n=>{
-      const sector=((lobeDomIdx[n.domain]||0)/lobeND)*Math.PI*2;
-      const az=sector+(hsh(n.id,1)-0.5)*(Math.PI*2/lobeND)*0.82;    // domain lobe + jitter
-      const el=(hsh(n.id,2)-0.5)*Math.PI*0.92;                       // vertical spread
-      const consol=Math.min(1,(n.corroboration_count||0)/8);
-      const depth=0.33+consol*0.60;                                  // hippocampus -> cortex
-      const ce=Math.cos(el);
-      const tx=EX*depth*ce*Math.cos(az), ty=EY*depth*Math.sin(el), tz=EZ*depth*ce*Math.sin(az);
-      const k=0.05*alpha; n.vx+=(tx-n.x)*k; n.vy+=(ty-n.y)*k; n.vz+=(tz-n.z)*k;
-      const q=(n.x*n.x)/(EX*EX)+(n.y*n.y)/(EY*EY)+(n.z*n.z)/(EZ*EZ);
-      if(q>1){ const f=(Math.sqrt(q)-1)*0.30; n.vx-=n.x*f; n.vy-=n.y*f; n.vz-=n.z*f; } // soft pull-in
-      if(q>1.6){ const r=1/Math.sqrt(q); n.x*=r*1.25; n.y*=r*1.25; n.z*=r*1.25;        // hard stop on runaways
-        n.vx*=0.3; n.vy*=0.3; n.vz*=0.3; }
-    }); };
-    lobeForce.initialize=(n)=>{ lobeNodes=n||[]; const ds=[...new Set(lobeNodes.map(x=>x.domain))];
-      lobeND=Math.max(1,ds.length); lobeDomIdx={}; ds.forEach((k,i)=>lobeDomIdx[k]=i); ds.forEach(k=>domainColor(k)); };
-    Graph.d3Force('lobe', lobeForce);
+    // Positions are pinned by placeNodes() (fx/fy/fz), so disable the force
+    // simulation entirely — zero per-tick cost regardless of node count.
+    ['charge','link','center','lobe'].forEach(f=>{ try{ Graph.d3Force(f, null); }catch(e){ /* noop */ } });
+
+    // Consolidation glow via a single bloom pass — scales to ANY node count (far
+    // cheaper than the old halo-sprite-per-node). Bright (corroborated, white-
+    // shifted) nodes bloom; the faint brain wireframe barely does.
+    try {
+      const bloom = new UnrealBloomPass(new THREE.Vector2(root.clientWidth||1280, root.clientHeight||720), 0.55, 0.5, 0.32);
+      Graph.postProcessingComposer().addPass(bloom);
+    } catch(e){ console.warn('[mri] bloom unavailable', e); }
 
     try { const sc=Graph.scene();
       // Procedural brain-shaped wireframe hull (default — no external asset).
@@ -303,17 +305,15 @@ export function mountMriBrain(container, opts = {}) {
     controls = Graph.controls();
     if (controls) { controls.autoRotate = scanning; controls.autoRotateSpeed = 0.45; }
 
-    // Live population — mirror the 2D view: re-pull the graph on remember/forget
-    // SSE events. Positions of existing nodes are preserved so the brain does
-    // not reshuffle; new memories settle into their lobe, forgotten ones drop.
+    // Live population — re-pull on remember/forget. placeNodes() is deterministic,
+    // so existing nodes keep their exact spot and new memories land in place; no
+    // re-heat, no reshuffle, no per-node position bookkeeping.
     if (opts.sse && typeof opts.sse.on === 'function') {
       let t = null;
       const reload = () => { clearTimeout(t); t = setTimeout(() => {
         loadGraph(fetchUrl).then(d => {
           if (disposed || !Graph) return;
-          const pos = {};
-          Graph.graphData().nodes.forEach(n => { pos[n.id] = { x:n.x, y:n.y, z:n.z }; });
-          d.nodes.forEach(n => { const p = pos[n.id]; if (p) { n.x=p.x; n.y=p.y; n.z=p.z; } });
+          placeNodes(d.nodes);
           Graph.graphData(d);
           refreshCounts(d);
         });
