@@ -30,6 +30,8 @@ notes which.
 | Variable | What it does | Default | Read by | Source |
 |----------|--------------|---------|---------|--------|
 | `REST_ADDR` | REST API listen address; overrides `config.yaml`. | `127.0.0.1:8080` | sage-gui | `cmd/sage-gui/config.go:156` |
+| `SAGE_CMT_RPC_ADDR` | CometBFT RPC listen address (also the tx-broadcast client target). Move it to run a second node on one host. | `tcp://127.0.0.1:26657` | sage-gui | `cmd/sage-gui/node.go:842` |
+| `SAGE_CMT_P2P_ADDR` | CometBFT P2P listen address. Personal mode defaults to loopback; quorum mode defaults to `tcp://0.0.0.0:26656` when unset. | `tcp://127.0.0.1:26656` | sage-gui | `cmd/sage-gui/node.go:860` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowlist of origins for REST CORS. | (none) | REST | `api/rest/server.go:222` |
 | `SAGE_COMET_RPC` | CometBFT RPC endpoint used by `sage-gui upgrade`. | (built-in) | sage-gui | `cmd/sage-gui/upgrade.go:44` |
 | `SAGE_TX_COMMIT_TIMEOUT_MS` | Timeout (ms) for `broadcast_tx_commit`. Raise it for unusually slow consensus. | `60000` (60s) | REST | `api/rest/memory_handler.go:1317` |

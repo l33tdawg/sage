@@ -330,7 +330,7 @@ func runServe() (rerr error) {
 	cometCfg.SetRoot(cometHome)
 	cometCfg.Consensus.CreateEmptyBlocks = false
 	cometCfg.Consensus.CreateEmptyBlocksInterval = 0
-	cometCfg.RPC.ListenAddress = "tcp://127.0.0.1:26657"
+	cometCfg.RPC.ListenAddress = cmtRPCAddr()
 	cometCfg.Instrumentation.Prometheus = false
 
 	if cfg.Quorum.Enabled {
@@ -338,7 +338,7 @@ func runServe() (rerr error) {
 		cometCfg.Consensus.TimeoutCommit = 3 * time.Second
 		p2pAddr := cfg.Quorum.P2PAddr
 		if p2pAddr == "" {
-			p2pAddr = "tcp://0.0.0.0:26656"
+			p2pAddr = cmtP2PAddr("tcp://0.0.0.0:26656")
 		}
 		cometCfg.P2P.ListenAddress = p2pAddr
 		cometCfg.P2P.PersistentPeers = joinPeers(cfg.Quorum.Peers)
@@ -352,7 +352,7 @@ func runServe() (rerr error) {
 	} else {
 		// Personal mode: single validator, fast blocks, no P2P
 		cometCfg.Consensus.TimeoutCommit = 1 * time.Second
-		cometCfg.P2P.ListenAddress = "tcp://127.0.0.1:26656"
+		cometCfg.P2P.ListenAddress = cmtP2PAddr("tcp://127.0.0.1:26656")
 	}
 
 	pv := privval.LoadFilePV(
@@ -431,8 +431,8 @@ func runServe() (rerr error) {
 	// have to re-bootstrap admin manually.
 	ensureInitialAdmin(ctx, sqliteStore, logger)
 
-	// CometBFT RPC URL for tx broadcast
-	cometRPC := "http://127.0.0.1:26657"
+	// CometBFT RPC URL for tx broadcast — derived from the RPC listen address.
+	cometRPC := cmtRPCClientURL()
 
 	// Backfill on_chain_height and first_seen for agents already registered on-chain
 	// but missing these fields in SQLite (upgrade path from v3.5 → v3.7.6+)
@@ -834,6 +834,35 @@ func restBaseURL(addr string) string {
 	return "http://" + addr
 }
 
+// cmtRPCAddr returns the CometBFT RPC listen address. Overridable via
+// SAGE_CMT_RPC_ADDR so two personal nodes can coexist on one host; the default
+// preserves the historical tcp://127.0.0.1:26657. This is transport only — the
+// RPC port is not consensus state, so changing it is ABCI-determinism-neutral.
+func cmtRPCAddr() string {
+	if v := os.Getenv("SAGE_CMT_RPC_ADDR"); v != "" {
+		return v
+	}
+	return "tcp://127.0.0.1:26657"
+}
+
+// cmtRPCClientURL converts the RPC listen address into a URL the in-process
+// tx-broadcast client can dial: tcp:// → http://, and a 0.0.0.0 wildcard listen
+// host is dialed as 127.0.0.1 (you connect to loopback, not the wildcard).
+func cmtRPCClientURL() string {
+	u := strings.Replace(cmtRPCAddr(), "tcp://", "http://", 1)
+	return strings.Replace(u, "0.0.0.0", "127.0.0.1", 1)
+}
+
+// cmtP2PAddr returns the CometBFT P2P listen address, overridable via
+// SAGE_CMT_P2P_ADDR. def is the historical fallback used when the env is unset
+// (loopback for personal mode, 0.0.0.0 for quorum) so defaults stay unchanged.
+func cmtP2PAddr(def string) string {
+	if v := os.Getenv("SAGE_CMT_P2P_ADDR"); v != "" {
+		return v
+	}
+	return def
+}
+
 // initCometBFTConfig generates CometBFT config files for a single-validator node.
 func initCometBFTConfig(home string) error {
 	configDir := filepath.Join(home, "config")
@@ -885,12 +914,12 @@ func initCometBFTConfig(home string) error {
 	}
 
 	// Write minimal config.toml
-	configToml := `# SAGE Personal — CometBFT config
+	configToml := fmt.Sprintf(`# SAGE Personal — CometBFT config
 proxy_app = "kvstore"
 moniker = "sage-personal"
 
 [rpc]
-laddr = "tcp://127.0.0.1:26657"
+laddr = %q
 
 [p2p]
 laddr = ""
@@ -902,7 +931,7 @@ create_empty_blocks_after = "5s"
 
 [mempool]
 size = 1000
-`
+`, cmtRPCAddr())
 	return os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configToml), 0600)
 }
 
