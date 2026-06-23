@@ -44,7 +44,10 @@ func defaultCometRPC() string {
 	if v := os.Getenv("SAGE_COMET_RPC"); v != "" {
 		return v
 	}
-	return "http://127.0.0.1:26657"
+	// Fall back to the node's own configured RPC so `upgrade` targets a node
+	// moved via SAGE_CMT_RPC_ADDR without a second env var. cmtRPCClientURL
+	// returns the historical http://127.0.0.1:26657 when that env is unset.
+	return cmtRPCClientURL()
 }
 
 // runUpgrade dispatches `sage-gui upgrade <subcommand>`.
@@ -94,8 +97,8 @@ propose flags:
                     Accepts an agent.key seed or a CometBFT priv_validator_key.json.
                     Use past app-v8 when the chain-admin identity isn't your default
                     agent.key (issue #34).
-  --rpc <url>       CometBFT RPC endpoint (default: $SAGE_COMET_RPC or
-                    http://127.0.0.1:26657).
+  --rpc <url>       CometBFT RPC endpoint (default: $SAGE_COMET_RPC, else derived
+                    from $SAGE_CMT_RPC_ADDR, else http://127.0.0.1:26657).
   --yes             Skip the confirmation prompt.
   --wait            Stay attached after the propose lands and heartbeat the chain
                     until the fork activates. At app-v12+ an idle chain mints no

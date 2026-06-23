@@ -39,7 +39,10 @@ embedding:
 
 quorum:
   enabled: true
-  p2p_addr: "tcp://0.0.0.0:26656"
+  # P2P listen address. Blank binds the historical default tcp://0.0.0.0:26656;
+  # override per-host with SAGE_CMT_P2P_ADDR (e.g. to run two quorum agents on
+  # one machine). A hardcoded value here would shadow that env override.
+  p2p_addr: ""
   peers:
     - "%s"
 `, agent.Name, primaryAddr)

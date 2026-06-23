@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/auth"
@@ -56,7 +57,9 @@ func printUsage() {
 	fmt.Println("  health    Check SAGE API health")
 	fmt.Println()
 	fmt.Println("Environment:")
-	fmt.Println("  SAGE_API_URL  API base URL (default: http://localhost:8080)")
+	fmt.Println("  SAGE_API_URL        API base URL (default: http://localhost:8080)")
+	fmt.Println("  SAGE_CMT_RPC_ADDR   CometBFT RPC listen address for `status`; set when the")
+	fmt.Println("                      node was moved off 26657 (default: scan 26657-26957)")
 }
 
 func cmdKeygen() {
@@ -82,13 +85,28 @@ func cmdKeygen() {
 	}
 }
 
-func cmdStatus() {
-	urls := []string{
+// statusRPCURLs returns the CometBFT /status endpoints to probe. When
+// SAGE_CMT_RPC_ADDR is set the node has been moved off the default RPC port, so
+// we query exactly that endpoint — mirroring cmd/sage-gui's cmtRPCClientURL
+// derivation (tcp:// → http://, a 0.0.0.0 wildcard listen host dialed as
+// 127.0.0.1). Unset preserves the historical scan of the local quorum dev
+// cluster (26657/26757/26857/26957).
+func statusRPCURLs() []string {
+	if v := os.Getenv("SAGE_CMT_RPC_ADDR"); v != "" {
+		u := strings.Replace(v, "tcp://", "http://", 1)
+		u = strings.Replace(u, "0.0.0.0", "127.0.0.1", 1)
+		return []string{u + "/status"}
+	}
+	return []string{
 		"http://localhost:26657/status",
 		"http://localhost:26757/status",
 		"http://localhost:26857/status",
 		"http://localhost:26957/status",
 	}
+}
+
+func cmdStatus() {
+	urls := statusRPCURLs()
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
