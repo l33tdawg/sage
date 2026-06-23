@@ -1692,10 +1692,16 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 		health["memories"] = stats
 	}
 
-	// CometBFT chain stats
+	// CometBFT chain stats — dial the configured RPC endpoint (honors
+	// SAGE_CMT_RPC_ADDR via h.CometBFTRPC) so a node moved off 26657 reports its
+	// own chain state instead of querying the historical hardcoded port.
 	chain := map[string]any{}
+	cometRPC := h.CometBFTRPC
+	if cometRPC == "" {
+		cometRPC = "http://127.0.0.1:26657"
+	}
 	cometClient := &http.Client{Timeout: 2 * time.Second}
-	statusReq, _ := http.NewRequestWithContext(r.Context(), "GET", "http://127.0.0.1:26657/status", nil)
+	statusReq, _ := http.NewRequestWithContext(r.Context(), "GET", cometRPC+"/status", nil)
 	if statusResp, statusErr := cometClient.Do(statusReq); statusErr == nil {
 		defer statusResp.Body.Close()
 		var cometStatus struct {
@@ -1724,7 +1730,7 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	// Peer details
-	netReq, _ := http.NewRequestWithContext(r.Context(), "GET", "http://127.0.0.1:26657/net_info", nil)
+	netReq, _ := http.NewRequestWithContext(r.Context(), "GET", cometRPC+"/net_info", nil)
 	if netResp, netErr := cometClient.Do(netReq); netErr == nil {
 		defer netResp.Body.Close()
 		var netInfo struct {
