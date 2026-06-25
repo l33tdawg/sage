@@ -107,9 +107,11 @@ func runServe() (rerr error) {
 			Msg("upgrade migration completed — chain state reset, memories preserved")
 	}
 
-	// Initialize CometBFT config if needed
-	if initErr := initCometBFTConfig(cometHome); initErr != nil {
-		return fmt.Errorf("init CometBFT: %w", initErr)
+	// Initialize CometBFT config (seeds a brand-new chain's genesis with the operator
+	// admin) and, if a prior admin-less genesis survived a reset, re-inject the seed.
+	// One helper so the heal step can't be dropped from serve unnoticed (issue #52).
+	if initErr := ensureGenesisSeed(cometHome, logger); initErr != nil {
+		return initErr
 	}
 
 	// Create SQLite store. ctx is cancelled on shutdown (below) so the long-lived
@@ -863,6 +865,141 @@ func cmtP2PAddr(def string) string {
 	return def
 }
 
+// genesisInitialAdminAppState returns the genesis app_state JSON that seeds the node
+// operator's agent key as the chain-admin, or nil if the operator key is unavailable.
+func genesisInitialAdminAppState() json.RawMessage {
+	admin := ensureOperatorAdminID()
+	if admin == "" {
+		return nil
+	}
+	// admin is canonical lowercase 64-hex, safe to embed verbatim.
+	return json.RawMessage(`{"sage":{"initial_admin":"` + admin + `"}}`)
+}
+
+// ensureOperatorAdminID returns the lowercase-hex ed25519 public key of the node
+// operator's ~/.sage/agent.key, GENERATING the key (32-byte seed form, via the
+// canonical loadOrGenerateKey) if it does not yet exist — `serve` does not
+// otherwise create it. Empty string on any failure.
+func ensureOperatorAdminID() string {
+	priv, err := loadOrGenerateKey(filepath.Join(SageHome(), "agent.key"))
+	if err != nil {
+		return ""
+	}
+	pub, ok := priv.Public().(ed25519.PublicKey)
+	if !ok {
+		return ""
+	}
+	return hex.EncodeToString(pub)
+}
+
+// ensureGenesisSeed performs the two issue-#52 genesis steps the serve path needs
+// after migrateOnUpgrade: initCometBFTConfig (which creates a freshly-seeded genesis
+// for a brand-new chain) and healGenesisAdminIfReset (which re-injects the seed if a
+// prior admin-less genesis survived a reset — initCometBFTConfig short-circuits on an
+// existing genesis, so without the heal an upgraded+reset chain re-deadlocks).
+//
+// The two steps live in ONE named helper, called from runServe and exercised directly
+// by TestIssue52_HealThenInitChain_EndToEnd, so the heal step cannot be silently
+// dropped from the serve path without a test going red.
+func ensureGenesisSeed(cometHome string, logger zerolog.Logger) error {
+	if err := initCometBFTConfig(cometHome); err != nil {
+		return fmt.Errorf("init CometBFT: %w", err)
+	}
+	// Strictly gated on height-0 (block store wiped) so a live chain's genesis hash is
+	// never disturbed. Runs AFTER migrateOnUpgrade's reset.
+	healGenesisAdminIfReset(cometHome, logger)
+	return nil
+}
+
+// healGenesisAdminIfReset injects the genesis chain-admin seed into a PRE-EXISTING
+// genesis.json that lacks one — but ONLY when the chain is at height 0 (the block
+// store has been wiped, e.g. by a fork-transition reset that keeps config/genesis).
+// This is what lets an already-deadlocked personal chain recover on its next reset:
+// initCometBFTConfig short-circuits when genesis.json exists, so without this an
+// upgraded+reset chain re-uses its admin-less genesis and re-deadlocks (issue #52).
+//
+// Strictly gated: if the block store still exists (a LIVE chain) it does nothing —
+// rewriting genesis.json on a live chain would change the genesis hash and break
+// CometBFT's handshake. Single-validator genesis only.
+func healGenesisAdminIfReset(home string, logger zerolog.Logger) {
+	configDir := filepath.Join(home, "config")
+	dataDir := filepath.Join(home, "data")
+	genesisPath := filepath.Join(configDir, "genesis.json")
+
+	if _, err := os.Stat(genesisPath); err != nil {
+		return // no genesis yet — initCometBFTConfig creates it WITH the seed
+	}
+	// Height-0 gate: rewrite genesis ONLY when BOTH the block store and the state
+	// store are absent. blockstore.db absence means no committed blocks; state.db
+	// absence matters because CometBFT loads the genesis doc from state.db's cached
+	// copy FIRST and only falls back to genesis.json when state.db has none — so if
+	// state.db survived a partial reset, a rewritten genesis.json would be silently
+	// ignored (the chain would re-read the stale admin-less doc and re-deadlock while
+	// we logged success). Either store present => treat as a LIVE chain, never touch
+	// its genesis (rewriting it would change the genesis hash and break the handshake).
+	if _, err := os.Stat(filepath.Join(dataDir, "blockstore.db")); err == nil {
+		return // committed blocks exist: live chain
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "state.db")); err == nil {
+		return // cached genesis doc would win over a rewrite: leave untouched
+	}
+	genDoc, err := cmttypes.GenesisDocFromFile(genesisPath)
+	if err != nil {
+		return
+	}
+	if len(genDoc.Validators) != 1 {
+		return // single-validator (personal) chains only
+	}
+	if genesisAppStateHasInitialAdmin(genDoc.AppState) {
+		return // already seeded
+	}
+	admin := ensureOperatorAdminID()
+	if admin == "" {
+		return
+	}
+	genDoc.AppState = json.RawMessage(`{"sage":{"initial_admin":"` + admin + `"}}`)
+	if err := genDoc.ValidateAndComplete(); err != nil {
+		logger.Warn().Err(err).Msg("issue#52 heal: genesis re-validate failed — leaving genesis unchanged")
+		return
+	}
+	// Back up the existing genesis, then write atomically (temp file + rename) so a
+	// crash mid-rewrite can never leave a half-written genesis.json. Mirrors the
+	// quorum-join backup at quorum.go. genesisPath is known to exist (checked above).
+	if err := copyFile(genesisPath, genesisPath+".bak"); err != nil {
+		logger.Warn().Err(err).Msg("issue#52 heal: could not back up genesis.json — leaving unchanged")
+		return
+	}
+	tmpPath := genesisPath + ".tmp"
+	if err := genDoc.SaveAs(tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		logger.Warn().Err(err).Msg("issue#52 heal: could not stage genesis rewrite — leaving unchanged")
+		return
+	}
+	if err := os.Rename(tmpPath, genesisPath); err != nil {
+		_ = os.Remove(tmpPath)
+		logger.Warn().Err(err).Msg("issue#52 heal: could not commit genesis rewrite — leaving unchanged (backup at .bak)")
+		return
+	}
+	logger.Info().Str("admin_id", admin[:16]).Msg("issue#52: injected genesis chain-admin into reset chain's genesis.json")
+}
+
+// genesisAppStateHasInitialAdmin reports whether the genesis app_state already
+// carries a non-empty sage.initial_admin (so heal-on-reset is a no-op).
+func genesisAppStateHasInitialAdmin(appState json.RawMessage) bool {
+	if len(appState) == 0 {
+		return false
+	}
+	var as struct {
+		Sage struct {
+			InitialAdmin string `json:"initial_admin"`
+		} `json:"sage"`
+	}
+	if err := json.Unmarshal(appState, &as); err != nil {
+		return false
+	}
+	return strings.TrimSpace(as.Sage.InitialAdmin) != ""
+}
+
 // initCometBFTConfig generates CometBFT config files for a single-validator node.
 func initCometBFTConfig(home string) error {
 	configDir := filepath.Join(home, "config")
@@ -905,6 +1042,14 @@ func initCometBFTConfig(home string) error {
 				Name:    "personal",
 			},
 		},
+	}
+	// issue #52: seed the operator's agent key as the genesis chain-admin so the
+	// personal fork-ladder climb to app-v13 never strands at the propose admin-gate.
+	// This is a single-validator genesis (quorum join overwrites it with a shared
+	// genesis that carries no app_state, so quorum is unaffected). InitChain only
+	// honours the seed for single-validator chains.
+	if admin := genesisInitialAdminAppState(); admin != nil {
+		genDoc.AppState = admin
 	}
 	if err := genDoc.ValidateAndComplete(); err != nil {
 		return fmt.Errorf("validate genesis: %w", err)

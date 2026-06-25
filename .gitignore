@@ -111,6 +111,7 @@ docs/*
 !docs/GETTING_STARTED.md
 !docs/ADMIN_BOOTSTRAP.md
 !docs/HOOKS.md
+!docs/ISSUE_52_RECOVERY.md
 # Agent-facing code reference (public)
 !docs/reference/
 # Architecture diagram (rendered PNG embedded in ARCHITECTURE.md; .mmd source kept local/untracked)

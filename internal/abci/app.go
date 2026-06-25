@@ -2,6 +2,7 @@ package abci
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1654,10 +1655,66 @@ func (app *SageApp) InitChain(_ context.Context, req *abcitypes.RequestInitChain
 		app.logger.Error().Err(err).Msg("failed to persist validators")
 	}
 
+	// issue #52: optionally seed the genesis chain-admin from app_state. Runs AFTER
+	// the validator set is loaded (it needs the count for the single-validator gate).
+	app.seedGenesisAdmin(req)
+
 	metrics.ValidatorCount.Set(float64(app.validators.Size()))
 	app.logger.Info().Int("validators", app.validators.Size()).Msg("chain initialized")
 
 	return &abcitypes.ResponseInitChain{}, nil
+}
+
+// seedGenesisAdmin registers the genesis app_state's `sage.initial_admin` as the
+// chain-admin at height 1, so a personal single-node chain can climb the fork
+// ladder to app-v13 without ever stranding at the propose admin-gate (issue #52).
+//
+// It is deliberately decoupled from the fork-version gates: the chain still births
+// at app-v1 and climbs; this only seeds an admin AGENT record. currentAppVersion()
+// reads only the fork-applied heights, never agent records, so there is no version
+// handshake skew (the trap that retired the earlier app_version-coupled seed).
+//
+// Consensus-safety invariants (all enforced here, all covered by tests):
+//   - empty app_state  -> no write -> byte-identical to the pre-#52 InitChain (the
+//     replay/state-sync safety proof: every existing chain has no app_state).
+//   - quorum (len(Validators) != 1) -> no write: a multi-validator genesis could
+//     carry a per-node initial_admin and fork the height-1 AppHash.
+//   - any unmarshal / hex-decode error or wrong length -> no write, no panic.
+//   - already registered -> no write: InitChain re-runs on reset/state-sync, and we
+//     must never clobber an evolved record back to genesis defaults.
+//
+// The parse uses a fixed typed struct (never map[string]interface{}, which would
+// admit float64 / iteration-order non-determinism).
+func (app *SageApp) seedGenesisAdmin(req *abcitypes.RequestInitChain) {
+	if len(req.AppStateBytes) == 0 {
+		return // no app_state: identical to every chain born before this change
+	}
+	if len(req.Validators) != 1 {
+		return // single-validator (personal) chains only — see invariants above
+	}
+	var as struct {
+		Sage struct {
+			InitialAdmin string `json:"initial_admin"`
+		} `json:"sage"`
+	}
+	if err := json.Unmarshal(req.AppStateBytes, &as); err != nil {
+		return // malformed app_state -> no seed
+	}
+	raw, err := hex.DecodeString(strings.TrimSpace(as.Sage.InitialAdmin))
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		return // missing / non-hex / wrong length -> no seed
+	}
+	// Canonical lowercase hex: the signer derives lowercase (PublicKeyToAgentID) and
+	// the propose gate compares agent_id verbatim, so an uppercase seed would strand.
+	adminID := hex.EncodeToString(raw)
+	if app.badgerStore.IsAgentRegistered(adminID) {
+		return // idempotent across reset / state-sync re-InitChain
+	}
+	if err := app.badgerStore.RegisterAgent(adminID, "genesis-admin", "admin", "", "", "", 1); err != nil {
+		app.logger.Error().Err(err).Str("admin_id", adminID[:16]).Msg("issue#52 genesis admin seed: RegisterAgent failed")
+		return
+	}
+	app.logger.Info().Str("admin_id", adminID[:16]).Msg("issue#52: seeded genesis chain-admin from app_state.sage.initial_admin")
 }
 
 // ValidatorIDs returns a snapshot of the current consensus validator-set IDs

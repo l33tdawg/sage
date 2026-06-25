@@ -55,6 +55,8 @@ func main() {
 		err = runUpgrade(os.Args[2:])
 	case "recover":
 		err = runRecover()
+	case "repair-chain":
+		err = runRepairChain(os.Args[2:])
 	case "quorum-init":
 		err = runQuorumInit()
 	case "quorum-join":
@@ -95,6 +97,7 @@ Commands:
   snapshot  List or prune on-disk chain snapshots (list | prune [--keep N])
   upgrade   Activate app-version consensus forks (status | propose --target N)
   recover   Reset vault passphrase using your recovery key
+  repair-chain  Recover a personal chain stranded at the upgrade admin-gate (issue #52); rebuilds consensus state, preserves memories
   quorum-init   Initialize a quorum network (generates shared genesis)
   quorum-join   Join a quorum network (imports genesis from another node)
   cert-status   Show TLS certificate status and expiry

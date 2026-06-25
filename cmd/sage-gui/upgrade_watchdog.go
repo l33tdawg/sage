@@ -278,10 +278,11 @@ func runAutoAdvance(ctx context.Context, cfg upgradeWatchdogConfig, interval tim
 					}
 				case autoAdvanceAdminRejected:
 					cfg.Logger.Error().Uint64("target", target).
-						Msg("auto-advance: propose rejected by the chain-admin gate — this node's agent.key does not hold the on-chain admin role. " +
-							"Run `sage-gui upgrade propose --target " + fmt.Sprint(target) + " --agent-key <chain-admin-key>` with the admin identity, " +
-							"or perform any admin op with agent.key first, then restart. Auto-advance is stopping (it will retry on next boot; " +
-							"a plan proposed manually still activates — the pending-plan pump carries it to its activation height).")
+						Msg("auto-advance halted: this node's agent.key is not the on-chain chain-admin, and past app-v9 it can " +
+							"no longer self-grant that role (issue #52). Recover with `sage-gui repair-chain` — it rebuilds the local " +
+							"consensus state so the chain re-initialises from genesis with your operator key seeded as chain-admin " +
+							"(memories are backed up and preserved); auto-advance resumes automatically afterwards. " +
+							"See docs/ISSUE_52_RECOVERY.md.")
 					return
 				case autoAdvanceTransient:
 					// fall through to the next tick

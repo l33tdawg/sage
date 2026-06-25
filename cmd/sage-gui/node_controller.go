@@ -218,6 +218,13 @@ func (c *SageNodeController) RegenerateGenesis(validators []orchestrator.Validat
 		InitialHeight:   1,
 		Validators:      genValidators,
 	}
+	// issue#52: carry the genesis admin seed across regeneration, but ONLY for a
+	// single-validator personal chain — InitChain honours sage.initial_admin only for
+	// single-validator genesis, so copying it onto a multi-validator regeneration would
+	// be inert, stale dead weight.
+	if len(genValidators) == 1 {
+		newGen.AppState = existingGen.AppState
+	}
 
 	if err := newGen.ValidateAndComplete(); err != nil {
 		return fmt.Errorf("validate new genesis: %w", err)
