@@ -317,10 +317,75 @@ export function mountMriBrain(container, opts = {}) {
     // Consolidation glow via a single bloom pass — scales to ANY node count (far
     // cheaper than the old halo-sprite-per-node). Bright (corroborated, white-
     // shifted) nodes bloom; the faint brain wireframe barely does.
+    // ONLY enable the bloom composer if the GPU can hold the extra post-processing render
+    // targets. On a small MAX_RENDERBUFFER_SIZE (observed 2048) at hi-DPI, the composer target
+    // (logical × devicePixelRatio, e.g. 1462×2≈2924) exceeds the ceiling → renderbufferStorage
+    // fails (GL_INVALID_VALUE) → COLOR_ATTACHMENT0 "no width or height" → the WHOLE scene is
+    // black. In that case we never touch postProcessingComposer() at all, so ForceGraph3D renders
+    // straight to the (pixel-ratio-clamped, always-safe) canvas — a glow-less brain beats a black
+    // one. Capable GPUs (maxRB 8192+) keep the glow exactly as before.
+    let bloom = null;
     try {
-      const bloom = new UnrealBloomPass(new THREE.Vector2(root.clientWidth||1280, root.clientHeight||720), 0.55, 0.5, 0.32);
-      Graph.postProcessingComposer().addPass(bloom);
+      const _r = Graph.renderer(), _gl = _r && _r.getContext && _r.getContext();
+      const _maxRB = (_gl && _gl.getParameter(_gl.MAX_RENDERBUFFER_SIZE)) || 8192;
+      const _rW = root.clientWidth||1280, _rH = root.clientHeight||720;
+      if ((window.devicePixelRatio||1) * Math.max(_rW, _rH) <= _maxRB) {
+        bloom = new UnrealBloomPass(new THREE.Vector2(_rW, _rH), 0.55, 0.5, 0.32);
+        Graph.postProcessingComposer().addPass(bloom);
+      } else {
+        console.warn('[mri] bloom disabled: MAX_RENDERBUFFER_SIZE', _maxRB, 'too small for',
+          (window.devicePixelRatio||1)+'× DPR — rendering without glow (avoids a black canvas)');
+      }
     } catch(e){ console.warn('[mri] bloom unavailable', e); }
+
+    // --- WebGL surface-sizing fix --------------------------------------------
+    // ForceGraph3D defaults its renderer + post-processing composer to the FULL
+    // window × devicePixelRatio. On hi-DPI / large viewports that product blows
+    // past the GPU's MAX_RENDERBUFFER_SIZE (the bloom pass's multisampled targets
+    // ~double it), so the framebuffer is created incomplete (COLOR_ATTACHMENT0
+    // has no width/height) and nothing draws — a black canvas that only recovers
+    // when a `window` resize fires (e.g. opening DevTools shrinks the viewport).
+    // FG3D also only listens to WINDOW resize, never the container, so a 0-sized
+    // container at first paint never self-corrects. Fix: size to the CONTAINER,
+    // clamp the pixel ratio + clamp to the GPU max, and observe the container so
+    // it's valid on first paint and on layout changes — not just window resize.
+    const gel = $('.mrib-graph');
+    function fitGraph(){
+      if (disposed || !Graph || !gel) return;
+      const W = gel.clientWidth, H = gel.clientHeight;
+      if (!W || !H) return; // container not laid out yet — ResizeObserver/rAF/timers will retry
+      try {
+        const renderer = Graph.renderer();
+        const gl = renderer && renderer.getContext && renderer.getContext();
+        const maxRB = (gl && gl.getParameter(gl.MAX_RENDERBUFFER_SIZE)) || 8192;
+        let pr = Math.min(window.devicePixelRatio || 1, 1.5);
+        pr = Math.min(pr, (maxRB / 2) / Math.max(W, H)); // stay under the GPU renderbuffer ceiling
+        pr = Math.max(0.5, pr);
+        if (renderer && renderer.setPixelRatio) renderer.setPixelRatio(pr);
+        Graph.width(W).height(H); // FG3D renderer size
+        // THE FIX: ForceGraph3D does NOT resize the EffectComposer or its passes,
+        // so the bloom render targets stay at their (often 0x0) first-paint size →
+        // COLOR_ATTACHMENT0 "no width or height" → incomplete framebuffer → black.
+        // Resize the composer AND the bloom pass explicitly.
+        // Only when bloom is active. Calling postProcessingComposer() LAZILY CREATES the
+        // composer, so we must not touch it when post-processing was deliberately disabled for a
+        // low-MAX_RENDERBUFFER_SIZE GPU — that would resurrect the oversized composer and re-black
+        // the canvas. No bloom → FG3D renders straight to the clamped renderer.
+        if (bloom) {
+          const comp = Graph.postProcessingComposer && Graph.postProcessingComposer();
+          if (comp) { if (comp.setPixelRatio) comp.setPixelRatio(pr); if (comp.setSize) comp.setSize(W, H); }
+          if (bloom.setSize) bloom.setSize(W, H);
+        }
+      } catch(e){ /* noop */ }
+    }
+    fitGraph();
+    requestAnimationFrame(fitGraph);
+    [120, 400, 1000].forEach(t => setTimeout(fitGraph, t)); // catch late iframe/panel layout
+    if (typeof ResizeObserver === 'function' && gel){
+      const ro = new ResizeObserver(() => fitGraph());
+      ro.observe(gel);
+      subs.push(() => ro.disconnect());
+    }
 
     try { const sc=Graph.scene();
       // Procedural brain-shaped wireframe hull (default — no external asset).
