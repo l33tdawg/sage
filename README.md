@@ -57,7 +57,40 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 
 ---
 
-## What's New in v10.8.5
+## What's New in v10.9.1
+
+**The CEREBRUM 3D memory-brain renders everywhere — and a deployed dashboard fix actually reaches you.** Dashboard-only; no consensus rule, AppHash surface, transaction handler, or key-encoding change; replay is byte-identical and the SDK is a lockstep bump.
+
+- **MRI 3D brain no longer renders black (#53).** On a range of real GPU/DPI combinations the whole 3D scene was a black canvas — ForceGraph3D sized its renderer *and* its post-processing bloom composer to the full window × devicePixelRatio, overflowing the GPU's `MAX_RENDERBUFFER_SIZE` into an incomplete framebuffer (`COLOR_ATTACHMENT0` with no width/height → every draw a no-op). The MRI view now sizes to its **container**, clamps the pixel ratio under the GPU ceiling, explicitly resizes the composer + bloom pass (which FG3D never did), and re-fits on first paint via a `ResizeObserver` instead of only `window` resize. On a genuinely small ceiling (observed 2048 on Firefox + NVIDIA at dpr 2) it disables the bloom glow rather than the whole scene — a glow-less brain beats a black one. Capable GPUs (`maxRB` 8192+) keep the glow unchanged.
+- **Dashboard cache-busting fixed (#54).** `index.html`'s `?v` token was hardcoded and `app.js` imported `mri-brain.js` with no version at all, so after a deploy browsers and CDNs kept serving the *previous* JS — a shipped fix only appeared in incognito or after a hard-refresh. The asset version is now a **content hash** computed once over every `go:embed`'d static asset, injected at request time, so every build serves fresh asset URLs and a warm cache can't mask a deployed change. This is what lets the #53 fix actually reach you.
+
+Thanks to [@ihubanov](https://github.com/ihubanov) for both (#53, #54). SDK 10.9.1 (lockstep, no SDK changes).
+
+## Older releases
+
+<details>
+<summary>v10.9.0 — personal-chain deadlock fix + repair-chain recovery</summary>
+
+**A personal memory chain can no longer strand itself — and an already-stranded one recovers in place.** A minor release that does touch `internal/abci` (`seedGenesisAdmin` in `InitChain`), but it is **replay-safe**: every existing chain carries no `app_state`, so its post-`InitChain` AppHash is byte-identical to pre-#52 (proven across 18 variants). `ConsensusForkVersion` is unchanged — no coordinated reset, healthy chains undisturbed.
+
+- **Genesis chain-admin seeding.** A single-validator personal chain could deadlock at genesis with no admin seeded to govern it. `InitChain` now seeds a genesis chain-admin (single-validator genesis only; idempotent; no non-determinism), so new personal chains are auto-protected.
+- **`sage-gui repair-chain` recovery.** An already-stranded chain recovers in place — every memory preserved. See [docs/ISSUE_52_RECOVERY.md](docs/ISSUE_52_RECOVERY.md).
+
+SDK 10.9.0 (lockstep, no SDK changes).
+</details>
+
+<details>
+<summary>v10.8.6 — configurable CometBFT RPC/P2P ports (SAGE_CMT_*)</summary>
+
+**The CometBFT RPC and P2P listen ports are now overridable.** Operational config only — no consensus, AppHash, transaction, or key-encoding change; replay is byte-identical and the SDK is a lockstep bump. Nothing touches `internal/abci` or chain state.
+
+- **`SAGE_CMT_RPC_*` / `SAGE_CMT_P2P_*` env vars, wired end to end.** `sage-gui serve` and the self-upgrade path honor the overrides when launching the embedded node; `sage-cli status` resolves the configured RPC address instead of assuming the default port; orchestrator bundles propagate the port config so bundled/multi-node runs stay consistent; the dashboard health panel honors `SAGE_CMT_RPC_ADDR`; and the new vars are documented in [docs/reference/environment-variables.md](docs/reference/environment-variables.md). All defaults are byte-for-byte unchanged when the env vars are unset.
+
+Originated from [@ihubanov](https://github.com/ihubanov)'s PR #50 and finished in #51. SDK 10.8.6 (lockstep, no SDK changes).
+</details>
+
+<details>
+<summary>v10.8.5 — anatomical 3D brain mesh + chi security patch</summary>
 
 **A real anatomical 3D brain, plus a dependency security patch.** No consensus, AppHash, transaction, or key-encoding change; replay is byte-identical and the SDK is a lockstep bump.
 
@@ -65,8 +98,7 @@ Add agents, configure domain-level read/write permissions, manage clearance leve
 - **Security: `go-chi/chi` → v5.2.4.** Clears [CVE-2025-69725](https://github.com/advisories/GHSA-mqqf-5wvp-8fh8) (an open-redirect in chi's `RedirectSlashes` middleware). SAGE never wired up that middleware, so it was not exposed — the bump just keeps the dependency tree clean.
 
 SDK 10.8.5 (lockstep, no SDK changes).
-
-## Older releases
+</details>
 
 <details>
 <summary>v10.8.4 — richer procedural brain hull for the MRI view</summary>
