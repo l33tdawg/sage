@@ -370,6 +370,30 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		staticFS, _ := fs.Sub(StaticFS, "static")
 		fileServer := http.FileServer(http.FS(staticFS))
 
+		// Content-hash asset version for cache-busting. index.html's ?v token was
+		// hardcoded (never bumped across releases) and app.js imports mri-brain.js
+		// with NO version — so browsers/CDNs served stale JS after a deploy (the
+		// fix only showed in incognito). This hash changes whenever any embedded
+		// asset changes, so each build serves fresh asset URLs.
+		assetVer := func() string {
+			h := sha256.New()
+			var files []string
+			_ = fs.WalkDir(staticFS, ".", func(p string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					files = append(files, p)
+				}
+				return nil
+			})
+			sort.Strings(files)
+			for _, p := range files {
+				if b, e := fs.ReadFile(staticFS, p); e == nil {
+					h.Write([]byte(p))
+					h.Write(b)
+				}
+			}
+			return hex.EncodeToString(h.Sum(nil))[:12]
+		}()
+
 		r.Get("/ui/*", func(w http.ResponseWriter, r *http.Request) {
 			// Strip /ui prefix
 			path := strings.TrimPrefix(r.URL.Path, "/ui")
@@ -411,6 +435,16 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			w.Header().Set("Pragma", "no-cache")
 			w.Header().Set("Expires", "0")
+
+			// Cache-busting: replace the (previously hardcoded) ?v token with the
+			// content hash, and inject it into app.js's version-less mri-brain.js
+			// import — so a new build always serves fresh JS through any cache/CDN.
+			if strings.HasSuffix(path, ".html") {
+				f = bytes.ReplaceAll(f, []byte("?v=678"), []byte("?v="+assetVer))
+			} else if strings.HasSuffix(path, ".js") {
+				f = bytes.ReplaceAll(f, []byte("from './mri-brain.js'"), []byte("from './mri-brain.js?v="+assetVer+"'"))
+				f = bytes.ReplaceAll(f, []byte("?v=678"), []byte("?v="+assetVer))
+			}
 
 			w.Write(f) //nolint:errcheck,gosec // static embedded file, not user input
 		})
