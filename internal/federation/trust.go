@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -65,26 +66,63 @@ func (m *Manager) remoteCAPath(remoteChainID string) string {
 	return filepath.Join(m.certsDir, "federation", remoteChainID, tlsca.CACertFile)
 }
 
-// StoreRemoteCA parses a PEM CA certificate, persists it under the federation
-// certs directory for remoteChainID, and returns its SPKI pin — the value the
-// operator submits on-chain as CrossFedTerms.PeerPubKey. Part of the JOIN
-// ceremony (exchange CA + endpoint out-of-band, then set terms).
-func (m *Manager) StoreRemoteCA(remoteChainID string, caPEM []byte) ([]byte, error) {
-	if err := ValidateChainID(remoteChainID); err != nil {
-		return nil, err
+// caCNPrefix is the CommonName prefix every SAGE-minted CA carries
+// (tlsca.GenerateCA sets CN = "sage-ca-<chainID>"). Binding the CN to the
+// claimed chain id closes the shared-CA impersonation gap: even if an operator
+// (mis)provisions one CA under two agreements, that CA's CN can name only ONE
+// chain, so it authenticates only that chain.
+const caCNPrefix = "sage-ca-"
+
+// StageRemoteCA parses+validates a PEM CA for remoteChainID and writes it to a
+// PENDING sidecar file (never the live path), returning its SPKI pin plus
+// commit/rollback closures. The caller broadcasts the terms tx FIRST (on-chain
+// authz) and only then commits — so an UNAUTHORIZED set can never overwrite an
+// existing agreement's live CA on disk (the confused-deputy availability kill).
+// commit atomically renames pending→live and drops the CA cache entry; rollback
+// removes the pending file.
+func (m *Manager) StageRemoteCA(remoteChainID string, caPEM []byte) (pin []byte, commit func() error, rollback func(), err error) {
+	if err = ValidateChainID(remoteChainID); err != nil {
+		return nil, nil, nil, err
 	}
 	cert, err := parseCACertPEM(caPEM)
 	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err = requireChainCN(cert, remoteChainID); err != nil {
+		return nil, nil, nil, err
+	}
+	final := m.remoteCAPath(remoteChainID)
+	if err = os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
+		return nil, nil, nil, fmt.Errorf("create federation certs dir: %w", err)
+	}
+	pending := final + ".pending"
+	if err = os.WriteFile(pending, caPEM, 0o600); err != nil {
+		return nil, nil, nil, fmt.Errorf("write pending remote CA: %w", err)
+	}
+	commit = func() error {
+		if renErr := os.Rename(pending, final); renErr != nil {
+			return fmt.Errorf("commit remote CA: %w", renErr)
+		}
+		m.invalidateCACache(remoteChainID)
+		return nil
+	}
+	rollback = func() { _ = os.Remove(pending) }
+	return SPKIFingerprint(cert), commit, rollback, nil
+}
+
+// StoreRemoteCA immediately persists a validated remote CA (stage + commit in
+// one shot). Used by internal callers and tests; the REST JOIN path uses the
+// staged variant so the disk write is gated on on-chain authz.
+func (m *Manager) StoreRemoteCA(remoteChainID string, caPEM []byte) ([]byte, error) {
+	pin, commit, rollback, err := m.StageRemoteCA(remoteChainID, caPEM)
+	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Dir(m.remoteCAPath(remoteChainID))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create federation certs dir: %w", err)
+	if err := commit(); err != nil {
+		rollback()
+		return nil, err
 	}
-	if err := os.WriteFile(m.remoteCAPath(remoteChainID), caPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("write remote CA: %w", err)
-	}
-	return SPKIFingerprint(cert), nil
+	return pin, nil
 }
 
 // parseCACertPEM decodes the first CERTIFICATE block and requires it to be a CA.
@@ -103,15 +141,31 @@ func parseCACertPEM(caPEM []byte) (*x509.Certificate, error) {
 	return cert, nil
 }
 
-// loadPinnedRemoteCA loads the on-disk CA for remoteChainID and verifies its
-// SPKI fingerprint against the agreement's on-chain pin. Fail-closed: missing
-// file, parse failure, or pin mismatch all deny.
+// requireChainCN enforces that a CA's CommonName names exactly remoteChainID.
+func requireChainCN(cert *x509.Certificate, remoteChainID string) error {
+	if cert.Subject.CommonName != caCNPrefix+remoteChainID {
+		return fmt.Errorf("remote CA CommonName %q does not name chain %q (expected %s%s)",
+			cert.Subject.CommonName, remoteChainID, caCNPrefix, remoteChainID)
+	}
+	return nil
+}
+
+// loadPinnedRemoteCA loads the on-disk CA for remoteChainID and verifies (a) its
+// SPKI fingerprint against the agreement's on-chain pin, AND (b) its CommonName
+// names the claimed chain. Fail-closed: missing file, parse failure, pin
+// mismatch, or CN mismatch all deny. Parsed CAs are cached by (chain, pin) so
+// the mTLS handshake / per-request verify don't re-read+parse from disk each
+// time (unauthenticated-handshake amplification).
 func (m *Manager) loadPinnedRemoteCA(remoteChainID string, expectedPin []byte) (*x509.Certificate, error) {
 	if err := ValidateChainID(remoteChainID); err != nil {
 		return nil, err
 	}
 	if len(expectedPin) != sha256.Size {
 		return nil, fmt.Errorf("agreement for %s: pinned key is not a 32-byte SPKI fingerprint", remoteChainID)
+	}
+	cacheKey := remoteChainID + ":" + hex.EncodeToString(expectedPin)
+	if cert := m.cachedCA(cacheKey); cert != nil {
+		return cert, nil
 	}
 	caPEM, err := os.ReadFile(m.remoteCAPath(remoteChainID)) // #nosec G304 -- path components validated
 	if err != nil {
@@ -124,6 +178,10 @@ func (m *Manager) loadPinnedRemoteCA(remoteChainID string, expectedPin []byte) (
 	if subtle.ConstantTimeCompare(SPKIFingerprint(cert), expectedPin) != 1 {
 		return nil, fmt.Errorf("remote CA for %s: SPKI pin mismatch (on-disk CA does not match the on-chain agreement)", remoteChainID)
 	}
+	if err := requireChainCN(cert, remoteChainID); err != nil {
+		return nil, err
+	}
+	m.putCA(cacheKey, cert)
 	return cert, nil
 }
 

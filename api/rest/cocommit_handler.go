@@ -24,6 +24,10 @@ import (
 // participants (each over the identical CanonicalCoreBytes); this handler is
 // the LOCAL submitter's entry point.
 
+// maxCoCommitCoauthorsREST mirrors the consensus cap (maxCoCommitCoauthors=64)
+// so the REST pre-verify loop can't be abused for CPU exhaustion.
+const maxCoCommitCoauthorsREST = 64
+
 // CoCommitCoauthorJSON is one coauthor entry on the wire (hex-encoded).
 type CoCommitCoauthorJSON struct {
 	PubKey  string `json:"pub_key"`  // hex ed25519 public key (32 bytes)
@@ -123,6 +127,14 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 	nonce, err := hex.DecodeString(req.AgreementNonce)
 	if err != nil || len(nonce) == 0 {
 		writeProblem(w, http.StatusBadRequest, "Invalid nonce", "agreement_nonce must be non-empty hex.")
+		return
+	}
+
+	// Reject an oversized coauthor set up front, mirroring the consensus cap
+	// (maxCoCommitCoauthors=64) — otherwise a malicious local caller could
+	// force thousands of ed25519 verifies below before the on-chain reject.
+	if len(req.Coauthors) > maxCoCommitCoauthorsREST {
+		writeProblem(w, http.StatusBadRequest, "Too many coauthors", "a co-commit envelope may declare at most 64 coauthors.")
 		return
 	}
 

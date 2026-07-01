@@ -33,7 +33,9 @@ func (f *fakeFederation) FanOutRecall(_ context.Context, _ []string, qr *federat
 func (f *fakeFederation) DeliverReceipts(context.Context, string, int64, int64) map[string]federation.DeliveryResult {
 	return nil
 }
-func (f *fakeFederation) StoreRemoteCA(string, []byte) ([]byte, error) { return nil, errors.New("na") }
+func (f *fakeFederation) StageRemoteCA(string, []byte) ([]byte, func() error, func(), error) {
+	return nil, nil, nil, errors.New("na")
+}
 func (f *fakeFederation) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
 	return nil, errors.New("na")
 }

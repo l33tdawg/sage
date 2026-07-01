@@ -84,11 +84,13 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist the remote CA and derive the pin BEFORE broadcasting: if the tx
-	// is rejected the orphan CA file is inert (nothing trusts it without a
-	// matching on-chain pin); the reverse order would race an active agreement
-	// with no trust anchor on disk.
-	pin, err := s.federation.StoreRemoteCA(req.RemoteChainID, []byte(req.RemoteCAPEM))
+	// STAGE the remote CA to a pending sidecar and derive the pin, but do NOT
+	// commit it to the live path until the terms tx is authorized on-chain.
+	// Authorization (crossFedAuthorized) lives in the consensus handler, so an
+	// unauthorized caller's tx is rejected — and because we only commit the CA
+	// after that succeeds, an unauthorized set can never overwrite an existing
+	// agreement's live pinned CA on disk (a silent availability kill).
+	pin, commitCA, rollbackCA, err := s.federation.StageRemoteCA(req.RemoteChainID, []byte(req.RemoteCAPEM))
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid remote CA", err.Error())
 		return
@@ -111,19 +113,29 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 	}
 	embedAgentAuth(r.Context(), setTx)
 	if err := tx.SignTx(setTx, s.signingKey); err != nil {
+		rollbackCA()
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return
 	}
 	encoded, err := tx.EncodeTx(setTx)
 	if err != nil {
+		rollbackCA()
 		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
 		return
 	}
 	hash, err := s.broadcastTxCommit(encoded)
 	if err != nil {
+		rollbackCA() // authz/consensus rejected — leave any existing live CA untouched
 		s.logger.Error().Err(err).Str("remote", req.RemoteChainID).Msg("cross_fed set rejected")
 		status, msg := broadcastErrorPublic(err)
 		writeProblem(w, status, "Agreement rejected", msg)
+		return
+	}
+	if err := commitCA(); err != nil {
+		// The terms are on-chain but the CA didn't land — the agreement is
+		// inert (pin mismatch fails closed) until re-provisioned. Surface it.
+		s.logger.Error().Err(err).Str("remote", req.RemoteChainID).Msg("cross_fed CA commit failed post-broadcast")
+		writeProblem(w, http.StatusInternalServerError, "CA commit failed", "Agreement recorded on-chain but the CA could not be persisted; re-run the join to provision it.")
 		return
 	}
 	writeJSON(w, http.StatusCreated, &CrossFedSetResponse{

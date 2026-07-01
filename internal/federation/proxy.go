@@ -7,6 +7,15 @@ import (
 	"sync"
 )
 
+const (
+	// maxFanOutConcurrency bounds simultaneous outbound peer queries in one
+	// recall fan-out.
+	maxFanOutConcurrency = 8
+	// maxMergedPerPeer caps how many results a single peer may contribute to a
+	// merged recall response (defense against a peer ignoring our topK).
+	maxMergedPerPeer = maxFedTopK
+)
+
 // FanOutRecall is the OFF-consensus recall proxy (Mode 1 — exchange): it
 // queries the requested peers concurrently and returns per-peer outcomes for
 // the REST layer to merge into its response. Foreign results are stamped with
@@ -40,12 +49,19 @@ func (m *Manager) FanOutRecall(ctx context.Context, targets []string, qr *QueryR
 		return nil
 	}
 
+	// Bound concurrent outbound peer connections: a wildcard fan-out over many
+	// agreements (or a malicious local caller repeating federated=true) would
+	// otherwise open one goroutine + fresh TLS handshake per agreement with no
+	// ceiling.
+	sem := make(chan struct{}, maxFanOutConcurrency)
 	outcomes := make([]PeerRecallOutcome, len(chains))
 	var wg sync.WaitGroup
 	for i, chain := range chains {
 		wg.Add(1)
 		go func(i int, chain string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			outcome := PeerRecallOutcome{ChainID: chain}
 			resp, err := m.QueryPeer(ctx, chain, qr)
 			if err != nil {
@@ -54,13 +70,29 @@ func (m *Manager) FanOutRecall(ctx context.Context, targets []string, qr *QueryR
 				// A peer serving under agreement X must identify as X.
 				outcome.Err = fmt.Errorf("peer identifies as %q, agreement expects %q", resp.ChainID, chain)
 			} else {
-				for _, res := range resp.Results {
+				results := resp.Results
+				// Cap per-peer results: a malicious peer can return up to
+				// maxFedResponseBytes of JSON regardless of our topK, and the
+				// merge appends them all into the local caller's response.
+				if len(results) > maxMergedPerPeer {
+					results = results[:maxMergedPerPeer]
+				}
+				for _, res := range results {
+					// SourceChainID is authoritative (we set it to the peer we
+					// actually authenticated + queried). SubmittingAgent is
+					// peer-controlled, so re-derive its chain qualifier from the
+					// trusted SourceChainID — strip any peer-supplied "@suffix"
+					// (which could spoof provenance as a third chain).
 					res.SourceChainID = chain
-					if res.SubmittingAgent != "" && !strings.Contains(res.SubmittingAgent, "@") {
-						res.SubmittingAgent = res.SubmittingAgent + "@" + chain
+					if res.SubmittingAgent != "" {
+						base := res.SubmittingAgent
+						if at := strings.IndexByte(base, '@'); at >= 0 {
+							base = base[:at]
+						}
+						res.SubmittingAgent = base + "@" + chain
 					}
 				}
-				outcome.Results = resp.Results
+				outcome.Results = results
 			}
 			outcomes[i] = outcome
 		}(i, chain)

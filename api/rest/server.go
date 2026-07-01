@@ -82,7 +82,11 @@ type Server struct {
 type FederationService interface {
 	FanOutRecall(ctx context.Context, targets []string, qr *federation.QueryRequest) []federation.PeerRecallOutcome
 	DeliverReceipts(ctx context.Context, sharedID string, height, commitTime int64) map[string]federation.DeliveryResult
-	StoreRemoteCA(remoteChainID string, caPEM []byte) ([]byte, error)
+	// StageRemoteCA writes the remote CA to a pending sidecar and returns its
+	// pin plus commit/rollback closures; the JOIN handler commits only after
+	// the terms tx is authorized on-chain (so an unauthorized set can't
+	// overwrite a live agreement's CA).
+	StageRemoteCA(remoteChainID string, caPEM []byte) (pin []byte, commit func() error, rollback func(), err error)
 	PeerStatus(ctx context.Context, remoteChainID string) (*federation.StatusResponse, error)
 	LocalChainID() string
 }

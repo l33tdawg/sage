@@ -208,23 +208,40 @@ func TestDomainAllowed(t *testing.T) {
 
 func TestPinMismatchFailsClosed(t *testing.T) {
 	a := newTestChain(t, "chain-a")
-	b := newTestChain(t, "chain-b")
-	c := newTestChain(t, "chain-c")
 
-	// Provision C's CA on disk under B's chain id, but pin B's real CA
-	// on-chain: the on-disk anchor no longer matches the agreement.
-	if _, err := a.mgr.StoreRemoteCA(b.chainID, c.caPEM); err != nil {
-		t.Fatal(err)
-	}
-	realPin, err := a.mgr.StoreRemoteCA("scratch-"+b.chainID, b.caPEM)
+	// Two CAs BOTH minted for "chain-b" (identical CN sage-ca-chain-b, distinct
+	// keys). Provision CA2 on disk, but pin CA1 on-chain → CN matches, pin does
+	// not → must fail closed on the pin.
+	ca1, _, err := tlsca.GenerateCA("chain-b")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.badger.SetCrossFed(b.chainID, "https://127.0.0.1:1", realPin, 4, 0, []string{"*"}, nil, "active"); err != nil {
+	ca2, _, err := tlsca.GenerateCA("chain-b")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.mgr.clientTLSConfig(b.chainID, realPin); err == nil {
+	pin1 := SPKIFingerprint(ca1)
+	if _, err := a.mgr.StoreRemoteCA("chain-b", []byte(tlsca.EncodeCertPEM(ca2))); err != nil {
+		t.Fatalf("store CA2 (CN matches chain-b): %v", err)
+	}
+	if err := a.badger.SetCrossFed("chain-b", "https://127.0.0.1:1", pin1, 4, 0, []string{"*"}, nil, "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.mgr.clientTLSConfig("chain-b", pin1); err == nil {
 		t.Fatal("client TLS config accepted a pin-mismatched on-disk CA")
+	}
+}
+
+// TestCACommonNameBindsChain covers the shared-CA impersonation fix: a CA whose
+// CommonName names a DIFFERENT chain than the agreement's slot is rejected even
+// if its pin matches — so one CA cannot authenticate two chains.
+func TestCACommonNameBindsChain(t *testing.T) {
+	a := newTestChain(t, "chain-a")
+	c := newTestChain(t, "chain-c")
+
+	// Try to provision chain-C's CA (CN sage-ca-chain-c) under the chain-b slot.
+	if _, _, _, err := a.mgr.StageRemoteCA("chain-b", c.caPEM); err == nil {
+		t.Fatal("staged a CA whose CommonName names a different chain")
 	}
 }
 
@@ -438,12 +455,22 @@ func TestReceiptExchangeEndToEnd(t *testing.T) {
 		t.Errorf("receipt fields wrong: %+v", receipt)
 	}
 
-	// Idempotency: with the anchor already on-chain, a re-push is a no-op.
-	anchor := sha256.Sum256(push.Receipt)
-	if err := b.badger.SetCoCommitAnchor(sharedID, a.chainID, anchor[:]); err != nil {
+	// Idempotency (H2 fix): once ANY anchor exists for (SharedID, peerChain), a
+	// re-push is a no-op — EVEN a receipt with different Height/CommitTime
+	// (attacker-chosen bytes that used to defeat the sha256(receipt) key and
+	// mint a fresh consensus tx per push).
+	anchor := sha256Bytes("some-prior-anchor-bytes")
+	if err := b.badger.SetCoCommitAnchor(sharedID, a.chainID, anchor); err != nil {
 		t.Fatal(err)
 	}
-	resp2, err := a.mgr.PushReceipt(ctx, b.chainID, push)
+	varied, err := a.mgr.BuildSignedReceipt(sharedID, 999999, 424242) // different Height/CommitTime
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hex.EncodeToString(varied.Receipt) == hex.EncodeToString(push.Receipt) {
+		t.Fatal("test bug: varied receipt is identical to the first")
+	}
+	resp2, err := a.mgr.PushReceipt(ctx, b.chainID, varied)
 	if err != nil {
 		t.Fatalf("re-push: %v", err)
 	}
@@ -451,7 +478,7 @@ func TestReceiptExchangeEndToEnd(t *testing.T) {
 		t.Fatalf("re-push status = %q, want already_anchored", resp2.Status)
 	}
 	if len(*captured) != 1 {
-		t.Fatalf("idempotent re-push broadcast a duplicate tx")
+		t.Fatalf("idempotency defeated: a Height-varied receipt broadcast a duplicate attest (%d txs)", len(*captured))
 	}
 }
 
@@ -502,14 +529,35 @@ func TestBuildSignedReceiptRequiresDeclaredCoauthor(t *testing.T) {
 func TestReplayCacheRejectsDuplicates(t *testing.T) {
 	a := newTestChain(t, "chain-a")
 	ts := time.Now().Unix()
-	if !a.mgr.replayFresh("chain-b:agent:sig1", ts) {
+	if !a.mgr.replayFresh("chain-b", "agent:sig1", ts) {
 		t.Fatal("first sighting rejected")
 	}
-	if a.mgr.replayFresh("chain-b:agent:sig1", ts) {
+	if a.mgr.replayFresh("chain-b", "agent:sig1", ts) {
 		t.Fatal("replay accepted")
 	}
-	if !a.mgr.replayFresh("chain-c:agent:sig1", ts) {
+	if !a.mgr.replayFresh("chain-c", "agent:sig1", ts) {
 		t.Fatal("chain-scoping broken: different chain's identical sig rejected")
+	}
+}
+
+// TestReplayCacheShardIsolation covers the H1 fix: one peer filling its own
+// shard to the per-chain cap must NOT lock out a different peer.
+func TestReplayCacheShardIsolation(t *testing.T) {
+	a := newTestChain(t, "chain-a")
+	ts := time.Now().Unix()
+	// Flood chain-b's shard to its cap with distinct sigs.
+	for i := 0; i < maxReplayEntriesPerChain; i++ {
+		if !a.mgr.replayFresh("chain-b", fmt.Sprintf("agent:sig-%d", i), ts) {
+			t.Fatalf("chain-b sig %d rejected before cap", i)
+		}
+	}
+	// chain-b is now at cap → a fresh chain-b sig is rejected...
+	if a.mgr.replayFresh("chain-b", "agent:overflow", ts) {
+		t.Fatal("chain-b accepted a sig past its per-chain cap")
+	}
+	// ...but a DIFFERENT peer is completely unaffected.
+	if !a.mgr.replayFresh("chain-c", "agent:sig1", ts) {
+		t.Fatal("chain-c locked out by chain-b's flood — shard isolation broken")
 	}
 }
 

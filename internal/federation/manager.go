@@ -3,7 +3,7 @@ package federation
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/sha256"
+	"crypto/x509"
 	"fmt"
 	"strings"
 	"sync"
@@ -14,6 +14,11 @@ import (
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
+
+// maxConcurrentReceiptBroadcasts caps how many receipt pushes may be doing a
+// blocking broadcast_tx_commit at once (each can occupy a goroutine up to the
+// commit timeout).
+const maxConcurrentReceiptBroadcasts = 4
 
 // Config wires a Manager into the node.
 type Config struct {
@@ -51,12 +56,25 @@ type Manager struct {
 	memStore     store.MemoryStore
 	logger       zerolog.Logger
 
-	// replayMu guards seenSigs — the federation listener's chain-scoped replay
-	// cache (key: chainID:agentID:sigHex). Same shape as the local API's
-	// sigCache but a separate instance: federation traffic must never evict or
-	// collide with local-API replay state.
+	// replayMu guards seenSigs — the federation listener's replay cache,
+	// SHARDED BY PEER CHAIN so one peer's flood can never evict or lock out
+	// another peer (a shared global cap would let any single authenticated peer
+	// DoS the whole listener by filling it with distinct valid sigs). Each
+	// chain gets its own bounded sub-map; the outer map holds only chains with
+	// live entries.
 	replayMu sync.Mutex
-	seenSigs map[string]int64
+	seenSigs map[string]map[string]int64
+
+	// caMu guards caCache — parsed pinned CAs keyed by "chainID:hexpin", so the
+	// mTLS handshake and per-request verify don't re-read+parse the CA from disk
+	// on every connection (unauthenticated-handshake amplification).
+	caMu    sync.RWMutex
+	caCache map[string]*x509.Certificate
+
+	// broadcastSem bounds concurrent receipt-triggered broadcast_tx_commit
+	// calls: each blocks up to the commit timeout, so an unbounded push flood
+	// would otherwise pin a goroutine per push. A small pool caps the hold.
+	broadcastSem chan struct{}
 }
 
 // NewManager builds the federation transport manager. It is safe to construct
@@ -72,7 +90,34 @@ func NewManager(cfg Config) *Manager {
 		badger:       cfg.Badger,
 		memStore:     cfg.MemStore,
 		logger:       cfg.Logger.With().Str("component", "federation").Logger(),
-		seenSigs:     make(map[string]int64),
+		seenSigs:     make(map[string]map[string]int64),
+		caCache:      make(map[string]*x509.Certificate),
+		broadcastSem: make(chan struct{}, maxConcurrentReceiptBroadcasts),
+	}
+}
+
+// cachedCA / putCA / invalidateCACache manage the parsed-CA cache. Keyed by
+// (chain, pin) so a re-provisioned CA (new pin) is a natural miss; commit of a
+// new CA also drops the chain's entries explicitly.
+func (m *Manager) cachedCA(key string) *x509.Certificate {
+	m.caMu.RLock()
+	defer m.caMu.RUnlock()
+	return m.caCache[key]
+}
+
+func (m *Manager) putCA(key string, cert *x509.Certificate) {
+	m.caMu.Lock()
+	defer m.caMu.Unlock()
+	m.caCache[key] = cert
+}
+
+func (m *Manager) invalidateCACache(remoteChainID string) {
+	m.caMu.Lock()
+	defer m.caMu.Unlock()
+	for k := range m.caCache {
+		if strings.HasPrefix(k, remoteChainID+":") {
+			delete(m.caCache, k)
+		}
 	}
 }
 
@@ -284,9 +329,26 @@ func (m *Manager) HandleIncomingReceipt(peerChainID string, push *ReceiptPush) (
 		return nil, fmt.Errorf("receipt signature matches no declared coauthor of %s for chain %s", receipt.SharedID, peerChainID)
 	}
 
-	// Idempotency: identical anchor already on-chain → nothing to do.
-	anchor := sha256.Sum256(push.Receipt)
-	if existing, aErr := m.badger.GetCoCommitAnchor(receipt.SharedID, peerChainID); aErr == nil && bytes.Equal(existing, anchor[:]) {
+	// First-write-wins idempotency, keyed on the SEMANTIC pair
+	// (SharedID, peerChainID) — NOT sha256(receipt). Height/CommitTime are
+	// non-semantic, attacker-chosen bytes inside the signed receipt, so a
+	// declared-coauthor peer could vary them to mint a different receipt hash
+	// on every push and force a fresh consensus attest each time. Because the
+	// anchor binds CoreHash (content-derived, identical for a given SharedID),
+	// the first valid anchor is as authoritative as any later one — so once ANY
+	// anchor exists for the pair, further pushes are a no-op. This also matches
+	// the plan's "idempotent, late-bindable" receipt design.
+	if existing, aErr := m.badger.GetCoCommitAnchor(receipt.SharedID, peerChainID); aErr == nil && len(existing) > 0 {
+		return &ReceiptPushResponse{Status: "already_anchored", SharedID: receipt.SharedID}, nil
+	}
+
+	// Bound concurrent blocking broadcasts (each occupies a goroutine up to the
+	// commit timeout).
+	m.broadcastSem <- struct{}{}
+	defer func() { <-m.broadcastSem }()
+	// Re-check under the semaphore: a racing push for the same pair may have
+	// anchored while we waited.
+	if existing, aErr := m.badger.GetCoCommitAnchor(receipt.SharedID, peerChainID); aErr == nil && len(existing) > 0 {
 		return &ReceiptPushResponse{Status: "already_anchored", SharedID: receipt.SharedID}, nil
 	}
 

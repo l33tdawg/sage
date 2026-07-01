@@ -27,7 +27,10 @@ const (
 	maxFedTopK       = 50
 	defaultFedTopK   = 10
 	maxTimestampSkew = 5 * time.Minute
-	maxReplayEntries = 10000
+	// maxReplayEntriesPerChain bounds each PEER CHAIN's replay shard. Total
+	// listener memory is bounded by (active peer chains × this) — and one
+	// peer's flood is confined to its own shard.
+	maxReplayEntriesPerChain = 4000
 )
 
 type peerCtxKey struct{}
@@ -151,7 +154,7 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		if !m.replayFresh(peerChain+":"+agentID+":"+sigHex, ts) {
+		if !m.replayFresh(peerChain, agentID+":"+sigHex, ts) {
 			httpError(w, http.StatusUnauthorized, "replayed signature")
 			return
 		}
@@ -165,27 +168,40 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 	})
 }
 
-// replayFresh records a signature key and reports whether it was unseen.
-// Chain-scoped (the key embeds the chain id) and size-bounded: expired entries
-// are evicted opportunistically, and the cache refuses new entries at cap
-// (failing CLOSED — a full cache rejects rather than accepts).
-func (m *Manager) replayFresh(key string, ts int64) bool {
+// replayFresh records a signature under its peer chain's shard and reports
+// whether it was unseen. SHARDED per peer chain with a PER-CHAIN cap: a single
+// peer flooding distinct valid sigs fills only its OWN shard, so it can lock
+// out only itself — never other peers (the earlier global cap let any one peer
+// DoS the whole listener). Within a shard, expired entries (ts older than the
+// skew horizon) are evicted first, so honest steady-state traffic never hits
+// the cap; the cap only bites a peer actively flooding, and empty shards are
+// dropped to bound the outer map to chains with live traffic.
+func (m *Manager) replayFresh(chainID, sigKey string, ts int64) bool {
 	m.replayMu.Lock()
 	defer m.replayMu.Unlock()
 	now := time.Now().Unix()
 	horizon := int64(maxTimestampSkew / time.Second)
-	for k, seenTS := range m.seenSigs {
+
+	shard := m.seenSigs[chainID]
+	if shard == nil {
+		shard = make(map[string]int64)
+		m.seenSigs[chainID] = shard
+	}
+	for k, seenTS := range shard {
 		if now-seenTS > horizon {
-			delete(m.seenSigs, k)
+			delete(shard, k)
 		}
 	}
-	if _, seen := m.seenSigs[key]; seen {
+	if _, seen := shard[sigKey]; seen {
 		return false
 	}
-	if len(m.seenSigs) >= maxReplayEntries {
-		return false
+	if len(shard) >= maxReplayEntriesPerChain {
+		return false // this peer is flooding its own shard; reject (fail closed) — others unaffected
 	}
-	m.seenSigs[key] = ts
+	shard[sigKey] = ts
+	// The outer map is bounded by the number of active agreements (peerAuth
+	// gates on ActiveAgreement before we get here), so no outer-map eviction is
+	// needed — only chains with a live agreement can ever create a shard.
 	return true
 }
 
@@ -291,8 +307,13 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 			hidden++
 			continue
 		}
-		memClass, _ := m.badger.GetMemoryClassification(rec.MemoryID)
-		if memClass > peer.Agreement.MaxClearance {
+		// Fail CLOSED on a classification read error: GetMemoryClassification
+		// returns (0, err) on a corrupt/unreadable entry, and 0 ≤ every ceiling
+		// — swallowing the error would DISCLOSE an arbitrarily-classified record
+		// across the federation boundary. This is the sole clearance gate on the
+		// egress path, so an error hides the record.
+		memClass, classErr := m.badger.GetMemoryClassification(rec.MemoryID)
+		if classErr != nil || memClass > peer.Agreement.MaxClearance {
 			hidden++
 			continue
 		}
