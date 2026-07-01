@@ -920,6 +920,18 @@ func (app *SageApp) postAppV13Rules(height int64) bool {
 	return app.postAppV13Fork(height)
 }
 
+// postAppV15Rules reports whether app-v15's consensus rules (the verb-ladder
+// deprecation-authz gate on processMemoryChallenge + the level-3 grant-cap
+// loosening) are in force at this height. These are ADDITIVE rules (like
+// app-v10/v11), so the NEXT independent fork ORs itself in here at one site
+// instead of touching every callsite. app-v15 is the highest independent gate
+// today, so this collapses to exactly postAppV15Fork and historical blocks
+// replay byte-identically. Do NOT OR this into postAppV12Rules/postAppV13Rules —
+// those are mutually-exclusive AppHash-REPLACEMENT rules, deliberately non-subsumed.
+func (app *SageApp) postAppV15Rules(height int64) bool {
+	return app.postAppV15Fork(height)
+}
+
 // refreshAppV9Fork populates appV9AppliedHeight from the persisted upgrade
 // audit trail. Called on boot (so a node restarting on a post-fork chain picks
 // up the gate without waiting for activation) and after the activation block in
@@ -1090,6 +1102,16 @@ func recordAppV11Branch(postFork bool) {
 		branch = "post"
 	}
 	metrics.ForkBranchTotal.WithLabelValues("app-v11", branch).Inc()
+}
+
+// recordAppV15Branch is the app-v15 sibling of recordAppV11Branch. Metrics-only,
+// never in the AppHash — counts the pre/post split of the verb-ladder gate.
+func recordAppV15Branch(postFork bool) {
+	branch := "pre"
+	if postFork {
+		branch = "post"
+	}
+	metrics.ForkBranchTotal.WithLabelValues("app-v15", branch).Inc()
 }
 
 // materializeAppV11Admin establishes a deterministic on-chain chain-admin at the
@@ -3009,6 +3031,43 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 		return &abcitypes.ExecTxResult{Code: 15, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
+	// app-v15 (verb-ladder): deprecation is the privileged "modify" verb. PRE-FORK
+	// ANY authenticated agent could deprecate ANY memory by client-supplied ID —
+	// the ungated-deprecate hole. POST-FORK the challenger must be the domain
+	// owner/ancestor-owner OR hold a level-3 (modify) grant on the memory's domain.
+	// All inputs derive from committed BadgerDB state + the consensus blockTime —
+	// no time.Now, no remote call, no per-node cache — so every replica reaches the
+	// same verdict. The whole block is skipped pre-fork (postAppV15Rules is false on
+	// every existing chain and on the activation block itself, strict >), so
+	// historical blocks replay byte-identically. Every reject returns BEFORE the
+	// SetMemoryHash deprecate below, so a rejected challenge never mutates Badger or
+	// the AppHash (same validate-before-write discipline as processMemorySubmit).
+	postV15 := app.postAppV15Rules(height)
+	recordAppV15Branch(postV15)
+	if postV15 {
+		domain, dErr := app.badgerStore.GetMemoryDomain(challenge.MemoryID)
+		if dErr != nil {
+			return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: domain lookup failed: %v", dErr)}
+		}
+		if domain == "" {
+			// Legacy/undomained memory, or a memoryID that was never submitted:
+			// nothing to authorize against. Deny-by-default rather than bypass the
+			// modify gate (a pre-v8.4 memory with no memdomain: key, or a bogus ID).
+			return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: memory %s has no recorded domain; not authorized to deprecate", challenge.MemoryID)}
+		}
+		isAdmin, adErr := app.badgerStore.IsDomainOwnerOrAncestor(domain, challengerID)
+		if adErr != nil {
+			return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: domain-owner lookup failed: %v", adErr)}
+		}
+		hasModify, hErr := app.badgerStore.HasAccessOrAncestor(domain, challengerID, 3, blockTime)
+		if hErr != nil {
+			return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: access lookup failed: %v", hErr)}
+		}
+		if !(isAdmin || hasModify) {
+			return &abcitypes.ExecTxResult{Code: 92, Log: fmt.Sprintf("challenge: agent %s not authorized to deprecate memory %s (need domain ownership or a level-3 modify grant)", challengerID[:16], challenge.MemoryID)}
+		}
+	}
+
 	// A challenge that passes BFT consensus (included in a block) is decisive —
 	// the memory is deprecated immediately. The block inclusion IS the consensus.
 	if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, nil, string(memory.StatusDeprecated)); err != nil {
@@ -3122,9 +3181,17 @@ func (app *SageApp) processAccessRequest(parsedTx *tx.ParsedTx, height int64, bl
 		return &abcitypes.ExecTxResult{Code: 30, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
-	// Validate level
-	if req.RequestedLevel < 1 || req.RequestedLevel > 2 {
-		return &abcitypes.ExecTxResult{Code: 31, Log: "invalid access level: must be 1 (read) or 2 (read+write)"}
+	// Validate level. app-v15 (verb-ladder) raises the requestable cap to 3
+	// (=modify) in lockstep with the grant cap. Pre-fork stays byte-identical
+	// (reject >2, Code 31, same log) for replay safety.
+	if app.postAppV15Rules(height) {
+		if req.RequestedLevel < 1 || req.RequestedLevel > 3 {
+			return &abcitypes.ExecTxResult{Code: 31, Log: "invalid access level: must be 1 (read), 2 (read+write), or 3 (modify)"}
+		}
+	} else {
+		if req.RequestedLevel < 1 || req.RequestedLevel > 2 {
+			return &abcitypes.ExecTxResult{Code: 31, Log: "invalid access level: must be 1 (read) or 2 (read+write)"}
+		}
 	}
 
 	// Generate deterministic request ID
@@ -3272,9 +3339,17 @@ func (app *SageApp) processAccessGrant(parsedTx *tx.ParsedTx, height int64, bloc
 		}
 	}
 
-	// Validate level
-	if grant.Level < 1 || grant.Level > 2 {
-		return &abcitypes.ExecTxResult{Code: 35, Log: "invalid access level: must be 1 (read) or 2 (read+write)"}
+	// Validate level. app-v15 (verb-ladder) raises the grantable cap to 3 (=modify),
+	// so the deprecate/supersede verb can be delegated. Pre-fork stays byte-identical
+	// (reject >2, Code 35, same log) for replay safety.
+	if app.postAppV15Rules(height) {
+		if grant.Level < 1 || grant.Level > 3 {
+			return &abcitypes.ExecTxResult{Code: 35, Log: "invalid access level: must be 1 (read), 2 (read+write), or 3 (modify)"}
+		}
+	} else {
+		if grant.Level < 1 || grant.Level > 2 {
+			return &abcitypes.ExecTxResult{Code: 35, Log: "invalid access level: must be 1 (read) or 2 (read+write)"}
+		}
 	}
 
 	// Write grant to BadgerDB
