@@ -79,6 +79,11 @@ type SupplementaryData struct {
 	EmbeddingHash    []byte
 	Provider         string
 	KnowledgeTriples []KnowledgeTriple
+	// Content backfills the off-chain record for txs that carry only a
+	// ContentHash on-chain (co-commit envelopes): the REST layer stages the raw
+	// content here so the local SQLite record is recallable. Off-chain mirror
+	// only — never consulted by any consensus branch or badger write.
+	Content string
 }
 
 // ValidMemoryTypes returns all valid memory types.

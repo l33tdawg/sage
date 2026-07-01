@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
@@ -63,6 +64,12 @@ type QueryMemoryRequest struct {
 	// Tags, when non-empty, restricts results to memories tagged with ANY
 	// of the listed values (OR semantics). SQLite-only.
 	Tags []string `json:"tags,omitempty"`
+	// Federated opts this recall into the v11 cross-network proxy: results
+	// from every active cross_fed peer are merged in (read-only, stamped with
+	// source_chain_id). FederateChains narrows the fan-out to named chains
+	// ("*" = all active). Both default off — local behaviour is unchanged.
+	Federated      bool     `json:"federated,omitempty"`
+	FederateChains []string `json:"federate_chains,omitempty"`
 }
 
 // QueryMemoryResponse is the JSON body for a successful query.
@@ -71,6 +78,17 @@ type QueryMemoryResponse struct {
 	NextCursor string          `json:"next_cursor,omitempty"`
 	TotalCount int             `json:"total_count"`
 	Filtered   *FilterInfo     `json:"filtered,omitempty"`
+	// Federation discloses the cross-network fan-out when a federated recall
+	// ran: which peers were queried and which failed (fail-closed peers are
+	// reported, never silently dropped).
+	Federation *FederationInfo `json:"federation,omitempty"`
+}
+
+// FederationInfo discloses the outcome of a federated recall fan-out.
+type FederationInfo struct {
+	Queried []string          `json:"queried"`
+	Merged  int               `json:"merged"`
+	Errors  map[string]string `json:"errors,omitempty"`
 }
 
 // FilterInfo surfaces server-side filters that hid data from the caller.
@@ -110,6 +128,11 @@ type MemoryResult struct {
 	TaskStatus         string     `json:"task_status,omitempty"`
 	CreatedAt          time.Time  `json:"created_at"`
 	CommittedAt        *time.Time `json:"committed_at,omitempty"`
+	// SourceChainID is v11 federation provenance: empty for local memories,
+	// the origin chain id for results merged in from a cross_fed peer (whose
+	// SubmittingAgent is then chain-qualified as pubkey@chain_id). Remote
+	// results live only in this response — they are never stored locally.
+	SourceChainID string `json:"source_chain_id,omitempty"`
 }
 
 // MemoryDetailResponse is a memory record with votes and corroborations.
@@ -721,6 +744,15 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
 
+	s.mergeFederatedRecall(r, &resp, req.Federated, req.FederateChains, &federation.QueryRequest{
+		Mode:          federation.ModeSemantic,
+		Embedding:     req.Embedding,
+		DomainTag:     req.DomainTag,
+		MinConfidence: req.MinConfidence,
+		TopK:          req.TopK,
+		Tags:          req.Tags,
+	})
+
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -749,6 +781,74 @@ func setFilterInfo(w http.ResponseWriter, resp *QueryMemoryResponse, submittingA
 	resp.Filtered = info
 }
 
+// defaultFedRecallTimeout bounds the cross-network fan-out so a slow or dead
+// peer can't stall a local recall. Overridable via SAGE_FED_RECALL_TIMEOUT_MS
+// (mirrors broadcastTxCommitTimeout's pattern).
+const defaultFedRecallTimeout = 4 * time.Second
+
+func fedRecallTimeout() time.Duration {
+	if v := os.Getenv("SAGE_FED_RECALL_TIMEOUT_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return defaultFedRecallTimeout
+}
+
+// mergeFederatedRecall appends read-only results from cross_fed peers to a
+// recall response (v11 Mode-1 exchange). Opt-in per request; no-op when the
+// federation transport isn't wired or the request didn't ask. Remote results
+// arrive already filtered by the SERVING peer's treaty enforcement (its
+// AllowedDomains + MaxClearance + committed-only) and are merged into the
+// response ONLY — nothing touches local stores, embeddings, or AppHash state.
+// Peer failures are disclosed in resp.Federation.Errors, never silently
+// dropped (fail-closed plus disclosure, same philosophy as FilterInfo).
+func (s *Server) mergeFederatedRecall(r *http.Request, resp *QueryMemoryResponse, federated bool, chains []string, fedReq *federation.QueryRequest) {
+	if s.federation == nil || (!federated && len(chains) == 0) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedRecallTimeout())
+	defer cancel()
+
+	outcomes := s.federation.FanOutRecall(ctx, chains, fedReq)
+	if len(outcomes) == 0 {
+		resp.Federation = &FederationInfo{Queried: []string{}}
+		return
+	}
+	info := &FederationInfo{}
+	for _, outcome := range outcomes {
+		info.Queried = append(info.Queried, outcome.ChainID)
+		if outcome.Err != nil {
+			if info.Errors == nil {
+				info.Errors = make(map[string]string)
+			}
+			info.Errors[outcome.ChainID] = outcome.Err.Error()
+			s.logger.Warn().Err(outcome.Err).Str("peer", outcome.ChainID).Msg("federated recall peer failed")
+			continue
+		}
+		for _, fr := range outcome.Results {
+			info.Merged++
+			resp.Results = append(resp.Results, &MemoryResult{
+				MemoryID:           fr.MemoryID,
+				SubmittingAgent:    fr.SubmittingAgent,
+				Content:            fr.Content,
+				ContentHash:        fr.ContentHash,
+				MemoryType:         fr.MemoryType,
+				DomainTag:          fr.DomainTag,
+				ConfidenceScore:    fr.ConfidenceScore,
+				CorroborationCount: fr.CorroborationCount,
+				Classification:     fr.Classification,
+				Status:             fr.Status,
+				CreatedAt:          fr.CreatedAt,
+				CommittedAt:        fr.CommittedAt,
+				SourceChainID:      fr.SourceChainID,
+			})
+		}
+	}
+	resp.TotalCount = len(resp.Results)
+	resp.Federation = info
+}
+
 // SearchMemoryRequest is the JSON body for POST /v1/memory/search.
 type SearchMemoryRequest struct {
 	Query         string   `json:"query"`
@@ -758,6 +858,9 @@ type SearchMemoryRequest struct {
 	StatusFilter  string   `json:"status_filter,omitempty"`
 	TopK          int      `json:"top_k,omitempty"`
 	Tags          []string `json:"tags,omitempty"`
+	// v11 federated recall opt-in — see QueryMemoryRequest.
+	Federated      bool     `json:"federated,omitempty"`
+	FederateChains []string `json:"federate_chains,omitempty"`
 }
 
 // handleSearchMemory handles POST /v1/memory/search — FTS5 full-text search.
@@ -938,6 +1041,15 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
 
+	s.mergeFederatedRecall(r, &resp, req.Federated, req.FederateChains, &federation.QueryRequest{
+		Mode:          federation.ModeText,
+		Query:         req.Query,
+		DomainTag:     req.DomainTag,
+		MinConfidence: req.MinConfidence,
+		TopK:          req.TopK,
+		Tags:          req.Tags,
+	})
+
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -961,6 +1073,9 @@ type HybridSearchMemoryRequest struct {
 	StatusFilter  string            `json:"status_filter,omitempty"`
 	TopK          int               `json:"top_k,omitempty"`
 	Tags          []string          `json:"tags,omitempty"`
+	// v11 federated recall opt-in — see QueryMemoryRequest.
+	Federated      bool     `json:"federated,omitempty"`
+	FederateChains []string `json:"federate_chains,omitempty"`
 }
 
 // HybridExpansion carries a single paraphrase/entity/temporal variant of the
@@ -1147,6 +1262,16 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		TotalCount: len(results),
 	}
 	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
+
+	s.mergeFederatedRecall(r, &resp, req.Federated, req.FederateChains, &federation.QueryRequest{
+		Mode:          federation.ModeHybrid,
+		Query:         req.Query,
+		Embedding:     req.Embedding,
+		DomainTag:     req.DomainTag,
+		MinConfidence: req.MinConfidence,
+		TopK:          req.TopK,
+		Tags:          req.Tags,
+	})
 
 	writeJSON(w, http.StatusOK, resp)
 }

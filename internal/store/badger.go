@@ -793,6 +793,57 @@ func (s *BadgerStore) SetCoCommitAnchor(sharedID, peerChainID string, anchorHash
 	})
 }
 
+// GetCoCommitAnchor returns the recorded cross-anchor for (sharedID, peer), or
+// nil if the peer has not been anchored yet (missing = "unconfirmed", not an
+// error). Read-only — used by the transport layer for idempotent receipt
+// delivery and confirmation status.
+func (s *BadgerStore) GetCoCommitAnchor(sharedID, peerChainID string) ([]byte, error) {
+	var anchor []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(cocommitAnchorKey(sharedID, peerChainID))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			anchor = append([]byte(nil), val...)
+			return nil
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return anchor, nil
+}
+
+// ListCoCommitAnchors returns every recorded peer anchor for a SharedID, keyed
+// by peer chain id. Read-only prefix scan (cocommit:anchor:<sharedID>:) — the
+// key charset guarantees ':' appears only as the separator.
+func (s *BadgerStore) ListCoCommitAnchors(sharedID string) (map[string][]byte, error) {
+	anchors := make(map[string][]byte)
+	prefix := []byte("cocommit:anchor:" + sharedID + ":")
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			peerChainID := string(item.Key()[len(prefix):])
+			if err := item.Value(func(val []byte) error {
+				anchors[peerChainID] = append([]byte(nil), val...)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return anchors, err
+}
+
 // --- CrossFed (v11 / app-v15) Mode-1 exchange TERMS ---
 //
 // Consensus-authoritative terms record keyed by remote_chain_id, one per remote
@@ -959,6 +1010,49 @@ func (s *BadgerStore) UpdateCrossFedStatus(remoteChainID, newStatus string) erro
 		blob := encodeCrossFedBlob(endpoint, peerPubKey, maxClearance, expiresAt, newStatus, allowedDomains, allowedDepts)
 		return txn.Set(crossFedKey(remoteChainID), blob)
 	})
+}
+
+// CrossFedRecord is the decoded form of one cross_fed:<remote_chain_id> terms
+// record, used by the OFF-consensus transport layer (federation listener, query
+// proxy, receipt exchange) which needs to enumerate agreements — the consensus
+// path only ever does point lookups via GetCrossFed.
+type CrossFedRecord struct {
+	RemoteChainID  string
+	Endpoint       string
+	PeerPubKey     []byte
+	MaxClearance   uint8
+	ExpiresAt      int64
+	AllowedDomains []string
+	AllowedDepts   []string
+	Status         string
+}
+
+// ListCrossFed returns every cross_fed terms record. Read-only prefix scan —
+// never called on the consensus path.
+func (s *BadgerStore) ListCrossFed() ([]CrossFedRecord, error) {
+	var records []CrossFedRecord
+	prefix := []byte("cross_fed:")
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			rec := CrossFedRecord{RemoteChainID: string(item.Key()[len(prefix):])}
+			if err := item.Value(func(val []byte) error {
+				var decErr error
+				rec.Endpoint, rec.PeerPubKey, rec.MaxClearance, rec.ExpiresAt, rec.Status,
+					rec.AllowedDomains, rec.AllowedDepts, decErr = decodeCrossFedBlob(val)
+				return decErr
+			}); err != nil {
+				continue // skip a corrupt record rather than failing the scan
+			}
+			records = append(records, rec)
+		}
+		return nil
+	})
+	return records, err
 }
 
 // SetMemoryAuthor records a memory's submitting agent (its author) on-chain.

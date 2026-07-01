@@ -551,7 +551,7 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 
 	memories := make([]map[string]any, 0, len(queryResp.Results))
 	for _, r := range queryResp.Results {
-		memories = append(memories, map[string]any{
+		entry := map[string]any{
 			"memory_id":           r.MemoryID,
 			"content":             r.Content,
 			"domain":              r.DomainTag,
@@ -560,7 +560,11 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 			"type":                r.MemoryType,
 			"status":              r.Status,
 			"created_at":          r.CreatedAt,
-		})
+		}
+		if r.SourceChainID != "" {
+			entry["source_chain_id"] = r.SourceChainID
+		}
+		memories = append(memories, entry)
 	}
 
 	return map[string]any{
@@ -583,6 +587,7 @@ type recallResp struct {
 		MemoryType         string  `json:"memory_type"`
 		Status             string  `json:"status"`
 		CreatedAt          string  `json:"created_at"`
+		SourceChainID      string  `json:"source_chain_id,omitempty"`
 	} `json:"results"`
 	TotalCount int `json:"total_count"`
 }

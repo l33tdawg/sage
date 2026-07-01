@@ -26,6 +26,7 @@ type Config struct {
 	Embedding  EmbeddingConfig  `yaml:"embedding"`
 	Encryption EncryptionConfig `yaml:"encryption"`
 	Quorum     QuorumConfig     `yaml:"quorum"`
+	Federation FederationConfig `yaml:"federation,omitempty"`
 	DataDir    string           `yaml:"data_dir"`
 	RESTAddr   string           `yaml:"rest_addr"`
 	AgentKey   string           `yaml:"agent_key_file"`
@@ -59,6 +60,18 @@ type Config struct {
 	// brings the CHAIN up to date. Quorum clusters never auto-advance
 	// regardless of this knob — fork scheduling there is an operator decision.
 	DisableAutoUpgrade bool `yaml:"disable_auto_upgrade,omitempty"`
+}
+
+// FederationConfig controls the v11 cross-network federation LISTENER (the
+// dedicated mTLS port serving other SAGE chains). The OUTBOUND side (federated
+// recall, receipt delivery) needs no listener and is always available once
+// cross_fed agreements exist — this only gates the inbound surface.
+type FederationConfig struct {
+	Enabled bool `yaml:"enabled"` // start the mTLS federation listener
+	// ListenAddr is the federation listener address (default 0.0.0.0:8444).
+	// Unlike the local API this REQUIRES a verified client certificate pinned
+	// to an active cross_fed agreement, so exposing it is the point.
+	ListenAddr string `yaml:"listen_addr,omitempty"`
 }
 
 // QuorumConfig controls multi-validator consensus mode.

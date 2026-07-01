@@ -36,6 +36,7 @@ import (
 	sageabci "github.com/l33tdawg/sage/internal/abci"
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/embedding"
+	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/mcp"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
@@ -672,12 +673,37 @@ func runServe() (rerr error) {
 		}
 	}
 
+	certsDir := filepath.Join(SageHome(), "certs")
+
+	// v11 federation transport: wire the manager BEFORE any listener serves
+	// requests (the TLS REST listener below mounts the same router). The
+	// OUTBOUND side (federated recall, receipt delivery) needs no inbound
+	// listener — only active cross_fed agreements; the dedicated inbound mTLS
+	// listener starts after cert auto-generation, and only when
+	// federation.enabled is set.
+	var fedMgr *federation.Manager
+	if fedAgentKey, akErr := loadOrGenerateKey(cfg.AgentKey); akErr != nil {
+		logger.Warn().Err(akErr).Msg("agent key unavailable — federation transport disabled")
+	} else if cfg.ChainID == "" {
+		logger.Warn().Msg("no chain_id in genesis/config — federation transport disabled")
+	} else {
+		fedMgr = federation.NewManager(federation.Config{
+			LocalChainID: cfg.ChainID,
+			CertsDir:     certsDir,
+			CometRPC:     cometRPC,
+			AgentKey:     fedAgentKey,
+			Badger:       badgerStore,
+			MemStore:     sqliteStore,
+			Logger:       logger,
+		})
+		restServer.SetFederation(fedMgr)
+	}
+
 	// TLS listener: encrypted REST on a separate port.
 	// Auto-generates self-signed certs on first run if none exist.
 	// Personal mode: TLS on localhost:8443. Quorum mode: TLS on 0.0.0.0:8443.
 	// Plain HTTP stays on localhost for dashboard backward compatibility.
 	var tlsServer *http.Server
-	certsDir := filepath.Join(SageHome(), "certs")
 	if !tlsca.CertsExist(certsDir) {
 		// Auto-generate self-signed certs for HTTPS. The CA CommonName tracks the
 		// unique chain_id (reconciled above); fall back to the legacy label only
@@ -731,6 +757,40 @@ func runServe() (rerr error) {
 				}
 			}()
 		}
+	}
+
+	// Dedicated v11 federation mTLS listener — a SEPARATE port and router from
+	// the local API: RequireAnyClientCert + per-agreement pinned-CA
+	// verification at handshake, chain-qualified signed requests per call. The
+	// local REST/TLS listeners above keep NoClientCert semantics untouched.
+	var fedServer *http.Server
+	if cfg.Federation.Enabled && fedMgr != nil {
+		if !tlsca.CertsExist(certsDir) {
+			logger.Warn().Msg("federation listener disabled: no TLS certificates")
+		} else if fedTLS, fedTLSErr := fedMgr.ServerTLSConfig(); fedTLSErr != nil {
+			logger.Warn().Err(fedTLSErr).Msg("federation listener disabled: TLS config failed")
+		} else {
+			fedAddr := cfg.Federation.ListenAddr
+			if fedAddr == "" {
+				fedAddr = "0.0.0.0:8444"
+			}
+			fedServer = &http.Server{
+				Addr:         fedAddr,
+				Handler:      fedMgr.Router(),
+				TLSConfig:    fedTLS,
+				ReadTimeout:  15 * time.Second,
+				WriteTimeout: 15 * time.Second,
+				IdleTimeout:  60 * time.Second,
+			}
+			go func() {
+				logger.Info().Str("addr", fedAddr).Str("chain_id", cfg.ChainID).Msg("federation mTLS listener starting")
+				if fedServeErr := fedServer.ListenAndServeTLS("", ""); fedServeErr != nil && fedServeErr != http.ErrServerClosed {
+					logger.Error().Err(fedServeErr).Msg("federation listener error")
+				}
+			}()
+		}
+	} else if cfg.Federation.Enabled {
+		logger.Warn().Msg("federation.enabled set but transport unavailable (missing agent key or chain_id)")
 	}
 
 	go func() {
@@ -835,6 +895,9 @@ func runServe() (rerr error) {
 	defer cancel()
 	if tlsServer != nil {
 		_ = tlsServer.Shutdown(shutdownCtx)
+	}
+	if fedServer != nil {
+		_ = fedServer.Shutdown(shutdownCtx)
 	}
 	return httpServer.Shutdown(shutdownCtx)
 }

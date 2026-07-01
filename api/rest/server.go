@@ -18,6 +18,7 @@ import (
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/embedding"
+	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
@@ -68,6 +69,22 @@ type Server struct {
 	// preserving v7.1.1-equivalent behaviour for callers that don't wire
 	// the fork gate (e.g. tests, older deployments).
 	postV8ForkFn func() bool
+
+	// federation is the v11 OFF-consensus transport (recall proxy, co-commit
+	// receipt exchange, cross-fed agreement setup). nil disables every
+	// federation surface — handlers 501 and the recall merge is skipped, so
+	// unwired deployments/tests behave exactly pre-v11.
+	federation FederationService
+}
+
+// FederationService is the slice of the federation.Manager the REST layer
+// consumes. An interface so handler tests can fake peers without TLS.
+type FederationService interface {
+	FanOutRecall(ctx context.Context, targets []string, qr *federation.QueryRequest) []federation.PeerRecallOutcome
+	DeliverReceipts(ctx context.Context, sharedID string, height, commitTime int64) map[string]federation.DeliveryResult
+	StoreRemoteCA(remoteChainID string, caPEM []byte) ([]byte, error)
+	PeerStatus(ctx context.Context, remoteChainID string) (*federation.StatusResponse, error)
+	LocalChainID() string
 }
 
 // SuppCacheWriter is the interface the REST server uses to store supplementary data
@@ -195,6 +212,13 @@ func loadValidatorSigningKey(logger zerolog.Logger) ed25519.PrivateKey {
 	return sk
 }
 
+// SetFederation wires the v11 federation transport. Must be called before the
+// server starts accepting requests (same contract as SetSuppCache). nil keeps
+// every federation surface disabled.
+func (s *Server) SetFederation(f FederationService) {
+	s.federation = f
+}
+
 // SetNodeOperatorID records the hex-encoded ed25519 public key that
 // identifies the local node operator (~/.sage/agent.key). Requests signed
 // with this key bypass agent-isolation RBAC on read paths since the
@@ -258,6 +282,16 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/memory/list", s.handleListMemoriesAuth)
 		r.Get("/v1/memory/timeline", s.handleTimelineAuth)
 		r.Post("/v1/memory/pre-validate", s.handlePreValidate)
+
+		// v11 federation transport (all OFF-consensus; consensus effects go
+		// through ordinary signed txs broadcast to CometBFT)
+		r.Post("/v1/federation/cross", s.handleCrossFedSet)
+		r.Get("/v1/federation/cross", s.handleCrossFedList)
+		r.Post("/v1/federation/cross/{chain_id}/revoke", s.handleCrossFedRevoke)
+		r.Get("/v1/federation/cross/{chain_id}/status", s.handleCrossFedPeerStatus)
+		r.Post("/v1/cocommit/submit", s.handleCoCommitSubmit)
+		r.Post("/v1/cocommit/{shared_id}/receipt/send", s.handleCoCommitReceiptSend)
+		r.Get("/v1/cocommit/{shared_id}/status", s.handleCoCommitStatus)
 
 		// Agent endpoints
 		r.Get("/v1/agent/me", s.handleGetAgent)

@@ -94,6 +94,51 @@ func buildRequestMessage(method, path string, body []byte, timestamp int64, nonc
 	return message
 }
 
+// --- X-Sig-Version=2 — chain-qualified request signing (v11 federation) ---
+//
+// V1 signatures bind method+path+body+timestamp[+nonce] but carry no notion of
+// WHICH network the request is for: the same agent key used on two chains
+// produces byte-identical signatures, so a request captured on chain A replays
+// verbatim against chain B. V2 folds a domain-separation hash of
+// (senderChainID, receiverChainID) into the signed message as a fixed-width
+// PREFIX (before the variable-length nonce), making the canonical bytes
+// unambiguous and un-spliceable. A v2 message can never collide with a v1
+// message: interpreting a v2 message as v1 would require the chain hash to
+// equal SHA-256 of a valid canonical request line, a second-preimage.
+
+// sigV2DomainTag domain-separates the chain-binding hash from every other
+// SHA-256 use in the protocol.
+const sigV2DomainTag = "sage-fed-sig-v2"
+
+// chainBindingHash = SHA-256(tag \x00 sender \x00 receiver). NUL separators make
+// the encoding injective (chain ids never contain NUL — genesis ids are
+// [a-z0-9-] — so no two (sender, receiver) pairs share a preimage).
+func chainBindingHash(senderChainID, receiverChainID string) [32]byte {
+	return sha256.Sum256([]byte(sigV2DomainTag + "\x00" + senderChainID + "\x00" + receiverChainID))
+}
+
+// buildRequestMessageV2 constructs the chain-qualified message to sign.
+// Format: chainBindingHash(32) || SHA-256(method + " " + path + "\n" + body)(32)
+// || BigEndian(timestamp)(8) || nonce.
+func buildRequestMessageV2(senderChainID, receiverChainID, method, path string, body []byte, timestamp int64, nonce []byte) []byte {
+	ch := chainBindingHash(senderChainID, receiverChainID)
+	return append(ch[:], buildRequestMessage(method, path, body, timestamp, nonce)...)
+}
+
+// SignRequestV2 signs a cross-chain federation request. The signature binds the
+// sending chain AND the intended receiving chain, so it cannot be replayed
+// against a third chain or reflected back at the sender.
+func SignRequestV2(privateKey ed25519.PrivateKey, senderChainID, receiverChainID, method, path string, body []byte, timestamp int64, nonce []byte) []byte {
+	return Sign(privateKey, buildRequestMessageV2(senderChainID, receiverChainID, method, path, body, timestamp, nonce))
+}
+
+// VerifyRequestV2 verifies a chain-qualified federation request signature. The
+// verifier passes its OWN chain id as receiverChainID and the claimed sender
+// chain id — a signature minted for any other (sender, receiver) pair fails.
+func VerifyRequestV2(publicKey ed25519.PublicKey, senderChainID, receiverChainID, method, path string, body []byte, timestamp int64, nonce []byte, signature []byte) bool {
+	return Verify(publicKey, buildRequestMessageV2(senderChainID, receiverChainID, method, path, body, timestamp, nonce), signature)
+}
+
 // VerifyAgentProof re-verifies an agent's Ed25519 signature on-chain using the
 // embedded proof fields from the transaction. Returns the verified agent ID
 // (hex-encoded public key) or an error if verification fails.

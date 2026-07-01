@@ -3039,6 +3039,16 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 			if len(supp.EmbeddingHash) > 0 {
 				record.EmbeddingHash = supp.EmbeddingHash
 			}
+			// Backfill raw content into the OFF-chain record only ("where
+			// available" — same per-node asymmetry as embeddings). The badger/
+			// AppHash writes above saw only env.ContentHash and are untouched.
+			// Hash-gated so a buggy/malicious local caller can't make the
+			// off-chain mirror disagree with the jointly-signed envelope.
+			if supp.Content != "" {
+				if h := sha256.Sum256([]byte(supp.Content)); bytes.Equal(h[:], env.ContentHash) {
+					record.Content = supp.Content
+				}
+			}
 		}
 	}
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "memory", data: record})
