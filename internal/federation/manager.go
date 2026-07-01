@@ -60,8 +60,10 @@ type Manager struct {
 	// SHARDED BY PEER CHAIN so one peer's flood can never evict or lock out
 	// another peer (a shared global cap would let any single authenticated peer
 	// DoS the whole listener by filling it with distinct valid sigs). Each
-	// chain gets its own bounded sub-map; the outer map holds only chains with
-	// live entries.
+	// chain gets its own bounded sub-map. The outer map is bounded by the number
+	// of chains that ever held an active agreement AND sent a request (peerAuth
+	// gates on ActiveAgreement first, so an attacker can't add shards) — empty
+	// shards aren't actively reaped, but that ceiling is operator-scale.
 	replayMu sync.Mutex
 	seenSigs map[string]map[string]int64
 

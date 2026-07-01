@@ -245,6 +245,41 @@ func TestCACommonNameBindsChain(t *testing.T) {
 	}
 }
 
+// TestStageRemoteCAConcurrentIsolation covers the round-3 griefing fix: two
+// concurrent stages for the SAME chain must use distinct pending files, so one
+// caller's rollback cannot delete the other's staged CA before it commits.
+func TestStageRemoteCAConcurrentIsolation(t *testing.T) {
+	a := newTestChain(t, "chain-a")
+
+	// Two CAs both minted for "chain-b" (same CN, distinct keys) — the legit L
+	// and the griefer U staging the same slot at once.
+	caL, _, err := tlsca.GenerateCA("chain-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caU, _, err := tlsca.GenerateCA("chain-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinL, commitL, _, err := a.mgr.StageRemoteCA("chain-b", []byte(tlsca.EncodeCertPEM(caL)))
+	if err != nil {
+		t.Fatalf("stage L: %v", err)
+	}
+	_, _, rollbackU, err := a.mgr.StageRemoteCA("chain-b", []byte(tlsca.EncodeCertPEM(caU)))
+	if err != nil {
+		t.Fatalf("stage U: %v", err)
+	}
+	// U (unauthorized) rolls back FIRST — must not touch L's pending file.
+	rollbackU()
+	if err := commitL(); err != nil {
+		t.Fatalf("L's commit was sabotaged by U's rollback: %v", err)
+	}
+	// L's CA is the one on disk, and its pin verifies.
+	if _, err := a.mgr.loadPinnedRemoteCA("chain-b", pinL); err != nil {
+		t.Fatalf("L's committed CA does not verify against its own pin: %v", err)
+	}
+}
+
 func TestSelfFederationRefused(t *testing.T) {
 	a := newTestChain(t, "chain-a")
 	pin := make([]byte, 32)

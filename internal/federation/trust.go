@@ -95,12 +95,29 @@ func (m *Manager) StageRemoteCA(remoteChainID string, caPEM []byte) (pin []byte,
 	if err = os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
 		return nil, nil, nil, fmt.Errorf("create federation certs dir: %w", err)
 	}
-	pending := final + ".pending"
-	if err = os.WriteFile(pending, caPEM, 0o600); err != nil {
-		return nil, nil, nil, fmt.Errorf("write pending remote CA: %w", err)
+	// UNIQUE pending file per stage (os.CreateTemp, mode 0600). A fixed
+	// "<final>.pending" path would be SHARED across concurrent sets for the same
+	// chain, so one caller's rollback (os.Remove) could delete another's staged
+	// CA mid-join — a griefing availability race triggerable by any
+	// authenticated agent (authz is on-chain, reached only after broadcast). A
+	// per-request temp file isolates commit/rollback completely.
+	f, err := os.CreateTemp(filepath.Dir(final), "ca-*.pending")
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("stage remote CA: %w", err)
+	}
+	pending := f.Name()
+	if _, wErr := f.Write(caPEM); wErr != nil {
+		_ = f.Close()
+		_ = os.Remove(pending)
+		return nil, nil, nil, fmt.Errorf("write pending remote CA: %w", wErr)
+	}
+	if cErr := f.Close(); cErr != nil {
+		_ = os.Remove(pending)
+		return nil, nil, nil, fmt.Errorf("finalize pending remote CA: %w", cErr)
 	}
 	commit = func() error {
 		if renErr := os.Rename(pending, final); renErr != nil {
+			_ = os.Remove(pending) // don't leak the temp on a failed commit
 			return fmt.Errorf("commit remote CA: %w", renErr)
 		}
 		m.invalidateCACache(remoteChainID)

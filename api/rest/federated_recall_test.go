@@ -75,7 +75,8 @@ func TestFederatedRecallMergesRemoteResults(t *testing.T) {
 	srv.SetFederation(fed)
 
 	body, _ := json.Marshal(HybridSearchMemoryRequest{Query: "knowledge", Embedding: []float32{0.1, 0.2}, Federated: true})
-	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/hybrid", body)
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/hybrid", body)
+	srv.SetNodeOperatorID(agentID) // federated recall is operator-gated
 	rr := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -104,6 +105,40 @@ func TestFederatedRecallMergesRemoteResults(t *testing.T) {
 	assert.ElementsMatch(t, []string{"chain-b", "chain-dead"}, resp.Federation.Queried)
 	assert.Equal(t, 1, resp.Federation.Merged)
 	assert.Contains(t, resp.Federation.Errors["chain-dead"], "unreachable")
+}
+
+func TestFederatedRecallDeniedForNonOperator(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+	memStore.memories["local-1"] = &memory.MemoryRecord{
+		MemoryID:        "local-1",
+		SubmittingAgent: "agent-x",
+		Content:         "local only",
+		ContentHash:     []byte{1},
+		MemoryType:      memory.TypeFact,
+		DomainTag:       "shared",
+		ConfidenceScore: 0.9,
+		Status:          memory.StatusCommitted,
+		CreatedAt:       time.Now(),
+	}
+	fed := &fakeFederation{outcomes: []federation.PeerRecallOutcome{
+		{ChainID: "chain-b", Results: []*federation.MemoryResult{{MemoryID: "remote-1", SourceChainID: "chain-b"}}},
+	}}
+	srv.SetFederation(fed)
+	srv.SetNodeOperatorID("some-other-operator") // caller will NOT match
+
+	body, _ := json.Marshal(HybridSearchMemoryRequest{Query: "local", Embedding: []float32{0.1, 0.2}, Federated: true})
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/hybrid", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+
+	var resp QueryMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, 0, fed.calls, "non-operator must not trigger a fan-out")
+	require.NotNil(t, resp.Federation)
+	assert.Contains(t, resp.Federation.Errors["*"], "operator")
+	// Only the local result survives — no remote leak.
+	assert.Equal(t, 1, resp.TotalCount)
 }
 
 func TestRecallWithoutOptInSkipsFederation(t *testing.T) {

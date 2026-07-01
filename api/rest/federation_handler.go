@@ -79,6 +79,17 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Missing scope", "allowed_domains is required (\"*\" for a chain-admin treaty).")
 		return
 	}
+	// Department scoping is NOT yet enforced on the query path (cross-chain dept
+	// semantics are an open design question — plan §9.2). Reject a restrictive
+	// allowed_depts rather than silently store a scope that does nothing (a
+	// false sense of narrowing). "*" (or empty) is the only accepted value.
+	for _, d := range req.AllowedDepts {
+		if d != "*" {
+			writeProblem(w, http.StatusBadRequest, "Dept scoping unsupported",
+				"allowed_depts is not enforced in v11.0; omit it or use [\"*\"]. Scope with allowed_domains instead.")
+			return
+		}
+	}
 	if req.ExpiresAt != 0 && req.ExpiresAt <= time.Now().Unix() {
 		writeProblem(w, http.StatusBadRequest, "Invalid expiry", "expires_at is in the past.")
 		return

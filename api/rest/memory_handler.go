@@ -803,8 +803,27 @@ func fedRecallTimeout() time.Duration {
 // response ONLY — nothing touches local stores, embeddings, or AppHash state.
 // Peer failures are disclosed in resp.Federation.Errors, never silently
 // dropped (fail-closed plus disclosure, same philosophy as FilterInfo).
+//
+// AUTHORIZATION: federated recall is an OPERATOR capability — the opt-in is
+// gated to the node operator (the identity that establishes agreements). The
+// per-agreement MaxClearance is a chain↔chain ceiling, NOT the requesting
+// local agent's personal clearance, so letting an arbitrary local agent invoke
+// it on a multi-tenant node would be a clearance side-channel (a low-clearance
+// agent reading a peer's higher-clearance corpus). Per-local-agent clearance
+// mapping of remote results is the richer future model (plan §9.8 clearance_map);
+// until then the operator gate is the conservative, escalation-free default.
 func (s *Server) mergeFederatedRecall(r *http.Request, resp *QueryMemoryResponse, federated bool, chains []string, fedReq *federation.QueryRequest) {
 	if s.federation == nil || (!federated && len(chains) == 0) {
+		return
+	}
+	callerID := middleware.ContextAgentID(r.Context())
+	if s.nodeOperatorID == "" || callerID != s.nodeOperatorID {
+		// Not permitted for this caller — disclose rather than silently return
+		// local-only, so the client can tell federation was declined vs unwired.
+		resp.Federation = &FederationInfo{
+			Queried: []string{},
+			Errors:  map[string]string{"*": "federated recall is restricted to the node operator"},
+		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), fedRecallTimeout())
