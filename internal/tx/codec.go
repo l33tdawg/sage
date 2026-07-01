@@ -361,6 +361,16 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 			return nil, fmt.Errorf("DomainReassign is nil for domain reassign tx")
 		}
 		return encodeDomainReassign(tx.DomainReassign), nil
+	case TxTypeCoCommitSubmit:
+		if tx.CoCommitSubmit == nil {
+			return nil, fmt.Errorf("CoCommitSubmit is nil for cocommit submit tx")
+		}
+		return encodeCoCommitSubmit(tx.CoCommitSubmit), nil
+	case TxTypeCoCommitAttest:
+		if tx.CoCommitAttest == nil {
+			return nil, fmt.Errorf("CoCommitAttest is nil for cocommit attest tx")
+		}
+		return encodeCoCommitAttest(tx.CoCommitAttest), nil
 	default:
 		return nil, ErrUnknownTxType
 	}
@@ -578,6 +588,20 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 		}
 		tx.DomainReassign = d
 		return nil
+	case TxTypeCoCommitSubmit:
+		s, err := decodeCoCommitSubmit(data)
+		if err != nil {
+			return err
+		}
+		tx.CoCommitSubmit = s
+		return nil
+	case TxTypeCoCommitAttest:
+		a, err := decodeCoCommitAttest(data)
+		if err != nil {
+			return err
+		}
+		tx.CoCommitAttest = a
+		return nil
 	default:
 		return ErrUnknownTxType
 	}
@@ -668,6 +692,183 @@ func decodeMemorySubmit(data []byte) (*MemorySubmit, error) {
 	}
 
 	return s, nil
+}
+
+// --- CoCommit (v11 / app-v15) ---
+
+// appendCoauthors encodes a coauthor slice: uint32 count then per-coauthor
+// PubKey/ChainID/Sig. Iterates in stored SLICE ORDER (never a Go map) so the
+// bytes are a pure function of the struct and hash identically on every
+// validator. Callers sort Coauthors by PubKey before building the signed core.
+func appendCoauthors(buf []byte, cs []CoCommitCoauthor) []byte {
+	buf = appendUint32(buf, uint32(len(cs))) // #nosec G115 -- coauthor count fits in uint32
+	for _, c := range cs {
+		buf = appendBytes(buf, c.PubKey)
+		buf = appendBytes(buf, []byte(c.ChainID))
+		buf = appendBytes(buf, c.Sig)
+	}
+	return buf
+}
+
+func readCoauthors(data []byte, off int) ([]CoCommitCoauthor, int, error) {
+	count, off, err := readUint32(data, off)
+	if err != nil {
+		return nil, 0, err
+	}
+	cs := make([]CoCommitCoauthor, 0, count)
+	for i := uint32(0); i < count; i++ {
+		var pub, chain, sig []byte
+		pub, off, err = readBytes(data, off)
+		if err != nil {
+			return nil, 0, err
+		}
+		chain, off, err = readBytes(data, off)
+		if err != nil {
+			return nil, 0, err
+		}
+		sig, off, err = readBytes(data, off)
+		if err != nil {
+			return nil, 0, err
+		}
+		cs = append(cs, CoCommitCoauthor{PubKey: pub, ChainID: string(chain), Sig: sig})
+	}
+	return cs, off, nil
+}
+
+func encodeCoCommitSubmit(s *CoCommitSubmit) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(s.SharedID))
+	buf = appendUint32(buf, s.SchemaVersion)
+	buf = appendBytes(buf, s.ContentHash)
+	buf = append(buf, byte(s.MemoryType))
+	buf = appendBytes(buf, []byte(s.Domain))
+	buf = append(buf, byte(s.Classification))
+	buf = appendFloat64(buf, s.ConfidenceScore)
+	buf = appendInt64(buf, s.CreatedAtUnix)
+	buf = appendBytes(buf, s.AgreementNonce)
+	buf = appendCoauthors(buf, s.Coauthors)
+	return buf
+}
+
+func decodeCoCommitSubmit(data []byte) (*CoCommitSubmit, error) {
+	s := &CoCommitSubmit{}
+	var b []byte
+	var err error
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	s.SharedID = string(b)
+
+	s.SchemaVersion, off, err = readUint32(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	s.ContentHash, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	if off >= len(data) {
+		return nil, ErrInvalidTxData
+	}
+	s.MemoryType = MemoryType(data[off])
+	off++
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	s.Domain = string(b)
+
+	if off >= len(data) {
+		return nil, ErrInvalidTxData
+	}
+	s.Classification = ClearanceLevel(data[off])
+	off++
+
+	s.ConfidenceScore, off, err = readFloat64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	s.CreatedAtUnix, off, err = readInt64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	s.AgreementNonce, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	s.Coauthors, _, err = readCoauthors(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func encodeCoCommitAttest(a *CoCommitAttest) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(a.SharedID))
+	buf = appendBytes(buf, []byte(a.PeerChainID))
+	buf = appendBytes(buf, a.PeerPubKey)
+	buf = appendBytes(buf, a.Receipt)
+	buf = appendBytes(buf, a.PeerSig)
+	buf = appendInt64(buf, a.CommitTime)
+	buf = appendBytes(buf, a.CoreHash)
+	return buf
+}
+
+func decodeCoCommitAttest(data []byte) (*CoCommitAttest, error) {
+	a := &CoCommitAttest{}
+	var b []byte
+	var err error
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	a.SharedID = string(b)
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	a.PeerChainID = string(b)
+
+	a.PeerPubKey, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	a.Receipt, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	a.PeerSig, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	a.CommitTime, off, err = readInt64(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	a.CoreHash, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+
+	return a, nil
 }
 
 // --- MemoryVote ---

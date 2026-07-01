@@ -49,6 +49,16 @@ const (
 	// promotion. Linked to an accepted gov_propose via ProposalID. Reuses the
 	// existing BadgerStore.TransferDomain primitive.
 	TxTypeDomainReassign TxType = 30
+	// v11 (app-v15): CO-COMMIT (Mode 2) dual-commit envelope + cross-anchor.
+	// Single-signer NODE txs; joint coauthor authority lives INSIDE the payload
+	// (Coauthors[].Sig / receipt ValSig), verified by standalone ed25519 in the
+	// handler with NO registration lookup. Both are dual-gated on postAppV15Fork
+	// (CheckTx reject + exec reject) so pre-activation chains treat them as unknown
+	// and replay byte-identically. A new TYPE byte is NOT backward-compatible like
+	// a trailing-optional field — old binaries decode-fail — so the codec ships to
+	// the whole validator set BEFORE app-v15 activates.
+	TxTypeCoCommitSubmit TxType = 31
+	TxTypeCoCommitAttest TxType = 32
 )
 
 // GovProposalOp identifies the governance operation being proposed.
@@ -302,6 +312,61 @@ type DomainReassign struct {
 	OpenToShared bool   // also write shared_domain:<name>
 }
 
+// CoCommitCoauthor is one foreign counter-signer of a co-committed envelope.
+// PubKey/Sig are raw ed25519 bytes (32/64), verified STANDALONE (no registration
+// lookup) against the envelope's CanonicalCoreBytes. ChainID is the coauthor's
+// home chain (identity is pubkey@chain_id).
+type CoCommitCoauthor struct {
+	PubKey  []byte // ed25519 public key, 32 bytes
+	ChainID string // coauthor's home chain id
+	Sig     []byte // ed25519 over CanonicalCoreBytes(env), 64 bytes
+}
+
+// CoCommitSubmit (tx 31) is a jointly-signed collaborative memory envelope,
+// committed NATIVELY to each participant's own chain as a first-class local
+// memory. Its fields map 1:1 onto MemorySubmit's proven encodings. SharedID is
+// content-derived (height-free) so every party computes the same id from the
+// envelope alone, before anyone commits. CreatedAtUnix is DATA — never a clock
+// branch input. AgreementNonce is folded into SharedID and CanonicalCoreBytes.
+type CoCommitSubmit struct {
+	SharedID        string             // hex(sha256(CoreHash‖sortedCoauthorKeys‖AgreementNonce))
+	SchemaVersion   uint32             //
+	ContentHash     []byte             //
+	MemoryType      MemoryType         // uint8 1..4
+	Domain          string             //
+	Classification  ClearanceLevel     // uint8 0..4; MUST use the identical scale on every chain
+	ConfidenceScore float64            //
+	CreatedAtUnix   int64              // DATA (authored time), never a branch input
+	AgreementNonce  []byte             //
+	Coauthors       []CoCommitCoauthor // sorted by PubKey when hashing; stored in slice order
+}
+
+// CommitReceipt is what a chain emits AFTER its own local quorum commit; a peer
+// wraps it verbatim into a CoCommitAttest. On the RECEIVING chain every field is
+// opaque DATA — CommitTime is NEVER compared to blockTime or used as a branch.
+type CommitReceipt struct {
+	ChainID    string
+	SharedID   string
+	LocalMemID string
+	Height     int64
+	CommitTime int64
+	CoreHash   []byte
+	ValSig     []byte // ed25519 over canonical(receipt sans ValSig), 64 bytes
+}
+
+// CoCommitAttest (tx 32) records a peer's signed CommitReceipt as a cross-anchor
+// (footgun T: the receipt enters the chain ONLY as verbatim bytes). CommitTime is
+// copied out as DATA only.
+type CoCommitAttest struct {
+	SharedID    string
+	PeerChainID string
+	PeerPubKey  []byte // ed25519 public key, 32 bytes
+	Receipt     []byte // verbatim canonical(CommitReceipt) bytes
+	PeerSig     []byte // == receipt.ValSig, 64 bytes
+	CommitTime  int64  // copied from receipt, DATA only
+	CoreHash    []byte // the shared core hash the receipt attests to (fail-closed bind)
+}
+
 // GovVote records a validator's vote on a governance proposal.
 type GovVote struct {
 	ProposalID string
@@ -423,6 +488,8 @@ type ParsedTx struct {
 	UpgradeCancel      *UpgradeCancel
 	UpgradeRevert      *UpgradeRevert
 	DomainReassign     *DomainReassign
+	CoCommitSubmit     *CoCommitSubmit
+	CoCommitAttest     *CoCommitAttest
 	Signature          []byte // Node validator Ed25519 signature (64 bytes)
 	PublicKey          []byte // Node validator Ed25519 public key (32 bytes)
 	Nonce              uint64

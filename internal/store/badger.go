@@ -691,6 +691,85 @@ func memoryAuthorKey(memoryID string) []byte {
 	return []byte("memauthor:" + memoryID)
 }
 
+// --- CoCommit (v11 / app-v15) key helpers + setters/getters ---
+//
+// All cocommit:* keys are keyed by the content-derived, height-free SharedID.
+// None collide with the existing prefixes (corrob: differs at char 2), and
+// because ComputeAppHash* hash every non-bookkeeping key, these values enter the
+// AppHash automatically with NO exclusion-rule change — provided every value is a
+// PURE function of tx bytes (which they are: sorted coauthors, verbatim hashes,
+// BE-fixed-width ints — never time.Now). Callers gate every write on
+// postAppV15Fork so pre-fork blocks never write them (byte-identical replay).
+
+func cocommitCoreKey(sharedID string) []byte      { return []byte("cocommit:core:" + sharedID) }
+func cocommitCoauthorsKey(sharedID string) []byte { return []byte("cocommit:coauthors:" + sharedID) }
+func cocommitSharedKey(sharedID string) []byte    { return []byte("cocommit:shared:" + sharedID) }
+
+func cocommitAnchorKey(sharedID, peerChainID string) []byte {
+	// sharedID is hex and peerChainID is a chain_id (charset [a-z2-7-]); neither
+	// contains ':', so the composite key is unambiguous.
+	return []byte("cocommit:anchor:" + sharedID + ":" + peerChainID)
+}
+
+// SetCoCommitShared marks a SharedID as a co-committed memory and records its
+// schema version (4 BE bytes).
+func (s *BadgerStore) SetCoCommitShared(sharedID string, schemaVersion uint32) error {
+	v := make([]byte, 4)
+	binary.BigEndian.PutUint32(v, schemaVersion)
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(cocommitSharedKey(sharedID), v)
+	})
+}
+
+// SetCoCommitCore records the shared CoreHash for a co-committed memory. The
+// attest path binds a peer receipt's CoreHash against this value (fail-closed).
+func (s *BadgerStore) SetCoCommitCore(sharedID string, coreHash []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(cocommitCoreKey(sharedID), coreHash)
+	})
+}
+
+// GetCoCommitCore returns the recorded CoreHash for a SharedID, or nil if no
+// cocommit:core: key exists (a missing key is not an error — an attest for an
+// unknown SharedID fails the fail-closed bind).
+func (s *BadgerStore) GetCoCommitCore(sharedID string) ([]byte, error) {
+	var core []byte
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, getErr := txn.Get(cocommitCoreKey(sharedID))
+		if getErr != nil {
+			return getErr
+		}
+		return item.Value(func(val []byte) error {
+			core = append([]byte(nil), val...)
+			return nil
+		})
+	})
+	if err == badger.ErrKeyNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return core, nil
+}
+
+// SetCoCommitCoauthors stores the deterministic (sorted) coauthor blob for a
+// SharedID, produced by tx.EncodeCoauthorsCanonical (a pure function of tx bytes).
+func (s *BadgerStore) SetCoCommitCoauthors(sharedID string, blob []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(cocommitCoauthorsKey(sharedID), blob)
+	})
+}
+
+// SetCoCommitAnchor records a peer's cross-attestation anchor
+// (sha256(canonical(receipt))) for a SharedID. Idempotent (re-attest overwrites
+// identical bytes) and late-bindable (a missing anchor = "unconfirmed").
+func (s *BadgerStore) SetCoCommitAnchor(sharedID, peerChainID string, anchorHash []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		return txn.Set(cocommitAnchorKey(sharedID, peerChainID), anchorHash)
+	})
+}
+
 // SetMemoryAuthor records a memory's submitting agent (its author) on-chain.
 // Caller gates on postAppV10Fork so pre-fork blocks never write this key
 // (byte-identical replay). This is the consensus-authoritative author field, and

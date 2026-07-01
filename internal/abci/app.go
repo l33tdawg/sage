@@ -3,6 +3,7 @@ package abci
 import (
 	"context"
 	"crypto/ed25519"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1986,6 +1987,17 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
 	}
 
+	// v11 (app-v15): reject co-commit txs pre-fork so they never reach the mempool.
+	// LOAD-BEARING for mixed-binary safety: an old binary DECODE-fails these type
+	// bytes (Code 1) while a v11 binary returns Code 10 — a v11 proposer seating a
+	// type-31/32 tx pre-activation would diverge LastResultsHash across the set.
+	// CheckTx has no block height, so gate on cached state height (single-chain, so
+	// no cross-chain key collision). Symmetric with the exec-side Code 10.
+	if (parsedTx.Type == tx.TxTypeCoCommitSubmit || parsedTx.Type == tx.TxTypeCoCommitAttest) &&
+		!app.postAppV15Fork(app.state.Height) {
+		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
+	}
+
 	return &abcitypes.ResponseCheckTx{Code: 0}, nil
 }
 
@@ -2376,6 +2388,10 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 		return app.processUpgradeRevert(parsedTx, height, blockTime)
 	case tx.TxTypeDomainReassign:
 		return app.processDomainReassign(parsedTx, height, blockTime)
+	case tx.TxTypeCoCommitSubmit:
+		return app.processCoCommitSubmit(parsedTx, height, blockTime)
+	case tx.TxTypeCoCommitAttest:
+		return app.processCoCommitAttest(parsedTx, height, blockTime)
 	default:
 		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
 	}
@@ -2756,6 +2772,219 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		Data: []byte(memoryID),
 		Log:  fmt.Sprintf("memory %s submitted", memoryID),
 	}
+}
+
+// isAllZeroBytes reports whether every byte is zero — used to reject an all-zero
+// ed25519 pubkey (a small-order point that can pass Verify for crafted messages),
+// mirroring the guard in VerifyAgentProof.
+func isAllZeroBytes(b []byte) bool {
+	for _, x := range b {
+		if x != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// processCoCommitSubmit commits a jointly-signed co-commit envelope (tx 31) as a
+// NATIVE local memory on THIS chain, keyed by the content-derived, height-free
+// SharedID and cross-anchorable by peers. It clones processMemorySubmit's write
+// discipline with two differences: (1) the LOCAL submitter passes local authz,
+// while every FOREIGN coauthor is verified by STANDALONE ed25519 signature only
+// (never through HasAccessMultiOrg/ListAgentOrgs — a foreign pubkey has no local
+// org membership and would correctly fail); (2) the id is the SharedID, not a
+// height-derived id, so both chains agree on it before either commits.
+// Dual-gated on postAppV15Fork; every reject returns BEFORE any state write.
+func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
+	// GATE 2 (exec reject): before ANY payload deref / state read / nonce effect.
+	postV15 := app.postAppV15Fork(height)
+	recordAppV15Branch(postV15)
+	if !postV15 {
+		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
+	}
+
+	env := parsedTx.CoCommitSubmit
+	if env == nil {
+		return &abcitypes.ExecTxResult{Code: 93, Log: "missing CoCommitSubmit payload"}
+	}
+
+	// LOCAL submitter identity (the node broadcasting to its own chain).
+	localID, err := verifyAgentIdentity(parsedTx)
+	if err != nil {
+		return &abcitypes.ExecTxResult{Code: 94, Log: fmt.Sprintf("co-commit: agent identity verification failed: %v", err)}
+	}
+
+	if len(env.Coauthors) == 0 {
+		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: envelope has no coauthors"}
+	}
+	if len(env.ContentHash) == 0 {
+		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: envelope has no content hash"}
+	}
+
+	// Verify EVERY coauthor's standalone ed25519 signature over CanonicalCoreBytes.
+	// No registration lookup — foreign coauthor authority was established once on
+	// their home chain and is proven here by signature alone (self-attesting).
+	core := tx.CanonicalCoreBytes(env)
+	for _, c := range env.Coauthors {
+		if len(c.PubKey) != ed25519.PublicKeySize || len(c.Sig) != ed25519.SignatureSize || isAllZeroBytes(c.PubKey) {
+			return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: malformed coauthor proof"}
+		}
+		if !auth.Verify(ed25519.PublicKey(c.PubKey), core, c.Sig) {
+			return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit: coauthor signature invalid"}
+		}
+	}
+
+	// Bind the id to the SIGNED core: recompute the content-derived SharedID and
+	// require it to match the envelope's claim (rejects a spoofed/renamed id).
+	coreHash := tx.CoreHashOf(env)
+	if env.SharedID != tx.ComputeSharedID(coreHash, env.Coauthors, env.AgreementNonce) {
+		return &abcitypes.ExecTxResult{Code: 96, Log: "co-commit: SharedID does not match signed core"}
+	}
+	sharedID := env.SharedID
+
+	// LOCAL authz for the LOCAL submitter only, on the envelope's domain (foreign
+	// coauthors are NOT run through this). Mirror processMemorySubmit's owned-domain
+	// write gate; auto-register an unowned, non-shared domain to the local submitter.
+	if env.Domain != "" && !app.isSharedDomain(env.Domain, height) {
+		domainOwner, domainErr := app.badgerStore.GetDomainOwner(env.Domain)
+		if domainErr == nil && domainOwner != "" {
+			hasAccess, accessErr := app.badgerStore.HasAccessMultiOrg(env.Domain, localID, 0, blockTime, app.postAppV8Rules(height))
+			if accessErr != nil || !hasAccess {
+				return &abcitypes.ExecTxResult{Code: 97, Log: fmt.Sprintf("co-commit: agent %s has no write access to domain %s", localID[:16], env.Domain)}
+			}
+		} else if regErr := app.badgerStore.RegisterDomain(env.Domain, localID, "", height); regErr != nil {
+			if !errors.Is(regErr, store.ErrDomainAlreadyRegistered) {
+				app.logger.Error().Err(regErr).Str("domain", env.Domain).Msg("co-commit: auto-register domain")
+			}
+		}
+	}
+
+	// Terminal-resubmit guard (mirror processMemorySubmit): a SharedID that already
+	// reached a terminal verdict must not be re-opened.
+	if _, st, gErr := app.badgerStore.GetMemoryHash(sharedID); gErr == nil &&
+		(st == string(memory.StatusCommitted) || st == string(memory.StatusDeprecated)) {
+		return &abcitypes.ExecTxResult{Code: 98, Log: fmt.Sprintf("co-commit %s already reached terminal status %q", sharedID, st)}
+	}
+
+	// Write the native local memory keyed by SharedID.
+	if setErr := app.badgerStore.SetMemoryHash(sharedID, env.ContentHash, string(memory.StatusProposed)); setErr != nil {
+		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit: badger write error: %v", setErr)}
+	}
+	if env.Domain != "" {
+		if domErr := app.badgerStore.SetMemoryDomain(sharedID, env.Domain); domErr != nil {
+			app.logger.Error().Err(domErr).Str("memory_id", sharedID).Msg("co-commit: set memory domain")
+		}
+	}
+	// memauthor = LOCAL submitter (first-writer-wins); foreign coauthors are
+	// recorded in cocommit:coauthors, not memauthor.
+	if existing, gErr := app.badgerStore.GetMemoryAuthor(sharedID); gErr == nil && existing == "" {
+		if authErr := app.badgerStore.SetMemoryAuthor(sharedID, localID); authErr != nil {
+			app.logger.Error().Err(authErr).Str("memory_id", sharedID).Msg("co-commit: set memory author")
+		}
+	}
+	classification := uint8(env.Classification)
+	if classErr := app.badgerStore.SetMemoryClassification(sharedID, classification); classErr != nil {
+		app.logger.Error().Err(classErr).Str("memory_id", sharedID).Msg("co-commit: set memory classification")
+	}
+
+	// Write the co-commit cross-anchor keys (pure functions of tx bytes -> AppHash).
+	if wErr := app.badgerStore.SetCoCommitShared(sharedID, env.SchemaVersion); wErr != nil {
+		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit: badger write error: %v", wErr)}
+	}
+	if wErr := app.badgerStore.SetCoCommitCore(sharedID, coreHash); wErr != nil {
+		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit: badger write error: %v", wErr)}
+	}
+	if wErr := app.badgerStore.SetCoCommitCoauthors(sharedID, tx.EncodeCoauthorsCanonical(env.Coauthors)); wErr != nil {
+		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit: badger write error: %v", wErr)}
+	}
+
+	// Buffer the off-chain memory + classification writes (consensus-first; flush
+	// in Commit). Content is not in the envelope (only its hash); the REST layer
+	// supplies embedding/provider via SuppCache where available.
+	record := &memory.MemoryRecord{
+		MemoryID:        sharedID,
+		SubmittingAgent: localID,
+		ContentHash:     env.ContentHash,
+		MemoryType:      memory.MemoryType(txMemoryTypeToString(env.MemoryType)),
+		DomainTag:       env.Domain,
+		ConfidenceScore: env.ConfidenceScore,
+		Status:          memory.StatusProposed,
+		CreatedAt:       blockTime,
+	}
+	if app.SuppCache != nil {
+		if supp := app.SuppCache.Pop(sharedID); supp != nil {
+			record.Embedding = supp.Embedding
+			record.Provider = supp.Provider
+			if len(supp.EmbeddingHash) > 0 {
+				record.EmbeddingHash = supp.EmbeddingHash
+			}
+		}
+	}
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "memory", data: record})
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{
+		writeType: "mem_classification",
+		data: &memClassificationData{
+			MemoryID:       sharedID,
+			Classification: store.ClearanceLevel(classification),
+		},
+	})
+
+	return &abcitypes.ExecTxResult{
+		Code: 0,
+		Data: []byte(sharedID),
+		Log:  fmt.Sprintf("co-commit %s submitted (%d coauthors)", sharedID, len(env.Coauthors)),
+	}
+}
+
+// processCoCommitAttest records a peer's signed CommitReceipt (tx 32) as a
+// cross-anchor for a co-committed memory. Fail-CLOSED: the receipt must be validly
+// signed by the peer AND its CoreHash must match this chain's recorded shared core
+// for the SharedID (proving the peer committed the SAME core). Determinism
+// (footgun T): the receipt enters the chain ONLY as verbatim signed bytes;
+// CommitTime is opaque DATA, never compared to blockTime or used as a branch.
+func (app *SageApp) processCoCommitAttest(parsedTx *tx.ParsedTx, height int64, _ time.Time) *abcitypes.ExecTxResult {
+	postV15 := app.postAppV15Fork(height)
+	recordAppV15Branch(postV15)
+	if !postV15 {
+		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
+	}
+
+	att := parsedTx.CoCommitAttest
+	if att == nil {
+		return &abcitypes.ExecTxResult{Code: 93, Log: "missing CoCommitAttest payload"}
+	}
+	if len(att.PeerPubKey) != ed25519.PublicKeySize || len(att.PeerSig) != ed25519.SignatureSize || isAllZeroBytes(att.PeerPubKey) {
+		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit attest: malformed peer proof"}
+	}
+	// The peer validator must have signed the verbatim receipt bytes.
+	if !auth.Verify(ed25519.PublicKey(att.PeerPubKey), att.Receipt, att.PeerSig) {
+		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit attest: peer signature invalid"}
+	}
+	// Bind on the SIGNED receipt's fields, not the unsigned convenience copies.
+	receipt, decErr := tx.DecodeCommitReceipt(att.Receipt)
+	if decErr != nil {
+		return &abcitypes.ExecTxResult{Code: 96, Log: fmt.Sprintf("co-commit attest: bad receipt: %v", decErr)}
+	}
+	if receipt.SharedID != att.SharedID || receipt.ChainID != att.PeerChainID {
+		return &abcitypes.ExecTxResult{Code: 96, Log: "co-commit attest: receipt SharedID/ChainID mismatch"}
+	}
+	// Fail-closed CoreHash bind: this chain must hold the same shared core.
+	localCore, coreErr := app.badgerStore.GetCoCommitCore(att.SharedID)
+	if coreErr != nil {
+		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit attest: badger read error: %v", coreErr)}
+	}
+	if len(localCore) == 0 {
+		return &abcitypes.ExecTxResult{Code: 97, Log: fmt.Sprintf("co-commit attest: no local co-commit for SharedID %s", att.SharedID)}
+	}
+	if !bytes.Equal(localCore, receipt.CoreHash) {
+		return &abcitypes.ExecTxResult{Code: 97, Log: "co-commit attest: receipt CoreHash does not match local core"}
+	}
+	// Store sha256(verbatim receipt) as the cross-anchor. Idempotent, late-bindable.
+	anchor := sha256.Sum256(att.Receipt)
+	if wErr := app.badgerStore.SetCoCommitAnchor(att.SharedID, att.PeerChainID, anchor[:]); wErr != nil {
+		return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit attest: badger write error: %v", wErr)}
+	}
+	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("co-commit %s anchored to peer %s", att.SharedID, att.PeerChainID)}
 }
 
 func (app *SageApp) processMemoryVote(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
