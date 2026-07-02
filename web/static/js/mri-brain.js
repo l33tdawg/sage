@@ -119,22 +119,31 @@ const STYLE = `
 .mrib .tip .chip{font-size:10px;padding:1px 6px;border-radius:6px;background:#0e1b30;color:#aecbf0;margin-right:4px}
 .mrib .flag{position:absolute;bottom:16px;right:16px;color:#3a4a66;font-size:10px;letter-spacing:1px}
 .mrib .boot{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#5d7395;letter-spacing:2px;font-size:12px}
-.mrib .explore{display:none;top:70px;left:16px;width:310px;max-height:calc(100% - 150px);flex-direction:column;padding:0;overflow:hidden}
-.mrib .explore .ex-head{padding:13px 15px 11px;border-bottom:1px solid #15233b}
-.mrib .explore .ex-title{color:#39d0ff;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
-.mrib .explore .ex-src{color:#dceaff;font-size:12px;line-height:1.45;max-height:54px;overflow:hidden;margin-bottom:9px}
-.mrib .explore .ex-back{color:#39d0ff;font-size:11px;cursor:pointer;border:1px solid #15233b;border-radius:8px;padding:5px 10px;display:inline-block;user-select:none}
+.mrib .explore{display:none;left:16px;right:306px;bottom:14px;height:47%;min-height:250px;flex-direction:column;padding:0;overflow:hidden}
+.mrib .explore .ex-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:12px 16px;border-bottom:1px solid #15233b}
+.mrib .explore .ex-head-l{min-width:0}
+.mrib .explore .ex-title{color:#39d0ff;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:5px}
+.mrib .explore .ex-src{color:#dceaff;font-size:12px;line-height:1.45;max-height:36px;overflow:hidden}
+.mrib .explore .ex-back{flex:none;color:#39d0ff;font-size:11px;cursor:pointer;border:1px solid #15233b;border-radius:8px;padding:6px 11px;user-select:none;white-space:nowrap}
 .mrib .explore .ex-back:hover{background:#0e1b30}
-.mrib .explore .ex-count{padding:8px 15px 4px;color:#5d7395;font-size:10px;letter-spacing:1px;text-transform:uppercase}
-.mrib .explore .ex-list{flex:1;min-height:0;overflow:auto;padding:0 8px 10px}
-.mrib .explore .ex-row{display:flex;gap:9px;align-items:flex-start;padding:8px 8px;border-radius:8px;cursor:pointer}
-.mrib .explore .ex-row:hover{background:#0e1b30}
-.mrib .explore .ex-row .dot{margin-top:4px;flex:none}
-.mrib .explore .ex-c{color:#cfe3ff;font-size:12px;line-height:1.4;max-height:50px;overflow:hidden}
-.mrib .explore .ex-m{margin-top:3px;font-size:10px;color:#5d7395;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
-.mrib .explore .ex-rel{font-weight:600;text-transform:uppercase;letter-spacing:.5px}
-.mrib .explore .ex-cc{color:#7f93b5}
-.mrib .explore .ex-empty{color:#5d7395;padding:14px;text-align:center;font-size:12px}
+.mrib .explore .ex-board{flex:1;min-height:0;display:flex;gap:10px;padding:12px}
+.mrib .explore .ex-col{flex:1;min-width:0;display:flex;flex-direction:column;background:rgba(6,11,20,.45);border:1px solid #12203a;border-radius:10px;overflow:hidden}
+.mrib .explore .ex-col-head{display:flex;align-items:center;gap:7px;padding:9px 11px;font-size:11px;letter-spacing:.5px;text-transform:uppercase;font-weight:600;border-bottom:1px solid #12203a}
+.mrib .explore .ex-col-glyph{font-size:12px}
+.mrib .explore .ex-col-n{margin-left:auto;color:#5d7395;font-weight:400}
+.mrib .explore .k-do .ex-col-head{color:#5ee2a0} .mrib .explore .k-do{border-color:rgba(94,226,160,.28)}
+.mrib .explore .k-dont .ex-col-head{color:#ff7a88} .mrib .explore .k-dont{border-color:rgba(255,122,136,.28)}
+.mrib .explore .k-observation .ex-col-head{color:#5ab0ff} .mrib .explore .k-observation{border-color:rgba(90,176,255,.28)}
+.mrib .explore .k-note .ex-col-head{color:#aecbf0}
+.mrib .explore .ex-col-list{flex:1;min-height:0;overflow:auto;padding:7px}
+.mrib .explore .ex-card{padding:8px 9px;border-radius:8px;cursor:pointer;margin-bottom:6px;background:rgba(14,27,48,.5);border:1px solid transparent}
+.mrib .explore .ex-card:hover{background:#12213a;border-color:#1e3252}
+.mrib .explore .ex-c{color:#dceaff;font-size:12px;line-height:1.38;max-height:60px;overflow:hidden}
+.mrib .explore .ex-m{margin-top:5px;font-size:10px;color:#5d7395;display:flex;gap:6px;align-items:center}
+.mrib .explore .ex-m .dot{width:8px;height:8px;flex:none}
+.mrib .explore .ex-cc{color:#7f93b5;margin-left:auto}
+.mrib .explore .ex-empty{color:#3a4a66;padding:10px;text-align:center;font-size:12px}
+.mrib .explore .ex-empty-big{padding:40px;color:#5d7395}
 `;
 
 function injectStyleOnce() {
@@ -392,37 +401,53 @@ export function mountMriBrain(container, opts = {}) {
     Graph.cameraPosition({ x: n.x*(1+d/r), y: n.y*(1+d/r), z: n.z*(1+d/r) }, n, 900);
   }
 
-  const RELCOL = { chain:'#39d0ff', 'same-topic':'#7ee787', similar:'#ffb454', 'same-lobe':'#8a9bb8' };
+  // The board columns: a memory's train of thought, bucketed by kind.
+  const KINDS = [
+    { key: 'do',          label: "Do's",         glyph: '✓' },
+    { key: 'dont',        label: "Don'ts",       glyph: '✗' },
+    { key: 'observation', label: 'Observations', glyph: '◉' },
+    { key: 'note',        label: 'Notes',        glyph: '▪' },
+  ];
   function renderExplorePanel(data, related){
     let p = $('.explore');
     if (!p) { p = document.createElement('div'); p.className = 'panel explore'; root.appendChild(p); }
-    const rows = related.map(rr => `
-      <div class="ex-row" data-id="${escapeHtml(rr.id)}">
-        <span class="dot" style="background:${domainColor(rr.domain)}"></span>
-        <div class="ex-t">
-          <div class="ex-c">${escapeHtml(rr.content || rr.id)}</div>
-          <div class="ex-m"><span class="ex-rel" style="color:${RELCOL[rr.relation]||'#8a9bb8'}">${escapeHtml(rr.relation||'')}</span>
-            <span class="ex-dom">${escapeHtml(rr.domain||'')}</span>${rr.corroboration_count?` <span class="ex-cc">◍${rr.corroboration_count}</span>`:''}</div>
-        </div>
-      </div>`).join('');
+    const groups = { do: [], dont: [], observation: [], note: [] };
+    related.forEach(rr => (groups[rr.kind] || groups.note).push(rr));
+    const card = rr => `
+      <div class="ex-card" data-id="${escapeHtml(rr.id)}">
+        <div class="ex-c">${escapeHtml(cleanContent(rr.content) || rr.id)}</div>
+        <div class="ex-m"><span class="dot" style="background:${domainColor(rr.domain)}"></span>
+          <span class="ex-dom">${escapeHtml(rr.domain||'')}</span>${rr.corroboration_count?` <span class="ex-cc">◍${rr.corroboration_count}</span>`:''}</div>
+      </div>`;
+    const columns = KINDS.map(k => {
+      const items = groups[k.key] || [];
+      return `<div class="ex-col k-${k.key}">
+        <div class="ex-col-head"><span class="ex-col-glyph">${k.glyph}</span>${k.label}<span class="ex-col-n">${items.length}</span></div>
+        <div class="ex-col-list">${items.map(card).join('') || '<div class="ex-empty">-</div>'}</div>
+      </div>`;
+    }).join('');
     p.innerHTML = `
       <div class="ex-head">
-        <div class="ex-title">◉ Train of thought</div>
-        <div class="ex-src">${escapeHtml(data.content || '')}</div>
+        <div class="ex-head-l">
+          <div class="ex-title">◉ Train of thought</div>
+          <div class="ex-src">${escapeHtml(cleanContent(data.content) || '')}</div>
+        </div>
         <div class="ex-back">← back to full brain</div>
       </div>
-      <div class="ex-count">${related.length} related ${related.length===1?'memory':'memories'}</div>
-      <div class="ex-list">${rows || '<div class="ex-empty">No related memories found.</div>'}</div>`;
+      ${related.length ? `<div class="ex-board">${columns}</div>` : '<div class="ex-empty ex-empty-big">No related memories found.</div>'}`;
     p.querySelector('.ex-back').onclick = exitFocus;
-    p.querySelectorAll('.ex-row').forEach(row => {
-      row.onclick = () => {
-        const rid = row.getAttribute('data-id');
+    p.querySelectorAll('.ex-card').forEach(el => {
+      el.onclick = () => {
+        const rid = el.getAttribute('data-id');
         const gn = (Graph.graphData().nodes || []).find(nn => nn.id === rid);
         if (gn) exploreNode(gn);
       };
     });
     p.style.display = 'flex';
   }
+  // cleanContent strips the leading [DO]/[DON'T]/[TAG] bracket (shown by the
+  // column) so cards read cleanly.
+  function cleanContent(s){ return String(s||'').replace(/^\s*\[[^\]]{1,24}\]\s*/, '').trim() || String(s||''); }
   function hideExplorePanel(){ const p = $('.explore'); if (p) p.style.display = 'none'; }
 
   loadGraph(urlFor()).then(data => {

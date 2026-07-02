@@ -43,8 +43,28 @@ type RelatedMemory struct {
 	CorroborationCount int     `json:"corroboration_count"`
 	Status             string  `json:"status"`
 	CreatedAt          string  `json:"created_at"`
+	MemoryType         string  `json:"memory_type"`
+	Kind               string  `json:"kind"`     // do | dont | observation | note (for the board columns)
 	Relation           string  `json:"relation"` // chain | same-topic | similar | same-lobe
 	Score              float64 `json:"score"`
+}
+
+// classifyKind buckets a memory for the train-of-thought board. A [DO]/[DON'T]
+// content prefix (from reflections) wins over memory_type; observations get
+// their own column; everything else (facts/inferences/tasks) is a note. [DON'T
+// is checked before [DO so "[DON'T]" isn't mistaken for a Do.
+func classifyKind(content, memType string) string {
+	c := strings.ToUpper(strings.TrimSpace(content))
+	switch {
+	case strings.HasPrefix(c, "[DON"):
+		return "dont"
+	case strings.HasPrefix(c, "[DO"):
+		return "do"
+	case memType == "observation":
+		return "observation"
+	default:
+		return "note"
+	}
 }
 
 var relatedWordRe = regexp.MustCompile(`[a-z0-9]{4,}`)
@@ -227,6 +247,8 @@ func (h *DashboardHandler) handleMemoryRelated(w http.ResponseWriter, r *http.Re
 			CorroborationCount: corr[e.rec.MemoryID],
 			Status:             string(e.rec.Status),
 			CreatedAt:          e.rec.CreatedAt.Format(time.RFC3339),
+			MemoryType:         string(e.rec.MemoryType),
+			Kind:               classifyKind(e.rec.Content, string(e.rec.MemoryType)),
 			Relation:           e.relation,
 			Score:              e.score,
 		})
