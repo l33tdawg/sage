@@ -312,7 +312,7 @@ export function mountMriBrain(container, opts = {}) {
       const row = document.createElement('div');
       row.className = 'row'; row.style.cursor = 'pointer';
       if (currentDomain === k) row.style.background = 'rgba(57,208,255,0.10)';
-      row.innerHTML = `<span class="dot" style="background:${domainColor(k)}"></span><div class="t"><b>${k}</b>${dc[k]?` <span style="color:#5d7395">· ${fmtN(dc[k])}</span>`:''}</div>`;
+      row.innerHTML = `<span class="dot" style="background:${domainColor(k)}"></span><div class="t"><b>${escapeHtml(k)}</b>${dc[k]?` <span style="color:#5d7395">· ${fmtN(dc[k])}</span>`:''}</div>`;
       row.onclick = () => { if (currentDomain !== k) { currentDomain = k; load(); } };
       lobes.appendChild(row);
     });
@@ -615,8 +615,8 @@ export function mountMriBrain(container, opts = {}) {
 
   function showTip(n){ const tip=$('.tip'); if(!n){ tip.style.display='none'; return; }
     tip.style.display='block';
-    tip.innerHTML=`<div class="h">${(n.label||'').slice(0,90)}</div><div class="m">${n.domain} · ${n.memory_type||'—'} · ${n.status}</div>
-      <div style="margin-top:5px"><span class="chip">conf ${(+n.confidence).toFixed(2)}</span><span class="chip">corroborated ×${n.corroboration_count||0}</span></div>`; }
+    tip.innerHTML=`<div class="h">${escapeHtml((n.label||'').slice(0,90))}</div><div class="m">${escapeHtml(n.domain)} · ${escapeHtml(n.memory_type||'—')} · ${escapeHtml(n.status)}</div>
+      <div style="margin-top:5px"><span class="chip">conf ${(+n.confidence).toFixed(2)}</span><span class="chip">corroborated ×${n.corroboration_count|0}</span></div>`; }
   function onMove(e){ const tip=$('.tip'); if(tip.style.display==='block'){ const r=root.getBoundingClientRect();
     tip.style.left=(e.clientX-r.left+14)+'px'; tip.style.top=(e.clientY-r.top+14)+'px'; } }
   root.addEventListener('mousemove', onMove);

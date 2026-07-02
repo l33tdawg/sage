@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -186,15 +187,21 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 				}
 				embedDashboardAgentProof(registerTx, h.SigningKey)
 				if signErr := tx.SignTx(registerTx, h.SigningKey); signErr != nil {
+					log.Printf("agent-create: on-chain AgentRegister sign failed for %s: %v", agentID, signErr)
 					return
 				}
 				encoded, encErr := tx.EncodeTx(registerTx)
 				if encErr != nil {
+					log.Printf("agent-create: on-chain AgentRegister encode failed for %s: %v", agentID, encErr)
 					return
 				}
 				// AgentRegister must land before AgentSetPermission (the agent has
 				// to exist on-chain first); broadcastTxSync waits for the commit.
+				// This runs after the 201 response, so failures can only be logged;
+				// the ABCI processor leaves on_chain_height unset on failure, which
+				// the dashboard surfaces as an un-synced agent.
 				if bErr := broadcastTxSync(h.CometBFTRPC, encoded); bErr != nil {
+					log.Printf("agent-create: on-chain AgentRegister broadcast failed for %s: %v", agentID, bErr)
 					return
 				}
 				// Sync the wizard-chosen permissions on-chain immediately, so
@@ -217,10 +224,13 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 				}
 				embedDashboardAgentProof(permTx, h.SigningKey)
 				if signErr := tx.SignTx(permTx, h.SigningKey); signErr != nil {
+					log.Printf("agent-create: on-chain AgentSetPermission sign failed for %s: %v", agentID, signErr)
 					return
 				}
-				if penc, pencErr := tx.EncodeTx(permTx); pencErr == nil {
-					_ = broadcastTxSync(h.CometBFTRPC, penc)
+				if penc, pencErr := tx.EncodeTx(permTx); pencErr != nil {
+					log.Printf("agent-create: on-chain AgentSetPermission encode failed for %s: %v", agentID, pencErr)
+				} else if bErr := broadcastTxSync(h.CometBFTRPC, penc); bErr != nil {
+					log.Printf("agent-create: on-chain AgentSetPermission broadcast failed for %s: %v", agentID, bErr)
 				}
 			}()
 		}
@@ -303,9 +313,12 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 		if req.Name != nil {
 			existing.Name = *req.Name
 		}
-		if req.Role != nil {
-			existing.Role = *req.Role
-		}
+		// Role is authoritative ON-CHAIN (set at AgentRegister) and there is no
+		// AgentSetPermission field to mutate it, so persisting a role change here
+		// would diverge SQLite from BadgerDB while the GUI shows "Saved". Do NOT
+		// write it; surface an honest warning if a change was attempted. (Full
+		// on-chain role mutation is a deferred consensus change.)
+		roleChangeRejected := req.Role != nil && *req.Role != existing.Role
 		if req.Avatar != nil {
 			existing.Avatar = *req.Avatar
 		}
@@ -313,7 +326,16 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 			existing.BootBio = *req.BootBio
 		}
 		if req.Clearance != nil {
-			existing.Clearance = *req.Clearance
+			// Clamp to the valid 0-4 clearance band (as create does) so the later
+			// uint8() narrowing cannot truncate an out-of-range value and diverge
+			// the on-chain clearance from what is stored/displayed.
+			c := *req.Clearance
+			if c < 0 {
+				c = 0
+			} else if c > 4 {
+				c = 4
+			}
+			existing.Clearance = c
 		}
 		if req.OrgID != nil {
 			existing.OrgID = *req.OrgID
@@ -336,25 +358,29 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 			return
 		}
 
-		// Broadcast metadata update through CometBFT synchronously so the
-		// GUI knows whether the on-chain state actually updated. Without this,
-		// a silent broadcast failure causes SQLite and BadgerDB to diverge
-		// (the "split-brain rename" bug).
-		var onChainWarning string
+		// Broadcast the update through CometBFT synchronously so the GUI knows
+		// whether the on-chain state actually updated. Without this, a silent
+		// broadcast failure causes SQLite and BadgerDB to diverge (the
+		// "split-brain rename" bug). The metadata (name/boot_bio) and the
+		// SECURITY-critical permission (clearance/domain/visible) syncs are
+		// INDEPENDENT: a failed metadata broadcast must NOT skip the permission
+		// broadcast (which would leave SQLite showing new clearance/domain the
+		// chain never got, with no warning).
+		var warnings []string
+		if roleChangeRejected {
+			warnings = append(warnings, "role is set at registration and cannot be changed here (unchanged)")
+		}
 		if h.CometBFTRPC != "" && h.SigningKey != nil {
-			// Metadata changes (name, boot_bio) go through AgentUpdate
+			// Metadata changes (name, boot_bio) go through AgentUpdate.
 			if req.Name != nil || req.BootBio != nil {
 				if err := h.broadcastAgentUpdate(id, existing.Name, existing.BootBio); err != nil {
-					onChainWarning = "on-chain sync failed: " + err.Error()
+					warnings = append(warnings, "on-chain sync failed: "+err.Error())
 				}
 			}
-			// Permission changes go through AgentSetPermission. Broadcast
-			// SYNCHRONOUSLY and surface any failure: this is a SECURITY control
-			// (role/clearance/domain-access/visible-agents), so a silently-failed
-			// on-chain grant that diverges BadgerDB from SQLite - while the GUI
-			// shows "Saved" - is exactly the kind of trust bug we must not ship.
-			if onChainWarning == "" && (req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil) {
-				clearance := uint8(existing.Clearance) // #nosec G115 -- clearance is 0-4
+			// Permission changes go through AgentSetPermission - attempted
+			// regardless of the metadata result above.
+			if req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil {
+				clearance := uint8(existing.Clearance) // #nosec G115 -- clamped to 0-4 above
 				permTx := &tx.ParsedTx{
 					Type:      tx.TxTypeAgentSetPermission,
 					Nonce:     tx.MonotonicNonce(h.SigningKey),
@@ -370,14 +396,15 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 				}
 				embedDashboardAgentProof(permTx, h.SigningKey)
 				if signErr := tx.SignTx(permTx, h.SigningKey); signErr != nil {
-					onChainWarning = "on-chain permission sync failed: " + signErr.Error()
+					warnings = append(warnings, "on-chain permission sync failed: "+signErr.Error())
 				} else if encoded, encErr := tx.EncodeTx(permTx); encErr != nil {
-					onChainWarning = "on-chain permission sync failed: " + encErr.Error()
+					warnings = append(warnings, "on-chain permission sync failed: "+encErr.Error())
 				} else if bErr := broadcastTxSync(h.CometBFTRPC, encoded); bErr != nil {
-					onChainWarning = "on-chain permission sync failed: " + bErr.Error()
+					warnings = append(warnings, "on-chain permission sync failed: "+bErr.Error())
 				}
 			}
 		}
+		onChainWarning := strings.Join(warnings, "; ")
 
 		resp := map[string]any{
 			"agent_id":  existing.AgentID,

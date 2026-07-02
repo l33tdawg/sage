@@ -403,15 +403,36 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	// seed is the ceremony's OWN seed (frozen in ctx), never re-resolved by chain
 	// id - so a second/retried session for the same guest can never persist a
 	// different seed than the one E was signed over.
+	// A persist failure here leaves the tx-33 ON-CHAIN-ACTIVE while the host has
+	// no usable guest CA / seed - an unauthenticatable, half-active agreement.
+	// Undo it (revoke on-chain, discard the staged CA, burn the session) instead
+	// of marking it active, so local and on-chain state stay consistent.
+	// MarkActive is reached ONLY when both commits succeed, which is also what
+	// makes its seed-scrub safe.
 	if cErr := ctx.CommitGuestCA(); cErr != nil {
-		m.logger.Error().Err(cErr).Str("guest", ctx.GuestChain).Msg("guest CA commit failed post-broadcast")
+		m.logger.Error().Err(cErr).Str("guest", ctx.GuestChain).Msg("guest CA commit failed post-broadcast; revoking agreement")
+		return m.undoPartialHostConfirm(sessionID, ctx, "guest CA commit failed", cErr)
 	}
 	if sErr := m.commitPairSeed(ctx.GuestChain, ctx.GuestPin, ctx.Seed); sErr != nil {
-		m.logger.Error().Err(sErr).Str("guest", ctx.GuestChain).Msg("host seed commit failed post-broadcast")
+		m.logger.Error().Err(sErr).Str("guest", ctx.GuestChain).Msg("host seed commit failed post-broadcast; revoking agreement")
+		return m.undoPartialHostConfirm(sessionID, ctx, "host seed commit failed", sErr)
 	}
 	m.joins.MarkActive(sessionID)
 	m.logger.Info().Str("guest", ctx.GuestChain).Str("tx", txHash).Msg("federation join activated (host side)")
 	return txHash, m.localChainID, nil
+}
+
+// undoPartialHostConfirm rolls back a host confirm that broadcast tx-33 but then
+// failed to persist the guest CA or seed: it revokes the on-chain agreement
+// (tx-34, best-effort), discards the staged CA, and aborts the session - leaving
+// no half-active agreement behind.
+func (m *Manager) undoPartialHostConfirm(sessionID string, ctx *ConfirmContext, what string, cause error) (string, string, error) {
+	if _, rErr := m.RevokeAgreement(ctx.GuestChain); rErr != nil {
+		m.logger.Error().Err(rErr).Str("guest", ctx.GuestChain).Msg("revoke after partial host confirm failed - manual cleanup may be needed")
+	}
+	ctx.RollbackGuestCA()
+	m.joins.Abort(sessionID)
+	return "", "", fmt.Errorf("%s after broadcast; agreement revoked: %w", what, cause)
 }
 
 // ---------------------------------------------------------------------------

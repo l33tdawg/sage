@@ -122,6 +122,15 @@ func (h *DashboardHandler) handleMemoryRelated(w http.ResponseWriter, r *http.Re
 		allowed[a] = true
 	}
 
+	// IDOR guard: the related set is already visibility-filtered in bump(), but the
+	// ANCHOR memory's own content/domain is returned below - so an MCP agent that
+	// cannot see this memory's submitter must be refused here too. Mirror the
+	// "not found" response so the endpoint does not leak the memory's existence.
+	if !seeAll && !allowed[x.SubmittingAgent] {
+		writeError(w, http.StatusNotFound, "memory not found")
+		return
+	}
+
 	type acc struct {
 		rec      *memory.MemoryRecord
 		score    float64

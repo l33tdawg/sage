@@ -480,6 +480,16 @@ func (c *ConfirmContext) RollbackGuestCA() {
 	}
 }
 
+// scrubSeed zeroizes the in-memory ceremony seed. Safe once the session is
+// terminal (Abort) or its persistent per-agreement seed is committed
+// (MarkActive): live TOTP verification reads the seed cache, never
+// JoinSession.Seed, so nothing needs the ceremony copy after that point.
+func (js *JoinSession) scrubSeed() {
+	for i := range js.Seed {
+		js.Seed[i] = 0
+	}
+}
+
 // MarkActive transitions to ACTIVE after the host broadcasts its tx-33 (the
 // staged guest CA is committed by the driver first).
 func (s *JoinStore) MarkActive(id string) {
@@ -489,6 +499,7 @@ func (s *JoinStore) MarkActive(id string) {
 		js.State = JoinActive
 		js.rollbackGuestCA = nil // committed; do not roll back on later cleanup
 		js.commitGuestCA = nil
+		js.scrubSeed() // persistent seed is committed; drop the ceremony copy now
 	}
 }
 
@@ -503,6 +514,7 @@ func (s *JoinStore) Abort(id string) {
 			js.rollbackGuestCA = nil
 			js.commitGuestCA = nil
 		}
+		js.scrubSeed() // burned session: don't leave the seed lingering until reap
 		js.State = JoinAborted
 	}
 }

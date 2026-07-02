@@ -6256,13 +6256,17 @@ function ChatGPTSetupWizard({ agents, onClose }) {
             const res = await wizardInstallCloudflared();
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
-            let buf = '';
             while (true) {
                 const { value, done } = await reader.read();
                 if (done) break;
-                buf += decoder.decode(value, { stream: true });
-                setInstallLog(prev => prev + decoder.decode(value, { stream: false }));
+                // Decode each chunk ONCE, streaming, so a multi-byte UTF-8 char
+                // straddling a chunk boundary is not corrupted (the old code
+                // decoded every chunk twice through one stateful decoder).
+                const text = decoder.decode(value, { stream: true });
+                if (text) setInstallLog(prev => prev + text);
             }
+            const tail = decoder.decode(); // flush any trailing partial sequence
+            if (tail) setInstallLog(prev => prev + tail);
             // Re-check.
             const d = await wizardCheckCloudflared();
             setCloudflaredInstalled(!!d.installed);

@@ -14,6 +14,15 @@ const (
 	// maxMergedPerPeer caps how many results a single peer may contribute to a
 	// merged recall response (defense against a peer ignoring our topK).
 	maxMergedPerPeer = maxFedTopK
+	// maxMergedBytesPerPeer bounds the total content bytes a single peer may
+	// contribute. The count cap alone still lets a peer pack up to
+	// maxFedResponseBytes (16 MiB) into a few huge results, and a wildcard
+	// fan-out retains every peer's slice at once, so without a byte budget one
+	// recall could hold N x 16 MiB.
+	maxMergedBytesPerPeer = 1 << 20 // 1 MiB merged content per peer
+	// maxResultContentBytes bounds a single federated result's content so one
+	// oversized entry cannot blow the per-peer budget on its own.
+	maxResultContentBytes = 64 << 10 // 64 KiB
 )
 
 // FanOutRecall is the OFF-consensus recall proxy (Mode 1 — exchange): it
@@ -71,12 +80,25 @@ func (m *Manager) FanOutRecall(ctx context.Context, targets []string, qr *QueryR
 				outcome.Err = fmt.Errorf("peer identifies as %q, agreement expects %q", resp.ChainID, chain)
 			} else {
 				results := resp.Results
-				// Cap per-peer results: a malicious peer can return up to
-				// maxFedResponseBytes of JSON regardless of our topK, and the
-				// merge appends them all into the local caller's response.
+				// Cap per-peer results by COUNT and by BYTES: a malicious peer can
+				// return up to maxFedResponseBytes of JSON regardless of our topK,
+				// and the merge appends them all into the local caller's response.
 				if len(results) > maxMergedPerPeer {
 					results = results[:maxMergedPerPeer]
 				}
+				budget := maxMergedBytesPerPeer
+				kept := results[:0]
+				for _, res := range results {
+					if res == nil || budget <= 0 {
+						break
+					}
+					if len(res.Content) > maxResultContentBytes {
+						res.Content = res.Content[:maxResultContentBytes] // bound one oversized entry
+					}
+					kept = append(kept, res)
+					budget -= len(res.Content) + len(res.SubmittingAgent) + len(res.DomainTag) + 128
+				}
+				results = kept
 				for _, res := range results {
 					// SourceChainID is authoritative (we set it to the peer we
 					// actually authenticated + queried). SubmittingAgent is

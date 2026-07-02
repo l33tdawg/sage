@@ -535,22 +535,67 @@ func writeUnauthorized(w http.ResponseWriter) {
 //
 // Sec-Fetch-Site is the canonical signal; we fall back to an Origin
 // allowlist for older browsers that don't emit it.
+//
+// Anti-DNS-rebinding: the Host header MUST be localhost or a raw IP first.
+// A rebinding attack serves its page from an attacker DOMAIN that re-resolves
+// to 127.0.0.1; the victim's browser then sends Host: attacker.com with a
+// same-origin Sec-Fetch-Site, which would otherwise pass every check below.
+// A rebinding target must be a resolvable domain name, so requiring a
+// loopback/IP-literal Host defeats it without us needing to know our own
+// bound address.
 func isLocalRequest(r *http.Request) bool {
-	switch r.Header.Get("Sec-Fetch-Site") {
+	secFetch := r.Header.Get("Sec-Fetch-Site")
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	// The anti-rebinding Host gate applies to BROWSER requests only: a rebinding
+	// page reaches us with a same-origin Sec-Fetch but an attacker-DOMAIN Host.
+	// Non-browser callers (CLI, curl, MCP agents) connect directly, are not a
+	// rebinding vector, and legitimately send arbitrary Host values, so they are
+	// not constrained here. Sec-Fetch-Site is a browser-set forbidden header that
+	// page JS cannot suppress, so a real browser request always carries it.
+	if (secFetch != "" || origin != "") && !hostIsLoopbackOrIP(r.Host) {
+		return false
+	}
+	switch secFetch {
 	case "cross-site":
 		return false
 	case "same-origin", "same-site", "none":
 		return true
 	}
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
 		// No Origin header: same-origin GET, or non-browser caller.
 		return true
 	}
-	return strings.HasPrefix(origin, "http://localhost") ||
-		strings.HasPrefix(origin, "http://127.0.0.1") ||
-		strings.HasPrefix(origin, "https://localhost") ||
-		strings.HasPrefix(origin, "https://127.0.0.1")
+	return originIsLocal(origin)
+}
+
+// hostIsLoopbackOrIP reports whether the request Host header is "localhost" or
+// a bare IP literal (loopback or LAN) - i.e. not a domain name that could be a
+// DNS-rebinding vector. Any explicit port is stripped first.
+func hostIsLoopbackOrIP(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[") // unwrap [::1]
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	return net.ParseIP(host) != nil
+}
+
+// originIsLocal parses an Origin header and checks its hostname is EXACTLY a
+// loopback name/address - not a prefix match, so http://localhost.evil.com and
+// http://127.0.0.1.evil.com are correctly rejected.
+func originIsLocal(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	host := u.Hostname() // strips port and [] brackets
+	return strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 // wizardSecurityGate is a defence-in-depth layer specifically for the

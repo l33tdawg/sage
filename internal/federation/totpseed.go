@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -77,9 +78,18 @@ func (m *Manager) readSeedHeader(remoteChainID string) (*TOTPSeedEnvelope, error
 
 // seedEstablished reports whether an active seed record exists for a chain
 // (readable while vault-locked). Drives the fail-closed v3 gate.
+//
+// A genuinely absent file means no seed was ever established (the v2 path is
+// correct). But any OTHER error (disk I/O, corrupt JSON) is AMBIGUOUS: we cannot
+// prove no seed exists, so we must fail CLOSED - report established=true so the
+// gate demands v3 (or 503s when the seed is not cached) instead of silently
+// downgrading to the weaker v2 factor.
 func (m *Manager) seedEstablished(remoteChainID string) bool {
 	env, err := m.readSeedHeader(remoteChainID)
-	return err == nil && env.SeedEstablished
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	return env.SeedEstablished
 }
 
 // stageSeedFn returns a commit/rollback pair that persists a seed ONLY after the
@@ -183,11 +193,12 @@ func (m *Manager) loadSeedFromDisk(path string) ([]byte, bool) {
 		if pass == "" {
 			return nil, false // locked
 		}
-		plain, dErr := tlsca.DecryptCAKey(env.Body, pass)
+		plain, dErr := tlsca.DecryptCAKeyBytes(env.Body, pass)
 		if dErr != nil {
 			return nil, false
 		}
-		return []byte(plain), true
+		// []byte (not string) so the caller's cache-purge can zeroize it.
+		return plain, true
 	}
 	seed, dErr := decodeB64(env.Body)
 	if dErr != nil {

@@ -112,17 +112,41 @@ func TestWizard_Allows_SameOriginBrowser(t *testing.T) {
 	h, _ := newTestHandler(t)
 	r := testRouter(h)
 
-	for _, origin := range []string{
-		"http://localhost:8080",
-		"http://127.0.0.1:8080",
+	for _, tc := range []struct{ origin, host string }{
+		{"http://localhost:8080", "localhost:8080"},
+		{"http://127.0.0.1:8080", "127.0.0.1:8080"},
 	} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/check-cloudflared", nil)
-		req.Header.Set("Origin", origin)
+		req.Header.Set("Origin", tc.origin)
 		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		req.Host = tc.host // a real same-origin request's Host matches its origin
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		assert.Equal(t, http.StatusOK, w.Code, "same-origin from %s should pass", origin)
+		assert.Equal(t, http.StatusOK, w.Code, "same-origin from %s should pass", tc.origin)
 	}
+}
+
+// TestWizard_Rejects_DNSRebinding verifies the anti-rebinding Host gate: a
+// browser request that looks same-origin (Sec-Fetch-Site: same-origin) but
+// carries an attacker DOMAIN in Host - the shape of a DNS-rebinding attack that
+// re-resolves that domain to 127.0.0.1 - is refused.
+func TestWizard_Rejects_DNSRebinding(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("wizard install path is POSIX-only")
+	}
+	withFakeCloudflared(t, nil)
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/check-cloudflared", nil)
+	req.Header.Set("Origin", "http://attacker.example")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Host = "attacker.example" // rebound to 127.0.0.1, but Host is a domain
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	// authMiddleware's isLocalRequest fails first in unencrypted mode, so the
+	// refusal surfaces as 401 (before the wizard gate's own 403).
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "rebinding domain Host must be refused")
 }
 
 // TestWizard_Allows_NoOrigin_CLI confirms non-browser callers (curl, native
@@ -222,6 +246,7 @@ func TestAuthMiddleware_AllowsSameOrigin_WhenEncryptionOff(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/memory/list", nil)
 	req.Header.Set("Origin", "http://localhost:8080")
+	req.Host = "localhost:8080" // a real same-origin request's Host matches its origin
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)

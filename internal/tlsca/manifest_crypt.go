@@ -92,22 +92,34 @@ func EncryptCAKey(caKeyPEM, passphrase string) (string, error) {
 // will surface as ErrManifestPassphrase from the GCM open step (authenticated
 // encryption).
 func DecryptCAKey(encrypted, passphrase string) (string, error) {
+	plain, err := DecryptCAKeyBytes(encrypted, passphrase)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
+}
+
+// DecryptCAKeyBytes is like DecryptCAKey but returns the plaintext as a []byte
+// the caller can zeroize after use, avoiding an immutable-string copy of secret
+// material (Go strings cannot be wiped). Prefer this for secrets with a bounded
+// lifetime (e.g. per-agreement TOTP seeds).
+func DecryptCAKeyBytes(encrypted, passphrase string) ([]byte, error) {
 	if passphrase == "" {
-		return "", errors.New("passphrase must not be empty")
+		return nil, errors.New("passphrase must not be empty")
 	}
 	raw, err := base64.StdEncoding.DecodeString(encrypted)
 	if err != nil {
-		return "", fmt.Errorf("decode base64: %w", err)
+		return nil, fmt.Errorf("decode base64: %w", err)
 	}
 	var envelope encryptedCAKey
 	if err = json.Unmarshal(raw, &envelope); err != nil {
-		return "", fmt.Errorf("parse envelope: %w", err)
+		return nil, fmt.Errorf("parse envelope: %w", err)
 	}
 	if envelope.Version != 1 {
-		return "", fmt.Errorf("unsupported envelope version %d", envelope.Version)
+		return nil, fmt.Errorf("unsupported envelope version %d", envelope.Version)
 	}
 	if len(envelope.Salt) != manifestSaltLen || len(envelope.Nonce) != manifestNonceLen {
-		return "", errors.New("invalid envelope: bad salt/nonce length")
+		return nil, errors.New("invalid envelope: bad salt/nonce length")
 	}
 
 	wrapKey := argon2.IDKey([]byte(passphrase), envelope.Salt,
@@ -115,16 +127,16 @@ func DecryptCAKey(encrypted, passphrase string) (string, error) {
 
 	block, err := aes.NewCipher(wrapKey)
 	if err != nil {
-		return "", fmt.Errorf("create cipher: %w", err)
+		return nil, fmt.Errorf("create cipher: %w", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("create GCM: %w", err)
+		return nil, fmt.Errorf("create GCM: %w", err)
 	}
 
 	plain, err := gcm.Open(nil, envelope.Nonce, envelope.Ciphertext, nil)
 	if err != nil {
-		return "", ErrManifestPassphrase
+		return nil, ErrManifestPassphrase
 	}
-	return string(plain), nil
+	return plain, nil
 }
