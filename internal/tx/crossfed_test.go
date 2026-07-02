@@ -64,10 +64,10 @@ func TestCrossFedRevoke_CodecRoundTrip(t *testing.T) {
 // CheckTx + FinalizeBlock.
 func TestCrossFedTerms_DecodeDoS(t *testing.T) {
 	var buf []byte
-	buf = appendBytes(buf, []byte("r")) // RemoteChainID
-	buf = appendBytes(buf, []byte("e")) // Endpoint
-	buf = appendBytes(buf, []byte("k")) // PeerPubKey
-	buf = append(buf, byte(1))          // MaxClearance
+	buf = appendBytes(buf, []byte("r"))       // RemoteChainID
+	buf = appendBytes(buf, []byte("e"))       // Endpoint
+	buf = appendBytes(buf, []byte("k"))       // PeerPubKey
+	buf = append(buf, byte(1))                // MaxClearance
 	buf = append(buf, 0xFF, 0xFF, 0xFF, 0xFF) // AllowedDomains count = 4294967295
 	if _, err := decodeCrossFedTerms(buf); err == nil {
 		t.Fatal("expected error for out-of-bounds AllowedDomains count (unbounded-alloc guard)")

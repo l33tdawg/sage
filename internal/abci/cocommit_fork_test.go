@@ -452,3 +452,119 @@ func TestCoCommit_CoauthorCannotSelfCorroborate(t *testing.T) {
 	ok := app.processMemoryCorroborate(makeMemoryCorroborateTx(t, outsider, env.SharedID, "independent"), 12, time.Now())
 	assert.Equal(t, uint32(0), ok.Code, "a non-coauthor may corroborate: %s", ok.Log)
 }
+
+// ---------------------------------------------------------------------------
+// Footgun E — envelope validity window + federation-status bind (app-v15).
+// ---------------------------------------------------------------------------
+
+// resignEnvelope recomputes the coauthor sigs + SharedID after mutating a signed
+// field (the window lives in CanonicalCoreBytes, so it must be re-signed).
+func resignEnvelope(env *tx.CoCommitSubmit, local agentKey, foreign testCoauthor) {
+	core := tx.CanonicalCoreBytes(env)
+	env.Coauthors[0].Sig = ed25519.Sign(local.priv, core)
+	env.Coauthors[1].Sig = ed25519.Sign(foreign.priv, core)
+	env.SharedID = tx.ComputeSharedID(tx.CoreHashOf(env), env.Coauthors, env.AgreementNonce)
+}
+
+// TestCoCommit_ValidityWindow: an envelope submitted outside its jointly-signed
+// [NotBefore, NotAfter) window is rejected vs the block's deterministic time.
+func TestCoCommit_ValidityWindow(t *testing.T) {
+	blockTime := time.Unix(1_700_001_000, 0)
+
+	// Expired: NotAfter in the past.
+	appExp := setupTestApp(t)
+	appExp.appV15AppliedHeight = 5
+	local := newAgentKey(t)
+	env, foreign := buildCoCommitEnvelope(t, local, "d", []byte("nw1"), "sage-b")
+	env.NotAfter = blockTime.Unix() - 1
+	resignEnvelope(env, local, foreign)
+	res := appExp.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 10, blockTime)
+	assert.Equal(t, uint32(98), res.Code, "expired envelope rejected")
+	assert.Contains(t, res.Log, "NotAfter")
+
+	// Not yet valid: NotBefore in the future.
+	appNb := setupTestApp(t)
+	appNb.appV15AppliedHeight = 5
+	local2 := newAgentKey(t)
+	env2, foreign2 := buildCoCommitEnvelope(t, local2, "d", []byte("nw2"), "sage-b")
+	env2.NotBefore = blockTime.Unix() + 1000
+	resignEnvelope(env2, local2, foreign2)
+	res2 := appNb.processCoCommitSubmit(coCommitSubmitTx(t, local2, env2), 10, blockTime)
+	assert.Equal(t, uint32(98), res2.Code, "not-yet-valid envelope rejected")
+	assert.Contains(t, res2.Log, "NotBefore")
+
+	// In-window: accepted.
+	appOk := setupTestApp(t)
+	appOk.appV15AppliedHeight = 5
+	local3 := newAgentKey(t)
+	env3, foreign3 := buildCoCommitEnvelope(t, local3, "d", []byte("nw3"), "sage-b")
+	env3.NotBefore = blockTime.Unix() - 100
+	env3.NotAfter = blockTime.Unix() + 100
+	resignEnvelope(env3, local3, foreign3)
+	res3 := appOk.processCoCommitSubmit(coCommitSubmitTx(t, local3, env3), 10, blockTime)
+	assert.Equal(t, uint32(0), res3.Code, "in-window envelope accepted: %s", res3.Log)
+}
+
+// TestCoCommit_RevokedFederationRejected: if a coauthor's home chain has a
+// cross_fed record that is not active (revoked), the co-commit is rejected —
+// closing stale-envelope replay after a federation is revoked.
+func TestCoCommit_RevokedFederationRejected(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 5
+	local := newAgentKey(t)
+	env, _ := buildCoCommitEnvelope(t, local, "d", []byte("nr1"), "sage-b")
+
+	// Active federation with the foreign coauthor's chain -> accepted.
+	require.NoError(t, app.badgerStore.SetCrossFed("sage-b", "https://x", make([]byte, 32), 4, 0, []string{"*"}, nil, "active"))
+	require.Equal(t, uint32(0), app.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 10, time.Now()).Code)
+
+	// Revoke it, then a FRESH envelope (new nonce) with the same foreign chain -> rejected.
+	require.NoError(t, app.badgerStore.UpdateCrossFedStatus("sage-b", "revoked"))
+	local2 := newAgentKey(t)
+	env2, _ := buildCoCommitEnvelope(t, local2, "d", []byte("nr2"), "sage-b")
+	res := app.processCoCommitSubmit(coCommitSubmitTx(t, local2, env2), 11, time.Now())
+	assert.Equal(t, uint32(98), res.Code, "co-commit under a revoked federation rejected")
+	assert.Contains(t, res.Log, "not active")
+}
+
+// TestCoCommit_NoWindowStillWorks: a legacy-style envelope with no window (0/0)
+// and no federation record commits normally (permanent envelope, local coauthor
+// has no self-fed record so the status gate does not fire).
+func TestCoCommit_NoWindowStillWorks(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 5
+	local := newAgentKey(t)
+	env, _ := buildCoCommitEnvelope(t, local, "d", []byte("nw0"), "sage-b")
+	assert.Equal(t, int64(0), env.NotBefore)
+	assert.Equal(t, int64(0), env.NotAfter)
+	res := app.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 10, time.Now())
+	assert.Equal(t, uint32(0), res.Code, "permanent envelope with no fed record commits: %s", res.Log)
+}
+
+// TestProcessAccessQuery_ForkGatedReject: post-app-v15 the on-chain similarity
+// query is a deterministic Code 10 reject (closing the per-node SQLite read that
+// folded into LastResultsHash); pre-fork the handler still runs.
+func TestProcessAccessQuery_ForkGatedReject(t *testing.T) {
+	app := setupTestApp(t)
+	agent := newAgentKey(t)
+
+	// Post-fork: deterministic reject BEFORE any offchainStore read.
+	app.appV15AppliedHeight = 5
+	pubKey, sig, bodyHash, ts := signAgentProof(t, agent, []byte("q"))
+	qtx := &tx.ParsedTx{
+		Type:           tx.TxTypeAccessQuery,
+		AccessQuery:    &tx.AccessQuery{Domain: "d", Embedding: []float32{0.1, 0.2}, TopK: 5},
+		AgentPubKey:    pubKey,
+		AgentSig:       sig,
+		AgentBodyHash:  bodyHash,
+		AgentTimestamp: ts,
+	}
+	res := app.processAccessQuery(qtx, 10, time.Now())
+	assert.Equal(t, uint32(10), res.Code, "post-fork access_query rejected")
+	assert.Empty(t, res.Data, "reject must emit empty Data (deterministic across nodes)")
+
+	// Pre-fork (gate dormant): the handler runs (payload validation reached).
+	app.appV15AppliedHeight = 0
+	resPre := app.processAccessQuery(qtx, 10, time.Now())
+	assert.NotEqual(t, uint32(10), resPre.Code, "pre-fork the handler still runs (not the app-v15 reject)")
+}

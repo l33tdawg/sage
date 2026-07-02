@@ -46,6 +46,11 @@ func CanonicalCoreBytes(s *CoCommitSubmit) []byte {
 		buf = appendBytes(buf, []byte(c.ChainID))
 		// Sig deliberately excluded — the signed bytes cannot include the signature.
 	}
+	// Validity window is part of the signed core (appended after the coauthor
+	// loop, mirroring its trailing-optional position in encodeCoCommitSubmit) so
+	// every coauthor commits to the envelope's freshness bounds (footgun E).
+	buf = appendInt64(buf, s.NotBefore)
+	buf = appendInt64(buf, s.NotAfter)
 	return buf
 }
 

@@ -333,12 +333,12 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 			CommittedAt:        rec.CommittedAt,
 		})
 	}
+	// hidden is logged, NOT returned — see QueryResponse (classification oracle).
 	m.logger.Info().Str("peer", peer.ChainID).Str("domain", req.DomainTag).Int("served", len(results)).Int("hidden", hidden).Msg("federation recall served")
 	writeJSON(w, http.StatusOK, &QueryResponse{
-		ChainID:        m.localChainID,
-		Results:        results,
-		TotalCount:     len(results),
-		HiddenByPolicy: hidden,
+		ChainID:    m.localChainID,
+		Results:    results,
+		TotalCount: len(results),
 	})
 }
 

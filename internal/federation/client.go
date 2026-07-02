@@ -10,13 +10,28 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/store"
 )
+
+// receiptDeliveryTimeout bounds a single receipt push (which blocks on the
+// peer's broadcast_tx_commit). Broadcast-scale, not read-scale; env-tunable.
+const defaultReceiptDeliveryTimeout = 20 * time.Second
+
+func receiptDeliveryTimeout() time.Duration {
+	if v := os.Getenv("SAGE_FED_RECEIPT_TIMEOUT_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+	return defaultReceiptDeliveryTimeout
+}
 
 // Outbound federation client — dials a peer's federation listener over mTLS
 // (our node cert as client cert, the agreement's pinned CA as the only trust
@@ -150,6 +165,13 @@ func (m *Manager) PeerStatus(ctx context.Context, remoteChainID string) (*Status
 // Best-effort per peer: failures are reported, never fatal — a missing anchor
 // is the designed "unconfirmed" steady state, retried via the idempotent
 // resend endpoint.
+//
+// Each push runs CONCURRENTLY with its OWN broadcast-scale deadline derived
+// from context.Background() — NOT the caller's read ctx. Each push blocks on the
+// PEER's broadcast_tx_commit (~a block) plus a fresh mTLS handshake, so sharing
+// the 4s recall-read budget across sequential peers timed out every peer after
+// the first (star anchoring with 3+ participants). The caller's ctx is honored
+// only for outright cancellation.
 func (m *Manager) DeliverReceipts(ctx context.Context, sharedID string, height, commitTime int64) map[string]DeliveryResult {
 	results := make(map[string]DeliveryResult)
 	push, err := m.BuildSignedReceipt(sharedID, height, commitTime)
@@ -162,15 +184,48 @@ func (m *Manager) DeliverReceipts(ctx context.Context, sharedID string, height, 
 		results["*"] = DeliveryResult{Status: "error", Error: err.Error()}
 		return results
 	}
+
+	sem := make(chan struct{}, maxFanOutConcurrency)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
 	for _, chain := range chains {
-		resp, pushErr := m.PushReceipt(ctx, chain, push)
-		if pushErr != nil {
-			results[chain] = DeliveryResult{Status: "error", Error: pushErr.Error()}
-			continue
-		}
-		results[chain] = DeliveryResult{Status: resp.Status, TxHash: resp.TxHash}
+		wg.Add(1)
+		go func(chain string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			// Per-peer deadline, independent of the caller's read budget, but
+			// still cancellable if the caller's ctx is cancelled.
+			pctx, cancel := context.WithTimeout(context.Background(), receiptDeliveryTimeout())
+			defer cancel()
+			pctx = mergeCancel(pctx, ctx)
+			resp, pushErr := m.PushReceipt(pctx, chain, push)
+			mu.Lock()
+			if pushErr != nil {
+				results[chain] = DeliveryResult{Status: "error", Error: pushErr.Error()}
+			} else {
+				results[chain] = DeliveryResult{Status: resp.Status, TxHash: resp.TxHash}
+			}
+			mu.Unlock()
+		}(chain)
 	}
+	wg.Wait()
 	return results
+}
+
+// mergeCancel returns a context that is cancelled when EITHER parent is (its own
+// deadline, or the caller's cancellation) — so a per-peer deadline bounds the
+// push while a client disconnect still aborts it.
+func mergeCancel(primary, alsoCancelOn context.Context) context.Context {
+	ctx, cancel := context.WithCancel(primary)
+	go func() {
+		select {
+		case <-alsoCancelOn.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx
 }
 
 func truncate(b []byte, n int) string {

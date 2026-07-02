@@ -779,6 +779,11 @@ func encodeCoCommitSubmit(s *CoCommitSubmit) []byte {
 	buf = appendInt64(buf, s.CreatedAtUnix)
 	buf = appendBytes(buf, s.AgreementNonce)
 	buf = appendCoauthors(buf, s.Coauthors)
+	// Trailing-optional validity window (footgun E). Always written by this
+	// binary; a decoder that predates the field leaves NotBefore/NotAfter zero
+	// (a permanent envelope). Kept in sync with CanonicalCoreBytes.
+	buf = appendInt64(buf, s.NotBefore)
+	buf = appendInt64(buf, s.NotAfter)
 	return buf
 }
 
@@ -837,9 +842,23 @@ func decodeCoCommitSubmit(data []byte) (*CoCommitSubmit, error) {
 		return nil, err
 	}
 
-	s.Coauthors, _, err = readCoauthors(data, off)
+	s.Coauthors, off, err = readCoauthors(data, off)
 	if err != nil {
 		return nil, err
+	}
+
+	// Trailing-optional validity window (footgun E). Absent on a legacy envelope
+	// → NotBefore/NotAfter stay 0 (permanent). Both are read together: a partial
+	// trailer is a malformed tx.
+	if off < len(data) {
+		s.NotBefore, off, err = readInt64(data, off)
+		if err != nil {
+			return nil, err
+		}
+		s.NotAfter, _, err = readInt64(data, off)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return s, nil

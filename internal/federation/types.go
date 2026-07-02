@@ -74,10 +74,15 @@ type MemoryResult struct {
 
 // QueryResponse is the body returned by POST /fed/v1/query.
 type QueryResponse struct {
-	ChainID        string          `json:"chain_id"`
-	Results        []*MemoryResult `json:"results"`
-	TotalCount     int             `json:"total_count"`
-	HiddenByPolicy int             `json:"hidden_by_policy,omitempty"`
+	ChainID    string          `json:"chain_id"`
+	Results    []*MemoryResult `json:"results"`
+	TotalCount int             `json:"total_count"`
+	// NOTE: the count of records hidden by the classification ceiling is
+	// deliberately NOT returned to the peer. Disclosing it turns the response
+	// into an existence/keyword oracle for higher-classified content in the
+	// allowed domain (iterate keywords, watch the hidden count). It is logged
+	// server-side instead. Only non-classification hides (domain/status defense
+	// in depth) would ever be safe to disclose.
 }
 
 // ReceiptPush is the body of POST /fed/v1/receipt — Mode-2 cross-anchor

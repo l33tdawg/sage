@@ -13,6 +13,23 @@ import (
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
+// maxRemoteChainIDLenREST mirrors the consensus maxRemoteChainIDLen so the JOIN
+// builder fails fast instead of after a wasted stage+broadcast.
+const maxRemoteChainIDLenREST = 50
+
+// requireNodeOperator gates an off-consensus federation action that is performed
+// with the node OPERATOR's key (outbound signed calls) and has no other authz
+// (unlike the cross_fed set/revoke txs, which are authorized on-chain). Fails
+// closed when no operator id is configured. Mirrors the federated-recall gate.
+func (s *Server) requireNodeOperator(w http.ResponseWriter, r *http.Request) bool {
+	callerID := middleware.ContextAgentID(r.Context())
+	if s.nodeOperatorID == "" || callerID != s.nodeOperatorID {
+		writeProblem(w, http.StatusForbidden, "Operator only", "This federation action is restricted to the node operator.")
+		return false
+	}
+	return true
+}
+
 // v11 Mode-1 exchange agreement setup — the REST tx-builder for
 // TxTypeCrossFedSet/Revoke (33/34). This is the operator half of the
 // federation-JOIN ceremony: the peers exchange CA certificates + endpoints
@@ -60,15 +77,26 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid remote chain id", err.Error())
 		return
 	}
+	// Match the consensus cap (maxRemoteChainIDLen=50) so an over-length id fails
+	// fast at validation instead of after a wasted stage+broadcast round-trip
+	// that the on-chain handler rejects with Code 102.
+	if len(req.RemoteChainID) > maxRemoteChainIDLenREST {
+		writeProblem(w, http.StatusBadRequest, "Invalid remote chain id", "remote_chain_id exceeds the maximum length (50).")
+		return
+	}
 	// Self-federation guard — enforced off-consensus by design (the ABCI app
 	// has no deterministic source for its own chain id; see processCrossFedSet).
 	if req.RemoteChainID == s.federation.LocalChainID() {
 		writeProblem(w, http.StatusBadRequest, "Self federation", "remote_chain_id equals this chain's id.")
 		return
 	}
+	// Require scheme+host only: the federation client appends a fixed /fed/v1/*
+	// path (and the V2 signature covers it), so a stored path/query/fragment
+	// would make every call to this peer 404 and mis-sign. Fail fast at JOIN.
 	endpoint, err := url.Parse(req.Endpoint)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" {
-		writeProblem(w, http.StatusBadRequest, "Invalid endpoint", "endpoint must be an https:// URL.")
+	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" ||
+		(endpoint.Path != "" && endpoint.Path != "/") || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+		writeProblem(w, http.StatusBadRequest, "Invalid endpoint", "endpoint must be an https://host[:port] URL with no path, query, or fragment.")
 		return
 	}
 	if req.MaxClearance < 0 || req.MaxClearance > 4 {
@@ -255,6 +283,9 @@ func (s *Server) handleCrossFedPeerStatus(w http.ResponseWriter, r *http.Request
 		writeProblem(w, http.StatusNotImplemented, "Federation disabled", "The federation transport is not wired on this node.")
 		return
 	}
+	if !s.requireNodeOperator(w, r) {
+		return
+	}
 	remoteChainID := chi.URLParam(r, "chain_id")
 	if err := federation.ValidateChainID(remoteChainID); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid remote chain id", err.Error())
@@ -264,9 +295,12 @@ func (s *Server) handleCrossFedPeerStatus(w http.ResponseWriter, r *http.Request
 	defer cancel()
 	status, err := s.federation.PeerStatus(ctx, remoteChainID)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{
+		// reachable stays a bool across both branches so typed clients don't break
+		// on the error path (the whole point of this endpoint is the
+		// unreachable-vs-misconfigured distinction).
+		writeJSON(w, http.StatusBadGateway, map[string]any{
 			"remote_chain_id": remoteChainID,
-			"reachable":       "false",
+			"reachable":       false,
 			"error":           err.Error(),
 		})
 		return

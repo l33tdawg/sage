@@ -1,9 +1,9 @@
 package abci
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1999,6 +1999,17 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
 	}
 
+	// v11 (app-v15): keep post-fork AccessQuery txs out of the mempool. INVERTED
+	// vs the block above — TxTypeAccessQuery is a KNOWN type today, so it is
+	// rejected once the fork IS active (whereas the co-commit types are rejected
+	// until active). The exec-side Code 10 is the load-bearing determinism
+	// guarantee; this is mempool hygiene so a post-fork proposer never seats one.
+	// Safe under mixed binaries: this fires only post-activation, by which point
+	// every validator runs the v15 binary (activation requires the rolled binary).
+	if parsedTx.Type == tx.TxTypeAccessQuery && app.postAppV15Fork(app.state.Height) {
+		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
+	}
+
 	return &abcitypes.ResponseCheckTx{Code: 0}, nil
 }
 
@@ -2913,6 +2924,30 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		return &abcitypes.ExecTxResult{Code: 96, Log: "co-commit: SharedID does not match signed core"}
 	}
 	sharedID := env.SharedID
+
+	// Footgun E — freshness + federation-status bind (both determinism-safe: only
+	// the block's own deterministic blockTime and on-chain cross_fed state, never
+	// time.Now). (1) Enforce the jointly-signed validity window; NotBefore/NotAfter
+	// live in CanonicalCoreBytes so every coauthor committed to them. (2) Reject if
+	// ANY coauthor's home chain has a cross_fed record that is not "active"
+	// (revoked). Together these stop a stale counter-signed envelope from being
+	// resurrected after a federation is rotated (window lapses) or revoked (status).
+	// Note: a coauthor whose chain has NO cross_fed record here — including the LOCAL
+	// coauthor, since a chain never self-federates — is not rejected; the app has no
+	// deterministic self-chain_id to require a positive "active", so this gate is the
+	// determinism-safe "reject if explicitly revoked", not "require active".
+	bt := blockTime.Unix()
+	if env.NotBefore != 0 && bt < env.NotBefore {
+		return &abcitypes.ExecTxResult{Code: 98, Log: "co-commit: envelope not yet valid (NotBefore)"}
+	}
+	if env.NotAfter != 0 && bt >= env.NotAfter {
+		return &abcitypes.ExecTxResult{Code: 98, Log: "co-commit: envelope validity window expired (NotAfter)"}
+	}
+	for _, c := range env.Coauthors {
+		if _, _, _, _, _, _, status, gErr := app.badgerStore.GetCrossFed(c.ChainID); gErr == nil && status != "active" {
+			return &abcitypes.ExecTxResult{Code: 98, Log: fmt.Sprintf("co-commit: coauthor chain %s federation not active (%s)", c.ChainID, status)}
+		}
+	}
 
 	// LOCAL authz for the LOCAL submitter only, on the envelope's domain (foreign
 	// coauthors are NOT run through this). Mirror processMemorySubmit's owned-domain
@@ -3972,6 +4007,24 @@ func (app *SageApp) processAccessRevoke(parsedTx *tx.ParsedTx, height int64, blo
 }
 
 func (app *SageApp) processAccessQuery(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
+	// app-v15: quarantine the on-chain similarity query. It reads app.offchainStore
+	// (per-node SQLite; embeddings are staged divergently via SuppCache, so replicas
+	// hold NULL and are excluded, and the cosine ranking is a non-stable sort) and
+	// folds the result into ExecTxResult.Data — which CometBFT hashes into
+	// LastResultsHash → the block header. Different validators therefore return
+	// different Data → header/AppHash divergence → BFT halt. On-chain similarity
+	// search over per-node vector state can NEVER be deterministic, so post-fork this
+	// tx type is a deterministic reject (identical Code 10, empty Data on every node);
+	// the real use case is served off the consensus path by the REST query endpoints.
+	// Gated on postAppV15Rules for skip-ahead safety; collapses to a no-op on every
+	// existing chain (appV15AppliedHeight==0), so pre-activation replay is
+	// byte-identical. Mirrors the app-v11 disable of the analogous bootstrapAdminFromSQL
+	// per-node read. The reject returns BEFORE any offchainStore read or state effect.
+	postV15 := app.postAppV15Rules(height)
+	recordAppV15Branch(postV15)
+	if postV15 {
+		return &abcitypes.ExecTxResult{Code: 10, Log: "access_query disabled on-chain (non-deterministic per-node read); use the REST similarity endpoints"}
+	}
 	query := parsedTx.AccessQuery
 	if query == nil {
 		return &abcitypes.ExecTxResult{Code: 40, Log: "missing access query payload"}

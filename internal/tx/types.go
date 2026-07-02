@@ -349,6 +349,15 @@ type CoCommitSubmit struct {
 	CreatedAtUnix   int64              // DATA (authored time), never a branch input
 	AgreementNonce  []byte             //
 	Coauthors       []CoCommitCoauthor // sorted by PubKey when hashing; stored in slice order
+	// NotBefore/NotAfter are a jointly-signed DETERMINISTIC validity window
+	// (unix seconds; 0 = unbounded on that end), folded into CanonicalCoreBytes
+	// so every coauthor signs it. processCoCommitSubmit enforces it against the
+	// block's own deterministic blockTime — NEVER time.Now — closing footgun E:
+	// a stale counter-signed envelope can't be resurrected after the window
+	// lapses (e.g. after a federation secret rotation). Trailing-optional on the
+	// wire for backward-compat; unset (0/0) means a permanent envelope.
+	NotBefore int64
+	NotAfter  int64
 }
 
 // CommitReceipt is what a chain emits AFTER its own local quorum commit; a peer

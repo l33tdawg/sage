@@ -55,8 +55,13 @@ type CoCommitSubmitRequest struct {
 	CreatedAtUnix  int64                  `json:"created_at_unix"`
 	AgreementNonce string                 `json:"agreement_nonce"` // hex
 	Coauthors      []CoCommitCoauthorJSON `json:"coauthors"`
-	Embedding      []float32              `json:"embedding,omitempty"`
-	Provider       string                 `json:"provider,omitempty"`
+	// NotBefore/NotAfter are the jointly-signed validity window (unix seconds;
+	// 0 = unbounded). All coauthors must sign the identical window. Enforced
+	// on-chain vs blockTime (footgun E).
+	NotBefore int64     `json:"not_before,omitempty"`
+	NotAfter  int64     `json:"not_after,omitempty"`
+	Embedding []float32 `json:"embedding,omitempty"`
+	Provider  string    `json:"provider,omitempty"`
 	// SkipReceiptDelivery suppresses the post-commit receipt push (deliver
 	// later via POST /v1/cocommit/{shared_id}/receipt/send).
 	SkipReceiptDelivery bool `json:"skip_receipt_delivery,omitempty"`
@@ -149,6 +154,10 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 		coauthors = append(coauthors, tx.CoCommitCoauthor{PubKey: pub, ChainID: c.ChainID, Sig: sig})
 	}
 
+	if req.NotBefore != 0 && req.NotAfter != 0 && req.NotAfter <= req.NotBefore {
+		writeProblem(w, http.StatusBadRequest, "Invalid validity window", "not_after must be greater than not_before.")
+		return
+	}
 	env := &tx.CoCommitSubmit{
 		SchemaVersion:   req.SchemaVersion,
 		ContentHash:     contentHash,
@@ -159,6 +168,8 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 		CreatedAtUnix:   req.CreatedAtUnix,
 		AgreementNonce:  nonce,
 		Coauthors:       coauthors,
+		NotBefore:       req.NotBefore,
+		NotAfter:        req.NotAfter,
 	}
 	coreHash := tx.CoreHashOf(env)
 	env.SharedID = tx.ComputeSharedID(coreHash, env.Coauthors, nonce)
@@ -247,6 +258,11 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCoCommitReceiptSend(w http.ResponseWriter, r *http.Request) {
 	if s.federation == nil {
 		writeProblem(w, http.StatusNotImplemented, "Federation disabled", "The federation transport is not wired on this node.")
+		return
+	}
+	// Receipt delivery pushes an operator-key-signed receipt to peers; it has no
+	// other authz, so gate it to the node operator (consistent with peer status).
+	if !s.requireNodeOperator(w, r) {
 		return
 	}
 	sharedID := chi.URLParam(r, "shared_id")

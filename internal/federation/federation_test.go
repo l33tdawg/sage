@@ -385,9 +385,8 @@ func TestClassificationCeilingHidesRecords(t *testing.T) {
 	if len(resp.Results) != 0 {
 		t.Fatalf("classified record leaked past the ceiling: %+v", resp.Results)
 	}
-	if resp.HiddenByPolicy != 1 {
-		t.Errorf("HiddenByPolicy = %d, want 1", resp.HiddenByPolicy)
-	}
+	// The hide count is deliberately NOT disclosed to the peer (classification
+	// existence oracle) — verified by QueryResponse having no such field.
 }
 
 func TestRevokedAgreementDeniedServerSide(t *testing.T) {
