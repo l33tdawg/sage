@@ -18,6 +18,12 @@ const SAGE_VERSION = 'v11.0';
 // directly). Reads the same /v1/dashboard/memory/graph the 2D brain uses.
 function MriView({ sse }) {
     const ref = useRef(null);
+    const [mriEmpty, setMriEmpty] = useState(false);
+    useEffect(() => {
+        let alive = true;
+        fetchStats().then(s => { if (alive) setMriEmpty((s.total_memories || 0) === 0); }).catch(() => {});
+        return () => { alive = false; };
+    }, [sse]);
     useEffect(() => {
         if (!ref.current) return;
         const cleanup = mountMriBrain(ref.current, {
@@ -27,7 +33,16 @@ function MriView({ sse }) {
         });
         return cleanup;
     }, [sse]);
-    return html`<div class="mri-stage" ref=${ref}></div>`;
+    return html`<div class="mri-wrap">
+        <div class="mri-stage" ref=${ref}></div>
+        ${mriEmpty && html`<div class="brain-empty-overlay">
+            <${EmptyState} icon="brain"
+                headline="Your brain is empty"
+                hint="No memories to visualize yet. Import an existing export or connect an agent over MCP, and the MRI will render them in 3D."
+                actionLabel="Import memories"
+                onAction=${() => { window.location.hash = '#/import'; }} />
+        </div>`}
+    </div>`;
 }
 
 // Global tooltips state — persisted in localStorage
@@ -1047,6 +1062,15 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
         <div class="brain-container">
             <canvas ref=${canvasRef} class="brain-canvas"></canvas>
             ${!graphLoaded ? html`<div class="brain-loading">◍ synthesizing memory graph…</div>` : ''}
+            ${graphLoaded && stats && (stats.total_memories || 0) === 0 ? html`
+                <div class="brain-empty-overlay">
+                    <${EmptyState} icon="brain"
+                        headline="Your brain is empty"
+                        hint="No memories have been committed yet. Import an existing export or connect an agent over MCP, and they'll appear here as a living graph."
+                        actionLabel="Import memories"
+                        onAction=${() => { window.location.hash = '#/import'; }} />
+                </div>
+            ` : ''}
 
             <div class="nav-pad">
                 <button class="nav-btn nav-up" onClick=${() => { stateRef.current.camera.y += 60; }} title="Pan up">
@@ -1749,8 +1773,13 @@ function TasksPage() {
         // Optimistic update
         setTasks(prev => prev.map(t => t.memory_id === taskId ? { ...t, task_status: newStatus } : t));
         try {
-            await updateTaskStatus(taskId, newStatus);
+            const res = await updateTaskStatus(taskId, newStatus);
+            if (res && res.error) {
+                showToast('Could not move task: ' + res.error, 'error');
+                loadTasks(); // revert on error
+            }
         } catch (e) {
+            showToast('Could not move task: ' + (e.message || 'network error'), 'error');
             loadTasks(); // revert on error
         }
     }
@@ -1760,12 +1789,18 @@ function TasksPage() {
         if (!newContent.trim()) return;
         setAdding(true);
         try {
-            await createTask(newContent.trim(), newDomain.trim() || 'general');
-            setNewContent('');
-            setNewDomain('');
-            setShowAddForm(false);
-            loadTasks();
+            const res = await createTask(newContent.trim(), newDomain.trim() || 'general');
+            if (res && res.error) {
+                showToast('Could not add task: ' + res.error, 'error');
+            } else {
+                showToast('Task added to Planned', 'success');
+                setNewContent('');
+                setNewDomain('');
+                setShowAddForm(false);
+                loadTasks();
+            }
         } catch (err) {
+            showToast('Could not add task: ' + (err.message || 'network error'), 'error');
             // stay on form so user can retry
         }
         setAdding(false);
@@ -1812,7 +1847,10 @@ function TasksPage() {
     return html`
         <div class="tasks-page">
             <div class="tasks-header">
-                <h2 class="tasks-title">Task Board</h2>
+                <div>
+                    <h2 class="tasks-title">Task Board <${HelpTip} text="Each card is a governed memory tagged [TASK], flowing through consensus like any other memory. Drag a card between columns, or use the play / check / drop buttons to move it through Planned, In Progress, Done, and Dropped." /><${PageHelp} section="getting-started" label="How SAGE memories work" /></h2>
+                    <div class="network-header-sub">Plan work as memories - drag cards across the board or use the card buttons to change status.</div>
+                </div>
                 <div class="tasks-filters">
                     <select class="filter-select" value=${domainFilter} onChange=${e => setDomainFilter(e.target.value)}>
                         <option value="">All domains</option>
@@ -1857,6 +1895,15 @@ function TasksPage() {
                     <button class="btn" onClick=${loadTasks}>Retry</button>
                 </div>
             `}
+            ${filtered.length === 0 && !loading && !error ? html`
+                <${EmptyState} icon="tasks"
+                    headline=${tasks.length === 0 ? 'No tasks yet' : 'No tasks in this view'}
+                    hint=${tasks.length === 0
+                        ? 'Tasks are governed memories tagged [TASK]. Add one, then drag it across Planned, In progress, and Done as work moves.'
+                        : 'No tasks match the current domain filter. Clear the filter or add a task to this domain.'}
+                    actionLabel="Add a task"
+                    onAction=${() => setShowAddForm(true)} />
+            ` : html`
             <div class="kanban-board">
                 ${TASK_COLUMNS.map(col => {
                     const colTasks = filtered.filter(t => t.task_status === col.key);
@@ -1902,7 +1949,7 @@ function TasksPage() {
                         </div>
                     `;
                 })}
-            </div>
+            </div>`}
         </div>
     `;
 }
@@ -2004,7 +2051,7 @@ function SearchPage({ onSelectMemory }) {
                         ${agents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.agent_id.slice(0, 8)}...)</option>`)}
                     </select>
                 `}
-                <span style="font-size: 12px; color: var(--text-muted); align-self: center;">${results.length} memories</span>
+                <span style="font-size: 12px; color: var(--text-muted); align-self: center;">${loading ? 'Searching...' : `${results.length} ${results.length === 1 ? 'memory' : 'memories'}`}</span>
             </div>
             <div class="memory-list">
                 ${error && html`
@@ -2040,9 +2087,17 @@ function SearchPage({ onSelectMemory }) {
                     </div>
                 `)}
                 ${results.length === 0 && !loading && !error && html`
-                    <div style="text-align: center; color: var(--text-muted); padding: 40px;">
-                        ${query ? 'No memories match your search.' : 'No memories yet.'}
-                    </div>
+                    ${(query || agentFilter || domainFilter || tagFilter)
+                        ? html`<${EmptyState} icon="search"
+                            headline="No memories match"
+                            hint="Search is an exact text match on content and domain (case-insensitive), newest first. Try a shorter or different term, or clear the filters."
+                            actionLabel="Clear search"
+                            onAction=${() => { setQuery(''); setAgentFilter(''); setDomainFilter(''); setTagFilter(''); loadMemories('', '', '', ''); }} />`
+                        : html`<${EmptyState} icon="brain"
+                            headline="No memories yet"
+                            hint="Your brain is empty. Import an existing memory export or connect an agent over MCP, and committed memories will show up here to search."
+                            actionLabel="Import memories"
+                            onAction=${() => { window.location.hash = '#/import'; }} />`}
                 `}
             </div>
         </div>
@@ -4246,7 +4301,7 @@ function HelpOverlay({ onClose, initialSection }) {
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Full-text search</div>
-                        <div class="guide-detail-desc">Type any keyword or phrase to search across all memory content. Results are sorted by relevance with domain badges and confidence scores shown inline.</div>
+                        <div class="guide-detail-desc">Type any keyword or phrase to match memory content and domain (case-insensitive exact match). Results are sorted newest first - there is no semantic ranking. Domain badges and confidence scores are shown inline.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Filters</div>
@@ -6896,6 +6951,19 @@ function App() {
         }).catch(() => setAuthState('ready')); // if auth check fails, assume no auth
     }, []);
 
+    // First-run onboarding: auto-open the Getting Started guide exactly once.
+    // The 'sage-help-dismissed' flag is set the moment we open it, so it never
+    // reappears on refresh or later visits (the overlay's own "Don't show again"
+    // checkbox still governs manual opens).
+    useEffect(() => {
+        if (authState !== 'ready') return;
+        let dismissed = false;
+        try { dismissed = localStorage.getItem('sage-help-dismissed') === '1'; } catch (e) {}
+        if (dismissed) return;
+        try { localStorage.setItem('sage-help-dismissed', '1'); } catch (e) {}
+        openHelp('getting-started');
+    }, [authState]);
+
     // Auto-lock after 30 minutes of inactivity when encrypted.
     useEffect(() => {
         if (!isEncrypted || authState !== 'ready') return;
@@ -6984,38 +7052,38 @@ function App() {
         <${ToastContainer} />
         <div class="sidebar">
             <div class="sidebar-logo">S</div>
-            <button class="sidebar-btn ${page === 'brain' ? 'active' : ''}" onClick=${() => navigate('brain')} title="Cerebrum">
+            <button class="sidebar-btn ${page === 'brain' ? 'active' : ''}" onClick=${() => navigate('brain')} title="Cerebrum - your brain home" aria-label="Cerebrum - your brain home">
                 ${icons.brain}
             </button>
-            <button class="sidebar-btn ${page === 'search' ? 'active' : ''}" onClick=${() => navigate('search')} title="Search">
+            <button class="sidebar-btn ${page === 'search' ? 'active' : ''}" onClick=${() => navigate('search')} title="Search - find memories" aria-label="Search - find memories">
                 ${icons.search}
             </button>
-            <button class="sidebar-btn ${page === 'tasks' ? 'active' : ''}" onClick=${() => navigate('tasks')} title="Tasks">
+            <button class="sidebar-btn ${page === 'tasks' ? 'active' : ''}" onClick=${() => navigate('tasks')} title="Tasks - governed task board" aria-label="Tasks - governed task board">
                 ${icons.tasks}
             </button>
-            <button class="sidebar-btn ${page === 'import' ? 'active' : ''}" onClick=${() => navigate('import')} title="Import">
+            <button class="sidebar-btn ${page === 'import' ? 'active' : ''}" onClick=${() => navigate('import')} title="Import - ingest conversation exports" aria-label="Import - ingest conversation exports">
                 ${icons.import}
             </button>
-            <button class="sidebar-btn ${page === 'network' ? 'active' : ''}" onClick=${() => navigate('network')} title="Network">
+            <button class="sidebar-btn ${page === 'network' ? 'active' : ''}" onClick=${() => navigate('network')} title="Network - agents, RBAC and validator quorum" aria-label="Network - agents, RBAC and validator quorum">
                 ${icons.network}
             </button>
-            <button class="sidebar-btn ${page === 'pipeline' ? 'active' : ''}" onClick=${() => navigate('pipeline')} title="Pipeline">
+            <button class="sidebar-btn ${page === 'pipeline' ? 'active' : ''}" onClick=${() => navigate('pipeline')} title="Pipeline - agent-to-agent message bus" aria-label="Pipeline - agent-to-agent message bus">
                 ${icons.pipeline}
             </button>
-            <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Networks — connect to another SAGE">
+            <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Networks - federate with another SAGE node" aria-label="Networks - federate with another SAGE node">
                 ${icons.federation}
             </button>
-            <button class="sidebar-btn ${page === 'settings' ? 'active' : ''}" onClick=${() => navigate('settings')} title="Settings">
+            <button class="sidebar-btn ${page === 'settings' ? 'active' : ''}" onClick=${() => navigate('settings')} title="Settings - node configuration" aria-label="Settings - node configuration">
                 ${icons.settings}
             </button>
             <div style="flex:1;"></div>
-            <button class="sidebar-btn" onClick=${() => openHelp(null)} title="Help">
+            <button class="sidebar-btn" onClick=${() => openHelp(null)} title="Help - open the CEREBRUM guide" aria-label="Help - open the CEREBRUM guide">
                 ${icons.help}
             </button>
         </div>
         <div class="main-content zoom-${textSize}">
             <div class="top-bar">
-                <h1>CEREBRUM <span class="sage-version" title="SAGE release">${SAGE_VERSION}</span> <span style="font-size:12px;font-weight:400;color:var(--text-muted);margin-left:6px">Your SAGE Brain</span></h1>
+                <h1 aria-label=${`CEREBRUM - ${PAGE_LABELS[page] || 'Your SAGE Brain'}`}>CEREBRUM <span class="sage-version" title="SAGE release">${SAGE_VERSION}</span> <span class="topbar-sep" aria-hidden="true">/</span> <span class="topbar-page">${PAGE_LABELS[page] || 'Your SAGE Brain'}</span></h1>
                 <div class="spacer"></div>
                 ${isEncrypted && html`
                     <button class="lock-btn" title="Lock CEREBRUM" onClick=${async () => {
@@ -7614,7 +7682,7 @@ function FederationPage() {
             <h1>Networks</h1>
             <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> - across the internet or your network. This is not the same as adding an agent to your own SAGE (do that under Agents), or joining other computers on your LAN into one brain (that's the quorum Network section).</p>
             <${FedGreenRail} />
-            ${err && html`<div class="fed-err">${err}</div>`}
+            ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
             <div class="fed-roles">
                 <button class="fed-role-card" onClick=${() => setMode('guest')}>
                     <div class="fed-role-glyph">${icons.federation}</div>
@@ -7629,9 +7697,16 @@ function FederationPage() {
             </div>
 
             <div class="fed-conns">
-                <h3>Your connections</h3>
+                <h3>Your connections <${HelpTip} text="Each row is a treaty with another SAGE. The dot is green when the connection is active and unexpired. The domains listed are the only knowledge shared across the link - everything else stays private." /></h3>
                 ${conns === null && html`<div class="muted">Loading…</div>`}
-                ${conns && conns.length === 0 && html`<div class="muted">No connections yet. ${localChain && html`<span>Your network id: <code>${localChain}</code></span>`}</div>`}
+                ${conns && conns.length === 0 && html`
+                    <${EmptyState} icon="federation"
+                        headline="No connections yet"
+                        hint="Link your whole SAGE to another SAGE to share memories across networks. Join someone's network with a code they share, or host one and hand out a code."
+                        actionLabel="Join a network"
+                        onAction=${() => setMode('guest')} />
+                    ${localChain && html`<div class="muted" style="text-align:center;margin-top:4px;">Your network id: <code>${localChain}</code></div>`}
+                `}
                 ${conns && conns.map(c => html`<div class="fed-conn-row" key=${c.remote_chain_id}>
                     <div class="fed-conn-main">
                         <span class="fed-conn-status ${c.status === 'active' && !c.expired ? 'on' : 'off'}"></span>
@@ -7642,6 +7717,35 @@ function FederationPage() {
                 </div>`)}
             </div>
         </div>
+    </div>`;
+}
+
+// PAGE_LABELS - human-readable page names for the top-bar breadcrumb and the
+// h1 aria-label, so the header orients the user instead of always reading
+// "CEREBRUM". Keyed by the same page ids used by navigate()/the sidebar.
+const PAGE_LABELS = {
+    brain: 'Home',
+    search: 'Search',
+    tasks: 'Tasks',
+    import: 'Import',
+    network: 'Network',
+    pipeline: 'Pipeline',
+    federation: 'Networks',
+    settings: 'Settings',
+};
+
+// EmptyState - shared, friendly zero-state used across empty screens (Search,
+// Tasks, Federation, and the zero-memory 2D/3D brain views). Icon + headline +
+// one-line explainer + optional primary action, so no dead-end is ever a blank
+// void. `icon` is a key into the shared `icons` set (falls back to a raw node).
+function EmptyState({ icon, headline, hint, actionLabel, onAction, compact }) {
+    return html`<div class="empty-state ${compact ? 'empty-state-compact' : ''}">
+        ${icon && html`<div class="empty-state-icon">${icons[icon] || icon}</div>`}
+        <div class="empty-state-headline">${headline}</div>
+        ${hint && html`<div class="empty-state-hint">${hint}</div>`}
+        ${actionLabel && onAction && html`
+            <button class="btn empty-state-action" onClick=${onAction}>${actionLabel}</button>
+        `}
     </div>`;
 }
 

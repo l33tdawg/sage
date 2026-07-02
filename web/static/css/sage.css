@@ -4188,3 +4188,99 @@ input[type="range"]::-moz-range-thumb {
     border: 1px solid var(--primary); border-radius: 999px;
     padding: 1px 8px; margin-left: 8px; vertical-align: middle;
 }
+
+/* Top-bar breadcrumb: brand / active-page label (nav orientation) */
+.topbar-sep {
+    color: var(--text-muted);
+    font-weight: 400;
+    margin: 0 2px;
+}
+.topbar-page {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+/* ============================================================================
+   EmptyState - shared friendly zero-state (Search, Tasks, Federation, brain).
+   Icon + headline + one-line explainer + optional primary action.
+   ============================================================================ */
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 8px;
+    padding: 48px 24px;
+    max-width: 440px;
+    margin: 0 auto;
+}
+.empty-state-compact { padding: 28px 20px; }
+.empty-state-icon {
+    width: 56px;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--accent-dim);
+    color: var(--accent);
+    margin-bottom: 4px;
+}
+.empty-state-icon svg { width: 28px; height: 28px; }
+.empty-state-headline {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+}
+.empty-state-hint {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+.empty-state-action { margin-top: 10px; }
+
+/* Zero-memory overlay centered over the 2D canvas / 3D MRI stage. */
+.brain-empty-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    z-index: 5;
+}
+.brain-empty-overlay .empty-state { pointer-events: auto; }
+
+/* MRI wrapper - keeps flex sizing while hosting the empty overlay as a sibling
+   of the renderer's mount div (mri-brain.js appends into .mri-stage untouched). */
+.mri-wrap {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    display: flex;
+}
+
+/* Tasks board first-run empty state (v11 UX uplift) */
+.tasks-empty-hint {
+    text-align: center;
+    padding: 32px 24px;
+    margin-bottom: 16px;
+    background: var(--bg-elevated);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+}
+.tasks-empty-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+}
+.tasks-empty-desc {
+    font-size: 13px;
+    color: var(--text-dim);
+    max-width: 460px;
+    margin: 0 auto 14px;
+    line-height: 1.5;
+}
