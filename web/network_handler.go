@@ -378,8 +378,10 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 				}
 			}
 			// Permission changes go through AgentSetPermission - attempted
-			// regardless of the metadata result above.
-			if req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil {
+			// regardless of the metadata result above. org_id/dept_id are part of
+			// the on-chain RBAC record (the tx carries them), so an org/dept-only
+			// edit must broadcast too, else SQLite diverges from BadgerDB silently.
+			if req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil || req.OrgID != nil || req.DeptID != nil {
 				clearance := uint8(existing.Clearance) // #nosec G115 -- clamped to 0-4 above
 				permTx := &tx.ParsedTx{
 					Type:      tx.TxTypeAgentSetPermission,
