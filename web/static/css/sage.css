@@ -4044,3 +4044,135 @@ input[type="range"]::-moz-range-thumb {
     position: relative;
     background: #05070d;
 }
+
+/* ============================================================================
+   v11 federation JOIN ceremony - guided guest/host wizards.
+   Green = safe/additive (nothing deleted). Danger red reserved for stop/abort.
+   ============================================================================ */
+.fed-page { padding: 24px 32px; max-width: 720px; }
+.fed-landing h1 { margin: 0 0 16px; }
+
+.fed-green-rail {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--accent-dim); border: 1px solid var(--accent);
+    color: var(--accent); border-radius: var(--radius);
+    padding: 10px 14px; font-size: 13px; margin: 14px 0;
+}
+.fed-green-dot { font-weight: 700; }
+
+.fed-roles { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0 28px; }
+.fed-role-card {
+    text-align: left; background: var(--bg-elevated); border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg); padding: 20px; cursor: pointer; color: var(--text);
+    transition: border-color .15s, transform .1s;
+}
+.fed-role-card:hover { border-color: var(--primary); transform: translateY(-1px); }
+.fed-role-glyph { width: 34px; height: 34px; color: var(--primary); margin-bottom: 10px; }
+.fed-role-glyph svg { width: 34px; height: 34px; }
+.fed-role-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+.fed-role-desc { color: var(--text-muted); font-size: 12px; }
+
+.fed-conns { margin-top: 24px; }
+.fed-conns h3 { font-size: 14px; margin: 0 0 10px; color: var(--text-dim); }
+.fed-conn-row {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--bg-surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 14px; margin-bottom: 8px;
+}
+.fed-conn-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.fed-conn-status { width: 9px; height: 9px; border-radius: 50%; background: var(--text-muted); flex: none; }
+.fed-conn-status.on { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.fed-conn-status.off { background: var(--text-muted); }
+.fed-conn-name { font-weight: 600; }
+.fed-conn-meta { font-size: 12px; }
+.fed-conn-off { flex: none; }
+
+/* Wizard shell */
+.fed-wizard { max-width: 560px; }
+.fed-wizard-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.fed-wizard-title { font-weight: 600; color: var(--text-dim); }
+.fed-back { padding: 5px 10px; font-size: 13px; }
+.fed-step { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 22px; }
+.fed-step h2 { margin: 0 0 6px; }
+.fed-step h3 { margin: 14px 0 8px; }
+.fed-step h4 { margin: 16px 0 6px; font-size: 13px; color: var(--text-dim); }
+.fed-step-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+.fed-field { margin: 14px 0; }
+.fed-field label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 6px; }
+.fed-err { background: rgba(239,68,68,0.12); border: 1px solid var(--danger); color: var(--danger); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; font-size: 13px; }
+
+/* Channel gate */
+.fed-gate-q { font-size: 15px; font-weight: 500; margin: 18px 0 14px; line-height: 1.4; }
+.fed-gate-choices { display: flex; flex-direction: column; gap: 10px; }
+.fed-gate-choices .btn { text-align: left; padding: 12px 14px; }
+.fed-gate-note { margin-top: 14px; font-size: 12px; }
+
+/* QR */
+.fed-qr { display: flex; flex-direction: column; align-items: center; gap: 10px; margin: 16px 0; }
+.fed-qr-canvas { background: #fff; padding: 12px; border-radius: var(--radius); min-width: 60px; min-height: 60px; }
+.fed-qr-canvas img, .fed-qr-canvas canvas { display: block; }
+.fed-qr-caption { font-size: 12px; text-align: center; }
+.fed-copy-btn { font-size: 12px; }
+
+/* Scanner */
+.fed-scan { display: flex; flex-direction: column; gap: 12px; align-items: center; }
+.fed-scan-choose { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.fed-scan-video { width: 100%; max-width: 340px; border-radius: var(--radius); background: #000; aspect-ratio: 1; object-fit: cover; }
+.fed-scan-hint { font-size: 12px; }
+.fed-scan-actions { display: flex; gap: 10px; }
+.fed-paste { width: 100%; background: var(--bg-deep); border: 1px solid var(--border-light); border-radius: var(--radius); color: var(--text); padding: 10px; font-family: monospace; font-size: 12px; resize: vertical; }
+
+/* Big spoken code */
+.fed-bigcode { display: flex; gap: 10px; justify-content: center; margin: 20px 0; }
+.fed-bigcode-d {
+    font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums;
+    background: var(--bg-elevated); border: 1px solid var(--border-light);
+    border-radius: var(--radius); width: 52px; text-align: center; padding: 8px 0; color: var(--primary);
+}
+.fed-read-instr { text-align: center; color: var(--text-dim); font-size: 14px; margin: 8px 0 14px; }
+
+/* Compare - the trust moment */
+.fed-compare { background: var(--bg-surface); border: 1px solid var(--border-light); border-radius: var(--radius-lg); padding: 24px; }
+.fed-compare h3 { margin: 0 0 8px; }
+.fed-compare-instr { color: var(--text-dim); font-size: 14px; line-height: 1.5; }
+.fed-compare-label { display: block; font-size: 13px; color: var(--text-dim); margin: 16px 0 8px; }
+.fed-compare-input {
+    width: 100%; font-size: 28px; letter-spacing: 8px; text-align: center;
+    background: var(--bg-deep); border: 2px solid var(--border-light); border-radius: var(--radius);
+    color: var(--text); padding: 12px; font-variant-numeric: tabular-nums;
+}
+.fed-compare-input:focus { border-color: var(--primary); outline: none; }
+.fed-compare-bad { color: var(--danger); font-size: 13px; margin-top: 10px; line-height: 1.4; }
+.fed-compare-actions { display: flex; justify-content: space-between; gap: 40px; margin-top: 22px; }
+.fed-compare-actions .btn { flex: 1; padding: 14px; font-size: 15px; }
+.btn-confirm-live { background: var(--accent); border-color: var(--accent); color: #04110b; font-weight: 600; }
+.btn-confirm-live:hover:not(:disabled) { background: #0ea371; }
+.fed-tier4-note { background: var(--secondary-dim); border: 1px solid var(--secondary); color: var(--text); border-radius: var(--radius); padding: 12px 14px; font-size: 13px; line-height: 1.5; margin: 12px 0; }
+
+/* Scope + share */
+.fed-scope { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin: 12px 0; }
+.fed-scope-h { font-size: 12px; color: var(--text-muted); margin-bottom: 4px; }
+.fed-scope-line { font-size: 14px; }
+.fed-share { margin: 12px 0; }
+.fed-share-label { display: block; font-size: 13px; color: var(--text-dim); margin: 12px 0 6px; }
+.fed-share-input { width: 100%; background: var(--bg-deep); border: 1px solid var(--border-light); border-radius: var(--radius); color: var(--text); padding: 10px; font-size: 14px; }
+.fed-share input[type=range] { width: 100%; }
+.fed-share-clr { font-size: 13px; font-weight: 600; margin-top: 6px; color: var(--accent); }
+.fed-share-clr.warn { color: var(--warning); }
+.fed-share-clr.danger { color: var(--danger); }
+
+/* 2-of-2 meter */
+.fed-2of2 { display: flex; align-items: center; gap: 8px; justify-content: center; margin: 14px 0; }
+.fed-dot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--border-light); background: transparent; }
+.fed-dot.on { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.fed-2of2-text { font-size: 12px; color: var(--text-muted); margin-left: 6px; }
+
+/* Waiting / done */
+.fed-waiting { display: flex; align-items: center; gap: 10px; justify-content: center; color: var(--text-dim); font-size: 14px; margin: 16px 0; }
+.fed-spinner { width: 16px; height: 16px; border: 2px solid var(--border-light); border-top-color: var(--primary); border-radius: 50%; animation: fed-spin 0.8s linear infinite; }
+@keyframes fed-spin { to { transform: rotate(360deg); } }
+.fed-done { text-align: center; }
+.fed-done-check { width: 56px; height: 56px; line-height: 56px; margin: 0 auto 12px; border-radius: 50%; background: var(--accent-dim); color: var(--accent); font-size: 30px; font-weight: 700; }
+
+.fed-landing-sub { font-size: 13px; line-height: 1.5; margin: 4px 0 8px; max-width: 620px; }
+.fed-compare-back { margin-top: 14px; width: 100%; font-size: 13px; }

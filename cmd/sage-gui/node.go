@@ -697,6 +697,10 @@ func runServe() (rerr error) {
 			Logger:       logger,
 		})
 		restServer.SetFederation(fedMgr)
+		// The dashboard drives the guided JOIN wizards (cookie-authed) by calling
+		// the same Manager directly - the browser has a session, not the operator
+		// signing key, so it cannot reach the agent-signed REST endpoints.
+		dashboard.SetFederation(fedMgr)
 	}
 
 	// TLS listener: encrypted REST on a separate port.

@@ -525,9 +525,13 @@ func (m *Manager) HostApprove(sessionID, typedCode string, grant ScopeWire) erro
 	if js.GuestChain == "" {
 		return fmt.Errorf("no guest request to approve yet")
 	}
-	if len(grant.AllowedDomains) == 0 {
-		return fmt.Errorf("allowed_domains is required (\"*\" for a full treaty)")
-	}
+	// Empty AllowedDomains is a legitimate "connect but share nothing" grant: the
+	// record is active (so the peer authenticates + reciprocity works) but the
+	// guest can read nothing. It is accepted on-chain for a chain-admin operator
+	// (the common solo/family case); a non-admin gets a clear on-chain authz
+	// error at broadcast, which the wizard surfaces recoverably. So do NOT block
+	// it here (blocking it stranded the ceremony at the irreversible compare step
+	// for exactly the conservative default the UI encourages).
 	if grant.MaxClearance < 0 || grant.MaxClearance > 4 {
 		return fmt.Errorf("max_clearance must be 0..4")
 	}
@@ -776,6 +780,22 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 	return &GuestRequestResult{CodeG: codeG, CodeH: codeH, ConfirmStep: resp.ConfirmStep}, nil
 }
 
+// GuestPollStatus dials the host's /fed/v1/join/status over the ceremony mTLS
+// config so the guest wizard learns when the host has approved (and receives the
+// host's granted scope, needed to compute E at confirm).
+func (m *Manager) GuestPollStatus(ctx context.Context, sessionID string) (*JoinStatusResp, error) {
+	d, ok := m.getGuestDraft(sessionID)
+	if !ok {
+		return nil, fmt.Errorf("no scanned connection for this session (re-scan)")
+	}
+	var resp JoinStatusResp
+	path := "/fed/v1/join/status?session_id=" + url.QueryEscape(sessionID)
+	if err := m.guestCall(ctx, d, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // GuestConfirm is approval #2: it computes E, broadcasts the guest's OWN tx-33
 // first (guest-first activation, RT-7), then POSTs /fed/v1/join/confirm so the
 // host activates its side. hostScope is what the guest polled from /join/status.
@@ -890,6 +910,52 @@ func (m *Manager) broadcastCrossFedSet(terms *tx.CrossFedTerms) (string, error) 
 	return hash, err
 }
 
+// RevokeAgreement broadcasts a tx-34 CrossFedRevoke for a remote chain (the
+// "turn off connection" action, H8) and purges the node-local seed + cached CA
+// so the peer relaxes back to v2-accepted for a future re-add. tx-34 deletes
+// nothing on disk (consensus cannot touch node-local files); the purge is the
+// off-consensus half.
+func (m *Manager) RevokeAgreement(remoteChainID string) (string, error) {
+	if err := ValidateChainID(remoteChainID); err != nil {
+		return "", err
+	}
+	body := []byte("cross_fed_revoke:" + remoteChainID)
+	bodyHash := sha256.Sum256(body)
+	ts := time.Now().Unix()
+	tsBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(tsBytes, uint64(ts)) // #nosec G115 -- ts non-negative
+	agentSig := ed25519.Sign(m.agentKey, append(append([]byte{}, bodyHash[:]...), tsBytes...))
+
+	ptx := &tx.ParsedTx{
+		Type:      tx.TxTypeCrossFedRevoke,
+		Nonce:     tx.MonotonicNonce(m.agentKey),
+		Timestamp: time.Unix(ts, 0),
+		CrossFedRevoke: &tx.CrossFedRevoke{
+			RemoteChainID: remoteChainID,
+			Reason:        "operator disconnect",
+		},
+		AgentPubKey:    m.agentPub,
+		AgentSig:       agentSig,
+		AgentBodyHash:  bodyHash[:],
+		AgentTimestamp: ts,
+	}
+	if err := tx.SignTx(ptx, m.agentKey); err != nil {
+		return "", fmt.Errorf("sign cross_fed revoke tx: %w", err)
+	}
+	encoded, err := tx.EncodeTx(ptx)
+	if err != nil {
+		return "", fmt.Errorf("encode cross_fed revoke tx: %w", err)
+	}
+	hash, _, err := m.broadcast(encoded)
+	if err != nil {
+		return "", err
+	}
+	// Off-consensus purge (zeroize seed cache + delete seed files + drop cached CA).
+	m.purgeSeed(remoteChainID)
+	m.invalidateCACache(remoteChainID)
+	return hash, nil
+}
+
 // commitPairSeed stages + commits the EXACT ceremony seed for (localChain,
 // remoteChain) with the canonical pin-pair binding, and flips seed_established.
 // The seed is passed in by the confirm driver (the one E was signed over), never
@@ -957,18 +1023,24 @@ func (m *Manager) guestCall(ctx context.Context, d *guestDraft, method, path str
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
 	reqCtx, cancel := context.WithTimeout(ctx, joinCallTimeout)
 	defer cancel()
 	u := strings.TrimRight(d.hostEndpoint, "/") + path
-	req, err := http.NewRequestWithContext(reqCtx, method, u, bytes.NewReader(payload))
+	var reqBody io.Reader = http.NoBody
+	if body != nil {
+		payload, mErr := json.Marshal(body)
+		if mErr != nil {
+			return mErr
+		}
+		reqBody = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(reqCtx, method, u, reqBody)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)

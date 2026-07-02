@@ -534,3 +534,43 @@ export async function wizardMintToken(agentId, tokenName) {
     });
     return res.json();
 }
+
+// ============================================================================
+// v11 federation JOIN ceremony (cookie-authed dashboard proxy). Off-consensus;
+// the only chain writes are the two operators' own tx-33/tx-34, fired inside the
+// node after each human confirmation.
+// ============================================================================
+
+async function fedFetch(path, opts) {
+    const res = await fetch(`${API_BASE}${path}`, opts);
+    const text = await res.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { error: text }; }
+    if (!res.ok) throw new Error(data.error || text || `HTTP ${res.status}`);
+    return data;
+}
+function fedPost(path, body) {
+    return fedFetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+    });
+}
+
+// Connections list / disconnect / reachability.
+export function fedConnections() { return fedFetch('/v1/dashboard/federation/connections'); }
+export function fedRevoke(chainId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/revoke`); }
+export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/status`); }
+
+// Host wizard.
+export function fedHostCreate(endpoint) { return fedPost('/v1/dashboard/federation/join/host/create', { endpoint }); }
+export function fedHostScanReturn(sessionId, returnUri) { return fedPost('/v1/dashboard/federation/join/host/scan-return', { session_id: sessionId, return_uri: returnUri }); }
+export function fedHostStatus(sessionId) { return fedFetch(`/v1/dashboard/federation/join/host/${encodeURIComponent(sessionId)}`); }
+export function fedHostApprove(sessionId, grant) { return fedPost(`/v1/dashboard/federation/join/host/${encodeURIComponent(sessionId)}/approve`, grant); }
+export function fedHostAbort(sessionId) { return fedPost(`/v1/dashboard/federation/join/host/${encodeURIComponent(sessionId)}/abort`); }
+
+// Guest wizard.
+export function fedGuestScan(uri, endpoint) { return fedPost('/v1/dashboard/federation/join/guest/scan', { uri, endpoint }); }
+export function fedGuestRequest(body) { return fedPost('/v1/dashboard/federation/join/guest/request', body); }
+export function fedGuestStatus(sessionId) { return fedFetch(`/v1/dashboard/federation/join/guest/${encodeURIComponent(sessionId)}/status`); }
+export function fedGuestConfirm(body) { return fedPost('/v1/dashboard/federation/join/guest/confirm', body); }

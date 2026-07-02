@@ -34,8 +34,11 @@ coverage.html
 go.work
 go.work.sum
 
-# Vendor (we use modules)
+# Vendor (Go modules) - but NOT the browser-side vendored libs, which must ship
+# in-repo so the go:embed'd dashboard builds fully offline (Preact/htm + QR).
 vendor/
+!web/static/js/vendor/
+!web/static/js/vendor/**
 
 # IDE
 .idea/

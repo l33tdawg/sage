@@ -1,6 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken } from './api.js';
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
+fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 
@@ -207,6 +208,10 @@ const icons = {
     network: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/><line x1="5" y1="19" x2="19" y2="19" opacity="0.3"/></svg>`,
     tasks: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
     pipeline: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h4"/><path d="M16 12h4"/><rect x="8" y="8" width="8" height="8" rx="2"/><path d="M12 4v4"/><path d="M12 16v4"/><circle cx="2" cy="12" r="1" fill="currentColor"/><circle cx="22" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="2" r="1" fill="currentColor"/><circle cx="12" cy="22" r="1" fill="currentColor"/></svg>`,
+    // Two interlinked rings — a handshake/connection between two networks.
+    // Deliberately NOT the quorum "network" node-graph glyph (federation-join
+    // ADDS a connection and deletes nothing; quorum-join wipes node state).
+    federation: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="12" r="5"/><circle cx="16" cy="12" r="5"/></svg>`,
 };
 
 // ============================================================================
@@ -6772,7 +6777,15 @@ function App() {
     const [authState, setAuthState] = useState('loading'); // loading | login | ready
     const [isEncrypted, setIsEncrypted] = useState(false);
     const [page, setPage] = useState('brain');
-    const [brainMode, setBrainMode] = useState('2d'); // '2d' (canvas) default | 'mri' (3D MRI, opt-in toggle)
+    // Brain view mode: 'mri' (3D MRI, the DEFAULT) | '2d' (canvas). Persisted so
+    // a user who prefers 2D keeps it across reloads; new users land on the MRI.
+    const [brainMode, setBrainMode] = useState(() => {
+        try { return localStorage.getItem('sage-brain-mode') || 'mri'; } catch (e) { return 'mri'; }
+    });
+    const changeBrainMode = (mode) => {
+        setBrainMode(mode);
+        try { localStorage.setItem('sage-brain-mode', mode); } catch (e) {}
+    };
     const [selectedMemory, setSelectedMemory] = useState(null);
     const [sseConnected, setSseConnected] = useState(false);
     const [timelineFilter, setTimelineFilter] = useState([]); // [{from, to}, ...]
@@ -6885,6 +6898,7 @@ function App() {
             else if (hash === '/import') setPage('import');
             else if (hash === '/network') setPage('network');
             else if (hash === '/pipeline') setPage('pipeline');
+            else if (hash === '/federation') setPage('federation');
             else setPage('brain');
         }
         window.addEventListener('hashchange', onHash);
@@ -6952,6 +6966,9 @@ function App() {
             <button class="sidebar-btn ${page === 'pipeline' ? 'active' : ''}" onClick=${() => navigate('pipeline')} title="Pipeline">
                 ${icons.pipeline}
             </button>
+            <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Networks — connect to another SAGE">
+                ${icons.federation}
+            </button>
             <button class="sidebar-btn ${page === 'settings' ? 'active' : ''}" onClick=${() => navigate('settings')} title="Settings">
                 ${icons.settings}
             </button>
@@ -6991,8 +7008,8 @@ function App() {
 
             ${page === 'brain' && html`
                 <div class="brain-mode-toggle">
-                    <button class=${brainMode === '2d' ? 'active' : ''} onClick=${() => setBrainMode('2d')}>2D</button>
-                    <button class=${brainMode === 'mri' ? 'active' : ''} onClick=${() => setBrainMode('mri')} title="3D MRI brain view">⬡ MRI</button>
+                    <button class=${brainMode === 'mri' ? 'active' : ''} onClick=${() => changeBrainMode('mri')} title="3D MRI brain view">⬡ MRI</button>
+                    <button class=${brainMode === '2d' ? 'active' : ''} onClick=${() => changeBrainMode('2d')}>2D</button>
                 </div>
                 ${brainMode === '2d'
                     ? html`
@@ -7006,6 +7023,7 @@ function App() {
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}
             ${page === 'network' && html`<${NetworkPage} sse=${sseRef.current} />`}
             ${page === 'pipeline' && html`<${PipelinePage} />`}
+            ${page === 'federation' && html`<${FederationPage} />`}
             ${page === 'settings' && html`<${SettingsPage} />`}
 
             <${MemoryDetail}
@@ -7019,5 +7037,576 @@ function App() {
     </${TooltipsContext.Provider}>`;
 }
 
-// Mount
+// ============================================================================
+// v11 federation JOIN ceremony - the guided guest/host wizards.
+//
+// Load-bearing safety rule (repeated in copy everywhere): federation-join ADDS a
+// connection and DELETES NOTHING. It is code-path-distinct from quorum-join
+// (which wipes node state). The word "delete" appears only inside negations.
+//
+// Honest crypto copy: the peer-authentication anchor is HUMAN - the in-person /
+// on-camera QR scan (default) or the spoken-code compare (fallback). The 6-digit
+// codes prove co-possession + 2-of-2 consent. Never "two cryptographic proofs";
+// never surface SPKI / mTLS / TOTP secret in the happy path.
+// ============================================================================
+
+// FedGreenRail - the persistent "nothing is deleted" reassurance rail. Present
+// on every ceremony screen (accent-green, NOT the amber warning banner).
+function FedGreenRail() {
+    return html`<div class="fed-green-rail">
+        <span class="fed-green-dot">✓</span>
+        Nothing is deleted. This only adds a connection to another network. Your memories are never touched.
+    </div>`;
+}
+
+// TwoOfTwoMeter - the ●○ / ●● 2-of-2 consent meter. n = 0..2.
+function TwoOfTwoMeter({ n, labelA = 'You', labelB = 'Them' }) {
+    return html`<div class="fed-2of2" role="status" aria-label=${`${n} of 2 confirmed`}>
+        <span class="fed-dot ${n >= 1 ? 'on' : ''}" title=${labelA}></span>
+        <span class="fed-dot ${n >= 2 ? 'on' : ''}" title=${labelB}></span>
+        <span class="fed-2of2-text">${n} of 2 confirmed</span>
+    </div>`;
+}
+
+// BigCode - a large, widely-spaced 6-digit code for reading aloud.
+function BigCode({ code }) {
+    const digits = String(code || '').split('');
+    return html`<div class="fed-bigcode" aria-label=${`code ${digits.join(' ')}`}>
+        ${digits.map((d, i) => html`<span class="fed-bigcode-d" key=${i}>${d}</span>`)}
+    </div>`;
+}
+
+// FedQr - renders a scannable QR from a string via the vendored encoder, with a
+// copyable text fallback so the flow never dead-ends if rendering fails.
+function FedQr({ text, size = 220, caption }) {
+    const ref = useRef(null);
+    const [copied, setCopied] = useState(false);
+    const [rendered, setRendered] = useState(false);
+    useEffect(() => {
+        if (!ref.current || !text) return;
+        ref.current.innerHTML = '';
+        try {
+            if (window.QRCode) {
+                // eslint-disable-next-line no-new
+                new window.QRCode(ref.current, {
+                    text, width: size, height: size,
+                    colorDark: '#0b1220', colorLight: '#ffffff',
+                    correctLevel: window.QRCode.CorrectLevel ? window.QRCode.CorrectLevel.L : 1,
+                });
+                setRendered(true);
+            }
+        } catch (e) { setRendered(false); }
+    }, [text, size]);
+    const copy = async () => {
+        try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (e) {}
+    };
+    return html`<div class="fed-qr">
+        <div class="fed-qr-canvas" ref=${ref}></div>
+        ${!rendered && html`<div class="fed-qr-fallback muted">QR unavailable - share the code below instead.</div>`}
+        ${caption && html`<div class="fed-qr-caption muted">${caption}</div>`}
+        <button class="btn fed-copy-btn" onClick=${copy}>${copied ? '✓ Copied' : 'Copy code instead'}</button>
+    </div>`;
+}
+
+// FedScanInput - get a connection code from the peer: live camera scan (Chrome's
+// native BarcodeDetector, jsQR fallback) OR paste. Both feed the same handler.
+// A camera-denied path silently offers paste (never a weaker default).
+function FedScanInput({ onValue, busy }) {
+    const videoRef = useRef(null);
+    const streamRef = useRef(null);
+    const rafRef = useRef(null);
+    const activeRef = useRef(false); // true only while the camera view is live
+    const [mode, setMode] = useState('choose'); // choose | camera | paste
+    const [pasted, setPasted] = useState('');
+    const [camErr, setCamErr] = useState('');
+
+    const stop = () => {
+        activeRef.current = false;
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+        if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+    };
+    useEffect(() => () => stop(), []);
+
+    const startCamera = async () => {
+        setCamErr(''); setMode('camera'); activeRef.current = true;
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+            // If the user cancelled / navigated away WHILE the permission prompt
+            // was open, stop() already ran (activeRef=false) but this stream was
+            // granted afterwards - release it now so the camera light goes off.
+            if (!activeRef.current) { stream.getTracks().forEach(t => t.stop()); return; }
+            streamRef.current = stream;
+            const v = videoRef.current;
+            if (!v) { stream.getTracks().forEach(t => t.stop()); return; }
+            v.srcObject = stream; await v.play();
+            let detector = null;
+            if ('BarcodeDetector' in window) {
+                try { detector = new window.BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { detector = null; }
+            }
+            const canvas = document.createElement('canvas');
+            const scanLoop = async () => {
+                if (!streamRef.current || !videoRef.current) return;
+                try {
+                    let value = null;
+                    if (detector) {
+                        const codes = await detector.detect(videoRef.current);
+                        if (codes && codes.length) value = codes[0].rawValue;
+                    } else if (window.jsQR && v.videoWidth) {
+                        canvas.width = v.videoWidth; canvas.height = v.videoHeight;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+                        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        const r = window.jsQR(img.data, img.width, img.height);
+                        if (r) value = r.data;
+                    }
+                    if (value) { stop(); onValue(value); return; }
+                } catch (e) {}
+                rafRef.current = requestAnimationFrame(scanLoop);
+            };
+            rafRef.current = requestAnimationFrame(scanLoop);
+        } catch (e) {
+            setCamErr('Camera unavailable - paste the code instead.');
+            setMode('paste');
+        }
+    };
+
+    if (mode === 'camera') {
+        return html`<div class="fed-scan">
+            <video class="fed-scan-video" ref=${videoRef} playsinline muted></video>
+            <div class="fed-scan-hint muted">Point your camera at their code.</div>
+            <div class="fed-scan-actions">
+                <button class="btn" onClick=${() => { stop(); setMode('paste'); }}>Paste it instead</button>
+                <button class="btn" onClick=${() => { stop(); setMode('choose'); }}>Cancel</button>
+            </div>
+        </div>`;
+    }
+    if (mode === 'paste') {
+        const v = pasted.trim();
+        return html`<div class="fed-scan">
+            ${camErr && html`<div class="muted">${camErr}</div>`}
+            <textarea class="fed-paste" rows="3" placeholder="Paste the connection code (starts with otpauth://…)"
+                value=${pasted} onInput=${e => setPasted(e.target.value)}></textarea>
+            <div class="fed-scan-actions">
+                <button class="btn" onClick=${() => setMode('choose')}>Back</button>
+                <button class="btn btn-primary" disabled=${!v || busy} onClick=${() => onValue(v)}>Use this code</button>
+            </div>
+        </div>`;
+    }
+    return html`<div class="fed-scan-choose">
+        <button class="btn btn-primary" disabled=${busy} onClick=${startCamera}>📷 Scan with camera</button>
+        <button class="btn" disabled=${busy} onClick=${() => setMode('paste')}>Paste the code</button>
+    </div>`;
+}
+
+// FedCodeCompare - THE TRUST MOMENT. Structurally unskippable (RT-1/RT-11): no
+// pre-highlighted "Yes", no auto-advance, no timeout-confirm. Decisive consent
+// requires TYPING the code you heard; the confirm button stays inert until the
+// typed value matches what this node computed. "No - stop" is first-class danger.
+function FedCodeCompare({ title, instruction, expectedCode, scope, confirmLabel, onConfirm, onReject, onBack, busy, tier4 }) {
+    const [typed, setTyped] = useState('');
+    const norm = typed.replace(/\D/g, '');
+    const match = norm.length === 6 && expectedCode && norm === String(expectedCode);
+    return html`<div class="fed-compare">
+        <${FedGreenRail} />
+        <h3>${title}</h3>
+        <p class="fed-compare-instr">${instruction}</p>
+        ${tier4 && html`<div class="fed-tier4-note">No camera or shared screen? This spoken-code compare is your ONLY safety check - say it out loud on a call you placed to someone you trust, and only continue if it matches exactly.</div>`}
+        ${scope && html`<${FedScopeSummary} scope=${scope} heading="They will be able to reach:" />`}
+        <label class="fed-compare-label">Type the code they read you</label>
+        <input class="fed-compare-input" inputmode="numeric" autocomplete="off" maxlength="7"
+            placeholder="• • • • • •" value=${typed} onInput=${e => setTyped(e.target.value)} />
+        ${norm.length === 6 && !match && html`<div class="fed-compare-bad">That doesn't match what's on your screen. Do NOT continue - hang up and call them back on a number you trust.</div>`}
+        <div class="fed-compare-actions">
+            <button class="btn btn-danger" disabled=${busy} onClick=${onReject}>No - stop</button>
+            <button class="btn ${match ? 'btn-confirm-live' : ''}" disabled=${!match || busy} onClick=${() => onConfirm(norm)}>
+                ${busy ? 'Working…' : (confirmLabel || 'Yes, they match')}
+            </button>
+        </div>
+        ${onBack && html`<button class="btn fed-compare-back" disabled=${busy} onClick=${onBack}>← Change what I share first</button>`}
+    </div>`;
+}
+
+// FedScopeSummary - plain-words rendering of a cross_fed scope (RT-9).
+function FedScopeSummary({ scope, heading }) {
+    if (!scope) return null;
+    const doms = (scope.allowed_domains && scope.allowed_domains.length) ? scope.allowed_domains : [];
+    const all = doms.some(d => d === '*');
+    const clr = CLEARANCE_LABELS[scope.max_clearance || 0] || 'Guest';
+    return html`<div class="fed-scope">
+        <div class="fed-scope-h">${heading || 'What is shared:'}</div>
+        <div class="fed-scope-line">${all ? 'All domains' : (doms.length ? doms.join(', ') : 'Nothing (no domains shared)')}</div>
+        <div class="fed-scope-line muted">up to ${clr} level</div>
+    </div>`;
+}
+
+// FedShareForm - configure a cross_fed grant (what the OTHER side may read).
+function FedShareForm({ value, onChange }) {
+    const v = value || { max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' };
+    const [domInput, setDomInput] = useState((v.allowed_domains || []).join(', '));
+    const applyDomains = (s) => {
+        const list = s.split(',').map(x => x.trim()).filter(Boolean);
+        onChange({ ...v, allowed_domains: list });
+    };
+    return html`<div class="fed-share">
+        <label class="fed-share-label">Domains they can read (comma-separated, or * for everything)</label>
+        <input class="fed-share-input" placeholder="e.g. family, recipes   (blank = nothing)"
+            value=${domInput} onInput=${e => { setDomInput(e.target.value); applyDomains(e.target.value); }} />
+        <label class="fed-share-label">Highest level they can read</label>
+        <input type="range" min="0" max="4" value=${v.max_clearance || 0}
+            onInput=${e => onChange({ ...v, max_clearance: parseInt(e.target.value, 10) })} />
+        <div class="fed-share-clr ${(v.max_clearance || 0) >= 3 ? 'danger' : (v.max_clearance || 0) >= 2 ? 'warn' : ''}">
+            ${CLEARANCE_LABELS[v.max_clearance || 0]}
+        </div>
+    </div>`;
+}
+
+// FedChannelGate - the physical-object question (redteam #2). Distinguishes a
+// code held as a PHYSICAL object from a transmitted image. A shared screen /
+// forwarded image / pure phone call routes to the spoken-code (Tier-4) path,
+// never presented as equal to in-person. Also collects the guest's own reachable
+// address (where the host will connect back).
+function FedChannelGate({ endpoint, onEndpoint, onChoose }) {
+    return html`<div class="fed-step">
+        <h2>Connect to another network</h2>
+        <${FedGreenRail} />
+        <div class="fed-field">
+            <label>Your network address (how they'll reach you)</label>
+            <input class="fed-share-input" value=${endpoint} onInput=${e => onEndpoint(e.target.value)}
+                placeholder="https://192.168.1.20:8444" />
+            <div class="muted">Usually https://[your computer's address]:8444 on your network.</div>
+        </div>
+        <div class="fed-gate-q">Are you looking at their code as a physical thing they're holding - in the same room, or held up to the camera on a call YOU placed to someone you trust?</div>
+        <div class="fed-gate-choices">
+            <button class="btn btn-primary" onClick=${() => onChoose(false)}>Yes - same room, or their phone on my camera</button>
+            <button class="btn" onClick=${() => onChoose(true)}>We're on a call, I'd see a shared screen or an image</button>
+            <button class="btn" onClick=${() => onChoose(true)}>We're just on the phone / no camera</button>
+        </div>
+        <div class="muted fed-gate-note">A shared screen or a forwarded image can be faked. For those we use the spoken-code method - it's built for calls.</div>
+    </div>`;
+}
+
+// GuestJoinWizard - "Join a network". Maps to guest STEP 1-4.
+function GuestJoinWizard({ onExit }) {
+    const [step, setStep] = useState('channel');
+    const [endpoint, setEndpoint] = useState(`https://${location.hostname}:8444`);
+    const [tier4, setTier4] = useState(false);
+    const [scan, setScan] = useState(null);       // {session_id, host_chain, host_endpoint, host_pin, return_uri}
+    const [scopeG, setScopeG] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
+    const [codes, setCodes] = useState(null);      // {code_g, code_h, confirm_step}
+    const [hostScope, setHostScope] = useState(null);
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+
+    const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
+
+    const doScan = async (uri) => {
+        setBusy(true); setErr('');
+        try { const r = await fedGuestScan(uri, endpoint); setScan(r); setStep('return'); }
+        catch (e) { fail(e); }
+        setBusy(false);
+    };
+    const doRequest = async () => {
+        setBusy(true); setErr('');
+        try {
+            const r = await fedGuestRequest({ session_id: scan.session_id, endpoint, ...scopeG });
+            setCodes(r); setStep('yourcode');
+        } catch (e) { fail(e); }
+        setBusy(false);
+    };
+    const doConfirm = async () => {
+        setBusy(true); setErr('');
+        try {
+            await fedGuestConfirm({ session_id: scan.session_id, endpoint, host_scope: hostScope || {} });
+            setStep('done');
+        } catch (e) { fail(e); }
+        setBusy(false);
+    };
+
+    // Poll host status while showing our code (waiting for host approval #1).
+    useEffect(() => {
+        if (step !== 'yourcode' || !scan) return;
+        let live = true;
+        const tick = async () => {
+            try {
+                const s = await fedGuestStatus(scan.session_id);
+                if (!live) return;
+                if (s.aborted) { setErr('They stopped the connection.'); setStep('channel'); return; }
+                if (s.host_approved) { setHostScope(s.host_scope || {}); setStep('theircode'); }
+            } catch (e) { /* transient; keep polling */ }
+        };
+        const id = setInterval(tick, 2000); tick();
+        return () => { live = false; clearInterval(id); };
+    }, [step, scan]);
+
+    return html`<div class="fed-wizard">
+        <div class="fed-wizard-head">
+            <button class="btn fed-back" onClick=${onExit}>← Back</button>
+            <span class="fed-wizard-title">Join a network</span>
+        </div>
+        ${err && html`<div class="fed-err">${err}</div>`}
+
+        ${step === 'channel' && html`<${FedChannelGate} endpoint=${endpoint} onEndpoint=${setEndpoint}
+            onChoose=${(t) => { setTier4(t); setStep('scan'); }} />`}
+
+        ${step === 'scan' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Point your camera at their code</h3>
+            ${tier4 && html`<div class="fed-tier4-note">No camera / shared screen: paste the code they send, then we'll double-check with a spoken code you compare out loud.</div>`}
+            <${FedScanInput} onValue=${doScan} busy=${busy} />
+        </div>`}
+
+        ${step === 'return' && scan && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Now show them YOUR code</h3>
+            <p class="muted">Connecting to <strong>${scan.host_chain}</strong>. Hold this up to their camera, or send it for them to paste.</p>
+            <${FedQr} text=${scan.return_uri} caption="Their SAGE scans this to check it's really you." />
+            <div class="fed-step-actions">
+                <button class="btn btn-primary" onClick=${() => setStep('share')}>They've got my code - next</button>
+            </div>
+        </div>`}
+
+        ${step === 'share' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>What will you let them read?</h3>
+            <p class="muted">Leave it blank to share nothing. You can change this later.</p>
+            <${FedShareForm} value=${scopeG} onChange=${setScopeG} />
+            <div class="fed-step-actions">
+                <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : 'Continue'}</button>
+            </div>
+        </div>`}
+
+        ${step === 'yourcode' && codes && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Read this to them out loud</h3>
+            <${BigCode} code=${codes.code_g} />
+            <p class="fed-read-instr">Call them and read this code. It proves you're really connected to each other - not someone in the middle.</p>
+            <div class="fed-waiting"><span class="fed-spinner"></span> Waiting for them to check your code…</div>
+            <${TwoOfTwoMeter} n=${0} />
+        </div>`}
+
+        ${step === 'theircode' && codes && html`<${FedCodeCompare}
+            title="Check the code they read you"
+            instruction="They'll read you a code. Type exactly what you hear."
+            expectedCode=${codes.code_h}
+            scope=${hostScope}
+            tier4=${tier4}
+            confirmLabel="Yes - connect"
+            busy=${busy}
+            onConfirm=${doConfirm}
+            onReject=${() => setStep('aborted')} />`}
+
+        ${step === 'done' && html`<div class="fed-step fed-done">
+            <div class="fed-done-check">✓</div>
+            <h2>You're connected to ${scan && scan.host_chain}</h2>
+            <${TwoOfTwoMeter} n=${2} />
+            <p class="muted">Nothing was deleted. This added a connection you can turn off any time.</p>
+            <button class="btn btn-primary" onClick=${onExit}>Done</button>
+        </div>`}
+
+        ${step === 'aborted' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Stopped - the codes didn't match</h3>
+            <p class="fed-compare-bad">Nothing was shared and nothing was changed on your brain. Hang up and call them back on a number you trust, then start over.</p>
+            <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Networks</button></div>
+        </div>`}
+    </div>`;
+}
+
+// HostJoinWizard - "Let someone join". Maps to host H1-H7.
+function HostJoinWizard({ onExit }) {
+    const [step, setStep] = useState('create');
+    const [endpoint, setEndpoint] = useState(`https://${location.hostname}:8444`);
+    const [session, setSession] = useState(null);   // {session_id, otpauth_uri, host_pin}
+    const [view, setView] = useState(null);          // host status view
+    const [grant, setGrant] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+    const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
+
+    const doCreate = async () => {
+        setBusy(true); setErr('');
+        try { const r = await fedHostCreate(endpoint); setSession(r); setStep('showqr'); }
+        catch (e) { fail(e); }
+        setBusy(false);
+    };
+    const doScanReturn = async (uri) => {
+        setBusy(true); setErr('');
+        try { await fedHostScanReturn(session.session_id, uri); setStep('waiting'); }
+        catch (e) { fail(e); }
+        setBusy(false);
+    };
+    const doApprove = async (typedCode) => {
+        setBusy(true); setErr('');
+        try { await fedHostApprove(session.session_id, { typed_code: typedCode, ...grant }); setStep('readback'); }
+        catch (e) { fail(e); }
+        setBusy(false);
+    };
+    // Cancel from a non-decision screen: burn the session and leave.
+    const abort = async () => {
+        try { if (session) await fedHostAbort(session.session_id); } catch (e) {}
+        onExit();
+    };
+    // Reject at the trust moment: burn the session but STAY mounted so the
+    // "Do NOT approve" safety message is actually seen.
+    const rejectStop = async () => {
+        try { if (session) await fedHostAbort(session.session_id); } catch (e) {}
+        setStep('aborted');
+    };
+
+    // Poll host session status during waiting / readback.
+    useEffect(() => {
+        if (!session || (step !== 'waiting' && step !== 'readback')) return;
+        let live = true;
+        const tick = async () => {
+            try {
+                const v = await fedHostStatus(session.session_id);
+                if (!live) return;
+                setView(v);
+                if (step === 'waiting' && v.guest_chain) setStep('review');
+                if (step === 'readback' && v.active) setStep('connected');
+            } catch (e) {}
+        };
+        const id = setInterval(tick, 2000); tick();
+        return () => { live = false; clearInterval(id); };
+    }, [step, session]);
+
+    return html`<div class="fed-wizard">
+        <div class="fed-wizard-head">
+            <button class="btn fed-back" onClick=${step === 'create' ? onExit : abort}>← ${step === 'create' ? 'Back' : 'Cancel'}</button>
+            <span class="fed-wizard-title">Let someone join</span>
+        </div>
+        ${err && html`<div class="fed-err">${err}</div>`}
+
+        ${step === 'create' && html`<div class="fed-step">
+            <h2>Let someone join your network</h2>
+            <${FedGreenRail} />
+            <div class="fed-field">
+                <label>Your network address (how they'll reach you)</label>
+                <input class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:8444" />
+            </div>
+            <button class="btn btn-primary" disabled=${busy} onClick=${doCreate}>${busy ? 'Working…' : 'Show my connection code'}</button>
+        </div>`}
+
+        ${step === 'showqr' && session && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Have them scan this</h3>
+            <${FedQr} text=${session.otpauth_uri} caption="Their SAGE app - or Google Authenticator - points at this." />
+            <p class="muted">Best done in the same room, or held up to a video call you trust.</p>
+            <h3>Then scan their code back</h3>
+            <${FedScanInput} onValue=${doScanReturn} busy=${busy} />
+        </div>`}
+
+        ${step === 'waiting' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <div class="fed-waiting"><span class="fed-spinner"></span> Waiting for their request…</div>
+        </div>`}
+
+        ${step === 'review' && view && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Someone using the name "${view.guest_chain}" wants to connect</h3>
+            ${view.guest_scope && html`<${FedScopeSummary} scope=${view.guest_scope} heading="They'll let YOU reach:" />`}
+            <h4>What can they read on YOUR network?</h4>
+            <p class="muted">Conservative by default. Blank shares nothing.</p>
+            <${FedShareForm} value=${grant} onChange=${setGrant} />
+            <div class="fed-step-actions">
+                <button class="btn btn-danger" onClick=${abort}>Ignore</button>
+                <button class="btn btn-primary" onClick=${() => setStep('compare')}>Next: check their code</button>
+            </div>
+        </div>`}
+
+        ${step === 'compare' && view && html`<${FedCodeCompare}
+            title="Check their code"
+            instruction="They'll read you a code. Type exactly what you hear. This is the moment that proves it's really them."
+            expectedCode=${view.code_g}
+            scope=${grant}
+            confirmLabel="Yes, they match - approve"
+            busy=${busy}
+            onConfirm=${doApprove}
+            onBack=${() => setStep('review')}
+            onReject=${rejectStop} />`}
+
+        ${step === 'readback' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Read this code back to them</h3>
+            ${view && view.code_h ? html`<${BigCode} code=${view.code_h} />` : html`<div class="fed-waiting"><span class="fed-spinner"></span> Preparing…</div>`}
+            <p class="fed-read-instr">Read ${view && view.guest_chain ? view.guest_chain : 'them'} this code so they can confirm it. Say it out loud - don't paste it.</p>
+            <div class="fed-waiting"><span class="fed-spinner"></span> You approved. Waiting for them (2 of 2)…</div>
+            <${TwoOfTwoMeter} n=${1} />
+        </div>`}
+
+        ${step === 'connected' && html`<div class="fed-step fed-done">
+            <div class="fed-done-check">✓</div>
+            <h2>Connected to ${view && view.guest_chain}</h2>
+            <${TwoOfTwoMeter} n=${2} />
+            <p class="muted">Nothing was deleted. You can turn this connection off any time.</p>
+            <button class="btn btn-primary" onClick=${onExit}>Done</button>
+        </div>`}
+
+        ${step === 'aborted' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Stopped - the codes didn't match</h3>
+            <p class="fed-compare-bad">Do NOT approve. Nothing was shared and nothing was changed on your brain. Hang up and call them back on a number you trust, then start over.</p>
+            <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Networks</button></div>
+        </div>`}
+    </div>`;
+}
+
+// FederationPage - the 8th sidebar section landing: role fork + connections list.
+function FederationPage() {
+    const [mode, setMode] = useState('landing'); // landing | guest | host
+    const [conns, setConns] = useState(null);
+    const [localChain, setLocalChain] = useState('');
+    const [err, setErr] = useState('');
+
+    const load = async () => {
+        try { const r = await fedConnections(); setConns(r.connections || []); setLocalChain(r.local_chain_id || ''); setErr(''); }
+        catch (e) { setErr(String(e.message || e)); setConns([]); }
+    };
+    useEffect(() => { if (mode === 'landing') load(); }, [mode]);
+
+    const revoke = async (chain) => {
+        if (!confirm(`Turn off the connection to ${chain}? This does NOT erase anything - it just stops the two networks from reaching each other.`)) return;
+        try { await fedRevoke(chain); showToast(`Disconnected from ${chain}`, 'success'); load(); }
+        catch (e) { showToast(String(e.message || e), 'error'); }
+    };
+
+    if (mode === 'guest') return html`<div class="page fed-page"><${GuestJoinWizard} onExit=${() => setMode('landing')} /></div>`;
+    if (mode === 'host') return html`<div class="page fed-page"><${HostJoinWizard} onExit=${() => setMode('landing')} /></div>`;
+
+    return html`<div class="page fed-page">
+        <div class="fed-landing">
+            <h1>Networks</h1>
+            <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> - across the internet or your network. This is not the same as adding an agent to your own SAGE (do that under Agents), or joining other computers on your LAN into one brain (that's the quorum Network section).</p>
+            <${FedGreenRail} />
+            ${err && html`<div class="fed-err">${err}</div>`}
+            <div class="fed-roles">
+                <button class="fed-role-card" onClick=${() => setMode('guest')}>
+                    <div class="fed-role-glyph">${icons.federation}</div>
+                    <div class="fed-role-title">Join someone's network</div>
+                    <div class="fed-role-desc">They'll show you a code to scan.</div>
+                </button>
+                <button class="fed-role-card" onClick=${() => setMode('host')}>
+                    <div class="fed-role-glyph">${icons.federation}</div>
+                    <div class="fed-role-title">Let someone join mine</div>
+                    <div class="fed-role-desc">You'll show a code for them to scan.</div>
+                </button>
+            </div>
+
+            <div class="fed-conns">
+                <h3>Your connections</h3>
+                ${conns === null && html`<div class="muted">Loading…</div>`}
+                ${conns && conns.length === 0 && html`<div class="muted">No connections yet. ${localChain && html`<span>Your network id: <code>${localChain}</code></span>`}</div>`}
+                ${conns && conns.map(c => html`<div class="fed-conn-row" key=${c.remote_chain_id}>
+                    <div class="fed-conn-main">
+                        <span class="fed-conn-status ${c.status === 'active' && !c.expired ? 'on' : 'off'}"></span>
+                        <span class="fed-conn-name">${c.remote_chain_id}</span>
+                        <span class="fed-conn-meta muted">${c.expired ? 'expired' : c.status} · ${(c.allowed_domains || []).join(', ') || 'no domains'}</span>
+                    </div>
+                    ${c.status === 'active' && html`<button class="btn btn-danger fed-conn-off" onClick=${() => revoke(c.remote_chain_id)}>Turn off</button>`}
+                </div>`)}
+            </div>
+        </div>
+    </div>`;
+}
+
 render(html`<${App} />`, document.getElementById('app'));

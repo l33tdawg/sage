@@ -107,6 +107,13 @@ type DashboardHandler struct {
 	// when requests include X-Agent-ID headers (i.e. MCP agent requests).
 	BadgerStore *store.BadgerStore
 
+	// Federation — the v11 JOIN ceremony driver (off-consensus). When set, the
+	// cookie-authed /v1/dashboard/federation/* proxy drives the guided guest/host
+	// wizards by calling the federation Manager directly (the browser has a
+	// dashboard session, not the operator's signing key, so it cannot hit the
+	// agent-signed REST endpoints; this proxy IS the operator half).
+	Federation FederationJoinDriver
+
 	// pendingImports holds parsed records from preview, keyed by import ID.
 	pendingImports sync.Map // string -> *pendingImport
 
@@ -357,6 +364,15 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Group(func(r chi.Router) {
 				r.Use(h.wizardSecurityGate)
 				h.RegisterChatGPTWizardRoutes(r)
+			})
+
+			// v11 real-TOTP federation JOIN ceremony proxy. Same-origin gated on
+			// top of authMiddleware (like the ChatGPT wizard) because these routes
+			// broadcast tx-33/tx-34 and dial remote peers on the operator's behalf,
+			// so a cross-origin tab must never be able to drive them.
+			r.Group(func(r chi.Router) {
+				r.Use(h.wizardSecurityGate)
+				h.registerFederationRoutes(r)
 			})
 		})
 
