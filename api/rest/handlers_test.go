@@ -1027,6 +1027,9 @@ func (m *mockAgentStore) InsertRedeployLog(_ context.Context, _ *store.Redeploym
 func (m *mockAgentStore) GetRedeployLog(_ context.Context, _ string) ([]*store.RedeploymentLogEntry, error) {
 	return nil, nil
 }
+func (m *mockAgentStore) GetLatestRedeployLog(_ context.Context) (*store.RedeploymentLogEntry, error) {
+	return nil, nil
+}
 func (m *mockAgentStore) UpdateRedeployLog(_ context.Context, _ int64, _, _ string) error {
 	return nil
 }

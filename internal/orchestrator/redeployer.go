@@ -391,6 +391,12 @@ func (r *Redeployer) GetLiveStatus(ctx context.Context) (status, currentPhase, o
 		status = "completed"
 	case latest.Status == string(StatusInProgress):
 		status = "running"
+	case lock.Active:
+		// Between phases: the previous phase's row already flipped to 'completed'
+		// but the next phase's in_progress row is not inserted yet. The lock is
+		// still held, so the run is mid-flight - report running, not idle (which
+		// would let a poll stop early and flash a false success).
+		status = "running"
 	default:
 		status = "idle"
 	}
