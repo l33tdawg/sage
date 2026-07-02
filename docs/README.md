@@ -13,6 +13,8 @@ The central documentation resource for **SAGE** — Sovereign Agent Governed Exp
 | **Integrate an agent / look up exact API, SDK, MCP, or behavior** | **[`reference/INDEX.md`](reference/INDEX.md)** — the authoritative, code-verified reference (cites `file:line`). Point agents here. |
 | Get a node running and submit your first memory | [`GETTING_STARTED.md`](GETTING_STARTED.md) |
 | Understand the system design (BFT, RBAC, federation, storage) | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| Connect your whole SAGE to another network (federation join) | [`FEDERATION.md`](FEDERATION.md) |
+| Read + navigate the CEREBRUM brain view (MRI, node encoding, train of thought) | [`BRAIN.md`](BRAIN.md) |
 | Bootstrap an admin / org / clearance setup | [`ADMIN_BOOTSTRAP.md`](ADMIN_BOOTSTRAP.md) |
 | Configure lifecycle hooks | [`HOOKS.md`](HOOKS.md) |
 

@@ -26,6 +26,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, and the five-gate query pipeline. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
 | [`concepts/content-validation-gate.md`](concepts/content-validation-gate.md) | The optional Layer-2 content-validation gate (`outcome_class`-keyed reject hook) and the deployment **arming seam** — both the stateless `contentvalidator.SetProvider` and the context-aware `SetProviderWithContext` (exposes the on-chain `RoleResolver` for signer-authority checks) — enabling it without patching the cmd entrypoints. |
+| [`federation-and-brain-api.md`](federation-and-brain-api.md) | The v11 HTTP surface: cross-network federation (`/fed/v1/*` mTLS listener, `/v1/federation/*` operator REST, `/v1/dashboard/federation/*` proxy) and the memory train-of-thought endpoint (`GET /v1/dashboard/memory/{id}/related`). All off-consensus; only tx-33/34 reach chain state. |
 
 ---
 
