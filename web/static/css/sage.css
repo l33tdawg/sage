@@ -20,6 +20,10 @@
     --radius: 8px;
     --radius-lg: 12px;
     --shadow: 0 4px 24px rgba(0,0,0,0.4);
+    /* Surface tokens referenced across the app (were undefined -> transparent
+       cards/code blocks). Alias to the existing surface scale. */
+    --card-bg: var(--bg-elevated);
+    --code-bg: var(--bg-deep);
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -4176,3 +4180,11 @@ input[type="range"]::-moz-range-thumb {
 
 .fed-landing-sub { font-size: 13px; line-height: 1.5; margin: 4px 0 8px; max-width: 620px; }
 .fed-compare-back { margin-top: 14px; width: 100%; font-size: 13px; }
+
+/* Release badge in the CEREBRUM header */
+.sage-version {
+    display: inline-block; font-size: 11px; font-weight: 600; letter-spacing: 0.3px;
+    color: var(--primary); background: var(--primary-dim);
+    border: 1px solid var(--primary); border-radius: 999px;
+    padding: 1px 8px; margin-left: 8px; vertical-align: middle;
+}

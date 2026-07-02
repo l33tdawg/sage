@@ -9,6 +9,10 @@ const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
 const html = window.html;
 
+// Product version shown in the CEREBRUM header. Bump at release; the precise
+// build string (git describe) stays available on the backend.
+const SAGE_VERSION = 'v11.0';
+
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
 // directly). Reads the same /v1/dashboard/memory/graph the 2D brain uses.
@@ -6979,7 +6983,7 @@ function App() {
         </div>
         <div class="main-content zoom-${textSize}">
             <div class="top-bar">
-                <h1>CEREBRUM <span style="font-size:12px;font-weight:400;color:var(--text-muted);margin-left:6px">Your SAGE Brain</span></h1>
+                <h1>CEREBRUM <span class="sage-version" title="SAGE release">${SAGE_VERSION}</span> <span style="font-size:12px;font-weight:400;color:var(--text-muted);margin-left:6px">Your SAGE Brain</span></h1>
                 <div class="spacer"></div>
                 ${isEncrypted && html`
                     <button class="lock-btn" title="Lock CEREBRUM" onClick=${async () => {

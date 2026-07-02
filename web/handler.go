@@ -324,6 +324,8 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Get("/v1/dashboard/tags", h.handleListTags)
 			r.Get("/v1/dashboard/memory/{id}/tags", h.handleGetMemoryTags)
 			r.Put("/v1/dashboard/memory/{id}/tags", h.handleSetMemoryTags)
+			// Memory "train of thought" - powers the MRI click-to-explore.
+			r.Get("/v1/dashboard/memory/{id}/related", h.handleMemoryRelated)
 
 			// Auto-start (open at login)
 			r.Get("/v1/dashboard/settings/autostart", h.handleGetAutostart)
@@ -382,8 +384,16 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			http.Redirect(w, r, "/ui/", http.StatusFound)
 		})
 
-		// SPA — serve static files, fallback to index.html
-		staticFS, _ := fs.Sub(StaticFS, "static")
+		// SPA - serve static files, fallback to index.html. SAGE_UI_DIR (dev only)
+		// serves from disk instead of the embed, so UI edits show on a browser
+		// reload with no rebuild; unset (production) uses the embedded assets.
+		var staticFS fs.FS
+		if dir := os.Getenv("SAGE_UI_DIR"); dir != "" {
+			staticFS = os.DirFS(dir)
+		} else {
+			sub, _ := fs.Sub(StaticFS, "static")
+			staticFS = sub
+		}
 		fileServer := http.FileServer(http.FS(staticFS))
 
 		// Content-hash asset version for cache-busting. index.html's ?v token was

@@ -27,6 +27,7 @@ const LINK_TYPES = {
   related:     { color: '#42587a', label: 'related',     typed: true },
   parent:      { color: '#243450', label: 'lineage',     typed: false },
   domain:      { color: '#1b2942', label: 'same domain', typed: false },
+  focus:       { color: '#39d0ff', label: 'train of thought', typed: false },
 };
 const PALETTE = ['#ff6b9d','#ffd166','#5ee2a0','#5ab0ff','#c08bff','#ff9f5a','#4dd6c4','#f7748a','#9ad14b','#7aa0ff'];
 function hexToRgb(h){ const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
@@ -118,6 +119,22 @@ const STYLE = `
 .mrib .tip .chip{font-size:10px;padding:1px 6px;border-radius:6px;background:#0e1b30;color:#aecbf0;margin-right:4px}
 .mrib .flag{position:absolute;bottom:16px;right:16px;color:#3a4a66;font-size:10px;letter-spacing:1px}
 .mrib .boot{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#5d7395;letter-spacing:2px;font-size:12px}
+.mrib .explore{display:none;top:70px;left:16px;width:310px;max-height:calc(100% - 150px);flex-direction:column;padding:0;overflow:hidden}
+.mrib .explore .ex-head{padding:13px 15px 11px;border-bottom:1px solid #15233b}
+.mrib .explore .ex-title{color:#39d0ff;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
+.mrib .explore .ex-src{color:#dceaff;font-size:12px;line-height:1.45;max-height:54px;overflow:hidden;margin-bottom:9px}
+.mrib .explore .ex-back{color:#39d0ff;font-size:11px;cursor:pointer;border:1px solid #15233b;border-radius:8px;padding:5px 10px;display:inline-block;user-select:none}
+.mrib .explore .ex-back:hover{background:#0e1b30}
+.mrib .explore .ex-count{padding:8px 15px 4px;color:#5d7395;font-size:10px;letter-spacing:1px;text-transform:uppercase}
+.mrib .explore .ex-list{flex:1;min-height:0;overflow:auto;padding:0 8px 10px}
+.mrib .explore .ex-row{display:flex;gap:9px;align-items:flex-start;padding:8px 8px;border-radius:8px;cursor:pointer}
+.mrib .explore .ex-row:hover{background:#0e1b30}
+.mrib .explore .ex-row .dot{margin-top:4px;flex:none}
+.mrib .explore .ex-c{color:#cfe3ff;font-size:12px;line-height:1.4;max-height:50px;overflow:hidden}
+.mrib .explore .ex-m{margin-top:3px;font-size:10px;color:#5d7395;display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.mrib .explore .ex-rel{font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.mrib .explore .ex-cc{color:#7f93b5}
+.mrib .explore .ex-empty{color:#5d7395;padding:14px;text-align:center;font-size:12px}
 `;
 
 function injectStyleOnce() {
@@ -166,11 +183,12 @@ export function mountMriBrain(container, opts = {}) {
       <div class="cls">A complementary-learning-systems view: SAGE is the <b>hippocampus</b>
         (episodic capture); corroboration + decay is the <b>sleep/consolidation</b> cycle.</div>
       <div class="seg">Nodes — memories</div>
-      <div class="row"><span class="k">◍</span><div class="t"><b>Size + glow = corroboration</b><br><span>consolidation toward cortex</span></div></div>
+      <div class="row"><span class="k">◍</span><div class="t"><b>Size + glow = corroboration</b><br><span>settled knowledge, pulled to the core</span></div></div>
       <div class="row"><span class="k">◌</span><div class="t"><b>Fade = confidence decay</b><br><span>the forgetting curve</span></div></div>
       <div class="row"><span class="k">⊘</span><div class="t"><b>Greyed = challenged / pruned</b><br><span>synaptic pruning</span></div></div>
       <div class="seg">Position</div>
-      <div class="row"><span class="k">⊙</span><div class="t"><b>Depth = consolidation</b><br><span>centre = hippocampus (fresh) → surface = cortex</span></div></div>
+      <div class="row"><span class="k">⊙</span><div class="t"><b>Depth = how established</b><br><span>centre = settled / corroborated → rim = new & fresh</span></div></div>
+      <div class="row"><span class="k">◉</span><div class="t"><b>Click a memory</b><br><span>see its train of thought</span></div></div>
       <div class="seg">Lobes — domains</div><div class="lobes"></div>
       <div class="seg">Connectome — typed links</div><div class="linktypes"></div>
     </div>
@@ -186,6 +204,10 @@ export function mountMriBrain(container, opts = {}) {
     <div class="flag"></div>`;
   container.appendChild(root);
   const $ = s => root.querySelector(s);
+  const escapeHtml = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // Click-to-explore ("train of thought") focus state. focusSet null = full brain.
+  let focusId = null, focusSet = null;
 
   const domainColors = {}; let seq = 0;
   const domainColor = k => { if(!k) k='unknown'; if(!domainColors[k]){ domainColors[k]=PALETTE[seq%PALETTE.length]; seq++; } return domainColors[k]; };
@@ -197,6 +219,9 @@ export function mountMriBrain(container, opts = {}) {
   // deprecated greyed.
   const nodeVal = n => 1.4 + (n.corroboration_count||0)*1.1 + (n.confidence||0)*0.8;
   function nodeColorRGBA(n){
+    // Focus mode: everything outside the clicked memory's train of thought fades
+    // back so the related constellation stands out.
+    if(focusSet && !focusSet.has(n.id)) return 'rgba(96,110,135,0.08)';
     if(n.status==='deprecated') return 'rgba(108,120,145,0.30)';
     if(n.status==='challenged') return 'rgba(150,162,185,0.55)';
     const [r,g,b]=hexToRgb(domainColor(n.domain));
@@ -219,9 +244,13 @@ export function mountMriBrain(container, opts = {}) {
       const az=((di[n.domain]||0)/nd)*Math.PI*2 + (hsh(n.id,1)-0.5)*(Math.PI*2/nd)*0.82;
       const el=(hsh(n.id,2)-0.5)*Math.PI*0.92;
       // radius FILLS the lobe volume (cube-root → uniform density, not a hollow
-      // shell), with corroboration pushing a memory outward toward the cortex.
+      // shell) - this is the PRIMARY driver so the whole brain stays populated.
+      // Corroboration then applies a gentle INWARD pull, so settled knowledge
+      // drifts toward the core and fresh memories sit a little further out,
+      // WITHOUT emptying the centre (most memories are uncorroborated). Capped
+      // at 0.86 so no dot spills outside the brain-shaped mesh.
       const cons=Math.min(1,(n.corroboration_count||0)/8);
-      const depth=Math.min(0.97, 0.30 + Math.cbrt(hsh(n.id,3))*0.55 + cons*0.15);
+      const depth=Math.max(0.10, Math.min(0.86, 0.28 + Math.cbrt(hsh(n.id,3))*0.52 - cons*0.22));
       const ce=Math.cos(el);
       n.fx=n.x=EX*depth*ce*Math.cos(az);
       n.fy=n.y=EY*depth*Math.sin(el);
@@ -284,6 +313,8 @@ export function mountMriBrain(container, opts = {}) {
   // Re-fetch (respecting the drill domain) and re-render. Deterministic placement
   // keeps existing nodes put; no re-heat.
   function load(){
+    // A drill / reload leaves focus mode.
+    focusId = null; focusSet = null; hideExplorePanel();
     loadGraph(urlFor()).then(d => {
       if (disposed || !Graph) return;
       placeNodes(d.nodes);
@@ -292,6 +323,107 @@ export function mountMriBrain(container, opts = {}) {
       buildLobes(d);
     });
   }
+
+  // --- Click-to-explore: a memory's "train of thought" ----------------------
+  // Clicking a node fetches its top related memories, blooms them as a labelled
+  // constellation around it (adding any that aren't in the sample), dims the
+  // rest of the brain, and lists them in a side panel. Click the background or
+  // "back" to return to the full brain.
+  const relatedBase = fetchUrl.split('/memory/')[0] + '/memory/';
+
+  function placeNear(node, anchor, i){
+    const rr = 40 + (i % 10) * 7;
+    const a = hsh(node.id, 1) * Math.PI * 2, el = (hsh(node.id, 2) - 0.5) * Math.PI;
+    const ce = Math.cos(el);
+    node.fx = node.x = anchor.x + rr * ce * Math.cos(a);
+    node.fy = node.y = anchor.y + rr * Math.sin(el);
+    node.fz = node.z = anchor.z + rr * ce * Math.sin(a);
+  }
+
+  function exitFocus(){
+    if (!focusId) return;
+    focusId = null; focusSet = null;
+    if (Graph) {
+      const gd = Graph.graphData();
+      gd.nodes = gd.nodes.filter(n => !n._added);
+      gd.links = gd.links.filter(l => l.link_type !== 'focus');
+      Graph.graphData(gd);
+      Graph.nodeColor(nodeColorRGBA);
+    }
+    hideExplorePanel();
+  }
+
+  async function exploreNode(n){
+    if (!Graph) return;
+    let data;
+    try {
+      const resp = await fetch(relatedBase + encodeURIComponent(n.id) + '/related?k=50', { credentials: 'same-origin' });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      data = await resp.json();
+    } catch (e) { console.warn('[mri] related fetch failed:', e.message); return; }
+    if (disposed) return;
+    const related = (data && Array.isArray(data.related)) ? data.related : [];
+    focusId = n.id;
+    focusSet = new Set([n.id]);
+    related.forEach(rr => focusSet.add(rr.id));
+
+    const gd = Graph.graphData();
+    gd.nodes = gd.nodes.filter(nn => !nn._added);
+    gd.links = gd.links.filter(l => l.link_type !== 'focus');
+    const present = new Set(gd.nodes.map(nn => nn.id));
+    related.forEach((rr, i) => {
+      if (!present.has(rr.id)) {
+        const node = { id: rr.id, domain: rr.domain || 'unknown', label: rr.content || rr.id,
+          status: rr.status || 'committed', corroboration_count: rr.corroboration_count || 0,
+          confidence: typeof rr.confidence === 'number' ? rr.confidence : 0.5, memory_type: '', _added: true };
+        placeNear(node, n, i);
+        gd.nodes.push(node);
+        present.add(rr.id);
+      }
+      gd.links.push({ source: n.id, target: rr.id, link_type: 'focus' });
+    });
+    Graph.graphData(gd);
+    Graph.nodeColor(nodeColorRGBA);
+    renderExplorePanel(data, related);
+    // Frame the whole train of thought at a fixed, reliable distance (the
+    // constellation spans ~110 units around the clicked node): pull the camera
+    // out along the node's radial direction and look at it.
+    const r = Math.hypot(n.x, n.y, n.z) || 1, d = 300;
+    Graph.cameraPosition({ x: n.x*(1+d/r), y: n.y*(1+d/r), z: n.z*(1+d/r) }, n, 900);
+  }
+
+  const RELCOL = { chain:'#39d0ff', 'same-topic':'#7ee787', similar:'#ffb454', 'same-lobe':'#8a9bb8' };
+  function renderExplorePanel(data, related){
+    let p = $('.explore');
+    if (!p) { p = document.createElement('div'); p.className = 'panel explore'; root.appendChild(p); }
+    const rows = related.map(rr => `
+      <div class="ex-row" data-id="${escapeHtml(rr.id)}">
+        <span class="dot" style="background:${domainColor(rr.domain)}"></span>
+        <div class="ex-t">
+          <div class="ex-c">${escapeHtml(rr.content || rr.id)}</div>
+          <div class="ex-m"><span class="ex-rel" style="color:${RELCOL[rr.relation]||'#8a9bb8'}">${escapeHtml(rr.relation||'')}</span>
+            <span class="ex-dom">${escapeHtml(rr.domain||'')}</span>${rr.corroboration_count?` <span class="ex-cc">◍${rr.corroboration_count}</span>`:''}</div>
+        </div>
+      </div>`).join('');
+    p.innerHTML = `
+      <div class="ex-head">
+        <div class="ex-title">◉ Train of thought</div>
+        <div class="ex-src">${escapeHtml(data.content || '')}</div>
+        <div class="ex-back">← back to full brain</div>
+      </div>
+      <div class="ex-count">${related.length} related ${related.length===1?'memory':'memories'}</div>
+      <div class="ex-list">${rows || '<div class="ex-empty">No related memories found.</div>'}</div>`;
+    p.querySelector('.ex-back').onclick = exitFocus;
+    p.querySelectorAll('.ex-row').forEach(row => {
+      row.onclick = () => {
+        const rid = row.getAttribute('data-id');
+        const gn = (Graph.graphData().nodes || []).find(nn => nn.id === rid);
+        if (gn) exploreNode(gn);
+      };
+    });
+    p.style.display = 'flex';
+  }
+  function hideExplorePanel(){ const p = $('.explore'); if (p) p.style.display = 'none'; }
 
   loadGraph(urlFor()).then(data => {
     if (disposed) return;
@@ -302,13 +434,14 @@ export function mountMriBrain(container, opts = {}) {
       .graphData(data).nodeId('id').nodeLabel(()=>'' )
       .nodeVal(nodeVal).nodeColor(nodeColorRGBA).nodeRelSize(2.4).nodeResolution(10).nodeOpacity(0.9)
       .linkColor(l=>(LINK_TYPES[l.link_type]||LINK_TYPES.related).color)
-      .linkWidth(l=> l.link_type==='contradicts'?0.6 : (LINK_TYPES[l.link_type]||{}).typed?0.35:0.18)
-      .linkOpacity(0.3)
-      .linkDirectionalParticles(l=> flow&&(LINK_TYPES[l.link_type]||{}).typed?2:0)
+      .linkWidth(l=> l.link_type==='focus'?0.8 : l.link_type==='contradicts'?0.6 : (LINK_TYPES[l.link_type]||{}).typed?0.35:0.18)
+      .linkOpacity(0.32)
+      .linkDirectionalParticles(l=> l.link_type==='focus'?3 : (flow&&(LINK_TYPES[l.link_type]||{}).typed?2:0))
       .linkDirectionalParticleWidth(1.1).linkDirectionalParticleSpeed(0.006)
       .warmupTicks(1).cooldownTicks(6)
       .onNodeHover(showTip)
-      .onNodeClick(n=>{ const r=Math.hypot(n.x,n.y,n.z)||1, d=40; Graph.cameraPosition({x:n.x*(1+d/r),y:n.y*(1+d/r),z:n.z*(1+d/r)},n,900); });
+      .onNodeClick(n=>{ exploreNode(n); })
+      .onBackgroundClick(()=>{ exitFocus(); });
 
     // Positions are pinned by placeNodes() (fx/fy/fz), so disable the force
     // simulation entirely — zero per-tick cost regardless of node count.
