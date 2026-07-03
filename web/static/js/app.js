@@ -1247,7 +1247,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                     <div class="wizard-modal" style="max-width:480px;">
                         <div class="wizard-header">
                             <h2>Transfer Domain Memories</h2>
-                            <button class="detail-close" onClick=${() => setDomainTransfer(null)}>x</button>
+                            <button class="detail-close" onClick=${() => setDomainTransfer(null)}>×</button>
                         </div>
                         <div class="wizard-body" style="padding:20px;">
                             <p style="color:var(--text-dim);margin-bottom:16px;">
@@ -1274,7 +1274,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                     <div class="wizard-modal" style="max-width:420px;">
                         <div class="wizard-header">
                             <h2>${bulkAction === 'domain' ? 'Move to Domain' : 'Add Tag'}</h2>
-                            <button class="detail-close" onClick=${() => { setBulkAction(null); setBulkInput(''); }}>x</button>
+                            <button class="detail-close" onClick=${() => { setBulkAction(null); setBulkInput(''); }}>×</button>
                         </div>
                         <div class="wizard-body" style="padding:20px;">
                             <p style="color:var(--text-dim);margin-bottom:12px;">
@@ -1311,7 +1311,7 @@ function BrainView({ sse, onSelectMemory, timelineFilter }) {
                     <div class="wizard-modal" style="max-width:480px;">
                         <div class="wizard-header">
                             <h2>Reassign Memories</h2>
-                            <button class="detail-close" onClick=${() => setBulkAction(null)}>x</button>
+                            <button class="detail-close" onClick=${() => setBulkAction(null)}>×</button>
                         </div>
                         <div class="wizard-body" style="padding:20px;">
                             <p style="color:var(--text-dim);margin-bottom:16px;">
@@ -1516,7 +1516,7 @@ function ToastContainer() {
     const icons = { success: '\u2713', error: '\u2717', warning: '\u26A0', info: '\u2139' };
 
     return html`
-        <div class="toast-container">
+        <div class="toast-container" role="status" aria-live="polite" aria-atomic="true">
             ${toasts.map(t => html`
                 <div key=${t.id} class="toast ${t.type} ${t.removing ? 'removing' : ''}">
                     <span class="toast-icon">${icons[t.type] || icons.info}</span>
@@ -1638,7 +1638,7 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
         <div class="detail-overlay ${visible ? 'open' : ''}" onTransitionEnd=${handleTransitionEnd}>
             <div class="detail-header">
                 <h2>Memory Detail</h2>
-                <button class="detail-close" onClick=${onClose}>x</button>
+                <button class="detail-close" onClick=${onClose}>×</button>
             </div>
             <div class="detail-body">
                 <div class="detail-section">
@@ -4599,7 +4599,7 @@ function HelpOverlay({ onClose, initialSection }) {
             <div class="help-modal guide-modal">
                 <div class="help-modal-header">
                     <h2>CEREBRUM Guide</h2>
-                    <button class="detail-close" onClick=${handleDismiss}>x</button>
+                    <button class="detail-close" onClick=${handleDismiss}>×</button>
                 </div>
                 <div class="guide-tabs">
                     ${sections.map(s => html`
@@ -4767,7 +4767,7 @@ function LoginScreen({ onSuccess, nextHint }) {
 // Network Page — Agent Management
 // ============================================================================
 
-const CLEARANCE_LABELS = ['Guest', 'Internal', 'Confidential', 'Secret', 'Top Secret'];
+const CLEARANCE_LABELS = ['Public', 'Internal', 'Confidential', 'Secret', 'Top Secret'];
 
 // Role metadata. Role is immutable after on-chain registration, so the Access
 // tab renders it read-only (no editable selector) to avoid reporting a "Saved"
@@ -5420,7 +5420,7 @@ function NetworkPage({ sse }) {
                     <div class="wizard-modal" style="max-width:520px;">
                         <div class="wizard-header">
                             <h2>New Governance Proposal</h2>
-                            <button class="detail-close" onClick=${() => setShowGovModal(false)}>x</button>
+                            <button class="detail-close" onClick=${() => setShowGovModal(false)}>×</button>
                         </div>
                         <div class="wizard-body" style="padding:20px;">
                             <div class="wizard-field">
@@ -5689,7 +5689,7 @@ function NetworkPage({ sse }) {
                     <div class="wizard-modal" style="max-width:480px;">
                         <div class="wizard-header">
                             <h2>Merge Agent Memories</h2>
-                            <button class="detail-close" onClick=${() => setMergeTarget(null)}>x</button>
+                            <button class="detail-close" onClick=${() => setMergeTarget(null)}>×</button>
                         </div>
                         <div class="wizard-body" style="padding:20px;">
                             <p style="color:var(--text-dim);margin-bottom:16px;">
@@ -5718,7 +5718,7 @@ function NetworkPage({ sse }) {
                     <div class="wizard-modal" style="max-width:520px;">
                         <div class="wizard-header">
                             <h2>${tagTransfer.step === 'tags' ? 'Transfer Memories by Tag' : 'Select Target Agent'}</h2>
-                            <button class="detail-close" onClick=${() => setTagTransfer(null)}>x</button>
+                            <button class="detail-close" onClick=${() => setTagTransfer(null)}>×</button>
                         </div>
                         <div class="wizard-body" style="padding:20px;">
                             ${tagTransfer.step === 'tags' ? html`
@@ -5774,7 +5774,7 @@ function NetworkPage({ sse }) {
             ${showRotateConfirm && html`
                 <div class="wizard-overlay" onClick=${(e) => { if (e.target === e.currentTarget) setShowRotateConfirm(null); }}>
                     <div class="wizard-modal" style="max-width:440px;">
-                        <div class="wizard-header"><h2>Rotate Agent Key</h2><button class="detail-close" onClick=${() => setShowRotateConfirm(null)}>x</button></div>
+                        <div class="wizard-header"><h2>Rotate Agent Key</h2><button class="detail-close" onClick=${() => setShowRotateConfirm(null)}>×</button></div>
                         <div class="wizard-body" style="padding:20px;">
                             <p style="color:var(--text-dim);margin-bottom:16px;">
                                 This will generate a new Ed25519 identity key for <strong>${showRotateConfirm.name}</strong>.
@@ -5914,7 +5914,7 @@ function AddAgentWizard({ onClose, onCreated }) {
             <div class="wizard-modal">
                 <div class="wizard-header">
                     <h2>Add Agent</h2>
-                    <button class="detail-close" onClick=${onClose}>x</button>
+                    <button class="detail-close" onClick=${onClose}>×</button>
                 </div>
                 <div class="wizard-body">
                     <div class="wizard-stepper">
@@ -6333,7 +6333,7 @@ function ChatGPTSetupWizard({ agents, onClose }) {
             <div class="wizard-modal" style="max-width:680px;max-height:85vh;display:flex;flex-direction:column;">
                 <div class="wizard-header">
                     <h2>Connect to ChatGPT — Step ${step} of 7</h2>
-                    <button class="detail-close" onClick=${onClose}>x</button>
+                    <button class="detail-close" onClick=${onClose}>×</button>
                 </div>
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;">
                     ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
@@ -6587,7 +6587,7 @@ function CursorSetupPanel({ agents, onClose }) {
             <div class="wizard-modal" style="max-width:620px;max-height:85vh;display:flex;flex-direction:column;">
                 <div class="wizard-header">
                     <h2>Connect to Cursor / Cline / Claude Desktop</h2>
-                    <button class="detail-close" onClick=${onClose}>x</button>
+                    <button class="detail-close" onClick=${onClose}>×</button>
                 </div>
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
                     <p>These clients accept bearer-token auth directly — <strong>no tunnel, no public URL, no Cloudflare account needed</strong>. They run on the same machine as SAGE and talk to <code>https://localhost:8443</code>.</p>
@@ -7343,7 +7343,7 @@ function FedScanInput({ onValue, busy }) {
 // pre-highlighted "Yes", no auto-advance, no timeout-confirm. Decisive consent
 // requires TYPING the code you heard; the confirm button stays inert until the
 // typed value matches what this node computed. "No - stop" is first-class danger.
-function FedCodeCompare({ title, instruction, expectedCode, scope, confirmLabel, onConfirm, onReject, onBack, busy, tier4 }) {
+function FedCodeCompare({ title, instruction, expectedCode, scope, scopeHeading, confirmLabel, onConfirm, onReject, onBack, busy, tier4 }) {
     const [typed, setTyped] = useState('');
     const norm = typed.replace(/\D/g, '');
     const match = norm.length === 6 && expectedCode && norm === String(expectedCode);
@@ -7352,7 +7352,7 @@ function FedCodeCompare({ title, instruction, expectedCode, scope, confirmLabel,
         <h3>${title}</h3>
         <p class="fed-compare-instr">${instruction}</p>
         ${tier4 && html`<div class="fed-tier4-note">No camera or shared screen? This spoken-code compare is your ONLY safety check - say it out loud on a call you placed to someone you trust, and only continue if it matches exactly.</div>`}
-        ${scope && html`<${FedScopeSummary} scope=${scope} heading="They will be able to reach:" />`}
+        ${scope && html`<${FedScopeSummary} scope=${scope} heading=${scopeHeading || 'They will be able to reach:'} />`}
         <label class="fed-compare-label">Type the code they read you</label>
         <input class="fed-compare-input" inputmode="numeric" autocomplete="off" maxlength="7"
             placeholder="• • • • • •" value=${typed} onInput=${e => setTyped(e.target.value)} />
@@ -7372,7 +7372,7 @@ function FedScopeSummary({ scope, heading }) {
     if (!scope) return null;
     const doms = (scope.allowed_domains && scope.allowed_domains.length) ? scope.allowed_domains : [];
     const all = doms.some(d => d === '*');
-    const clr = CLEARANCE_LABELS[scope.max_clearance || 0] || 'Guest';
+    const clr = CLEARANCE_LABELS[scope.max_clearance || 0] || 'Public';
     return html`<div class="fed-scope">
         <div class="fed-scope-h">${heading || 'What is shared:'}</div>
         <div class="fed-scope-line">${all ? 'All domains' : (doms.length ? doms.join(', ') : 'Nothing (no domains shared)')}</div>
@@ -7530,6 +7530,7 @@ function GuestJoinWizard({ onExit }) {
             instruction="They'll read you a code. Type exactly what you hear."
             expectedCode=${codes.code_h}
             scope=${hostScope}
+            scopeHeading="You will be able to reach:"
             tier4=${tier4}
             confirmLabel="Yes - connect"
             busy=${busy}
