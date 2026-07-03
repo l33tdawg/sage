@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -1590,10 +1590,22 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
     const [agentInfo, setAgentInfo] = useState(null);
     const [visible, setVisible] = useState(false);
     const [lastMemory, setLastMemory] = useState(null);
+    const [editingDomain, setEditingDomain] = useState(false);
+    const [domainInput, setDomainInput] = useState('');
+    const [domainOverride, setDomainOverride] = useState(null);
+    const [savingDomain, setSavingDomain] = useState(false);
+    const [domainList, setDomainList] = useState([]);
+
+    // Existing domains for the change-domain picker.
+    useEffect(() => {
+        fetchStats().then(d => { if (d && d.by_domain) setDomainList(Object.keys(d.by_domain).sort()); }).catch(() => {});
+    }, []);
 
     // Keep last memory data for closing animation
     useEffect(() => {
         setConfirming(false); // never carry an armed delete across to a different memory
+        setEditingDomain(false);
+        setDomainOverride(null); // drop any per-memory domain edit when a different memory opens
         if (memory) {
             setLastMemory(memory);
             // Double-rAF: first frame renders the element off-screen, second triggers transition
@@ -1630,6 +1642,19 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
         onClose();
     }
 
+    async function saveDomain() {
+        const nd = domainInput.trim();
+        const current = domainOverride || m.domain;
+        if (!nd || nd === current) { setEditingDomain(false); return; }
+        setSavingDomain(true);
+        try {
+            const res = await updateMemory(m.id || m.memory_id, { domain: nd });
+            if (res && res.error) { showToast(res.error, 'error'); }
+            else { setDomainOverride(nd); setEditingDomain(false); showToast(`Domain changed to ${nd}`, 'success'); }
+        } catch (e) { showToast('Failed to change domain: ' + (e.message || e), 'error'); }
+        setSavingDomain(false);
+    }
+
     // Use displayMemory for rendering (keeps last data during close animation)
     const m = displayMemory;
     const conf = m.confidence;
@@ -1660,7 +1685,23 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
                 <div class="detail-meta">
                     <div class="detail-meta-item">
                         <label>Domain</label>
-                        <span class="domain-badge" style="background: ${color}20; color: ${color};">${m.domain}</span>
+                        ${editingDomain ? html`
+                            <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                                <input list="md-domain-list" class="filter-select" style="padding:4px 8px;font-size:12px;min-width:130px;"
+                                    value=${domainInput} autofocus
+                                    onInput=${e => setDomainInput(e.target.value)}
+                                    onKeyDown=${e => { if (e.key === 'Enter') saveDomain(); if (e.key === 'Escape') setEditingDomain(false); }} />
+                                <datalist id="md-domain-list">${domainList.map(d => html`<option value=${d}></option>`)}</datalist>
+                                <button class="btn" style="padding:3px 9px;font-size:11px;" disabled=${savingDomain} onClick=${saveDomain}>${savingDomain ? 'Saving...' : 'Save'}</button>
+                                <button class="btn btn-secondary" style="padding:3px 9px;font-size:11px;" disabled=${savingDomain} onClick=${() => setEditingDomain(false)}>Cancel</button>
+                            </div>
+                        ` : html`
+                            <span style="display:inline-flex;align-items:center;gap:8px;">
+                                <span class="domain-badge" style="background: ${color}20; color: ${color};">${domainOverride || m.domain}</span>
+                                <button class="btn-link" style="background:none;border:none;color:var(--primary);cursor:pointer;font-size:11px;padding:0;" title="Move this memory to a different domain"
+                                    onClick=${() => { setDomainInput(domainOverride || m.domain || ''); setEditingDomain(true); }}>Change</button>
+                            </span>
+                        `}
                     </div>
                     <div class="detail-meta-item">
                         <label>Type</label>
