@@ -2914,6 +2914,19 @@ func (s *SQLiteStore) ReleaseRedeployLock(ctx context.Context) error {
 	return err
 }
 
+// ClearStaleRedeployLogs marks lingering in_progress log rows as rolled_back so
+// an abandoned/crashed run can't wedge the status poll forever.
+func (s *SQLiteStore) ClearStaleRedeployLogs(ctx context.Context) (int, error) {
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	res, err := s.writeExecContext(ctx,
+		`UPDATE redeployment_log SET status='rolled_back', completed_at=?, error='cleared: stale/abandoned redeployment run' WHERE status='in_progress'`, now)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 func (s *SQLiteStore) GetRedeployLock(ctx context.Context) (*RedeploymentLock, error) {
 	lock := &RedeploymentLock{}
 	var lockedAt, expiresAt string

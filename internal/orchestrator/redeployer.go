@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/store"
@@ -89,6 +90,13 @@ type Redeployer struct {
 	mu         sync.Mutex
 	lockTTL    time.Duration
 	statusChan chan RedeployStatus
+	// running is true only while a Deploy goroutine is actively executing IN
+	// THIS process. It's the authoritative "is a redeploy live" signal for the
+	// status poll: a persisted lock/log row from a crashed-or-restarted run does
+	// NOT set it, so a stuck run is reported as failed immediately on restart
+	// (not after the 30-min lock TTL), and a genuinely-long live run keeps
+	// reporting running even if its lock TTL lapses.
+	running atomic.Bool
 }
 
 // NewRedeployer creates a new redeployer.
@@ -111,6 +119,9 @@ func (r *Redeployer) StatusChan() <-chan RedeployStatus {
 func (r *Redeployer) Deploy(ctx context.Context, op Operation, agentID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	r.running.Store(true)
+	defer r.running.Store(false)
 
 	phases := []Phase{
 		PhaseLockAcquired,
@@ -389,25 +400,71 @@ func (r *Redeployer) GetLiveStatus(ctx context.Context) (status, currentPhase, o
 		// COMPLETED only ever appears on the success path, so treat it as done
 		// even in the brief window before its row flips in_progress->completed.
 		status = "completed"
-	case latest.Status == string(StatusInProgress):
-		status = "running"
-	case lock.Active:
-		// Between phases: the previous phase's row already flipped to 'completed'
-		// but the next phase's in_progress row is not inserted yet. The lock is
-		// still held, so the run is mid-flight - report running, not idle (which
-		// would let a poll stop early and flash a false success).
+	case r.running.Load():
+		// A Deploy goroutine is actively executing in THIS process — mid-flight,
+		// whether the last row is in_progress or we're between phases. This is the
+		// authoritative signal (not the lock TTL): a long real run keeps reporting
+		// running even past 30 min, and a persisted lock from a dead/prior-process
+		// run does NOT fake it.
 		status = "running"
 	default:
-		// Lock released, yet the last recorded phase is a non-terminal one that
-		// never reached COMPLETED - the run was abandoned (e.g. lock TTL expired
-		// mid-flight). Report failed, never idle, so a poll can't read it as a
-		// success. The genuine success window (COMPLETED row still flipping from
-		// in_progress) is caught by the PhaseCompleted case above, so this cannot
-		// misfire on a real completion.
+		// No live in-process run, yet the last recorded phase is a non-terminal
+		// one that never reached COMPLETED — the run was abandoned (crash/kill/
+		// restart). Report failed, NEVER running: without this a frozen in_progress
+		// log row (e.g. a redeploy that bricked and was recovered out-of-band) would
+		// wedge the "reconfiguration in progress" banner forever, since the derived
+		// status has no TTL of its own. The genuine success window (COMPLETED row
+		// still flipping from in_progress) is caught by the PhaseCompleted case
+		// above, so this cannot misfire on a real completion.
 		status = "failed"
 		errMsg = "redeployment did not complete (stalled at " + latest.Phase + ")"
 	}
 	return status, currentPhase, operation, agentID, errMsg, nil
+}
+
+// QuickAgentOp applies an agent operation WITHOUT a chain redeployment — for a
+// single-validator (personal) node, where every agent maps to the node's one
+// validator key so the validator set never actually changes. A full redeploy
+// (stop → regenerate genesis → WIPE state → restart) is therefore a destructive
+// no-op that has bricked personal nodes; the only meaningful step is the
+// app-level RBAC update (mark an added agent active). remove/rotate are already
+// handled by their own handlers. Writes a COMPLETED log so the status poll reads
+// clean and no "reconfiguration in progress" banner is left behind.
+func (r *Redeployer) QuickAgentOp(ctx context.Context, op, agentID string) error {
+	if Operation(op) == OpAddAgent {
+		if err := r.store.UpdateAgentStatus(ctx, agentID, "active"); err != nil {
+			return fmt.Errorf("activate agent: %w", err)
+		}
+	}
+	entry := &store.RedeploymentLogEntry{
+		Operation: op,
+		AgentID:   agentID,
+		Phase:     string(PhaseCompleted),
+		Status:    string(StatusCompleted),
+	}
+	if err := r.store.InsertRedeployLog(ctx, entry); err != nil {
+		r.logger.Warn().Err(err).Msg("quick agent op: failed to log completion (harmless)")
+	}
+	r.logger.Info().Str("operation", op).Str("agent_id", agentID).
+		Msg("agent operation applied without chain redeployment (single-node network)")
+	return nil
+}
+
+// ClearStale clears a stuck/abandoned redeployment. It refuses when a run is
+// genuinely live (lock held and not expired); otherwise it releases any stale
+// lock and marks lingering in_progress log rows terminal so the status poll
+// stops reporting "running". Returns the number of log rows cleared (0 = nothing
+// was stuck). Idempotent and safe to call anytime.
+func (r *Redeployer) ClearStale(ctx context.Context) (int, error) {
+	status, err := r.GetStatus(ctx) // TTL-checked; auto-releases an expired lock
+	if err != nil {
+		return 0, err
+	}
+	if status.Active {
+		return 0, fmt.Errorf("a redeployment is currently in progress — cannot clear")
+	}
+	_ = r.store.ReleaseRedeployLock(ctx) // usually already gone; belt-and-suspenders
+	return r.store.ClearStaleRedeployLogs(ctx)
 }
 
 // GetStatus returns the current redeployment status.

@@ -1849,6 +1849,10 @@ func (s *PostgresStore) UpdateRedeployLog(_ context.Context, _ int64, _, _ strin
 	return fmt.Errorf("UpdateRedeployLog not implemented for PostgresStore")
 }
 
+func (s *PostgresStore) ClearStaleRedeployLogs(_ context.Context) (int, error) {
+	return 0, fmt.Errorf("ClearStaleRedeployLogs not implemented for PostgresStore")
+}
+
 // --- Pipeline Store stubs (SQLite-only feature for now) ---
 
 func (s *PostgresStore) InsertPipeline(_ context.Context, _ *PipelineMessage) error {

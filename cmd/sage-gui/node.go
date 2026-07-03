@@ -582,6 +582,7 @@ func runServe() (rerr error) {
 		return json.Marshal(bundle)
 	}
 	dashboard.QuorumEnabled = cfg.Quorum.Enabled
+	dashboard.ValidatorCountFn = app.ValidatorCount // authoritative single-validator check for agent ops
 	dashboard.SetNetworkMode = func(enabled bool) error {
 		cfg.Quorum.Enabled = enabled
 		return SaveConfig(cfg)

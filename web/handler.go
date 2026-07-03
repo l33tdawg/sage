@@ -160,6 +160,12 @@ type DashboardHandler struct {
 	// the LAN). A personal node binds P2P to loopback, so it must switch to
 	// network mode before it can accept a joining peer.
 	QuorumEnabled bool
+	// ValidatorCountFn returns the live consensus validator count. When set it is
+	// the authoritative signal for whether an agent op needs a full chain
+	// redeploy (count > 1) or can be applied instantly (count <= 1) — more
+	// accurate than QuorumEnabled, since a network-mode host with only
+	// non-validator peers is still a single-validator chain.
+	ValidatorCountFn func() int
 	// SetNetworkMode persists the network-mode flag to config.yaml (the node
 	// then re-binds P2P to the LAN on the next restart). Wired in cmd/sage-gui.
 	SetNetworkMode func(enabled bool) error
@@ -194,6 +200,12 @@ type RedeployOrchestrator interface {
 	// the current-or-last phase, and an error message on failure - derived from the
 	// redeploy log so a poll can tell a completed redeploy from a failed one.
 	GetLiveStatus(ctx context.Context) (status, currentPhase, operation, agentID, errMsg string, err error)
+	// ClearStale clears a stuck/abandoned redeployment (refuses if one is genuinely
+	// live). Returns the number of stale log rows cleared.
+	ClearStale(ctx context.Context) (int, error)
+	// QuickAgentOp applies an agent operation WITHOUT a chain redeployment, for a
+	// single-validator (personal) node where the validator set never changes.
+	QuickAgentOp(ctx context.Context, op, agentID string) error
 }
 
 // PreValidateVote represents a single validator's vote result from pre-validation.

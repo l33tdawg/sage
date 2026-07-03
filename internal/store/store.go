@@ -401,6 +401,10 @@ type AgentStore interface {
 	// redeployment for status polling.
 	GetLatestRedeployLog(ctx context.Context) (*RedeploymentLogEntry, error)
 	UpdateRedeployLog(ctx context.Context, id int64, status, errorMsg string) error
+	// ClearStaleRedeployLogs marks any lingering in_progress redeployment_log
+	// rows as rolled_back (an abandoned/crashed run leaves them frozen, which
+	// would otherwise wedge the status poll forever). Returns the count cleared.
+	ClearStaleRedeployLogs(ctx context.Context) (int, error)
 }
 
 // PipelineMessage represents an ephemeral agent-to-agent work item.

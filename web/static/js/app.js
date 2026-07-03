@@ -4724,7 +4724,7 @@ function HelpOverlay({ onClose, initialSection }) {
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Removing an agent</div>
-                        <div class="guide-detail-desc">Click Remove in the action bar. This triggers a chain redeployment — the chain briefly pauses (~30 seconds) while the validator set is updated. Memories from the removed agent are preserved. You cannot remove the last admin.</div>
+                        <div class="guide-detail-desc">Click Remove in the action bar. On a single-node (personal) network this is instant. On a multi-node network the chain briefly reconfigures its validator set. Memories from the removed agent are preserved with their original attribution. You cannot remove the last admin.</div>
                     </div>
                 </div>
                 <div class="guide-callout">
@@ -5558,7 +5558,7 @@ function NetworkPage({ sse }) {
             if (res.error) { showToast(res.error, 'error'); return; }
             const rdRes = await startRedeploy('remove_agent', agent.agent_id);
             if (rdRes.error) showToast('Agent removed but redeployment failed: ' + rdRes.error, 'warning');
-            else { setRedeployStatus(rdRes); startRedeployPoll(); }
+            else { setRedeployStatus(rdRes); if (rdRes.status !== 'completed') startRedeployPoll(); } // single-node: instant, no poll
             setShowRemoveConfirm(null); setExpandedId(null); loadAgents();
         } catch (e) { showToast('Failed to remove agent', 'error'); }
     }, [loadAgents, startRedeployPoll]);
@@ -5570,7 +5570,7 @@ function NetworkPage({ sse }) {
             if (res.error) { showToast(res.error, 'error'); setRotating(false); return; }
             const rdRes = await startRedeploy('rotate_key', res.new_agent_id);
             if (rdRes.error) showToast('Key rotated but redeployment failed: ' + rdRes.error, 'warning');
-            else { setRedeployStatus(rdRes); startRedeployPoll(); }
+            else { setRedeployStatus(rdRes); if (rdRes.status !== 'completed') startRedeployPoll(); } // single-node: instant, no poll
             setShowRotateConfirm(null); setExpandedId(null); loadAgents();
         } catch (e) { showToast('Failed to rotate key', 'error'); }
         setRotating(false);
@@ -6052,19 +6052,21 @@ function NetworkPage({ sse }) {
 
             ${unregistered.length > 0 && html`
                 <div class="unregistered-section">
-                    <h3 style="color:var(--text-muted);font-size:14px;font-weight:500;margin-bottom:12px;display:flex;align-items:center;gap:8px;">
-                        <span style="color:var(--warning, #f5a623);">?</span> Unregistered Agents
-                        <${HelpTip} text="These agents have memories in your SAGE database but aren't registered in the dashboard. They were likely created by per-project Claude Code sessions. You can merge their memories into a registered agent." />
+                    <h3 style="color:var(--text-muted);font-size:14px;font-weight:500;margin-bottom:6px;display:flex;align-items:center;gap:8px;">
+                        <span style="color:var(--warning, #f5a623);">?</span> Leftover identities
                     </h3>
+                    <p style="color:var(--text-dim);font-size:12px;margin:0 0 12px;max-width:760px;line-height:1.5;">
+                        These IDs wrote memories but were never registered as agents — usually old or per-project keys (e.g. a Claude Code session in another folder). They're harmless. To tidy up, hand their memories to one of your registered agents as the new owner. <strong style="color:var(--text-muted);">Nothing is deleted</strong> — the memories move over and the leftover ID disappears from this list.
+                    </p>
                     <div class="unregistered-list">
                         ${unregistered.map(u => html`
                             <div class="unregistered-card" key=${u.agent_id}>
                                 <div class="unregistered-info">
                                     <span class="mono" style="font-size:12px;color:var(--text-dim);">${u.short_id}</span>
-                                    <span style="font-size:12px;color:var(--text-muted);">${u.memory_count} memor${u.memory_count === 1 ? 'y' : 'ies'}</span>
+                                    <span style="font-size:12px;color:var(--text-muted);">${u.memory_count} memor${u.memory_count === 1 ? 'y' : 'ies'} · no owner</span>
                                 </div>
                                 <button class="merge-btn" onClick=${() => setMergeTarget({ source: u.agent_id, sourceShort: u.short_id, memoryCount: u.memory_count })}>
-                                    Merge into...
+                                    Give to an agent & remove →
                                 </button>
                             </div>
                         `)}
@@ -6075,27 +6077,29 @@ function NetworkPage({ sse }) {
                 <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) setMergeTarget(null); }}>
                     <div class="wizard-modal" style="max-width:480px;">
                         <div class="wizard-header">
-                            <h2>Merge Agent Memories</h2>
+                            <h2>Choose the new owner</h2>
                             <button class="detail-close" onClick=${() => setMergeTarget(null)}>×</button>
                         </div>
                         <div class="wizard-body" style="padding:20px;">
-                            <p style="color:var(--text-dim);margin-bottom:16px;">
-                                Reassign <strong>${mergeTarget.memoryCount}</strong> memor${mergeTarget.memoryCount === 1 ? 'y' : 'ies'} from
-                                <code style="font-size:11px;">${mergeTarget.sourceShort}</code> to a registered agent.
+                            <p style="color:var(--text-dim);margin-bottom:8px;">
+                                The <strong>${mergeTarget.memoryCount}</strong> memor${mergeTarget.memoryCount === 1 ? 'y' : 'ies'} from
+                                <code style="font-size:11px;">${mergeTarget.sourceShort}</code> will move to the agent you pick. Nothing is deleted, and this leftover ID then disappears.
                             </p>
                             <p style="color:var(--text-muted);font-size:12px;margin-bottom:16px;">
-                                This operation goes through BFT consensus on-chain. The memories will be re-attributed on the next block.
+                                The reassignment is recorded on-chain (BFT consensus) and takes effect on the next block.
                             </p>
-                            <div style="display:flex;flex-direction:column;gap:8px;">
-                                ${agents.filter(a => a.status !== 'removed').map(a => html`
-                                    <button class="merge-target-btn" onClick=${() => handleMerge(mergeTarget.source, a.agent_id)} disabled=${merging}>
-                                        <span>${a.avatar || '\u{1F916}'}</span>
-                                        <span>${a.name}</span>
-                                        <span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>
-                                    </button>
-                                `)}
-                            </div>
-                            ${merging && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Submitting to blockchain consensus...</p>`}
+                            ${agents.filter(a => a.status !== 'removed').length === 0
+                                ? html`<div class="import-error">You have no registered agents to hand these memories to yet. Add an agent first (the + Add Agent button above), then come back.</div>`
+                                : html`<div style="display:flex;flex-direction:column;gap:8px;">
+                                    ${agents.filter(a => a.status !== 'removed').map(a => html`
+                                        <button class="merge-target-btn" onClick=${() => handleMerge(mergeTarget.source, a.agent_id)} disabled=${merging}>
+                                            <span>${a.avatar || '\u{1F916}'}</span>
+                                            <span>${a.name}</span>
+                                            <span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>
+                                        </button>
+                                    `)}
+                                </div>`}
+                            ${merging && html`<p style="color:var(--primary);font-size:12px;margin-top:12px;">Reassigning memories on-chain…</p>`}
                         </div>
                     </div>
                 </div>
@@ -6287,6 +6291,11 @@ function AddAgentWizard({ onClose, onCreated }) {
             const rdRes = await startRedeploy('add_agent', res.agent_id);
             if (rdRes.error) {
                 setError(rdRes.error);
+                setDeploying(false);
+            } else if (rdRes.status === 'completed') {
+                // Single-node (personal) network: applied instantly, no chain
+                // redeploy — don't show the ~30s "Deploying…" progress screen.
+                setDeployStatus(rdRes);
                 setDeploying(false);
             } else {
                 setDeployStatus(rdRes);
@@ -7764,11 +7773,12 @@ function RemoveConfirmModal({ agent, onConfirm, onCancel }) {
                     ? html`
                         <h3>Remove ${agent.name}?</h3>
                         <p>
-                            This will mark the agent as removed and trigger a chain redeployment.
-                            ${agent.memory_count > 0 ? html`<br/><br/><strong style="color:var(--warning);">This agent has ${agent.memory_count} memories.</strong> Memories will be preserved with original attribution.` : ''}
+                            This marks the agent as removed. ${agent.memory_count > 0
+                                ? html`<strong style="color:var(--warning);">Its ${agent.memory_count} memories are kept</strong> with their original attribution — nothing is deleted.`
+                                : html`It has no memories.`}
                         </p>
-                        <div class="warning-banner">
-                            ⚠ Chain will be briefly paused during redeployment.
+                        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;">
+                            On a single-node (personal) network this is instant. On a multi-node network the chain briefly reconfigures its validator set.
                         </div>
                         <div class="confirm-actions" style="margin-top:16px;">
                             <button class="btn" onClick=${onCancel}>Cancel</button>

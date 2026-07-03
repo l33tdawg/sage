@@ -1841,6 +1841,14 @@ func (app *SageApp) ValidatorIDs() []string {
 // archetypeIDs is supplied by the caller, which owns the seed→key derivation, so
 // this consensus package stays ignorant of that scheme. Returns (changed, error);
 // (false, nil) is the guard declining — the normal, healthy path.
+// ValidatorCount returns the number of consensus validators currently in the
+// set. A count of 1 means a single-validator chain, where agent add/remove never
+// changes the validator set (so a full genesis-regenerating redeploy is
+// unnecessary). Read-only; safe to call from the dashboard layer.
+func (app *SageApp) ValidatorCount() int {
+	return app.validators.Size()
+}
+
 func (app *SageApp) ReconcileSelfValidator(selfID string, archetypeIDs []string, singleNode bool) (bool, error) {
 	if !singleNode || selfID == "" || len(archetypeIDs) == 0 {
 		return false, nil

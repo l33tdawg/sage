@@ -66,6 +66,7 @@ func (h *DashboardHandler) RegisterNetworkRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/network/claim", handleClaimAgent(agentStore))
 	r.Get("/v1/dashboard/network/redeploy/status", h.handleRedeployStatusLive)
 	r.Post("/v1/dashboard/network/redeploy", h.handleTriggerRedeploy)
+	r.Post("/v1/dashboard/network/redeploy/clear", h.handleClearRedeploy)
 
 	r.Get("/v1/dashboard/network/unregistered", h.handleUnregisteredAgents(agentStore))
 	r.Post("/v1/dashboard/network/merge", h.handleMergeAgent(agentStore))
@@ -680,6 +681,22 @@ func (h *DashboardHandler) handleRedeployStatusLive(w http.ResponseWriter, r *ht
 	})
 }
 
+// handleClearRedeploy clears a stuck/abandoned redeployment (e.g. one that was
+// interrupted mid-flight and left a frozen in_progress log row that would
+// otherwise wedge the status banner forever). Refuses if a run is genuinely live.
+func (h *DashboardHandler) handleClearRedeploy(w http.ResponseWriter, r *http.Request) {
+	if h.Redeployer == nil {
+		writeError(w, http.StatusServiceUnavailable, "redeployer not configured")
+		return
+	}
+	cleared, err := h.Redeployer.ClearStale(r.Context())
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"cleared": cleared, "status": "idle"})
+}
+
 // handleTriggerRedeploy starts a chain redeployment operation.
 // Returns 202 Accepted immediately — the operation runs in a background goroutine.
 // Poll GET /v1/dashboard/network/redeploy/status for progress.
@@ -716,6 +733,28 @@ func (h *DashboardHandler) handleTriggerRedeploy(w http.ResponseWriter, r *http.
 	// Check if already redeploying
 	if h.Redeployer.IsRedeploying() {
 		writeError(w, http.StatusConflict, "redeployment already in progress")
+		return
+	}
+
+	// Single-validator chain: an agent op never changes the validator set, so the
+	// destructive stop/wipe/restart is unnecessary AND has bricked personal nodes
+	// before. Apply the lightweight equivalent and return — no chain
+	// redeployment, no "reconfiguration in progress" banner. Prefer the live
+	// validator count (a network-mode host with only non-validator peers is still
+	// single-validator); fall back to the quorum flag if the count isn't wired.
+	singleValidator := !h.QuorumEnabled
+	if h.ValidatorCountFn != nil {
+		singleValidator = h.ValidatorCountFn() <= 1
+	}
+	if singleValidator {
+		if err := h.Redeployer.QuickAgentOp(r.Context(), req.Operation, req.AgentID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"status":  "completed",
+			"message": "applied without a chain redeployment (single-node network)",
+		})
 		return
 	}
 

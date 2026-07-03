@@ -241,3 +241,50 @@ func TestGetStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, status.Active)
 }
+
+// TestGetLiveStatus_StaleInProgressAutoHeals verifies the root-cause fix: an
+// in_progress log row left by a crashed/restarted run (no live in-process
+// Deploy) must read as "failed", not wedge the status as "running" forever.
+func TestGetLiveStatus_StaleInProgressAutoHeals(t *testing.T) {
+	r, s, _ := newTestRedeployer(t)
+	ctx := context.Background()
+	require.NoError(t, s.InsertRedeployLog(ctx, &store.RedeploymentLogEntry{
+		Operation: "remove_agent", AgentID: "abc", Phase: string(PhaseChainRestarted), Status: string(StatusInProgress),
+	}))
+	// r.running is false (no live Deploy in this process).
+	status, phase, _, _, _, err := r.GetLiveStatus(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "failed", status, "a stuck in_progress row with no live run must auto-heal to failed")
+	assert.Equal(t, string(PhaseChainRestarted), phase)
+}
+
+// TestQuickAgentOp_NoChainRedeploy verifies the single-node path applies an
+// agent op WITHOUT any destructive chain operation and logs COMPLETED.
+func TestQuickAgentOp_NoChainRedeploy(t *testing.T) {
+	r, s, mock := newTestRedeployer(t)
+	ctx := context.Background()
+	require.NoError(t, r.QuickAgentOp(ctx, "remove_agent", "abc"))
+	assert.Equal(t, 0, mock.stopCalled, "must not stop the chain")
+	assert.Equal(t, 0, mock.wipeCalled, "must not wipe chain state")
+	assert.Equal(t, 0, mock.regenCalled, "must not regenerate genesis")
+	latest, err := s.GetLatestRedeployLog(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, string(PhaseCompleted), latest.Phase)
+	status, _, _, _, _, _ := r.GetLiveStatus(ctx)
+	assert.Equal(t, "completed", status)
+}
+
+// TestClearStale marks lingering in_progress rows terminal when nothing is live.
+func TestClearStale(t *testing.T) {
+	r, s, _ := newTestRedeployer(t)
+	ctx := context.Background()
+	require.NoError(t, s.InsertRedeployLog(ctx, &store.RedeploymentLogEntry{
+		Operation: "remove_agent", AgentID: "abc", Phase: string(PhaseChainRestarted), Status: string(StatusInProgress),
+	}))
+	n, err := r.ClearStale(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "one stale row cleared")
+	latest, err := s.GetLatestRedeployLog(ctx)
+	require.NoError(t, err)
+	assert.NotEqual(t, string(StatusInProgress), latest.Status, "no in_progress rows should remain")
+}
