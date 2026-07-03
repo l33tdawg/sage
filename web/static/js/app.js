@@ -1807,16 +1807,19 @@ function TasksPage({ sse }) {
 
     useEffect(() => { loadTasks(); }, []);
 
+    // Debounced reload that never fires mid-drag. Called by SSE events AND by
+    // drag-end, so an update that arrived during a drag (incl. a cancelled drag
+    // that produces no server event) is still picked up once the drag settles.
+    const scheduleReload = () => {
+        clearTimeout(reloadTimer.current);
+        reloadTimer.current = setTimeout(() => { if (!draggingRef.current) loadTasks(); }, 500);
+    };
+
     // Live refresh: agents create and move tasks through the same shared store, so
-    // refresh on task/remember/forget events (debounced, and never mid-drag) instead
-    // of leaving the board stale until a manual reload.
+    // refresh on task/remember/forget events instead of leaving the board stale.
     useEffect(() => {
         if (!sse) return;
-        const bump = () => {
-            clearTimeout(reloadTimer.current);
-            reloadTimer.current = setTimeout(() => { if (!draggingRef.current) loadTasks(); }, 500);
-        };
-        const subs = [sse.on('task', bump), sse.on('remember', bump), sse.on('forget', bump)];
+        const subs = [sse.on('task', scheduleReload), sse.on('remember', scheduleReload), sse.on('forget', scheduleReload)];
         return () => { clearTimeout(reloadTimer.current); subs.forEach(u => u && u()); };
     }, [sse]);
 
@@ -1905,6 +1908,7 @@ function TasksPage({ sse }) {
         }
         setDragging(null);
         setDragOver(null);
+        scheduleReload(); // pick up any refresh deferred during the drag
     }
 
     const taskAuthors = [...new Set(tasks.map(t => t.provider).filter(Boolean))].sort();
@@ -1999,7 +2003,7 @@ function TasksPage({ sse }) {
                                     <div class="kanban-card ${dragging === task.memory_id ? 'dragging' : ''}"
                                          draggable="true"
                                          onDragStart=${e => handleDragStart(e, task)}
-                                         onDragEnd=${() => { draggingRef.current = false; }}>
+                                         onDragEnd=${() => { draggingRef.current = false; scheduleReload(); }}>
                                         <div class="kanban-card-content">${task.content.replace(/^\[TASK\]\s*/i, '')}</div>
                                         <div class="kanban-card-meta">
                                             <span class="domain-badge" style="background:${getDomainColor(task.domain_tag)}20;color:${getDomainColor(task.domain_tag)};font-size:10px;padding:2px 6px;">
