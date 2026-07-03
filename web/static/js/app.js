@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -1802,10 +1802,24 @@ function TasksPage({ sse }) {
     const [newDomain, setNewDomain] = useState('');
     const [adding, setAdding] = useState(false);
     const [showOldDone, setShowOldDone] = useState(false);
+    const [agentList, setAgentList] = useState([]);
     const draggingRef = useRef(false);
     const reloadTimer = useRef(null);
+    const agentName = (id) => { const a = agentList.find(x => x.agent_id === id); return a ? a.name : (id ? id.slice(0, 8) : ''); };
 
-    useEffect(() => { loadTasks(); }, []);
+    useEffect(() => {
+        loadTasks();
+        fetchAgents().then(d => setAgentList(d.agents || [])).catch(() => {});
+    }, []);
+
+    async function doAssign(taskId, assignee) {
+        setTasks(prev => prev.map(t => t.memory_id === taskId ? { ...t, assignee } : t)); // optimistic
+        try {
+            const res = await assignTask(taskId, assignee);
+            if (res && res.error) { showToast('Could not assign: ' + res.error, 'error'); loadTasks(); }
+            else showToast(assignee ? `Assigned to ${agentName(assignee)}` : 'Task unassigned', 'success');
+        } catch (e) { showToast('Could not assign task', 'error'); loadTasks(); }
+    }
 
     // Debounced reload that never fires mid-drag. Called by SSE events AND by
     // drag-end, so an update that arrived during a drag (incl. a cancelled drag
@@ -2014,6 +2028,19 @@ function TasksPage({ sse }) {
                                                 : html`<span title="Created from the dashboard" style="font-size:10px;color:var(--primary);">You</span>`}
                                             <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">${timeAgo(task.created_at)}</span>
                                         </div>
+                                        ${agentList.length > 0 && html`
+                                            <div class="kanban-card-assign" style="margin-top:6px;display:flex;align-items:center;gap:4px;">
+                                                <span style="font-size:10px;color:var(--text-muted);">${task.assignee ? '👤' : 'Assign:'}</span>
+                                                <select style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:4px;"
+                                                    value=${task.assignee || ''}
+                                                    onClick=${e => e.stopPropagation()}
+                                                    onChange=${e => { e.stopPropagation(); doAssign(task.memory_id, e.target.value); }}
+                                                    title=${task.assignee ? 'Assigned to ' + agentName(task.assignee) : 'Assign this task to an agent'}>
+                                                    <option value="">Unassigned</option>
+                                                    ${agentList.map(a => html`<option value=${a.agent_id}>${a.name}</option>`)}
+                                                </select>
+                                            </div>
+                                        `}
                                         ${col.key !== 'done' && col.key !== 'dropped' ? html`
                                             <div class="kanban-card-actions">
                                                 ${col.key === 'planned' && html`

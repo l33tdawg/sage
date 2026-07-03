@@ -1651,7 +1651,7 @@ func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	tasks, err := s.store.GetOpenTasks(r.Context(), domain, provider)
+	tasks, err := s.store.GetOpenTasks(r.Context(), domain, provider, agentID)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Failed to get tasks", err.Error())
 		return

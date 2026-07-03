@@ -102,6 +102,15 @@ export async function bulkUpdateMemories(ids, { domain, addTags, agent } = {}) {
     return res.json();
 }
 
+export async function assignTask(id, assignee) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/tasks/${id}/assign`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignee: assignee || '' }),
+    });
+    return res.json();
+}
+
 export async function importMemories(file) {
     const form = new FormData();
     form.append('file', file);

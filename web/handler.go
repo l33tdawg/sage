@@ -323,6 +323,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Get("/v1/dashboard/tasks", h.handleGetTasks)
 			r.Post("/v1/dashboard/tasks", h.handleCreateTaskDashboard)
 			r.Put("/v1/dashboard/tasks/{id}/status", h.handleUpdateTaskStatusDashboard)
+			r.Put("/v1/dashboard/tasks/{id}/assign", h.handleAssignTask)
 
 			// Tags
 			r.Get("/v1/dashboard/tags", h.handleListTags)
@@ -1552,7 +1553,10 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		tasks, err = h.store.GetAllTasks(r.Context(), domain, limit)
 	} else {
 		provider := r.URL.Query().Get("provider")
-		tasks, err = h.store.GetOpenTasks(r.Context(), domain, provider)
+		// X-Agent-ID (set by the MCP server on every request) drives ownership: an
+		// agent's backlog excludes tasks claimed by another agent.
+		agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+		tasks, err = h.store.GetOpenTasks(r.Context(), domain, provider, agentID)
 	}
 
 	if err != nil {
@@ -1571,6 +1575,8 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		// and filter by author. Human-created tasks carry an empty provider.
 		Provider        string `json:"provider"`
 		SubmittingAgent string `json:"submitting_agent"`
+		// Assignee: the agent_id a task is assigned to / claimed by (board only).
+		Assignee string `json:"assignee"`
 	}
 	results := make([]taskResult, 0, len(tasks))
 	for _, t := range tasks {
@@ -1583,6 +1589,7 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 			CreatedAt:       t.CreatedAt.Format("2006-01-02T15:04:05Z"),
 			Provider:        t.Provider,
 			SubmittingAgent: t.SubmittingAgent,
+			Assignee:        t.Assignee,
 		})
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{"tasks": results, "total": len(results)})
@@ -1612,12 +1619,44 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+	// Claim-on-pickup: when an AGENT (X-Agent-ID present) starts a task, auto-claim
+	// it so no other agent picks up the same work. Best-effort; failure to claim
+	// must not fail the status change. Humans (dashboard, no header) don't claim.
+	if agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID")); agentID != "" && ts == memory.TaskStatusInProgress {
+		_ = h.store.SetTaskAssignee(r.Context(), id, agentID)
+	}
 	// Real-time: agents and humans update status through this same handler, so one
 	// broadcast keeps every open board in sync without a manual refresh.
 	if h.SSE != nil {
 		h.SSE.Broadcast(SSEEvent{Type: EventTask, MemoryID: id})
 	}
 	writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "task_status": body.TaskStatus})
+}
+
+// handleAssignTask assigns (or, with an empty assignee, unassigns) a task to a
+// specific agent from the dashboard - so a human can hand work to one agent.
+func (h *DashboardHandler) handleAssignTask(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "missing task id")
+		return
+	}
+	var body struct {
+		Assignee string `json:"assignee"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if err := h.store.SetTaskAssignee(r.Context(), id, strings.TrimSpace(body.Assignee)); err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if h.SSE != nil {
+		h.SSE.Broadcast(SSEEvent{Type: EventTask, MemoryID: id})
+	}
+	writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "assignee": body.Assignee})
 }
 
 // handleCreateTaskDashboard creates a new task from the CEREBRUM dashboard.

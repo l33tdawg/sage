@@ -141,8 +141,10 @@ type MemoryStore interface {
 	// GetLinksAmong returns typed links where BOTH endpoints are in memoryIDs,
 	// batched into one query (avoids the N+1 of GetLinkedMemories per memory).
 	GetLinksAmong(ctx context.Context, memoryIDs []string) ([]memory.MemoryLink, error)
-	GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error)
+	GetOpenTasks(ctx context.Context, domain string, provider string, assignee string) ([]*memory.MemoryRecord, error)
 	GetAllTasks(ctx context.Context, domain string, limit int) ([]*memory.MemoryRecord, error)
+	// SetTaskAssignee assigns/claims a task for an agent (empty clears it).
+	SetTaskAssignee(ctx context.Context, memoryID, assignee string) error
 	// Tags
 	SetTags(ctx context.Context, memoryID string, tags []string) error
 	GetTags(ctx context.Context, memoryID string) ([]string, error)

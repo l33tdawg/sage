@@ -549,6 +549,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 
 	// Migration: add task support (task_status column + update CHECK constraint).
 	s.migrateTaskSupport(ctx)
+	s.migrateTaskAssignee(ctx)
 
 	// Schema migrations — add columns to network_agents that didn't exist in earlier versions.
 	agentMigrations := []string{
@@ -622,6 +623,18 @@ func (s *SQLiteStore) migrateProvider(ctx context.Context) {
 	}
 	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN provider TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
+}
+
+// migrateTaskAssignee adds the assignee column to memories so tasks can be
+// assigned to / claimed by a specific agent (empty = open to any agent).
+func (s *SQLiteStore) migrateTaskAssignee(ctx context.Context) {
+	row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='assignee'`)
+	var count int
+	if err := row.Scan(&count); err != nil || count > 0 {
+		return // already migrated or error
+	}
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN assignee TEXT DEFAULT ''`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_assignee ON memories(assignee) WHERE assignee != ''`)
 }
 
 // migrateTaskSupport adds task_status column and updates the memory_type CHECK constraint
@@ -3373,7 +3386,7 @@ func (s *SQLiteStore) GetLinksAmong(ctx context.Context, memoryIDs []string) ([]
 }
 
 // GetOpenTasks returns all task memories that are planned or in_progress.
-func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error) {
+func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider string, assignee string) ([]*memory.MemoryRecord, error) {
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
 		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at, COALESCE(task_status, '')
 		FROM memories
@@ -3389,6 +3402,12 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 	if provider != "" {
 		query += ` AND (provider = ? OR provider = '')`
 		args = append(args, provider)
+	}
+	// Ownership: an identified agent sees unassigned tasks + those assigned to it,
+	// never tasks another agent has claimed - so agents don't double-work.
+	if assignee != "" {
+		query += ` AND (COALESCE(assignee, '') = '' OR assignee = ?)`
+		args = append(args, assignee)
 	}
 	query += ` ORDER BY created_at DESC`
 
@@ -3448,7 +3467,56 @@ func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int)
 		}
 		records = append(records, rec)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close() // done reading; the follow-up assignee query reuses the conn
+	s.populateTaskAssignees(ctx, records)
+	return records, nil
+}
+
+// populateTaskAssignees fills rec.Assignee for the given task records. assignee
+// is not part of scanMemoryRow's fixed column set, so the board reads it here.
+func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memory.MemoryRecord) {
+	if len(records) == 0 {
+		return
+	}
+	ph := make([]string, len(records))
+	args := make([]any, len(records))
+	for i, rec := range records {
+		ph[i] = "?"
+		args[i] = rec.MemoryID
+	}
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT memory_id, COALESCE(assignee, '') FROM memories WHERE memory_id IN (`+strings.Join(ph, ",")+`)`, args...)
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	amap := make(map[string]string, len(records))
+	for rows.Next() {
+		var id, a string
+		if rows.Scan(&id, &a) == nil {
+			amap[id] = a
+		}
+	}
+	for _, rec := range records {
+		rec.Assignee = amap[rec.MemoryID]
+	}
+}
+
+// SetTaskAssignee assigns a task to (or claims it for) an agent. Empty assignee
+// clears the assignment. Only affects task-type memories.
+func (s *SQLiteStore) SetTaskAssignee(ctx context.Context, memoryID, assignee string) error {
+	res, err := s.writeExecContext(ctx,
+		`UPDATE memories SET assignee = ? WHERE memory_id = ? AND memory_type = 'task'`, assignee, memoryID)
+	if err != nil {
+		return fmt.Errorf("set task assignee: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("task not found: %s", memoryID)
+	}
+	return nil
 }
 
 // ---- Tag operations ----

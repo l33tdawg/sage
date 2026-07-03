@@ -50,6 +50,9 @@ type MemoryRecord struct {
 	Status          MemoryStatus `json:"status"`
 	ParentHash      string       `json:"parent_hash,omitempty"`
 	TaskStatus      TaskStatus   `json:"task_status,omitempty"`
+	// Assignee is the agent_id a task is assigned to / claimed by (empty = open to
+	// any agent). Populated only on the task read paths.
+	Assignee        string       `json:"assignee,omitempty"`
 	CreatedAt       time.Time    `json:"created_at"`
 	CommittedAt     *time.Time   `json:"committed_at,omitempty"`
 	DeprecatedAt    *time.Time   `json:"deprecated_at,omitempty"`

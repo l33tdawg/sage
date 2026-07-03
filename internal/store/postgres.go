@@ -1275,6 +1275,10 @@ func (s *PostgresStore) UpdateMemoryAgent(ctx context.Context, memoryID string, 
 }
 
 // UpdateTaskStatus updates the task_status of a task memory.
+func (s *PostgresStore) SetTaskAssignee(_ context.Context, _, _ string) error {
+	return fmt.Errorf("SetTaskAssignee not implemented for PostgresStore (SQLite-only feature)")
+}
+
 func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
 	result, err := s.db.Exec(ctx,
 		`UPDATE memories SET task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'`,
@@ -1373,7 +1377,7 @@ func (s *PostgresStore) GetLinksAmong(ctx context.Context, memoryIDs []string) (
 }
 
 // GetOpenTasks returns all task memories that are planned or in_progress.
-func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provider string) ([]*memory.MemoryRecord, error) {
+func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provider string, assignee string) ([]*memory.MemoryRecord, error) {
 	query := `SELECT memory_id, submitting_agent, content, content_hash,
 		memory_type, domain_tag, COALESCE(provider, ''), confidence_score, status, parent_hash, COALESCE(task_status, ''),
 		created_at, committed_at, deprecated_at
@@ -1394,6 +1398,7 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 		args = append(args, provider)
 		argN++ //nolint:ineffassign
 	}
+	_ = assignee // task assignment/claim is a SQLite-only feature; Postgres has no assignee column
 	query += " ORDER BY created_at DESC"
 
 	rows, err := s.db.Query(ctx, query, args...)
