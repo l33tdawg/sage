@@ -767,6 +767,11 @@ func runServe() (rerr error) {
 					tlsAddr = "127.0.0.1:8443" // Personal: localhost only.
 				}
 			}
+			// Surface the effective MCP TLS bind so the dashboard's remote-connect
+			// (Flow 2) discovery can tell whether a tool on another computer can
+			// reach this node directly over the LAN (non-loopback bind) or only via
+			// a tunnel (loopback bind).
+			dashboard.MCPTLSAddr = tlsAddr
 			tlsServer = &http.Server{
 				Addr:         tlsAddr,
 				Handler:      r,

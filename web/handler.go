@@ -86,6 +86,7 @@ type DashboardHandler struct {
 	graphCache   map[string]*graphCacheEntry
 	ExecPath     string // path to sage-gui binary, used by /v1/mcp-config
 	RESTAddr     string // configured REST listen address (cfg.RESTAddr), surfaced read-only in Settings > Connection
+	MCPTLSAddr   string // configured MCP TLS (bearer) listen address, used by /v1/dashboard/connect/remote-url to report whether the node is reachable from another computer (loopback bind = local-only)
 	Encrypted    atomic.Bool
 	VaultLocked  atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
 
@@ -341,6 +342,12 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 			// Same-machine one-click connect — writes a provider's MCP config.
 			r.Post("/v1/dashboard/connect/{provider}", h.handleConnectProvider)
+
+			// Remote-connect (Flow 2) — reports how a tool on ANOTHER computer can
+			// reach this node (public tunnel and/or LAN bind), so the frontend can
+			// generate the right per-tool paste block or gate honestly when there is
+			// no remote path yet.
+			r.Get("/v1/dashboard/connect/remote-url", h.handleConnectRemoteURL)
 
 			// Task backlog
 			r.Get("/v1/dashboard/tasks", h.handleGetTasks)

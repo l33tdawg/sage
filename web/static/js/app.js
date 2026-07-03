@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -5348,8 +5348,11 @@ function NetworkPage({ sse }) {
     const [tagTransfer, setTagTransfer] = useState(null); // { agentId, agentName, tags: [], step: 'tags'|'target', selectedTag: null }
     const [transferring, setTransferring] = useState(false);
 
-    // External-client wizard state (v6.7.3)
+    // External-client wizard state (v6.7.3). remoteWizardTarget tailors the
+    // shared RemoteAccessWizard's final step: 'chatgpt' → OAuth connector fields,
+    // 'tool' → bearer paste blocks for a remote IDE client.
     const [showChatGPTWizard, setShowChatGPTWizard] = useState(false);
+    const [remoteWizardTarget, setRemoteWizardTarget] = useState('chatgpt');
     const [showCursorPanel, setShowCursorPanel] = useState(false);
     // Same-machine connect entry (Phase 5b-1)
     const [showConnectTool, setShowConnectTool] = useState(false);
@@ -5837,8 +5840,8 @@ function NetworkPage({ sse }) {
                 </div>
                 <div class="ext-clients-grid">
                     <div class="ext-client-card" role="button" tabIndex="0"
-                        onClick=${() => setShowChatGPTWizard(true)}
-                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowChatGPTWizard(true); } }}>
+                        onClick=${() => { setRemoteWizardTarget('chatgpt'); setShowChatGPTWizard(true); }}
+                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRemoteWizardTarget('chatgpt'); setShowChatGPTWizard(true); } }}>
                         <div class="ext-client-icon">🤖</div>
                         <div class="ext-client-info">
                             <div class="ext-client-title">Connect to ChatGPT</div>
@@ -6138,9 +6141,11 @@ function NetworkPage({ sse }) {
                 </div>
             `}
             ${showWizard && html`<${AddAgentWizard} onClose=${() => setShowWizard(false)} onCreated=${() => { setShowWizard(false); loadAgents(); }} />`}
-            ${showChatGPTWizard && html`<${ChatGPTSetupWizard} agents=${agents} onClose=${() => setShowChatGPTWizard(false)} />`}
+            ${showChatGPTWizard && html`<${RemoteAccessWizard} agents=${agents} target=${remoteWizardTarget} onClose=${() => setShowChatGPTWizard(false)} />`}
             ${showCursorPanel && html`<${CursorSetupPanel} agents=${agents} onClose=${() => setShowCursorPanel(false)} />`}
-            ${showConnectTool && html`<${ConnectToolModal} onClose=${() => setShowConnectTool(false)} />`}
+            ${showConnectTool && html`<${ConnectToolModal} agents=${agents}
+                onOpenChatGPT=${(t) => { setRemoteWizardTarget(t || 'chatgpt'); setShowConnectTool(false); setShowChatGPTWizard(true); }}
+                onClose=${() => setShowConnectTool(false)} />`}
             ${showRemoveConfirm && html`<${RemoveConfirmModal} agent=${showRemoveConfirm} onConfirm=${() => handleRemove(showRemoveConfirm)} onCancel=${() => setShowRemoveConfirm(null)} />`}
             ${showRotateConfirm && html`
                 <div class="wizard-overlay" onClick=${(e) => { if (e.target === e.currentTarget) setShowRotateConfirm(null); }}>
@@ -6538,13 +6543,18 @@ function AddAgentWizard({ onClose, onCreated }) {
     `;
 }
 
-// ChatGPTSetupWizard — guided 6-step flow that wires SAGE to ChatGPT's MCP
-// connector via cloudflared. v6.7.3.
+// RemoteAccessWizard — guided flow that gives SAGE a public URL via cloudflared
+// so a tool on another computer (or a hosted chat like ChatGPT) can reach it.
+// Steps 1-6 are generic tunnel setup (install → login → hostname → create →
+// mint bearer); step 7 tailors the final instructions to `target`:
+//   'chatgpt' — ChatGPT connector OAuth fields + "Open ChatGPT Connectors"
+//   'tool'    — the public MCP URL + bearer, with per-client paste blocks
+//               (Cursor/Cline url+headers, Windsurf/Claude Desktop mcp-remote)
 //
-// Local-first philosophy: SAGE never proxies through anyone's cloud. The
-// user owns the cloudflared tunnel, the Cloudflare account, and the domain.
-// We just collapse 9 manual terminal steps into a UI.
-function ChatGPTSetupWizard({ agents, onClose }) {
+// Local-first philosophy: SAGE never proxies through anyone's cloud. The user
+// owns the cloudflared tunnel, the Cloudflare account, and the domain.
+function RemoteAccessWizard({ agents, onClose, target }) {
+    const forChatGPT = (target || 'chatgpt') === 'chatgpt';
     const [step, setStep] = useState(1);
     const [error, setError] = useState(null);
 
@@ -6581,7 +6591,7 @@ function ChatGPTSetupWizard({ agents, onClose }) {
 
     // Step 6: token mint
     const [agentChoice, setAgentChoice] = useState('');
-    const [tokenName, setTokenName] = useState('chatgpt');
+    const [tokenName, setTokenName] = useState(forChatGPT ? 'chatgpt' : 'remote');
     const [mintedToken, setMintedToken] = useState(null);
     const [minting, setMinting] = useState(false);
 
@@ -6703,7 +6713,7 @@ function ChatGPTSetupWizard({ agents, onClose }) {
         <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
             <div class="wizard-modal" style="max-width:680px;max-height:85vh;display:flex;flex-direction:column;">
                 <div class="wizard-header">
-                    <h2>Connect to ChatGPT — Step ${step} of 7</h2>
+                    <h2>${forChatGPT ? 'Connect to ChatGPT' : 'Set up remote access'} — Step ${step} of 7</h2>
                     <button class="detail-close" onClick=${onClose}>×</button>
                 </div>
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;">
@@ -6712,7 +6722,9 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                     ${step === 1 && html`
                         <div style="line-height:1.55;color:var(--text);">
                             <h3 style="margin-top:0;color:var(--accent);">SAGE is local-first by design</h3>
-                            <p>ChatGPT lives at <code>chatgpt.com</code>. SAGE lives on <strong>your machine</strong>. To bridge them, you'll set up a tunnel from a domain you own to your localhost.</p>
+                            ${forChatGPT
+                                ? html`<p>ChatGPT lives at <code>chatgpt.com</code>. SAGE lives on <strong>your machine</strong>. To bridge them, you'll set up a tunnel from a domain you own to your localhost.</p>`
+                                : html`<p>SAGE lives on <strong>your machine</strong>. To let a tool on another computer reach it, you'll give it a public URL — a tunnel from a domain you own to your localhost. The same URL works for a hosted chat like ChatGPT too.</p>`}
                             <p><strong>SAGE doesn't proxy through our cloud, ever.</strong> You own the tunnel. We just collapse the 9 terminal commands it normally takes into 6 clicks.</p>
                             <h4 style="color:var(--accent);">Prerequisites</h4>
                             <ul>
@@ -6720,8 +6732,8 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                                 <li>A domain on Cloudflare DNS (a <code>.xyz</code> is ~$1/year if you don't already own one)</li>
                             </ul>
                             <div class="warning-banner" style="margin-top:16px;">
-                                <strong>Don't want to own a domain?</strong> Cancel this wizard and pick the
-                                <em>Connect to Cursor / Cline / Claude Desktop</em> card instead. Those clients accept bearer-only and don't need a public URL — that's actually <em>more</em> local-first than ChatGPT.
+                                <strong>Don't want to own a domain?</strong> If the tool is on <em>this</em> computer, cancel and use the
+                                <em>Connect an AI tool → On this computer</em> flow instead — those clients need no public URL at all.
                             </div>
                         </div>
                     `}
@@ -6789,7 +6801,7 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                     ${step === 4 && html`
                         <div style="line-height:1.55;">
                             <h3 style="margin-top:0;">Pick your hostname</h3>
-                            <p>This is the public URL ChatGPT will hit. SAGE will create a CNAME from
+                            <p>This is the public URL your ${forChatGPT ? 'ChatGPT connector' : 'tool (or ChatGPT)'} will hit. SAGE will create a CNAME from
                                 <strong>${subdomain || '<sub>'}.${zone || '<your-domain>'}</strong>
                                 to your localhost via Cloudflare's tunnel.</p>
                             <div class="wizard-field">
@@ -6847,8 +6859,8 @@ function ChatGPTSetupWizard({ agents, onClose }) {
 
                     ${step === 6 && html`
                         <div style="line-height:1.55;">
-                            <h3 style="margin-top:0;">Mint a bearer token for ChatGPT</h3>
-                            <p>The bearer is the credential ChatGPT will use to talk to SAGE. Tokens are scoped to a specific agent identity — pick (or create) the agent ChatGPT should run as.</p>
+                            <h3 style="margin-top:0;">Mint a bearer token</h3>
+                            <p>The bearer is the credential the ${forChatGPT ? 'ChatGPT connector' : 'remote tool'} will use to talk to SAGE. Tokens are scoped to a specific agent identity — pick (or create) the agent it should run as.</p>
                             <div class="wizard-field">
                                 <label>Agent</label>
                                 <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
@@ -6856,12 +6868,12 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                                     ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
                                 </select>
                                 <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
-                                    No "chatgpt" agent yet? Cancel and create one in the Network tab first, then come back. (Best practice: dedicate one agent to ChatGPT for clear audit trails.)
+                                    No dedicated agent yet? Cancel and create one in the Network tab first, then come back. (Best practice: dedicate one agent per remote tool for clear audit trails.)
                                 </div>
                             </div>
                             <div class="wizard-field">
                                 <label>Token name</label>
-                                <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="chatgpt" />
+                                <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder=${forChatGPT ? 'chatgpt' : 'remote'} />
                             </div>
                             <button class="btn btn-primary" onClick=${startMintToken} disabled=${minting || !agentChoice}>
                                 ${minting ? 'Minting…' : 'Mint bearer'}
@@ -6869,7 +6881,7 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                         </div>
                     `}
 
-                    ${step === 7 && mintedToken && html`
+                    ${step === 7 && mintedToken && forChatGPT && html`
                         <div style="line-height:1.55;">
                             <h3 style="margin-top:0;color:var(--accent-green);">✓ Ready to paste into ChatGPT</h3>
                             <div class="warning-banner" style="margin-bottom:14px;">
@@ -6888,6 +6900,19 @@ function ChatGPTSetupWizard({ agents, onClose }) {
                             <div style="margin-top:18px;display:flex;gap:8px;">
                                 <a class="btn btn-primary" href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener">Open ChatGPT Connectors →</a>
                             </div>
+                        </div>
+                    `}
+
+                    ${step === 7 && mintedToken && !forChatGPT && html`
+                        <div style="line-height:1.55;">
+                            <h3 style="margin-top:0;color:var(--accent-green);">✓ Your public URL is ready</h3>
+                            <div class="warning-banner" style="margin-bottom:14px;">
+                                Save the bearer token NOW — it's shown ONCE. It carries the agent's identity; treat it like a password.
+                            </div>
+                            <${ChatGPTCopyField} label="MCP Server URL" value=${`https://${tunnelHostname || (subdomain + '.' + zone)}/v1/mcp/sse`} />
+                            <${ChatGPTCopyField} label="Bearer token (save now!)" value=${mintedToken.token} sensitive=${true} />
+                            <p style="margin:16px 0 0;color:var(--text-dim);font-size:13px;">Paste the block that matches your tool on the other computer:</p>
+                            <${RemotePasteBlocks} url=${`https://${tunnelHostname || (subdomain + '.' + zone)}/v1/mcp/sse`} token=${mintedToken.token} selfSigned=${false} />
                         </div>
                     `}
                 </div>
@@ -7025,12 +7050,287 @@ const SAME_MACHINE_PROVIDERS = [
     { key: 'claude-desktop', name: 'Claude Desktop', icon: '\u{1F5A5}️', folder: false },
 ];
 
+// remoteMcpJson — the single source of truth for the MCP config a remote client
+// pastes to reach SAGE. kind 'url' = HTTP+SSE clients (Cursor/Cline) that take a
+// url + Authorization header; kind 'mcp-remote' = stdio-only clients (Windsurf,
+// Claude Desktop) that bridge through the npx mcp-remote shim.
+//
+// For mcp-remote the header VALUE ("Bearer <token>") must NOT ride in an argv
+// element — several MCP clients (Claude Desktop especially) split args on
+// spaces, which mangles the token. mcp-remote supports ${VAR} substitution in
+// --header, so we pass "Authorization:${AUTH_HEADER}" (no space after the colon)
+// and put the value in env, where the space is safe. When selfSigned, env also
+// carries NODE_TLS_REJECT_UNAUTHORIZED=0 so mcp-remote accepts the node's
+// self-signed LAN cert (there is no equivalent escape for url clients).
+function remoteMcpJson(kind, url, token, selfSigned) {
+    if (kind === 'url') {
+        return `{
+  "mcpServers": {
+    "sage": {
+      "url": "${url}",
+      "headers": { "Authorization": "Bearer ${token}" }
+    }
+  }
+}`;
+    }
+    const env = [`"AUTH_HEADER": "Bearer ${token}"`];
+    if (selfSigned) env.push(`"NODE_TLS_REJECT_UNAUTHORIZED": "0"`);
+    return `{
+  "mcpServers": {
+    "sage": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "${url}", "--header", "Authorization:\${AUTH_HEADER}"],
+      "env": { ${env.join(', ')} }
+    }
+  }
+}`;
+}
+
+// RemotePasteBlocks — renders BOTH client families' paste blocks (used by the
+// RemoteAccessWizard's tool step, where the specific tool wasn't carried
+// through the tunnel handoff). url has a valid cert when it's the tunnel; pass
+// selfSigned only for a self-signed LAN URL.
+function RemotePasteBlocks({ url, token, selfSigned }) {
+    const preStyle = 'background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);';
+    return html`
+        <p style="font-size:12px;color:var(--text-dim);margin:14px 0 4px;"><strong>Cursor / Cline</strong> — url + bearer header (Cursor: <code>~/.cursor/mcp.json</code> or Settings → MCP):</p>
+        <pre style=${preStyle}>${remoteMcpJson('url', url, token, selfSigned)}</pre>
+        ${selfSigned && html`<div class="warning-banner" style="margin-top:8px;">Stock Cursor/Cline will reject a self-signed certificate — use the public tunnel URL for these.</div>`}
+        <p style="font-size:12px;color:var(--text-dim);margin:16px 0 4px;"><strong>Windsurf / Claude Desktop</strong> — stdio via <code>mcp-remote</code> (needs Node.js on the other machine):</p>
+        <pre style=${preStyle}>${remoteMcpJson('mcp-remote', url, token, selfSigned)}</pre>
+    `;
+}
+
+// REMOTE_PROVIDERS — tools/chats running on ANOTHER computer that reach this
+// node over the network (Flow 2). kind drives the paste block we generate:
+//   'url'        — the client speaks HTTP+SSE with url+headers (Cursor, Cline)
+//   'mcp-remote' — the client is stdio-only, so it bridges via the mcp-remote npx shim (Windsurf, Claude Desktop)
+//   'oauth'      — a hosted chat that needs a public URL + OAuth (ChatGPT); routed to the dedicated tunnel wizard
+const REMOTE_PROVIDERS = [
+    { key: 'cursor', name: 'Cursor / Cline', icon: '\u{1F4BB}', kind: 'url' },
+    { key: 'windsurf', name: 'Windsurf', icon: '\u{1F30A}', kind: 'mcp-remote' },
+    { key: 'claude-desktop', name: 'Claude Desktop', icon: '\u{1F5A5}️', kind: 'mcp-remote' },
+    { key: 'chatgpt', name: 'ChatGPT / hosted chat', icon: '\u{1F4AC}', kind: 'oauth' },
+];
+
+// RemoteConnectPanel — Flow 2 body. A tool on another computer can only reach
+// this node via a public tunnel or a direct LAN bind, so we first ask the node
+// how it's reachable (connectRemoteUrl), then walk the user through: pick tool
+// → (bearer clients) mint a token + copy a paste block against the reachable
+// URL, or (ChatGPT) hand off to the tunnel/OAuth wizard. When there's NO remote
+// path we say so plainly and offer to set one up.
+function RemoteConnectPanel({ agents, onOpenChatGPT }) {
+    const [info, setInfo] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [loadErr, setLoadErr] = useState(null);
+    const [tool, setTool] = useState('');
+    const [base, setBase] = useState('');           // 'tunnel' | 'lan'
+    const [lanIdx, setLanIdx] = useState(0);        // which lan_candidates entry the operator picked
+    const [agentChoice, setAgentChoice] = useState('');
+    const [tokenName, setTokenName] = useState('remote');
+    const [minting, setMinting] = useState(false);
+    const [minted, setMinted] = useState(null);
+    const [mintErr, setMintErr] = useState(null);
+
+    const eligibleAgents = (agents || []).filter(a => a.status !== 'removed');
+    const selected = REMOTE_PROVIDERS.find(p => p.key === tool) || null;
+
+    useEffect(() => {
+        let alive = true;
+        connectRemoteUrl()
+            .then(d => { if (alive) { setInfo(d); setBase(d.has_tunnel ? 'tunnel' : (d.lan_exposed ? 'lan' : '')); } })
+            .catch(e => { if (alive) setLoadErr(e.message || 'could not read node reachability'); })
+            .finally(() => { if (alive) setLoading(false); });
+        return () => { alive = false; };
+    }, []);
+
+    // Reset the per-tool wizard when switching tools.
+    const pickTool = (key) => {
+        setTool(key);
+        setMinted(null);
+        setMintErr(null);
+        if (info) setBase(info.has_tunnel ? 'tunnel' : (info.lan_exposed ? 'lan' : ''));
+    };
+
+    const onMint = async () => {
+        setMinting(true);
+        setMintErr(null);
+        try {
+            const r = await wizardMintToken(agentChoice, tokenName || 'remote');
+            if (r.error) setMintErr(r.error);
+            else setMinted(r);
+        } catch (e) { setMintErr('mint failed: ' + (e.message || e)); }
+        setMinting(false);
+    };
+
+    const lanCands = (info && info.lan_candidates) || [];
+    const lanCand = lanCands[lanIdx] || lanCands[0] || null;
+    const lanUrl = lanCand ? `https://${lanCand.ip}:${(info && info.mcp_port) || 8443}/v1/mcp/sse` : null;
+    const baseUrl = base === 'tunnel' ? (info && info.tunnel_mcp_url) : lanUrl;
+    const isSelfSigned = base === 'lan' && !!(info && info.self_signed);
+
+    // Cursor/Cline (url kind) can't be told to trust a self-signed cert, so a
+    // LAN URL simply won't work for them. This gates the mint form (below) so
+    // the dead-end is stated BEFORE the user mints a throwaway bearer.
+    const urlSelfSignedDeadEnd = selected && selected.kind === 'url' && isSelfSigned;
+
+    // Per-tool paste block, generated once a bearer is minted. url-kind never
+    // reaches here while self-signed (urlSelfSignedDeadEnd gates minting).
+    const renderPasteBlock = () => {
+        const token = minted.token;
+        if (selected.kind === 'url') {
+            return html`
+                <p style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">
+                    <strong>${selected.name}</strong> on the other computer — add this to its MCP servers config
+                    (Cursor: <code>~/.cursor/mcp.json</code> or Settings → MCP; Cline: its MCP settings JSON):
+                </p>
+                <pre style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);">${remoteMcpJson('url', baseUrl, token, false)}</pre>
+            `;
+        }
+        // mcp-remote: stdio-only clients bridge through the npx shim.
+        const where = selected.key === 'claude-desktop'
+            ? 'Claude Desktop → Settings → Developer → Edit Config'
+            : 'Windsurf → its MCP config (~/.codeium/windsurf/mcp_config.json)';
+        return html`
+            <p style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">
+                <strong>${selected.name}</strong> talks over stdio, so it bridges through <code>mcp-remote</code>
+                (requires Node.js on the other machine). Add this in ${where}, then restart it:
+            </p>
+            <pre style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);">${remoteMcpJson('mcp-remote', baseUrl, token, isSelfSigned)}</pre>
+            ${isSelfSigned && html`<div class="warning-banner" style="margin-top:8px;">
+                This LAN URL uses a self-signed certificate — the <code>NODE_TLS_REJECT_UNAUTHORIZED</code> line above tells
+                mcp-remote to accept it. The public tunnel path has a real certificate and doesn't need it.
+            </div>`}
+        `;
+    };
+
+    if (loading) return html`<div style="text-align:center;padding:32px;color:var(--text-dim);">Checking how this node is reachable…</div>`;
+    if (loadErr) return html`<div class="import-error">${loadErr}</div>`;
+
+    return html`
+        <h3 style="margin-top:0;">Which tool on the other computer?</h3>
+        <div class="connect-cards" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-bottom:8px;">
+            ${REMOTE_PROVIDERS.map(p => html`
+                <div class="connect-card ${tool === p.key ? 'selected' : ''}" role="button" tabIndex="0"
+                    onClick=${() => pickTool(p.key)}
+                    onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickTool(p.key); } }}>
+                    <div class="connect-card-icon">${p.icon}</div>
+                    <h4>${p.name}</h4>
+                    <p>${p.kind === 'oauth' ? 'OAuth + public URL' : (p.kind === 'url' ? 'URL + bearer' : 'stdio via mcp-remote')}</p>
+                </div>
+            `)}
+        </div>
+
+        ${selected && selected.kind === 'oauth' && html`
+            <div class="summary-card" style="padding:18px;margin-top:12px;">
+                <p style="margin-top:0;">ChatGPT (and other hosted chats) need a <strong>public HTTPS URL and OAuth</strong> —
+                    they can't reach a bare localhost or LAN address. The dedicated wizard sets up the Cloudflare tunnel,
+                    mints the token, and gives you the exact fields to paste into ChatGPT's connector.</p>
+                ${info.has_tunnel
+                    ? html`<p style="color:var(--accent-green);margin:0 0 12px;">✓ A tunnel is already configured (<code>${info.tunnel_hostname}</code>) — the wizard will reuse it.</p>`
+                    : html`<p style="color:var(--text-dim);margin:0 0 12px;">No tunnel yet — the wizard will walk you through creating one.</p>`}
+                <button class="btn btn-primary" onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}>Open the ChatGPT setup wizard →</button>
+            </div>
+        `}
+
+        ${selected && selected.kind !== 'oauth' && !info.has_tunnel && !info.lan_exposed && html`
+            <div class="summary-card" style="padding:18px;margin-top:12px;">
+                <h4 style="margin-top:0;">This node isn't reachable from another computer yet</h4>
+                <p style="color:var(--text-dim);">SAGE is listening on localhost only, so a tool on a different machine
+                    has no way in. Give it a public URL — a stable HTTPS address that works from anywhere. The wizard sets up
+                    the tunnel, then hands you the exact ${selected.name} paste block.</p>
+                <button class="btn btn-primary" onClick=${() => onOpenChatGPT && onOpenChatGPT('tool')}>Set up a public tunnel →</button>
+            </div>
+        `}
+
+        ${selected && selected.kind !== 'oauth' && (info.has_tunnel || info.lan_exposed) && html`
+            <div style="margin-top:12px;">
+                ${(info.has_tunnel && info.lan_exposed) && html`
+                    <div class="wizard-field">
+                        <label>How will the other computer reach this node?</label>
+                        <div style="display:flex;gap:16px;font-size:13px;margin-top:4px;">
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                                <input type="radio" name="rc-base" checked=${base === 'tunnel'} onChange=${() => setBase('tunnel')} />
+                                Public tunnel <span style="color:var(--text-muted);">(${info.tunnel_hostname})</span>
+                            </label>
+                            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                                <input type="radio" name="rc-base" checked=${base === 'lan'} onChange=${() => setBase('lan')} />
+                                ${lanCand && lanCand.is_private ? 'Local network' : 'Direct address'}
+                            </label>
+                        </div>
+                    </div>
+                `}
+
+                ${base === 'lan' && lanCands.length > 1 && html`
+                    <div class="wizard-field">
+                        <label>Which address can the other computer reach? <span style="color:var(--text-muted);font-weight:normal;">(pick the network you share with it)</span></label>
+                        <select class="wizard-select" value=${String(lanIdx)} onInput=${e => setLanIdx(parseInt(e.target.value, 10) || 0)}>
+                            ${lanCands.map((c, i) => html`<option value=${String(i)}>${c.iface} — ${c.ip} ${c.is_private ? '(local network)' : '(direct/overlay)'}</option>`)}
+                        </select>
+                    </div>
+                `}
+
+                ${baseUrl && html`
+                    <div style="font-size:12px;color:var(--text-muted);margin:6px 0 10px;">
+                        Configured at <code>${baseUrl}</code>${base === 'tunnel' ? '' : (lanCand && lanCand.is_private ? ' — reachable from devices on the same network' : ' — reachable from devices that can route to this address')}.
+                    </div>
+                `}
+
+                ${mintErr && html`<div class="import-error" style="margin-bottom:12px;">${mintErr}</div>`}
+
+                ${urlSelfSignedDeadEnd
+                    ? html`
+                        <div class="warning-banner" style="margin-top:8px;">
+                            <strong>${selected.name} can't use the local-network URL.</strong> It's served with a self-signed
+                            certificate and stock Cursor/Cline reject that with no override.
+                            ${info.has_tunnel
+                                ? html` Use the public tunnel — it has a real certificate.`
+                                : html` Set up a public tunnel (a real certificate) and this tool will connect cleanly.`}
+                        </div>
+                        ${info.has_tunnel
+                            ? html`<button class="btn btn-primary" style="margin-top:10px;" onClick=${() => setBase('tunnel')}>Use the public tunnel instead →</button>`
+                            : html`<button class="btn btn-primary" style="margin-top:10px;" onClick=${() => onOpenChatGPT && onOpenChatGPT('tool')}>Set up a public tunnel →</button>`}
+                    `
+                    : html`
+                        ${!minted && html`
+                            <h4 style="margin:14px 0 8px;">Mint a bearer for the other computer</h4>
+                            <div class="wizard-field">
+                                <label>Agent</label>
+                                <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
+                                    <option value="">Pick an agent…</option>
+                                    ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
+                                </select>
+                            </div>
+                            <div class="wizard-field">
+                                <label>Token name</label>
+                                <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="remote" />
+                            </div>
+                            <button class="btn btn-primary" onClick=${onMint} disabled=${minting || !agentChoice}>
+                                ${minting ? 'Minting…' : 'Mint bearer'}
+                            </button>
+                        `}
+
+                        ${minted && html`
+                            <h4 style="margin:14px 0 8px;color:var(--accent-green);">✓ Token minted</h4>
+                            <div class="warning-banner" style="margin-bottom:14px;">
+                                Save the bearer NOW — it's shown ONCE. It carries the agent's identity; treat it like a password.
+                            </div>
+                            <${ChatGPTCopyField} label="MCP Server URL" value=${baseUrl} />
+                            <${ChatGPTCopyField} label="Bearer token (save now!)" value=${minted.token} sensitive=${true} />
+                            <div style="margin-top:16px;">${renderPasteBlock()}</div>
+                        `}
+                    `}
+            </div>
+        `}
+    `;
+}
+
 // ConnectToolModal — Phase 5b entry point for wiring an AI tool to SAGE.
 // Step 0 branches on WHERE the tool lives. Flow 1 (same machine) is fully
 // implemented here: pick a provider, give a project folder for folder-scoped
 // tools, hit Connect, and the node writes/merges the tool's MCP config, then we
 // show a per-file result rail. Flows 2 and 3 are placeholders for later.
-function ConnectToolModal({ onClose }) {
+function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
     const [view, setView] = useState('branch'); // 'branch' | 'flow1' | 'flow2' | 'flow3'
     const [provider, setProvider] = useState('');
     const [projectPath, setProjectPath] = useState('');
@@ -7103,11 +7403,7 @@ function ConnectToolModal({ onClose }) {
 
                     ${view === 'flow2' && html`
                         <button class="btn" style="margin-bottom:16px;" onClick=${() => setView('branch')}>← Back</button>
-                        <div class="summary-card" style="text-align:center;padding:32px 20px;">
-                            <div style="font-size:40px;margin-bottom:12px;">\u{1F6A7}</div>
-                            <h3 style="margin:0 0 8px;">Coming in the next update</h3>
-                            <p style="color:var(--text-dim);margin:0;">Connecting a chat or tool on another computer is on its way. For now, use the ChatGPT or Cursor cards below.</p>
-                        </div>
+                        <${RemoteConnectPanel} agents=${agents} onOpenChatGPT=${onOpenChatGPT} />
                     `}
 
                     ${view === 'flow3' && html`

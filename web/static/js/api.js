@@ -617,6 +617,20 @@ export async function connectProvider(provider, { path, token } = {}) {
     return res.json();
 }
 
+// ─── Remote connect (Phase 5b-2) ───
+// Reports how a tool on ANOTHER computer can reach this node: a public tunnel
+// (has_tunnel + tunnel_mcp_url + oauth urls) and/or a direct LAN bind
+// (lan_exposed + lan_mcp_url + self_signed). When neither is present the tool
+// cannot reach this node yet and the UI offers to set up a tunnel.
+export async function connectRemoteUrl() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/connect/remote-url`);
+    if (!res.ok) {
+        const e = await res.json().catch(() => ({}));
+        throw new Error(e.error || `remote-url failed (HTTP ${res.status})`);
+    }
+    return res.json();
+}
+
 // ============================================================================
 // v11 federation JOIN ceremony (cookie-authed dashboard proxy). Off-consensus;
 // the only chain writes are the two operators' own tx-33/tx-34, fired inside the
