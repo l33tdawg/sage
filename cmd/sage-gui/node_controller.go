@@ -171,8 +171,16 @@ func (c *SageNodeController) RegenerateGenesis(validators []orchestrator.Validat
 		Str("chain_id", existingGen.ChainID).
 		Msg("regenerating genesis with new validator set")
 
-	// Build new validator list
+	// Build new validator list. Multiple agents can resolve to the SAME
+	// validator key: on a single-node personal chain every agent maps to the
+	// node's one validator key (they have no distinct consensus key). A
+	// duplicate entry makes CometBFT's NewValidatorSet panic and BRICKS the node
+	// on the next start (it can't build the genesis validator set), so we
+	// deduplicate by validator address — N agents on one node collapse to one
+	// validator; a genuine multi-node quorum with distinct keys stays distinct.
 	genValidators := make([]cmttypes.GenesisValidator, 0, len(validators))
+	seenValidator := make(map[string]bool)
+	droppedDupes := 0
 
 	for _, v := range validators {
 		var pubKey cmtcrypto.PubKey
@@ -187,6 +195,13 @@ func (c *SageNodeController) RegenerateGenesis(validators []orchestrator.Validat
 			pubKey = localPK
 		}
 
+		addr := pubKey.Address().String()
+		if seenValidator[addr] {
+			droppedDupes++
+			continue
+		}
+		seenValidator[addr] = true
+
 		power := v.Power
 		if power <= 0 {
 			power = 10
@@ -198,6 +213,12 @@ func (c *SageNodeController) RegenerateGenesis(validators []orchestrator.Validat
 			Power:   power,
 			Name:    v.Name,
 		})
+	}
+	if droppedDupes > 0 {
+		c.logger.Warn().
+			Int("dropped_duplicate_validators", droppedDupes).
+			Int("unique_validators", len(genValidators)).
+			Msg("collapsed duplicate validators while regenerating genesis (agents sharing one node key)")
 	}
 
 	// If no validators provided, fall back to the local validator
