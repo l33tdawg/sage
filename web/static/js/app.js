@@ -5325,7 +5325,7 @@ function NetworkPage({ sse }) {
         <div class="network-page fade-in">
             ${isRedeploying && html`<div class="redeploy-banner"><span class="deploy-spinner"></span> Network reconfiguration in progress...${redeployStatus.operation ? ` (${redeployStatus.operation.replace(/_/g, ' ')})` : ''}</div>`}
             <div class="network-header">
-                <div><h2>Network <${HelpTip} text="Manage agents on your SAGE chain. Each agent is a separate node that participates in BFT consensus. Click any agent to expand its details and permissions." /><${PageHelp} section="network" label="Network & Agents guide" /></h2><div class="network-header-sub">${agents.length} agent${agents.length !== 1 ? 's' : ''} on this network</div></div>
+                <div><h2>Agents <${HelpTip} text="Manage the agents on your own SAGE node. Each agent is a separate participant in BFT consensus with its own permissions. Click any agent to expand its details and access. (To connect your whole node to ANOTHER SAGE, use Federation.)" /><${PageHelp} section="network" label="Agents guide" /></h2><div class="network-header-sub">${agents.length} agent${agents.length !== 1 ? 's' : ''} on this node</div></div>
             </div>
 
             <div class="gov-section">
@@ -7101,13 +7101,13 @@ function App() {
             <button class="sidebar-btn ${page === 'import' ? 'active' : ''}" onClick=${() => navigate('import')} title="Import - ingest conversation exports" aria-label="Import - ingest conversation exports">
                 ${icons.import}
             </button>
-            <button class="sidebar-btn ${page === 'network' ? 'active' : ''}" onClick=${() => navigate('network')} title="Network - agents, RBAC and validator quorum" aria-label="Network - agents, RBAC and validator quorum">
+            <button class="sidebar-btn ${page === 'network' ? 'active' : ''}" onClick=${() => navigate('network')} title="Agents - your agents, RBAC and validator quorum" aria-label="Agents - your agents, RBAC and validator quorum">
                 ${icons.network}
             </button>
             <button class="sidebar-btn ${page === 'pipeline' ? 'active' : ''}" onClick=${() => navigate('pipeline')} title="Pipeline - agent-to-agent message bus" aria-label="Pipeline - agent-to-agent message bus">
                 ${icons.pipeline}
             </button>
-            <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Networks - federate with another SAGE node" aria-label="Networks - federate with another SAGE node">
+            <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Federation - connect your whole node to another SAGE" aria-label="Federation - connect your whole node to another SAGE">
                 ${icons.federation}
             </button>
             <button class="sidebar-btn ${page === 'settings' ? 'active' : ''}" onClick=${() => navigate('settings')} title="Settings - node configuration" aria-label="Settings - node configuration">
@@ -7716,8 +7716,8 @@ function FederationPage() {
 
     return html`<div class="page fed-page">
         <div class="fed-landing">
-            <h1>Networks</h1>
-            <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> - across the internet or your network. This is not the same as adding an agent to your own SAGE (do that under Agents), or joining other computers on your LAN into one brain (that's the quorum Network section).</p>
+            <h1>Federation</h1>
+            <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> - across the internet or your network. This is not the same as adding an agent to your own SAGE (do that under <strong>Agents</strong>), or the validator quorum your own agents form (also under Agents). Federation links two separate brains.</p>
             <${FedGreenRail} />
             ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
             <div class="fed-roles">
@@ -7765,9 +7765,9 @@ const PAGE_LABELS = {
     search: 'Search',
     tasks: 'Tasks',
     import: 'Import',
-    network: 'Network',
+    network: 'Agents',
     pipeline: 'Pipeline',
-    federation: 'Networks',
+    federation: 'Federation',
     settings: 'Settings',
 };
 
