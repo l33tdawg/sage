@@ -31,6 +31,7 @@ import (
 
 	"github.com/cometbft/cometbft/p2p"
 	cmttypes "github.com/cometbft/cometbft/types"
+	"github.com/rs/zerolog"
 )
 
 // defaultP2PPort is CometBFT's default P2P port; used when the host's
@@ -171,12 +172,22 @@ func applyNodeJoinBundle(b NodeJoinBundle, force bool) error {
 	// Refuse to wipe chain state out from under a running node — that risks
 	// BadgerDB/CometBFT corruption. Check BEFORE any destructive step.
 	if serveIsRunning() {
-		return fmt.Errorf("a SAGE node appears to be running (CometBFT RPC on :26657 is up) — stop it before joining a network")
+		return fmt.Errorf("a SAGE node appears to be running — stop it before joining a network")
 	}
 
+	return doWipeAndAdopt(b, genesisBytes)
+}
+
+// doWipeAndAdopt is the destructive core shared by the CLI apply (guarded) and
+// the startup apply (called before any store opens). It has NO running-node
+// guard — callers must ensure no node is live. It sets this node up as a
+// non-validator peer: own identity, host genesis verbatim, wiped chain state,
+// quorum config pointing at the host.
+func doWipeAndAdopt(b NodeJoinBundle, genesisBytes []byte) error {
 	home := SageHome()
 	cometHome := filepath.Join(home, "data", "cometbft")
 	configDir := filepath.Join(cometHome, "config")
+	badgerPath := filepath.Join(home, "data", "badger")
 
 	// Ensure this node has its own CometBFT identity (node key + validator key).
 	// A brand-new joiner has none; initCometBFTConfig creates them and seeds a
@@ -201,7 +212,7 @@ func applyNodeJoinBundle(b NodeJoinBundle, force bool) error {
 	// Wipe local chain state — the previous personal chain is incompatible with
 	// the adopted genesis. Mirrors runQuorumJoin: reset priv_validator_state to
 	// height 0, drop CometBFT DBs, and reset BadgerDB (AppHash would mismatch).
-	if wipeErr := wipeChainStateForJoin(cometHome, home); wipeErr != nil {
+	if wipeErr := wipeChainStateForJoin(cometHome, badgerPath); wipeErr != nil {
 		return wipeErr
 	}
 
@@ -222,7 +233,7 @@ func applyNodeJoinBundle(b NodeJoinBundle, force bool) error {
 
 // wipeChainStateForJoin resets CometBFT + BadgerDB state so this node re-syncs
 // the adopted chain from genesis. SQLite memories are untouched.
-func wipeChainStateForJoin(cometHome, home string) error {
+func wipeChainStateForJoin(cometHome, badgerPath string) error {
 	dataDir := filepath.Join(cometHome, "data")
 
 	// Reset validator signing state to height 0 (CometBFT refuses to sign below
@@ -238,7 +249,6 @@ func wipeChainStateForJoin(cometHome, home string) error {
 		}
 	}
 
-	badgerPath := filepath.Join(home, "data", "badger")
 	if _, statErr := os.Stat(badgerPath); statErr == nil {
 		if rmErr := os.RemoveAll(badgerPath); rmErr != nil {
 			return fmt.Errorf("reset badger: %w", rmErr)
@@ -248,6 +258,85 @@ func wipeChainStateForJoin(cometHome, home string) error {
 		}
 	}
 	return nil
+}
+
+// pendingJoinPath is where the guest "Join a network" dashboard flow stashes the
+// decrypted bundle so applyPendingJoinAtStartup can apply it on the next boot,
+// BEFORE any store opens (the running-node guard makes an in-process apply
+// impossible for a node joining from its own dashboard).
+func pendingJoinPath() string {
+	return filepath.Join(SageHome(), "pending-join.json")
+}
+
+// WritePendingJoin persists a decrypted bundle for apply-on-next-restart.
+// Exported so the web guest-ceremony driver can call it via a callback.
+func WritePendingJoin(bundleJSON []byte) error {
+	// Validate before persisting so we never stage a bundle that would fail at
+	// startup (and brick boot).
+	b, err := parseNodeJoinBundleJSON(bundleJSON)
+	if err != nil {
+		return err
+	}
+	if _, err := validateNodeJoinBundle(b); err != nil {
+		return err
+	}
+	// Version-check at STAGE time so the dashboard surfaces a clear error DURING
+	// the ceremony instead of silently no-op'ing on the next restart (the
+	// startup apply also discards a mismatch, but the user would see nothing).
+	if b.AppVersion != "" && b.AppVersion != version {
+		return fmt.Errorf("the host runs SAGE %s but this computer runs %s — install the same version, then join", b.AppVersion, version)
+	}
+	return os.WriteFile(pendingJoinPath(), bundleJSON, 0600)
+}
+
+// RemovePendingJoin deletes any staged join bundle (backout). Not an error if
+// none is staged.
+func RemovePendingJoin() error {
+	err := os.Remove(pendingJoinPath())
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+// applyPendingJoinAtStartup applies a staged join bundle if one is present. It
+// runs at the very start of serve — before stores open — so the destructive
+// wipe happens on a closed chain. A malformed/incompatible pending file is
+// logged and REMOVED rather than bricking boot (returns applied=false). Returns
+// applied=true only when the join was actually performed.
+func applyPendingJoinAtStartup(logger zerolog.Logger) (bool, error) {
+	path := pendingJoinPath()
+	data, err := os.ReadFile(path) //nolint:gosec // path under SAGE home
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read pending join: %w", err)
+	}
+	b, perr := parseNodeJoinBundleJSON(data)
+	if perr != nil {
+		logger.Warn().Err(perr).Msg("pending network-join file is unparseable — discarding")
+		_ = os.Remove(path)
+		return false, nil
+	}
+	genesisBytes, verr := validateNodeJoinBundle(b)
+	if verr != nil {
+		logger.Warn().Err(verr).Msg("pending network-join bundle invalid — discarding")
+		_ = os.Remove(path)
+		return false, nil
+	}
+	if b.AppVersion != "" && b.AppVersion != version {
+		logger.Warn().Str("host_version", b.AppVersion).Str("this_version", version).
+			Msg("pending network-join version mismatch — discarding to avoid an AppHash split")
+		_ = os.Remove(path)
+		return false, nil
+	}
+	if adoptErr := doWipeAndAdopt(b, genesisBytes); adoptErr != nil {
+		// Leave the pending file in place so a transient failure retries next boot.
+		return false, fmt.Errorf("apply pending join: %w", adoptErr)
+	}
+	_ = os.Remove(path)
+	return true, nil
 }
 
 // serveIsRunning reports whether a local SAGE node appears to be running, by

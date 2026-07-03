@@ -631,6 +631,30 @@ export async function connectRemoteUrl() {
     return res.json();
 }
 
+// ─── LAN node-join ceremony (Phase 5b-3, Flow 3) ───
+// Host side: add another computer to your SAGE network as a non-validator peer.
+async function njFetch(path, opts) {
+    const res = await fetch(`${API_BASE}${path}`, opts);
+    const text = await res.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { error: text }; }
+    if (!res.ok) throw new Error(data.error || text || `HTTP ${res.status}`);
+    return data;
+}
+const njPost = (path, body) => njFetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+
+export const joinHostInterfaces = () => njFetch('/v1/dashboard/network/join/host/interfaces');
+export const enableNetworkMode = () => njPost('/v1/dashboard/network/mode/enable');
+export const joinHostStart = (lanIp) => njPost('/v1/dashboard/network/join/host/start', { lan_ip: lanIp });
+export const joinHostStatus = () => njFetch('/v1/dashboard/network/join/host/status');
+export const joinHostApprove = () => njPost('/v1/dashboard/network/join/host/approve');
+export const joinHostAbort = () => njPost('/v1/dashboard/network/join/host/abort');
+// Guest side: make THIS node part of another SAGE network.
+export const joinGuestStart = (token) => njPost('/v1/dashboard/network/join/guest/start', { token });
+export const joinGuestStatus = () => njFetch('/v1/dashboard/network/join/guest/status');
+export const joinGuestCancel = () => njPost('/v1/dashboard/network/join/guest/cancel');
+export const joinGuestRestart = () => njPost('/v1/dashboard/network/join/guest/restart');
+
 // ============================================================================
 // v11 federation JOIN ceremony (cookie-authed dashboard proxy). Off-consensus;
 // the only chain writes are the two operators' own tx-33/tx-34, fired inside the

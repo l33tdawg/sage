@@ -1,6 +1,8 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
+joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
+joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -5356,6 +5358,8 @@ function NetworkPage({ sse }) {
     const [showCursorPanel, setShowCursorPanel] = useState(false);
     // Same-machine connect entry (Phase 5b-1)
     const [showConnectTool, setShowConnectTool] = useState(false);
+    // LAN node-join guest entry (Phase 5b-3)
+    const [showJoinGuest, setShowJoinGuest] = useState(false);
 
     // Governance state
     const [govProposals, setGovProposals] = useState([]);
@@ -5831,6 +5835,16 @@ function NetworkPage({ sse }) {
                         </div>
                         <div class="ext-client-cta">Get started →</div>
                     </div>
+                    <div class="ext-client-card" role="button" tabIndex="0"
+                        onClick=${() => setShowJoinGuest(true)}
+                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowJoinGuest(true); } }}>
+                        <div class="ext-client-icon">🔗</div>
+                        <div class="ext-client-info">
+                            <div class="ext-client-title">Join a network</div>
+                            <div class="ext-client-desc">Make this computer part of another SAGE on your network - it keeps its own node but shares that network's memory.</div>
+                        </div>
+                        <div class="ext-client-cta">Paste a code →</div>
+                    </div>
                 </div>
             </div>
 
@@ -6146,6 +6160,7 @@ function NetworkPage({ sse }) {
             ${showConnectTool && html`<${ConnectToolModal} agents=${agents}
                 onOpenChatGPT=${(t) => { setRemoteWizardTarget(t || 'chatgpt'); setShowConnectTool(false); setShowChatGPTWizard(true); }}
                 onClose=${() => setShowConnectTool(false)} />`}
+            ${showJoinGuest && html`<${NetworkJoinGuestPanel} onClose=${() => setShowJoinGuest(false)} />`}
             ${showRemoveConfirm && html`<${RemoveConfirmModal} agent=${showRemoveConfirm} onConfirm=${() => handleRemove(showRemoveConfirm)} onCancel=${() => setShowRemoveConfirm(null)} />`}
             ${showRotateConfirm && html`
                 <div class="wizard-overlay" onClick=${(e) => { if (e.target === e.currentTarget) setShowRotateConfirm(null); }}>
@@ -7420,8 +7435,8 @@ function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
                                 onClick=${() => setView('flow3')}
                                 onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setView('flow3'); } }}>
                                 <div class="connect-card-icon">\u{1F5A7}</div>
-                                <h4>On another computer on my network - make it an agent here</h4>
-                                <p>Turn a tool on another machine into a full agent on this node.</p>
+                                <h4>On another computer on my network - add it to my SAGE</h4>
+                                <p>Make another computer a node in your SAGE network. It runs its own SAGE and shares this node's memory.</p>
                             </div>
                         </div>
                     `}
@@ -7433,11 +7448,7 @@ function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
 
                     ${view === 'flow3' && html`
                         <button class="btn" style="margin-bottom:16px;" onClick=${() => setView('branch')}>← Back</button>
-                        <div class="summary-card" style="text-align:center;padding:32px 20px;">
-                            <div style="font-size:40px;margin-bottom:12px;">\u{1F6A7}</div>
-                            <h3 style="margin:0 0 8px;">Coming in the next update</h3>
-                            <p style="color:var(--text-dim);margin:0;">Making a tool on another machine into a full agent here is on its way.</p>
-                        </div>
+                        <${NetworkJoinHostPanel} />
                     `}
 
                     ${view === 'flow1' && html`
@@ -7505,6 +7516,220 @@ function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
                 </div>
                 <div class="wizard-footer">
                     <button class="btn" onClick=${onClose}>${result && result.ok ? 'Done' : 'Close'}</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+// NetworkJoinHostPanel — Flow 3 host side. Add another computer to your SAGE
+// network as a non-validator peer. Ensures the node is in network mode (LAN
+// P2P), lets the operator pick the LAN address, mints a pairing token, then
+// number-compares + approves the guest.
+function NetworkJoinHostPanel() {
+    const [info, setInfo] = useState(null);      // { candidates, network_mode }
+    const [loading, setLoading] = useState(true);
+    const [err, setErr] = useState(null);
+    const [switching, setSwitching] = useState(false);
+    const [lanIdx, setLanIdx] = useState(0);
+    const [session, setSession] = useState(null); // { token, session_id, lan_ip, expires_at }
+    const [starting, setStarting] = useState(false);
+    const [status, setStatus] = useState(null);   // { state, sas, guest_name, guest_node_id }
+    const [approving, setApproving] = useState(false);
+    const pollRef = useRef(null);
+
+    useEffect(() => {
+        joinHostInterfaces().then(setInfo).catch(e => setErr(e.message)).finally(() => setLoading(false));
+        // On close, tear down any pairing immediately (the LAN listener) rather
+        // than leaving it up until the TTL reaper.
+        return () => {
+            if (pollRef.current) clearInterval(pollRef.current);
+            joinHostAbort().catch(() => {});
+        };
+    }, []);
+
+    // Poll host status once a pairing is live.
+    useEffect(() => {
+        if (!session) return;
+        pollRef.current = setInterval(async () => {
+            try { setStatus(await joinHostStatus()); } catch (e) { /* keep last */ }
+        }, 2000);
+        return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+    }, [session]);
+
+    const cands = (info && info.candidates) || [];
+    const lanCand = cands[lanIdx] || cands[0] || null;
+
+    const onSwitch = async () => {
+        setSwitching(true); setErr(null);
+        try { await enableNetworkMode(); } catch (e) { setErr(e.message); setSwitching(false); }
+        // On success the node re-execs — this session drops; we show a restart notice.
+    };
+
+    const onStart = async () => {
+        if (!lanCand) return;
+        setStarting(true); setErr(null);
+        try { setSession(await joinHostStart(lanCand.ip)); }
+        catch (e) { setErr(e.message); }
+        setStarting(false);
+    };
+
+    const onApprove = async () => {
+        setApproving(true); setErr(null);
+        try { await joinHostApprove(); setStatus(s => ({ ...(s || {}), state: 'approved' })); }
+        catch (e) { setErr(e.message); }
+        setApproving(false);
+    };
+
+    if (loading) return html`<div style="text-align:center;padding:32px;color:var(--text-dim);">Checking your network…</div>`;
+    if (err && !info) return html`<div class="import-error">${err}</div>`;
+
+    // Network-mode switch gate.
+    if (info && !info.network_mode) {
+        return html`
+            <div class="summary-card" style="padding:18px;">
+                <h4 style="margin-top:0;">Turn on network mode first</h4>
+                <p style="color:var(--text-dim);">Right now SAGE only listens on this computer. To let another computer join, it needs to
+                    listen on your local network. This is a <strong>one-time switch</strong> and a quick restart — your memories and chain are kept.</p>
+                ${switching
+                    ? html`<div class="warning-banner">SAGE is switching to network mode and restarting (about 10-20s). When it's back, unlock the vault and reopen <em>Add a computer</em>.</div>`
+                    : html`<button class="btn btn-primary" onClick=${onSwitch}>Switch to network mode & restart</button>`}
+                ${err && html`<div class="import-error" style="margin-top:12px;">${err}</div>`}
+            </div>
+        `;
+    }
+
+    // Not yet started: pick the LAN address.
+    if (!session) {
+        return html`
+            <h3 style="margin-top:0;">Add a computer to your network</h3>
+            <p style="color:var(--text-dim);">The other computer will run its own SAGE and share this node's memory. Pick the address it can reach you on:</p>
+            ${cands.length === 0
+                ? html`<div class="import-error">No local network address found. Make sure you're connected to a network.</div>`
+                : html`
+                    <div class="wizard-field">
+                        <label>Your address on the network</label>
+                        <select class="wizard-select" value=${String(lanIdx)} onInput=${e => setLanIdx(parseInt(e.target.value, 10) || 0)}>
+                            ${cands.map((c, i) => html`<option value=${String(i)}>${c.iface} — ${c.ip} ${c.is_private ? '(local network)' : '(direct)'}</option>`)}
+                        </select>
+                    </div>
+                    <button class="btn btn-primary" style="width:100%;padding:12px;" onClick=${onStart} disabled=${starting}>
+                        ${starting ? 'Starting…' : 'Start'}
+                    </button>
+                `}
+            ${err && html`<div class="import-error" style="margin-top:12px;">${err}</div>`}
+        `;
+    }
+
+    // Pairing live.
+    const st = (status && status.state) || 'waiting';
+    return html`
+        <h3 style="margin-top:0;">On the other computer</h3>
+        <p style="color:var(--text-dim);font-size:13px;">Open SAGE there → <em>Join a network</em> and paste this code (or run <code>sage-gui pair &lt;code&gt;</code> in a terminal):</p>
+        <${ChatGPTCopyField} label="Pairing code" value=${session.token} sensitive=${true} />
+
+        ${st === 'waiting' && html`
+            <div style="display:flex;align-items:center;gap:8px;color:var(--text-dim);margin-top:14px;">
+                <span class="spinner" style="width:14px;height:14px;"></span> Waiting for the other computer to connect…
+            </div>
+        `}
+
+        ${(st === 'connected') && html`
+            <div class="summary-card" style="padding:16px;margin-top:14px;">
+                <p style="margin:0 0 6px;">A computer wants to join${status.guest_name ? html` — <strong>${status.guest_name}</strong>` : ''}. Does the code shown on it match this one?</p>
+                <div style="text-align:center;font-size:30px;letter-spacing:6px;font-weight:700;color:var(--accent);margin:10px 0;">${status.sas}</div>
+                <button class="btn btn-primary" style="width:100%;" onClick=${onApprove} disabled=${approving}>
+                    ${approving ? 'Approving…' : 'Yes, the codes match — approve'}
+                </button>
+                <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">Only approve if the numbers are identical on both screens.</div>
+            </div>
+        `}
+
+        ${(st === 'approved') && html`
+            <div class="warning-banner" style="margin-top:14px;background:var(--accent-dim);color:var(--accent);">
+                ✓ Approved. The other computer is joining and will restart to sync. You can close this.
+            </div>
+        `}
+        ${err && html`<div class="import-error" style="margin-top:12px;">${err}</div>`}
+    `;
+}
+
+// NetworkJoinGuestPanel — Flow 3 guest side. Make THIS node part of another
+// SAGE network: paste the host's pairing code, compare the 6-digit code, wait
+// for the host to approve, then restart to finish (the join is applied at boot).
+function NetworkJoinGuestPanel({ onClose }) {
+    const [token, setToken] = useState('');
+    const [starting, setStarting] = useState(false);
+    const [sas, setSas] = useState(null);
+    const [status, setStatus] = useState(null); // { state, sas, chain_id, error }
+    const [err, setErr] = useState(null);
+    const [restarting, setRestarting] = useState(false);
+    const pollRef = useRef(null);
+
+    useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+    const onJoin = async () => {
+        setStarting(true); setErr(null);
+        try {
+            const r = await joinGuestStart(token.trim());
+            setSas(r.sas);
+            pollRef.current = setInterval(async () => {
+                try { setStatus(await joinGuestStatus()); } catch (e) { /* keep */ }
+            }, 2000);
+        } catch (e) { setErr(e.message); }
+        setStarting(false);
+    };
+
+    const onRestart = async () => {
+        setRestarting(true); setErr(null);
+        try { await joinGuestRestart(); } catch (e) { setErr(e.message); setRestarting(false); }
+    };
+
+    const st = status && status.state;
+
+    return html`
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) { joinGuestCancel().catch(() => {}); onClose(); } }}>
+            <div class="wizard-modal" style="max-width:560px;">
+                <div class="wizard-header">
+                    <h2>Join a SAGE network</h2>
+                    <button class="detail-close" onClick=${() => { joinGuestCancel().catch(() => {}); onClose(); }}>×</button>
+                </div>
+                <div class="wizard-body" style="padding:20px;line-height:1.55;">
+                    ${!sas && html`
+                        <p style="color:var(--text-dim);">This makes <strong>this computer</strong> part of another SAGE network — it keeps its own node but shares that network's memory.
+                            On the host, open <em>Connect an AI tool → another computer on my network</em> to get a pairing code, then paste it here.</p>
+                        <div class="warning-banner" style="margin-bottom:12px;">Heads up: joining resets this node's local chain state and restarts it. Your stored memories are kept.</div>
+                        <div class="wizard-field">
+                            <label>Pairing code from the host</label>
+                            <textarea class="wizard-input" style="min-height:70px;font-family:monospace;font-size:11px;" value=${token} onInput=${e => setToken(e.target.value)} placeholder="paste the code shown on the other computer"></textarea>
+                        </div>
+                        <button class="btn btn-primary" onClick=${onJoin} disabled=${starting || !token.trim()}>
+                            ${starting ? 'Connecting…' : 'Join'}
+                        </button>
+                    `}
+
+                    ${sas && (!st || st === 'awaiting_approval' || st === 'connecting') && html`
+                        <p style="margin-top:0;">Check this code matches the one on the host, then have them approve:</p>
+                        <div style="text-align:center;font-size:34px;letter-spacing:8px;font-weight:700;color:var(--accent);margin:14px 0;">${sas}</div>
+                        <div style="display:flex;align-items:center;gap:8px;color:var(--text-dim);justify-content:center;">
+                            <span class="spinner" style="width:14px;height:14px;"></span> Waiting for the host to approve…
+                        </div>
+                    `}
+
+                    ${st === 'ready' && html`
+                        <div style="text-align:center;">
+                            <div style="font-size:38px;margin-bottom:8px;">✓</div>
+                            <h3 style="margin:0 0 8px;color:var(--accent-green);">Approved${status.chain_id ? html` — joining ${status.chain_id}` : ''}</h3>
+                            <p style="color:var(--text-dim);">This node will restart to finish joining and start syncing the shared memory.</p>
+                            <button class="btn btn-primary" onClick=${onRestart} disabled=${restarting}>
+                                ${restarting ? 'Restarting…' : 'Restart & finish joining'}
+                            </button>
+                            <div style="font-size:11px;color:var(--text-muted);margin-top:8px;">Changed your mind? Close this window to cancel — nothing is applied until you restart.</div>
+                        </div>
+                    `}
+
+                    ${st === 'error' && html`<div class="import-error" style="margin-top:12px;">${status.error || 'Join failed'}</div>`}
+                    ${err && html`<div class="import-error" style="margin-top:12px;">${err}</div>`}
                 </div>
             </div>
         </div>

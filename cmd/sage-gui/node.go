@@ -99,6 +99,25 @@ func runServe() (rerr error) {
 		}
 	}
 
+	// Pending LAN join (Flow 3, guest side): the "Join a network" dashboard flow
+	// decrypts the host bundle, stages it, and restarts. Apply it HERE — before
+	// any store opens or genesis is seeded — so the destructive wipe+adopt runs
+	// on a closed chain, then normal startup proceeds already joined.
+	if applied, joinErr := applyPendingJoinAtStartup(logger); joinErr != nil {
+		return fmt.Errorf("apply pending network join: %w", joinErr)
+	} else if applied {
+		logger.Info().Msg("applied pending network join — this node is now a peer on the host's network")
+		// doWipeAndAdopt wrote quorum mode + the host peer to config.yaml. Reload
+		// so THIS same-process CometBFT startup binds LAN P2P and dials the host
+		// (a stale in-memory cfg would start the node isolated on loopback), and
+		// so the later encryption-reconcile SaveConfig can't clobber the quorum flip.
+		reloaded, reloadErr := LoadConfig()
+		if reloadErr != nil {
+			return fmt.Errorf("reload config after network join: %w", reloadErr)
+		}
+		cfg = reloaded
+	}
+
 	// Auto-migrate on version upgrade: backup SQLite, reset chain state
 	if migrated, migrateErr := migrateOnUpgrade(cfg.DataDir); migrateErr != nil {
 		return fmt.Errorf("upgrade migration: %w", migrateErr)
@@ -567,6 +586,17 @@ func runServe() (rerr error) {
 		cfg.Quorum.Enabled = enabled
 		return SaveConfig(cfg)
 	}
+	// Guest side of Flow 3: the joining node's dashboard drives the ceremony and
+	// stages the bundle; it's applied at the next startup (before stores open).
+	dashboard.GuestNodeIDFn = func() (string, error) {
+		nk, nkErr := p2p.LoadNodeKey(filepath.Join(cometHome, "config", "node_key.json"))
+		if nkErr != nil {
+			return "", nkErr
+		}
+		return string(nk.ID()), nil
+	}
+	dashboard.WritePendingJoinFn = WritePendingJoin
+	dashboard.RemovePendingJoinFn = RemovePendingJoin
 	if sk := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); sk != nil {
 		dashboard.SigningKey = sk
 	}

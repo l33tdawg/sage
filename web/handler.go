@@ -163,6 +163,16 @@ type DashboardHandler struct {
 	// SetNetworkMode persists the network-mode flag to config.yaml (the node
 	// then re-binds P2P to the LAN on the next restart). Wired in cmd/sage-gui.
 	SetNetworkMode func(enabled bool) error
+
+	// GuestJoin drives the JOINING node's "Join a network" ceremony (Flow 3,
+	// guest side). GuestNodeIDFn returns this node's CometBFT p2p node id (for
+	// the hello proof) and WritePendingJoinFn stages the decrypted bundle for
+	// apply-on-next-restart. All nil => the guest join endpoints return 503.
+	GuestJoin          *GuestJoinStore
+	GuestNodeIDFn      func() (string, error)
+	WritePendingJoinFn func(bundleJSON []byte) error
+	// RemovePendingJoinFn un-stages a pending join (on cancel/backout).
+	RemovePendingJoinFn func() error
 }
 
 // isPostV8Fork is the internal accessor — returns false when no fork gate is
@@ -233,6 +243,7 @@ func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardH
 		Version:     version,
 		Pairing:     NewPairingStore(),
 		NetworkJoin: NewNetworkJoinStore(),
+		GuestJoin:   NewGuestJoinStore(),
 	}
 	// If the store implements PreferencesStore, wire it up.
 	if ps, ok := memStore.(PreferencesStore); ok {
@@ -378,6 +389,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Group(func(r chi.Router) {
 				r.Use(h.wizardSecurityGate)
 				h.RegisterNetworkJoinHostRoutes(r)
+				h.RegisterNetworkJoinGuestRoutes(r)
 			})
 
 			// Task backlog
