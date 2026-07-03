@@ -1971,6 +1971,7 @@ function SearchPage({ onSelectMemory }) {
     const [domains, setDomains] = useState([]);
     const [tagFilter, setTagFilter] = useState('');
     const [allTags, setAllTags] = useState([]);
+    const searchTimer = useRef(null);
 
     useEffect(() => {
         loadMemories();
@@ -1983,19 +1984,13 @@ function SearchPage({ onSelectMemory }) {
         setLoading(true);
         setError(null);
         try {
-            const params = { limit: 100, sort: 'newest' };
+            const params = { limit: search ? 200 : 100, sort: 'newest' };
             if (agent) params.agent = agent;
             if (domain) params.domain = domain;
             if (tag) params.tag = tag;
+            if (search) params.q = search; // real server-side FTS/keyword search over the whole base
             const data = await fetchMemories(params);
-            let memories = data.memories || [];
-            if (search) {
-                const q = search.toLowerCase();
-                memories = memories.filter(m =>
-                    (m.content && m.content.toLowerCase().includes(q)) ||
-                    (m.domain_tag && m.domain_tag.toLowerCase().includes(q))
-                );
-            }
+            const memories = data.memories || [];
             setResults(memories);
             setTotal(data.total || memories.length);
         } catch (err) {
@@ -2008,7 +2003,9 @@ function SearchPage({ onSelectMemory }) {
     function handleSearch(e) {
         const v = e.target.value;
         setQuery(v);
-        loadMemories(v, agentFilter, domainFilter, tagFilter);
+        // Debounce: search now hits the server (FTS/keyword), so don't fire per keystroke.
+        clearTimeout(searchTimer.current);
+        searchTimer.current = setTimeout(() => loadMemories(v, agentFilter, domainFilter, tagFilter), 250);
     }
 
     function handleAgentFilter(e) {
@@ -2034,7 +2031,7 @@ function SearchPage({ onSelectMemory }) {
             <input class="search-page-input" type="text" placeholder="Search memories..."
                    value=${query} onInput=${handleSearch} />
             <div class="search-filters">
-                <${HelpTip} text="Search committed memories by exact text (case-insensitive) in content or domain. There is no semantic or relevance ranking - matches are sorted newest first. Domain, tag, and agent filters narrow the set." />
+                <${HelpTip} text="Full-text search across your whole memory base by content or domain - relevance-ranked when the full-text index is available, keyword-matched otherwise. Domain, tag, and agent filters narrow the set." />
                 <${PageHelp} section="search" label="Search & Import guide" />
                 <select class="filter-select" value=${domainFilter} onChange=${handleDomainFilter}>
                     <option value="">All domains</option>

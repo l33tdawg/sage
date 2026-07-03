@@ -878,10 +878,51 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	records, total, err := h.store.ListMemories(r.Context(), opts)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	// Real search: when q is present, use FTS (SearchByText) for ranked results.
+	// On an encrypted vault FTS is disabled, so fall back to a server-side keyword
+	// scan over a broad recent pool - still far better than the old client-side
+	// substring filter over only the newest 100. RBAC (opts.SubmittingAgents) is
+	// applied on both paths.
+	var records []*memory.MemoryRecord
+	var total int
+	if qStr := strings.TrimSpace(q.Get("q")); qStr != "" {
+		qopts := store.QueryOptions{
+			DomainTag:        opts.DomainTag,
+			Provider:         opts.Provider,
+			StatusFilter:     opts.Status,
+			TopK:             limit,
+			SubmittingAgents: opts.SubmittingAgents,
+		}
+		if ftsRecs, ferr := h.store.SearchByText(r.Context(), qStr, qopts); ferr == nil {
+			records, total = ftsRecs, len(ftsRecs)
+		} else {
+			pool, _, perr := h.store.ListMemories(r.Context(), store.ListOptions{
+				DomainTag: opts.DomainTag, Tag: opts.Tag, Provider: opts.Provider,
+				Status: opts.Status, SubmittingAgent: opts.SubmittingAgent,
+				SubmittingAgents: opts.SubmittingAgents, Limit: 1000, Sort: "newest",
+			})
+			if perr != nil {
+				writeError(w, http.StatusInternalServerError, perr.Error())
+				return
+			}
+			needle := strings.ToLower(qStr)
+			for _, m := range pool {
+				if strings.Contains(strings.ToLower(m.Content), needle) || strings.Contains(strings.ToLower(m.DomainTag), needle) {
+					records = append(records, m)
+					if len(records) >= limit {
+						break
+					}
+				}
+			}
+			total = len(records)
+		}
+	} else {
+		var lerr error
+		records, total, lerr = h.store.ListMemories(r.Context(), opts)
+		if lerr != nil {
+			writeError(w, http.StatusInternalServerError, lerr.Error())
+			return
+		}
 	}
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
