@@ -7200,6 +7200,7 @@ function OverviewPage({ sse }) {
     const TONE = {
         healthy:  { bg: 'rgba(16,185,129,0.15)', fg: '#10b981' },
         degraded: { bg: 'rgba(245,158,11,0.15)', fg: '#f59e0b' },
+        limited:  { bg: 'rgba(245,158,11,0.15)', fg: '#f59e0b' }, // amber like degraded, but a capability note, not a node fault
         danger:   { bg: 'rgba(239,68,68,0.15)',  fg: '#ef4444' },
         neutral:  { bg: 'rgba(107,114,128,0.15)', fg: '#9ca3af' },
     };
@@ -7261,10 +7262,15 @@ function OverviewPage({ sse }) {
     }
     let chainTone = 'neutral';
     if (chain) {
+        // A BFT chain does not mint empty blocks, so a rising block age on an
+        // idle chain is normal, not a stall - never flash amber on age alone
+        // (that produced a spurious 10-30s amber window before the idle
+        // threshold kicked in). Degraded only when the node is behind, the
+        // mempool is backed up, or there is pending work not being minted.
+        const stalled = mempoolTxs != null && mempoolTxs > 0 && ageS !== null && ageS > CHAIN_IDLE_AFTER_MS / 1000;
         if (chain.catching_up) chainTone = 'degraded';
         else if (mempoolHot) chainTone = 'degraded';
-        else if (chainIdle) chainTone = 'healthy';
-        else if (ageS !== null && ageS > 10) chainTone = 'degraded';
+        else if (stalled) chainTone = 'degraded';
         else chainTone = 'healthy';
     }
     const chainTiles = [
@@ -7333,7 +7339,14 @@ function OverviewPage({ sse }) {
     const rr = health?.embedder?.reranker;
     const rrOn = !!(rr && rr.enabled);
     const rrText = rrOn ? `On - ${rr.model || 'reranker'}` : 'Off';
-    const embTone = !health ? 'neutral' : ((emb.online && emb.provider !== 'hash') ? 'healthy' : 'degraded');
+    // Distinguish a reduced-capability fallback (hash/none: no semantic search,
+    // but the node itself is fine) from a genuinely broken embedder (a
+    // configured provider that is offline). Only the latter is a node fault.
+    const embFallback = !emb.provider || emb.provider === 'hash' || emb.provider === 'none' || emb.provider === 'unknown';
+    let embTone;
+    if (!health) embTone = 'neutral';
+    else if (embFallback) embTone = 'limited';
+    else embTone = emb.online ? 'healthy' : 'degraded';
     const embTiles = [
         tile(emb.displayName || '--', 'Provider', { small: true, title: emb.label || '' }),
         tile(emb.online ? 'Online' : 'Offline', 'Runtime state', { small: true, color: emb.online ? '#10b981' : '#ef4444' }),
@@ -7345,10 +7358,15 @@ function OverviewPage({ sse }) {
     // ---- overall node banner (worst section wins) ----
     const cannotReach = failed.health && !health;
     const loading = health === null && !failed.health;
-    const anyDegraded = [chainTone, quorumTone, agentTone, fedTone, embTone].includes('degraded');
-    const nodeTone = cannotReach ? 'danger' : (loading ? 'neutral' : (anyDegraded ? 'degraded' : 'healthy'));
-    const nodeLabel = cannotReach ? 'Cannot reach node' : (loading ? 'Checking node' : (anyDegraded ? 'Node degraded' : 'Node healthy'));
-    const nodePillText = cannotReach ? 'offline' : (loading ? 'checking' : (anyDegraded ? 'degraded' : 'healthy'));
+    // Only CORE node health escalates the top banner: chain (behind/stalled),
+    // quorum (RPC error), or a CONFIGURED embedder that is offline. The hash
+    // fallback (embTone 'limited') is a capability note, not a node fault - if
+    // it escalated, every default/no-Ollama install would sit permanently amber
+    // and operators would learn to ignore the banner (alarm fatigue).
+    const coreDegraded = chainTone === 'degraded' || quorumTone === 'degraded' || embTone === 'degraded';
+    const nodeTone = cannotReach ? 'danger' : (loading ? 'neutral' : (coreDegraded ? 'degraded' : 'healthy'));
+    const nodeLabel = cannotReach ? 'Cannot reach node' : (loading ? 'Checking node' : (coreDegraded ? 'Node degraded' : 'Node healthy'));
+    const nodePillText = cannotReach ? 'offline' : (loading ? 'checking' : (coreDegraded ? 'degraded' : 'healthy'));
 
     return html`<div class="settings-page">
         <div class="settings-section" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
@@ -7408,7 +7426,7 @@ function OverviewPage({ sse }) {
 
         ${sectionCard('Embeddings',
             'The embedding provider that turns memories into vectors for semantic recall, and the optional reranker that reorders recall candidates.',
-            pill(embTone, embTone === 'healthy' ? 'healthy' : (embTone === 'degraded' ? 'degraded' : 'checking')),
+            pill(embTone, embTone === 'healthy' ? 'healthy' : (embTone === 'degraded' ? 'offline' : (embTone === 'limited' ? 'limited' : 'checking'))),
             failed.health,
             html`<div class="chain-stats-grid">${embTiles}</div>`)}
     </div>`;
