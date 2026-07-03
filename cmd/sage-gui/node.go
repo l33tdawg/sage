@@ -552,6 +552,21 @@ func runServe() (rerr error) {
 	// Same-machine one-click connect: the dashboard endpoint delegates provider
 	// config writing to the package-main writers via this dispatcher.
 	dashboard.ConnectFunc = connectProvider
+	// LAN node-join ceremony (Flow 3): the dashboard drives it but the temp LAN
+	// listener + the (secret-free) bundle assembly live here in package main.
+	dashboard.PairingListenerFn = startPairingListener
+	dashboard.BuildJoinBundleFn = func(lanIP string) ([]byte, error) {
+		bundle, err := buildNodeJoinBundle(lanIP)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(bundle)
+	}
+	dashboard.QuorumEnabled = cfg.Quorum.Enabled
+	dashboard.SetNetworkMode = func(enabled bool) error {
+		cfg.Quorum.Enabled = enabled
+		return SaveConfig(cfg)
+	}
 	if sk := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); sk != nil {
 		dashboard.SigningKey = sk
 	}

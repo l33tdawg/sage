@@ -61,6 +61,8 @@ func main() {
 		err = runQuorumInit()
 	case "quorum-join":
 		err = runQuorumJoin()
+	case "pair":
+		err = runPair(os.Args[2:])
 	case "cert-status":
 		err = runCertStatus()
 	case "mcp-token":
@@ -100,6 +102,7 @@ Commands:
   repair-chain  Recover a personal chain stranded at the upgrade admin-gate (issue #52); rebuilds consensus state, preserves memories
   quorum-init   Initialize a quorum network (generates shared genesis)
   quorum-join   Join a quorum network (imports genesis from another node)
+  pair          Join a SAGE network on your LAN as a non-validator peer (sage-gui pair <token>)
   cert-status   Show TLS certificate status and expiry
   mcp-token     Manage HTTP MCP bearer tokens (create | list | revoke)
   status    Show node status

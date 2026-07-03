@@ -143,6 +143,26 @@ type DashboardHandler struct {
 	// cmd/sage-gui to connectProvider so the config-writer funcs (package main)
 	// run without the web package importing them. nil disables the endpoint.
 	ConnectFunc func(provider, path, token string) ([]ConnectFile, error)
+
+	// NetworkJoin drives the LAN node-join ceremony (Phase 5b-3, Flow 3). The
+	// two callbacks below let the package-web handler start a temporary LAN
+	// listener and build the (secret-free) join bundle without importing the
+	// cmd/sage-gui config/CometBFT writers. All three nil => the join endpoints
+	// return 503.
+	NetworkJoin *NetworkJoinStore
+	// PairingListenerFn binds a temporary 0.0.0.0 listener serving the guest
+	// pairing handler and returns a stop func + the bound port.
+	PairingListenerFn func(handler http.Handler) (stop func(), port int, err error)
+	// BuildJoinBundleFn assembles this host's join bundle (JSON) for a guest
+	// that will reach the node at lanIP.
+	BuildJoinBundleFn func(lanIP string) ([]byte, error)
+	// QuorumEnabled reports whether this node is in network/quorum mode (P2P on
+	// the LAN). A personal node binds P2P to loopback, so it must switch to
+	// network mode before it can accept a joining peer.
+	QuorumEnabled bool
+	// SetNetworkMode persists the network-mode flag to config.yaml (the node
+	// then re-binds P2P to the LAN on the next restart). Wired in cmd/sage-gui.
+	SetNetworkMode func(enabled bool) error
 }
 
 // isPostV8Fork is the internal accessor — returns false when no fork gate is
@@ -208,10 +228,11 @@ func (h *DashboardHandler) resolveAgentRBAC(r *http.Request) ([]string, bool) {
 // NewDashboardHandler creates a new dashboard handler.
 func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardHandler {
 	h := &DashboardHandler{
-		store:   memStore,
-		SSE:     NewSSEBroadcaster(),
-		Version: version,
-		Pairing: NewPairingStore(),
+		store:       memStore,
+		SSE:         NewSSEBroadcaster(),
+		Version:     version,
+		Pairing:     NewPairingStore(),
+		NetworkJoin: NewNetworkJoinStore(),
 	}
 	// If the store implements PreferencesStore, wire it up.
 	if ps, ok := memStore.(PreferencesStore); ok {
@@ -348,6 +369,16 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			// generate the right per-tool paste block or gate honestly when there is
 			// no remote path yet.
 			r.Get("/v1/dashboard/connect/remote-url", h.handleConnectRemoteURL)
+
+			// LAN node-join ceremony (Flow 3) — operator side. Same-origin gated
+			// on top of authMiddleware (like the wizard/federation routes) since
+			// these routes open a LAN listener and reconfigure the node, so a
+			// cross-origin tab must never drive them. The guest-facing half runs
+			// on a temporary listener (see guestPairingHandler).
+			r.Group(func(r chi.Router) {
+				r.Use(h.wizardSecurityGate)
+				h.RegisterNetworkJoinHostRoutes(r)
+			})
 
 			// Task backlog
 			r.Get("/v1/dashboard/tasks", h.handleGetTasks)

@@ -104,9 +104,13 @@ func (ps *PairingStore) Cleanup() {
 	}
 }
 
-// redeemRateLimiter tracks redemption attempts per IP for brute-force protection.
+// redeemRateLimiter tracks redemption attempts per IP for brute-force
+// protection. A single mutex guards the map AND the per-IP slices so allow()
+// and sweep() are fully serialized (the slices are non-atomic headers that both
+// read and write, so map-level atomicity alone is not enough).
 type redeemRateLimiter struct {
-	attempts sync.Map // IP -> *[]time.Time
+	mu       sync.Mutex
+	attempts map[string][]time.Time
 }
 
 const redeemMaxAttempts = 10
@@ -117,25 +121,49 @@ func (rl *redeemRateLimiter) allow(ip string) bool {
 	now := time.Now()
 	cutoff := now.Add(-redeemWindow)
 
-	val, _ := rl.attempts.LoadOrStore(ip, &[]time.Time{})
-	times := val.(*[]time.Time)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if rl.attempts == nil {
+		rl.attempts = make(map[string][]time.Time)
+	}
 
 	// Prune old entries
-	fresh := make([]time.Time, 0, len(*times))
-	for _, t := range *times {
+	fresh := rl.attempts[ip][:0:0]
+	for _, t := range rl.attempts[ip] {
 		if t.After(cutoff) {
 			fresh = append(fresh, t)
 		}
 	}
 
 	if len(fresh) >= redeemMaxAttempts {
-		*times = fresh
+		rl.attempts[ip] = fresh
 		return false
 	}
 
 	fresh = append(fresh, now)
-	*times = fresh
+	rl.attempts[ip] = fresh
 	return true
+}
+
+// sweep drops entries whose timestamps have all aged out, bounding map growth
+// under a spoofed-source-IP flood. Called opportunistically (e.g. from the
+// pairing reaper).
+func (rl *redeemRateLimiter) sweep() {
+	cutoff := time.Now().Add(-redeemWindow)
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	for ip, times := range rl.attempts {
+		keep := false
+		for _, t := range times {
+			if t.After(cutoff) {
+				keep = true
+				break
+			}
+		}
+		if !keep {
+			delete(rl.attempts, ip)
+		}
+	}
 }
 
 // generatePairingCode creates a code like "SAG-X7KP4M2N" using crypto/rand.
