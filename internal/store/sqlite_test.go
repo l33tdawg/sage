@@ -1263,6 +1263,13 @@ func TestUpdateMemoryEmbedding_PreservesAgentProvider(t *testing.T) {
 	rec.Provider = "claude-code" // agent LLM provider — must survive re-embedding
 	require.NoError(t, s.InsertMemory(ctx, rec))
 
+	// Before embedding it's in the work set (embedding_provider = ''), decryptable.
+	items, err := s.ListMemoriesForReembed(ctx, 100)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.True(t, items[0].Decryptable)
+	require.Equal(t, "pricing decision notes", items[0].Content, "content decrypts for embedding")
+
 	// Re-embed: new vector, embedding provider "ollama".
 	emb := make([]float32, 768)
 	for i := range emb {
@@ -1281,12 +1288,20 @@ func TestUpdateMemoryEmbedding_PreservesAgentProvider(t *testing.T) {
 	require.Equal(t, 1, counts["ollama"], "memory should count under embedding provider ollama")
 	require.Equal(t, 0, counts["claude-code"], "counts must be keyed on embedding_provider, not agent provider")
 
-	// Re-embed iteration surfaces the current embedding provider.
-	items, err := s.ListMemoriesForReembed(ctx, 100, 0)
+	// After embedding it has left the work set.
+	items, err = s.ListMemoriesForReembed(ctx, 100)
 	require.NoError(t, err)
-	require.Len(t, items, 1)
-	require.Equal(t, "ollama", items[0].EmbeddingProvider)
-	require.Equal(t, "pricing decision notes", items[0].Content, "content decrypts for embedding")
+	require.Len(t, items, 0, "an ollama-tagged memory is no longer in the re-embed set")
+
+	// A memory tagged skipped (e.g. undecryptable) also leaves the work set.
+	rec2 := testMemory("m2", "agent1", "unreadable", "general")
+	require.NoError(t, s.InsertMemory(ctx, rec2))
+	require.NoError(t, s.MarkMemoryEmbeddingSkipped(ctx, "m2"))
+	items, err = s.ListMemoriesForReembed(ctx, 100)
+	require.NoError(t, err)
+	require.Len(t, items, 0, "a skipped memory is not retried")
+	counts, _ = s.CountMemoriesByProvider(ctx)
+	require.Equal(t, 1, counts["skipped"])
 
 	// Missing memory errors rather than silently no-op'ing.
 	require.Error(t, s.UpdateMemoryEmbedding(ctx, "nope", emb, "ollama"))

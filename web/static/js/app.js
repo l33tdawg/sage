@@ -1,7 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
-embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, enableSemanticEmbeddings,
+embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
@@ -3368,16 +3368,32 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     const [reembedding, setReembedding] = useState(false);
     const [enabling, setEnabling] = useState(false);
     const [warn, setWarn] = useState(null); // non-blocking notice (e.g. partial re-embed failures)
+    const [skipped, setSkipped] = useState(0); // memories that couldn't be read/embedded
     const busy = pulling || reembedding || enabling;
 
     useEffect(() => {
-        embeddingsStatus().then(s => {
-            setStatus(s);
-            if (s.is_semantic && s.need_reembed === 0) setStep('done');
-            else if (!s.ollama_running) setStep('need-ollama');
-            else if (!s.model_available) setStep('pull');
-            else setStep('intro');
-        }).catch(e => setErr(e.message)).finally(() => setLoading(false));
+        (async () => {
+            try {
+                // Re-attach if a background re-embed is already running (reopened
+                // modal, or it kept going after the modal was closed).
+                const prog = await reembedProgress().catch(() => null);
+                if (prog && prog.running) {
+                    setStatus(await embeddingsStatus().catch(() => null));
+                    setProg({ done: prog.done || 0, total: prog.total || 0 });
+                    setStep('reembed');
+                    setLoading(false);
+                    pollReembed();
+                    return;
+                }
+                const s = await embeddingsStatus();
+                setStatus(s);
+                if (s.is_semantic && s.need_reembed === 0) setStep('done');
+                else if (!s.ollama_running) setStep('need-ollama');
+                else if (!s.model_available) setStep('pull');
+                else setStep('intro');
+            } catch (e) { setErr(e.message); }
+            setLoading(false);
+        })();
     }, []);
 
     // Read a text/plain "key: value\n" stream, dispatching each line.
@@ -3409,23 +3425,31 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
         setPulling(false);
     };
 
-    const doReembed = async () => {
-        setReembedding(true); setErr(null); setWarn(null); setProg({ done: 0, total: status?.need_reembed || 0 });
-        // Track error/warn in LOCAL vars — a setErr() inside the stream can't be
-        // read back from the stale `err` closure, so we can't gate on it.
-        let streamErr = null, streamWarn = null;
+    // pollReembed watches the SERVER-SIDE background job to completion. The job
+    // survives client hiccups (backgrounded tab, network blip), so we just poll
+    // its snapshot every second and mirror it into the progress bar.
+    const pollReembed = async () => {
+        setReembedding(true); setErr(null); setWarn(null);
         try {
-            const res = await reembedMemories();
-            if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
-            await readStream(res, (k, v) => {
-                if (k === 'total') setProg({ done: 0, total: parseInt(v, 10) || 0 });
-                if (k === 'progress') { const p = v.split('/'); setProg({ done: parseInt(p[0], 10) || 0, total: parseInt(p[1], 10) || 0 }); }
-                if (k === 'error') { streamErr = v; setErr(v); }
-                if (k === 'warn') { streamWarn = v; setWarn(v); }
-            });
-            if (!streamErr) { if (streamWarn) setWarn(streamWarn); setStep('enable'); } // only advance on a clean run
-        } catch (e) { setErr(e.message || String(e)); }
+            for (;;) {
+                const p = await reembedProgress();
+                setProg({ done: p.done || 0, total: p.total || 0 });
+                setSkipped(p.skipped || 0);
+                if (p.error) { setErr(p.error); break; }        // stay on reembed; error shown
+                if (!p.running) { setStep('enable'); break; }    // finished
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        } catch (e) { setErr('Lost contact with the node: ' + (e.message || e)); }
         setReembedding(false);
+    };
+
+    const doReembed = async () => {
+        setErr(null); setWarn(null); setProg({ done: 0, total: status?.need_reembed || 0 });
+        try {
+            const s = await reembedMemories();               // starts (or re-attaches to) the job
+            setProg({ done: s.done || 0, total: s.total || 0 });
+        } catch (e) { setErr(e.message || String(e)); return; }
+        pollReembed();
     };
 
     const doEnable = async () => {
@@ -3498,6 +3522,9 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                             <div style="font-size:34px;margin-bottom:6px;">✓</div>
                             <h3 style="margin:0 0 8px;color:var(--accent-green);">Memories re-read</h3>
                             <p style="color:var(--text-dim);">Last step: switch SAGE over to smart memory. It restarts briefly (about 10-20s) — unlock the vault when it's back.</p>
+                            ${skipped > 0 && html`<div class="warning-banner" style="margin:10px 0;font-size:12px;text-align:left;">
+                                ${skipped} memor${skipped === 1 ? 'y' : 'ies'} couldn't be read — ${skipped === 1 ? 'it was' : 'they were'} encrypted with a previous vault key, so ${skipped === 1 ? 'it' : 'they'} can't be searched no matter the embedder. Since ${skipped === 1 ? "it's" : "they're"} unreadable, you can safely deprecate ${skipped === 1 ? 'it' : 'them'} from the Memories page — or, if you still have your original vault's recovery key, restore that to get ${skipped === 1 ? 'it' : 'them'} back.
+                            </div>`}
                             <button class="btn btn-primary" onClick=${doEnable} disabled=${enabling}>${enabling ? 'Switching…' : 'Finish & restart'}</button>
                         </div>
                     `}

@@ -646,8 +646,18 @@ export async function checkOllamaEmbed() {
 export function pullEmbedModel() {
     return fetch(`${API_BASE}/v1/dashboard/embeddings/pull-model`, { method: 'POST' });
 }
-export function reembedMemories() {
-    return fetch(`${API_BASE}/v1/dashboard/embeddings/reembed`, { method: 'POST' });
+// reembedMemories STARTS (or re-attaches to) the server-side background re-embed
+// job and returns its current snapshot {running, done, total, failed, error}.
+// The job runs independently of this request — poll reembedProgress() for updates.
+export async function reembedMemories() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/reembed`, { method: 'POST' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
+export async function reembedProgress() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/reembed/progress`);
+    if (!res.ok) throw new Error(`reembed progress failed (HTTP ${res.status})`);
+    return res.json();
 }
 export async function enableSemanticEmbeddings() {
     const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/enable`, { method: 'POST' });

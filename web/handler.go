@@ -160,6 +160,9 @@ type DashboardHandler struct {
 	// the LAN). A personal node binds P2P to loopback, so it must switch to
 	// network mode before it can accept a joining peer.
 	QuorumEnabled bool
+	// reembed holds the state of the background re-embed job (server-side, decoupled
+	// from any request so it survives client disconnects). See embeddings_handler.go.
+	reembed reembedJob
 	// SetEmbeddingOllama persists the embedding provider switch to Ollama +
 	// nomic-embed-text in config.yaml (the node re-reads it on the next restart).
 	// Wired in cmd/sage-gui. nil disables the enable endpoint.

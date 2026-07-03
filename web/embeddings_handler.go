@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -40,6 +41,7 @@ func (h *DashboardHandler) RegisterEmbeddingsRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/embeddings/check-ollama", h.handleEmbeddingsCheckOllama)
 	r.Post("/v1/dashboard/embeddings/pull-model", h.handleEmbeddingsPullModel)
 	r.Post("/v1/dashboard/embeddings/reembed", h.handleEmbeddingsReembed)
+	r.Get("/v1/dashboard/embeddings/reembed/progress", h.handleEmbeddingsReembedProgress)
 	r.Post("/v1/dashboard/embeddings/enable", h.handleEmbeddingsEnable)
 }
 
@@ -52,27 +54,25 @@ func (h *DashboardHandler) handleEmbeddingsStatus(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, "count memories: "+err.Error())
 		return
 	}
-	total, onOllama := 0, 0
-	for provider, n := range counts {
+	total := 0
+	for _, n := range counts {
 		total += n
-		if provider == embedProviderOllama {
-			onOllama += n
-		}
 	}
 	current := currentEmbedProvider(h.embedder)
 	ollamaUp := ollamaRunning(r.Context())
 	modelReady := ollamaUp && ollamaHasModel(r.Context(), embedModel)
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"provider":        current,            // active embedder: "hash" | "ollama" | ...
+		"provider":        current, // active embedder: "hash" | "ollama" | ...
 		"is_semantic":     current == embedProviderOllama,
 		"model":           embedModel,
 		"dimension":       embedDimension,
 		"ollama_running":  ollamaUp,
 		"model_available": modelReady,
 		"total_memories":  total,
-		"need_reembed":    total - onOllama, // memories not yet on the Ollama vector space
-		"on_ollama":       onOllama,
+		"need_reembed":    counts[""], // untagged memories still needing an embedding (excludes done + skipped)
+		"on_ollama":       counts[embedProviderOllama],
+		"skipped":         counts["skipped"],
 		"vault_locked":    h.VaultLocked.Load(),
 	})
 }
@@ -149,10 +149,39 @@ func (h *DashboardHandler) handleEmbeddingsPullModel(w http.ResponseWriter, r *h
 	line("done", "0")
 }
 
-// handleEmbeddingsReembed re-embeds every memory not yet on the Ollama vector
-// space, streaming progress as text/plain "progress: done/total" lines. Requires
-// the vault unlocked (it decrypts content + re-encrypts embeddings). Resumable:
-// already-Ollama memories are skipped, so a re-run finishes an interrupted pass.
+// reembedJob is the live state of the SERVER-SIDE background re-embed job. It is
+// intentionally decoupled from any HTTP request: a re-embed of thousands of
+// memories takes minutes, and tying it to a streaming response made it die on any
+// client hiccup (backgrounded tab, throttling, network blip) — which then
+// cancelled the server loop via the request context. The job now runs on a
+// background context and the frontend polls handleEmbeddingsReembedProgress.
+type reembedJob struct {
+	mu      sync.Mutex
+	running bool
+	done    int // successfully embedded this run
+	skipped int // couldn't embed (undecryptable / empty / embed error) — tagged so they leave the set
+	total   int // memories needing embedding at the start of the run
+	errMsg  string
+}
+
+func (j *reembedJob) snapshot() map[string]any {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return map[string]any{
+		"running": j.running,
+		"done":    j.done,
+		"skipped": j.skipped,
+		"total":   j.total,
+		"error":   j.errMsg,
+	}
+}
+
+// handleEmbeddingsReembed STARTS (or re-attaches to) the background re-embed job
+// and returns its current snapshot immediately. Idempotent: if a job is already
+// running, it returns that job's status instead of starting a second one.
+// Requires the vault unlocked (it decrypts content + re-encrypts embeddings).
+// Resumable: already-Ollama memories are skipped, so a re-run finishes an
+// interrupted pass.
 func (h *DashboardHandler) handleEmbeddingsReembed(w http.ResponseWriter, r *http.Request) {
 	if h.VaultLocked.Load() {
 		writeError(w, http.StatusForbidden, "unlock the vault before re-embedding")
@@ -162,80 +191,82 @@ func (h *DashboardHandler) handleEmbeddingsReembed(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusPreconditionFailed, "Ollama with "+embedModel+" is not available")
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeError(w, http.StatusInternalServerError, "streaming unsupported")
-		return
-	}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(http.StatusOK)
-	line := func(k, v string) { fmt.Fprintf(w, "%s: %s\n", k, v); flusher.Flush() }
 
-	// Total to do (memories not on Ollama).
-	counts, _ := h.store.CountMemoriesByProvider(r.Context())
-	total := 0
-	for provider, n := range counts {
-		if provider != embedProviderOllama {
-			total += n
-		}
-	}
-	line("total", fmt.Sprintf("%d", total))
-	if total == 0 {
-		line("done", "0")
+	h.reembed.mu.Lock()
+	if h.reembed.running {
+		h.reembed.mu.Unlock()
+		writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
 		return
 	}
+	// Count what's left (untagged memories) up front for the progress bar.
+	counts, _ := h.store.CountMemoriesByProvider(r.Context())
+	total := counts[""]
+	h.reembed.running = true
+	h.reembed.done, h.reembed.skipped, h.reembed.total, h.reembed.errMsg = 0, 0, total, ""
+	h.reembed.mu.Unlock()
+
+	go h.runReembed()
+
+	writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
+}
+
+// handleEmbeddingsReembedProgress returns the background job's current snapshot.
+func (h *DashboardHandler) handleEmbeddingsReembedProgress(w http.ResponseWriter, r *http.Request) {
+	writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
+}
+
+// runReembed is the background worker. It uses context.Background() so it is NOT
+// tied to the triggering request — the operator can close the modal, background
+// the tab, or lose the connection and the job keeps going.
+func (h *DashboardHandler) runReembed() {
+	ctx := context.Background()
+	defer func() {
+		h.reembed.mu.Lock()
+		h.reembed.running = false
+		h.reembed.mu.Unlock()
+	}()
 
 	client := embedding.NewClient(ollamaBaseURL, embedModel)
-	done, failed, offset := 0, 0, 0
-	// Use the request context so a client disconnect / node shutdown stops the loop.
-	ctx := r.Context()
+	markSkipped := func(id string) {
+		_ = h.store.MarkMemoryEmbeddingSkipped(ctx, id) // tag so it leaves the '' work set
+		h.reembed.mu.Lock()
+		h.reembed.skipped++
+		h.reembed.mu.Unlock()
+	}
 	for {
-		if ctx.Err() != nil {
-			line("error", "cancelled")
-			return
-		}
-		mems, err := h.store.ListMemoriesForReembed(ctx, reembedPageSize, offset)
+		// Each call returns the NEXT batch of still-untagged memories; every one is
+		// tagged below (ollama or skipped), so the set converges to empty.
+		mems, err := h.store.ListMemoriesForReembed(ctx, reembedPageSize)
 		if err != nil {
-			line("error", "list memories: "+err.Error())
-			line("done", "1")
+			h.reembed.mu.Lock()
+			h.reembed.errMsg = "list memories: " + err.Error()
+			h.reembed.mu.Unlock()
 			return
 		}
 		if len(mems) == 0 {
-			break
+			return // no more work — converged
 		}
 		for _, m := range mems {
-			// Skip memories already on the target embedder (resumable re-runs) or
-			// with no content to embed. NOTE: this reads embedding_provider, NOT the
-			// agent's `provider` column — those are distinct.
-			if m.EmbeddingProvider == embedProviderOllama || strings.TrimSpace(m.Content) == "" {
+			// Can't embed: undecryptable (vault-key mismatch) or empty content.
+			// Tag skipped so it drops out permanently instead of looping forever.
+			if !m.Decryptable || strings.TrimSpace(m.Content) == "" {
+				markSkipped(m.MemoryID)
 				continue
 			}
 			emb, embErr := client.Embed(ctx, m.Content)
 			if embErr != nil {
-				failed++
-				continue // skip; a later re-run retries it (still not tagged ollama)
-			}
-			if upErr := h.store.UpdateMemoryEmbedding(ctx, m.MemoryID, emb, embedProviderOllama); upErr != nil {
-				failed++
+				markSkipped(m.MemoryID) // persistent embed failure — tag so it can't wedge the loop
 				continue
 			}
-			done++
-			if done%5 == 0 || done == total {
-				line("progress", fmt.Sprintf("%d/%d", done, total))
+			if upErr := h.store.UpdateMemoryEmbedding(ctx, m.MemoryID, emb, embedProviderOllama); upErr != nil {
+				markSkipped(m.MemoryID)
+				continue
 			}
+			h.reembed.mu.Lock()
+			h.reembed.done++
+			h.reembed.mu.Unlock()
 		}
-		if len(mems) < reembedPageSize {
-			break
-		}
-		offset += reembedPageSize
 	}
-	line("progress", fmt.Sprintf("%d/%d", done, total))
-	if failed > 0 {
-		line("warn", fmt.Sprintf("%d memories could not be re-embedded (will retry on the next run)", failed))
-	}
-	line("done", "0")
 }
 
 // handleEmbeddingsEnable switches the node's embedding provider to Ollama in

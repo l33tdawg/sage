@@ -937,22 +937,27 @@ func (s *SQLiteStore) CountMemoriesByProvider(ctx context.Context) (map[string]i
 	return out, rows.Err()
 }
 
-// ReembedItem is one memory to (re-)embed: its id, decrypted content, and the
-// embedder that last produced its vector (empty = never tagged).
+// ReembedItem is one memory to (re-)embed: its id and decrypted content.
+// Decryptable is false when the stored content could not be decrypted (vault-key
+// mismatch / corruption) — such a memory can't be embedded and should be tagged
+// so it drops out of the work set rather than being retried forever.
 type ReembedItem struct {
-	MemoryID          string
-	Content           string
-	EmbeddingProvider string
+	MemoryID    string
+	Content     string
+	Decryptable bool
 }
 
-// ListMemoriesForReembed pages memories (id + decrypted content + current
-// embedding_provider) ordered by creation, for the re-embed engine. Offset paging
-// over ALL rows is stable because updating embedding_provider changes neither the
-// row set nor the created_at ordering — so no rows are skipped or double-visited.
-func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit, offset int) ([]ReembedItem, error) {
+// ListMemoriesForReembed returns up to `limit` memories that still need embedding
+// (embedding_provider = ''), decrypting their content. It deliberately uses a
+// WHERE filter + LIMIT (no OFFSET): the re-embed loop tags every returned row
+// (ollama or skipped), so each subsequent call returns the NEXT batch of
+// still-untagged rows — stable, no skips, and it converges to empty. A decrypt
+// failure is tolerated (Decryptable=false), never fatal, matching every other
+// list path in this store.
+func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit int) ([]ReembedItem, error) {
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT memory_id, content, COALESCE(embedding_provider, '') FROM memories ORDER BY created_at ASC, memory_id ASC LIMIT ? OFFSET ?`,
-		limit, offset)
+		`SELECT memory_id, content FROM memories WHERE COALESCE(embedding_provider, '') = '' ORDER BY created_at ASC, memory_id ASC LIMIT ?`,
+		limit)
 	if err != nil {
 		return nil, err
 	}
@@ -961,17 +966,27 @@ func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit, offset 
 	for rows.Next() {
 		var it ReembedItem
 		var content string
-		if scanErr := rows.Scan(&it.MemoryID, &content, &it.EmbeddingProvider); scanErr != nil {
+		if scanErr := rows.Scan(&it.MemoryID, &content); scanErr != nil {
 			return nil, scanErr
 		}
 		dec, decErr := s.decryptContent(content)
-		if decErr != nil {
-			return nil, fmt.Errorf("decrypt content for %s: %w", it.MemoryID, decErr)
+		it.Decryptable = decErr == nil
+		if decErr == nil {
+			it.Content = dec
 		}
-		it.Content = dec
 		out = append(out, it)
 	}
 	return out, rows.Err()
+}
+
+// MarkMemoryEmbeddingSkipped tags a memory's embedding_provider as "skipped" so it
+// drops out of the re-embed work set (used for memories that can't be embedded —
+// undecryptable content, empty content, or a persistent embed error). Off-chain,
+// local; does not touch the embedding vector or the agent `provider` column.
+func (s *SQLiteStore) MarkMemoryEmbeddingSkipped(ctx context.Context, memoryID string) error {
+	_, err := s.writeExecContext(ctx,
+		`UPDATE memories SET embedding_provider = 'skipped' WHERE memory_id = ?`, memoryID)
+	return err
 }
 
 func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {

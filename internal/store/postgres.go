@@ -255,8 +255,12 @@ func (s *PostgresStore) CountMemoriesByProvider(_ context.Context) (map[string]i
 	return nil, fmt.Errorf("CountMemoriesByProvider not implemented for PostgresStore")
 }
 
-func (s *PostgresStore) ListMemoriesForReembed(_ context.Context, _, _ int) ([]ReembedItem, error) {
+func (s *PostgresStore) ListMemoriesForReembed(_ context.Context, _ int) ([]ReembedItem, error) {
 	return nil, fmt.Errorf("ListMemoriesForReembed not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) MarkMemoryEmbeddingSkipped(_ context.Context, _ string) error {
+	return fmt.Errorf("MarkMemoryEmbeddingSkipped not implemented for PostgresStore")
 }
 
 func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {
