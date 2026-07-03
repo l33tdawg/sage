@@ -161,6 +161,23 @@ func runServe() (rerr error) {
 				Msg("hybrid recall reranker enabled")
 		}
 	}
+	// Persisted reranker intent (Settings > Engine toggle) overrides the env
+	// config so an operator's dashboard on/off choice survives restart without
+	// needing SAGE_RERANK_* env vars. A stored "0" explicitly turns it off.
+	if prefs, perr := sqliteStore.GetAllPreferences(context.Background()); perr == nil {
+		if v, ok := prefs["reranker_enabled"]; ok {
+			cfg := embedding.ResolveRerankerConfig()
+			cfg.Enabled = v == "1" || v == "true"
+			if u := prefs["reranker_url"]; u != "" {
+				cfg.URL = u
+			}
+			if m := prefs["reranker_model"]; m != "" {
+				cfg.Model = m
+			}
+			sqliteStore.SetReranker(embedding.BuildReranker(cfg), cfg.Oversample)
+			logger.Info().Bool("enabled", cfg.Enabled).Str("url", cfg.URL).Msg("reranker applied from saved preferences")
+		}
+	}
 
 	// Unlock encryption vault if enabled
 	vaultKeyPath := filepath.Join(SageHome(), "vault.key")
@@ -531,6 +548,7 @@ func runServe() (rerr error) {
 	// Wire CometBFT consensus for dashboard agent operations (Step 7).
 	// Agent create/update will be broadcast on-chain in addition to direct SQLite writes.
 	dashboard.CometBFTRPC = cometRPC
+	dashboard.RESTAddr = cfg.RESTAddr // surfaced read-only in Settings > Connection
 	if sk := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); sk != nil {
 		dashboard.SigningKey = sk
 	}

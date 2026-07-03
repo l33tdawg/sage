@@ -46,7 +46,8 @@ type SQLiteStore struct {
 	// SetReranker after ResolveRerankerConfig+BuildReranker, so the store
 	// stays agnostic to whether an operator turned the reranker on.
 	reranker           embedding.Reranker
-	rerankerOversample int // RRF candidate pool size factor when reranker is active
+	rerankerOversample int          // RRF candidate pool size factor when reranker is active
+	rerankerMu         sync.RWMutex // guards reranker + rerankerOversample; they are hot-swappable at runtime via SetReranker (Settings > Recall toggle), so live recall readers must synchronize
 }
 
 // writeExecContext wraps ExecContext with writeMu for standalone (non-tx) writes.
@@ -100,23 +101,28 @@ func (s *SQLiteStore) SetVault(v *vault.Vault) {
 // `oversample` is the multiplier applied to TopK when sizing the candidate
 // pool fed to the reranker; values <= 0 fall through to the default 2.
 func (s *SQLiteStore) SetReranker(r embedding.Reranker, oversample int) {
-	s.reranker = r
 	if oversample <= 0 {
 		oversample = 2
 	}
+	s.rerankerMu.Lock()
+	s.reranker = r
 	s.rerankerOversample = oversample
+	s.rerankerMu.Unlock()
 }
 
 // RerankerInfo reports the optional reranker configuration to
 // /v1/dashboard/health. enabled is true whenever a reranker is attached; when
 // it is the HTTP flavour we also surface the configured model + upstream URL.
-// The reranker field is wired once at startup via SetReranker (no mutex, same
-// as SetVault), so no locking is required here.
+// The reranker is hot-swappable at runtime (SetReranker), so snapshot it under
+// the read lock before inspecting it.
 func (s *SQLiteStore) RerankerInfo() (bool, string, string) {
-	if hr, ok := s.reranker.(*embedding.HTTPReranker); ok {
+	s.rerankerMu.RLock()
+	r := s.reranker
+	s.rerankerMu.RUnlock()
+	if hr, ok := r.(*embedding.HTTPReranker); ok {
 		return true, hr.Model(), hr.URL()
 	}
-	return s.reranker != nil, "", ""
+	return r != nil, "", ""
 }
 
 // VaultActive reports whether content is encrypted at rest by an attached
@@ -1183,10 +1189,18 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 	// When the reranker is active we ask RRF for more candidates than the
 	// caller wants back, so the cross-encoder has a real pool to choose from.
 	// Without a reranker, RRF trims directly to requestedTopK.
+	// Snapshot the hot-swappable reranker under the read lock so a concurrent
+	// SetReranker (Settings > Recall toggle) can't tear the interface value out
+	// from under this recall.
+	s.rerankerMu.RLock()
+	reranker := s.reranker
+	rerankerOversample := s.rerankerOversample
+	s.rerankerMu.RUnlock()
+
 	rerankPool := requestedTopK
-	rerankActive := s.reranker != nil && query != ""
+	rerankActive := reranker != nil && query != ""
 	if rerankActive {
-		os := s.rerankerOversample
+		os := rerankerOversample
 		if os <= 0 {
 			os = 2
 		}
@@ -1231,13 +1245,13 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 		return merged, nil
 	}
 
-	return s.applyReranker(ctx, query, merged, requestedTopK)
+	return s.applyReranker(ctx, query, merged, requestedTopK, reranker)
 }
 
 // applyReranker rescores `candidates` against `query` using the attached
 // reranker and returns the top-K. Failures fall back to the RRF-sorted
 // candidates so a flaky reranker upstream never blocks recall.
-func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidates []*memory.MemoryRecord, topK int) ([]*memory.MemoryRecord, error) {
+func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidates []*memory.MemoryRecord, topK int, reranker embedding.Reranker) ([]*memory.MemoryRecord, error) {
 	// Bound topK so an attacker-influenced value can't drive a giant
 	// preallocation in `out := make(..., 0, topK)` below.
 	const maxRerankK = 1000
@@ -1255,7 +1269,7 @@ func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidate
 		texts[i] = c.Content
 	}
 
-	scored, err := s.reranker.Rerank(ctx, query, texts)
+	scored, err := reranker.Rerank(ctx, query, texts)
 	if err != nil || len(scored) == 0 {
 		// Best-effort: if the reranker is unreachable or returns nothing
 		// useful, surface the RRF ordering rather than fail the whole recall.

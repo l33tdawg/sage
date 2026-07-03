@@ -85,6 +85,7 @@ type DashboardHandler struct {
 	graphCacheMu sync.Mutex
 	graphCache   map[string]*graphCacheEntry
 	ExecPath     string // path to sage-gui binary, used by /v1/mcp-config
+	RESTAddr     string // configured REST listen address (cfg.RESTAddr), surfaced read-only in Settings > Connection
 	Encrypted    atomic.Bool
 	VaultLocked  atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
 
@@ -320,6 +321,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			// Recall settings (k-value, confidence threshold)
 			r.Get("/v1/dashboard/settings/recall", h.handleGetRecallSettings)
 			r.Post("/v1/dashboard/settings/recall", h.handleSaveRecallSettings)
+			r.Get("/v1/dashboard/settings/reranker", h.handleGetReranker)
+			r.Post("/v1/dashboard/settings/reranker", h.handleSaveReranker)
+			r.Post("/v1/dashboard/settings/reranker/test", h.handleTestReranker)
 			r.Get("/v1/dashboard/settings/cleanup", h.handleGetCleanupSettings)
 			r.Post("/v1/dashboard/settings/cleanup", h.handleSaveCleanupSettings)
 			r.Post("/v1/dashboard/cleanup/run", h.handleRunCleanup)
@@ -1820,6 +1824,9 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 		"encrypted":    h.Encrypted.Load(),
 		"vault_locked": h.VaultLocked.Load(),
 		"uptime":       time.Since(startTime).String(),
+	}
+	if h.RESTAddr != "" {
+		health["rest_addr"] = h.RESTAddr
 	}
 
 	// Embedder status. Before v6.8.8 the dashboard hard-coded an Ollama probe

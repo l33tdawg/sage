@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -3348,11 +3348,108 @@ function CleanupSettings() {
 // Settings Page
 // ============================================================================
 
+// RerankerControl - a real on/off toggle + URL/model config + Test for the
+// optional cross-encoder reranker. Applied live (no restart) and persisted.
+// The reranker is a bring-your-own add-on (not the bundled embedder), so unlike
+// the embedder it IS configurable.
+function RerankerControl() {
+    const [cfg, setCfg] = useState(null);
+    const [url, setUrl] = useState('');
+    const [model, setModel] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [testResult, setTestResult] = useState(null);
+    const [msg, setMsg] = useState('');
+    const [, bumpRender] = useState(0); // force the controlled toggle to resync even when a guard bails
+    useEffect(() => {
+        fetchReranker().then(c => { setCfg(c); setUrl(c.url || ''); setModel(c.model || ''); })
+            .catch(() => setCfg({ enabled: false, url: '', model: '' }));
+    }, []);
+    const inputStyle = 'background:var(--bg-elev);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;width:100%;';
+    if (!cfg) return html`<div class="settings-row"><span class="label">Reranker</span><span class="value" style="color:var(--text-muted)">Loading...</span></div>`;
+    const save = async (enabled) => {
+        bumpRender(n => n + 1); // guarantee a re-render so the toggle reflects cfg.enabled even when the URL guard bails
+        if (enabled && !url.trim()) { setMsg('Enter a reranker URL first.'); return; }
+        setBusy(true); setMsg('');
+        try {
+            const next = await saveReranker({ enabled, url: url.trim(), model: model.trim() });
+            setCfg(next); setUrl(next.url || ''); setModel(next.model || ''); setMsg(enabled ? 'Reranker on.' : 'Reranker off.');
+        } catch (e) { setMsg('Save failed: ' + (e.message || 'error')); }
+        setBusy(false);
+    };
+    const test = async () => {
+        if (!url.trim()) { setMsg('Enter a reranker URL to test.'); return; }
+        setBusy(true); setTestResult(null); setMsg('');
+        try { setTestResult(await testReranker({ url: url.trim(), model: model.trim() })); }
+        catch (e) { setTestResult({ ok: false, error: e.message || 'error' }); }
+        setBusy(false);
+    };
+    return html`
+        <div>
+            <div class="settings-row">
+                <span class="label"><span class="status-dot ${cfg.enabled ? 'active' : 'inactive'}"></span> Reranker</span>
+                <span class="value" style="display:flex;align-items:center;gap:8px;">
+                    <span style="color:${cfg.enabled ? '#10b981' : '#6b7280'};font-size:12px;">${cfg.enabled ? 'On' : 'Off'}</span>
+                    <label class="toggle-switch" onClick=${(e) => e.stopPropagation()}>
+                        <input type="checkbox" checked=${cfg.enabled} disabled=${busy} onChange=${(e) => save(e.target.checked)} />
+                        <span class="toggle-slider"></span>
+                    </label>
+                </span>
+            </div>
+            <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;max-width:560px;">
+                <input style=${inputStyle} placeholder="Reranker URL (e.g. http://localhost:8081)" value=${url} onInput=${e => setUrl(e.target.value)} />
+                <input style=${inputStyle} placeholder="Model (default BAAI/bge-reranker-v2-m3)" value=${model} onInput=${e => setModel(e.target.value)} />
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                    <button class="btn" disabled=${busy} onClick=${test}>Test connection</button>
+                    <button class="btn" disabled=${busy} onClick=${() => save(true)}>Save & enable</button>
+                    ${testResult ? html`<span style="font-size:12px;color:${testResult.ok ? '#10b981' : '#ef4444'};">${testResult.ok ? 'Reachable' : ('Failed: ' + String(testResult.error || '').slice(0, 100))}</span>` : ''}
+                    ${msg ? html`<span style="font-size:12px;color:var(--text-muted);">${msg}</span>` : ''}
+                </div>
+                <div style="font-size:11px;color:var(--text-muted);">Optional. Point at a TEI-compatible reranker server to re-score recall results for sharper relevance. Off by default; the bundled embedder works fine without it.</div>
+            </div>
+        </div>
+    `;
+}
+
+// RestartNodeButton - a confirm-armed node restart. The handler already exists
+// (POST /v1/dashboard/settings/update/restart); restarting re-locks the vault.
+function RestartNodeButton() {
+    const [arming, setArming] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const armRef = useRef(null);
+    useEffect(() => () => { if (armRef.current) clearTimeout(armRef.current); }, []);
+    const doRestart = async () => {
+        if (!arming) {
+            setArming(true);
+            armRef.current = setTimeout(() => setArming(false), 4000);
+            return;
+        }
+        if (armRef.current) clearTimeout(armRef.current);
+        setArming(false); setBusy(true);
+        try { await restartServer(); } catch (e) {}
+    };
+    return html`
+        <div class="settings-row">
+            <span class="label">Restart node</span>
+            <span class="value">
+                <button class="btn" disabled=${busy} style=${arming ? 'border-color:#f59e0b;color:#f59e0b;' : ''} onClick=${doRestart}>
+                    ${busy ? 'Restarting...' : (arming ? 'Click again to confirm' : 'Restart')}
+                </button>
+            </span>
+        </div>
+        ${arming ? html`<div style="font-size:11px;color:#f59e0b;margin-top:4px;">Restarting re-locks the vault - you will need to unlock again. The node is briefly offline.</div>` : ''}
+    `;
+}
+
 function SettingsPage() {
     const [settingsTab, setSettingsTab] = useState('overview');
     const [stats, setStats] = useState(null);
     const [health, setHealth] = useState(null);
     const [updateAvailable, setUpdateAvailable] = useState(false);
+    const [mcpConfig, setMcpConfig] = useState(null);      // GET /v1/mcp-config - copy-paste block
+    const [mcpConfigErr, setMcpConfigErr] = useState(false);
+    const [mcpCopied, setMcpCopied] = useState(false);
+    const [agents, setAgents] = useState([]);                // local agents using this node (Overview tab)
+    const [peerAgentFilter, setPeerAgentFilter] = useState('all');
 
     // Fetch health with live polling every 3s
     useEffect(() => {
@@ -3361,6 +3458,7 @@ function SettingsPage() {
                 setHealth(h);
             }).catch(() => {});
             fetchStats().then(setStats).catch(() => {});
+            fetchAgents().then(a => setAgents(a?.agents || [])).catch(() => {});
         };
         poll();
         const iv = setInterval(poll, 3000);
@@ -3375,6 +3473,11 @@ function SettingsPage() {
         doCheck();
         const iv = setInterval(doCheck, 12 * 60 * 60 * 1000);
         return () => clearInterval(iv);
+    }, []);
+
+    // Fetch the copy-paste MCP config block once (System > Connection).
+    useEffect(() => {
+        fetchMcpConfig().then(c => setMcpConfig(c)).catch(() => setMcpConfigErr(true));
     }, []);
 
     // Countdown ticker — force re-render every 100ms for smooth display
@@ -3450,12 +3553,22 @@ function SettingsPage() {
 
     const peers = chain?.peer_list || [];
 
+    // Connection-exposure derived state for the System > Connection section.
+    // (The reranker control is self-contained in <RerankerControl/>.)
+    const restAddr = health?.rest_addr || '';
+    const restLocalOnly = restAddr.startsWith('127.0.0.1') || restAddr.startsWith('localhost') || restAddr.startsWith('[::1]');
+    const restNetworkExposed = !!restAddr && !restLocalOnly;
+    const copyMcp = async () => {
+        try { await navigator.clipboard.writeText(JSON.stringify(mcpConfig, null, 2)); setMcpCopied(true); setTimeout(() => setMcpCopied(false), 1500); } catch (e) {}
+    };
+
     const tabs = [
         { id: 'overview', label: 'Overview', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M4 4h3v3H4zM9 4h3v3H9zM4 9h3v3H4zM9 9h3v3H9z" fill="currentColor" opacity="0.8"/><path d="M2 2h12v12H2z" stroke="currentColor" fill="none" stroke-width="1.5" rx="2"/></svg>` },
+        { id: 'connection', label: 'Connection', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M6 10l4-4M6.5 4.5l1-1a2.5 2.5 0 013.5 3.5l-1 1M9.5 11.5l-1 1a2.5 2.5 0 01-3.5-3.5l1-1" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
+        { id: 'recall', label: 'Recall', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>` },
         { id: 'security', label: 'Security', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1L2 4v4c0 4 3 6 6 7 3-1 6-3 6-7V4L8 1z" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>` },
-        { id: 'data', label: 'Data', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M2 4h12v8H2z" stroke="currentColor" fill="none" stroke-width="1.5" rx="1"/><path d="M5 1v3M11 1v3M2 8h12" stroke="currentColor" stroke-width="1.5"/></svg>` },
-        { id: 'config', label: 'Configuration', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><circle cx="8" cy="8" r="3" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3 3l1.5 1.5M11.5 11.5L13 13M13 3l-1.5 1.5M4.5 11.5L3 13" stroke="currentColor" stroke-width="1.5"/></svg>` },
-        { id: 'update', label: 'Update', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/><path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
+        { id: 'maintenance', label: 'Maintenance', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2a3 3 0 00-3 3.9L3 11v2h2l5.1-5A3 3 0 1011 2z" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linejoin="round"/></svg>` },
+        { id: 'updates', label: 'Updates', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/><path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
     ];
 
     return html`
@@ -3466,7 +3579,7 @@ function SettingsPage() {
                             onClick=${() => setSettingsTab(t.id)}>
                         ${t.icon}
                         <span>${t.label}</span>
-                        ${t.id === 'update' && updateAvailable ? html`<span class="update-badge" title="Update available"></span>` : ''}
+                        ${t.id === 'updates' && updateAvailable ? html`<span class="update-badge" title="Update available"></span>` : ''}
                     </button>
                 `)}
                 <${PageHelp} section="settings" label="Settings guide" />
@@ -3542,36 +3655,105 @@ function SettingsPage() {
                             </div>
                         ` : html`<div></div>`}
 
-                        <!-- Connected Peers -->
-                        <div class="settings-section">
-                            <h3>
-                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
-                                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
-                                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
-                                </svg>
-                                Connected Peers
-                            </h3>
-                            ${peers.length > 0 ? peers.map(p => html`
-                                <div class="peer-card">
+                    </div>
+
+                    <!-- Peers & agents (combined, filtered) - peers are other nodes,
+                         agents are the local identities using this node. Peers are
+                         usually empty on a single machine, so we show both here. -->
+                    <div class="settings-section">
+                        <h3>
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
+                                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+                                <path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                            </svg>
+                            Peers & agents <${HelpTip} text="Everything connected to this node: peer SAGE nodes (other machines in quorum) and the local agents that read and write memory here. A single-machine node has no peers - that is normal." />
+                        </h3>
+                        <div style="display:flex;gap:6px;margin-bottom:14px;">
+                            ${[['all', 'All'], ['peers', 'Peers'], ['agents', 'Agents']].map(([f, lbl]) => html`
+                                <button class="btn" style="padding:4px 12px;font-size:12px;${peerAgentFilter === f ? 'border-color:var(--accent);color:var(--accent);' : ''}" onClick=${() => setPeerAgentFilter(f)}>${lbl}${f === 'peers' ? ` (${peers.length})` : (f === 'agents' ? ` (${agents.length})` : '')}</button>
+                            `)}
+                        </div>
+                        ${(() => {
+                            const now = Date.now();
+                            const showPeers = peerAgentFilter !== 'agents';
+                            const showAgents = peerAgentFilter !== 'peers';
+                            const rows = [];
+                            if (showPeers) peers.forEach(p => rows.push(html`
+                                <div class="peer-card" key=${'peer-' + (p.id || p.remote_ip)}>
                                     <div class="peer-header">
                                         <span class="status-dot active"></span>
                                         <span class="peer-moniker">${p.moniker || 'unknown'}</span>
-                                        <span class="peer-badge">${p.outbound ? 'outbound' : 'inbound'}</span>
+                                        <span class="peer-badge">peer · ${p.outbound ? 'outbound' : 'inbound'}</span>
                                     </div>
                                     <div class="peer-meta">
                                         <span class="peer-meta-label">IP</span><span class="peer-meta-value">${p.remote_ip}</span>
                                         <span class="peer-meta-label">Connected</span><span class="peer-meta-value">${formatDuration(p.duration)}</span>
                                         <span class="peer-meta-label">Sent</span><span class="peer-meta-value">${formatBytes(p.bytes_sent)}</span>
                                         <span class="peer-meta-label">Received</span><span class="peer-meta-value">${formatBytes(p.bytes_recv)}</span>
-                                        <span class="peer-meta-label">Node ID</span><span class="peer-meta-value">${p.id}...</span>
                                     </div>
                                 </div>
-                            `) : html`
-                                <div class="peer-empty">No peers connected — running in Personal mode.
-                                    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">Connect other SAGE nodes via quorum mode to see peers here.</div>
-                                </div>
-                            `}
+                            `));
+                            if (showAgents) agents.forEach(a => {
+                                const ageMs = a.last_seen ? (now - new Date(a.last_seen).getTime()) : Infinity;
+                                const dot = ageMs < 5 * 60 * 1000 ? '#10b981' : (ageMs < 60 * 60 * 1000 ? '#f59e0b' : '#6b7280');
+                                rows.push(html`
+                                    <div class="peer-card" key=${'agent-' + a.agent_id}>
+                                        <div class="peer-header">
+                                            <span class="status-dot" style="background:${dot};"></span>
+                                            <span class="peer-moniker">${a.name || (a.agent_id || '').slice(0, 8)}</span>
+                                            <span class="peer-badge">agent${a.provider ? ' · ' + a.provider : ''}</span>
+                                        </div>
+                                        <div class="peer-meta">
+                                            <span class="peer-meta-label">Role</span><span class="peer-meta-value">${a.role || '--'}</span>
+                                            <span class="peer-meta-label">Memories</span><span class="peer-meta-value">${(a.memory_count || 0).toLocaleString()}</span>
+                                            <span class="peer-meta-label">Last seen</span><span class="peer-meta-value">${a.last_seen ? timeAgo(a.last_seen) : 'never'}</span>
+                                        </div>
+                                    </div>
+                                `);
+                            });
+                            return rows.length ? rows : html`<div class="peer-empty">${peerAgentFilter === 'peers' ? 'No peer nodes connected - this is a single-machine node (normal).' : (peerAgentFilter === 'agents' ? 'No agents registered on this node yet.' : 'No peers or agents yet.')}</div>`;
+                        })()}
+                    </div>
+                </div>
+            `}
+
+            ${settingsTab === 'connection' && html`
+                <div class="settings-tab-content">
+                    <div class="settings-section">
+                        <h3>Connection <${HelpTip} text="How this node is reached. REST is the HTTP API your dashboard and tools use; MCP is the local command your AI client runs to plug in. Share these when connecting an Agent or another client." /></h3>
+                        <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">Endpoints other tools and Agents use to reach this node.</p>
+                        ${html`<${ChatGPTCopyField} label="REST API address" value=${window.location.origin} />`}
+                        ${restAddr ? html`<${ChatGPTCopyField} label="REST listen address" value=${restAddr} />` : ''}
+                        ${restNetworkExposed ? html`<div style="color:#f59e0b;font-size:11px;margin:2px 0 12px;">This address is reachable on your network, not just this machine.</div>` : ''}
+                        <div style="margin-top:16px;">
+                            <div style="font-size:13px;font-weight:600;margin-bottom:6px;">MCP configuration</div>
+                            <div style="color:var(--text-muted);font-size:0.85rem;margin-bottom:10px;">Paste this into your AI client's MCP settings so it can use this node as its memory. SAGE's MCP runs as a local command (stdio), so there is nothing to open on your firewall.</div>
+                            ${mcpConfig ? html`
+                                <pre style="background:var(--bg-elev);padding:12px;border-radius:4px;font-size:12px;overflow-x:auto;white-space:pre;margin:0 0 8px;">${JSON.stringify(mcpConfig, null, 2)}</pre>
+                                <button class="btn" onClick=${copyMcp}>${mcpCopied ? 'Copied!' : 'Copy config'}</button>
+                            ` : (mcpConfigErr ? html`<div style="color:var(--text-muted);font-size:12px;">Config unavailable - is the node running?</div>` : html`<div style="color:var(--text-muted);font-size:12px;">Loading...</div>`)}
                         </div>
+                    </div>
+                </div>
+            `}
+
+            ${settingsTab === 'recall' && html`
+                <div class="settings-tab-content">
+                    <div class="settings-section">
+                        <h3>Recall & embeddings <${HelpTip} text="How this node finds and returns memories. Controls how much context your Agent pulls each turn, and the status of the models that power semantic search." /></h3>
+                        ${html`<${MemoryMode} />`}
+                    </div>
+                    <div class="settings-section" style="margin-top:16px">
+                        ${html`<${RecallSettings} />`}
+                    </div>
+                    <div class="settings-section" style="margin-top:16px">
+                        ${html`<${BootInstructions} />`}
+                    </div>
+                    <div class="settings-section" style="margin-top:16px">
+                        <h3>Engine status <${HelpTip} text="The embedding model that turns memories into vectors for semantic recall (bundled with SAGE, not configurable), plus the optional reranker that re-scores recall results (bring your own)." /></h3>
+                        <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} Embedding model</span><span class="value" style="color: ${embedderStatus.online ? '#10b981' : '#6b7280'}" title="${embedderStatus.detail || ''}">${embedderStatus.displayName || (embedderStatus.online ? 'Connected' : 'Offline')}${embedderStatus.detail ? ' · ' + embedderStatus.detail : ''}</span></div>
+                        <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 14px;">The embedding model is managed by SAGE and is not configurable here.</div>
+                        ${html`<${RerankerControl} />`}
                     </div>
                 </div>
             `}
@@ -3584,46 +3766,29 @@ function SettingsPage() {
                 </div>
             `}
 
-            ${settingsTab === 'data' && html`
+            ${settingsTab === 'maintenance' && html`
                 <div class="settings-tab-content">
                     <div class="settings-section">
+                        <h3>Memory cleanup <${HelpTip} text="Prune stale, low-confidence memories so recall stays sharp. Always Preview before you Clean - Clean is destructive." /></h3>
+                        ${html`<${CleanupSettings} />`}
+                    </div>
+                    <div class="settings-section" style="margin-top:16px">
                         <h3>Export & Backup</h3>
                         <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">
                             Download a full backup of your memories in JSONL format. This file can be re-imported on a new machine via the Import page to restore your brain.
                         </p>
                         <div class="settings-row">
-                            <span class="label">Export all memories (JSONL — re-importable)</span>
-                            <button class="btn" onClick=${() => {
-                                window.open('/v1/dashboard/export', '_blank');
-                            }}>Download Backup</button>
+                            <span class="label">Export all memories (JSONL - re-importable)</span>
+                            <button class="btn" onClick=${() => { window.open('/v1/dashboard/export', '_blank'); }}>Download Backup</button>
                         </div>
-                    </div>
-
-                    <div class="settings-section" style="margin-top:16px">
-                        <h3>Restore</h3>
-                        <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">
-                            To restore from a backup, go to the <strong>Import</strong> page (sidebar) and upload your <code>.jsonl</code> backup file. All domains, types, and metadata will be preserved.
+                        <p style="color:var(--text-muted);font-size:0.85rem;margin-top:12px;">
+                            To restore, go to the <strong>Import</strong> page (sidebar) and upload your <code>.jsonl</code> backup file. All domains, types, and metadata are preserved.
                         </p>
                     </div>
-                </div>
-            `}
-
-            ${settingsTab === 'config' && html`
-                <div class="settings-tab-content">
-                    ${html`<${BootInstructions} />`}
-
                     <div class="settings-section" style="margin-top:16px">
-                        ${html`<${MemoryMode} />`}
+                        <h3>Node <${HelpTip} text="Restart this SAGE node. Restarting re-locks the vault (you will need to unlock again) and briefly takes the node offline." /></h3>
+                        ${html`<${RestartNodeButton} />`}
                     </div>
-
-                    <div class="settings-section" style="margin-top:16px">
-                        ${html`<${RecallSettings} />`}
-                    </div>
-
-                    <div class="settings-section" style="margin-top:16px">
-                        ${html`<${CleanupSettings} />`}
-                    </div>
-
                     <div class="settings-section" style="margin-top:16px">
                         <h3>Preferences</h3>
                         <div class="settings-row">
@@ -3642,10 +3807,11 @@ function SettingsPage() {
                 </div>
             `}
 
-            ${settingsTab === 'update' && html`
+            ${settingsTab === 'updates' && html`
                 <div class="settings-tab-content">
-                    ${html`<${SoftwareUpdate} />`}
-
+                    <div class="settings-section">
+                        ${html`<${SoftwareUpdate} />`}
+                    </div>
                     <div class="settings-section" style="margin-top:16px">
                         <h3>About</h3>
                         <div class="settings-row"><span class="label">Full Name</span><span class="value">(Sovereign) Agent Governed Experience</span></div>

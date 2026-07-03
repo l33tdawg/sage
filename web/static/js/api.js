@@ -81,6 +81,36 @@ export async function fetchValidators() {
     return res.json();
 }
 
+export async function fetchMcpConfig() {
+    const res = await fetch(`${API_BASE}/v1/mcp-config`);
+    if (!res.ok) throw new Error('mcp-config fetch failed');
+    return res.json();
+}
+
+export async function fetchReranker() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/reranker`);
+    if (!res.ok) throw new Error('reranker fetch failed');
+    return res.json();
+}
+
+export async function saveReranker({ enabled, url, model }) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/reranker`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled, url, model }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || 'save failed'); }
+    return res.json();
+}
+
+export async function testReranker({ url, model }) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/reranker/test`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, model }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || 'test failed'); }
+    return res.json();
+}
+
 export async function deleteMemory(id) {
     const res = await fetch(`${API_BASE}/v1/dashboard/memory/${id}`, { method: 'DELETE' });
     return res.json();
