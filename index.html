@@ -11,20 +11,20 @@
   gtag('js', new Date());
   gtag('config', 'G-Y9LD21QVEQ');
 </script>
-<title>SAGE — Give Your AI a Persistent, Secure Memory</title>
+<title>SAGE — Persistent Memory for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Your AI forgets everything between conversations. SAGE fixes that. Private, persistent memory that runs on your laptop. No cloud. No data leaving.">
+<meta name="description" content="Local-first, consensus-governed memory infrastructure for AI agents. Semantic recall, managed reranking, LAN-first federation, and a dashboard-native operator experience.">
 <meta name="theme-color" content="#0a0614">
-<meta property="og:title" content="SAGE — Give Your AI a Persistent, Secure Memory">
-<meta property="og:description" content="Your AI forgets everything between conversations. SAGE fixes that. Private, persistent memory that runs entirely on your laptop.">
+<meta property="og:title" content="SAGE — Persistent Memory for AI Agents">
+<meta property="og:description" content="Local-first, consensus-governed memory infrastructure for AI agents: semantic recall, managed reranking, LAN-first federation, and CEREBRUM.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/">
 <meta property="og:image" content="https://l33tdawg.github.io/sage/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="SAGE — Give Your AI a Persistent, Secure Memory">
-<meta name="twitter:description" content="Your AI forgets everything between conversations. SAGE fixes that. Private, persistent memory that runs entirely on your laptop.">
+<meta name="twitter:title" content="SAGE — Persistent Memory for AI Agents">
+<meta name="twitter:description" content="Local-first, consensus-governed memory infrastructure for AI agents: semantic recall, managed reranking, LAN-first federation, and CEREBRUM.">
 <meta name="twitter:image" content="https://l33tdawg.github.io/sage/og-image.png">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -315,6 +315,13 @@ h1 em {
 .feature-icon.gold { background: rgba(251,191,36,0.12); }
 .feature-card h3 { font-size: 1rem; font-weight: 600; color: var(--bright); margin-bottom: 6px; }
 .feature-card p { font-size: 0.88rem; color: var(--muted); line-height: 1.6; }
+.faq-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 36px; }
+.faq-item {
+  padding: 24px; background: rgba(167,139,250,0.02);
+  border: 1px solid rgba(167,139,250,0.08); border-radius: 14px;
+}
+.faq-item h3 { font-size: 0.98rem; color: var(--bright); margin-bottom: 8px; }
+.faq-item p { font-size: 0.86rem; color: var(--muted); line-height: 1.6; }
 
 /* ─── What's New Banner ─── */
 .whats-new { background: linear-gradient(135deg, rgba(124,58,237,0.08), rgba(244,114,182,0.05)); border: 1px solid rgba(167,139,250,0.15); border-radius: 16px; padding: 32px; margin-top: 48px; }
@@ -478,6 +485,7 @@ footer a:hover { text-decoration: underline; }
   .section { padding: 60px 0; }
   .value-grid { grid-template-columns: repeat(2, 1fr); }
   .features-grid { grid-template-columns: 1fr; }
+  .faq-grid { grid-template-columns: 1fr; }
   .steps-grid { grid-template-columns: 1fr; }
   .network-grid { grid-template-columns: 1fr; }
   .migrate-grid { grid-template-columns: 1fr; }
@@ -708,11 +716,11 @@ footer a:hover { text-decoration: underline; }
       <!-- What's New -->
       <div class="whats-new reveal">
         <h3>What's new in <span id="whats-new-version">v11.0.0</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11 is the release where SAGE stops asking you to be a systems administrator. A first-run wizard sets everything up from the dashboard, semantic memory turns on with one guided flow, the new reranker installs <em>itself</em> &mdash; SAGE downloads the engine and the model, verifies both, and manages the process &mdash; and two people can now link their SAGE brains face-to-face with a verification ceremony built on rotating codes and QR scans. Under the hood it activates the app-v15 consensus fork (new co-commit and cross-federation transaction types plus an authorization hardening pass), with the usual guarantee: byte-identical replay before activation, safe rolling upgrades, and hands-free fork advance on personal nodes.</p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11 is the release where SAGE stops asking you to be a systems administrator. A first-run wizard sets everything up from the dashboard, semantic memory turns on with one guided flow, the new reranker installs <em>itself</em> &mdash; SAGE downloads the engine and the model, verifies both, and manages the process &mdash; and two people can now link their SAGE brains on a local network with a verification ceremony built on rotating codes and QR scans. Under the hood it activates the app-v15 consensus fork (new co-commit and cross-federation transaction types plus an authorization hardening pass), with the usual guarantee: byte-identical replay before activation, safe rolling upgrades, and hands-free fork advance on personal nodes.</p>
         <div class="new-features">
           <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>CEREBRUM, rebuilt around you</h4><p>The 3D MRI brain is now the default view &mdash; your memories as glowing points inside a translucent brain, domains as lobes ordered by recent activity, corroborated knowledge pulled to the core. Around it: an Overview control board for the whole node, real full-text + semantic search with bulk curation, a live task board your agents and you share (with assignment and atomic claiming), and the agent-to-agent message bus as a Messages tab. A first-run onboarding wizard walks new nodes through everything &mdash; re-runnable any time from Settings.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>A reranker that installs itself</h4><p>One click in the dashboard and SAGE downloads a pinned llama.cpp build for your platform and the bge-reranker-v2-m3 model, verifies both by checksum, then starts and manages the sidecar &mdash; no terminal, no package manager, nothing leaves your machine. Recall results get re-scored by a cross-encoder for sharper relevance, and the recall depth setting now goes up to 20 with guidance that adapts to whether the reranker is on.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Federation with a human handshake</h4><p>Link your whole SAGE to another person&rsquo;s &mdash; across the room or across the internet. The join ceremony verifies both sides with rotating six-digit codes (Google-Authenticator compatible), QR scans, and an unskippable mutual compare, so you know exactly who you federated with. Share only the domains you choose, at the clearance ceiling you choose; recall reaches across live, nothing is copied, and nothing is ever deleted. Revoke any time.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Federation with a human handshake</h4><p>Link your whole SAGE to another person&rsquo;s on the same LAN, or over reachability you provide. First-class internet/NAT traversal is planned for v11.5. The join ceremony verifies both sides with rotating six-digit codes (Google-Authenticator compatible), QR scans, and an unskippable mutual compare, so you know exactly who you federated with. Share only the domains you choose, at the clearance ceiling you choose; recall reaches across live, nothing is copied, and nothing is ever deleted. Revoke any time.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Semantic memory made effortless</h4><p>A guided flow turns on meaning-based recall (Ollama + nomic-embed-text), re-reads your existing memories in the background with live progress, and &mdash; if an old vault key left some memories unreadable &mdash; recovers them in place with your recovery key. Every new memory is stamped with the embedder that produced it, so the dashboard always tells you the truth about what is searchable by meaning.</p></div></div>
         </div>
       </div>
@@ -726,7 +734,7 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>A 3D MRI brain of your memories &mdash; domains as lobes, consolidation as depth. Search, curate, and drill in; a 2D graph view is one toggle away.</p></div></div>
         <div class="feature-card"><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI&rsquo;s memory from existing conversation history.</p></div></div>
         <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
-        <div class="feature-card"><div><h3>Federation</h3><p>Link two SAGE brains with a human-verified join ceremony. Share chosen domains live, at a clearance you set &mdash; revocable any time.</p></div></div>
+        <div class="feature-card"><div><h3>Federation</h3><p>Link two SAGE brains on a LAN or operator-provided route with a human-verified join ceremony. Share chosen domains live, at a clearance you set &mdash; revocable any time.</p></div></div>
         <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Standard SQLite database. Open it with any tool, query it, back it up. You own every byte.</p></div></div>
         <div class="feature-card"><div><h3>Agent Pipeline</h3><p>Route work between AI agents. Send research to one model, analysis to another, results back to your primary &mdash; all through SAGE.</p></div></div>
         <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
@@ -740,13 +748,26 @@ footer a:hover { text-decoration: underline; }
         </div>
         <div class="reveal">
           <div class="screenshot-grid">
-            <div class="screenshot-thumb" onclick="openLightbox(0)"><img src="screen-brain.png" alt="CEREBRUM" loading="lazy"><div class="screenshot-label">CEREBRUM</div></div>
+            <div class="screenshot-thumb" onclick="openLightbox(0)"><img src="screen-overview.png" alt="Overview" loading="lazy"><div class="screenshot-label">Overview</div></div>
             <div class="screenshot-thumb" onclick="openLightbox(1)"><img src="screen-network.png" alt="Federation" loading="lazy"><div class="screenshot-label">Federation</div></div>
-            <div class="screenshot-thumb" onclick="openLightbox(2)"><img src="screen-overview.png" alt="Overview" loading="lazy"><div class="screenshot-label">Overview</div></div>
-            <div class="screenshot-thumb" onclick="openLightbox(3)"><img src="screen-security.png" alt="Security" loading="lazy"><div class="screenshot-label">Security</div></div>
-            <div class="screenshot-thumb" onclick="openLightbox(4)"><img src="screen-config.png" alt="Recall Engine" loading="lazy"><div class="screenshot-label">Recall Engine</div></div>
-            <div class="screenshot-thumb" onclick="openLightbox(5)"><img src="screen-update.png" alt="Update" loading="lazy"><div class="screenshot-label">Update</div></div>
+            <div class="screenshot-thumb" onclick="openLightbox(2)"><img src="screen-config.png" alt="Recall Engine" loading="lazy"><div class="screenshot-label">Recall Engine</div></div>
           </div>
+        </div>
+      </div>
+
+      <!-- FAQ -->
+      <div style="margin-top:80px;">
+        <div class="reveal" style="text-align:center;">
+          <div class="section-tag">FAQ</div>
+          <h2>Questions before you install</h2>
+        </div>
+        <div class="faq-grid reveal">
+          <div class="faq-item"><h3>What is SAGE?</h3><p>SAGE is local memory infrastructure for AI agents. It gives tools like Claude Code, Codex, Cursor, Windsurf, and Claude Desktop a persistent memory server they can use through MCP or REST.</p></div>
+          <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation, confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
+          <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in an inspectable SQLite store, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
+          <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
+          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds the rebuilt CEREBRUM dashboard, first-run onboarding, guided semantic setup, a self-installing local reranker, v11 federation, and the app-v15 consensus fork.</p></div>
+          <div class="faq-item"><h3>What does federation mean in v11?</h3><p>v11 federation is LAN-first: it links two separate SAGE brains through a human-verified ceremony when the nodes can already reach each other, such as same LAN, VPN, or your own tunnel. Built-in internet/NAT traversal is planned for v11.5.</p></div>
         </div>
       </div>
     </div>
@@ -974,7 +995,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install sage-sdk</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install sage-agent-sdk</span></div>
         </div>
       </div>
 
@@ -1211,12 +1232,9 @@ function copyPrompt(box) {
 
 // ─── Screenshot Lightbox ───
 const lbImages = [
-  { src: 'screen-brain.png', caption: 'CEREBRUM — Your AI\'s memory as a living neural network' },
-  { src: 'screen-network.png', caption: 'Federation — Link two SAGE brains with a consent-gated join ceremony' },
   { src: 'screen-overview.png', caption: 'Overview — Chain health, peers, agents, and federation status' },
-  { src: 'screen-security.png', caption: 'Security — AES-256-GCM encryption and data export' },
+  { src: 'screen-network.png', caption: 'Federation — LAN-first SAGE-to-SAGE links with a consent-gated join ceremony' },
   { src: 'screen-config.png', caption: 'Recall Engine — Semantic setup, managed reranker, and recall tuning' },
-  { src: 'screen-update.png', caption: 'Update — One-click updates from the dashboard' },
 ];
 let lbIdx = 0;
 function openLightbox(idx) {
