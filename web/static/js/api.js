@@ -805,3 +805,6 @@ export async function rerankerSetupStop() {
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
     return res.json();
 }
+export function rerankerSetupInstallEngine() {
+    return fetch(`${API_BASE}/v1/dashboard/reranker/setup/install-engine`, { method: 'POST' });
+}

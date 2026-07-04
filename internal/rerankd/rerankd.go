@@ -82,9 +82,13 @@ func (m *Manager) ModelPath() string {
 func (m *Manager) pidFilePath() string { return filepath.Join(m.dataDir, "rerankd.pid") }
 func (m *Manager) logFilePath() string { return filepath.Join(m.dataDir, "rerankd.log") }
 
-// BinaryPath locates llama-server on PATH or in the usual install prefixes
-// (brew on macOS/Linuxbrew, plain /usr/local).
+// BinaryPath locates llama-server: the managed install wins (version-pinned,
+// lives beside the model), then PATH, then the usual install prefixes (brew
+// on macOS/Linuxbrew, plain /usr/local).
 func (m *Manager) BinaryPath() (string, bool) {
+	if m.EngineInstalled() {
+		return m.managedBinaryPath(), true
+	}
 	if p, err := exec.LookPath(binaryName); err == nil {
 		return p, true
 	}

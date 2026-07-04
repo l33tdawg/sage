@@ -2446,15 +2446,20 @@ func (h *DashboardHandler) handleSaveRecallSettings(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// Clamp to valid ranges
-	if body.TopK < 4 {
-		body.TopK = 4
+	// Clamp to valid ranges. k tops out at 20: with the reranker on, high k
+	// stays sharp (over-sample + re-score); the floor of 3 keeps recall from
+	// being starved into uselessness.
+	if body.TopK < 3 {
+		body.TopK = 3
 	}
-	if body.TopK > 10 {
-		body.TopK = 10
+	if body.TopK > 20 {
+		body.TopK = 20
 	}
-	if body.MinConfidence < 85 {
-		body.MinConfidence = 85
+	// Floor 50: low enough to include inferences (0.60+) and the documented
+	// 70% default - the old floor of 85 made the default unrepresentable the
+	// moment anyone pressed Save.
+	if body.MinConfidence < 50 {
+		body.MinConfidence = 50
 	}
 	if body.MinConfidence > 100 {
 		body.MinConfidence = 100

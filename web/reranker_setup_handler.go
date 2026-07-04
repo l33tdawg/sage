@@ -25,12 +25,17 @@ type RerankdManager interface {
 	Stop() error
 	Probe(ctx context.Context) bool
 	URL() string
+	EngineInstalled() bool
+	InstallSupported() bool
+	EngineSizeBytes() int64
+	InstallEngine(ctx context.Context, progress func(done, total int64)) error
 }
 
 // RegisterRerankerSetupRoutes wires the managed-reranker setup routes
 // (authed group).
 func (h *DashboardHandler) RegisterRerankerSetupRoutes(r chi.Router) {
 	r.Get("/v1/dashboard/reranker/setup/status", h.handleRerankerSetupStatus)
+	r.Post("/v1/dashboard/reranker/setup/install-engine", h.handleRerankerSetupInstallEngine)
 	r.Post("/v1/dashboard/reranker/setup/download", h.handleRerankerSetupDownload)
 	r.Post("/v1/dashboard/reranker/setup/start", h.handleRerankerSetupStart)
 	r.Post("/v1/dashboard/reranker/setup/stop", h.handleRerankerSetupStop)
@@ -52,18 +57,58 @@ func (h *DashboardHandler) handleRerankerSetupStatus(w http.ResponseWriter, r *h
 		}
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"available":    true,
-		"os":           runtime.GOOS,
-		"binary_found": binFound,
-		"binary_path":  binPath,
-		"model_name":   rerankd.ModelDisplayName,
-		"model_bytes":  rerankd.ModelSizeBytes,
-		"model_ready":  h.Rerankd.ModelReady(),
-		"downloading":  h.Rerankd.Downloading(),
-		"running":      h.Rerankd.Probe(r.Context()),
-		"url":          h.Rerankd.URL(),
-		"managed":      managed,
+		"available":         true,
+		"os":                runtime.GOOS,
+		"binary_found":      binFound,
+		"binary_path":       binPath,
+		"engine_installed":  h.Rerankd.EngineInstalled(),
+		"install_supported": h.Rerankd.InstallSupported(),
+		"engine_bytes":      h.Rerankd.EngineSizeBytes(),
+		"model_name":        rerankd.ModelDisplayName,
+		"model_bytes":       rerankd.ModelSizeBytes,
+		"model_ready":       h.Rerankd.ModelReady(),
+		"downloading":       h.Rerankd.Downloading(),
+		"running":           h.Rerankd.Probe(r.Context()),
+		"url":               h.Rerankd.URL(),
+		"managed":           managed,
 	})
+}
+
+// handleRerankerSetupInstallEngine streams the pinned llama.cpp release
+// download + extract as "key: value" progress lines - the zero-terminal
+// engine install. Detached from the request context like the model download.
+func (h *DashboardHandler) handleRerankerSetupInstallEngine(w http.ResponseWriter, r *http.Request) {
+	if h.Rerankd == nil {
+		writeError(w, http.StatusNotImplemented, "managed reranker not available on this node")
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	line := func(k, v string) { fmt.Fprintf(w, "%s: %s\n", k, v); flusher.Flush() }
+
+	instCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	lastEmit := time.Time{}
+	err := h.Rerankd.InstallEngine(instCtx, func(done, total int64) {
+		if time.Since(lastEmit) < 250*time.Millisecond && done != total {
+			return
+		}
+		lastEmit = time.Now()
+		line("progress", fmt.Sprintf("%d %d", done, total))
+	})
+	if err != nil {
+		line("error", err.Error())
+		line("done", "1")
+		return
+	}
+	line("done", "0")
 }
 
 // handleRerankerSetupDownload streams the pinned GGUF download as
