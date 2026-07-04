@@ -68,8 +68,8 @@ func runPair(args []string) error {
 	guestNodeID := string(nodeKey.ID())
 
 	nonceBytes := make([]byte, 16)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return fmt.Errorf("generate nonce: %w", err)
+	if _, readErr := rand.Read(nonceBytes); readErr != nil {
+		return fmt.Errorf("generate nonce: %w", readErr)
 	}
 	nonce := hex.EncodeToString(nonceBytes)
 
@@ -88,10 +88,11 @@ func runPair(args []string) error {
 		SAS   string `json:"sas"`
 		Error string `json:"error"`
 	}
-	if code, err := pairPost(client, base+"/pair/hello", helloBody, &hello); err != nil {
-		return fmt.Errorf("contact host: %w", err)
-	} else if code != http.StatusOK {
-		return fmt.Errorf("host rejected pairing: %s", firstNonEmpty(hello.Error, fmt.Sprintf("HTTP %d", code)))
+	helloCode, helloErr := pairPost(client, base+"/pair/hello", helloBody, &hello)
+	if helloErr != nil {
+		return fmt.Errorf("contact host: %w", helloErr)
+	} else if helloCode != http.StatusOK {
+		return fmt.Errorf("host rejected pairing: %s", firstNonEmpty(hello.Error, fmt.Sprintf("HTTP %d", helloCode)))
 	}
 
 	// Cross-check: our locally-derived SAS must equal what the host returned.
@@ -128,9 +129,9 @@ func runPair(args []string) error {
 			State      string `json:"state"`
 			Error      string `json:"error"`
 		}{}
-		code, err := pairPost(client, base+"/pair/bundle", bundleReq, &enc)
-		if err != nil {
-			return fmt.Errorf("fetch bundle: %w", err)
+		code, bundleErr := pairPost(client, base+"/pair/bundle", bundleReq, &enc)
+		if bundleErr != nil {
+			return fmt.Errorf("fetch bundle: %w", bundleErr)
 		}
 		if code == http.StatusOK {
 			break

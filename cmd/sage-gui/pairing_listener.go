@@ -19,7 +19,8 @@ import (
 // and returns a stop func plus the chosen port. Wired to
 // DashboardHandler.PairingListenerFn.
 func startPairingListener(handler http.Handler) (stop func(), port int, err error) {
-	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	//nolint:gosec // Pairing intentionally opens a short-lived LAN listener gated by proof-of-secret.
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "0.0.0.0:0")
 	if err != nil {
 		return nil, 0, fmt.Errorf("bind pairing listener: %w", err)
 	}

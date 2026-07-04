@@ -415,8 +415,8 @@ func (m *Manager) HandleIncomingReceipt(peerChainID string, push *ReceiptPush) (
 			CoreHash:    receipt.CoreHash,
 		},
 	}
-	if err := tx.SignTx(attest, m.agentKey); err != nil {
-		return nil, fmt.Errorf("sign attest tx: %w", err)
+	if signErr := tx.SignTx(attest, m.agentKey); signErr != nil {
+		return nil, fmt.Errorf("sign attest tx: %w", signErr)
 	}
 	encoded, err := tx.EncodeTx(attest)
 	if err != nil {

@@ -37,11 +37,11 @@ func newCeremonyNode(t *testing.T, chainID string) *ceremonyNode {
 	if err != nil {
 		t.Fatalf("gen node cert: %v", err)
 	}
-	if err := tlsca.WriteCert(filepath.Join(dir, tlsca.NodeCertFile), nodeCert); err != nil {
-		t.Fatalf("write node cert: %v", err)
+	if writeErr := tlsca.WriteCert(filepath.Join(dir, tlsca.NodeCertFile), nodeCert); writeErr != nil {
+		t.Fatalf("write node cert: %v", writeErr)
 	}
-	if err := tlsca.WriteKey(filepath.Join(dir, tlsca.NodeKeyFile), nodeKey); err != nil {
-		t.Fatalf("write node key: %v", err)
+	if writeErr := tlsca.WriteKey(filepath.Join(dir, tlsca.NodeKeyFile), nodeKey); writeErr != nil {
+		t.Fatalf("write node key: %v", writeErr)
 	}
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	badger, err := store.NewBadgerStore(filepath.Join(dir, "badger"))
@@ -110,8 +110,8 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 	}
 
 	// Host scans the guest's return QR (records the anchor pin).
-	if err := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); err != nil {
-		t.Fatalf("HostScanReturn: %v", err)
+	if scanErr := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); scanErr != nil {
+		t.Fatalf("HostScanReturn: %v", scanErr)
 	}
 
 	// Guest fires /join/request; both sides compute the codes.
@@ -200,8 +200,8 @@ func TestJoinApproveWrongCodeRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GuestScan: %v", err)
 	}
-	if err := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); err != nil {
-		t.Fatalf("HostScanReturn: %v", err)
+	if scanErr := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); scanErr != nil {
+		t.Fatalf("HostScanReturn: %v", scanErr)
 	}
 	if _, err := guest.mgr.GuestRequest(ctx, create.SessionID, guestEndpoint, ScopeWire{AllowedDomains: []string{"*"}}); err != nil {
 		t.Fatalf("GuestRequest: %v", err)
@@ -238,8 +238,8 @@ func TestJoinCeremonyConcurrentPolls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GuestScan: %v", err)
 	}
-	if err := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); err != nil {
-		t.Fatalf("HostScanReturn: %v", err)
+	if scanErr := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); scanErr != nil {
+		t.Fatalf("HostScanReturn: %v", scanErr)
 	}
 
 	// Hammer the host view + guest request/approve/confirm concurrently.

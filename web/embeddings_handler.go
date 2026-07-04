@@ -234,6 +234,7 @@ func (h *DashboardHandler) handleEmbeddingsReembed(w http.ResponseWriter, r *htt
 	h.reembed.startedAt = time.Now() // for ETA
 	h.reembed.mu.Unlock()
 
+	//nolint:gosec // Re-embedding is a deliberate background job that continues after the request returns.
 	go h.runReembed()
 
 	writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
@@ -403,6 +404,7 @@ func (h *DashboardHandler) recoverOrphans(w http.ResponseWriter, r *http.Request
 					h.reembed.running = true
 					h.reembed.done, h.reembed.skipped, h.reembed.total, h.reembed.errMsg = 0, 0, counts2[""], ""
 					h.reembed.startedAt = time.Now()
+					//nolint:gosec // Re-embedding is a deliberate background job that continues after the request returns.
 					go h.runReembed()
 				}
 				h.reembed.mu.Unlock()

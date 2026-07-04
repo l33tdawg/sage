@@ -31,7 +31,7 @@ func TestMintChainID_ShapeAndLength(t *testing.T) {
 	}
 	// Suffix must be lowercase base32 (a-z, 2-7) so it survives CometBFT p2p/genesis validation.
 	for _, r := range suffix {
-		if !((r >= 'a' && r <= 'z') || (r >= '2' && r <= '7')) {
+		if (r < 'a' || r > 'z') && (r < '2' || r > '7') {
 			t.Fatalf("suffix %q has non-base32 char %q", suffix, r)
 		}
 	}

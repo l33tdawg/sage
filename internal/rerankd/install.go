@@ -291,6 +291,7 @@ func extractTarGzFlat(r io.Reader, dst string) error {
 			if rerr != nil {
 				return rerr
 			}
+			//nolint:gosec // linkPath is dst plus a sanitized basename; target was verified inside dst.
 			if werr := os.WriteFile(linkPath, data, st.Mode().Perm()); werr != nil {
 				return werr
 			}

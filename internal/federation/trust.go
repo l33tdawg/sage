@@ -270,9 +270,10 @@ func (m *Manager) ServerTLSConfig() (*tls.Config, error) {
 		return nil, fmt.Errorf("load node certificate for federation listener: %w", err)
 	}
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS13,
-		ClientAuth:   tls.RequireAnyClientCert,
+		Certificates:           []tls.Certificate{cert},
+		MinVersion:             tls.VersionTLS13,
+		ClientAuth:             tls.RequireAnyClientCert,
+		SessionTicketsDisabled: true,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			return m.verifyFederationClientCert(rawCerts)
 		},
@@ -357,9 +358,10 @@ func (m *Manager) clientTLSConfig(remoteChainID string, expectedPin []byte) (*tl
 		return nil, fmt.Errorf("load node client certificate: %w", err)
 	}
 	return &tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true, // #nosec G402 -- verification happens in VerifyPeerCertificate against the pinned per-agreement CA; hostname matching is intentionally replaced by the SPKI pin (loopback-SAN node certs)
+		Certificates:           []tls.Certificate{cert},
+		MinVersion:             tls.VersionTLS13,
+		SessionTicketsDisabled: true,
+		InsecureSkipVerify:     true, // #nosec G402 -- verification happens in VerifyPeerCertificate against the pinned per-agreement CA; hostname matching is intentionally replaced by the SPKI pin (loopback-SAN node certs)
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			return verifyChainAgainstCA(rawCerts, ca, x509.ExtKeyUsageServerAuth)
 		},

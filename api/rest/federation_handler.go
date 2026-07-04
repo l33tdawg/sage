@@ -151,7 +151,7 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	embedAgentAuth(r.Context(), setTx)
-	if err := tx.SignTx(setTx, s.signingKey); err != nil {
+	if signErr := tx.SignTx(setTx, s.signingKey); signErr != nil {
 		rollbackCA()
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return

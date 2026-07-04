@@ -759,6 +759,7 @@ func (h *DashboardHandler) handleTriggerRedeploy(w http.ResponseWriter, r *http.
 	}
 
 	// Launch in background goroutine — client polls for status
+	//nolint:gosec // Redeploy is an operator-triggered background job; request ctx ends before the job should.
 	go func() {
 		ctx := context.Background()
 		if err := h.Redeployer.DeployOp(ctx, req.Operation, req.AgentID); err != nil {

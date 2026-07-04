@@ -50,11 +50,11 @@ func newTestChain(t *testing.T, chainID string) *testChain {
 	if err != nil {
 		t.Fatalf("generate node cert: %v", err)
 	}
-	if err := tlsca.WriteCert(filepath.Join(certsDir, tlsca.NodeCertFile), nodeCert); err != nil {
-		t.Fatal(err)
+	if writeErr := tlsca.WriteCert(filepath.Join(certsDir, tlsca.NodeCertFile), nodeCert); writeErr != nil {
+		t.Fatal(writeErr)
 	}
-	if err := tlsca.WriteKey(filepath.Join(certsDir, tlsca.NodeKeyFile), nodeKey); err != nil {
-		t.Fatal(err)
+	if writeErr := tlsca.WriteKey(filepath.Join(certsDir, tlsca.NodeKeyFile), nodeKey); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	badger, err := store.NewBadgerStore(filepath.Join(dir, "badger"))
@@ -494,8 +494,8 @@ func TestReceiptExchangeEndToEnd(t *testing.T) {
 	// (attacker-chosen bytes that used to defeat the sha256(receipt) key and
 	// mint a fresh consensus tx per push).
 	anchor := sha256Bytes("some-prior-anchor-bytes")
-	if err := b.badger.SetCoCommitAnchor(sharedID, a.chainID, anchor); err != nil {
-		t.Fatal(err)
+	if anchorErr := b.badger.SetCoCommitAnchor(sharedID, a.chainID, anchor); anchorErr != nil {
+		t.Fatal(anchorErr)
 	}
 	varied, err := a.mgr.BuildSignedReceipt(sharedID, 999999, 424242) // different Height/CommitTime
 	if err != nil {

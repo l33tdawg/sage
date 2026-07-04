@@ -99,7 +99,7 @@ type JoinRequestResp struct {
 	HostAgentID  string `json:"host_agent_id"` // hex ed25519 operator pub
 	HostNonce    string `json:"host_nonce"`    // hex 16B
 	ConfirmStep  int64  `json:"confirm_step"`
-	HostPin      string `json:"host_pin"`      // hex 32B (echo; guest already holds it from the QR)
+	HostPin      string `json:"host_pin"` // hex 32B (echo; guest already holds it from the QR)
 	HostEndpoint string `json:"host_endpoint"`
 }
 
@@ -246,7 +246,7 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid guest agent id")
 		return
 	}
-	if err := validateJoinEndpoint(req.GuestEndpoint); err != nil {
+	if valErr := validateJoinEndpoint(req.GuestEndpoint); valErr != nil {
 		httpError(w, http.StatusBadRequest, "invalid guest endpoint")
 		return
 	}
@@ -496,15 +496,15 @@ func (m *Manager) HostScanReturn(sessionID, returnURI string) error {
 
 // HostSessionView is the host wizard's poll payload.
 type HostSessionView struct {
-	SessionID   string     `json:"session_id"`
-	State       string     `json:"state"`
-	GuestChain  string     `json:"guest_chain,omitempty"`
-	GuestScope  *ScopeWire `json:"guest_scope,omitempty"`
-	CodeG       string     `json:"code_g,omitempty"` // host compares this to what the guest reads (approval #1)
-	CodeH       string     `json:"code_h,omitempty"` // host reads this back (after approval)
-	Approved    bool       `json:"approved"`
-	Active      bool       `json:"active"`
-	ExpectsGuest bool      `json:"expects_guest"`
+	SessionID    string     `json:"session_id"`
+	State        string     `json:"state"`
+	GuestChain   string     `json:"guest_chain,omitempty"`
+	GuestScope   *ScopeWire `json:"guest_scope,omitempty"`
+	CodeG        string     `json:"code_g,omitempty"` // host compares this to what the guest reads (approval #1)
+	CodeH        string     `json:"code_h,omitempty"` // host reads this back (after approval)
+	Approved     bool       `json:"approved"`
+	Active       bool       `json:"active"`
+	ExpectsGuest bool       `json:"expects_guest"`
 }
 
 // HostSessionStatus returns the host wizard view, computing CODE_G once a guest
@@ -669,11 +669,11 @@ func (m *Manager) dropGuestDraft(sessionID string) {
 
 // GuestScanResult is returned to the guest wizard after a successful scan.
 type GuestScanResult struct {
-	SessionID     string `json:"session_id"`
-	HostChain     string `json:"host_chain"`
-	HostEndpoint  string `json:"host_endpoint"`
-	HostPinHex    string `json:"host_pin"`
-	ReturnURI     string `json:"return_uri"` // the guest's pin-only return QR (host scans it)
+	SessionID    string `json:"session_id"`
+	HostChain    string `json:"host_chain"`
+	HostEndpoint string `json:"host_endpoint"`
+	HostPinHex   string `json:"host_pin"`
+	ReturnURI    string `json:"return_uri"` // the guest's pin-only return QR (host scans it)
 }
 
 // GuestScan parses a scanned host enrollment QR (fail-closed), fetches the host
@@ -690,7 +690,7 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 	if enr.Role != "host" {
 		return nil, fmt.Errorf("this is not a host connection code")
 	}
-	if err := ValidateChainID(enr.ChainID); err != nil {
+	if valErr := ValidateChainID(enr.ChainID); valErr != nil {
 		return nil, fmt.Errorf("invalid host chain id in code")
 	}
 	if enr.ChainID == m.localChainID {
@@ -709,8 +709,8 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 	if subtle.ConstantTimeCompare(SPKIFingerprint(caCert), enr.Pin) != 1 {
 		return nil, fmt.Errorf("host CA does not match the scanned code (possible tampering) - stop")
 	}
-	if err := requireChainCN(caCert, enr.ChainID); err != nil {
-		return nil, err
+	if cnErr := requireChainCN(caCert, enr.ChainID); cnErr != nil {
+		return nil, cnErr
 	}
 	ownPin, err := m.ownPin()
 	if err != nil {
@@ -761,8 +761,8 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 		return nil, err
 	}
 	guestNonce := make([]byte, 16)
-	if _, err := randRead(guestNonce); err != nil {
-		return nil, err
+	if _, readErr := randRead(guestNonce); readErr != nil {
+		return nil, readErr
 	}
 	body := &JoinRequestWire{
 		SessionID:     sessionID,
@@ -775,8 +775,8 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 		Scope:         scope,
 	}
 	var resp JoinRequestResp
-	if err := m.guestCall(ctx, d, http.MethodPost, "/fed/v1/join/request", body, &resp); err != nil {
-		return nil, err
+	if callErr := m.guestCall(ctx, d, http.MethodPost, "/fed/v1/join/request", body, &resp); callErr != nil {
+		return nil, callErr
 	}
 	hostNonce, err := hex.DecodeString(resp.HostNonce)
 	if err != nil || len(hostNonce) != 16 {
@@ -1108,9 +1108,10 @@ func (m *Manager) joinClientTLS(hostCAPEM, hostPin []byte) (*tls.Config, error) 
 		return nil, err
 	}
 	return &tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		MinVersion:         tls.VersionTLS13,
-		InsecureSkipVerify: true, // #nosec G402 -- verification is the pinned-CA check below
+		Certificates:           []tls.Certificate{cert},
+		MinVersion:             tls.VersionTLS13,
+		SessionTicketsDisabled: true,
+		InsecureSkipVerify:     true, // #nosec G402 -- verification is the pinned-CA check below
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			return verifyChainAgainstCA(rawCerts, caCert, x509.ExtKeyUsageServerAuth)
 		},

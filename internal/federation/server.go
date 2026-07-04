@@ -110,8 +110,8 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 		for _, c := range r.TLS.PeerCertificates {
 			rawCerts = append(rawCerts, c.Raw)
 		}
-		if err := verifyChainAgainstCA(rawCerts, ca, x509.ExtKeyUsageClientAuth); err != nil {
-			m.logger.Warn().Err(err).Str("peer", peerChain).Msg("federation request denied: client cert does not match claimed chain")
+		if certErr := verifyChainAgainstCA(rawCerts, ca, x509.ExtKeyUsageClientAuth); certErr != nil {
+			m.logger.Warn().Err(certErr).Str("peer", peerChain).Msg("federation request denied: client cert does not match claimed chain")
 			httpError(w, http.StatusForbidden, "client certificate does not match claimed chain")
 			return
 		}

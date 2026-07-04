@@ -36,12 +36,12 @@ import (
 	sageabci "github.com/l33tdawg/sage/internal/abci"
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/embedding"
-	"github.com/l33tdawg/sage/internal/rerankd"
 	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/mcp"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/orchestrator"
+	"github.com/l33tdawg/sage/internal/rerankd"
 	"github.com/l33tdawg/sage/internal/snapshot"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
@@ -210,14 +210,14 @@ func runServe() (rerr error) {
 		// sidecar answers, so boot is never blocked on it.
 		if prefs["reranker_managed"] == "1" {
 			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				startCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				defer cancel()
-				url, err := rerankdMgr.Start(ctx)
-				if err != nil {
-					logger.Warn().Err(err).Msg("managed reranker sidecar did not start; recall continues without reranking")
+				rerankURL, startErr := rerankdMgr.Start(startCtx)
+				if startErr != nil {
+					logger.Warn().Err(startErr).Msg("managed reranker sidecar did not start; recall continues without reranking")
 					return
 				}
-				logger.Info().Str("url", url).Msg("managed reranker sidecar ready")
+				logger.Info().Str("url", rerankURL).Msg("managed reranker sidecar ready")
 			}()
 		}
 	}

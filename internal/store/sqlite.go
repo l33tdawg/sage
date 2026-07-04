@@ -933,7 +933,7 @@ func (s *SQLiteStore) CountMemoriesByProvider(ctx context.Context) (map[string]i
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make(map[string]int)
 	for rows.Next() {
 		var provider string
@@ -954,7 +954,7 @@ func (s *SQLiteStore) GetDomainLastActivity(ctx context.Context) (map[string]str
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make(map[string]string)
 	for rows.Next() {
 		var domain, last string
@@ -977,7 +977,7 @@ type ReembedItem struct {
 }
 
 // ListMemoriesForReembed returns up to `limit` memories that still need embedding
-// (embedding_provider = ''), decrypting their content. It deliberately uses a
+// (embedding_provider = ”), decrypting their content. It deliberately uses a
 // WHERE filter + LIMIT (no OFFSET): the re-embed loop tags every returned row
 // (ollama or skipped), so each subsequent call returns the NEXT batch of
 // still-untagged rows — stable, no skips, and it converges to empty. A decrypt
@@ -994,7 +994,7 @@ func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit int) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []ReembedItem
 	for rows.Next() {
 		var it ReembedItem
@@ -1021,7 +1021,7 @@ func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit int) ([]
 }
 
 // ResetErroredEmbeddings clears the 'error' embedding tag (readable memories whose
-// embed transiently failed) back to '' so the next re-embed run retries them.
+// embed transiently failed) back to ” so the next re-embed run retries them.
 // Returns how many were reset.
 func (s *SQLiteStore) ResetErroredEmbeddings(ctx context.Context) (int, error) {
 	res, err := s.writeExecContext(ctx,
@@ -1080,12 +1080,14 @@ func (s *SQLiteStore) RekeyUnreadableMemories(ctx context.Context, oldVault *vau
 	for rows.Next() {
 		var c cand
 		if scanErr := rows.Scan(&c.id, &c.content); scanErr != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, scanErr
 		}
 		cands = append(cands, c)
 	}
-	rows.Close()
+	if closeErr := rows.Close(); closeErr != nil {
+		return 0, closeErr
+	}
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}

@@ -3655,7 +3655,7 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 		if hErr != nil {
 			return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: access lookup failed: %v", hErr)}
 		}
-		if !(isAdmin || hasModify) {
+		if !isAdmin && !hasModify {
 			return &abcitypes.ExecTxResult{Code: 92, Log: fmt.Sprintf("challenge: agent %s not authorized to deprecate memory %s (need domain ownership or a level-3 modify grant)", challengerID[:16], challenge.MemoryID)}
 		}
 	}

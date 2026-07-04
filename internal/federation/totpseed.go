@@ -1,7 +1,6 @@
 package federation
 
 import (
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -261,15 +260,4 @@ func (m *Manager) purgeSeed(remoteChainID string) {
 		_ = os.Remove(m.seedPath(remoteChainID))
 		_ = os.Remove(m.seedPrevPath(remoteChainID))
 	}
-}
-
-// seedCommitOf returns the stored SeedCommit (RT-8 seed-aware replace check):
-// compares whether a re-enrollment changes the seed_commit for an existing
-// agreement. Reads the header binding without decrypting the body.
-func (m *Manager) boundPinPairMatches(remoteChainID string, pinPair []byte) bool {
-	env, err := m.readSeedHeader(remoteChainID)
-	if err != nil {
-		return false
-	}
-	return subtle.ConstantTimeCompare(env.BoundPinPair, pinPair) == 1
 }

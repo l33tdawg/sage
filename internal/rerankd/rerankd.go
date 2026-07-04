@@ -271,7 +271,7 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	}
 	// --embedding --pooling rank --rerank is the documented trio for serving
 	// a cross-encoder reranker; /v1/rerank appears only with these set.
-	cmd := exec.Command(bin,
+	cmd := exec.CommandContext(context.WithoutCancel(ctx), bin,
 		"-m", m.ModelPath(),
 		"--embedding", "--pooling", "rank", "--rerank",
 		"--host", "127.0.0.1",
@@ -299,7 +299,7 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("start %s: %w", binaryName, err)
 	}
 	m.cmd = cmd
-	_ = os.WriteFile(m.pidFilePath(), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
+	_ = os.WriteFile(m.pidFilePath(), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
 	exited := make(chan struct{})
 	go func() {
 		_ = cmd.Wait() // reap; the log file stays open for the process lifetime
@@ -325,7 +325,7 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
-			m.stopLocked()
+			_ = m.stopLocked()
 			return "", ctx.Err()
 		case <-exited: // crashed during startup (bad flags, port in use, ...)
 			m.cmd = nil
@@ -337,7 +337,7 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 			return m.URL(), nil
 		}
 	}
-	m.stopLocked()
+	_ = m.stopLocked()
 	return "", fmt.Errorf("%s did not become healthy - see %s", binaryName, m.logFilePath())
 }
 

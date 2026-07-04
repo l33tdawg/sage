@@ -22,7 +22,7 @@ func testEnvelope(t *testing.T, nonce []byte) *CoCommitSubmit {
 		CreatedAtUnix:   1_700_000_000,
 		AgreementNonce:  nonce,
 	}
-	var privs []ed25519.PrivateKey
+	privs := make([]ed25519.PrivateKey, 0, 2)
 	for _, chain := range []string{"sage-a", "sage-b"} {
 		pub, priv, err := ed25519.GenerateKey(rand.Reader)
 		if err != nil {

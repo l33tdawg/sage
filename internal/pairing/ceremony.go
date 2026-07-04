@@ -12,6 +12,7 @@
 //   - the bundle (which contains the chain genesis — effectively the join
 //     credential) is AES-256-GCM encrypted under a key derived from S, so a
 //     network eavesdropper who never scanned the QR learns nothing usable.
+//
 // Each use of S is domain-separated by a distinct label so the subkeys are
 // independent.
 package pairing
@@ -179,8 +180,8 @@ func DecodeToken(token string) (Token, []byte, error) {
 		return Token{}, nil, fmt.Errorf("decode token: %w", err)
 	}
 	var t Token
-	if err := json.Unmarshal(data, &t); err != nil {
-		return Token{}, nil, fmt.Errorf("parse token: %w", err)
+	if parseErr := json.Unmarshal(data, &t); parseErr != nil {
+		return Token{}, nil, fmt.Errorf("parse token: %w", parseErr)
 	}
 	if t.Version != 1 || t.Addr == "" || t.SessionID == "" {
 		return Token{}, nil, fmt.Errorf("malformed pairing token")

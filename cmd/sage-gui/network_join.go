@@ -19,6 +19,7 @@ package main
 // local tools connect over stdio (Flow 1). No CA key, no passphrase.
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -348,7 +349,8 @@ func applyPendingJoinAtStartup(logger zerolog.Logger) (bool, error) {
 func serveIsRunning() bool {
 	addr := strings.TrimPrefix(cmtRPCAddr(), "tcp://")
 	addr = strings.Replace(addr, "0.0.0.0", "127.0.0.1", 1)
-	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	dialer := net.Dialer{Timeout: 500 * time.Millisecond}
+	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
 	if err != nil {
 		return false
 	}

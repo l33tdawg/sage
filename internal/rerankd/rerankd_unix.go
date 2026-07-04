@@ -3,11 +3,13 @@
 package rerankd
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // sidecarSysProcAttr puts the sidecar in its own process group so a signal
@@ -29,7 +31,9 @@ func killSidecar(pid int) {
 // adopted-sidecar Stop can't SIGTERM a recycled, unrelated pid. `ps -o comm=`
 // prints the process's command basename on both macOS and Linux.
 func pidIsLlamaServer(pid int) bool {
-	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return false
 	}

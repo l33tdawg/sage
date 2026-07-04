@@ -24,8 +24,8 @@ func approvedSession(t *testing.T) (st *JoinStore, id string, certSPKI []byte, e
 		t.Fatalf("Create: %v", err)
 	}
 	id = js.ID
-	if err := st.SetExpectedGuest(id, guestPin, "https://guest:8444", now); err != nil {
-		t.Fatalf("SetExpectedGuest: %v", err)
+	if setErr := st.SetExpectedGuest(id, guestPin, "https://guest:8444", now); setErr != nil {
+		t.Fatalf("SetExpectedGuest: %v", setErr)
 	}
 	rb := false
 	rolledBack = &rb

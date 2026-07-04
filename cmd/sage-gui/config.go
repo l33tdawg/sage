@@ -244,8 +244,8 @@ func persistChainID(chainID string) error {
 
 	// Unmarshal into a RAW Config (no path expansion) so paths round-trip verbatim.
 	var raw Config
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parse config: %w", err)
+	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
+		return fmt.Errorf("parse config: %w", parseErr)
 	}
 	if raw.ChainID == chainID {
 		return nil // no drift

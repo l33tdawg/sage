@@ -69,8 +69,8 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 	}
 
 	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, 0, fmt.Errorf("generate nonce: %w", err)
+	if _, readErr := rand.Read(nonce); readErr != nil {
+		return nil, 0, fmt.Errorf("generate nonce: %w", readErr)
 	}
 	ts := time.Now().Unix()
 
@@ -205,6 +205,7 @@ func (m *Manager) DeliverReceipts(ctx context.Context, sharedID string, height, 
 	var wg sync.WaitGroup
 	for _, chain := range chains {
 		wg.Add(1)
+		//nolint:gosec // Receipt delivery intentionally uses per-peer broadcast deadlines independent of the caller's read ctx.
 		go func(chain string) {
 			defer wg.Done()
 			sem <- struct{}{}
