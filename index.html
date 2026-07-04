@@ -11,20 +11,20 @@
   gtag('js', new Date());
   gtag('config', 'G-Y9LD21QVEQ');
 </script>
-<title>SAGE — Persistent Memory for AI Agents</title>
+<title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Local-first, consensus-governed memory infrastructure for AI agents. Semantic recall, managed reranking, LAN-first federation, and a dashboard-native operator experience.">
+<meta name="description" content="Install SAGE v11: local-first persistent memory for AI agents with the CEREBRUM MRI brain, semantic recall, managed reranking, and LAN-first federation.">
 <meta name="theme-color" content="#0a0614">
-<meta property="og:title" content="SAGE — Persistent Memory for AI Agents">
-<meta property="og:description" content="Local-first, consensus-governed memory infrastructure for AI agents: semantic recall, managed reranking, LAN-first federation, and CEREBRUM.">
+<meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
+<meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and LAN-first federation.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/">
 <meta property="og:image" content="https://l33tdawg.github.io/sage/og-image.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="SAGE — Persistent Memory for AI Agents">
-<meta name="twitter:description" content="Local-first, consensus-governed memory infrastructure for AI agents: semantic recall, managed reranking, LAN-first federation, and CEREBRUM.">
+<meta name="twitter:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
+<meta name="twitter:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and LAN-first federation.">
 <meta name="twitter:image" content="https://l33tdawg.github.io/sage/og-image.png">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -64,17 +64,6 @@ body {
   position: fixed; top: 0; left: 0;
   width: 100vw; height: 100vh;
   z-index: 0; pointer-events: none; opacity: 0.4;
-}
-
-/* ─── Floating Orbs ─── */
-.orb { position: fixed; border-radius: 50%; filter: blur(80px); z-index: 0; pointer-events: none; animation: drift 20s ease-in-out infinite; }
-.orb-1 { width: 500px; height: 500px; background: radial-gradient(circle, rgba(124,58,237,0.15), transparent 70%); top: -10%; left: -5%; animation-duration: 25s; }
-.orb-2 { width: 400px; height: 400px; background: radial-gradient(circle, rgba(167,139,250,0.1), transparent 70%); top: 40%; right: -10%; animation-duration: 30s; animation-delay: -5s; }
-.orb-3 { width: 350px; height: 350px; background: radial-gradient(circle, rgba(244,114,182,0.08), transparent 70%); bottom: 10%; left: 20%; animation-duration: 22s; animation-delay: -10s; }
-@keyframes drift {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  33% { transform: translate(30px, -20px) scale(1.05); }
-  66% { transform: translate(-20px, 15px) scale(0.95); }
 }
 
 /* ─── Layout ─── */
@@ -231,6 +220,208 @@ h1 em {
   color: var(--accent); font-size: 0.82rem; text-decoration: none; transition: all 0.2s;
 }
 .badge-link:hover { border-color: var(--accent); background: rgba(139,92,246,0.2); }
+
+/* ─── v11 Landing Hero ─── */
+.hero.v11-hero {
+  min-height: min(860px, calc(100vh - 56px));
+  align-items: center;
+  padding: 56px 0 40px;
+  background:
+    linear-gradient(90deg, rgba(6,2,14,0.92) 0%, rgba(6,2,14,0.7) 44%, rgba(6,2,14,0.35) 100%),
+    radial-gradient(circle at 70% 45%, rgba(45,212,191,0.12), transparent 32%),
+    radial-gradient(circle at 50% 70%, rgba(124,58,237,0.12), transparent 36%);
+}
+.v11-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.78fr) minmax(420px, 1.22fr);
+  align-items: center;
+  gap: 42px;
+}
+.hero-copy h1 {
+  max-width: 620px;
+  margin-bottom: 18px;
+  color: #f7f4ff;
+  animation: none;
+  opacity: 1;
+}
+.hero-copy .hero-sub,
+.hero-copy .hero-actions,
+.hero-copy .download-badges {
+  animation: none;
+  opacity: 1;
+}
+.hero-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 14px;
+  border: 1px solid rgba(45,212,191,0.28);
+  border-radius: 999px;
+  color: #7dd3fc;
+  background: rgba(45,212,191,0.06);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 20px;
+}
+.hero-kicker::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 12px var(--teal);
+}
+.hero-proof {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 22px 0 22px;
+  max-width: 620px;
+}
+.proof-chip {
+  padding: 10px 12px;
+  border: 1px solid rgba(167,139,250,0.12);
+  border-radius: 10px;
+  background: rgba(17,11,34,0.74);
+}
+.proof-chip strong {
+  display: block;
+  color: var(--bright);
+  font-size: 0.9rem;
+  line-height: 1.2;
+}
+.proof-chip span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+  margin-top: 3px;
+}
+.hero-visual {
+  position: relative;
+  min-height: 520px;
+  display: flex;
+  align-items: center;
+}
+.hero-shot {
+  position: relative;
+  width: 100%;
+  border: 1px solid rgba(45,212,191,0.2);
+  border-radius: 8px;
+  overflow: hidden;
+  background: #02050a;
+  box-shadow: 0 30px 90px rgba(0,0,0,0.55), 0 0 70px rgba(45,212,191,0.16);
+}
+.hero-shot img {
+  display: block;
+  width: 100%;
+}
+.hero-shot-label {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(3,7,18,0.78);
+  border: 1px solid rgba(45,212,191,0.22);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: #67e8f9;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.hero-shot-label::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 10px #22c55e;
+}
+.v11-home-band {
+  padding: 56px 0;
+  border-top: 1px solid rgba(167,139,250,0.08);
+  border-bottom: 1px solid rgba(167,139,250,0.08);
+  background: rgba(10,6,20,0.78);
+}
+.install-row {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 24px;
+  align-items: center;
+}
+.install-note {
+  border: 1px solid rgba(167,139,250,0.12);
+  border-radius: 12px;
+  padding: 22px;
+  background: rgba(17,11,34,0.74);
+}
+.install-note h3 { color: var(--bright); font-size: 1.1rem; margin-bottom: 8px; }
+.install-note p { color: var(--muted); font-size: 0.9rem; line-height: 1.6; }
+.home-screens {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr;
+  gap: 14px;
+  margin-top: 34px;
+}
+.home-screens .screenshot-thumb:first-child {
+  grid-row: span 2;
+}
+.home-screens .screenshot-thumb img {
+  height: 100%;
+  object-fit: cover;
+}
+.federation-hero {
+  padding: 78px 0;
+  background:
+    linear-gradient(180deg, var(--void), rgba(3,14,18,0.9)),
+    radial-gradient(circle at 20% 40%, rgba(45,212,191,0.12), transparent 34%);
+}
+.fed-hero-grid {
+  display: grid;
+  grid-template-columns: 0.86fr 1.14fr;
+  gap: 42px;
+  align-items: center;
+}
+.fed-panel {
+  border: 1px solid rgba(45,212,191,0.18);
+  border-radius: 8px;
+  background: rgba(2,6,23,0.72);
+  overflow: hidden;
+  box-shadow: 0 24px 70px rgba(0,0,0,0.42);
+}
+.fed-panel img {
+  display: block;
+  width: 100%;
+}
+.fed-list {
+  list-style: none;
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+}
+.fed-list li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  color: var(--text);
+  font-size: 0.93rem;
+  line-height: 1.55;
+}
+.fed-list li::before {
+  content: '';
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  margin-top: 9px;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 12px rgba(45,212,191,0.7);
+}
 
 /* ─── "Free Your Mind" prompt box ─── */
 .free-prompt { margin-top: 32px; animation: fadeUp 0.8s ease-out 0.5s both; text-align: center; }
@@ -519,6 +710,14 @@ footer a:hover { text-decoration: underline; }
   .hero-text h1, .hero-text .hero-sub { text-align: center; }
   .hero-text .hero-actions { justify-content: center; }
   .hero-text .download-badges { justify-content: center; }
+  .v11-hero-grid { grid-template-columns: 1fr; gap: 28px; }
+  .hero.v11-hero { min-height: auto; padding: 44px 0 34px; }
+  .hero-visual { min-height: auto; }
+  .hero-proof { grid-template-columns: 1fr; }
+  .install-row { grid-template-columns: 1fr; }
+  .home-screens { grid-template-columns: 1fr; }
+  .home-screens .screenshot-thumb:first-child { grid-row: auto; }
+  .fed-hero-grid { grid-template-columns: 1fr; }
   .hero-actions { flex-direction: column; align-items: center; }
   .setup-steps { flex-direction: column; align-items: center; gap: 8px; }
   .step-arrow { transform: rotate(90deg); padding-top: 0; flex: 0 0 24px; }
@@ -535,10 +734,6 @@ footer a:hover { text-decoration: underline; }
 </head>
 <body>
 
-<!-- Atmospheric orbs -->
-<div class="orb orb-1"></div>
-<div class="orb orb-2"></div>
-<div class="orb orb-3"></div>
 <canvas class="neural-canvas" id="neural"></canvas>
 
 <!-- Nav -->
@@ -567,56 +762,59 @@ footer a:hover { text-decoration: underline; }
 <!-- ════════════════════════════════════════════════════ -->
 <div class="tab-content active" id="tab-home">
 
-  <section class="hero">
+  <section class="hero v11-hero">
     <div class="container">
-      <div class="hero-inner">
-        <div class="hero-split">
-          <div class="hero-icon">
-            <img src="sage-brain.svg" alt="SAGE Brain">
+      <div class="v11-hero-grid">
+        <div class="hero-copy">
+          <div class="hero-kicker">SAGE v11 · MRI memory brain · LAN-first federation</div>
+          <h1>Your AI's memory, visible as a <em>living brain</em></h1>
+          <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP client a local memory node: semantic recall, governed validation, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
+          <div class="hero-proof">
+            <div class="proof-chip"><strong>Local-first</strong><span>SQLite + optional AES-256</span></div>
+            <div class="proof-chip"><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
+            <div class="proof-chip"><strong>Federation</strong><span>LAN / VPN / your route</span></div>
           </div>
-          <div class="hero-text">
-            <div class="hero-badge">Open Source &middot; AES-256 Encrypted &middot; Any AI, Any Model &middot; LongMemEval-S R@5 0.9053</div>
-            <h1>Give Your AI a Persistent,<br><em>Secure Memory</em></h1>
-            <p class="hero-sub">Every conversation starts from zero. SAGE provides persistent, encrypted, consensus-validated memory that runs entirely on your machine &mdash; your data never leaves it.</p>
-            <div class="hero-actions">
-              <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                Download SAGE
-              </a>
-              <button class="btn-secondary" onclick="switchTab('connect')">Connect Your AI</button>
-            </div>
-            <div class="download-badges">
-              <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-macOS-arm64.dmg" class="badge-link">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.8-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M13 3.5c.73-.83 1.94-1.46 2.94-1.5.13 1.17-.34 2.35-1.04 3.19-.69.85-1.83 1.51-2.95 1.42-.15-1.15.41-2.35 1.05-3.11z"/></svg>
-                macOS
-              </a>
-              <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-Windows-Setup.exe" class="badge-link">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M0 3.449L9.75 2.1v9.451H0m10.949-9.602L24 0v11.4H10.949M0 12.6h9.75v9.451L0 20.699M10.949 12.6H24V24l-12.9-1.801"/></svg>
-                Windows
-              </a>
-              <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a11.966 11.966 0 0 0 .084.727c.108.743.305 1.434.658 2.014.241.396.559.724.932.984.358.25.785.434 1.27.553.373.091.761.138 1.156.138.612 0 1.203-.12 1.738-.331.236-.094.463-.2.673-.32l.093-.053c.352-.199.675-.401.971-.607.59-.41 1.082-.77 1.486-.921.428-.16.88-.243 1.34-.243.46 0 .912.083 1.34.243.404.151.896.511 1.486.921.296.206.619.408.97.607l.094.053c.21.12.437.226.673.32.535.211 1.126.331 1.738.331.395 0 .783-.047 1.156-.138.485-.119.912-.303 1.27-.553.373-.26.691-.588.932-.984.353-.58.55-1.271.658-2.014.026-.173.054-.349.084-.727.123-.805-.009-1.657-.287-2.489-.589-1.771-1.831-3.47-2.716-4.521-.75-1.067-.974-1.928-1.05-3.02-.065-1.491 1.056-5.965-3.17-6.298A5.11 5.11 0 0 0 12.504 0"/></svg>
-                Linux
-              </a>
-            </div>
-            <div style="margin-top:8px;font-size:0.78rem;color:var(--muted);">
-              Latest: <strong id="latest-version" style="color:var(--accent);">...</strong> &mdash; Signed &amp; notarized
-            </div>
+          <div class="hero-actions">
+            <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Download SAGE
+            </a>
+            <button class="btn-secondary" onclick="switchTab('connect')">Connect Your AI</button>
+          </div>
+          <div class="download-badges">
+            <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-macOS-arm64.dmg" class="badge-link">macOS</a>
+            <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-Windows-Setup.exe" class="badge-link">Windows</a>
+            <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
+          </div>
+          <div style="margin-top:8px;font-size:0.78rem;color:var(--muted);">
+            Latest: <strong id="latest-version" style="color:var(--accent);">...</strong> &mdash; signed release assets
           </div>
         </div>
-
+        <div class="hero-visual" aria-label="CEREBRUM MRI brain dashboard screenshot">
+          <button class="hero-shot" onclick="openLightbox(0)" aria-label="Open CEREBRUM MRI screenshot">
+            <img src="screen-brain.png" alt="CEREBRUM MRI brain dashboard with memory nodes inside a 3D brain">
+            <span class="hero-shot-label">CEREBRUM MRI</span>
+          </button>
+        </div>
       </div>
     </div>
   </section>
 
-  <!-- Below the fold -->
-  <div class="container" style="padding-bottom:60px;">
-    <div class="hero-below">
-      <div class="free-prompt">
-        <div class="free-prompt-label">Or just tell your AI</div>
-        <div class="free-prompt-box" onclick="copyPrompt(this)" title="Click to copy">
-          <div class="free-prompt-text">Connect to SAGE persistent memory: fetch http://localhost:8080/v1/mcp-config and save the response as .mcp.json in this project root. Then restart your session and initialize SAGE memory.</div>
-          <button class="free-prompt-copy" onclick="event.stopPropagation(); copyPrompt(this.parentElement)">Copy</button>
+  <section class="v11-home-band">
+    <div class="container">
+      <div class="install-row">
+        <div>
+          <div class="section-tag">Install in minutes</div>
+          <h2>Download it, open CEREBRUM, connect your AI.</h2>
+          <p class="section-desc">v11 is dashboard-first. The onboarding flow walks through semantic memory, AI-tool connection, and setup recovery without making users spelunk through config files.</p>
+        </div>
+        <div class="install-note">
+          <h3>Or tell your AI to connect itself</h3>
+          <p>Click to copy the MCP bootstrap prompt and paste it into any agent session that can edit its project folder.</p>
+          <div class="free-prompt-box" onclick="copyPrompt(this)" title="Click to copy" style="margin-top:14px;">
+            <div class="free-prompt-text">Connect to SAGE persistent memory: fetch http://localhost:8080/v1/mcp-config and save the response as .mcp.json in this project root. Then restart your session and initialize SAGE memory.</div>
+            <button class="free-prompt-copy" onclick="event.stopPropagation(); copyPrompt(this.parentElement)">Copy</button>
+          </div>
         </div>
       </div>
       <div id="minds-freed" style="display:none;text-align:center;margin-top:24px;animation:fadeUp 0.6s ease-out both;">
@@ -624,43 +822,37 @@ footer a:hover { text-decoration: underline; }
           Downloads: <strong id="download-count" style="font-size:1.25rem;">0</strong>
         </span>
       </div>
+      <div class="home-screens reveal">
+        <div class="screenshot-thumb" onclick="openLightbox(0)"><img src="screen-brain.png" alt="CEREBRUM MRI brain" loading="lazy"><div class="screenshot-label">MRI Brain</div></div>
+        <div class="screenshot-thumb" onclick="openLightbox(2)"><img src="screen-config.png" alt="Recall Engine" loading="lazy"><div class="screenshot-label">Recall Engine</div></div>
+        <div class="screenshot-thumb" onclick="openLightbox(3)"><img src="screen-overview.png" alt="Overview dashboard" loading="lazy"><div class="screenshot-label">Overview</div></div>
+      </div>
     </div>
+  </section>
 
-    <div class="setup-flow" style="margin-top:40px;">
-      <div class="setup-flow-label">How it works</div>
-      <div class="setup-steps">
-        <div class="setup-step">
-          <div class="step-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 8v8m-4-4h8"/></svg></div>
-          <div class="step-label">Install</div>
-          <div class="step-desc">Double-click the DMG or EXE</div>
+  <section class="federation-hero">
+    <div class="container">
+      <div class="fed-hero-grid">
+        <div class="fed-panel reveal" onclick="openLightbox(1)">
+          <img src="screen-network.png" alt="Federation dashboard showing LAN-first SAGE-to-SAGE links">
         </div>
-        <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <div class="setup-step">
-          <div class="step-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#2dd4bf" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
-          <div class="step-label">Onboarding</div>
-          <div class="step-desc">The dashboard walks you through it</div>
-        </div>
-        <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <div class="setup-step">
-          <div class="step-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#f472b6" stroke-width="2"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div>
-          <div class="step-label">Pick Your AI</div>
-          <div class="step-desc">Any AI that speaks MCP</div>
-        </div>
-        <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <div class="setup-step">
-          <div class="step-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6m-6 3h4m-4 3h6"/></svg></div>
-          <div class="step-label">Connect</div>
-          <div class="step-desc">One click, or one JSON snippet</div>
-        </div>
-        <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
-        <div class="setup-step">
-          <div class="step-icon step-active"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2"><path d="M5 13l4 4L19 7"/></svg></div>
-          <div class="step-label" style="color:#22c55e;">Memory Active</div>
-          <div class="step-desc" style="color:#22c55e99;">Your AI now remembers</div>
+        <div class="reveal">
+          <div class="section-tag">New in v11</div>
+          <h2>Federate two SAGE brains without handing memory to a cloud.</h2>
+          <p class="section-desc">v11 links two separate SAGE nodes when they can already reach each other: same LAN, VPN, or an operator-provided route. Built-in internet/NAT traversal is planned for v11.5.</p>
+          <ul class="fed-list">
+            <li>Human-verified join ceremony with QR enrollment and rotating six-digit compare codes.</li>
+            <li>Share only chosen domains at the clearance ceiling you set.</li>
+            <li>Recall queries across the link live; no silent copying, no remote deletion.</li>
+          </ul>
+          <div class="hero-actions" style="margin-top:28px;">
+            <button class="btn-secondary" onclick="switchTab('network')">See federation details</button>
+            <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">Install v11</a>
+          </div>
         </div>
       </div>
     </div>
-  </div>
+  </section>
 
   <!-- Value props -->
   <div class="section" style="background: linear-gradient(180deg, var(--void) 0%, var(--deep) 50%, var(--void) 100%); padding: 60px 0;">
@@ -715,7 +907,7 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.0.0</span></h3>
+        <h3>What's new in <span id="whats-new-version">v11.0.1</span></h3>
         <p style="opacity:0.85;margin:0 0 24px 0;">v11 is the release where SAGE stops asking you to be a systems administrator. A first-run wizard sets everything up from the dashboard, semantic memory turns on with one guided flow, the new reranker installs <em>itself</em> &mdash; SAGE downloads the engine and the model, verifies both, and manages the process &mdash; and two people can now link their SAGE brains on a local network with a verification ceremony built on rotating codes and QR scans. Under the hood it activates the app-v15 consensus fork (new co-commit and cross-federation transaction types plus an authorization hardening pass), with the usual guarantee: byte-identical replay before activation, safe rolling upgrades, and hands-free fork advance on personal nodes.</p>
         <div class="new-features">
           <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>CEREBRUM, rebuilt around you</h4><p>The 3D MRI brain is now the default view &mdash; your memories as glowing points inside a translucent brain, domains as lobes ordered by recent activity, corroborated knowledge pulled to the core. Around it: an Overview control board for the whole node, real full-text + semantic search with bulk curation, a live task board your agents and you share (with assignment and atomic claiming), and the agent-to-agent message bus as a Messages tab. A first-run onboarding wizard walks new nodes through everything &mdash; re-runnable any time from Settings.</p></div></div>
@@ -1000,7 +1192,7 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <div class="dev-badges reveal">
-        <div class="dev-badge"><strong>Go 1.24+</strong></div>
+        <div class="dev-badge"><strong>Go 1.25+</strong></div>
         <div class="dev-badge"><strong>Python SDK</strong></div>
         <div class="dev-badge"><strong>SQLite</strong> embedded</div>
         <div class="dev-badge"><strong>MCP</strong> protocol</div>
@@ -1235,6 +1427,7 @@ const lbImages = [
   { src: 'screen-brain.png', caption: 'CEREBRUM MRI brain — memory focus, related notes, and the train-of-thought view' },
   { src: 'screen-network.png', caption: 'Federation — LAN-first SAGE-to-SAGE links with a consent-gated join ceremony' },
   { src: 'screen-config.png', caption: 'Recall Engine — Semantic setup, managed reranker, and recall tuning' },
+  { src: 'screen-overview.png', caption: 'Overview — chain health, agents, federation, embeddings, and update status' },
 ];
 let lbIdx = 0;
 function openLightbox(idx) {
