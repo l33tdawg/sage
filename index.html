@@ -629,8 +629,8 @@ footer a:hover { text-decoration: underline; }
         <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
         <div class="setup-step">
           <div class="step-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#2dd4bf" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg></div>
-          <div class="step-label">Setup Wizard</div>
-          <div class="step-desc">Opens in your browser</div>
+          <div class="step-label">Onboarding</div>
+          <div class="step-desc">The dashboard walks you through it</div>
         </div>
         <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
         <div class="setup-step">
@@ -641,8 +641,8 @@ footer a:hover { text-decoration: underline; }
         <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
         <div class="setup-step">
           <div class="step-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6m-6 3h4m-4 3h6"/></svg></div>
-          <div class="step-label">Paste Config</div>
-          <div class="step-desc">One JSON snippet</div>
+          <div class="step-label">Connect</div>
+          <div class="step-desc">One click, or one JSON snippet</div>
         </div>
         <div class="step-arrow"><svg viewBox="0 0 32 16"><path d="M2 8h24m-6-5l6 5-6 5" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
         <div class="setup-step">
@@ -707,11 +707,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v10.9.1</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">The v10.9 line is about robustness you never have to think about. A personal memory chain can no longer strand itself, and an already-stranded one recovers in place &mdash; without touching your memories. And CEREBRUM, the 3D memory dashboard, now renders on the full range of real-world GPUs and dots-per-inch instead of going black on some of them, with a deployed fix that actually reaches you through a warm browser cache. No consensus rule, transaction handler, AppHash, or <code>ConsensusForkVersion</code> change in the line, so a mixed v10.8.x / v10.9.x cluster computes identical state and healthy chains are undisturbed.</p>
+        <h3>What's new in <span id="whats-new-version">v11.0.0</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11 is the release where SAGE stops asking you to be a systems administrator. A first-run wizard sets everything up from the dashboard, semantic memory turns on with one guided flow, the new reranker installs <em>itself</em> &mdash; SAGE downloads the engine and the model, verifies both, and manages the process &mdash; and two people can now link their SAGE brains face-to-face with a verification ceremony built on rotating codes and QR scans. Under the hood it activates the app-v15 consensus fork (new co-commit and cross-federation transaction types plus an authorization hardening pass), with the usual guarantee: byte-identical replay before activation, safe rolling upgrades, and hands-free fork advance on personal nodes.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Personal-chain recovery (<code>repair-chain</code>, #52)</h4><p>A single-validator personal chain could deadlock itself at genesis with no admin seeded to govern it. v10.9.0 seeds a genesis chain-admin in <code>InitChain</code> so new chains are auto-protected, and adds <code>sage-gui repair-chain</code> to recover an already-stranded one &mdash; every memory preserved. The change is replay-safe: existing chains carry no app_state, so their post-<code>InitChain</code> AppHash stays byte-identical (proven across 18 variants), and <code>ConsensusForkVersion</code> is unchanged &mdash; no coordinated reset, healthy chains untouched.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>CEREBRUM renders everywhere (#53, #54)</h4><p>The MRI 3D brain rendered as a black canvas on a range of GPU/DPI combos: ForceGraph3D sized its WebGL targets to the full window &times; device-pixel-ratio, overflowing the GPU's <code>MAX_RENDERBUFFER_SIZE</code> into an incomplete framebuffer. v10.9.1 sizes to the container, clamps the pixel ratio under the GPU ceiling, resizes the bloom composer explicitly, and disables the glow rather than the whole scene on a small ceiling &mdash; a glow-less brain beats a black one. A companion content-hash on every embedded asset means a rebuilt dashboard always serves fresh JS through any warm browser or CDN cache, so the fix actually reaches you. Dashboard-only; no node behavior change.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>CEREBRUM, rebuilt around you</h4><p>The 3D MRI brain is now the default view &mdash; your memories as glowing points inside a translucent brain, domains as lobes ordered by recent activity, corroborated knowledge pulled to the core. Around it: an Overview control board for the whole node, real full-text + semantic search with bulk curation, a live task board your agents and you share (with assignment and atomic claiming), and the agent-to-agent message bus as a Messages tab. A first-run onboarding wizard walks new nodes through everything &mdash; re-runnable any time from Settings.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>A reranker that installs itself</h4><p>One click in the dashboard and SAGE downloads a pinned llama.cpp build for your platform and the bge-reranker-v2-m3 model, verifies both by checksum, then starts and manages the sidecar &mdash; no terminal, no package manager, nothing leaves your machine. Recall results get re-scored by a cross-encoder for sharper relevance, and the recall depth setting now goes up to 20 with guidance that adapts to whether the reranker is on.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Federation with a human handshake</h4><p>Link your whole SAGE to another person&rsquo;s &mdash; across the room or across the internet. The join ceremony verifies both sides with rotating six-digit codes (Google-Authenticator compatible), QR scans, and an unskippable mutual compare, so you know exactly who you federated with. Share only the domains you choose, at the clearance ceiling you choose; recall reaches across live, nothing is copied, and nothing is ever deleted. Revoke any time.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Semantic memory made effortless</h4><p>A guided flow turns on meaning-based recall (Ollama + nomic-embed-text), re-reads your existing memories in the background with live progress, and &mdash; if an old vault key left some memories unreadable &mdash; recovers them in place with your recovery key. Every new memory is stamped with the embedder that produced it, so the dashboard always tells you the truth about what is searchable by meaning.</p></div></div>
         </div>
       </div>
 
@@ -719,12 +721,12 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>Persistent Memory</h3><p>Memories persist across every conversation &mdash; projects, preferences, decisions, prior outcomes. Nothing is lost between sessions.</p></div></div>
         <div class="feature-card"><div><h3>Governed Knowledge</h3><p>Memories are validated before being committed. Spurious data is filtered out; corroborated data is reinforced.</p></div></div>
         <div class="feature-card"><div><h3>Confidence Scoring</h3><p>Memories strengthen with corroboration and decay without reinforcement &mdash; analogous to human episodic memory.</p></div></div>
-        <div class="feature-card"><div><h3>Semantic Search</h3><p>Recall by meaning, not keywords. Local embeddings via Ollama keep your data private.</p></div></div>
+        <div class="feature-card"><div><h3>Semantic Search + Reranker</h3><p>Recall by meaning with local embeddings, then re-score with a self-installing local reranker. Everything on your machine.</p></div></div>
         <div class="feature-card"><div><h3>Learns From Outcomes</h3><p>Stores what worked and what failed. Published research shows agents with this feedback loop improve measurably over time.</p></div></div>
-        <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>Visualises memory as a force-directed graph. Search and filter by domain, type, or agent.</p></div></div>
+        <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>A 3D MRI brain of your memories &mdash; domains as lobes, consolidation as depth. Search, curate, and drill in; a 2D graph view is one toggle away.</p></div></div>
         <div class="feature-card"><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI&rsquo;s memory from existing conversation history.</p></div></div>
         <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
-        <div class="feature-card"><div><h3>Boot Instructions</h3><p>Customise startup behaviour. Configured from the dashboard; no config files to edit.</p></div></div>
+        <div class="feature-card"><div><h3>Federation</h3><p>Link two SAGE brains with a human-verified join ceremony. Share chosen domains live, at a clearance you set &mdash; revocable any time.</p></div></div>
         <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Standard SQLite database. Open it with any tool, query it, back it up. You own every byte.</p></div></div>
         <div class="feature-card"><div><h3>Agent Pipeline</h3><p>Route work between AI agents. Send research to one model, analysis to another, results back to your primary &mdash; all through SAGE.</p></div></div>
         <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
