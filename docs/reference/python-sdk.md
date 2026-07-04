@@ -1,8 +1,8 @@
-Verified against SDK source at SAGE v8.1.1 (commit 2ca50ba). Package: sage-agent-sdk.
+Verified against SDK source at SAGE v11.0.0 (branch v11-dev, commit 904263c). Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 8.1.0  
+**Package:** `sage-agent-sdk` **Version:** 11.0.0  
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
