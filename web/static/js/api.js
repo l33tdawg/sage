@@ -663,6 +663,22 @@ export async function enableSemanticEmbeddings() {
     const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/enable`, { method: 'POST' });
     return res.json();
 }
+export async function deprecateUnreadable() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/deprecate-unreadable`, { method: 'POST' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
+// getRecoveryKey re-displays the vault recovery key after re-verifying the passphrase
+// (the "back up my recovery key" path). Passphrase never stored; sent once per view.
+export async function getRecoveryKey(passphrase) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/ledger/recovery-key`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ passphrase }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
 
 // ─── LAN node-join ceremony (Phase 5b-3, Flow 3) ───
 // Host side: add another computer to your SAGE network as a non-validator peer.

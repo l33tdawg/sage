@@ -42,6 +42,7 @@ func (h *DashboardHandler) RegisterEmbeddingsRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/embeddings/pull-model", h.handleEmbeddingsPullModel)
 	r.Post("/v1/dashboard/embeddings/reembed", h.handleEmbeddingsReembed)
 	r.Get("/v1/dashboard/embeddings/reembed/progress", h.handleEmbeddingsReembedProgress)
+	r.Post("/v1/dashboard/embeddings/deprecate-unreadable", h.handleEmbeddingsDeprecateUnreadable)
 	r.Post("/v1/dashboard/embeddings/enable", h.handleEmbeddingsEnable)
 }
 
@@ -72,7 +73,8 @@ func (h *DashboardHandler) handleEmbeddingsStatus(w http.ResponseWriter, r *http
 		"total_memories":  total,
 		"need_reembed":    counts[""], // untagged memories still needing an embedding (excludes done + skipped)
 		"on_ollama":       counts[embedProviderOllama],
-		"skipped":         counts["skipped"],
+		"unreadable":      counts["skipped"], // undecryptable/empty — deprecation candidates
+		"errored":         counts["error"],   // readable but embed failed — retryable
 		"vault_locked":    h.VaultLocked.Load(),
 	})
 }
@@ -156,24 +158,40 @@ func (h *DashboardHandler) handleEmbeddingsPullModel(w http.ResponseWriter, r *h
 // cancelled the server loop via the request context. The job now runs on a
 // background context and the frontend polls handleEmbeddingsReembedProgress.
 type reembedJob struct {
-	mu      sync.Mutex
-	running bool
-	done    int // successfully embedded this run
-	skipped int // couldn't embed (undecryptable / empty / embed error) — tagged so they leave the set
-	total   int // memories needing embedding at the start of the run
-	errMsg  string
+	mu        sync.Mutex
+	running   bool
+	done      int // successfully embedded this run
+	skipped   int // couldn't embed (undecryptable / empty / embed error) — tagged so they leave the set
+	total     int // memories needing embedding at the start of the run
+	errMsg    string
+	startedAt time.Time
 }
 
 func (j *reembedJob) snapshot() map[string]any {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return map[string]any{
+	m := map[string]any{
 		"running": j.running,
 		"done":    j.done,
 		"skipped": j.skipped,
 		"total":   j.total,
 		"error":   j.errMsg,
 	}
+	// ETA from the observed rate (processed / elapsed). Only meaningful while
+	// running with some progress; the client shows it as "~N min left".
+	processed := j.done + j.skipped
+	if j.running && processed > 0 && !j.startedAt.IsZero() {
+		elapsed := time.Since(j.startedAt).Seconds()
+		if elapsed > 0 {
+			rate := float64(processed) / elapsed // items/sec
+			remaining := j.total - processed
+			if rate > 0 && remaining > 0 {
+				m["eta_seconds"] = int(float64(remaining) / rate)
+			}
+			m["elapsed_seconds"] = int(elapsed)
+		}
+	}
+	return m
 }
 
 // handleEmbeddingsReembed STARTS (or re-attaches to) the background re-embed job
@@ -198,11 +216,15 @@ func (h *DashboardHandler) handleEmbeddingsReembed(w http.ResponseWriter, r *htt
 		writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
 		return
 	}
+	// Retry previously-errored embeds by clearing the 'error' tag back to '' so
+	// they re-enter the work set this run (transient failures aren't stuck forever).
+	_, _ = h.store.ResetErroredEmbeddings(r.Context())
 	// Count what's left (untagged memories) up front for the progress bar.
 	counts, _ := h.store.CountMemoriesByProvider(r.Context())
 	total := counts[""]
 	h.reembed.running = true
 	h.reembed.done, h.reembed.skipped, h.reembed.total, h.reembed.errMsg = 0, 0, total, ""
+	h.reembed.startedAt = time.Now() // for ETA
 	h.reembed.mu.Unlock()
 
 	go h.runReembed()
@@ -213,6 +235,23 @@ func (h *DashboardHandler) handleEmbeddingsReembed(w http.ResponseWriter, r *htt
 // handleEmbeddingsReembedProgress returns the background job's current snapshot.
 func (h *DashboardHandler) handleEmbeddingsReembedProgress(w http.ResponseWriter, r *http.Request) {
 	writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
+}
+
+// handleEmbeddingsDeprecateUnreadable soft-deprecates the memories that couldn't
+// be read (embedding_provider = 'skipped'; undecryptable with the current vault
+// key). Deprecated = hidden from all views, row + on-chain hash retained
+// (reversible, NOT a hard delete). Only touches unreadable memories — readable
+// memories that merely failed to embed ('error') are never deprecated.
+func (h *DashboardHandler) handleEmbeddingsDeprecateUnreadable(w http.ResponseWriter, r *http.Request) {
+	n, err := h.store.DeprecateUnreadableMemories(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "deprecate unreadable: "+err.Error())
+		return
+	}
+	if n > 0 {
+		h.SSE.Broadcast(SSEEvent{Type: EventForget})
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"deprecated": n})
 }
 
 // runReembed is the background worker. It uses context.Background() so it is NOT
@@ -227,44 +266,67 @@ func (h *DashboardHandler) runReembed() {
 	}()
 
 	client := embedding.NewClient(ollamaBaseURL, embedModel)
-	markSkipped := func(id string) {
-		_ = h.store.MarkMemoryEmbeddingSkipped(ctx, id) // tag so it leaves the '' work set
+	fail := func(msg string) {
+		h.reembed.mu.Lock()
+		h.reembed.errMsg = msg
+		h.reembed.mu.Unlock()
+	}
+	// markUnreadable: content can't be read (undecryptable / empty) — a deprecation
+	// candidate. markErrored: content IS readable but the embed failed (retryable),
+	// kept distinct so it's never deprecated. Both tag the row so it leaves the ''
+	// work set and the loop converges. A FAILED tag write is returned so the caller
+	// stops rather than re-fetching the same untagged row forever.
+	markUnreadable := func(id string) error {
+		if err := h.store.MarkMemoryEmbeddingSkipped(ctx, id); err != nil {
+			return err
+		}
 		h.reembed.mu.Lock()
 		h.reembed.skipped++
 		h.reembed.mu.Unlock()
+		return nil
+	}
+	markErrored := func(id string) error {
+		if err := h.store.MarkMemoryEmbeddingError(ctx, id); err != nil {
+			return err
+		}
+		h.reembed.mu.Lock()
+		h.reembed.skipped++
+		h.reembed.mu.Unlock()
+		return nil
 	}
 	for {
 		// Each call returns the NEXT batch of still-untagged memories; every one is
-		// tagged below (ollama or skipped), so the set converges to empty.
+		// tagged below (ollama / skipped / error), so the set converges to empty.
+		// ListMemoriesForReembed returns an error if the vault key is unavailable
+		// (locked mid-run), so we never mis-tag readable memories as unreadable.
 		mems, err := h.store.ListMemoriesForReembed(ctx, reembedPageSize)
 		if err != nil {
-			h.reembed.mu.Lock()
-			h.reembed.errMsg = "list memories: " + err.Error()
-			h.reembed.mu.Unlock()
+			fail("list memories: " + err.Error())
 			return
 		}
 		if len(mems) == 0 {
 			return // no more work — converged
 		}
 		for _, m := range mems {
-			// Can't embed: undecryptable (vault-key mismatch) or empty content.
-			// Tag skipped so it drops out permanently instead of looping forever.
+			var tagErr error
+			// Unreadable: undecryptable (vault-key mismatch) or empty content.
 			if !m.Decryptable || strings.TrimSpace(m.Content) == "" {
-				markSkipped(m.MemoryID)
-				continue
+				tagErr = markUnreadable(m.MemoryID)
+			} else if emb, embErr := client.Embed(ctx, m.Content); embErr != nil {
+				tagErr = markErrored(m.MemoryID) // readable but embed failed — retryable
+			} else if upErr := h.store.UpdateMemoryEmbedding(ctx, m.MemoryID, emb, embedProviderOllama); upErr != nil {
+				tagErr = markErrored(m.MemoryID)
+			} else {
+				h.reembed.mu.Lock()
+				h.reembed.done++
+				h.reembed.mu.Unlock()
 			}
-			emb, embErr := client.Embed(ctx, m.Content)
-			if embErr != nil {
-				markSkipped(m.MemoryID) // persistent embed failure — tag so it can't wedge the loop
-				continue
+			if tagErr != nil {
+				// A tag write failed — the row stays untagged and would be re-fetched
+				// forever. Stop with a visible error instead of spinning.
+				fail("tag write failed: " + tagErr.Error())
+				return
 			}
-			if upErr := h.store.UpdateMemoryEmbedding(ctx, m.MemoryID, emb, embedProviderOllama); upErr != nil {
-				markSkipped(m.MemoryID)
-				continue
-			}
-			h.reembed.mu.Lock()
-			h.reembed.done++
-			h.reembed.mu.Unlock()
 		}
 	}
 }

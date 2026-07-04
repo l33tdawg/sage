@@ -2,6 +2,7 @@
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
 embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
+deprecateUnreadable, getRecoveryKey,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
@@ -2297,6 +2298,8 @@ function SynapticLedger() {
     const [error, setError] = useState(null);
     const [busy, setBusy] = useState(false);
     const [recoveryKey, setRecoveryKey] = useState(null);
+    const [keyIsBackup, setKeyIsBackup] = useState(false); // true when shown via the "back up" flow (not freshly generated)
+    const [backupPass, setBackupPass] = useState('');
 
     const loadStatus = useCallback(async () => {
         try {
@@ -2377,6 +2380,18 @@ function SynapticLedger() {
         setBusy(false);
     };
 
+    const handleBackupRecoveryKey = async () => {
+        if (!backupPass) { setError('Enter your passphrase to reveal the recovery key'); return; }
+        setError(null); setBusy(true);
+        try {
+            const res = await getRecoveryKey(backupPass);
+            setKeyIsBackup(true);
+            setRecoveryKey(res.recovery_key);
+            setBackupPass('');
+        } catch (e) { setError(e.message || String(e)); }
+        setBusy(false);
+    };
+
     const handleDisable = async () => {
         setError(null);
         setBusy(true);
@@ -2400,10 +2415,12 @@ function SynapticLedger() {
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
                         <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                     </svg>
-                    Recovery Key Generated
+                    ${keyIsBackup ? 'Your Recovery Key' : 'Recovery Key Generated'}
                 </h3>
                 <div class="warning-banner" style="margin-bottom:16px;">
-                    ⚠ Save this recovery key NOW. It will not be shown again. If you lose your passphrase and this key, your encrypted memories are unrecoverable.
+                    ${keyIsBackup
+                        ? '⚠ Store this somewhere safe and offline (a password manager is ideal). Anyone with this key can decrypt your memories. If you lose your passphrase AND this key, your encrypted memories are unrecoverable.'
+                        : '⚠ Save this recovery key NOW. It will not be shown again. If you lose your passphrase and this key, your encrypted memories are unrecoverable.'}
                 </div>
                 <div style="background:var(--bg-deep);border:1px solid var(--border-light);border-radius:var(--radius);padding:12px;font-family:monospace;font-size:11px;word-break:break-all;color:var(--text-dim);margin-bottom:16px;max-height:100px;overflow-y:auto;">
                     ${recoveryKey}
@@ -2415,17 +2432,17 @@ function SynapticLedger() {
                     <button class="btn" onClick=${() => {
                         navigator.clipboard.writeText(recoveryKey);
                     }}>Copy to Clipboard</button>
-                    <button class="btn" onClick=${() => {
-                        setRecoveryKey(null);
-                        // After first-time encryption enable, send to lock screen
-                        if (window.__sageLock) {
-                            window.__sageLock();
-                        } else {
-                            setView('status');
-                        }
-                    }}>
-                        I've saved it — Lock Now
-                    </button>
+                    ${keyIsBackup
+                        ? html`<button class="btn" onClick=${() => { setRecoveryKey(null); setKeyIsBackup(false); setView('status'); }}>Done</button>`
+                        : html`<button class="btn" onClick=${() => {
+                            setRecoveryKey(null);
+                            // After first-time encryption enable, send to lock screen
+                            if (window.__sageLock) {
+                                window.__sageLock();
+                            } else {
+                                setView('status');
+                            }
+                        }}>I've saved it — Lock Now</button>`}
                 </div>
             </div>
         `;
@@ -2503,6 +2520,36 @@ function SynapticLedger() {
         `;
     }
 
+    // Back up recovery key — re-verify the passphrase, then reveal (no side effects)
+    if (view === 'backup') {
+        return html`
+            <div>
+                <h3>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+                    </svg>
+                    Back up recovery key
+                </h3>
+                <p style="font-size:13px;color:var(--text-dim);margin:12px 0;line-height:1.6;">
+                    Your recovery key is only shown once when encryption is first enabled. Re-enter your passphrase to view it again and save a backup. This doesn't change anything — same key, same passphrase.
+                </p>
+                ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
+                <div class="wizard-field">
+                    <label>Passphrase</label>
+                    <input class="wizard-input" type="password" placeholder="Your vault passphrase"
+                        value=${backupPass} onInput=${e => setBackupPass(e.target.value)}
+                        onKeyDown=${e => { if (e.key === 'Enter') handleBackupRecoveryKey(); }} />
+                </div>
+                <div style="display:flex;gap:8px;margin-top:4px;">
+                    <button class="btn btn-primary" onClick=${handleBackupRecoveryKey} disabled=${busy || !backupPass}>
+                        ${busy ? 'Verifying…' : 'Reveal recovery key'}
+                    </button>
+                    <button class="btn" onClick=${() => { setView('status'); setError(null); setBackupPass(''); }}>Cancel</button>
+                </div>
+            </div>
+        `;
+    }
+
     // Disable confirmation
     if (view === 'disable') {
         return html`
@@ -2561,6 +2608,13 @@ function SynapticLedger() {
                         <span class="value" style="font-family:monospace;font-size:12px;">${status.vault_path}</span>
                     </div>
                 </div>
+                <div class="settings-row">
+                    <span class="label">Recovery Key</span>
+                    <button class="btn" style="padding:4px 12px;font-size:12px;" onClick=${() => { setView('backup'); setError(null); }}>Back up →</button>
+                </div>
+                <p style="font-size:11px;color:var(--text-muted);margin:2px 0 10px;line-height:1.5;">
+                    Your recovery key resets your passphrase if you forget it. It's shown only once at setup — back it up here anytime (passphrase required).
+                </p>
                 <div style="display:flex;gap:8px;">
                     <button class="btn" onClick=${() => setView('change')}>Change Passphrase</button>
                     <button class="btn btn-danger" onClick=${() => setView('disable')}>Disable</button>
@@ -3368,8 +3422,10 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     const [reembedding, setReembedding] = useState(false);
     const [enabling, setEnabling] = useState(false);
     const [warn, setWarn] = useState(null); // non-blocking notice (e.g. partial re-embed failures)
-    const [skipped, setSkipped] = useState(0); // memories that couldn't be read/embedded
-    const busy = pulling || reembedding || enabling;
+    const [skipped, setSkipped] = useState(0); // memories that couldn't be read/embedded (this run)
+    const [deprecating, setDeprecating] = useState(false);
+    const [deprecatedCount, setDeprecatedCount] = useState(null); // set after a deprecate action
+    const busy = pulling || reembedding || enabling || deprecating;
 
     useEffect(() => {
         (async () => {
@@ -3436,7 +3492,12 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                 setProg({ done: p.done || 0, total: p.total || 0 });
                 setSkipped(p.skipped || 0);
                 if (p.error) { setErr(p.error); break; }        // stay on reembed; error shown
-                if (!p.running) { setStep('enable'); break; }    // finished
+                if (!p.running) {                                // finished — refetch status for the unreadable count
+                    const s = await embeddingsStatus().catch(() => null);
+                    if (s) setStatus(s);
+                    setStep('enable');
+                    break;
+                }
                 await new Promise(r => setTimeout(r, 1000));
             }
         } catch (e) { setErr('Lost contact with the node: ' + (e.message || e)); }
@@ -3456,6 +3517,17 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
         setEnabling(true); setErr(null);
         try { await enableSemanticEmbeddings(); setStep('done'); }
         catch (e) { setErr(e.message); setEnabling(false); }
+    };
+
+    const doDeprecate = async () => {
+        setDeprecating(true); setErr(null);
+        try {
+            const r = await deprecateUnreadable();
+            setDeprecatedCount(r.deprecated || 0);
+            const s = await embeddingsStatus().catch(() => null); // refresh: unreadable -> 0
+            if (s) setStatus(s);
+        } catch (e) { setErr(e.message || String(e)); }
+        setDeprecating(false);
     };
 
     const pct = prog && prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
@@ -3522,10 +3594,12 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                             <div style="font-size:34px;margin-bottom:6px;">✓</div>
                             <h3 style="margin:0 0 8px;color:var(--accent-green);">Memories re-read</h3>
                             <p style="color:var(--text-dim);">Last step: switch SAGE over to smart memory. It restarts briefly (about 10-20s) — unlock the vault when it's back.</p>
-                            ${skipped > 0 && html`<div class="warning-banner" style="margin:10px 0;font-size:12px;text-align:left;">
-                                ${skipped} memor${skipped === 1 ? 'y' : 'ies'} couldn't be read — ${skipped === 1 ? 'it was' : 'they were'} encrypted with a previous vault key, so ${skipped === 1 ? 'it' : 'they'} can't be searched no matter the embedder. Since ${skipped === 1 ? "it's" : "they're"} unreadable, you can safely deprecate ${skipped === 1 ? 'it' : 'them'} from the Memories page — or, if you still have your original vault's recovery key, restore that to get ${skipped === 1 ? 'it' : 'them'} back.
+                            ${status?.unreadable > 0 && deprecatedCount === null && html`<div class="warning-banner" style="margin:10px 0;font-size:12px;text-align:left;">
+                                <div style="margin-bottom:8px;"><strong>${status.unreadable} memor${status.unreadable === 1 ? 'y' : 'ies'} couldn't be read.</strong> ${status.unreadable === 1 ? 'It was' : 'They were'} encrypted with a <em>previous</em> vault key (from before your encryption was re-initialised), so ${status.unreadable === 1 ? "it can't" : "they can't"} be decrypted with your current key — no embedder can fix that. Recovering the old key would only strand your current memories instead, so the practical cleanup is to deprecate ${status.unreadable === 1 ? 'it' : 'them'} (hidden from view, not hard-deleted — reversible).</div>
+                                <button class="btn" style="font-size:12px;padding:6px 12px;" onClick=${doDeprecate} disabled=${deprecating}>${deprecating ? 'Deprecating…' : `Deprecate the ${status.unreadable} unreadable memor${status.unreadable === 1 ? 'y' : 'ies'}`}</button>
                             </div>`}
-                            <button class="btn btn-primary" onClick=${doEnable} disabled=${enabling}>${enabling ? 'Switching…' : 'Finish & restart'}</button>
+                            ${deprecatedCount !== null && html`<div style="margin:10px 0;font-size:12px;color:var(--text-dim);text-align:left;">✓ Deprecated ${deprecatedCount} unreadable memor${deprecatedCount === 1 ? 'y' : 'ies'} — hidden from view. You can back up your <em>current</em> recovery key anytime in Settings → Synaptic Ledger.</div>`}
+                            <button class="btn btn-primary" onClick=${doEnable} disabled=${enabling || deprecating}>${enabling ? 'Switching…' : 'Finish & restart'}</button>
                         </div>
                     `}
 
@@ -8567,6 +8641,44 @@ function OverviewPage({ sse }) {
 // Root App
 // ============================================================================
 
+// ReembedBanner — a global slide-down banner shown while a re-embed job runs.
+// It polls the SERVER-SIDE job snapshot, so it appears in EVERY open tab
+// automatically (the server is the single source of truth — no cross-tab wiring).
+// Non-blocking: the re-embed is off-chain background maintenance, so it informs
+// rather than locks the UI.
+function ReembedBanner() {
+    const [job, setJob] = useState(null);
+    useEffect(() => {
+        let alive = true;
+        const poll = async () => {
+            try { const p = await reembedProgress(); if (alive) setJob(p); }
+            catch { if (alive) setJob(null); }
+        };
+        poll();
+        const iv = setInterval(poll, 2500);
+        return () => { alive = false; clearInterval(iv); };
+    }, []);
+    if (!job || !job.running) return null;
+    const total = job.total || 0;
+    const done = (job.done || 0) + (job.skipped || 0);
+    const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+    const eta = job.eta_seconds;
+    const etaStr = (eta === null || eta === undefined) ? '' : (eta >= 60 ? `~${Math.ceil(eta / 60)} min left` : `~${Math.max(1, eta)} sec left`);
+    return html`
+        <div style="position:fixed;top:0;left:0;right:0;z-index:2000;background:rgba(18,20,26,0.97);border-bottom:1px solid var(--border-light);backdrop-filter:blur(6px);box-shadow:0 2px 14px rgba(0,0,0,0.4);animation:reembedSlideDown 0.3s ease;">
+            <style>@keyframes reembedSlideDown { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }</style>
+            <div style="max-width:920px;margin:0 auto;padding:9px 20px;display:flex;align-items:center;gap:12px;">
+                <span style="font-size:19px;line-height:1;">🧠</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;font-weight:600;color:var(--text);">Upgrading memory to semantic search — ${pct}%${etaStr ? ` · ${etaStr}` : ''}</div>
+                    <div style="background:var(--bg-elev);border-radius:6px;height:6px;overflow:hidden;margin:5px 0 4px;"><div style="height:100%;width:${pct}%;background:var(--accent);transition:width .4s;"></div></div>
+                    <div style="font-size:11px;color:var(--text-muted);">${done.toLocaleString()} / ${total.toLocaleString()} memories · keep working — search results are briefly incomplete while this runs</div>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
 function App() {
     const [authState, setAuthState] = useState('loading'); // loading | login | ready
     const [isEncrypted, setIsEncrypted] = useState(false);
@@ -8754,6 +8866,7 @@ function App() {
 
     return html`<${TooltipsContext.Provider} value=${tooltipsEnabled}>
         <${ToastContainer} />
+        <${ReembedBanner} />
         <div class="sidebar">
             <div class="sidebar-logo">S</div>
             <button class="sidebar-btn ${page === 'overview' ? 'active' : ''}" onClick=${() => navigate('overview')} title="Overview - node control board" aria-label="Overview - node control board">

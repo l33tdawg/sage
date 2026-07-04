@@ -119,9 +119,16 @@ type MemoryStore interface {
 	// ListMemoriesForReembed returns up to `limit` memories still needing an
 	// embedding (embedding_provider = ''), with decrypted content.
 	ListMemoriesForReembed(ctx context.Context, limit int) ([]ReembedItem, error)
-	// MarkMemoryEmbeddingSkipped tags a memory as unembeddable so it leaves the
-	// re-embed work set.
+	// MarkMemoryEmbeddingSkipped tags a memory as UNREADABLE (undecryptable/empty)
+	// so it leaves the re-embed work set and is a deprecation candidate.
 	MarkMemoryEmbeddingSkipped(ctx context.Context, memoryID string) error
+	// MarkMemoryEmbeddingError tags a readable memory whose embed failed (retryable);
+	// kept distinct from unreadable so it is never deprecated.
+	MarkMemoryEmbeddingError(ctx context.Context, memoryID string) error
+	// DeprecateUnreadableMemories soft-deprecates all unreadable ('skipped') memories.
+	DeprecateUnreadableMemories(ctx context.Context) (int, error)
+	// ResetErroredEmbeddings clears the 'error' tag back to '' so failed embeds retry.
+	ResetErroredEmbeddings(ctx context.Context) (int, error)
 	UpdateStatus(ctx context.Context, memoryID string, status memory.MemoryStatus, now time.Time) error
 	QuerySimilar(ctx context.Context, embedding []float32, opts QueryOptions) ([]*memory.MemoryRecord, error)
 	SearchByText(ctx context.Context, query string, opts QueryOptions) ([]*memory.MemoryRecord, error)

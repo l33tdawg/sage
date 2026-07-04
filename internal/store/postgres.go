@@ -263,6 +263,18 @@ func (s *PostgresStore) MarkMemoryEmbeddingSkipped(_ context.Context, _ string) 
 	return fmt.Errorf("MarkMemoryEmbeddingSkipped not implemented for PostgresStore")
 }
 
+func (s *PostgresStore) MarkMemoryEmbeddingError(_ context.Context, _ string) error {
+	return fmt.Errorf("MarkMemoryEmbeddingError not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) DeprecateUnreadableMemories(_ context.Context) (int, error) {
+	return 0, fmt.Errorf("DeprecateUnreadableMemories not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) ResetErroredEmbeddings(_ context.Context) (int, error) {
+	return 0, fmt.Errorf("ResetErroredEmbeddings not implemented for PostgresStore")
+}
+
 func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,

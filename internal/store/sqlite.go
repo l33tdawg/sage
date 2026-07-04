@@ -159,12 +159,17 @@ func (s *SQLiteStore) encryptContent(plaintext string) (string, error) {
 
 // decryptContent decrypts a string if it's encrypted.
 // Returns the original string if not encrypted or no vault.
+// vaultLockedPlaceholder is returned for encrypted content when no vault key is
+// available. It is NOT real content — callers that need plaintext (e.g. re-embed)
+// must treat it as undecryptable, never store or embed it.
+const vaultLockedPlaceholder = "[encrypted — vault locked]"
+
 func (s *SQLiteStore) decryptContent(stored string) (string, error) {
 	if !strings.HasPrefix(stored, encPrefix) {
 		return stored, nil // not encrypted
 	}
 	if s.vault == nil {
-		return "[encrypted — vault locked]", nil
+		return vaultLockedPlaceholder, nil
 	}
 	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, encPrefix))
 	if err != nil {
@@ -970,6 +975,14 @@ func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit int) ([]
 			return nil, scanErr
 		}
 		dec, decErr := s.decryptContent(content)
+		// No vault key available (locked): decryption is impossible for EVERY
+		// encrypted memory, not just this one. Abort the whole batch rather than
+		// letting the caller embed the placeholder or mis-tag readable memories as
+		// unreadable — a genuine key-mismatch (decErr != nil) is different and is
+		// reported per-row via Decryptable=false.
+		if dec == vaultLockedPlaceholder {
+			return nil, fmt.Errorf("vault key unavailable — unlock before re-embedding")
+		}
 		it.Decryptable = decErr == nil
 		if decErr == nil {
 			it.Content = dec
@@ -979,14 +992,53 @@ func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit int) ([]
 	return out, rows.Err()
 }
 
-// MarkMemoryEmbeddingSkipped tags a memory's embedding_provider as "skipped" so it
-// drops out of the re-embed work set (used for memories that can't be embedded —
-// undecryptable content, empty content, or a persistent embed error). Off-chain,
-// local; does not touch the embedding vector or the agent `provider` column.
+// ResetErroredEmbeddings clears the 'error' embedding tag (readable memories whose
+// embed transiently failed) back to '' so the next re-embed run retries them.
+// Returns how many were reset.
+func (s *SQLiteStore) ResetErroredEmbeddings(ctx context.Context) (int, error) {
+	res, err := s.writeExecContext(ctx,
+		`UPDATE memories SET embedding_provider = '' WHERE embedding_provider = 'error'`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// MarkMemoryEmbeddingSkipped tags a memory's embedding_provider as "skipped",
+// meaning it is UNREADABLE and can't ever be embedded (undecryptable content /
+// vault-key mismatch, or empty content). It drops out of the re-embed work set and
+// is a candidate for deprecation. Off-chain, local; does not touch the embedding
+// vector or the agent `provider` column.
 func (s *SQLiteStore) MarkMemoryEmbeddingSkipped(ctx context.Context, memoryID string) error {
 	_, err := s.writeExecContext(ctx,
 		`UPDATE memories SET embedding_provider = 'skipped' WHERE memory_id = ?`, memoryID)
 	return err
+}
+
+// MarkMemoryEmbeddingError tags a memory's embedding_provider as "error", meaning
+// its content IS readable but the embedder failed on it (likely transient). It
+// drops out of the CURRENT run's work set (so the job terminates) but is kept
+// distinct from "skipped" so it is NEVER deprecated as unreadable and can be
+// retried later.
+func (s *SQLiteStore) MarkMemoryEmbeddingError(ctx context.Context, memoryID string) error {
+	_, err := s.writeExecContext(ctx,
+		`UPDATE memories SET embedding_provider = 'error' WHERE memory_id = ?`, memoryID)
+	return err
+}
+
+// DeprecateUnreadableMemories soft-deprecates every memory tagged unreadable
+// (embedding_provider = 'skipped') — hidden from all views, row + on-chain hash
+// retained (reversible, not a hard delete). Returns how many were deprecated.
+func (s *SQLiteStore) DeprecateUnreadableMemories(ctx context.Context) (int, error) {
+	res, err := s.writeExecContext(ctx,
+		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		 WHERE embedding_provider = 'skipped' AND status != 'deprecated'`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {

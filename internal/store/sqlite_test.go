@@ -1306,3 +1306,33 @@ func TestUpdateMemoryEmbedding_PreservesAgentProvider(t *testing.T) {
 	// Missing memory errors rather than silently no-op'ing.
 	require.Error(t, s.UpdateMemoryEmbedding(ctx, "nope", emb, "ollama"))
 }
+
+// TestDeprecateUnreadableMemories verifies deprecation targets ONLY unreadable
+// ('skipped') memories — never readable-but-errored ('error') ones, and never
+// successfully embedded ones.
+func TestDeprecateUnreadableMemories(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, s.InsertMemory(ctx, testMemory("ok", "a", "readable embedded", "g")))
+	require.NoError(t, s.UpdateMemoryEmbedding(ctx, "ok", make([]float32, 768), "ollama"))
+	require.NoError(t, s.InsertMemory(ctx, testMemory("bad", "a", "unreadable", "g")))
+	require.NoError(t, s.MarkMemoryEmbeddingSkipped(ctx, "bad"))
+	require.NoError(t, s.InsertMemory(ctx, testMemory("err", "a", "readable but embed failed", "g")))
+	require.NoError(t, s.MarkMemoryEmbeddingError(ctx, "err"))
+
+	n, err := s.DeprecateUnreadableMemories(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, n, "only the unreadable memory is deprecated")
+
+	ok, _ := s.GetMemory(ctx, "ok")
+	require.NotEqual(t, "deprecated", string(ok.Status))
+	bad, _ := s.GetMemory(ctx, "bad")
+	require.Equal(t, "deprecated", string(bad.Status))
+	errm, _ := s.GetMemory(ctx, "err")
+	require.NotEqual(t, "deprecated", string(errm.Status), "readable-but-errored memory must NOT be deprecated")
+
+	n2, err := s.DeprecateUnreadableMemories(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 0, n2, "idempotent — nothing left to deprecate")
+}

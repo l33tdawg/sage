@@ -441,6 +441,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Get("/v1/dashboard/settings/ledger", h.handleGetLedgerStatus)
 			r.Post("/v1/dashboard/settings/ledger/enable", h.handleEnableLedger)
 			r.Post("/v1/dashboard/settings/ledger/change-passphrase", h.handleChangePassphrase)
+			r.Post("/v1/dashboard/settings/ledger/recovery-key", h.handleGetRecoveryKey)
 			r.Post("/v1/dashboard/settings/ledger/disable", h.handleDisableLedger)
 
 			// Pre-validate endpoint — dry-run the per-node validation checks

@@ -160,6 +160,46 @@ func (h *DashboardHandler) handleChangePassphrase(w http.ResponseWriter, r *http
 	})
 }
 
+// handleGetRecoveryKey re-displays the vault recovery key (the raw data key) after
+// re-verifying the passphrase. This is the "back up my recovery key" path: the key
+// is only shown once at enable-time, so a user who enabled encryption long ago (and
+// didn't save it, or wants a fresh copy) can retrieve it here WITHOUT the side
+// effect of changing their passphrase. Passphrase-gated even though the vault is
+// unlocked, so a walk-up on an unlocked session can't lift the raw key.
+func (h *DashboardHandler) handleGetRecoveryKey(w http.ResponseWriter, r *http.Request) {
+	if !h.Encrypted.Load() {
+		writeError(w, http.StatusBadRequest, "encryption is not enabled")
+		return
+	}
+	var body struct {
+		Passphrase string `json:"passphrase"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Passphrase == "" {
+		writeError(w, http.StatusBadRequest, "passphrase is required")
+		return
+	}
+	v, err := vault.Open(h.VaultKeyPath, body.Passphrase)
+	if err != nil {
+		if err == vault.ErrWrongPassphrase {
+			writeError(w, http.StatusUnauthorized, "wrong passphrase")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "open vault: "+err.Error())
+		return
+	}
+	key, keyErr := v.RecoveryKey()
+	if keyErr != nil {
+		writeError(w, http.StatusInternalServerError, "recovery key: "+keyErr.Error())
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"recovery_key": key})
+}
+
 // handleRecoverLedger resets the vault passphrase using the recovery key.
 // This is the escape hatch when a user loses their passphrase but has the recovery key.
 func (h *DashboardHandler) handleRecoverLedger(w http.ResponseWriter, r *http.Request) {
