@@ -237,6 +237,32 @@ h1 em {
   align-items: center;
   gap: 42px;
 }
+.hero-cta-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 28px auto 0;
+  text-align: center;
+  animation: none;
+  opacity: 1;
+}
+.hero-cta-strip .hero-actions,
+.hero-cta-strip .download-badges {
+  justify-content: center;
+  animation: none;
+  opacity: 1;
+}
+.hero-cta-strip .download-badges {
+  margin-top: 16px;
+}
+.hero-cta-strip .latest-note {
+  margin-top: 10px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.hero-cta-strip .latest-note strong {
+  color: var(--accent);
+}
 .hero-copy h1 {
   max-width: 620px;
   margin-bottom: 18px;
@@ -244,9 +270,7 @@ h1 em {
   animation: none;
   opacity: 1;
 }
-.hero-copy .hero-sub,
-.hero-copy .hero-actions,
-.hero-copy .download-badges {
+.hero-copy .hero-sub {
   animation: none;
   opacity: 1;
 }
@@ -712,6 +736,7 @@ footer a:hover { text-decoration: underline; }
   .hero-text .download-badges { justify-content: center; }
   .v11-hero-grid { grid-template-columns: 1fr; gap: 28px; }
   .hero.v11-hero { min-height: auto; padding: 44px 0 34px; }
+  .hero-cta-strip { margin-top: 24px; }
   .hero-visual { min-height: auto; }
   .hero-proof { grid-template-columns: 1fr; }
   .install-row { grid-template-columns: 1fr; }
@@ -774,27 +799,29 @@ footer a:hover { text-decoration: underline; }
             <div class="proof-chip"><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
             <div class="proof-chip"><strong>Federation</strong><span>LAN / VPN / your route</span></div>
           </div>
-          <div class="hero-actions">
-            <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-              Download SAGE
-            </a>
-            <button class="btn-secondary" onclick="switchTab('connect')">Connect Your AI</button>
-          </div>
-          <div class="download-badges">
-            <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-macOS-arm64.dmg" class="badge-link">macOS</a>
-            <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-Windows-Setup.exe" class="badge-link">Windows</a>
-            <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
-          </div>
-          <div style="margin-top:8px;font-size:0.78rem;color:var(--muted);">
-            Latest: <strong id="latest-version" style="color:var(--accent);">...</strong> &mdash; signed release assets
-          </div>
         </div>
         <div class="hero-visual" aria-label="CEREBRUM MRI brain dashboard screenshot">
           <button class="hero-shot" onclick="openLightbox(0)" aria-label="Open CEREBRUM MRI screenshot">
             <img src="screen-brain.png" alt="CEREBRUM MRI brain dashboard with memory nodes inside a 3D brain">
             <span class="hero-shot-label">CEREBRUM MRI</span>
           </button>
+        </div>
+      </div>
+      <div class="hero-cta-strip">
+        <div class="hero-actions">
+          <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            Download SAGE
+          </a>
+          <button class="btn-secondary" onclick="switchTab('connect')">Connect Your AI</button>
+        </div>
+        <div class="download-badges">
+          <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-macOS-arm64.dmg" class="badge-link">macOS</a>
+          <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-Windows-Setup.exe" class="badge-link">Windows</a>
+          <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
+        </div>
+        <div class="latest-note">
+          Latest: <strong id="latest-version">...</strong> &mdash; signed release assets
         </div>
       </div>
     </div>
