@@ -75,11 +75,12 @@ These override `config.yaml`'s embedding block. Provider values: `hash` (built-i
 | `SAGE_HYBRID_BM25_WEIGHT` | Weight on the BM25 rank contribution (float ≥ 0). | `0.4` | `internal/store/hybrid.go:45` |
 | `SAGE_HYBRID_VECTOR_WEIGHT` | Weight on the vector rank contribution (float ≥ 0). | `0.6` | `internal/store/hybrid.go:50` |
 | `SAGE_HYBRID_OVERSAMPLE` | Per-index oversample multiplier (`TopK × N`, int ≥ 1). | `2` | `internal/store/hybrid.go:55` |
-| `SAGE_RERANK_ENABLED` | Truthy value turns on the cross-encoder reranker. | off | `internal/embedding/reranker.go:159` |
-| `SAGE_RERANK_URL` | TEI reranker endpoint (required when reranking is enabled). | (none) | `internal/embedding/reranker.go:160` |
-| `SAGE_RERANK_MODEL` | Reranker model. | `BAAI/bge-reranker-v2-m3` | `internal/embedding/reranker.go:161` |
-| `SAGE_RERANK_TIMEOUT_MS` | Reranker request timeout (ms, int > 0). | `2000` | `internal/embedding/reranker.go:168` |
-| `SAGE_RERANK_OVERSAMPLE` | Candidates pulled before reranking (int ≥ 1). | `2` | `internal/embedding/reranker.go:173` |
+| `SAGE_RERANK_ENABLED` | Truthy value turns on the cross-encoder reranker. | off | `internal/embedding/reranker.go:214` |
+| `SAGE_RERANK_URL` | Reranker endpoint (required when reranking is enabled). | (none) | `internal/embedding/reranker.go:215` |
+| `SAGE_RERANK_MODEL` | Reranker model. | `BAAI/bge-reranker-v2-m3` | `internal/embedding/reranker.go:216` |
+| `SAGE_RERANK_KIND` | **v11.** Endpoint dialect: `tei` (default) or `llamacpp` (the managed sidecar). Trimmed + lower-cased; unknown values fall back to TEI. | `tei` | `internal/embedding/reranker.go:217` |
+| `SAGE_RERANK_TIMEOUT_MS` | Reranker request timeout (ms, int > 0). | `2000` | `internal/embedding/reranker.go:224` |
+| `SAGE_RERANK_OVERSAMPLE` | Candidates pulled before reranking (int ≥ 1). | `2` | `internal/embedding/reranker.go:229` |
 
 ---
 

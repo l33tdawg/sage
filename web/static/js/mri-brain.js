@@ -93,6 +93,12 @@ const STYLE = `
 .mrib-graph{position:absolute;inset:0}
 .mrib .panel{position:absolute;background:rgba(10,16,28,.78);border:1px solid #15233b;border-radius:12px;backdrop-filter:blur(8px);box-shadow:0 8px 40px #0008;z-index:5}
 .mrib .legend{top:16px;right:16px;width:270px;padding:13px 15px;max-height:84%;overflow:auto}
+.mrib .legend.collapsed .lg-detail{display:none}
+.mrib .legend.collapsed{max-height:70%}
+.mrib .lg-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.mrib .lg-toggle{cursor:pointer;color:#39d0ff;font-size:10px;letter-spacing:1px;text-transform:uppercase;border:1px solid #15233b;border-radius:7px;padding:3px 8px;user-select:none;white-space:nowrap}
+.mrib .lg-toggle:hover{background:#0e1b30}
+.mrib .lobes .more{color:#5d7395;font-size:11px;margin-top:7px}
 .mrib .legend h4{margin:0 0 4px;font-size:11px;letter-spacing:1.5px;color:#39d0ff;text-transform:uppercase}
 .mrib .legend .cls{color:#5d7395;font-size:11px;margin:0 0 11px;border-bottom:1px solid #15233b;padding-bottom:9px}
 .mrib .legend .row{display:flex;align-items:center;gap:9px;margin:6px 0}
@@ -167,11 +173,12 @@ async function loadGraph(fetchUrl) {
         status:n.status||'committed', corroboration_count:n.corroboration_count||0,
         confidence: typeof n.confidence==='number'?n.confidence:0.5, memory_type:n.memory_type||'' })),
       links: srcEdges.map(e=>({ source:e.source, target:e.target, link_type:e.type||'related' })),
-      total: (g && g.total) || 0, domainCounts: (g && g.domain_counts) || null };
+      total: (g && g.total) || 0, domainCounts: (g && g.domain_counts) || null,
+      domainLast: (g && g.domain_last) || null };
   } catch (err) {
     // No live node / fetch error: render the empty brain, never synthetic data.
     console.warn('[mri] live graph unavailable:', err.message);
-    return { live: false, nodes: [], links: [], total: 0, domainCounts: null };
+    return { live: false, nodes: [], links: [], total: 0, domainCounts: null, domainLast: null };
   }
 }
 
@@ -187,18 +194,20 @@ export function mountMriBrain(container, opts = {}) {
     <div class="boot">◉ ACQUIRING HIPPOCAMPAL FIELD…</div>
     ${showScan ? '<div class="panel scan"><b>CEREBRUM · MRI</b><div class="s">◉ SCANNING</div></div>' : ''}
     <div class="panel legend">
-      <h4>The reading</h4>
-      <div class="cls">A complementary-learning-systems view: SAGE is the <b>hippocampus</b>
-        (episodic capture); corroboration + decay is the <b>sleep/consolidation</b> cycle.</div>
-      <div class="seg">Nodes — memories</div>
-      <div class="row"><span class="k">◍</span><div class="t"><b>Size + glow = corroboration</b><br><span>settled knowledge, pulled to the core</span></div></div>
-      <div class="row"><span class="k">◌</span><div class="t"><b>Fade = confidence decay</b><br><span>the forgetting curve</span></div></div>
-      <div class="row"><span class="k">⊘</span><div class="t"><b>Greyed = challenged / pruned</b><br><span>synaptic pruning</span></div></div>
-      <div class="seg">Position</div>
-      <div class="row"><span class="k">⊙</span><div class="t"><b>Depth = how established</b><br><span>centre = settled / corroborated → rim = new & fresh</span></div></div>
-      <div class="row"><span class="k">◉</span><div class="t"><b>Click a memory</b><br><span>see its train of thought</span></div></div>
+      <div class="lg-head"><h4>The reading</h4><span class="lg-toggle"></span></div>
+      <div class="lg-detail">
+        <div class="cls">A complementary-learning-systems view: SAGE is the <b>hippocampus</b>
+          (episodic capture); corroboration + decay is the <b>sleep/consolidation</b> cycle.</div>
+        <div class="seg">Nodes — memories</div>
+        <div class="row"><span class="k">◍</span><div class="t"><b>Size + glow = corroboration</b><br><span>settled knowledge, pulled to the core</span></div></div>
+        <div class="row"><span class="k">◌</span><div class="t"><b>Fade = confidence decay</b><br><span>the forgetting curve</span></div></div>
+        <div class="row"><span class="k">⊘</span><div class="t"><b>Greyed = challenged / pruned</b><br><span>synaptic pruning</span></div></div>
+        <div class="seg">Position</div>
+        <div class="row"><span class="k">⊙</span><div class="t"><b>Depth = how established</b><br><span>centre = settled / corroborated → rim = new & fresh</span></div></div>
+        <div class="row"><span class="k">◉</span><div class="t"><b>Click a memory</b><br><span>see its train of thought</span></div></div>
+      </div>
       <div class="seg">Lobes — domains</div><div class="lobes"></div>
-      <div class="seg">Connectome — typed links</div><div class="linktypes"></div>
+      <div class="lg-detail"><div class="seg">Connectome — typed links</div><div class="linktypes"></div></div>
     </div>
     <div class="panel hud">
       <div><div class="n nn">0</div><div class="l">memories</div></div>
@@ -213,6 +222,25 @@ export function mountMriBrain(container, opts = {}) {
   container.appendChild(root);
   const $ = s => root.querySelector(s);
   const escapeHtml = s => String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // The reading panel collapses to just the domain lobes (the default) so it
+  // stops covering the brain; the full how-to-read detail is one click away.
+  const LEGEND_KEY = 'sage-mri-legend';
+  let legendMode = 'domains';
+  try { legendMode = localStorage.getItem(LEGEND_KEY) === 'full' ? 'full' : 'domains'; } catch(e){}
+  function applyLegendMode(){
+    const lg = $('.legend'); if (!lg) return;
+    lg.classList.toggle('collapsed', legendMode !== 'full');
+    const t = $('.lg-toggle');
+    if (t) t.textContent = legendMode === 'full' ? '▴ less' : '▾ how to read';
+  }
+  applyLegendMode();
+  const lgToggle = $('.lg-toggle');
+  if (lgToggle) lgToggle.onclick = () => {
+    legendMode = legendMode === 'full' ? 'domains' : 'full';
+    try { localStorage.setItem(LEGEND_KEY, legendMode); } catch(e){}
+    applyLegendMode();
+  };
 
   // Click-to-explore ("train of thought") focus state. focusSet null = full brain.
   let focusId = null, focusSet = null;
@@ -297,9 +325,15 @@ export function mountMriBrain(container, opts = {}) {
   // Lobe legend with per-domain counts; click a lobe to drill into it, "← all
   // lobes" to return. Built from the true domain set so every lobe stays
   // navigable even while only a sample is shown.
+  const MAX_LOBES = 30;
   function buildLobes(d){
     const dc = d.domainCounts || {};
-    const doms = (Object.keys(dc).length ? Object.keys(dc) : [...new Set(d.nodes.map(n=>n.domain))]).sort();
+    const dl = d.domainLast || {};
+    // Most recently active first (last committed memory), alpha tiebreak;
+    // capped to the newest 30 - the full list lives in Search.
+    const all = (Object.keys(dc).length ? Object.keys(dc) : [...new Set(d.nodes.map(n=>n.domain))])
+      .sort((a,b) => String(dl[b]||'').localeCompare(String(dl[a]||'')) || a.localeCompare(b));
+    const doms = all.slice(0, MAX_LOBES);
     const lobes = $('.lobes'); lobes.innerHTML = '';
     if (currentDomain) {
       const back = document.createElement('div');
@@ -316,6 +350,12 @@ export function mountMriBrain(container, opts = {}) {
       row.onclick = () => { if (currentDomain !== k) { currentDomain = k; load(); } };
       lobes.appendChild(row);
     });
+    if (all.length > doms.length) {
+      const more = document.createElement('div');
+      more.className = 'more';
+      more.textContent = `+ ${all.length - doms.length} older domains - find them in Search`;
+      lobes.appendChild(more);
+    }
   }
 
   // Re-fetch (respecting the drill domain) and re-render. Deterministic placement
@@ -593,7 +633,12 @@ export function mountMriBrain(container, opts = {}) {
       try {
         const cam = Graph.camera();
         const W = root.clientWidth || 1280, H = root.clientHeight || 720;
-        cam.setViewOffset(W, H, -180, -100, W, H); // shift the brain left + up into the visible area
+        // setViewOffset with POSITIVE x pans the rendered image left, so the
+        // brain centres in the space the right-hand reading panel leaves
+        // visible (the old negative offset shoved it UNDER the panel).
+        const lg = $('.legend');
+        const occl = lg ? Math.min(lg.offsetWidth + 32, W * 0.4) : 0;
+        cam.setViewOffset(W, H, occl / 2, 0, W, H);
         cam.updateProjectionMatrix();
       } catch(e){ /* noop */ }
     }

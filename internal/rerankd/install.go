@@ -108,6 +108,22 @@ func (m *Manager) InstallEngine(ctx context.Context, progress func(done, total i
 	if m.EngineInstalled() {
 		return nil
 	}
+	// Guard against concurrent installs racing on the shared .part dir and
+	// rename (same pattern as Download). Without it, a second call's
+	// RemoveAll(tmpDir)/RemoveAll(engineDir) can delete the tree an earlier
+	// call is still extracting into.
+	m.dlMu.Lock()
+	if m.installing {
+		m.dlMu.Unlock()
+		return fmt.Errorf("an engine install is already in progress")
+	}
+	m.installing = true
+	m.dlMu.Unlock()
+	defer func() {
+		m.dlMu.Lock()
+		m.installing = false
+		m.dlMu.Unlock()
+	}()
 	asset, ok := engineAssetFor()
 	if !ok {
 		return fmt.Errorf("no pinned llama.cpp build for %s/%s - install llama.cpp manually (brew install llama.cpp) and rerun setup", runtime.GOOS, runtime.GOARCH)
@@ -178,6 +194,11 @@ func (m *Manager) InstallEngine(ctx context.Context, progress func(done, total i
 	}
 	if st, err := os.Stat(filepath.Join(tmpDir, serverBinaryName())); err != nil || st.IsDir() {
 		return fmt.Errorf("engine archive did not contain %s", serverBinaryName())
+	}
+	// Belt-and-braces: if another install won the race while we were extracting,
+	// leave its engine in place rather than RemoveAll/Rename over it.
+	if m.EngineInstalled() {
+		return nil
 	}
 	_ = os.RemoveAll(m.engineDir())
 	if err := os.Rename(tmpDir, m.engineDir()); err != nil {

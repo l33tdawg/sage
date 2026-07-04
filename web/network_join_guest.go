@@ -13,11 +13,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -294,7 +294,9 @@ func (h *DashboardHandler) handleGuestJoinRestart(w http.ResponseWriter, r *http
 	}
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		syscall.Exec(execPath, os.Args, os.Environ()) //nolint:errcheck,gosec // execPath is the verified current binary
+		if err := restartSelf(execPath); err != nil { // no-op + logged on Windows
+			log.Printf("network join apply: restart failed: %v", err)
+		}
 	}()
 }
 

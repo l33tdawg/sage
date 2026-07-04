@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -413,8 +414,10 @@ func (h *DashboardHandler) handleRestart(w http.ResponseWriter, r *http.Request)
 	// Give the response time to reach the client
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		// Re-exec the binary with the same args
-		syscall.Exec(execPath, os.Args, os.Environ()) //nolint:errcheck,gosec // execPath is the verified current binary
+		// Re-exec the binary with the same args (no-op + logged on Windows).
+		if err := restartSelf(execPath); err != nil {
+			log.Printf("restart: re-exec failed: %v", err)
+		}
 	}()
 }
 

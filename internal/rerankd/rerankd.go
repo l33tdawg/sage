@@ -64,6 +64,9 @@ type Manager struct {
 
 	dlMu        sync.Mutex
 	downloading bool
+	installing  bool  // engine install in flight (guards install.go)
+	dlDone      int64 // cumulative bytes of the in-flight (or last) model download
+	dlTotal     int64 // total bytes of the in-flight (or last) model download
 }
 
 // New returns a manager rooted at the SAGE home directory (~/.sage).
@@ -119,6 +122,23 @@ func (m *Manager) Downloading() bool {
 	return m.downloading
 }
 
+// Installing reports whether an engine install is in flight.
+func (m *Manager) Installing() bool {
+	m.dlMu.Lock()
+	defer m.dlMu.Unlock()
+	return m.installing
+}
+
+// Progress reports the in-flight (or most recent) model download's cumulative
+// bytes and total. total is 0 before any download has started. It lets a
+// handler that finds a detached download already running attach to it and
+// stream progress instead of failing the retry.
+func (m *Manager) Progress() (done, total int64) {
+	m.dlMu.Lock()
+	defer m.dlMu.Unlock()
+	return m.dlDone, m.dlTotal
+}
+
 // Download fetches the pinned GGUF to ModelPath with sha256 verification and
 // an atomic rename. progress (optional) receives cumulative bytes and the
 // total. Returns immediately if the model is already present. Concurrent
@@ -133,6 +153,7 @@ func (m *Manager) Download(ctx context.Context, progress func(done, total int64)
 		return fmt.Errorf("a download is already in progress")
 	}
 	m.downloading = true
+	m.dlDone, m.dlTotal = 0, modelWantSize // publish a total a poller can key on
 	m.dlMu.Unlock()
 	defer func() {
 		m.dlMu.Lock()
@@ -177,6 +198,16 @@ func (m *Manager) Download(ctx context.Context, progress func(done, total int64)
 			}
 			_, _ = hasher.Write(buf[:n])
 			done += int64(n)
+			// Abort early on an oversized stream (mutable resolve/main ref, a
+			// redirect/CDN hop, or a MITM) instead of writing it all to disk
+			// before the post-loop size check - the same guard InstallEngine
+			// applies. The deferred cleanup removes the .part file.
+			if done > modelWantSize {
+				return fmt.Errorf("model larger than pinned size - refusing it")
+			}
+			m.dlMu.Lock()
+			m.dlDone = done
+			m.dlMu.Unlock()
 			if progress != nil {
 				progress(done, modelWantSize)
 			}
@@ -249,6 +280,20 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	cmd.SysProcAttr = sidecarSysProcAttr()
+	// Hand the third-party binary a sanitized environment: strip every SAGE_*
+	// var so the vault passphrase (SAGE_PASSPHRASE) and embedding key
+	// (SAGE_EMBEDDING_API_KEY) never reach a separate, network-listening
+	// process where they would be exposed in /proc/<pid>/environ or a crash
+	// dump. llama-server needs no SAGE_* variable; every platform-critical var
+	// (PATH, HOME, TMPDIR, SystemRoot, ...) is preserved so it still spawns.
+	var childEnv []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "SAGE_") {
+			continue
+		}
+		childEnv = append(childEnv, kv)
+	}
+	cmd.Env = childEnv
 	if err := cmd.Start(); err != nil {
 		_ = logf.Close()
 		return "", fmt.Errorf("start %s: %w", binaryName, err)
@@ -259,7 +304,18 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	go func() {
 		_ = cmd.Wait() // reap; the log file stays open for the process lifetime
 		_ = logf.Close()
+		// close(exited) BEFORE taking m.mu so Start's select (which holds m.mu)
+		// can observe the crash-during-startup case without deadlocking.
 		close(exited)
+		// Clear our state when the child dies on its own (not just the in-Start
+		// crash path). The m.cmd == cmd guard keeps a later respawn safe, and it
+		// leaves stopLocked's first branch only ever holding a live child we own.
+		m.mu.Lock()
+		if m.cmd == cmd {
+			m.cmd = nil
+			_ = os.Remove(m.pidFilePath())
+		}
+		m.mu.Unlock()
 	}()
 
 	// Wait for the model to load. /health returns 503 while loading, 200
@@ -316,9 +372,10 @@ func (m *Manager) stopLocked() error {
 		return nil
 	}
 	// Adopted process: use the pidfile left by whichever incarnation
-	// spawned it. Verify the port actually serves a reranker before
-	// killing anything, so a recycled pid can't take out an innocent
-	// process.
+	// spawned it. Verify the pid is STILL our llama-server before signaling -
+	// a probe of the port only proves that something answers on 8082, not that
+	// this pid is that listener, so a recycled pid could otherwise take out an
+	// innocent process. When the check fails we just drop the stale pidfile.
 	b, err := os.ReadFile(m.pidFilePath())
 	if err != nil {
 		return nil // nothing to stop
@@ -328,7 +385,7 @@ func (m *Manager) stopLocked() error {
 		_ = os.Remove(m.pidFilePath())
 		return nil
 	}
-	if m.Probe(context.Background()) {
+	if pidIsLlamaServer(pid) {
 		killSidecar(pid)
 	}
 	_ = os.Remove(m.pidFilePath())

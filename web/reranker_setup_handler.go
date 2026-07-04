@@ -20,6 +20,8 @@ type RerankdManager interface {
 	ModelReady() bool
 	ModelPath() string
 	Downloading() bool
+	Installing() bool
+	Progress() (done, total int64)
 	Download(ctx context.Context, progress func(done, total int64)) error
 	Start(ctx context.Context) (string, error)
 	Stop() error
@@ -68,6 +70,7 @@ func (h *DashboardHandler) handleRerankerSetupStatus(w http.ResponseWriter, r *h
 		"model_bytes":       rerankd.ModelSizeBytes,
 		"model_ready":       h.Rerankd.ModelReady(),
 		"downloading":       h.Rerankd.Downloading(),
+		"installing":        h.Rerankd.Installing(),
 		"running":           h.Rerankd.Probe(r.Context()),
 		"url":               h.Rerankd.URL(),
 		"managed":           managed,
@@ -90,6 +93,10 @@ func (h *DashboardHandler) handleRerankerSetupInstallEngine(w http.ResponseWrite
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// The dashboard http.Server sets a 15s WriteTimeout (an absolute per-request
+	// write deadline). This is a minutes-long stream, so clear the deadline or
+	// the server guillotines it at 15s mid-download (same fix as web/sse.go).
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) //nolint:errcheck // best-effort; unsupported writers keep prior behaviour
 	w.WriteHeader(http.StatusOK)
 	line := func(k, v string) { fmt.Fprintf(w, "%s: %s\n", k, v); flusher.Flush() }
 
@@ -128,8 +135,20 @@ func (h *DashboardHandler) handleRerankerSetupDownload(w http.ResponseWriter, r 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Clear the http.Server's 15s WriteTimeout (an absolute per-request write
+	// deadline) so the server doesn't guillotine this minutes-long download
+	// stream mid-flight (same fix as web/sse.go).
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) //nolint:errcheck // best-effort; unsupported writers keep prior behaviour
 	w.WriteHeader(http.StatusOK)
 	line := func(k, v string) { fmt.Fprintf(w, "%s: %s\n", k, v); flusher.Flush() }
+
+	// A download detached from an earlier (closed) tab may still be running.
+	// Rather than fail the retry with "a download is already in progress",
+	// attach to the live download and stream its progress until it finishes.
+	if h.Rerankd.Downloading() {
+		h.streamRerankerDownloadProgress(r.Context(), line)
+		return
+	}
 
 	dlCtx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
@@ -144,11 +163,45 @@ func (h *DashboardHandler) handleRerankerSetupDownload(w http.ResponseWriter, r 
 		line("progress", fmt.Sprintf("%d %d", done, total))
 	})
 	if err != nil {
+		// Lost the start race to a concurrent request - attach to that download
+		// instead of surfacing the guard error as a step failure.
+		if h.Rerankd.Downloading() {
+			h.streamRerankerDownloadProgress(r.Context(), line)
+			return
+		}
 		line("error", err.Error())
 		line("done", "1")
 		return
 	}
 	line("done", "0")
+}
+
+// streamRerankerDownloadProgress attaches to an in-flight detached download by
+// polling the manager's progress accessor, emitting the same "progress"/"done"
+// lines a fresh download would, so a reopened tab rejoins instead of erroring.
+func (h *DashboardHandler) streamRerankerDownloadProgress(ctx context.Context, line func(k, v string)) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if done, total := h.Rerankd.Progress(); total > 0 {
+			line("progress", fmt.Sprintf("%d %d", done, total))
+		}
+		if !h.Rerankd.Downloading() {
+			// The download finished (or failed); ModelReady distinguishes them.
+			if h.Rerankd.ModelReady() {
+				line("done", "0")
+			} else {
+				line("error", "download did not complete")
+				line("done", "1")
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // handleRerankerSetupStart spawns (or adopts) the sidecar, waits for it to
@@ -164,6 +217,11 @@ func (h *DashboardHandler) handleRerankerSetupStart(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusNotImplemented, "reranker not supported on this store")
 		return
 	}
+	// Start blocks up to 150s waiting for the sidecar to load the model, but the
+	// http.Server's 15s WriteTimeout would fail the final JSON write - making the
+	// UI report "start" as failed even though the sidecar came up and prefs were
+	// persisted. Push the write deadline just past the start budget.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(160 * time.Second)) //nolint:errcheck // best-effort; unsupported writers keep prior behaviour
 	ctx, cancel := context.WithTimeout(r.Context(), 150*time.Second)
 	defer cancel()
 	url, err := h.Rerankd.Start(ctx)

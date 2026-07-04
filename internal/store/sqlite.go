@@ -946,6 +946,26 @@ func (s *SQLiteStore) CountMemoriesByProvider(ctx context.Context) (map[string]i
 	return out, rows.Err()
 }
 
+// GetDomainLastActivity returns, per domain, the created_at of its most
+// recent non-deprecated memory. The MRI lobe list sorts by this so the most
+// recently active domains surface first.
+func (s *SQLiteStore) GetDomainLastActivity(ctx context.Context) (map[string]string, error) {
+	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag, MAX(created_at) FROM memories WHERE status != 'deprecated' GROUP BY domain_tag`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var domain, last string
+		if scanErr := rows.Scan(&domain, &last); scanErr != nil {
+			return nil, scanErr
+		}
+		out[domain] = last
+	}
+	return out, rows.Err()
+}
+
 // ReembedItem is one memory to (re-)embed: its id and decrypted content.
 // Decryptable is false when the stored content could not be decrypted (vault-key
 // mismatch / corruption) — such a memory can't be embedded and should be tagged

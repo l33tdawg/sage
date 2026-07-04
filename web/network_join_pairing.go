@@ -20,13 +20,13 @@ package web
 
 import (
 	"encoding/json"
+	"log"
 	"net"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	joinSessionTTL = 10 * time.Minute
+	joinSessionTTL     = 10 * time.Minute
 	joinStateWaiting   = "waiting"
 	joinStateConnected = "connected"
 	joinStateApproved  = "approved"
@@ -178,7 +178,8 @@ func (h *DashboardHandler) handleEnableNetworkMode(w http.ResponseWriter, r *htt
 	// quorum — revert so config never diverges from the live process.
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		if err := syscall.Exec(execPath, os.Args, os.Environ()); err != nil { //nolint:gosec // execPath is the verified current binary
+		if err := restartSelf(execPath); err != nil {
+			log.Printf("network mode switch: restart failed, reverting to personal mode: %v", err)
 			_ = h.SetNetworkMode(false)
 		}
 	}()

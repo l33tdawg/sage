@@ -1,7 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
-rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
+rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
 embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
@@ -1735,7 +1735,7 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
                             <span class="value agent-detail-link" onClick=${() => {
                                 if (onNavigate) onNavigate('network');
                                 onClose();
-                            }} title="View agent on Network page">
+                            }} title="View agent on Agents page">
                                 <span style="margin-right:4px;">${agentInfo.avatar || '🤖'}</span>
                                 <span>${agentInfo.name}</span>
                                 <span class="agent-role-badge" style="margin-left:6px;font-size:9px;padding:1px 5px;">${agentInfo.role}</span>
@@ -1813,6 +1813,7 @@ function TasksPage({ sse }) {
     const [agentList, setAgentList] = useState([]);
     const draggingRef = useRef(false);
     const reloadTimer = useRef(null);
+    const movedThisSession = useRef(new Set()); // keeps just-completed old cards visible (see isRecentDone)
     const agentName = (id) => { const a = agentList.find(x => x.agent_id === id); return a ? a.name : (id ? id.slice(0, 8) : ''); };
 
     // Board / Messages tabs. The agent message bus (formerly its own Pipeline
@@ -1881,6 +1882,7 @@ function TasksPage({ sse }) {
     }
 
     async function moveTask(taskId, newStatus) {
+        if (newStatus === 'done' || newStatus === 'dropped') movedThisSession.current.add(taskId);
         // Optimistic update
         setTasks(prev => prev.map(t => t.memory_id === taskId ? { ...t, task_status: newStatus } : t));
         try {
@@ -1917,10 +1919,14 @@ function TasksPage({ sse }) {
         setAdding(false);
     }
 
-    // Filter out done/dropped items older than 7 days unless showOldDone is on
+    // Filter out done/dropped items older than 7 days unless showOldDone is on.
+    // The cutoff uses created_at (the API has no completed_at), so a week-old
+    // card dropped on Done would vanish MID-DROP - exempt anything the user
+    // moved this session.
     function isRecentDone(task) {
         if (task.task_status !== 'done' && task.task_status !== 'dropped') return true;
         if (showOldDone) return true;
+        if (movedThisSession.current.has(task.memory_id)) return true;
         const created = new Date(task.created_at);
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
         return created > sevenDaysAgo;
@@ -2179,6 +2185,15 @@ function SearchPage({ onSelectMemory }) {
             const memories = data.memories || [];
             setResults(memories);
             setTotal(data.total || memories.length);
+            // Prune the bulk selection to what is actually on screen - a
+            // filter/search change must not leave invisible memories armed
+            // for Move/Tag/Deprecate.
+            setSelected(prev => {
+                if (prev.size === 0) return prev;
+                const visible = new Set(memories.map(m => m.memory_id));
+                const next = new Set([...prev].filter(id => visible.has(id)));
+                return next.size === prev.size ? prev : next;
+            });
         } catch (err) {
             setResults([]);
             setError(err && err.message ? err.message : 'Failed to load memories');
@@ -3088,7 +3103,7 @@ function MemoryMode() {
 
 function RecallSettings() {
     const [topK, setTopK] = useState(5);
-    const [minConfidence, setMinConfidence] = useState(95);
+    const [minConfidence, setMinConfidence] = useState(70); // server default (handler.go): inferences included
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [rrOn, setRrOn] = useState(null); // reranker state drives the k guidance
@@ -3550,9 +3565,13 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     const [warn, setWarn] = useState(null); // non-blocking notice (e.g. partial re-embed failures)
     const [skipped, setSkipped] = useState(0); // memories that couldn't be read/embedded (this run)
     const [panelBusy, setPanelBusy] = useState(false); // UnreadableMemoriesPanel recover/deprecate in flight
-    // On the terminal 'done' step the node is restarting itself - keep the
-    // modal closable there so the flow can't dead-end (review HIGH).
-    const busy = pulling || reembedding || (enabling && step !== 'done');
+    const alive = useRef(true); // poll loops must stop touching state after close
+    useEffect(() => () => { alive.current = false; }, []);
+    // Close-blockers: only CLIENT-side work locks the modal. The re-embed job
+    // is server-side and survives the client (ReembedBanner keeps showing
+    // progress in every tab), so it must never trap the user here; the 'done'
+    // step stays closable while the node restarts (review HIGHs).
+    const busy = pulling || (enabling && step !== 'done');
     const refreshStatus = () => { embeddingsStatus().then(setStatus).catch(() => {}); };
 
     useEffect(() => {
@@ -3616,6 +3635,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
         setReembedding(true); setErr(null); setWarn(null);
         try {
             for (;;) {
+                if (!alive.current) return; // modal closed - the server job continues without us
                 const p = await reembedProgress();
                 setProg({ done: p.done || 0, total: p.total || 0 });
                 setSkipped(p.skipped || 0);
@@ -3623,7 +3643,15 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                 if (!p.running) {                                // finished — refetch status for the unreadable count
                     const s = await embeddingsStatus().catch(() => null);
                     if (s) setStatus(s);
-                    setStep('enable');
+                    // Per-item failures don't stop the job (the server tags
+                    // them 'error' and converges) - surface them instead of
+                    // declaring green success over a degraded brain.
+                    if (s && s.errored > 0) {
+                        setWarn(`${s.errored} memor${s.errored === 1 ? 'y' : 'ies'} couldn't be embedded (the model may have hiccuped mid-run) - run this setup again to retry ${s.errored === 1 ? 'it' : 'them'}.`);
+                    }
+                    // An already-semantic node (recover/retry flows) needs no
+                    // config switch and no restart - it's done.
+                    setStep(s && s.is_semantic ? 'done' : 'enable');
                     break;
                 }
                 await new Promise(r => setTimeout(r, 1000));
@@ -3644,8 +3672,15 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     const doEnable = async () => {
         setEnabling(true); setErr(null);
         try {
-            await enableSemanticEmbeddings();
+            const r = await enableSemanticEmbeddings();
             setStep('done');
+            if (r && r.restart_required) {
+                // Platform without in-process restart (Windows): the switch is
+                // saved; the operator relaunches SAGE manually.
+                setWarn(r.message || 'Semantic memory is on. Quit SAGE and relaunch it to finish switching.');
+                setEnabling(false);
+                return;
+            }
             // The node execs itself in place to pick up the new embedder, so
             // poll until it answers again and only then release the modal -
             // otherwise Done/× stay dead and the user is stuck (review HIGH).
@@ -3661,7 +3696,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     const pct = prog && prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
 
     return html`
-        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget && !pulling && !reembedding && !enabling) onClose(); }}>
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget && !busy) onClose(); }}>
             <div class="wizard-modal" style="max-width:560px;max-height:85vh;display:flex;flex-direction:column;">
                 <div class="wizard-header">
                     <h2>Turn on smart memory</h2>
@@ -3672,7 +3707,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
 
                     ${!loading && step === 'intro' && html`
                         <p>Right now SAGE finds memories by matching <strong>keywords</strong>. Smart memory lets it find them by <strong>meaning</strong> — so "what did I decide about pricing" also surfaces notes that never used those exact words.</p>
-                        <p style="color:var(--text-dim);font-size:13px;">It runs entirely on your machine using the bundled model (Ollama + nomic-embed-text). Nothing leaves your computer.</p>
+                        <p style="color:var(--text-dim);font-size:13px;">It runs entirely on your machine using a local model (Ollama + nomic-embed-text). Nothing leaves your computer.</p>
                         <div class="summary-card" style="padding:14px;margin:14px 0;">
                             <div style="font-size:13px;">To switch on, SAGE will re-read your <strong>${status?.need_reembed ?? status?.total_memories ?? 0} memories</strong> once (a few minutes), then restart briefly. Your memories aren't changed or deleted.</div>
                         </div>
@@ -3709,11 +3744,13 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                             <button class="btn btn-primary" style="width:100%;padding:12px;" onClick=${doReembed}>Start</button>
                         `}
                         ${(reembedding || (prog && prog.done > 0)) && html`
-                            <p style="margin-top:0;">${reembedding ? 'Re-reading your memories…' : 'Done re-reading.'}</p>
+                            <p style="margin-top:0;">${reembedding ? 'Re-reading your memories…' : (err ? 'Re-reading stopped.' : 'Done re-reading.')}</p>
                             <div style="background:var(--bg-elev);border-radius:8px;height:12px;overflow:hidden;margin:10px 0;">
                                 <div style="height:100%;width:${pct}%;background:var(--accent);transition:width .3s;"></div>
                             </div>
                             <div style="font-size:12px;color:var(--text-muted);text-align:center;">${prog ? `${prog.done} / ${prog.total}` : ''} ${pct ? `(${pct}%)` : ''}</div>
+                            ${reembedding && html`<div style="font-size:12px;color:var(--text-muted);margin-top:8px;">Safe to close - the job keeps running on the node and the banner tracks it.</div>`}
+                            ${!reembedding && err && html`<button class="btn btn-primary" style="margin-top:10px;" onClick=${doReembed}>Try again</button>`}
                         `}
                     `}
 
@@ -3784,7 +3821,13 @@ function RerankerControl() {
         }).catch(() => setCfg({ enabled: false, url: '', model: '' }));
     }, []);
     const reload = () => {
-        fetchReranker().then(c => { setCfg(c); setUrl(c.url || ''); setModel(c.model || ''); }).catch(() => {});
+        fetchReranker().then(c => {
+            setCfg(c);
+            // Respect operator input: only resync the fields when they are
+            // untouched or the setup flow just persisted a config (in which
+            // case the inputs are not rendered anyway).
+            if (!urlDirty.current || c.enabled) { setUrl(c.url || ''); setModel(c.model || ''); }
+        }).catch(() => {});
         rerankerSetupStatus().then(setSetup).catch(() => {});
     };
     const managed = !!(setup && setup.managed && cfg && cfg.enabled);
@@ -3854,7 +3897,7 @@ function RerankerControl() {
                 ${detected && !cfg.enabled ? html`
                     <div style="font-size:12px;color:#10b981;">Found a reranker running at ${detected} - the URL was filled in for you. Click Save & enable to start using it (the connection is verified on save).</div>
                 ` : ''}
-                <div style="font-size:11px;color:var(--text-muted);">Optional. Re-scores recall results for sharper relevance. Off by default; the bundled embedder works fine without it.</div>
+                <div style="font-size:11px;color:var(--text-muted);">Optional. Re-scores recall results for sharper relevance. Off by default; recall works fine without it.</div>
             </div>
             `}
             ${showSetup && html`<${RerankerSetupModal} onClose=${() => { setShowSetup(false); reload(); }} onDone=${reload} />`}
@@ -3913,11 +3956,30 @@ function RerankerSetupModal({ onClose, onDone }) {
         catch (e) { setErr(e.message || String(e)); return null; }
     };
 
+    // A download/install detached from an earlier session may still be
+    // running server-side (the server deliberately survives dropped clients).
+    // Attach to it: poll status until it settles, then continue the flow.
+    const attachToDetached = async () => {
+        setPhase('attach');
+        for (;;) {
+            await new Promise(r => setTimeout(r, 2000));
+            const s = await rerankerSetupStatus().catch(() => null);
+            if (!s) continue;
+            setSt(s);
+            if (!s.downloading && !s.installing) {
+                if (s.running && s.managed) { setPhase('done'); return; }
+                setPhase('consent');
+                return;
+            }
+        }
+    };
+
     useEffect(() => {
         (async () => {
             const s = await refresh();
             if (!s || !s.available) { setPhase('unavailable'); return; }
             if (s.running && s.managed) { setPhase('done'); return; }
+            if (s.downloading || s.installing) { attachToDetached(); return; }
             if (!s.binary_found && !s.install_supported) { setPhase('manual'); return; }
             setPhase('consent');
         })();
@@ -3968,8 +4030,14 @@ function RerankerSetupModal({ onClose, onDone }) {
             setPhase('done');
             if (onDone) onDone();
         } catch (e) {
-            setErr(e.message || String(e));
-            await refresh();
+            const msg = e.message || String(e);
+            const s = await refresh();
+            if (/already in progress/i.test(msg) || (s && (s.downloading || s.installing))) {
+                runningRef.current = false;
+                attachToDetached(); // a detached run owns the work - wait for it instead of erroring
+                return;
+            }
+            setErr(msg);
             setPhase('consent'); // every step is idempotent - retry resumes where it left off
         }
         runningRef.current = false;
@@ -4015,6 +4083,9 @@ function RerankerSetupModal({ onClose, onDone }) {
                 </div>
                 <div class="wizard-body" style="padding:20px;line-height:1.55;">
                     ${phase === 'check' && html`<p style="color:var(--text-dim);text-align:center;padding:20px;">Checking what's already in place\u2026</p>`}
+                    ${phase === 'attach' && html`
+                        <p style="color:var(--text-dim);text-align:center;padding:20px;">A download started earlier is still running on the node - waiting for it to finish\u2026<br/><span style="font-size:12px;">Safe to close - setup picks up where it left off next time.</span></p>
+                    `}
                     ${phase === 'unavailable' && html`<p style="color:var(--text-dim);">The managed reranker isn't available on this node build. You can still point SAGE at your own TEI-compatible server from Settings.</p>`}
                     ${phase === 'consent' && html`
                         <p style="margin-top:0;">The reranker re-scores recall results with a cross-encoder for sharper relevance. SAGE sets it up by itself - nothing to install, nothing leaves this machine:</p>
@@ -4201,7 +4272,7 @@ function SettingsPage({ onRunSetup }) {
 
     return html`
         <div class="settings-page">
-            ${showEmbedSetup && html`<${EmbeddingsSetupModal} onClose=${() => setShowEmbedSetup(false)} onDone=${() => { fetchHealth().then(setHealth).catch(() => {}); refreshEmb(); }} />`}
+            ${showEmbedSetup && html`<${EmbeddingsSetupModal} onClose=${() => { setShowEmbedSetup(false); refreshEmb(); }} onDone=${() => { fetchHealth().then(setHealth).catch(() => {}); refreshEmb(); }} />`}
             <div class="settings-tabs">
                 ${tabs.map(t => html`
                     <button class="settings-tab ${settingsTab === t.id ? 'active' : ''}"
@@ -4264,16 +4335,19 @@ function SettingsPage({ onRunSetup }) {
                             <h3>System Status</h3>
                             <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:#10b981">Running</span></div>
                             <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} ${embedderStatus.displayName}</span><span class="value" style="color: ${embedderStatus.online ? '#10b981' : '#6b7280'}" title="${embedderStatus.detail || ''}">${embedderStatus.online ? (embedderStatus.detail ? embedderStatus.detail : 'Connected') : 'Offline'}</span></div>
-                            ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0))) && html`
+                            ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0 || embStatus.errored > 0))) && html`
                                 <div class="settings-row" style="align-items:center;">
                                     <span class="label" style="color:var(--text-dim);font-size:12px;">${embedderStatus.provider === 'hash'
                                         ? 'Only keyword matching is on — turn on semantic (meaning-based) search.'
                                         : embStatus.need_reembed > 0
                                             ? `${embStatus.need_reembed} memor${embStatus.need_reembed === 1 ? 'y' : 'ies'} still need re-reading to be searchable by meaning.`
-                                            : `${embStatus.unreadable} memor${embStatus.unreadable === 1 ? 'y' : 'ies'} couldn't be read (old vault key) — recover or hide ${embStatus.unreadable === 1 ? 'it' : 'them'}.`}</span>
-                                    <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : embStatus.need_reembed > 0 ? 'Finish setup →' : 'Review →'}</button>
+                                            : embStatus.unreadable > 0
+                                                ? `${embStatus.unreadable} memor${embStatus.unreadable === 1 ? 'y' : 'ies'} couldn't be read (old vault key) — recover or hide ${embStatus.unreadable === 1 ? 'it' : 'them'}.`
+                                                : `${embStatus.errored} memor${embStatus.errored === 1 ? 'y' : 'ies'} failed to embed — run the retry.`}</span>
+                                    <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : embStatus.need_reembed > 0 ? 'Finish setup →' : embStatus.unreadable > 0 ? 'Review →' : 'Retry →'}</button>
                                 </div>
                             `}
+                            <div class="settings-row"><span class="label">${statusDot(!!(health?.embedder?.reranker?.enabled))} Reranker</span><span class="value" style="color: ${health?.embedder?.reranker?.enabled ? '#10b981' : '#6b7280'}">${health?.embedder?.reranker?.enabled ? (health.embedder.reranker.model || 'On') : 'Off'}</span></div>
                             <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span><span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">${encrypted ? 'AES-256-GCM' : 'Off'}</span></div>
                             <div class="settings-row"><span class="label">Version</span><span class="value">${ver}</span></div>
                             <div class="settings-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>
@@ -4381,14 +4455,16 @@ function SettingsPage({ onRunSetup }) {
                     <div class="settings-section">
                         <h3>Memory engine <${HelpTip} text="The two models that power recall: the embedding model that turns memories into vectors for semantic search (managed by SAGE), and the optional reranker that re-scores recall results for sharper relevance (one-click managed setup)." /></h3>
                         <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} Embedding model</span><span class="value" style="color: ${embedderStatus.online ? '#10b981' : '#6b7280'}" title="${embedderStatus.detail || ''}">${embedderStatus.displayName || (embedderStatus.online ? 'Connected' : 'Offline')}${embedderStatus.detail ? ' · ' + embedderStatus.detail : ''}</span></div>
-                        ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0))) ? html`
+                        ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0 || embStatus.errored > 0))) ? html`
                             <div class="settings-row" style="align-items:center;">
                                 <span class="label" style="color:var(--text-dim);font-size:12px;">${embedderStatus.provider === 'hash'
                                     ? 'Only keyword matching is on — turn on semantic (meaning-based) search.'
                                     : embStatus.need_reembed > 0
                                         ? `${embStatus.need_reembed} memor${embStatus.need_reembed === 1 ? 'y' : 'ies'} still need re-reading to be searchable by meaning.`
-                                        : `${embStatus.unreadable} memor${embStatus.unreadable === 1 ? 'y' : 'ies'} couldn't be read (old vault key) — recover or hide ${embStatus.unreadable === 1 ? 'it' : 'them'}.`}</span>
-                                <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : embStatus.need_reembed > 0 ? 'Finish setup →' : 'Review →'}</button>
+                                        : embStatus.unreadable > 0
+                                            ? `${embStatus.unreadable} memor${embStatus.unreadable === 1 ? 'y' : 'ies'} couldn't be read (old vault key) — recover or hide ${embStatus.unreadable === 1 ? 'it' : 'them'}.`
+                                            : `${embStatus.errored} memor${embStatus.errored === 1 ? 'y' : 'ies'} failed to embed — run the retry.`}</span>
+                                <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : embStatus.need_reembed > 0 ? 'Finish setup →' : embStatus.unreadable > 0 ? 'Review →' : 'Retry →'}</button>
                             </div>
                         ` : html`
                             <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 14px;">The embedding model is managed by SAGE and is not configurable here.</div>
@@ -4508,6 +4584,11 @@ function ImportPage({ sse }) {
             const p = data.data || data;
             if (p.phase === 'complete') {
                 setProgress(null);
+                // Synthesize the outcome for a page that remounted mid-import
+                // (the confirm fetch that would normally set it died with the
+                // old mount). The live page overwrites this with the fuller
+                // HTTP result moments later.
+                setResult(prev => prev || { imported: p.imported || 0, skipped: p.skipped || 0, errors: [] });
             } else {
                 setProgress(p);
             }
@@ -4537,6 +4618,7 @@ function ImportPage({ sse }) {
             setResult(null);
             setError(null);
             setPreview(null);
+            setSuggestion(null);
         } else {
             setError('Please drop a .json, .jsonl, .zip, .md, or .txt file.');
         }
@@ -4549,6 +4631,7 @@ function ImportPage({ sse }) {
             setResult(null);
             setError(null);
             setPreview(null);
+            setSuggestion(null);
         }
     }
 
@@ -4690,7 +4773,7 @@ function ImportPage({ sse }) {
                 </div>
             </div>
 
-            <div class="drop-zone ${dragging ? 'drop-zone-active' : ''} ${selectedFile ? 'drop-zone-has-file' : ''} ${importing ? 'drop-zone-disabled' : ''}"
+            <div class="drop-zone ${dragging ? 'drop-zone-active' : ''} ${selectedFile ? 'drop-zone-has-file' : ''} ${(importing || progress) ? 'drop-zone-disabled' : ''}"
                  onDragOver=${!importing ? handleDragOver : undefined}
                  onDragLeave=${!importing ? handleDragLeave : undefined}
                  onDrop=${!importing ? handleDrop : undefined}
@@ -4775,7 +4858,7 @@ function ImportPage({ sse }) {
                 </div>
             `}
 
-            ${(importing && progress) && html`
+            ${progress && html`
                 <div class="import-progress fade-in">
                     <div class="import-progress-header">
                         <span>Processing memories on-chain...</span>
@@ -4833,7 +4916,7 @@ function ImportPage({ sse }) {
                         ${result.imported != null && html`
                             <div class="import-stat">
                                 <span class="import-stat-value">${result.imported}</span>
-                                <span class="import-stat-label">memories imported${result.provider ? ` from ${result.provider}` : ''}</span>
+                                <span class="import-stat-label">memories imported${result.source ? ` from ${result.source}` : ''}</span>
                             </div>
                         `}
                         ${result.skipped != null && result.skipped > 0 && html`
@@ -5223,7 +5306,7 @@ function HelpOverlay({ onClose, initialSection }) {
                 <div class="guide-steps">
                     <div class="guide-step"><span class="guide-step-num">1</span><div><strong>Connect your AI assistant</strong> — Add the MCP config from Settings to Claude Code, Cursor, or any MCP-compatible client. Your assistant will automatically call <code>sage_inception</code> on startup to load its memory.</div></div>
                     <div class="guide-step"><span class="guide-step-num">2</span><div><strong>Start a conversation</strong> — As you work with your assistant, it stores observations, facts, and inferences. Each memory goes through consensus validation before being committed.</div></div>
-                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>Explore your brain</strong> — Open the Cerebrum view (brain icon) to see your memories as an interactive bubble visualization. Each bubble represents a memory — its size reflects confidence, its color represents the knowledge domain.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>Explore your brain</strong> — Open the Cerebrum view (brain icon) to see your memories inside the 3D MRI brain (drag to orbit, click a memory to focus it) - or flip the toggle for the 2D bubble map, where size reflects confidence and color the knowledge domain.</div></div>
                 </div>
             `,
         },
@@ -5231,9 +5314,20 @@ function HelpOverlay({ onClose, initialSection }) {
             key: 'cerebrum-view',
             title: 'Cerebrum View',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/></svg>`,
-            summary: 'Interactive visualization of your memories as a neural map.',
+            summary: 'Two brain views: the 3D MRI brain (default) and the 2D bubble map.',
             content: html`
-                <p>The Cerebrum view is your brain's neural map — a force-directed graph where each bubble is a committed memory.</p>
+                <p>The Cerebrum view is your brain's neural map, with two modes switched by the toggle at the top: the <strong>3D MRI brain</strong> (the default) renders memories as glowing points inside a translucent brain, and the <strong>2D bubble map</strong> is a force-directed graph where each bubble is a committed memory.</p>
+                <div class="guide-detail-grid">
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">MRI: navigate</div>
+                        <div class="guide-detail-desc">Drag to orbit, scroll to zoom. Click a memory point to focus it and light up its related constellation. The lobe legend drills into a domain.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">MRI: scan & flow</div>
+                        <div class="guide-detail-desc">"Scan" toggles a slow auto-rotate; "flow" animates particles along memory links so you can watch knowledge pathways. Corroborated memories glow brighter and larger.</div>
+                    </div>
+                </div>
+                <p style="margin-top:10px;"><strong>2D bubble map</strong> — the classic force-directed view:</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Bubble size</div>
@@ -5330,11 +5424,11 @@ function HelpOverlay({ onClose, initialSection }) {
         },
         {
             key: 'network',
-            title: 'Network & Agents',
+            title: 'Agents',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/></svg>`,
             summary: 'Manage agents on your SAGE chain — add peers, set roles, and control permissions.',
             content: html`
-                <p>The Network page manages all agents participating in your SAGE consensus chain. Each agent is a separate identity — a different Claude Code project, machine, or assistant — that shares the same memory network.</p>
+                <p>The Agents page manages all agents participating in your SAGE consensus chain. Each agent is a separate identity — a different Claude Code project, machine, or assistant — that shares the same memory network.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Agent list</div>
@@ -5361,7 +5455,7 @@ function HelpOverlay({ onClose, initialSection }) {
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Unregistered agents</div>
-                        <div class="guide-detail-desc">Agents that submit memories via MCP but are not formally registered in the dashboard show up in the Brain view agent filter tabs with a dashed border and a "?" badge. Their memories are stored normally, but they lack a configured name, role, and permissions. You can link an unregistered agent to a dashboard identity at any time from the Network page.</div>
+                        <div class="guide-detail-desc">Agents that submit memories via MCP but are not formally registered in the dashboard show up in the Brain view agent filter tabs with a dashed border and a "?" badge. Their memories are stored normally, but they lack a configured name, role, and permissions. You can link an unregistered agent to a dashboard identity at any time from the Agents page.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Admin role indicator</div>
@@ -5427,7 +5521,7 @@ function HelpOverlay({ onClose, initialSection }) {
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">How agents join</div>
                         <div class="guide-detail-desc">
-                            <strong>Option 1: Dashboard-first (recommended)</strong> — Create the agent in the Network page with name, role, and RBAC. Copy the install command and run it in your project folder. The agent claims its pre-configured identity automatically.
+                            <strong>Option 1: Dashboard-first (recommended)</strong> — Create the agent in the Agents page with name, role, and RBAC. Copy the install command and run it in your project folder. The agent claims its pre-configured identity automatically.
                             <br/><br/>
                             <strong>Option 2: Auto-register</strong> — Just install MCP config (<code>sage-gui mcp install</code>) without a token. The agent self-registers on-chain during its first <code>sage_inception</code> call with a default identity. Configure permissions later from the dashboard.
                         </div>
@@ -5458,7 +5552,7 @@ function HelpOverlay({ onClose, initialSection }) {
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Unregistered agents on-chain</div>
-                        <div class="guide-detail-desc">Agents that auto-register (no claim token) get an on-chain record but appear in the Brain view agent tabs with a dashed border and "?" badge, indicating they lack a dashboard-configured identity. Their memories are valid and consensus-verified, but they operate with default permissions until an admin links them to a named identity or configures their RBAC from the Network page.</div>
+                        <div class="guide-detail-desc">Agents that auto-register (no claim token) get an on-chain record but appear in the Brain view agent tabs with a dashed border and "?" badge, indicating they lack a dashboard-configured identity. Their memories are valid and consensus-verified, but they operate with default permissions until an admin links them to a named identity or configures their RBAC from the Agents page.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Admin role indicator</div>
@@ -5529,11 +5623,11 @@ function HelpOverlay({ onClose, initialSection }) {
         },
         {
             key: 'pipeline',
-            title: 'Pipeline',
+            title: 'Messages',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h4"/><path d="M16 12h4"/><rect x="8" y="8" width="8" height="8" rx="2"/><path d="M12 4v4"/><path d="M12 16v4"/><circle cx="2" cy="12" r="1" fill="currentColor"/><circle cx="22" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="2" r="1" fill="currentColor"/><circle cx="12" cy="22" r="1" fill="currentColor"/></svg>`,
             summary: 'Route work between AI agents — SAGE as a message bus. Lives under Tasks > Messages.',
             content: html`
-                <p>The Pipeline turns SAGE into an agent-to-agent message bus. Instead of copy-pasting between Claude, Perplexity, and ChatGPT, agents can send work to each other through SAGE. The pipeline is ephemeral — messages auto-expire, and only a journal summary persists as a memory.</p>
+                <p>The Messages tab under Tasks (the agent pipeline) turns SAGE into an agent-to-agent message bus. Instead of copy-pasting between Claude, Perplexity, and ChatGPT, agents can send work to each other through SAGE. The pipeline is ephemeral — messages auto-expire, and only a journal summary persists as a memory.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Sending work</div>
@@ -5577,24 +5671,33 @@ function HelpOverlay({ onClose, initialSection }) {
             key: 'settings',
             title: 'Settings & Maintenance',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
-            summary: 'Auto-cleanup, MCP configuration, chain health, and peer info.',
+            summary: 'Tabbed settings: Overview, Connection, Recall, Security, Maintenance, Updates.',
             content: html`
+                <p>Settings is organized into tabs: <strong>Overview</strong> (chain health, system status, peers & agents), <strong>Connection</strong> (MCP config + connect flows), <strong>Recall</strong> (memory engine + recall tuning), <strong>Security</strong> (Synaptic Ledger encryption), <strong>Maintenance</strong> (cleanup, backup, restart, redo setup), and <strong>Updates</strong>.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Auto-cleanup</div>
-                        <div class="guide-detail-desc">Enable auto-cleanup to automatically remove stale observations and low-confidence memories over time. This keeps your brain lean and focused on high-value knowledge. Configure the cleanup interval and minimum confidence threshold.</div>
+                        <div class="guide-detail-label">Memory engine (Recall tab)</div>
+                        <div class="guide-detail-desc">The two models that power recall: the semantic embedder (Ollama + nomic-embed-text, with a guided "Turn on smart memory" setup) and the optional reranker - one click and SAGE downloads the engine and model itself, then manages the process.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">MCP config</div>
-                        <div class="guide-detail-desc">The Settings page shows your MCP configuration snippet. Copy this into your AI client's MCP config file to connect your assistant to SAGE. The config includes the server URL and authentication details.</div>
+                        <div class="guide-detail-label">Recall tuning (Recall tab)</div>
+                        <div class="guide-detail-desc">Results per query (k, 3-20) controls how many memories each recall returns - higher pairs well with the reranker. Minimum confidence (50-100%) filters by earned, decaying consensus confidence.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Chain health</div>
-                        <div class="guide-detail-desc">Monitor your consensus chain: current block height, validator count, latest block time, and sync status. A healthy chain produces blocks every few seconds with all validators participating.</div>
+                        <div class="guide-detail-label">MCP config (Connection tab)</div>
+                        <div class="guide-detail-desc">Your MCP configuration snippet plus the guided "Connect an AI tool" flows (same machine, remote, LAN). Copy the snippet into your AI client's MCP config to connect it to SAGE.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Peers</div>
-                        <div class="guide-detail-desc">View connected peers on your SAGE network. Each peer is another node running sage-gui that participates in consensus. Peers sync memories and validate each other's submissions through BFT.</div>
+                        <div class="guide-detail-label">Auto-cleanup (Maintenance tab)</div>
+                        <div class="guide-detail-desc">Automatically remove stale observations and low-confidence memories over time. Configure the cleanup interval and minimum confidence threshold; always Preview before Clean.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Chain health & peers (Overview tab)</div>
+                        <div class="guide-detail-desc">Block height, sync status, voting power, and every peer node and agent identity connected to this node. An idle chain mints no empty blocks - "Idle" is not a stall.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Updates & setup (Maintenance/Updates tabs)</div>
+                        <div class="guide-detail-desc">Check for updates and apply them in place, restart the node, export backups, and re-run the first-run setup wizard any time via "Run setup".</div>
                     </div>
                 </div>
             `,
@@ -8487,7 +8590,7 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
 
     const refreshEmb = () => embeddingsStatus().then(setEmb).catch(() => setEmb(null));
     const refreshAgents = () => fetchAgents().then(d => setAgents(d.agents || [])).catch(() => {});
-    const refreshRerank = () => rerankerSetupStatus().then(s => setRerankOn(!!(s && s.managed && s.running))).catch(() => {});
+    const refreshRerank = () => fetchReranker().then(c => setRerankOn(!!c.enabled)).catch(() => {}); // any enabled reranker counts, incl. BYO TEI
     useEffect(() => { refreshEmb(); refreshAgents(); refreshRerank(); }, []);
 
     const finish = () => { saveOnboarding(true).catch(() => {}); onClose(); };
@@ -8534,7 +8637,7 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                                 </div>
                             `}
                         ` : html`
-                            <p style="margin-top:0;">Out of the box SAGE recalls by <strong>keywords</strong>. Turning on the bundled semantic embedder lets your agents find memories by <strong>meaning</strong> - the single biggest recall upgrade.</p>
+                            <p style="margin-top:0;">Out of the box SAGE recalls by <strong>keywords</strong>. Turning on the semantic embedder (a free local model via Ollama) lets your agents find memories by <strong>meaning</strong> - the single biggest recall upgrade.</p>
                             ${ollamaUp
                                 ? html`<p style="color:#10b981;font-size:13px;">Ollama is already running on this machine - setup takes about a minute.</p>`
                                 : html`<p style="color:var(--text-dim);font-size:13px;">It uses <strong>Ollama</strong>, a free local model runner. The setup screen walks you through installing it - or skip for now and turn it on any time from Settings.</p>`}
@@ -8615,8 +8718,8 @@ function PipelineView({ onStats }) {
         setSending(false);
     }
 
-    const loadData = useCallback(async () => {
-        setLoading(true);
+    const loadData = useCallback(async (background) => {
+        if (background !== true) setLoading(true); // interval refreshes must not blink the empty state
         setError(null);
         try {
             const [pipeData, statsData] = await Promise.all([
@@ -8629,7 +8732,7 @@ function PipelineView({ onStats }) {
             if (onStats) onStats(statsData.stats || {});
         } catch (e) {
             console.error('Pipeline load error:', e);
-            setError(e && e.message ? e.message : 'Failed to load pipeline');
+            setError(e && e.message ? e.message : 'Failed to load messages');
         }
         setLoading(false);
     }, [filter]);
@@ -8638,7 +8741,7 @@ function PipelineView({ onStats }) {
 
     // Auto-refresh every 10 seconds
     useEffect(() => {
-        const interval = setInterval(loadData, 10000);
+        const interval = setInterval(() => loadData(true), 10000);
         return () => clearInterval(interval);
     }, [loadData]);
 
@@ -8680,7 +8783,7 @@ function PipelineView({ onStats }) {
                     </div>
                 </div>
                 ${agentList.length > 0 && html`<button class="btn btn-primary" onClick=${() => setShowCompose(v => !v)}>\u2709 Send note to agent</button>`}
-                <button class="btn" onClick=${loadData}>\u21BB Refresh</button>
+                <button class="btn" onClick=${() => loadData()}>\u21BB Refresh</button>
             </div>
             ${showCompose && html`
                 <div style="background:var(--card-bg);border:1px solid var(--primary);border-radius:10px;padding:16px;margin-bottom:20px;">
@@ -8723,12 +8826,12 @@ function PipelineView({ onStats }) {
 
             ${error && html`
                 <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);color:#ef4444;padding:12px 16px;border-radius:8px;margin-bottom:16px;display:flex;align-items:center;gap:12px;font-size:13px;">
-                    <span style="flex:1;">Couldn't load pipeline: ${error}</span>
-                    <button class="btn" onClick=${loadData}>Retry</button>
+                    <span style="flex:1;">Couldn't load messages: ${error}</span>
+                    <button class="btn" onClick=${() => loadData()}>Retry</button>
                 </div>
             `}
             ${loading && items.length === 0 && html`
-                <div style="text-align:center;padding:60px;color:var(--text-muted);">Loading pipeline...</div>
+                <div style="text-align:center;padding:60px;color:var(--text-muted);">Loading messages...</div>
             `}
 
             ${!loading && !error && items.length === 0 && html`
@@ -9806,7 +9909,7 @@ function GuestJoinWizard({ onExit }) {
     return html`<div class="fed-wizard">
         <div class="fed-wizard-head">
             <button class="btn fed-back" onClick=${onExit}>← Back</button>
-            <span class="fed-wizard-title">Join a network</span>
+            <span class="fed-wizard-title">Join someone’s network</span>
         </div>
         ${err && html`<div class="fed-err">${err}</div>`}
 
@@ -9873,7 +9976,7 @@ function GuestJoinWizard({ onExit }) {
             <${FedGreenRail} />
             <h3>Stopped - the codes didn't match</h3>
             <p class="fed-compare-bad">Nothing was shared and nothing was changed on your brain. Hang up and call them back on a number you trust, then start over.</p>
-            <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Networks</button></div>
+            <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Federation</button></div>
         </div>`}
     </div>`;
 }
@@ -10012,7 +10115,7 @@ function HostJoinWizard({ onExit }) {
             <${FedGreenRail} />
             <h3>Stopped - the codes didn't match</h3>
             <p class="fed-compare-bad">Do NOT approve. Nothing was shared and nothing was changed on your brain. Hang up and call them back on a number you trust, then start over.</p>
-            <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Networks</button></div>
+            <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Federation</button></div>
         </div>`}
     </div>`;
 }
@@ -10065,7 +10168,7 @@ function FederationPage() {
                     <${EmptyState} icon="federation"
                         headline="No connections yet"
                         hint="Link your whole SAGE to another SAGE to share memories across networks. Join someone's network with a code they share, or host one and hand out a code."
-                        actionLabel="Join a network"
+                        actionLabel="Join someone's network"
                         onAction=${() => setMode('guest')} />
                     ${localChain && html`<div class="muted" style="text-align:center;margin-top:4px;">Your network id: <code>${localChain}</code></div>`}
                 `}

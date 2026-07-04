@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +35,16 @@ import (
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
 )
+
+// errDeprecatedNoFTS forces handleListMemories onto the keyword pool-scan path
+// for status=deprecated: deprecated rows are deliberately absent from the FTS
+// index, so an FTS MATCH can never serve that filter.
+var errDeprecatedNoFTS = errors.New("deprecated status uses keyword scan, not FTS")
+
+// assetVerRe matches the ?v=NNN cache-busting token on served HTML/JS so the
+// content-hash rewrite survives manual version bumps (a fixed literal rots the
+// moment index.html's token is changed).
+var assetVerRe = regexp.MustCompile(`\?v=\d+`)
 
 // PreferencesStore defines methods for preferences and cleanup operations.
 type PreferencesStore interface {
@@ -376,7 +388,16 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 			// Embeddings setup — turn on the bundled semantic embedder + re-embed.
 			h.RegisterEmbeddingsRoutes(r)
-			h.RegisterRerankerSetupRoutes(r)
+
+			// Reranker setup downloads+extracts+chmods a binary and spawns
+			// llama-server as a subprocess, so it gets the same same-origin gate
+			// as the other subprocess-spawning wizards (ChatGPT/federation/
+			// network-join) on top of authMiddleware - a cross-origin tab must
+			// never be able to drive subprocess execution.
+			r.Group(func(r chi.Router) {
+				r.Use(h.wizardSecurityGate)
+				h.RegisterRerankerSetupRoutes(r)
+			})
 
 			r.Delete("/v1/dashboard/memory/{id}", h.handleDeleteMemory)
 			r.Patch("/v1/dashboard/memory/{id}", h.handleUpdateMemory)
@@ -573,14 +594,20 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			w.Header().Set("Pragma", "no-cache")
 			w.Header().Set("Expires", "0")
 
-			// Cache-busting: replace the (previously hardcoded) ?v token with the
-			// content hash, and inject it into app.js's version-less mri-brain.js
-			// import — so a new build always serves fresh JS through any cache/CDN.
+			// Cache-busting: rewrite any ?v=NNN token to the content hash
+			// (pattern-based so a manual version bump can't outrun it), and inject
+			// the hash into app.js's/mri-brain.js's version-less imports - so a new
+			// build always serves fresh JS through any cache/CDN. The regex runs
+			// FIRST so it only ever touches source tokens, never an injected hash.
 			if strings.HasSuffix(path, ".html") {
-				f = bytes.ReplaceAll(f, []byte("?v=678"), []byte("?v="+assetVer))
+				f = assetVerRe.ReplaceAll(f, []byte("?v="+assetVer))
 			} else if strings.HasSuffix(path, ".js") {
+				f = assetVerRe.ReplaceAll(f, []byte("?v="+assetVer))
 				f = bytes.ReplaceAll(f, []byte("from './mri-brain.js'"), []byte("from './mri-brain.js?v="+assetVer+"'"))
-				f = bytes.ReplaceAll(f, []byte("?v=678"), []byte("?v="+assetVer))
+				f = bytes.ReplaceAll(f, []byte("from './api.js'"), []byte("from './api.js?v="+assetVer+"'"))
+				f = bytes.ReplaceAll(f, []byte("import('./api.js')"), []byte("import('./api.js?v="+assetVer+"')"))
+				f = bytes.ReplaceAll(f, []byte("from './sse.js'"), []byte("from './sse.js?v="+assetVer+"'"))
+				f = bytes.ReplaceAll(f, []byte("from '/ui/js/vendor/sage-graph.bundle.js'"), []byte("from '/ui/js/vendor/sage-graph.bundle.js?v="+assetVer+"'"))
 			}
 
 			w.Write(f) //nolint:errcheck,gosec // static embedded file, not user input
@@ -1003,7 +1030,19 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		if opts.Tag != "" {
 			qopts.Tags = []string{opts.Tag} // honor the tag filter on the FTS path too (the fallback already did)
 		}
-		if ftsRecs, ferr := h.store.SearchByText(r.Context(), qStr, qopts); ferr == nil {
+		var ftsRecs []*memory.MemoryRecord
+		var ferr error
+		if opts.Status == "deprecated" {
+			// Deprecated rows are deliberately absent from the FTS index
+			// (DeleteMemory drops them; BackfillFTS excludes them), so a MATCH
+			// can never serve status=deprecated - it would always return zero.
+			// Force the keyword pool-scan fallback below, which searches
+			// deprecated rows correctly on both encrypted and unencrypted nodes.
+			ferr = errDeprecatedNoFTS
+		} else {
+			ftsRecs, ferr = h.store.SearchByText(r.Context(), qStr, qopts)
+		}
+		if ferr == nil {
 			records, total = ftsRecs, len(ftsRecs)
 		} else {
 			pool, _, perr := h.store.ListMemories(r.Context(), store.ListOptions{
@@ -1416,8 +1455,22 @@ func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, dr
 	if seeAll && domainCounts != nil {
 		resp["total"] = grandTotal
 		resp["domain_counts"] = domainCounts
+		// Per-domain recency so the lobe list can order by last activity
+		// (newest first) instead of alphabetically. Optional-interface so
+		// non-SQLite stores simply omit it.
+		if dap, ok := h.store.(domainActivityProvider); ok {
+			if dl, dErr := dap.GetDomainLastActivity(ctx); dErr == nil {
+				resp["domain_last"] = dl
+			}
+		}
 	}
 	return json.Marshal(resp)
+}
+
+// domainActivityProvider is implemented by SQLiteStore: per-domain timestamp
+// of the most recent non-deprecated memory, feeding the MRI lobe ordering.
+type domainActivityProvider interface {
+	GetDomainLastActivity(ctx context.Context) (map[string]string, error)
 }
 
 // stratifiedSample draws a representative, importance-ranked sample for the

@@ -134,6 +134,7 @@ export async function testReranker({ url, model }) {
 
 export async function deleteMemory(id) {
     const res = await fetch(`${API_BASE}/v1/dashboard/memory/${id}`, { method: 'DELETE' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
     return res.json();
 }
 
@@ -156,6 +157,7 @@ export async function bulkUpdateMemories(ids, { domain, addTags, agent } = {}) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
     });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
     return res.json();
 }
 
@@ -448,7 +450,9 @@ export async function saveRecallSettings(topK, minConfidence) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ top_k: topK, min_confidence: minConfidence }),
     });
-    return res.json();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'save failed');
+    return data; // echoes the server-clamped values
 }
 
 // ─── Memory Mode API ───
@@ -682,6 +686,7 @@ export async function reembedProgress() {
 }
 export async function enableSemanticEmbeddings() {
     const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/enable`, { method: 'POST' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
     return res.json();
 }
 export async function deprecateUnreadable() {

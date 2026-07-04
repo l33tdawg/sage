@@ -1504,3 +1504,24 @@ func TestInsertMemory_StampsEmbeddingProvider(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, counts[""], "unstamped memory stays re-embeddable")
 }
+
+func TestGetDomainLastActivity(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	old := testMemory("dla-1", "a", "old memory", "quiet-domain")
+	old.CreatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, s.InsertMemory(ctx, old))
+	fresh := testMemory("dla-2", "a", "fresh memory", "busy-domain")
+	fresh.CreatedAt = time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, s.InsertMemory(ctx, fresh))
+	fresher := testMemory("dla-3", "a", "fresher in same domain", "busy-domain")
+	fresher.CreatedAt = time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	require.NoError(t, s.InsertMemory(ctx, fresher))
+
+	dl, err := s.GetDomainLastActivity(ctx)
+	require.NoError(t, err)
+	require.Len(t, dl, 2)
+	assert.True(t, dl["busy-domain"] > dl["quiet-domain"], "busy domain must sort newer: %v", dl)
+	assert.Contains(t, dl["busy-domain"], "2026-07-02", "MAX(created_at) per domain")
+}

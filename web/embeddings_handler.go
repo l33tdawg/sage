@@ -16,11 +16,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -120,6 +120,10 @@ func (h *DashboardHandler) handleEmbeddingsPullModel(w http.ResponseWriter, r *h
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Clear the http.Server's 15s WriteTimeout (an absolute per-request write
+	// deadline) so the server doesn't guillotine this minutes-long model pull
+	// mid-stream (same fix as web/sse.go).
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{}) //nolint:errcheck // best-effort; unsupported writers keep prior behaviour
 	w.WriteHeader(http.StatusOK)
 	line := func(k, v string) { fmt.Fprintf(w, "%s: %s\n", k, v); flusher.Flush() }
 
@@ -386,6 +390,24 @@ func (h *DashboardHandler) recoverOrphans(w http.ResponseWriter, r *http.Request
 		resp["recovered"] = n
 		if n > 0 {
 			h.SSE.Broadcast(SSEEvent{Type: EventForget}) // recovered content appears in views
+			// The recovered rows re-entered the re-embed work set (their
+			// embedding_provider was cleared). On a semantic node, actually
+			// start the background job so the "queued for re-embedding" copy
+			// is true - otherwise they sit unembedded until someone finds the
+			// Settings CTA. Same guarded start as handleEmbeddingsReembed.
+			if currentEmbedProvider(h.embedder) == embedProviderOllama &&
+				ollamaRunning(r.Context()) && ollamaHasModel(r.Context(), embedModel) {
+				h.reembed.mu.Lock()
+				if !h.reembed.running {
+					counts2, _ := h.store.CountMemoriesByProvider(r.Context())
+					h.reembed.running = true
+					h.reembed.done, h.reembed.skipped, h.reembed.total, h.reembed.errMsg = 0, 0, counts2[""], ""
+					h.reembed.startedAt = time.Now()
+					go h.runReembed()
+				}
+				h.reembed.mu.Unlock()
+				resp["reembed_started"] = true
+			}
 		}
 	}
 	writeJSONResp(w, http.StatusOK, resp)
@@ -404,6 +426,18 @@ func (h *DashboardHandler) handleEmbeddingsEnable(w http.ResponseWriter, r *http
 		writeError(w, http.StatusInternalServerError, "enable ollama embeddings: "+err.Error())
 		return
 	}
+	// The provider switch is persisted above; a restart just makes every
+	// consumer pick it up. Where an in-process restart isn't supported (Windows
+	// has no exec(2)), tell the operator to relaunch manually instead of
+	// pretending to restart and silently doing nothing.
+	if !restartInProcessSupported() {
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"ok":               true,
+			"restart_required": true,
+			"message":          "Semantic memory is on. Quit SAGE and relaunch it to finish switching.",
+		})
+		return
+	}
 	execPath, err := os.Executable()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "cannot determine binary path")
@@ -415,8 +449,8 @@ func (h *DashboardHandler) handleEmbeddingsEnable(w http.ResponseWriter, r *http
 	}
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		if execErr := syscall.Exec(execPath, os.Args, os.Environ()); execErr != nil { //nolint:gosec // verified current binary
-			_ = h.SetEmbeddingOllama // exec failed; process stays up in the old mode
+		if execErr := restartSelf(execPath); execErr != nil { // stays up in the old mode on failure
+			log.Printf("embeddings enable: restart failed: %v", execErr)
 		}
 	}()
 }

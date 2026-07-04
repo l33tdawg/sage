@@ -3,6 +3,10 @@
 package rerankd
 
 import (
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -19,4 +23,15 @@ func killSidecar(pid int) {
 	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
 		_ = syscall.Kill(pid, syscall.SIGTERM)
 	}
+}
+
+// pidIsLlamaServer reports whether pid is still our llama-server process, so an
+// adopted-sidecar Stop can't SIGTERM a recycled, unrelated pid. `ps -o comm=`
+// prints the process's command basename on both macOS and Linux.
+func pidIsLlamaServer(pid int) bool {
+	out, err := exec.Command("ps", "-o", "comm=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	return filepath.Base(strings.TrimSpace(string(out))) == binaryName
 }

@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v4.3.0
+# sage-gui v11.0.0
 ```
 
 ---
@@ -85,13 +85,80 @@ Dashboard: http://localhost:8080/ui/
 REST API:  http://localhost:8080/v1/
 ```
 
-Open the dashboard in your browser to see the Brain Visualization — a living neural network of your AI's memory. Click any memory bubble to focus its domain group (arranged in a timeline), click time buckets at the bottom to filter by hour, and expand the Chain Activity bar to see real-time consensus events.
+Open the dashboard in your browser to see the Brain Visualization. The default view is the **MRI** brain (a 3D, brain-shaped map of your AI's memory); a **2D** toggle gives you a flat force-directed graph with a timeline scrubber. Click any memory to see its "train of thought", click a domain lobe to drill in, and expand the Chain Activity bar to see real-time consensus events. See [BRAIN.md](BRAIN.md) for a full guide to reading it.
+
+---
+
+## First run: the onboarding wizard
+
+The first time you open a fresh node's dashboard (empty brain, setup not yet done), SAGE greets you with a short **onboarding wizard**. It is three steps, and it walks you straight from an empty brain to working memory:
+
+1. **Welcome** - a one-screen orientation to CEREBRUM, the dashboard where you watch and curate everything your AI tools remember.
+2. **Semantic memory** - turn on recall-by-meaning (the guided embedder setup, below). Optional, but it is the single biggest recall upgrade, so the wizard recommends it.
+3. **Connect an AI tool** - wire up Claude Code, Codex, Cursor, ChatGPT, or another client so it gets persistent memory.
+
+Closing the wizard at any point marks onboarding done, so it never nags you again. You can **re-run it any time** from **Settings > Maintenance > Run setup** - handy if you skipped a step or want to connect another tool later. The wizard reuses the real setup screens (it does not duplicate them), so whatever you do inside it is the same thing you would do from Settings.
+
+---
+
+## Turn on smart (semantic) memory
+
+Out of the box SAGE recalls by **keywords**. Turning on the bundled semantic embedder lets your agents find memories by **meaning** even when the wording differs. This is the biggest recall upgrade you can make, and it stays fully local.
+
+Open the guided setup from the onboarding wizard, or from **Settings > Recall**. SAGE walks a non-technical path end to end:
+
+1. **Detect Ollama** - SAGE uses [Ollama](https://ollama.ai), a free local model runner, to host the embedder. If it is not installed yet, the screen tells you how to get it.
+2. **Download the model** - it pulls `nomic-embed-text` (the embedder) with a live progress bar if you do not already have it.
+3. **Re-embed your existing memories** - anything already in your brain is re-embedded so old and new memories are searchable the same way. This runs as a **background job on the node**: it survives closing the modal, reloading, or switching tabs, and a progress banner keeps you posted in every tab. Memories that cannot be read or embedded are surfaced honestly rather than silently skipped, and you can re-run setup to retry them.
+4. **Switch recall over** - SAGE flips the node to the semantic embedder (a brief restart) and you are done.
+
+The embedder is locked to **Ollama + nomic-embed-text** - this screen turns the bundled one on, it is not a "pick your own embedder" menu. Everything stays on your machine; nothing is sent to any cloud.
+
+---
+
+## The managed reranker (one click)
+
+A **reranker** re-scores your recall results with a cross-encoder so the most relevant memories rise to the top. It is a recommended extra on top of semantic memory, and SAGE now sets it up for you with **one click** - no terminal, no package manager, nothing to install by hand.
+
+From the onboarding wizard, or **Settings > Recall**, choose "Set up the reranker". After a single consent click, SAGE does all of this itself:
+
+- **Downloads the engine** - a pinned [llama.cpp](https://github.com/ggml-org/llama.cpp) release build (Ollama has no rerank endpoint, so SAGE runs its own sidecar). It is **checksum-verified** (sha256) so a tampered or truncated download never lands.
+- **Downloads the model** - the pinned `bge-reranker-v2-m3` cross-encoder GGUF, also checksum-verified, a one-time download (the engine plus model is roughly 650 MB total).
+- **Runs and manages the process** - SAGE starts the sidecar on loopback, switches recall over to it, and **manages the process from then on**. Nothing leaves your machine.
+
+The whole thing runs on the node, so it survives a dropped browser: if you close the tab mid-download, setup picks up where it left off next time. Each step is idempotent, so a retry resumes rather than restarts.
+
+Prefer to bring your own? You can still point SAGE at any external TEI-compatible rerank server from **Settings > Recall**.
+
+### Tuning recall (k)
+
+**Settings > Recall** also exposes **results per query (k)**, adjustable from **3 to 20**. This is how many memories each recall returns. Higher values pair especially well with the reranker: retrieve a broader candidate set, then let the cross-encoder re-score it and float the best few to the top. A minimum-confidence slider (50-100%) filters by earned, decaying consensus confidence.
+
+---
+
+## Connect an AI tool
+
+The dashboard's **Connect an AI tool** flow (in the onboarding wizard, and on the Settings > Connection tab) writes the config for you. It first asks the one question that matters - is the tool on **this** computer, or **another** one - and then branches into three flows:
+
+### 1. Same machine, one click
+
+For Claude Code, Codex, Cursor, Windsurf, or Claude Desktop running on the same computer as SAGE. Pick the tool, give a project folder if it is a per-project client (Claude Code, Codex, Cursor), and click Connect. SAGE **writes the config file itself** and the agent registers its own on-chain identity on first connect. Restart the tool and it picks up its SAGE connection. You manage its identity and permissions afterward on the Agents page.
+
+### 2. Remote MCP (another computer or a hosted chat)
+
+For a hosted chat like ChatGPT, or a tool on a different machine that reaches SAGE over the network. A guided wizard gives SAGE a public URL through **your own cloudflared tunnel** (it can install cloudflared for you, does the one-time Cloudflare login, creates the tunnel, routes DNS, and mints a bearer token). Local-first by design: your tunnel, your domain, your bearer token. SAGE never proxies through anyone else's cloud. Bearer-only clients that run on the same machine (Cursor, Cline, Claude Desktop) can also connect directly to `https://localhost:8443` without a tunnel.
+
+### 3. LAN pairing (another computer on your network joins your SAGE)
+
+For making another computer on your local network a **node in your SAGE network** - it runs its own SAGE and shares this node's memory. The host mints a **pairing code (shown as a QR plus a short code)** over a temporary LAN listener that only exists while a pairing is active. The joining machine proves it holds the code, then the two sides **compare a six-digit code** to confirm they reached each other and not an impostor. Only after that does the host hand over the (encrypted) join bundle. The session expires in about 10 minutes if you leave it. This is a peer node, not a validator; it shares the same memory ledger.
+
+> The older per-agent LAN pairing (`sage-gui pair CODE`) is still available from the **Agents** page for wiring up a single agent identity on another machine - see [Multi-Agent Network](#multi-agent-network) below.
 
 ---
 
 ## Connect to Claude Desktop
 
-This is the killer feature. Claude Desktop can read and write memories directly via MCP (Model Context Protocol).
+This is the killer feature. Claude Desktop can read and write memories directly via MCP (Model Context Protocol). The **Connect an AI tool** flow above writes this config for you; the manual steps below are the reference if you would rather do it by hand.
 
 ### 1. Get your MCP config
 
@@ -240,7 +307,7 @@ Open `http://localhost:8080/ui/` and go to the Network tab. The wizard walks you
 The fastest way to connect a new machine:
 
 1. On your main SAGE node, click **Add Agent** and select **LAN Pairing**
-2. You get a 6-character code (valid for 5 minutes)
+2. You get a pairing code (valid for 15 minutes)
 3. On the new machine, run `sage-gui pair ABC123` (replacing with your code)
 4. The new machine automatically receives its config, keys, and connects to your network
 

@@ -110,6 +110,17 @@ func (h *DashboardHandler) handleSaveReranker(w http.ResponseWriter, r *http.Req
 	setter.SetReranker(embedding.BuildReranker(cfg), cfg.Oversample)
 
 	if h.prefStore != nil {
+		// A manual save is the operator taking over from the managed sidecar
+		// flow. If a managed sidecar was running, stop it before clearing the
+		// flag - once reranker_managed=0 nothing owns the process again, so it
+		// would outlive node restarts as an orphan (~600MB RSS, its own process
+		// group). Skip the stop when the operator re-entered the sidecar's own
+		// URL (they mean to keep using it, just unmanaged).
+		if prev, perr := h.prefStore.GetAllPreferences(r.Context()); perr == nil && prev["reranker_managed"] == "1" {
+			if h.Rerankd != nil && req.URL != h.Rerankd.URL() {
+				_ = h.Rerankd.Stop()
+			}
+		}
 		enabledVal := "0"
 		if req.Enabled {
 			enabledVal = "1"
@@ -118,8 +129,8 @@ func (h *DashboardHandler) handleSaveReranker(w http.ResponseWriter, r *http.Req
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_url", req.URL)
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_model", cfg.Model)
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_kind", cfg.Kind)
-		// A manual save is the operator taking over from the managed sidecar
-		// flow - stop auto-starting it on boot so the two configs can't fight.
+		// Stop auto-starting the managed sidecar on boot so the two configs
+		// can't fight.
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_managed", "0")
 	}
 
