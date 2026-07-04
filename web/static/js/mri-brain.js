@@ -339,7 +339,7 @@ export function mountMriBrain(container, opts = {}) {
       const back = document.createElement('div');
       back.className = 'row'; back.style.cursor = 'pointer';
       back.innerHTML = '<span class="k">←</span><div class="t"><b>all lobes</b></div>';
-      back.onclick = () => { currentDomain = null; load(); };
+      back.onclick = () => { currentDomain = null; load(); zoomOut(); };
       lobes.appendChild(back);
     }
     doms.forEach(k => {
@@ -388,6 +388,14 @@ export function mountMriBrain(container, opts = {}) {
     node.fz = node.z = anchor.z + rr * ce * Math.sin(a);
   }
 
+  // Return the camera to the framing shot. Used when leaving focus and when
+  // jumping back to all lobes - but NEVER from load() itself, which SSE
+  // reloads also call (yanking the camera on every new memory would fight
+  // the user's hand).
+  function zoomOut(){
+    if (Graph) Graph.cameraPosition({ x: 0, y: 60, z: 620 }, { x: 0, y: 0, z: 0 }, 900);
+  }
+
   function exitFocus(){
     if (!focusId) return;
     focusId = null; focusSet = null;
@@ -399,6 +407,7 @@ export function mountMriBrain(container, opts = {}) {
       Graph.nodeColor(nodeColorRGBA);
     }
     hideExplorePanel();
+    zoomOut();
   }
 
   async function exploreNode(n){
@@ -410,7 +419,30 @@ export function mountMriBrain(container, opts = {}) {
       data = await resp.json();
     } catch (e) { console.warn('[mri] related fetch failed:', e.message); return; }
     if (disposed) return;
-    const related = (data && Array.isArray(data.related)) ? data.related : [];
+    const relatedAll = (data && Array.isArray(data.related)) ? data.related : [];
+    // Second re-rank pass over the similarity results: raw similarity mixes
+    // unrelated tags, so scope the train of thought to the clicked memory's
+    // OWN lobe plus adjacent lobes (domains the current connectome shows
+    // typed links into from this domain).
+    const homeDomain = n.domain || 'unknown';
+    const adjacent = (() => {
+      const adj = new Set();
+      const gd0 = Graph.graphData();
+      const domOf = {}; gd0.nodes.forEach(nn => { domOf[nn.id] = nn.domain || 'unknown'; });
+      gd0.links.forEach(l => {
+        if (l.link_type === 'domain' || l.link_type === 'focus') return; // typed links only
+        const a = domOf[typeof l.source === 'object' ? l.source.id : l.source];
+        const b = domOf[typeof l.target === 'object' ? l.target.id : l.target];
+        if (!a || !b || a === b) return;
+        if (a === homeDomain) adj.add(b);
+        if (b === homeDomain) adj.add(a);
+      });
+      return adj;
+    })();
+    const related = relatedAll.filter(rr => {
+      const d = rr.domain || 'unknown';
+      return d === homeDomain || adjacent.has(d);
+    });
     focusId = n.id;
     focusSet = new Set([n.id]);
     related.forEach(rr => focusSet.add(rr.id));
@@ -473,7 +505,7 @@ export function mountMriBrain(container, opts = {}) {
         </div>
         <div class="ex-back">← back to full brain</div>
       </div>
-      ${related.length ? `<div class="ex-board">${columns}</div>` : '<div class="ex-empty ex-empty-big">No related memories found.</div>'}`;
+      ${related.length ? `<div class="ex-board">${columns}</div>` : '<div class="ex-empty ex-empty-big">No related memories in this lobe or its neighbours.</div>'}`;
     p.querySelector('.ex-back').onclick = exitFocus;
     p.querySelectorAll('.ex-card').forEach(el => {
       el.onclick = () => {
