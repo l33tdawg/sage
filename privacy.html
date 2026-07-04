@@ -50,7 +50,7 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
 
   <h2>What data is stored</h2>
   <ul>
-    <li><strong>AI memories</strong> — stored in a local SQLite database at <code>~/.sage/</code> on your computer</li>
+    <li><strong>AI memories</strong> — stored in local BadgerDB/SQLite stores at <code>~/.sage/</code> on your computer</li>
     <li><strong>Encryption keys</strong> — Ed25519 signing keys generated locally, stored locally</li>
     <li><strong>Extension settings</strong> — your (S)AGE server URL (default: localhost:8080), stored in browser local storage</li>
   </ul>
@@ -76,7 +76,7 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
   </ul>
 
   <h2>Network requests</h2>
-  <p>The only network requests made by (S)AGE are to <strong>your own local server</strong> at <code>localhost:8080</code> (or whatever URL you configure). No data is ever transmitted to any external server, cloud service, or third party.</p>
+  <p>By default, (S)AGE talks to <strong>your own local server</strong> at <code>localhost:8080</code> (or whatever URL you configure). Optional connector flows you configure, such as Cloudflare tunnel or ChatGPT connector setup, make only the network requests needed for that feature. The SAGE project does not receive your memory contents.</p>
 
   <h2>Open source</h2>
   <p>All source code is publicly available at <a href="https://github.com/l33tdawg/sage">github.com/l33tdawg/sage</a> under the Apache 2.0 license. You can audit every line of code.</p>

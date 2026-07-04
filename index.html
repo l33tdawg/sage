@@ -658,13 +658,165 @@ h1 em {
 /* ─── Privacy Visual ─── */
 .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; margin-top: 48px; }
 .privacy-visual { position: relative; display: flex; justify-content: center; align-items: center; min-height: 260px; }
-.shield { width: 160px; height: 180px; position: relative; }
-.shield-shape { width: 100%; height: 100%; background: linear-gradient(180deg, rgba(167,139,250,0.12), rgba(167,139,250,0.03)); border: 1.5px solid rgba(167,139,250,0.25); border-radius: 50% 50% 50% 50% / 30% 30% 70% 70%; display: flex; align-items: center; justify-content: center; position: relative; }
-.shield-shape::after { content: ''; position: absolute; inset: 8px; border: 1px solid rgba(167,139,250,0.1); border-radius: 50% 50% 50% 50% / 30% 30% 70% 70%; }
-.shield-icon { font-size: 2.5rem; opacity: 0.9; }
-.shield-ring { position: absolute; inset: -30px; border: 1px solid rgba(167,139,250,0.08); border-radius: 50%; animation: spin-slow 30s linear infinite; }
-.shield-ring::before { content: ''; position: absolute; top: -3px; left: 50%; width: 6px; height: 6px; background: var(--accent); border-radius: 50%; box-shadow: 0 0 10px var(--accent); }
-@keyframes spin-slow { to { transform: rotate(360deg); } }
+.privacy-brain {
+  position: relative;
+  width: min(390px, 100%);
+  min-height: 330px;
+  perspective: 900px;
+  font-family: var(--font-mono);
+}
+.privacy-brain::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 330px;
+  height: 330px;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(45,212,191,0.08);
+  border-radius: 50%;
+}
+.privacy-brain::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 34px;
+  width: 230px;
+  height: 18px;
+  transform: translateX(-50%);
+  background: radial-gradient(ellipse, rgba(45,212,191,0.2), transparent 70%);
+  border-radius: 50%;
+}
+.brain-stage {
+  position: absolute;
+  inset: 18px 10px 42px;
+  transform-style: preserve-3d;
+  animation: brain-spin 14s linear infinite;
+}
+.brain-shell,
+.brain-lobe,
+.brain-slice,
+.brain-stem,
+.brain-core {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform-style: preserve-3d;
+}
+.brain-shell {
+  width: 238px;
+  height: 180px;
+  margin: -88px 0 0 -119px;
+  border: 1px solid rgba(125,211,252,0.45);
+  border-radius: 54% 46% 50% 50% / 44% 54% 42% 56%;
+  box-shadow: 0 0 28px rgba(14,165,233,0.22), inset 0 0 30px rgba(45,212,191,0.1);
+}
+.brain-shell::before,
+.brain-shell::after {
+  content: '';
+  position: absolute;
+  inset: 16px 24px 18px 22px;
+  border: 1px solid rgba(125,211,252,0.22);
+  border-radius: 56% 44% 48% 52% / 44% 55% 42% 58%;
+}
+.brain-shell::after {
+  inset: 36px 54px 34px 50px;
+  border-color: rgba(45,212,191,0.28);
+}
+.brain-lobe {
+  width: 178px;
+  height: 132px;
+  margin: -66px 0 0 -89px;
+  border: 1px solid rgba(14,165,233,0.32);
+  border-radius: 52% 48% 54% 46% / 46% 58% 42% 54%;
+}
+.brain-lobe.one { transform: translate3d(-36px, -4px, 28px) rotateZ(-10deg) rotateY(56deg); }
+.brain-lobe.two { transform: translate3d(34px, 0, -22px) rotateZ(8deg) rotateY(-54deg); }
+.brain-lobe.three { transform: translate3d(0, 18px, 14px) rotateX(62deg); width: 216px; }
+.brain-slice {
+  width: 248px;
+  height: 158px;
+  margin: -79px 0 0 -124px;
+  border: 1px solid rgba(45,212,191,0.18);
+  border-radius: 50%;
+}
+.brain-slice.one { transform: rotateY(90deg); }
+.brain-slice.two { transform: rotateX(72deg); }
+.brain-slice.three { transform: rotateY(52deg) rotateX(16deg); border-color: rgba(167,139,250,0.22); }
+.brain-stem {
+  width: 42px;
+  height: 96px;
+  margin: 42px 0 0 -18px;
+  border: 1px solid rgba(125,211,252,0.42);
+  border-radius: 42% 42% 48% 48%;
+  transform: rotateZ(18deg) rotateX(14deg);
+  box-shadow: inset 0 0 18px rgba(14,165,233,0.12);
+}
+.brain-core {
+  width: 118px;
+  height: 26px;
+  margin: 8px 0 0 -54px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, rgba(125,211,252,0.9), rgba(45,212,191,0.86), transparent);
+  filter: blur(0.2px);
+  box-shadow: 0 0 24px rgba(45,212,191,0.42);
+  transform: rotateZ(4deg);
+}
+.brain-node {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #7dd3fc;
+  box-shadow: 0 0 12px rgba(125,211,252,0.85);
+  animation: brain-node-pulse 2.8s ease-in-out infinite;
+}
+.brain-node:nth-child(1) { left: 126px; top: 90px; background: #fb7185; animation-delay: -0.2s; }
+.brain-node:nth-child(2) { left: 190px; top: 122px; background: #f59e0b; animation-delay: -0.8s; }
+.brain-node:nth-child(3) { left: 218px; top: 178px; background: #2dd4bf; animation-delay: -1.4s; }
+.brain-node:nth-child(4) { left: 154px; top: 210px; background: #a78bfa; animation-delay: -2s; }
+.brain-node:nth-child(5) { left: 96px; top: 152px; background: #22c55e; animation-delay: -2.4s; }
+.brain-caption {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid rgba(45,212,191,0.22);
+  border-radius: 10px;
+  background: rgba(2,6,23,0.58);
+  color: var(--teal);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  box-shadow: 0 0 24px rgba(45,212,191,0.1);
+}
+.brain-caption::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 12px var(--teal);
+}
+@keyframes brain-spin {
+  from { transform: rotateY(0deg) rotateX(8deg); }
+  to { transform: rotateY(360deg) rotateX(8deg); }
+}
+@keyframes brain-node-pulse {
+  0%, 100% { transform: scale(0.84); opacity: 0.62; }
+  50% { transform: scale(1.35); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-stage,
+  .brain-node {
+    animation: none;
+  }
+}
 .privacy-points { display: flex; flex-direction: column; gap: 20px; }
 .privacy-point { display: flex; gap: 14px; align-items: flex-start; padding: 18px; background: rgba(167,139,250,0.03); border: 1px solid rgba(167,139,250,0.08); border-radius: 12px; transition: all 0.3s; }
 .privacy-point:hover { background: rgba(167,139,250,0.06); border-color: rgba(167,139,250,0.15); }
@@ -768,6 +920,7 @@ footer a:hover { text-decoration: underline; }
     <div class="nav-tabs" id="nav-tabs">
       <button class="nav-tab active" data-tab="home">Home</button>
       <button class="nav-tab" data-tab="features">Features</button>
+      <button class="nav-tab" data-tab="features" data-scroll="faq">FAQ</button>
       <button class="nav-tab" data-tab="connect">Connect</button>
       <button class="nav-tab" data-tab="network">Network</button>
       <button class="nav-tab" data-tab="research">Research</button>
@@ -793,9 +946,9 @@ footer a:hover { text-decoration: underline; }
         <div class="hero-copy">
           <div class="hero-kicker">SAGE v11 · MRI memory brain · LAN-first federation</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
-          <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP client a local memory node: semantic recall, governed validation, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
+          <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, governed validation, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
-            <div class="proof-chip"><strong>Local-first</strong><span>SQLite + optional AES-256</span></div>
+            <div class="proof-chip"><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
             <div class="proof-chip"><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
             <div class="proof-chip"><strong>Federation</strong><span>LAN / VPN / your route</span></div>
           </div>
@@ -833,7 +986,7 @@ footer a:hover { text-decoration: underline; }
         <div>
           <div class="section-tag">Install in minutes</div>
           <h2>Download it, open CEREBRUM, connect your AI.</h2>
-          <p class="section-desc">v11 is dashboard-first. The onboarding flow walks through semantic memory, AI-tool connection, and setup recovery without making users spelunk through config files.</p>
+          <p class="section-desc">v11 is dashboard-first. The onboarding flow handles semantic memory, AI-tool connection, and setup recovery without making users edit config files by hand.</p>
         </div>
         <div class="install-note">
           <h3>Or tell your AI to connect itself</h3>
@@ -935,7 +1088,7 @@ footer a:hover { text-decoration: underline; }
       <!-- What's New -->
       <div class="whats-new reveal">
         <h3>What's new in <span id="whats-new-version">v11.0.1</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11 is the release where SAGE stops asking you to be a systems administrator. A first-run wizard sets everything up from the dashboard, semantic memory turns on with one guided flow, the new reranker installs <em>itself</em> &mdash; SAGE downloads the engine and the model, verifies both, and manages the process &mdash; and two people can now link their SAGE brains on a local network with a verification ceremony built on rotating codes and QR scans. Under the hood it activates the app-v15 consensus fork (new co-commit and cross-federation transaction types plus an authorization hardening pass), with the usual guarantee: byte-identical replay before activation, safe rolling upgrades, and hands-free fork advance on personal nodes.</p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11 makes SAGE usable from the dashboard. First-run onboarding connects your AI, semantic memory turns on through a guided local Ollama flow, the reranker installs and verifies itself, and two SAGE nodes can federate on a LAN, VPN, or operator-provided route with a human verification ceremony. Under the hood, app-v15 adds co-commit and cross-federation transaction types while preserving byte-identical replay before activation.</p>
         <div class="new-features">
           <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>CEREBRUM, rebuilt around you</h4><p>The 3D MRI brain is now the default view &mdash; your memories as glowing points inside a translucent brain, domains as lobes ordered by recent activity, corroborated knowledge pulled to the core. Around it: an Overview control board for the whole node, real full-text + semantic search with bulk curation, a live task board your agents and you share (with assignment and atomic claiming), and the agent-to-agent message bus as a Messages tab. A first-run onboarding wizard walks new nodes through everything &mdash; re-runnable any time from Settings.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>A reranker that installs itself</h4><p>One click in the dashboard and SAGE downloads a pinned llama.cpp build for your platform and the bge-reranker-v2-m3 model, verifies both by checksum, then starts and manages the sidecar &mdash; no terminal, no package manager, nothing leaves your machine. Recall results get re-scored by a cross-encoder for sharper relevance, and the recall depth setting now goes up to 20 with guidance that adapts to whether the reranker is on.</p></div></div>
@@ -954,7 +1107,7 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI&rsquo;s memory from existing conversation history.</p></div></div>
         <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
         <div class="feature-card"><div><h3>Federation</h3><p>Link two SAGE brains on a LAN or operator-provided route with a human-verified join ceremony. Share chosen domains live, at a clearance you set &mdash; revocable any time.</p></div></div>
-        <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Standard SQLite database. Open it with any tool, query it, back it up. You own every byte.</p></div></div>
+        <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Local BadgerDB/SQLite stores under your home directory. Inspect, query, back up, and move your data.</p></div></div>
         <div class="feature-card"><div><h3>Agent Pipeline</h3><p>Route work between AI agents. Send research to one model, analysis to another, results back to your primary &mdash; all through SAGE.</p></div></div>
         <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
       </div>
@@ -975,7 +1128,7 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <!-- FAQ -->
-      <div style="margin-top:80px;">
+      <div id="faq" style="margin-top:80px;">
         <div class="reveal" style="text-align:center;">
           <div class="section-tag">FAQ</div>
           <h2>Questions before you install</h2>
@@ -983,7 +1136,7 @@ footer a:hover { text-decoration: underline; }
         <div class="faq-grid reveal">
           <div class="faq-item"><h3>What is SAGE?</h3><p>SAGE is local memory infrastructure for AI agents. It gives tools like Claude Code, Codex, Cursor, Windsurf, and Claude Desktop a persistent memory server they can use through MCP or REST.</p></div>
           <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation, confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
-          <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in an inspectable SQLite store, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
+          <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
           <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
           <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds the rebuilt CEREBRUM dashboard, first-run onboarding, guided semantic setup, a self-installing local reranker, v11 federation, and the app-v15 consensus fork.</p></div>
           <div class="faq-item"><h3>What does federation mean in v11?</h3><p>v11 federation is LAN-first: it links two separate SAGE brains through a human-verified ceremony when the nodes can already reach each other, such as same LAN, VPN, or your own tunnel. Built-in internet/NAT traversal is planned for v11.5.</p></div>
@@ -1010,13 +1163,13 @@ footer a:hover { text-decoration: underline; }
           <div class="step-num">01</div>
           <div class="step-icon"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
           <h3>Install SAGE</h3>
-          <p>Download for macOS or Windows. Double-click to install. Signed and notarized.</p>
+          <p>Download for macOS, Windows, or Linux. Install the signed release asset and open the local dashboard.</p>
         </div>
         <div class="step-card">
           <div class="step-num">02</div>
           <div class="step-icon"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
           <h3>Connect Your AI</h3>
-          <p>The setup wizard generates MCP config for your AI &mdash; Claude, ChatGPT, DeepSeek, Gemini, Cursor, or any MCP tool.</p>
+          <p>The setup wizard generates MCP config for Claude Code, Codex, Cursor, Windsurf, Claude Desktop, and other MCP-capable tools.</p>
         </div>
         <div class="step-card">
           <div class="step-num">03</div>
@@ -1035,7 +1188,7 @@ footer a:hover { text-decoration: underline; }
         <div class="reveal" style="text-align:center;">
           <div class="section-tag">ChatGPT</div>
           <h2>Connecting ChatGPT</h2>
-          <p class="section-desc" style="margin:0 auto 32px;">ChatGPT does not speak the same MCP protocol as Claude, Cursor, and Cline. SAGE ships an OAuth-based connector and a guided 6-step setup wizard that handles the tunnel, OAuth flow, and token issuance for you. A separate browser-extension path is available for users who prefer not to expose SAGE over a tunnel.</p>
+          <p class="section-desc" style="margin:0 auto 32px;">MCP-native tools connect locally. ChatGPT uses a separate OAuth connector path, so SAGE includes a guided setup flow for the tunnel, OAuth exchange, and token issuance. A browser-extension path is available for users who prefer not to expose SAGE over a tunnel.</p>
         </div>
         <div style="text-align:center;" class="reveal">
           <a href="connect.html#chatgpt" class="btn-secondary">ChatGPT setup instructions &rarr;</a>
@@ -1093,7 +1246,7 @@ footer a:hover { text-decoration: underline; }
       <div class="reveal" style="text-align:center;">
         <div class="section-tag">Multi-Agent Networks</div>
         <h2>Build your private<br>AI network</h2>
-        <p class="section-desc" style="margin:0 auto;">SAGE starts as one brain. When you need a team &mdash; across machines, family members, or an entire org &mdash; add agents from the dashboard.</p>
+        <p class="section-desc" style="margin:0 auto;">SAGE starts as one local brain. When you need a team across projects, machines, or an organization, add agents from the dashboard.</p>
       </div>
 
       <div class="network-grid reveal">
@@ -1135,7 +1288,7 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <div class="info-note reveal" style="margin-top:40px;">
-        <strong>100% dashboard-driven.</strong> Generate signing keys, configure permissions, rotate credentials &mdash; all from the CEREBRUM dashboard. No CLI commands, no config files, no SSH. Click &ldquo;Add Agent&rdquo;, run the install command, done.
+        <strong>Dashboard-driven control.</strong> Generate signing keys, configure permissions, and rotate credentials from CEREBRUM. The only terminal step is the generated claim command an agent runs inside its project folder.
       </div>
     </div>
   </div>
@@ -1154,7 +1307,7 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <div class="info-note reveal" style="margin-top:40px;margin-bottom:40px;border-left:3px solid var(--teal);">
-        <strong>Retrieval benchmarks.</strong> SAGE on LongMemEval-S (Wu et al., ICLR 2025, 500 questions): <strong>R@5 = 0.8927, R@10 = 0.9461, MRR = 0.8842</strong>. On LoCoMo (Maharana et al., ACL 2024, 1986 questions): <strong>R@5 = 0.6394, Hit@5 = 0.6954</strong>; scored via mem0's published LLM-judge harness: <strong>0.7656</strong>. Every write through full BFT consensus. The hybrid recall stack that produced these numbers ships unchanged in v8.0. Reproducers in <a href="https://github.com/l33tdawg/sage/tree/main/bench" target="_blank" rel="noopener" style="color:var(--teal);">bench/</a>.
+        <strong>Retrieval benchmarks.</strong> SAGE on LongMemEval-S (Wu et al., ICLR 2025, 500 questions): <strong>R@5 = 0.8927, R@10 = 0.9461, MRR = 0.8842</strong>. On LoCoMo (Maharana et al., ACL 2024, 1986 questions): <strong>R@5 = 0.6394, Hit@5 = 0.6954</strong>; scored via mem0's published LLM-judge harness: <strong>0.7656</strong>. Every write goes through BFT consensus; the local semantic recall and reranking stack ships in v11. Reproducers live in <a href="https://github.com/l33tdawg/sage/tree/main/bench" target="_blank" rel="noopener" style="color:var(--teal);">bench/</a>.
       </div>
 
       <div class="papers-grid reveal">
@@ -1191,8 +1344,8 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="reveal" style="text-align:center;">
         <div class="section-tag">For Developers</div>
-        <h2>Infrastructure,<br>not a library</h2>
-        <p class="section-desc" style="margin:0 auto;">SAGE isn't an API you call. It's memory infrastructure &mdash; a local server your AI connects to via MCP. Build from source or use the Python SDK.</p>
+        <h2>Local memory infrastructure<br>with real developer hooks</h2>
+        <p class="section-desc" style="margin:0 auto;">Run SAGE as a local memory server, then connect through MCP, REST, or the Python SDK. The dashboard handles setup; the APIs stay available when you need automation.</p>
       </div>
 
       <div class="dev-install reveal">
@@ -1221,7 +1374,7 @@ footer a:hover { text-decoration: underline; }
       <div class="dev-badges reveal">
         <div class="dev-badge"><strong>Go 1.25+</strong></div>
         <div class="dev-badge"><strong>Python SDK</strong></div>
-        <div class="dev-badge"><strong>SQLite</strong> embedded</div>
+        <div class="dev-badge"><strong>BadgerDB</strong> + SQLite</div>
         <div class="dev-badge"><strong>MCP</strong> protocol</div>
         <div class="dev-badge"><strong>REST API</strong></div>
         <div class="dev-badge"><strong>Apache 2.0</strong></div>
@@ -1232,15 +1385,33 @@ footer a:hover { text-decoration: underline; }
         <div class="reveal" style="text-align:center;">
           <div class="section-tag">Privacy &amp; Security</div>
           <h2>Your data never<br>leaves your machine</h2>
-          <p class="section-desc" style="margin:0 auto;">Most &ldquo;memory plugins&rdquo; send your conversations to servers. SAGE runs entirely local. A SQLite file in your home directory.</p>
+          <p class="section-desc" style="margin:0 auto;">Most &ldquo;memory plugins&rdquo; send your conversations to servers. SAGE runs locally, with memories stored in local BadgerDB/SQLite stores under your home directory.</p>
         </div>
         <div class="privacy-grid reveal">
           <div class="privacy-visual">
-            <div class="shield"><div class="shield-shape"></div><div class="shield-ring"></div></div>
+            <div class="privacy-brain" aria-label="Animated CEREBRUM MRI memory map stored locally">
+              <div class="brain-stage" aria-hidden="true">
+                <div class="brain-shell"></div>
+                <div class="brain-lobe one"></div>
+                <div class="brain-lobe two"></div>
+                <div class="brain-lobe three"></div>
+                <div class="brain-slice one"></div>
+                <div class="brain-slice two"></div>
+                <div class="brain-slice three"></div>
+                <div class="brain-stem"></div>
+                <div class="brain-core"></div>
+                <div class="brain-node"></div>
+                <div class="brain-node"></div>
+                <div class="brain-node"></div>
+                <div class="brain-node"></div>
+                <div class="brain-node"></div>
+              </div>
+              <div class="brain-caption">CEREBRUM MRI - local memory map</div>
+            </div>
           </div>
           <div class="privacy-points">
             <div class="privacy-point"><div><h3>100% Local</h3><p>No cloud accounts. No telemetry. Memories live in <code>~/.sage/</code> and nowhere else.</p></div></div>
-            <div class="privacy-point"><div><h3>Fully Inspectable</h3><p>Standard SQLite. Open it with any tool, query it, back it up, move it.</p></div></div>
+            <div class="privacy-point"><div><h3>Fully Inspectable</h3><p>Local data stores under <code>~/.sage/</code>. Inspect them, query them, back them up, move them.</p></div></div>
             <div class="privacy-point"><div><h3>Tamper-Evident</h3><p>Every memory is digitally signed with your local key. Full audit trail.</p></div></div>
             <div class="privacy-point"><div><h3>AES-256 Encrypted at Rest</h3><p>Optional encryption for the memory vault. If your machine is stolen, the on-disk memories remain unreadable.</p></div></div>
           </div>
@@ -1287,22 +1458,33 @@ const observer = new IntersectionObserver((entries) => {
 }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
 document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
 
-function switchTab(name) {
+function switchTab(name, scrollTarget) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
   const tab = document.getElementById('tab-' + name);
   if (tab) {
     tab.classList.add('active');
-    window.scrollTo(0, 0);
     // Trigger reveals for the newly visible tab
     tab.querySelectorAll('.reveal').forEach(el => {
       observer.observe(el);
     });
+    if (scrollTarget) {
+      requestAnimationFrame(() => {
+        const target = document.getElementById(scrollTarget);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } else {
+      window.scrollTo(0, 0);
+    }
   }
-  const btn = document.querySelector(`.nav-tab[data-tab="${name}"]`);
+  const btn = scrollTarget
+    ? document.querySelector(`.nav-tab[data-scroll="${scrollTarget}"]`)
+    : document.querySelector(`.nav-tab[data-tab="${name}"]:not([data-scroll])`);
   if (btn) btn.classList.add('active');
   // Update URL hash
-  if (name !== 'home') {
+  if (scrollTarget) {
+    history.replaceState(null, '', '#' + scrollTarget);
+  } else if (name !== 'home') {
     history.replaceState(null, '', '#' + name);
   } else {
     history.replaceState(null, '', window.location.pathname);
@@ -1310,7 +1492,7 @@ function switchTab(name) {
 }
 
 document.querySelectorAll('.nav-tab').forEach(btn => {
-  btn.addEventListener('click', () => { switchTab(btn.dataset.tab); closeMobileNav(); });
+  btn.addEventListener('click', () => { switchTab(btn.dataset.tab, btn.dataset.scroll); closeMobileNav(); });
 });
 
 // ─── Mobile hamburger menu ───
@@ -1338,6 +1520,8 @@ document.addEventListener('click', (e) => {
 const initHash = window.location.hash.slice(1);
 if (initHash && document.getElementById('tab-' + initHash)) {
   switchTab(initHash);
+} else if (initHash === 'faq') {
+  switchTab('features', 'faq');
 }
 
 // ─── Neural Network Canvas ───

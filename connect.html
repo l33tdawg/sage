@@ -531,7 +531,7 @@ sage-gui mcp install</code><button class="copy-btn" onclick="copyCode(this)">Cop
         <li>Mint a bearer token &mdash; shown once, with one-click copy buttons for every field ChatGPT&rsquo;s connector form requires.</li>
       </ol>
       <div class="info-box" style="margin-top:12px;">
-        <strong>Local-first.</strong> The wizard is pure local orchestration &mdash; no SAGE-hosted relay, no phone-home. The tunnel runs under your Cloudflare account; SAGE never sees the traffic.
+        <strong>Local-first.</strong> The wizard is pure local orchestration &mdash; no SAGE-hosted relay, no phone-home. The tunnel runs under your Cloudflare account; the SAGE project never sees the traffic.
       </div>
       <div class="info-box warn" style="margin-top:12px;">
         <strong>Windows users.</strong> Step 1 uses <code>winget install --id Cloudflare.cloudflared</code>. If <code>winget</code> isn&rsquo;t available (older Windows 10), grab <code>cloudflared-windows-amd64.exe</code> from <a href="https://github.com/cloudflare/cloudflared/releases" style="color:var(--accent);">the cloudflared releases page</a>, rename to <code>cloudflared.exe</code>, drop it on your PATH (e.g. <code>C:\Windows\System32</code>), then re-run step 1. After the wizard finishes, the tunnel won&rsquo;t auto-respawn on reboot until you register it as a Windows service &mdash; see step 3.
@@ -670,7 +670,7 @@ Environment:
 
     <div class="faq-item">
       <h4>Where is my data stored?</h4>
-      <p>Everything stays on your machine in <code>~/.sage/</code>. The database is a single SQLite file. Nothing is ever sent to any cloud. If you enabled encryption during setup, all memories are AES-256-GCM encrypted at rest.</p>
+      <p>Everything stays on your machine in <code>~/.sage/</code> by default. SAGE uses local BadgerDB/SQLite stores. Optional connector flows, such as your Cloudflare tunnel, use only the network path you configure. If you enabled encryption during setup, memories are AES-256-GCM encrypted at rest.</p>
     </div>
 
     <div class="faq-item">
