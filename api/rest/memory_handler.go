@@ -475,10 +475,11 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	// This ensures memories only appear in the query layer AFTER consensus.
 	if s.suppCache != nil {
 		s.suppCache.Put(memoryID, &memory.SupplementaryData{
-			Embedding:        req.Embedding,
-			EmbeddingHash:    embeddingHash,
-			Provider:         req.Provider,
-			KnowledgeTriples: req.KnowledgeTriples,
+			Embedding:         req.Embedding,
+			EmbeddingHash:     embeddingHash,
+			Provider:          req.Provider,
+			EmbeddingProvider: s.embedderStampFor(req.Embedding),
+			KnowledgeTriples:  req.KnowledgeTriples,
 		})
 	}
 

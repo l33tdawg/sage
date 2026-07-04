@@ -1469,3 +1469,38 @@ func TestListMemoriesActiveHidesDeprecated(t *testing.T) {
 	require.Len(t, dep, 1)
 	require.Equal(t, "d", dep[0].MemoryID)
 }
+
+// TestInsertMemory_StampsEmbeddingProvider guards the v11 fix where every new
+// memory landed with embedding_provider='' and the dashboard forever counted
+// it as "needs re-embed" even though the vector was semantic. The stamp must
+// survive the insert AND the upsert path must never clobber an existing stamp
+// with an empty one.
+func TestInsertMemory_StampsEmbeddingProvider(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	rec := testMemory("emb-stamp-1", "agent-a", "stamped semantic memory", "test-domain")
+	rec.Embedding = []float32{0.1, 0.2, 0.3}
+	rec.EmbeddingProvider = "ollama"
+	require.NoError(t, s.InsertMemory(ctx, rec))
+
+	counts, err := s.CountMemoriesByProvider(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts["ollama"], "insert must stamp embedding_provider")
+	assert.Zero(t, counts[""], "no untagged rows expected")
+
+	// Re-upsert the same memory WITHOUT a stamp (e.g. a replayed write that
+	// lacks supp data): the existing tag must survive.
+	rec2 := testMemory("emb-stamp-1", "agent-a", "stamped semantic memory", "test-domain")
+	require.NoError(t, s.InsertMemory(ctx, rec2))
+	counts, err = s.CountMemoriesByProvider(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts["ollama"], "upsert without a stamp must not clobber the existing tag")
+
+	// An unstamped brand-new memory still lands as '' = needs re-embed.
+	rec3 := testMemory("emb-stamp-2", "agent-a", "hash-era memory", "test-domain")
+	require.NoError(t, s.InsertMemory(ctx, rec3))
+	counts, err = s.CountMemoriesByProvider(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts[""], "unstamped memory stays re-embeddable")
+}

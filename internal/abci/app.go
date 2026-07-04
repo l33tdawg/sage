@@ -2778,6 +2778,7 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		if supp := app.SuppCache.Pop(memoryID); supp != nil {
 			record.Embedding = supp.Embedding
 			record.Provider = supp.Provider
+			record.EmbeddingProvider = supp.EmbeddingProvider
 			if len(supp.EmbeddingHash) > 0 {
 				record.EmbeddingHash = supp.EmbeddingHash
 			}
@@ -3095,6 +3096,7 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		if supp := app.SuppCache.Pop(sharedID); supp != nil {
 			record.Embedding = supp.Embedding
 			record.Provider = supp.Provider
+			record.EmbeddingProvider = supp.EmbeddingProvider
 			if len(supp.EmbeddingHash) > 0 {
 				record.EmbeddingHash = supp.EmbeddingHash
 			}

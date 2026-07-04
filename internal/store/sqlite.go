@@ -854,8 +854,8 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 
 	_, err = s.writeExecContext(ctx,
 		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, provider, confidence_score, status, parent_hash, task_status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			memory_type, domain_tag, provider, embedding_provider, confidence_score, status, parent_hash, task_status, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (memory_id) DO UPDATE SET
 			submitting_agent = excluded.submitting_agent,
 			status = excluded.status,
@@ -876,10 +876,11 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 			embedding = COALESCE(excluded.embedding, memories.embedding),
 			embedding_hash = COALESCE(excluded.embedding_hash, memories.embedding_hash),
 			provider = COALESCE(NULLIF(excluded.provider, ''), memories.provider),
+			embedding_provider = COALESCE(NULLIF(excluded.embedding_provider, ''), memories.embedding_provider),
 			parent_hash = COALESCE(NULLIF(excluded.parent_hash, ''), memories.parent_hash)`,
 		record.MemoryID, record.SubmittingAgent, content, record.ContentHash,
 		encEmb, record.EmbeddingHash,
-		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,
+		string(record.MemoryType), record.DomainTag, record.Provider, record.EmbeddingProvider, record.ConfidenceScore,
 		string(record.Status), record.ParentHash, string(record.TaskStatus), formatTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)

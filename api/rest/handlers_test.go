@@ -21,6 +21,7 @@ import (
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // --- Mock stores -------------------------------------------------------------
@@ -68,6 +69,25 @@ func (m *mockMemoryStore) GetMemory(_ context.Context, memoryID string) (*memory
 	}
 	return rec, nil
 }
+
+// Embedding-maintenance surface (added with the v11 embeddings-setup work) -
+// inert stubs, the REST tests never exercise re-embedding.
+func (m *mockMemoryStore) UpdateMemoryEmbedding(_ context.Context, _ string, _ []float32, _ string) error {
+	return nil
+}
+func (m *mockMemoryStore) CountMemoriesByProvider(_ context.Context) (map[string]int, error) {
+	return map[string]int{}, nil
+}
+func (m *mockMemoryStore) ListMemoriesForReembed(_ context.Context, _ int) ([]store.ReembedItem, error) {
+	return nil, nil
+}
+func (m *mockMemoryStore) MarkMemoryEmbeddingSkipped(_ context.Context, _ string) error { return nil }
+func (m *mockMemoryStore) MarkMemoryEmbeddingError(_ context.Context, _ string) error   { return nil }
+func (m *mockMemoryStore) DeprecateUnreadableMemories(_ context.Context) (int, error)   { return 0, nil }
+func (m *mockMemoryStore) RekeyUnreadableMemories(_ context.Context, _ *vault.Vault, _ bool) (int, error) {
+	return 0, nil
+}
+func (m *mockMemoryStore) ResetErroredEmbeddings(_ context.Context) (int, error) { return 0, nil }
 
 func (m *mockMemoryStore) UpdateStatus(_ context.Context, memoryID string, status memory.MemoryStatus, now time.Time) error {
 	rec, ok := m.memories[memoryID]
@@ -1065,6 +1085,9 @@ func (m *mockAgentStore) GetAgentByName(_ context.Context, name string) (*store.
 		}
 	}
 	return nil, nil
+}
+func (m *mockAgentStore) ClearStaleRedeployLogs(_ context.Context) (int, error) {
+	return 0, nil
 }
 
 // --- Domain Access Read Enforcement Tests ------------------------------------

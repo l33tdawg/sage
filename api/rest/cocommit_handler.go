@@ -194,10 +194,11 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 			embeddingHash = hashEmbedding(req.Embedding)
 		}
 		s.suppCache.Put(env.SharedID, &memory.SupplementaryData{
-			Content:       req.Content,
-			Embedding:     req.Embedding,
-			EmbeddingHash: embeddingHash,
-			Provider:      req.Provider,
+			Content:           req.Content,
+			Embedding:         req.Embedding,
+			EmbeddingHash:     embeddingHash,
+			Provider:          req.Provider,
+			EmbeddingProvider: s.embedderStampFor(req.Embedding),
 		})
 	}
 

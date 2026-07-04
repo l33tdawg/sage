@@ -46,7 +46,11 @@ type MemoryRecord struct {
 	MemoryType      MemoryType   `json:"memory_type"`
 	DomainTag       string       `json:"domain_tag"`
 	Provider        string       `json:"provider,omitempty"`
-	ConfidenceScore float64      `json:"confidence_score"`
+	// EmbeddingProvider records which EMBEDDER produced Embedding ("ollama",
+	// ...; empty = none/unknown, i.e. needs re-embed). Distinct from Provider,
+	// which is the submitting agent's LLM identity.
+	EmbeddingProvider string  `json:"embedding_provider,omitempty"`
+	ConfidenceScore   float64 `json:"confidence_score"`
 	Status          MemoryStatus `json:"status"`
 	ParentHash      string       `json:"parent_hash,omitempty"`
 	TaskStatus      TaskStatus   `json:"task_status,omitempty"`
@@ -82,10 +86,15 @@ type KnowledgeTriple struct {
 // stages this in a process-local cache; the ABCI app reads it during FinalizeBlock
 // to build the complete record that Commit flushes to the offchain store.
 type SupplementaryData struct {
-	Embedding        []float32
-	EmbeddingHash    []byte
-	Provider         string
-	KnowledgeTriples []KnowledgeTriple
+	Embedding     []float32
+	EmbeddingHash []byte
+	Provider      string
+	// EmbeddingProvider names the embedder that produced Embedding, so the
+	// off-chain row is stamped at insert time. Without it every new memory
+	// lands at embedding_provider='' and the dashboard forever counts it as
+	// "needs re-embed" even though the vector is semantic.
+	EmbeddingProvider string
+	KnowledgeTriples  []KnowledgeTriple
 	// Content backfills the off-chain record for txs that carry only a
 	// ContentHash on-chain (co-commit envelopes): the REST layer stages the raw
 	// content here so the local SQLite record is recallable. Off-chain mirror
