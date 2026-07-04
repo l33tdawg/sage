@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentTags, transferTag, transferDomain, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
 embeddingsStatus, checkOllamaEmbed, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
@@ -1814,6 +1814,28 @@ function TasksPage({ sse }) {
     const reloadTimer = useRef(null);
     const agentName = (id) => { const a = agentList.find(x => x.agent_id === id); return a ? a.name : (id ? id.slice(0, 8) : ''); };
 
+    // Board / Messages tabs. The agent message bus (formerly its own Pipeline
+    // page) lives here as a second tab; #/pipeline deep-links keep working and
+    // select it. The hash is the single source of truth for which tab shows.
+    const isMessagesHash = () => window.location.hash.startsWith('#/pipeline');
+    const [tab, setTab] = useState(isMessagesHash() ? 'messages' : 'board');
+    const [pipePending, setPipePending] = useState(0);
+    useEffect(() => {
+        const onHash = () => setTab(isMessagesHash() ? 'messages' : 'board');
+        window.addEventListener('hashchange', onHash);
+        return () => window.removeEventListener('hashchange', onHash);
+    }, []);
+    // Keep the Messages badge live while the user is on the Board; on the
+    // Messages tab PipelineView's own 10s refresh reports counts via onStats.
+    useEffect(() => {
+        const poll = () => fetchPipelineStats().then(d => setPipePending((d.stats && d.stats.pending) || 0)).catch(() => {});
+        poll();
+        if (tab === 'messages') return;
+        const id = setInterval(poll, 10000);
+        return () => clearInterval(id);
+    }, [tab]);
+    const switchTab = (t) => { window.location.hash = t === 'messages' ? '/pipeline' : '/tasks'; };
+
     useEffect(() => {
         loadTasks();
         fetchAgents().then(d => setAgentList(d.agents || [])).catch(() => {});
@@ -1941,6 +1963,16 @@ function TasksPage({ sse }) {
 
     return html`
         <div class="tasks-page">
+            <div class="settings-tabs tasks-tabs" role="tablist">
+                <button class="settings-tab ${tab === 'board' ? 'active' : ''}" role="tab" aria-selected=${tab === 'board'} onClick=${() => switchTab('board')}>
+                    ${icons.tasks}<span>Board</span>
+                </button>
+                <button class="settings-tab ${tab === 'messages' ? 'active' : ''}" role="tab" aria-selected=${tab === 'messages'} onClick=${() => switchTab('messages')}>
+                    ${icons.pipeline}<span>Messages</span>
+                    ${pipePending > 0 ? html`<span class="tab-count" title="${pipePending} pending message${pipePending !== 1 ? 's' : ''}">${pipePending}</span>` : ''}
+                </button>
+            </div>
+            ${tab === 'messages' ? html`<${PipelineView} onStats=${(s) => setPipePending((s && s.pending) || 0)} />` : html`
             <div class="tasks-header">
                 <div>
                     <h2 class="tasks-title">Task Board <${HelpTip} text="Each card is a governed memory tagged [TASK], flowing through consensus like any other memory. Drag a card between columns, or use the play / check / drop buttons to move it through Planned, In Progress, Done, and Dropped." /><${PageHelp} section="getting-started" label="How SAGE memories work" /></h2>
@@ -2069,6 +2101,7 @@ function TasksPage({ sse }) {
                     `;
                 })}
             </div>`}
+            `}
         </div>
     `;
 }
@@ -3505,7 +3538,9 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     const [warn, setWarn] = useState(null); // non-blocking notice (e.g. partial re-embed failures)
     const [skipped, setSkipped] = useState(0); // memories that couldn't be read/embedded (this run)
     const [panelBusy, setPanelBusy] = useState(false); // UnreadableMemoriesPanel recover/deprecate in flight
-    const busy = pulling || reembedding || enabling;
+    // On the terminal 'done' step the node is restarting itself - keep the
+    // modal closable there so the flow can't dead-end (review HIGH).
+    const busy = pulling || reembedding || (enabling && step !== 'done');
     const refreshStatus = () => { embeddingsStatus().then(setStatus).catch(() => {}); };
 
     useEffect(() => {
@@ -3596,8 +3631,19 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
 
     const doEnable = async () => {
         setEnabling(true); setErr(null);
-        try { await enableSemanticEmbeddings(); setStep('done'); }
-        catch (e) { setErr(e.message); setEnabling(false); }
+        try {
+            await enableSemanticEmbeddings();
+            setStep('done');
+            // The node execs itself in place to pick up the new embedder, so
+            // poll until it answers again and only then release the modal -
+            // otherwise Done/× stay dead and the user is stuck (review HIGH).
+            for (;;) {
+                await new Promise(res => setTimeout(res, 2000));
+                const s = await embeddingsStatus().catch(() => null);
+                if (s) { setStatus(s); break; }
+            }
+            setEnabling(false);
+        } catch (e) { setErr(e.message); setEnabling(false); }
     };
 
     const pct = prog && prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 0;
@@ -3663,7 +3709,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                         <div style="text-align:center;">
                             <div style="font-size:34px;margin-bottom:6px;">✓</div>
                             <h3 style="margin:0 0 8px;color:var(--accent-green);">Memories re-read</h3>
-                            <p style="color:var(--text-dim);">Last step: switch SAGE over to smart memory. It restarts briefly (about 10-20s) — unlock the vault when it's back.</p>
+                            <p style="color:var(--text-dim);">Last step: switch SAGE over to smart memory. It restarts briefly (about 10-20s). If your vault has a passphrase, unlock it when the node is back.</p>
                             <${UnreadableMemoriesPanel} status=${status} onChange=${refreshStatus} onBusy=${setPanelBusy} />
                             <button class="btn btn-primary" onClick=${doEnable} disabled=${enabling || panelBusy} title=${panelBusy ? 'Finish the recovery first' : ''}>${enabling ? 'Switching…' : 'Finish & restart'}</button>
                         </div>
@@ -3674,7 +3720,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                             <div style="text-align:center;">
                                 <div style="font-size:38px;margin-bottom:8px;">🧠</div>
                                 <h3 style="margin:0 0 8px;color:var(--accent-green);">Smart memory is ${enabling ? 'turning on' : 'on'}</h3>
-                                <p style="color:var(--text-dim);">${status?.is_semantic ? 'This node is using semantic search.' : 'SAGE is restarting to finish. Unlock the vault when it returns, and semantic search will be live.'}</p>
+                                <p style="color:var(--text-dim);">${status?.is_semantic ? 'This node is using semantic search.' : 'SAGE is restarting to finish (about 10-20s). If your vault has a passphrase, unlock it when the node is back and semantic search will be live.'}</p>
                             </div>
                             ${/* Only offer recover/deprecate when the node is actually up + unlocked — after
                                 a Finish&restart the node is mid-reboot with the vault locked, so the panel's
@@ -3706,10 +3752,21 @@ function RerankerControl() {
     const [busy, setBusy] = useState(false);
     const [testResult, setTestResult] = useState(null);
     const [msg, setMsg] = useState('');
+    const [detected, setDetected] = useState(null);
+    const urlDirty = useRef(false); // operator typed - a late detect probe must not clobber it
     const [, bumpRender] = useState(0); // force the controlled toggle to resync even when a guard bails
     useEffect(() => {
-        fetchReranker().then(c => { setCfg(c); setUrl(c.url || ''); setModel(c.model || ''); })
-            .catch(() => setCfg({ enabled: false, url: '', model: '' }));
+        fetchReranker().then(c => {
+            setCfg(c); setUrl(c.url || ''); setModel(c.model || '');
+            // Nothing configured yet: probe the conventional local port and
+            // pre-fill the URL so the operator isn't staring at a blank field.
+            // The probe can take seconds; only fill if the field is untouched.
+            if (!c.enabled && !c.url) {
+                detectReranker().then(d => {
+                    if (d && d.found && d.url && !urlDirty.current) { setUrl(d.url); setDetected(d.url); }
+                }).catch(() => {});
+            }
+        }).catch(() => setCfg({ enabled: false, url: '', model: '' }));
     }, []);
     const inputStyle = 'background:var(--bg-elev);border:1px solid var(--border);border-radius:4px;padding:6px 8px;color:var(--text);font-size:12px;width:100%;';
     if (!cfg) return html`<div class="settings-row"><span class="label">Reranker</span><span class="value" style="color:var(--text-muted)">Loading...</span></div>`;
@@ -3743,7 +3800,7 @@ function RerankerControl() {
                 </span>
             </div>
             <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;max-width:560px;">
-                <input style=${inputStyle} placeholder="Reranker URL (e.g. http://localhost:8081)" value=${url} onInput=${e => setUrl(e.target.value)} />
+                <input style=${inputStyle} placeholder="Reranker URL (e.g. http://localhost:8081)" value=${url} onInput=${e => { urlDirty.current = true; setUrl(e.target.value); }} />
                 <input style=${inputStyle} placeholder="Model (default BAAI/bge-reranker-v2-m3)" value=${model} onInput=${e => setModel(e.target.value)} />
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
                     <button class="btn" disabled=${busy} onClick=${test}>Test connection</button>
@@ -3751,6 +3808,9 @@ function RerankerControl() {
                     ${testResult ? html`<span style="font-size:12px;color:${testResult.ok ? '#10b981' : '#ef4444'};">${testResult.ok ? 'Reachable' : ('Failed: ' + String(testResult.error || '').slice(0, 100))}</span>` : ''}
                     ${msg ? html`<span style="font-size:12px;color:var(--text-muted);">${msg}</span>` : ''}
                 </div>
+                ${detected && !cfg.enabled ? html`
+                    <div style="font-size:12px;color:#10b981;">Found a reranker running at ${detected} - the URL was filled in for you. Click Save & enable to start using it (the connection is verified on save).</div>
+                ` : ''}
                 <div style="font-size:11px;color:var(--text-muted);">Optional. Point at a TEI-compatible reranker server to re-score recall results for sharper relevance. Off by default; the bundled embedder works fine without it.</div>
             </div>
         </div>
@@ -3787,7 +3847,7 @@ function RestartNodeButton() {
     `;
 }
 
-function SettingsPage() {
+function SettingsPage({ onRunSetup }) {
     const [settingsTab, setSettingsTab] = useState('overview');
     const [stats, setStats] = useState(null);
     const [health, setHealth] = useState(null);
@@ -4152,6 +4212,13 @@ function SettingsPage() {
                         ${html`<${RestartNodeButton} />`}
                     </div>
                     <div class="settings-section" style="margin-top:16px">
+                        <h3>Setup <${HelpTip} text="Re-run the first-run setup: semantic memory + connect an AI tool. Safe to run any time - nothing changes until you click through it." /></h3>
+                        <div class="settings-row">
+                            <span class="label">Run the setup wizard again</span>
+                            <button class="btn" onClick=${() => onRunSetup && onRunSetup()}>Run setup</button>
+                        </div>
+                    </div>
+                    <div class="settings-section" style="margin-top:16px">
                         <h3>Preferences</h3>
                         <div class="settings-row">
                             <span class="label">Contextual Tooltips</span>
@@ -4311,6 +4378,7 @@ function ImportPage({ sse }) {
 
     return html`
         <div class="import-page">
+            <div class="import-inner">
             <div class="import-header">
                 <h2>Import Memories</h2>
                 <p class="import-subtitle">Bring your AI conversations into SAGE</p>
@@ -4562,6 +4630,7 @@ function ImportPage({ sse }) {
                     </button>
                 </div>
             `}
+            </div>
         </div>
     `;
 }
@@ -5234,7 +5303,7 @@ function HelpOverlay({ onClose, initialSection }) {
             key: 'pipeline',
             title: 'Pipeline',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h4"/><path d="M16 12h4"/><rect x="8" y="8" width="8" height="8" rx="2"/><path d="M12 4v4"/><path d="M12 16v4"/><circle cx="2" cy="12" r="1" fill="currentColor"/><circle cx="22" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="2" r="1" fill="currentColor"/><circle cx="12" cy="22" r="1" fill="currentColor"/></svg>`,
-            summary: 'Route work between AI agents — SAGE as a message bus.',
+            summary: 'Route work between AI agents — SAGE as a message bus. Lives under Tasks > Messages.',
             content: html`
                 <p>The Pipeline turns SAGE into an agent-to-agent message bus. Instead of copy-pasting between Claude, Perplexity, and ChatGPT, agents can send work to each other through SAGE. The pipeline is ephemeral — messages auto-expire, and only a journal summary persists as a memory.</p>
                 <div class="guide-detail-grid">
@@ -5263,8 +5332,8 @@ function HelpOverlay({ onClose, initialSection }) {
                         <div class="guide-detail-desc">Pipeline messages have a time-to-live (default: 60 minutes, max: 24 hours). Expired messages are automatically cleaned up. Completed messages are purged after 24 hours — only the journal summary persists as a committed memory.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Dashboard</div>
-                        <div class="guide-detail-desc">The Pipeline page in CEREBRUM shows all messages with status filters (pending, claimed, completed, expired, failed). Click any message to expand and see the full payload, result, and metadata. Auto-refreshes every 10 seconds.</div>
+                        <div class="guide-detail-label">Messages tab</div>
+                        <div class="guide-detail-desc">The Messages tab under Tasks shows all messages with status filters (pending, claimed, completed, expired, failed). Click any message to expand and see the full payload, result, and metadata. Auto-refreshes every 10 seconds.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Auto-journal</div>
@@ -8167,7 +8236,111 @@ function RemoveConfirmModal({ agent, onConfirm, onCancel }) {
 // Pipeline Page — Agent-to-Agent Message Bus
 // ============================================================================
 
-function PipelinePage() {
+// ============================================================================
+// Onboarding - first-run setup, dashboard-native
+// ============================================================================
+
+// OnboardingWizard - shown once on a fresh node (empty brain + onboarding not
+// yet marked done) and re-runnable from Settings > Maintenance. Three short
+// steps that reuse the REAL setup surfaces (EmbeddingsSetupModal for semantic
+// memory, ConnectToolModal for wiring an AI tool) instead of duplicating them.
+// Closing it at ANY point marks onboarding done so it never nags; the Settings
+// entry is the way back in.
+function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
+    const [step, setStep] = useState(0); // 0 welcome | 1 memory | 2 connect | 3 done
+    const [emb, setEmb] = useState(null);
+    const [agents, setAgents] = useState([]);
+    const [showEmbedSetup, setShowEmbedSetup] = useState(false);
+    const [showConnect, setShowConnect] = useState(false);
+    const [showChatGPT, setShowChatGPT] = useState(false);
+    const [chatGPTTarget, setChatGPTTarget] = useState('chatgpt');
+
+    const refreshEmb = () => embeddingsStatus().then(setEmb).catch(() => setEmb(null));
+    const refreshAgents = () => fetchAgents().then(d => setAgents(d.agents || [])).catch(() => {});
+    useEffect(() => { refreshEmb(); refreshAgents(); }, []);
+
+    const finish = () => { saveOnboarding(true).catch(() => {}); onClose(); };
+
+    const semantic = !!(emb && emb.is_semantic);
+    const ollamaUp = !!(emb && emb.ollama_running);
+    const titles = ['Welcome to SAGE', 'Semantic memory', 'Connect an AI tool', "You're set"];
+
+    return html`
+        <div class="wizard-overlay">
+            <div class="wizard-modal" style="max-width:560px;">
+                <div class="wizard-header">
+                    <h2>${titles[step]}</h2>
+                    <button class="detail-close" onClick=${finish} title="Close - you can rerun this from Settings > Maintenance">×</button>
+                </div>
+                <div class="wizard-body" style="padding:20px;line-height:1.55;">
+                    ${step === 0 && html`
+                        <p style="margin-top:0;">Your node is running - this dashboard (CEREBRUM) is where you watch and curate everything your AI tools remember.</p>
+                        <p>Two quick steps take you from empty brain to working memory:</p>
+                        <ol style="margin:0 0 4px;padding-left:20px;color:var(--text-dim);">
+                            <li><strong>Semantic memory</strong> - recall by meaning, not just keywords.</li>
+                            <li><strong>Connect an AI tool</strong> - Claude Code, Codex, Cursor, ChatGPT and friends.</li>
+                        </ol>
+                        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
+                            <button class="btn" onClick=${finish}>Skip for now</button>
+                            <button class="btn btn-primary" onClick=${() => setStep(1)}>Let's go</button>
+                        </div>
+                    `}
+                    ${step === 1 && html`
+                        ${semantic ? html`
+                            <div style="display:flex;align-items:center;gap:10px;background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
+                                <span style="color:#10b981;font-size:18px;">✓</span>
+                                <div style="font-size:13px;">Semantic memory is <strong>on</strong> - your agents recall by meaning (Ollama + nomic-embed-text).</div>
+                            </div>
+                        ` : html`
+                            <p style="margin-top:0;">Out of the box SAGE recalls by <strong>keywords</strong>. Turning on the bundled semantic embedder lets your agents find memories by <strong>meaning</strong> - the single biggest recall upgrade.</p>
+                            ${ollamaUp
+                                ? html`<p style="color:#10b981;font-size:13px;">Ollama is already running on this machine - setup takes about a minute.</p>`
+                                : html`<p style="color:var(--text-dim);font-size:13px;">It uses <strong>Ollama</strong>, a free local model runner. The setup screen walks you through installing it - or skip for now and turn it on any time from Settings.</p>`}
+                            <button class="btn btn-primary" onClick=${() => setShowEmbedSetup(true)}>Set up semantic memory</button>
+                        `}
+                        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
+                            <button class="btn" onClick=${() => setStep(0)}>Back</button>
+                            ${semantic
+                                ? html`<button class="btn btn-primary" onClick=${() => setStep(2)}>Next</button>`
+                                : html`<button class="btn" onClick=${() => setStep(2)}>Skip this step</button>`}
+                        </div>
+                    `}
+                    ${step === 2 && html`
+                        <p style="margin-top:0;">Wire an AI tool to this node and it gets persistent memory: it reloads what it knows when it boots, and remembers what it learns as it works.</p>
+                        ${agents.length > 0 && html`<p style="color:#10b981;font-size:13px;">✓ ${agents.length} agent identit${agents.length === 1 ? 'y' : 'ies'} registered on this node.</p>`}
+                        <button class="btn btn-primary" onClick=${() => setShowConnect(true)}>Connect an AI tool</button>
+                        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
+                            <button class="btn" onClick=${() => setStep(1)}>Back</button>
+                            <button class="btn btn-primary" onClick=${() => setStep(3)}>Next</button>
+                        </div>
+                    `}
+                    ${step === 3 && html`
+                        <p style="margin-top:0;">That's the essentials. Two things worth knowing about:</p>
+                        <ul style="padding-left:20px;color:var(--text-dim);">
+                            <li><strong>Import</strong> - bring your existing ChatGPT / Claude / Gemini conversations into the brain.</li>
+                            <li><strong>The guide</strong> - how memories, consensus, agents and federation fit together.</li>
+                        </ul>
+                        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;flex-wrap:wrap;">
+                            <button class="btn" onClick=${() => { finish(); if (onNavigate) onNavigate('import'); }}>Import conversations</button>
+                            <button class="btn" onClick=${() => { finish(); if (onOpenGuide) onOpenGuide('getting-started'); }}>Open the guide</button>
+                            <button class="btn btn-primary" onClick=${finish}>Finish</button>
+                        </div>
+                    `}
+                </div>
+            </div>
+        </div>
+        ${showEmbedSetup && html`<${EmbeddingsSetupModal} onClose=${() => { setShowEmbedSetup(false); refreshEmb(); }} onDone=${refreshEmb} />`}
+        ${showConnect && html`<${ConnectToolModal} agents=${agents}
+            onOpenChatGPT=${(t) => { setChatGPTTarget(t || 'chatgpt'); setShowConnect(false); setShowChatGPT(true); }}
+            onClose=${() => { setShowConnect(false); refreshAgents(); }} />`}
+        ${showChatGPT && html`<${RemoteAccessWizard} agents=${agents} target=${chatGPTTarget} onClose=${() => setShowChatGPT(false)} />`}
+    `;
+}
+
+// PipelineView - the agent message bus, rendered as the Messages tab inside
+// the Tasks page (it used to be its own sidebar page). onStats reports the
+// latest status counts up so the tab badge stays fresh while you watch.
+function PipelineView({ onStats }) {
     const [items, setItems] = useState([]);
     const [stats, setStats] = useState({});
     const [total, setTotal] = useState(0);
@@ -8210,6 +8383,7 @@ function PipelinePage() {
             setItems(pipeData.items || []);
             setStats(statsData.stats || {});
             setTotal(statsData.total || 0);
+            if (onStats) onStats(statsData.stats || {});
         } catch (e) {
             console.error('Pipeline load error:', e);
             setError(e && e.message ? e.message : 'Failed to load pipeline');
@@ -8250,11 +8424,18 @@ function PipelinePage() {
     const truncate = (s, n) => s && s.length > n ? s.slice(0, n) + '...' : s;
 
     return html`
-        <div class="tasks-page" style="padding:24px;">
-            <div style="display:flex;align-items:center;gap:12px;margin-bottom:20px;flex-wrap:wrap;">
-                <h2 style="margin:0;font-size:20px;">Pipeline</h2>
-                <span style="color:var(--text-muted);font-size:13px;">Agent message bus - what agents ask each other to do, and notes you send them.</span>
-                <div style="flex:1"></div>
+        <div style="flex:1;min-height:0;overflow-y:auto;">
+            <div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+                <div style="flex:1;min-width:280px;">
+                    <div style="font-weight:600;font-size:15px;display:flex;align-items:center;gap:6px;">Agent messages <${PageHelp} section="pipeline" label="How the message bus works" /></div>
+                    <div style="font-size:12px;color:var(--text-muted);line-height:1.5;margin-top:4px;">
+                        Point-to-point handoffs between your agents - and notes you send them. A message waits as
+                        <strong>pending</strong>, turns <strong>claimed</strong> when the target agent picks it up on
+                        its next turn, and <strong>completed</strong> when it replies. Messages expire on their own;
+                        only a journal summary is kept as a memory. The Board tab is the shared to-do list; this is
+                        the direct line.
+                    </div>
+                </div>
                 ${agentList.length > 0 && html`<button class="btn btn-primary" onClick=${() => setShowCompose(v => !v)}>\u2709 Send note to agent</button>`}
                 <button class="btn" onClick=${loadData}>\u21BB Refresh</button>
             </div>
@@ -8308,15 +8489,13 @@ function PipelinePage() {
             `}
 
             ${!loading && !error && items.length === 0 && html`
-                <div style="text-align:center;padding:80px 20px;">
-                    <div style="margin-bottom:16px;opacity:0.25;">${icons.pipeline}</div>
-                    <p style="color:var(--text-muted);font-size:14px;margin:0 0 8px;">
-                        No pipeline messages${filter ? html` with status <strong>"${filter}"</strong>` : ''}.
-                    </p>
-                    <p style="color:var(--text-muted);font-size:12px;margin:0;max-width:500px;margin:0 auto;">
-                        Use <code style="background:var(--code-bg);padding:2px 6px;border-radius:4px;font-size:11px;">sage_pipe(to="perplexity", intent="research", payload="...")</code> from any connected agent to route work between AI providers.
-                    </p>
-                </div>
+                <${EmptyState} icon="pipeline"
+                    headline=${filter ? `No ${filter} messages` : 'No messages yet'}
+                    hint=${filter
+                        ? 'Nothing with this status right now. Clear the filter to see the whole feed.'
+                        : 'When an agent hands work to another (sage_pipe) or you send a note from here, it shows up in this feed.'}
+                    actionLabel=${agentList.length > 0 ? 'Send a note to an agent' : undefined}
+                    onAction=${agentList.length > 0 ? () => setShowCompose(true) : undefined} />
             `}
 
             ${items.length > 0 && html`
@@ -8771,6 +8950,7 @@ function App() {
     const [sseConnected, setSseConnected] = useState(false);
     const [timelineFilter, setTimelineFilter] = useState([]); // [{from, to}, ...]
     const [showHelp, setShowHelp] = useState(false);
+    const [showOnboarding, setShowOnboarding] = useState(false);
     const [helpSection, setHelpSection] = useState(null);
     const openHelp = (section) => { setHelpSection(section || null); setShowHelp(true); };
     window.__sageOpenHelp = openHelp;
@@ -8841,17 +9021,47 @@ function App() {
         }).catch(() => setAuthState('ready')); // if auth check fails, assume no auth
     }, []);
 
-    // First-run onboarding: auto-open the Getting Started guide exactly once.
-    // The 'sage-help-dismissed' flag is set the moment we open it, so it never
-    // reappears on refresh or later visits (the overlay's own "Don't show again"
-    // checkbox still governs manual opens).
+    // First-run onboarding. A FRESH node (empty brain, onboarding not marked
+    // done server-side) gets the real setup wizard; a lived-in node upgrading
+    // to this build gets the flag quietly marked done and falls back to the
+    // old behavior: auto-open the Getting Started guide exactly once per
+    // browser (the 'sage-help-dismissed' localStorage flag).
     useEffect(() => {
         if (authState !== 'ready') return;
-        let dismissed = false;
-        try { dismissed = localStorage.getItem('sage-help-dismissed') === '1'; } catch (e) {}
-        if (dismissed) return;
-        try { localStorage.setItem('sage-help-dismissed', '1'); } catch (e) {}
-        openHelp('getting-started');
+        (async () => {
+            try {
+                const ob = await fetchOnboarding();
+                if (!ob.done) {
+                    // Tri-state freshness: null = stats unreadable this load.
+                    // Only DECIDE (show wizard / mark done) on a positive
+                    // answer - a transient stats hiccup must not permanently
+                    // suppress a fresh node's wizard (review MED).
+                    let fresh = null;
+                    try {
+                        const s = await fetchStats();
+                        if (typeof s.total_memories === 'number') fresh = s.total_memories === 0;
+                    } catch (e) {}
+                    if (fresh === null) return; // decide on the next load
+                    if (fresh) {
+                        // The wizard replaces the guide auto-open on fresh nodes
+                        // (its last step offers the guide instead). Latch done
+                        // NOW: step 1's embedder switch restarts the node, and
+                        // the reload must not replay the wizard from the top
+                        // (review MED). Settings > Run setup ignores the flag.
+                        try { localStorage.setItem('sage-help-dismissed', '1'); } catch (e) {}
+                        saveOnboarding(true).catch(() => {});
+                        setShowOnboarding(true);
+                        return;
+                    }
+                    saveOnboarding(true).catch(() => {}); // lived-in node: never nag
+                }
+            } catch (e) { /* endpoint missing (old binary): fall through to the guide */ }
+            let dismissed = false;
+            try { dismissed = localStorage.getItem('sage-help-dismissed') === '1'; } catch (e) {}
+            if (dismissed) return;
+            try { localStorage.setItem('sage-help-dismissed', '1'); } catch (e) {}
+            openHelp('getting-started');
+        })();
     }, [authState]);
 
     // Auto-lock after 30 minutes of inactivity when encrypted.
@@ -8892,7 +9102,7 @@ function App() {
             else if (hash === '/settings') setPage('settings');
             else if (hash === '/import') setPage('import');
             else if (hash === '/network') setPage('network');
-            else if (hash === '/pipeline') setPage('pipeline');
+            else if (hash === '/pipeline') setPage('tasks'); // legacy deep-link: the message bus lives in Tasks > Messages now
             else if (hash === '/federation') setPage('federation');
             else setPage('brain');
         }
@@ -8942,6 +9152,7 @@ function App() {
     return html`<${TooltipsContext.Provider} value=${tooltipsEnabled}>
         <${ToastContainer} />
         <${ReembedBanner} />
+        ${showOnboarding && html`<${OnboardingWizard} onClose=${() => setShowOnboarding(false)} onNavigate=${navigate} onOpenGuide=${openHelp} />`}
         <div class="sidebar">
             <div class="sidebar-logo">S</div>
             <button class="sidebar-btn ${page === 'overview' ? 'active' : ''}" onClick=${() => navigate('overview')} title="Overview - node control board" aria-label="Overview - node control board">
@@ -8953,7 +9164,7 @@ function App() {
             <button class="sidebar-btn ${page === 'search' ? 'active' : ''}" onClick=${() => navigate('search')} title="Search - find memories" aria-label="Search - find memories">
                 ${icons.search}
             </button>
-            <button class="sidebar-btn ${page === 'tasks' ? 'active' : ''}" onClick=${() => navigate('tasks')} title="Tasks - governed task board" aria-label="Tasks - governed task board">
+            <button class="sidebar-btn ${page === 'tasks' ? 'active' : ''}" onClick=${() => navigate('tasks')} title="Tasks - task board + agent messages" aria-label="Tasks - task board + agent messages">
                 ${icons.tasks}
             </button>
             <button class="sidebar-btn ${page === 'import' ? 'active' : ''}" onClick=${() => navigate('import')} title="Import - ingest conversation exports" aria-label="Import - ingest conversation exports">
@@ -8961,9 +9172,6 @@ function App() {
             </button>
             <button class="sidebar-btn ${page === 'network' ? 'active' : ''}" onClick=${() => navigate('network')} title="Agents - your agents, RBAC and validator quorum" aria-label="Agents - your agents, RBAC and validator quorum">
                 ${icons.network}
-            </button>
-            <button class="sidebar-btn ${page === 'pipeline' ? 'active' : ''}" onClick=${() => navigate('pipeline')} title="Pipeline - agent-to-agent message bus" aria-label="Pipeline - agent-to-agent message bus">
-                ${icons.pipeline}
             </button>
             <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Federation - connect your whole node to another SAGE" aria-label="Federation - connect your whole node to another SAGE">
                 ${icons.federation}
@@ -9022,9 +9230,8 @@ function App() {
             ${page === 'tasks' && html`<${TasksPage} sse=${sseRef.current} />`}
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}
             ${page === 'network' && html`<${NetworkPage} sse=${sseRef.current} />`}
-            ${page === 'pipeline' && html`<${PipelinePage} />`}
             ${page === 'federation' && html`<${FederationPage} />`}
-            ${page === 'settings' && html`<${SettingsPage} />`}
+            ${page === 'settings' && html`<${SettingsPage} onRunSetup=${() => setShowOnboarding(true)} />`}
 
             <${MemoryDetail}
                 memory=${selectedMemory}
@@ -9627,7 +9834,6 @@ const PAGE_LABELS = {
     tasks: 'Tasks',
     import: 'Import',
     network: 'Agents',
-    pipeline: 'Pipeline',
     federation: 'Federation',
     settings: 'Settings',
 };

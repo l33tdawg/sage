@@ -33,24 +33,47 @@ type RerankResult struct {
 	Score float64
 }
 
-// HTTPReranker calls a TEI-compatible /rerank endpoint via plain HTTP. We
-// deliberately match HuggingFace TEI's request/response shape so operators
-// can drop in `text-embeddings-inference --model-id BAAI/bge-reranker-v2-m3`
-// (or any TEI-compatible server) without writing a SAGE-specific adapter.
+// Reranker dialects. TEI is HuggingFace text-embeddings-inference's shape
+// (POST /rerank {query, texts} -> [{index, score}]). LlamaCpp is llama.cpp's
+// llama-server shape (POST /v1/rerank {query, documents} ->
+// {results: [{index, relevance_score}]}) - the runtime SAGE's managed
+// reranker sidecar uses, since Ollama has no rerank endpoint.
+const (
+	RerankKindTEI      = "tei"
+	RerankKindLlamaCpp = "llamacpp"
+)
+
+// HTTPReranker calls a /rerank endpoint via plain HTTP, speaking either the
+// TEI dialect or the llama.cpp llama-server dialect (see RerankKind*). TEI is
+// the default so operators can drop in `text-embeddings-inference --model-id
+// BAAI/bge-reranker-v2-m3` (or any TEI-compatible server) without writing a
+// SAGE-specific adapter.
 type HTTPReranker struct {
 	baseURL string
 	model   string
+	kind    string
 	timeout time.Duration
 	client  *http.Client
 }
 
-// NewHTTPReranker returns a reranker that POSTs to `<baseURL>/rerank`.
-// `model` is informational only; TEI servers serve one model per process so
-// the field shows up in observability rather than gating the request.
+// NewHTTPReranker returns a TEI-dialect reranker that POSTs to
+// `<baseURL>/rerank`. `model` is informational only; TEI servers serve one
+// model per process so the field shows up in observability rather than
+// gating the request.
 func NewHTTPReranker(baseURL, model string, timeout time.Duration) *HTTPReranker {
+	return NewHTTPRerankerKind(baseURL, model, RerankKindTEI, timeout)
+}
+
+// NewHTTPRerankerKind returns a reranker speaking the given dialect. Unknown
+// kinds fall back to TEI.
+func NewHTTPRerankerKind(baseURL, model, kind string, timeout time.Duration) *HTTPReranker {
+	if kind != RerankKindLlamaCpp {
+		kind = RerankKindTEI
+	}
 	return &HTTPReranker{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		model:   model,
+		kind:    kind,
 		timeout: timeout,
 		client:  &http.Client{Timeout: timeout},
 	}
@@ -74,10 +97,23 @@ type tEIRerankResponse struct {
 	Score float64 `json:"score"`
 }
 
-// Rerank issues a single /rerank call. The TEI response is a list of
-// {index, score} objects ordered by score descending; we preserve the
-// upstream ordering in the returned slice so callers can decide whether to
-// re-sort or read top-N directly.
+type llamaCppRerankRequest struct {
+	Model     string   `json:"model"`
+	Query     string   `json:"query"`
+	Documents []string `json:"documents"`
+}
+
+type llamaCppRerankResponse struct {
+	Results []struct {
+		Index          int     `json:"index"`
+		RelevanceScore float64 `json:"relevance_score"`
+	} `json:"results"`
+}
+
+// Rerank issues a single rerank call in the configured dialect. Both dialects
+// return one score per input; we preserve the upstream ordering in the
+// returned slice so callers can decide whether to re-sort or read top-N
+// directly.
 func (r *HTTPReranker) Rerank(ctx context.Context, query string, texts []string) ([]RerankResult, error) {
 	if r == nil || r.baseURL == "" {
 		return nil, fmt.Errorf("reranker not configured")
@@ -86,7 +122,13 @@ func (r *HTTPReranker) Rerank(ctx context.Context, query string, texts []string)
 		return nil, nil
 	}
 
-	body, err := json.Marshal(tEIRerankRequest{Query: query, Texts: texts})
+	path := "/rerank"
+	var payload any = tEIRerankRequest{Query: query, Texts: texts}
+	if r.kind == RerankKindLlamaCpp {
+		path = "/v1/rerank"
+		payload = llamaCppRerankRequest{Model: r.model, Query: query, Documents: texts}
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal rerank request: %w", err)
 	}
@@ -98,7 +140,7 @@ func (r *HTTPReranker) Rerank(ctx context.Context, query string, texts []string)
 		defer cancel()
 	}
 
-	req, err := http.NewRequestWithContext(reqCtx, "POST", r.baseURL+"/rerank", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(reqCtx, "POST", r.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build rerank request: %w", err)
 	}
@@ -115,6 +157,18 @@ func (r *HTTPReranker) Rerank(ctx context.Context, query string, texts []string)
 		// SAGE node logs with multi-megabyte HTML pages.
 		buf, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("rerank http %d: %s", resp.StatusCode, strings.TrimSpace(string(buf)))
+	}
+
+	if r.kind == RerankKindLlamaCpp {
+		var raw llamaCppRerankResponse
+		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+			return nil, fmt.Errorf("decode rerank response: %w", err)
+		}
+		out := make([]RerankResult, 0, len(raw.Results))
+		for _, item := range raw.Results {
+			out = append(out, RerankResult{Index: item.Index, Score: item.RelevanceScore})
+		}
+		return out, nil
 	}
 
 	var raw []tEIRerankResponse
@@ -136,6 +190,7 @@ type RerankerConfig struct {
 	Enabled    bool
 	URL        string
 	Model      string
+	Kind       string // RerankKindTEI (default) or RerankKindLlamaCpp
 	TimeoutMS  int
 	Oversample int // RRF returns TopK * Oversample candidates before rerank
 }
@@ -159,6 +214,7 @@ func ResolveRerankerConfig() RerankerConfig {
 		Enabled:    envTrue("SAGE_RERANK_ENABLED"),
 		URL:        strings.TrimSpace(os.Getenv("SAGE_RERANK_URL")),
 		Model:      strings.TrimSpace(os.Getenv("SAGE_RERANK_MODEL")),
+		Kind:       strings.TrimSpace(strings.ToLower(os.Getenv("SAGE_RERANK_KIND"))),
 		TimeoutMS:  defaultRerankerTimeoutMS,
 		Oversample: defaultRerankerOversample,
 	}
@@ -196,5 +252,5 @@ func BuildReranker(cfg RerankerConfig) Reranker {
 	if !cfg.Enabled || cfg.URL == "" {
 		return nil
 	}
-	return NewHTTPReranker(cfg.URL, cfg.Model, time.Duration(cfg.TimeoutMS)*time.Millisecond)
+	return NewHTTPRerankerKind(cfg.URL, cfg.Model, cfg.Kind, time.Duration(cfg.TimeoutMS)*time.Millisecond)
 }

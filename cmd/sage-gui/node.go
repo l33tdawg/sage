@@ -193,6 +193,9 @@ func runServe() (rerr error) {
 			if m := prefs["reranker_model"]; m != "" {
 				cfg.Model = m
 			}
+			if k := prefs["reranker_kind"]; k != "" {
+				cfg.Kind = k
+			}
 			sqliteStore.SetReranker(embedding.BuildReranker(cfg), cfg.Oversample)
 			logger.Info().Bool("enabled", cfg.Enabled).Str("url", cfg.URL).Msg("reranker applied from saved preferences")
 		}

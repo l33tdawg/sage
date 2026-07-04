@@ -19,11 +19,13 @@ type rerankerSetter interface {
 }
 
 // rerankerSettingsView is the GET/POST shape for the Settings > Engine reranker
-// control.
+// control. Kind selects the endpoint dialect: "tei" (default) or "llamacpp"
+// (the managed sidecar). The Settings form omits it, which means TEI.
 type rerankerSettingsView struct {
 	Enabled bool   `json:"enabled"`
 	URL     string `json:"url"`
 	Model   string `json:"model"`
+	Kind    string `json:"kind,omitempty"`
 }
 
 // handleGetReranker returns the current reranker configuration. It reports the
@@ -49,6 +51,9 @@ func (h *DashboardHandler) handleGetReranker(w http.ResponseWriter, r *http.Requ
 			}
 			if v, ok := prefs["reranker_model"]; ok && v != "" {
 				view.Model = v
+			}
+			if v, ok := prefs["reranker_kind"]; ok && v != "" {
+				view.Kind = v
 			}
 		}
 	}
@@ -80,9 +85,26 @@ func (h *DashboardHandler) handleSaveReranker(w http.ResponseWriter, r *http.Req
 	cfg := embedding.ResolveRerankerConfig() // inherit default timeout + oversample
 	cfg.Enabled = req.Enabled
 	cfg.URL = req.URL
+	cfg.Kind = strings.TrimSpace(strings.ToLower(req.Kind))
 	if req.Model != "" {
 		cfg.Model = req.Model
 	}
+
+	// Verify before enabling: a URL that doesn't answer a trivial rerank call
+	// would otherwise sit silently "On" while every recall falls back to RRF
+	// ordering (the store degrades gracefully, so nothing else would surface
+	// the misconfiguration). Turning OFF never probes.
+	if req.Enabled {
+		probe := embedding.NewHTTPRerankerKind(cfg.URL, cfg.Model, cfg.Kind, 5*time.Second)
+		probeCtx, cancel := context.WithTimeout(r.Context(), 6*time.Second)
+		_, err := probe.Rerank(probeCtx, "sage reranker connection test", []string{"alpha", "beta"})
+		cancel()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "reranker not reachable at that URL: "+err.Error())
+			return
+		}
+	}
+
 	// Hot-swap. BuildReranker returns nil when disabled or URL-less, which
 	// SetReranker treats as "reranker off".
 	setter.SetReranker(embedding.BuildReranker(cfg), cfg.Oversample)
@@ -95,9 +117,30 @@ func (h *DashboardHandler) handleSaveReranker(w http.ResponseWriter, r *http.Req
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_enabled", enabledVal)
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_url", req.URL)
 		_ = h.prefStore.SetPreference(r.Context(), "reranker_model", cfg.Model)
+		_ = h.prefStore.SetPreference(r.Context(), "reranker_kind", cfg.Kind)
 	}
 
-	writeJSONResp(w, http.StatusOK, rerankerSettingsView{Enabled: req.Enabled, URL: req.URL, Model: cfg.Model})
+	writeJSONResp(w, http.StatusOK, rerankerSettingsView{Enabled: req.Enabled, URL: req.URL, Model: cfg.Model, Kind: cfg.Kind})
+}
+
+// handleDetectReranker probes the conventional local reranker address so the
+// dashboard can pre-fill the URL field instead of presenting a blank one. The
+// candidate list is FIXED loopback addresses - no caller-supplied URL is
+// accepted, so this is a convenience probe, not an SSRF surface. 127.0.0.1 is
+// tried as well as localhost in case localhost resolves to ::1 while the
+// reranker binds IPv4 only.
+func (h *DashboardHandler) handleDetectReranker(w http.ResponseWriter, r *http.Request) {
+	for _, u := range []string{"http://localhost:8081", "http://127.0.0.1:8081"} {
+		rr := embedding.NewHTTPReranker(u, "BAAI/bge-reranker-v2-m3", 2*time.Second)
+		ctx, cancel := context.WithTimeout(r.Context(), 2500*time.Millisecond)
+		_, err := rr.Rerank(ctx, "sage reranker detect", []string{"alpha"})
+		cancel()
+		if err == nil {
+			writeJSONResp(w, http.StatusOK, map[string]any{"found": true, "url": u})
+			return
+		}
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"found": false})
 }
 
 // handleTestReranker probes a candidate reranker endpoint with a trivial rerank

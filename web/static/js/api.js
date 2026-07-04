@@ -102,6 +102,27 @@ export async function saveReranker({ enabled, url, model }) {
     return res.json();
 }
 
+export async function fetchOnboarding() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/onboarding`);
+    if (!res.ok) throw new Error('onboarding fetch failed');
+    return res.json();
+}
+
+export async function saveOnboarding(done) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/onboarding`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ done }),
+    });
+    if (!res.ok) throw new Error('onboarding save failed');
+    return res.json();
+}
+
+export async function detectReranker() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/reranker/detect`);
+    if (!res.ok) throw new Error('reranker detect failed');
+    return res.json();
+}
+
 export async function testReranker({ url, model }) {
     const res = await fetch(`${API_BASE}/v1/dashboard/settings/reranker/test`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
