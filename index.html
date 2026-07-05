@@ -740,14 +740,15 @@ h1 em {
 .scanner-bed {
   position: absolute;
   left: 50%;
-  top: 50%;
-  width: 214px;
-  height: 166px;
-  transform: translate(-50%, -49%);
-  border-radius: 48% 52% 46% 54% / 54% 53% 47% 46%;
+  top: 49%;
+  width: 236px;
+  height: 182px;
+  transform: translate(-50%, -50%);
+  border-radius: 46% 54% 48% 52% / 56% 55% 45% 44%;
   background:
-    radial-gradient(circle at 38% 44%, rgba(45,212,191,0.13), transparent 36%),
-    radial-gradient(circle at 62% 43%, rgba(125,211,252,0.11), transparent 34%);
+    radial-gradient(ellipse at 35% 42%, rgba(45,212,191,0.14), transparent 42%),
+    radial-gradient(ellipse at 66% 43%, rgba(125,211,252,0.12), transparent 40%),
+    radial-gradient(ellipse at 50% 72%, rgba(167,139,250,0.08), transparent 34%);
   filter: drop-shadow(0 0 22px rgba(45,212,191,0.26));
 }
 .brain-scan-svg {
@@ -757,22 +758,23 @@ h1 em {
   height: 100%;
 }
 .brain-scan-svg .brain-fill {
-  fill: rgba(8,47,73,0.34);
+  fill: rgba(8,47,73,0.3);
   stroke: rgba(125,211,252,0.72);
-  stroke-width: 1.2;
+  stroke-width: 1.05;
 }
 .brain-scan-svg .brain-fold {
   fill: none;
   stroke: rgba(45,212,191,0.62);
-  stroke-width: 1;
+  stroke-width: 0.82;
   stroke-linecap: round;
+  stroke-linejoin: round;
   opacity: 0.9;
 }
 .brain-scan-svg .brain-midline {
   fill: none;
   stroke: rgba(167,139,250,0.58);
-  stroke-width: 1;
-  stroke-dasharray: 5 7;
+  stroke-width: 0.9;
+  stroke-dasharray: 4 7;
 }
 .scan-beam {
   position: absolute;
@@ -1470,12 +1472,13 @@ footer a:hover { text-decoration: underline; }
                 <div class="scanner-grid"></div>
                 <div class="scan-focus"></div>
                 <div class="scanner-bed">
-                  <svg class="brain-scan-svg" viewBox="0 0 214 166" role="img" aria-label="Top-down CEREBRUM brain scan">
-                    <path class="brain-fill" d="M106 13c-24 0-43 9-55 26-22 1-36 17-36 39 0 18 9 31 24 37-2 21 12 38 34 38 13 0 24-5 33-14 9 9 20 14 33 14 22 0 36-17 34-38 15-6 24-19 24-37 0-22-14-38-36-39-12-17-31-26-55-26Z"/>
-                    <path class="brain-midline" d="M107 22c-3 19-2 36 0 54 2 19 1 39-2 63"/>
-                    <path class="brain-fold" d="M58 44c17-12 34-13 46-3M50 68c15-10 34-9 45 4M42 93c17-5 35 0 48 13M61 121c12-8 25-8 38 0"/>
-                    <path class="brain-fold" d="M154 44c-17-12-34-13-46-3M164 68c-15-10-34-9-45 4M172 93c-17-5-35 0-48 13M153 121c-12-8-25-8-38 0"/>
-                    <path class="brain-fold" d="M82 31c-10 20-8 38 6 53M132 31c10 20 8 38-6 53M78 139c-5-18 0-31 16-41M136 139c5-18 0-31-16-41"/>
+                  <svg class="brain-scan-svg" viewBox="0 0 236 182" role="img" aria-label="Top-down CEREBRUM brain scan">
+                    <path class="brain-fill" d="M118 13c-23 0-43 7-57 20-12 11-20 25-23 42-16 7-25 21-25 39 0 20 14 35 34 39 4 11 13 18 25 21 14 3 29-1 42-13l4-4 5 4c13 12 28 16 42 13 12-3 21-10 25-21 20-4 34-19 34-39 0-18-9-32-25-39-3-17-11-31-23-42-15-13-35-20-58-20Z"/>
+                    <path class="brain-midline" d="M119 21c-3 14-2 29 0 43 2 15 1 28-2 40-3 14-2 29 2 50"/>
+                    <path class="brain-fold" d="M72 33c-11 9-17 19-17 31M91 28c-9 13-8 26 2 39M63 53c13-7 28-8 42-2M45 75c16-8 34-7 49 2M35 99c17-6 36-2 52 10M49 126c14-10 30-10 45-2M72 151c9-12 19-20 32-24"/>
+                    <path class="brain-fold" d="M164 33c11 9 17 19 17 31M145 28c9 13 8 26-2 39M173 53c-13-7-28-8-42-2M191 75c-16-8-34-7-49 2M201 99c-17-6-36-2-52 10M187 126c-14-10-30-10-45-2M164 151c-9-12-19-20-32-24"/>
+                    <path class="brain-fold" d="M101 38c-13 13-17 29-11 47M135 38c14 13 17 29 11 47M83 82c15 7 24 18 28 35M153 82c-15 7-24 18-28 35M93 119c-15 4-25 13-30 27M143 119c15 4 25 13 30 27"/>
+                    <path class="brain-fold" d="M73 107c10-12 24-17 41-14M163 107c-10-12-24-17-41-14M99 67c8 8 12 18 12 32M137 67c-8 8-12 18-12 32M61 88c7 3 13 8 17 16M175 88c-7 3-13 8-17 16"/>
                   </svg>
                 </div>
                 <div class="scan-beam"></div>
