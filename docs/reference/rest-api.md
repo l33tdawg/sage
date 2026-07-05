@@ -1100,11 +1100,68 @@ The `version` field is intentionally omitted — `/health` is reachable through 
 
 ### `GET /ready`
 
-Readiness probe. Checks PostgreSQL and CometBFT. No auth.
+Readiness probe. Checks the store (postgres/SQLite), CometBFT, and the embedding
+provider. No auth. (`internal/metrics/health.go`)
 
-**Response** (HTTP 200): `{"status": "ready", "postgres": true, "cometbft": true}`
+**Response** (HTTP 200 or 503):
 
-503 when not ready.
+```json
+{
+  "status": "ready",          // ready | degraded | not_ready
+  "postgres": true,
+  "cometbft": true,
+  "embedder": {
+    "checked": true,          // false until the watchdog's first probe
+    "ok": true,
+    "semantic": true,         // false = hash fallback (a capability note, not a fault)
+    "provider": "ollama",
+    "model": "nomic-embed-text",
+    "detail": ""              // error summary when ok=false
+  }
+}
+```
+
+Status semantics:
+- `not_ready` → **HTTP 503**: core infrastructure (store or CometBFT) is down.
+- `degraded` → **HTTP 200** by default: core is up but a *semantic* embedder has been
+  probed and is unreachable, so hybrid/semantic recall has dropped to keyword-only.
+  The node still serves. Pass `?strict=1` to make this a **503** for gates that
+  require semantic recall.
+- `ready` → **HTTP 200**: everything healthy. A hash (non-semantic) provider is
+  `ready` — non-semantic is a capability, not a fault. An embedder not yet probed is
+  also `ready`.
+
+The embedder status is refreshed by a ~30s background watchdog (see the node's
+`startEmbedderWatchdog`).
+
+---
+
+### `GET /v1/chain/backpressure`
+
+First-class mempool backpressure signal so clients can pace writes without polling
+raw CometBFT RPC. Ed25519-authed. Served from a ~1s-TTL cache (safe to poll tightly).
+(`api/rest/mempool.go`)
+
+**Response** (HTTP 200):
+
+```json
+{
+  "mempool_txs": 2100,
+  "mempool_bytes": 5242880,
+  "mempool_max_txs": 5000,       // the real runtime cap (CometBFT DefaultConfig)
+  "mempool_pct": 0.42,           // mempool_txs / mempool_max_txs, 0..1
+  "accepting_writes": true,      // false at pct >= 0.9
+  "retry_after_ms": 0            // > 0 (a back-off hint) only when near cap
+}
+```
+
+Returns **HTTP 503** (problem+json) when the CometBFT RPC probe fails.
+
+Every successful `POST /v1/memory/submit` also carries an **`X-Sage-Mempool-Pct`**
+response header (e.g. `"0.42"`), so streaming writers can self-throttle with zero
+extra round-trips. A memory submit rejected because the mempool is full now returns
+**HTTP 503 + `Retry-After`** (a distinct RFC-7807 problem type) instead of an opaque
+500.
 
 ---
 

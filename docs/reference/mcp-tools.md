@@ -108,7 +108,7 @@ first non-inception tool call if the brain is empty (`server.go:239-248`).
 to the current topic AND store an observation about what just happened. Single
 most important operational tool.
 
-**Source:** `tools.go:129-147` (definition), `tools.go:785-895` (handler)
+**Source:** `tools.go:129-147` (definition), `tools.go:892` (`toolTurn` handler)
 
 **Parameters:**
 
@@ -128,6 +128,10 @@ most important operational tool.
 - `pipe_inbox`: pipeline items addressed to this agent (if any).
 - `pipe_inbox_count`, `pipe_results`, `pipe_results_count`: pipeline data.
 - `recall_error` / `store_error`: set if a phase failed.
+- `recall_mode` (`semantic_only` | `hybrid` | `keyword_only`), `semantic_degraded`
+  (bool), `degraded_reason`: signal when the recall silently fell back to
+  keyword-only (embedder down or a non-semantic hash node) — same meaning as on
+  `sage_recall`.
 - Returns `vault_locked` error if the Synaptic Ledger is locked.
 
 **Recall path:** Uses hybrid BM25+vector (RRF) by default; falls back to FTS5
@@ -216,7 +220,7 @@ verified configurations).
 
 **Purpose:** Semantic search over committed memories.
 
-**Source:** `tools.go:40-54` (definition), `tools.go:462-542` (handler)
+**Source:** `tools.go:40-54` (definition), `tools.go:495` (`toolRecall` handler)
 
 **Parameters:**
 
@@ -230,9 +234,18 @@ verified configurations).
 **Returns:**
 - `memories`: array of `{memory_id, content, domain, confidence, type, status, created_at}`.
 - `total_count`: total matching memories.
+- `recall_mode`: which path served the request — `semantic_only` | `hybrid` |
+  `keyword_only`.
+- `semantic_degraded`: `true` when recall did NOT have meaningful semantic vectors —
+  the embedder is down/unreachable or the node runs a non-semantic hash provider, so
+  results are keyword-quality. When this is `true`, treat recall as lower-fidelity
+  (fix the embedder / run the smart-memory setup).
+- `degraded_reason`: present only when degraded — a short explanation.
 
 **Search path:** Same hybrid/semantic/FTS5 fallback chain as `sage_turn` recall
-phase. Only `committed` memories are returned.
+phase. Only `committed` memories are returned. The `recall_mode`/`semantic_degraded`
+fields surface silent keyword-only fallback so a caller isn't misled into trusting a
+degraded recall.
 
 **REST:** `POST /v1/memory/hybrid`, `POST /v1/memory/query`, `POST /v1/memory/search`
 
