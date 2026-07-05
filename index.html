@@ -263,6 +263,26 @@ h1 em {
 .hero-cta-strip .latest-note strong {
   color: var(--accent);
 }
+.hero-cta-strip .download-counter {
+  text-align: center;
+  margin-top: 10px;
+  animation: fadeUp 0.6s ease-out both;
+}
+.download-counter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 24px;
+  border-radius: 28px;
+  background: rgba(34,197,94,0.1);
+  border: 1px solid rgba(34,197,94,0.25);
+  font-size: 0.94rem;
+  color: #22c55e;
+  font-weight: 600;
+}
+.download-counter-pill strong {
+  font-size: 1.12rem;
+}
 .hero-copy h1 {
   max-width: 620px;
   margin-bottom: 18px;
@@ -1054,6 +1074,11 @@ footer a:hover { text-decoration: underline; }
         <div class="latest-note">
           Latest: <strong id="latest-version">...</strong> &mdash; signed release assets
         </div>
+        <div id="minds-freed" class="download-counter" style="display:none;">
+          <span class="download-counter-pill">
+            Downloads: <strong id="download-count">0</strong>
+          </span>
+        </div>
       </div>
     </div>
   </section>
@@ -1074,11 +1099,6 @@ footer a:hover { text-decoration: underline; }
             <button class="free-prompt-copy" onclick="event.stopPropagation(); copyPrompt(this.parentElement)">Copy</button>
           </div>
         </div>
-      </div>
-      <div id="minds-freed" style="display:none;text-align:center;margin-top:24px;animation:fadeUp 0.6s ease-out both;">
-        <span style="display:inline-flex;align-items:center;gap:12px;padding:12px 28px;border-radius:28px;background:rgba(34,197,94,0.1);border:1px solid rgba(34,197,94,0.25);font-size:1.05rem;color:#22c55e;font-weight:600;">
-          Downloads: <strong id="download-count" style="font-size:1.25rem;">0</strong>
-        </span>
       </div>
       <div class="home-screens reveal">
         <div class="screenshot-thumb" onclick="openLightbox(0)"><img src="screen-brain.png" alt="CEREBRUM MRI brain" loading="lazy"><div class="screenshot-label">MRI Brain</div></div>
