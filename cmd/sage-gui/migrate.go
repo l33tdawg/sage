@@ -141,16 +141,19 @@ func resetChainState(dataDir, badgerPath, cometHome, sqlitePath, lastVersion str
 
 	// Step 1: Backup SQLite (the precious data) using VACUUM INTO for atomic consistency
 	if _, statErr := os.Stat(sqlitePath); statErr == nil {
-		// Clean up stale WAL/SHM files from previous version — these can cause
-		// hangs when the new binary tries to open the database.
-		for _, suffix := range []string{"-wal", "-shm"} {
-			walPath := sqlitePath + suffix
-			if _, walErr := os.Stat(walPath); walErr == nil {
-				if cpErr := checkpointWAL(sqlitePath); cpErr != nil {
-					fmt.Fprintf(os.Stderr, "  Warning: WAL checkpoint failed: %v (removing stale WAL)\n", cpErr)
-				}
-				_ = os.Remove(walPath)
+		// Fold any write-ahead log back into the main DB so the backup is complete.
+		// If the checkpoint can't run (e.g. the DB is briefly busy), ABORT rather than
+		// deleting an un-checkpointed WAL — deleting it would discard committed memories
+		// not yet folded into the main file. The live DB + WAL stay intact, so the node
+		// keeps every memory and simply retries next boot. checkpointWAL uses TRUNCATE,
+		// which empties the WAL on success, so the sidecars are safe to remove after.
+		if _, walErr := os.Stat(sqlitePath + "-wal"); walErr == nil {
+			if cpErr := checkpointWAL(sqlitePath); cpErr != nil {
+				return fmt.Errorf("your memories are intact — could not checkpoint the write-ahead log before backup (is the database busy?); aborting before any chain rebuild: %w", cpErr)
 			}
+		}
+		for _, suffix := range []string{"-wal", "-shm"} {
+			_ = os.Remove(sqlitePath + suffix)
 		}
 
 		backupDir := filepath.Join(SageHome(), "backups")
@@ -171,23 +174,20 @@ func resetChainState(dataDir, badgerPath, cometHome, sqlitePath, lastVersion str
 				return fmt.Errorf("write backup: %w", writeErr)
 			}
 		}
-		// Verify the backup actually landed before proceeding to wipe
-		// derived chain state. If the backup is missing or suspiciously
-		// small relative to the source, abort — the live sage.db is
-		// still intact at this point, so refusing here means the user
-		// keeps every memory.
-		srcInfo, srcStatErr := os.Stat(sqlitePath)
-		if srcStatErr != nil {
-			return fmt.Errorf("stat live sqlite for backup verify: %w", srcStatErr)
-		}
-		backupInfo, backupStatErr := os.Stat(backupPath) //nolint:gosec // backupPath is server-controlled
-		if backupStatErr != nil {
-			return fmt.Errorf("stat backup for verify: %w", backupStatErr)
-		}
-		if verifyErr := verifyBackupSize(srcInfo.Size(), backupInfo.Size(), backupPath); verifyErr != nil {
+		// Verify the backup actually landed before proceeding to wipe derived chain
+		// state. Verify by CONTENT, not size: VACUUM INTO compacts (drops free pages),
+		// so a valid backup of a fragmented DB is legitimately smaller than the source
+		// — a size heuristic falsely rejects it. Instead run a structural check and
+		// confirm no memory row was lost. The live sage.db is still intact here, so
+		// refusing means the user keeps every memory. A rejected backup is deleted so
+		// it can't accumulate across repeated boots.
+		if verifyErr := verifyBackup(sqlitePath, backupPath); verifyErr != nil {
+			_ = os.Remove(backupPath) //nolint:gosec // backupPath is server-controlled
 			return verifyErr
 		}
-		fmt.Fprintf(os.Stderr, "  Memories saved to %s (%d bytes, verified)\n", backupPath, backupInfo.Size())
+		if backupInfo, statErr := os.Stat(backupPath); statErr == nil { //nolint:gosec // backupPath is server-controlled
+			fmt.Fprintf(os.Stderr, "  Memories saved to %s (%d bytes, verified)\n", backupPath, backupInfo.Size())
+		}
 	}
 
 	// Step 2: Rebuild BadgerDB chain index (memories live in SQLite and
@@ -340,7 +340,10 @@ func cleanupNoisyMemories(sqlitePath string) int {
 // pending WAL writes into the main DB file. This prevents stale WAL files
 // from causing hangs on upgrade.
 func checkpointWAL(dbPath string) error {
-	dsn := dbPath + "?_busy_timeout=5000"
+	// modernc.org/sqlite honors busy_timeout only via a _pragma param (mattn-style
+	// _busy_timeout is silently ignored), so a briefly-locked DB waits 5s here rather
+	// than failing the checkpoint instantly.
+	dsn := dbPath + "?_pragma=busy_timeout(5000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return err
@@ -349,13 +352,25 @@ func checkpointWAL(dbPath string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = db.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
-	return err
+	// wal_checkpoint(TRUNCATE) reports its outcome in a result ROW (busy, log,
+	// checkpointed), not as an exec error: a concurrent reader can leave busy=1 with
+	// WAL frames un-backfilled while Exec sees no error. Read the row and treat busy!=0
+	// as failure so the caller never deletes an un-truncated WAL.
+	var busy, logFrames, checkpointed int
+	if scanErr := db.QueryRowContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed); scanErr != nil {
+		return scanErr
+	}
+	if busy != 0 {
+		return fmt.Errorf("WAL checkpoint blocked (database busy) — refusing to treat the WAL as flushed")
+	}
+	return nil
 }
 
 // vacuumBackup creates an atomic backup using VACUUM INTO with a timeout.
 func vacuumBackup(srcPath, dstPath string) error {
-	dsn := srcPath + "?_journal_mode=WAL&_busy_timeout=15000"
+	// _pragma=busy_timeout is the modernc-honored form (mattn-style _busy_timeout is a
+	// no-op) so a transient lock waits rather than dropping straight to raw-copy.
+	dsn := srcPath + "?_pragma=busy_timeout(15000)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return err
@@ -372,27 +387,90 @@ func stampVersion(path string) error {
 	return os.WriteFile(path, []byte(version+"\n"), 0600)
 }
 
-// verifyBackupSize gates the destructive chain rebuild on the SQLite
-// backup surviving as a sane file. Refuses to proceed if the backup is
-// empty or drops below 95% of the source size (VACUUM INTO can
-// legitimately shrink a fragmented DB by a few percent; anything beyond
-// that is a partial-write / disk-full / silent-truncation symptom).
-// Sources of zero bytes pass trivially — there are no memories to lose.
+// verifyBackup gates the destructive chain rebuild on the SQLite backup being a
+// STRUCTURALLY SOUND copy that lost no memory — verifying by content, not size.
+// VACUUM INTO compacts (drops free pages), so a valid backup of a fragmented DB is
+// legitimately smaller than the source; a size heuristic falsely rejects it and, on
+// the re-mint path, silently denies the fix to exactly the fragmented-DB nodes that
+// need it. Instead: the backup must exist, be non-empty, pass a structural
+// quick_check, and carry at least as many `memories` rows as the live DB (VACUUM
+// preserves rows; a row shortfall is the real truncation signal). If the source has
+// no `memories` table (fresh/foreign DB) the row check is skipped — quick_check
+// still guards structure.
 //
-// Error messages are written for an operator who sees them in the
-// dashboard or logs: they lead with the reassurance that the live
-// database is intact, since the abort happens BEFORE any destructive
-// operation. The technical detail follows so the cause is debuggable.
-func verifyBackupSize(srcSize, backupSize int64, backupPath string) error {
-	if srcSize == 0 {
-		return nil
+// The abort happens BEFORE any destructive operation, so the live sage.db is intact;
+// error messages lead with that reassurance for an operator reading the logs.
+func verifyBackup(srcPath, backupPath string) error {
+	bi, statErr := os.Stat(backupPath) //nolint:gosec // backupPath is server-controlled
+	if statErr != nil {
+		return fmt.Errorf("your memories are intact — the pre-upgrade backup at %s could not be found; aborting before any chain rebuild: %w", backupPath, statErr)
 	}
-	if backupSize == 0 {
-		return fmt.Errorf("upgrade paused as a safety measure — your memories are intact. The pre-upgrade backup file at %s is empty (this should never happen). Aborting before any chain rebuild so nothing destructive runs", backupPath)
+	if bi.Size() == 0 {
+		return fmt.Errorf("your memories are intact — the pre-upgrade backup at %s is empty; aborting before any chain rebuild so nothing destructive runs", backupPath)
 	}
-	minAcceptable := (srcSize * 19) / 20
-	if backupSize < minAcceptable {
-		return fmt.Errorf("upgrade paused as a safety measure — your memories are intact. The pre-upgrade backup at %s is only %d bytes vs. the live %d-byte database (need ≥ %d). Aborting before any chain rebuild — please check disk space and retry", backupPath, backupSize, srcSize, minAcceptable)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	bdb, openErr := sql.Open("sqlite", roDSN(backupPath))
+	if openErr != nil {
+		return fmt.Errorf("your memories are intact — could not open the pre-upgrade backup %s to verify it; aborting: %w", backupPath, openErr)
+	}
+	defer func() { _ = bdb.Close() }()
+
+	var check string
+	if qErr := bdb.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&check); qErr != nil {
+		return fmt.Errorf("your memories are intact — could not run an integrity check on the pre-upgrade backup %s; aborting: %w", backupPath, qErr)
+	}
+	if check != "ok" {
+		return fmt.Errorf("your memories are intact — the pre-upgrade backup %s failed its integrity check (%s); aborting before any chain rebuild", backupPath, check)
+	}
+
+	// Row-count parity on the precious table. Distinguish "no memories table" (a
+	// fresh/foreign DB — legitimately skip parity) from "couldn't read the DB" (a
+	// lock/corruption — must NOT silently skip the truncation check; refuse instead).
+	srcCount, srcPresent, srcErr := memoriesRowCount(ctx, srcPath)
+	if srcErr != nil {
+		return fmt.Errorf("your memories are intact — could not read the live database %s to verify the backup (is it locked?); aborting before any chain rebuild: %w", srcPath, srcErr)
+	}
+	if srcPresent {
+		backupCount, backupPresent, backupErr := memoriesRowCount(ctx, backupPath)
+		if backupErr != nil || !backupPresent {
+			return fmt.Errorf("your memories are intact — the pre-upgrade backup %s is missing its memories table or could not be read; aborting", backupPath)
+		}
+		if backupCount < srcCount {
+			return fmt.Errorf("your memories are intact — the pre-upgrade backup %s has %d memories vs. %d live (possible truncation); aborting before any chain rebuild", backupPath, backupCount, srcCount)
+		}
 	}
 	return nil
+}
+
+// roDSN builds a genuinely read-only modernc.org/sqlite DSN with a real busy timeout.
+// Both busy_timeout and query_only must go through _pragma — the mattn-style
+// _busy_timeout / mode=ro query params are silently ignored by this driver.
+func roDSN(path string) string {
+	return path + "?_pragma=busy_timeout(15000)&_pragma=query_only(true)"
+}
+
+// memoriesRowCount returns the memories-table row count. present=false means the
+// table is ABSENT (a fresh/foreign DB — the caller skips parity). A non-nil err means
+// the DB could not be opened or read (lock/corruption); the caller must treat that as
+// a verification failure, never a silent skip.
+func memoriesRowCount(ctx context.Context, dbPath string) (count int64, present bool, err error) {
+	db, err := sql.Open("sqlite", roDSN(dbPath))
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = db.Close() }()
+	var name string
+	switch scanErr := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name='memories'`).Scan(&name); {
+	case scanErr == sql.ErrNoRows:
+		return 0, false, nil // no memories table — legitimate skip
+	case scanErr != nil:
+		return 0, false, scanErr // couldn't read schema — real error (lock/corruption)
+	}
+	if scanErr := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories`).Scan(&count); scanErr != nil {
+		return 0, true, scanErr // table present but unreadable — real error
+	}
+	return count, true, nil
 }

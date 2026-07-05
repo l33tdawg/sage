@@ -129,6 +129,19 @@ func runServe() (rerr error) {
 			Msg("upgrade migration completed — chain state reset, memories preserved")
 	}
 
+	// Federation fix: pre-v11 personal nodes were all born with the identical
+	// "sage-personal" chain_id, which the federation self-federation guard treats
+	// as the same network — so two distinct users could never connect. Re-mint a
+	// globally-unique id (memories backed up + preserved; quorum/joined nodes and
+	// already-unique ids are skipped). Runs AFTER migrateOnUpgrade (whose reset
+	// keeps the legacy genesis) and BEFORE ensureGenesisSeed + the chain_id
+	// reconcile below, so the new id flows into cfg.ChainID for this same boot.
+	if remolded, remintErr := remintLegacyChainID(cfg.DataDir, cfg, logger); remintErr != nil {
+		return fmt.Errorf("re-mint legacy chain_id: %w", remintErr)
+	} else if remolded {
+		logger.Info().Msg("legacy shared chain_id re-minted — cross-node federation is now unblocked")
+	}
+
 	// Initialize CometBFT config (seeds a brand-new chain's genesis with the operator
 	// admin) and, if a prior admin-less genesis survived a reset, re-inject the seed.
 	// One helper so the heal step can't be dropped from serve unnoticed (issue #52).
@@ -826,6 +839,11 @@ func runServe() (rerr error) {
 	// Personal mode: TLS on localhost:8443. Quorum mode: TLS on 0.0.0.0:8443.
 	// Plain HTTP stays on localhost for dashboard backward compatibility.
 	var tlsServer *http.Server
+	// Self-heal a stale TLS CA CommonName before the auto-gen below (see
+	// reconcileCACommonName): on a re-minted personal node whose cert rotation didn't
+	// fully complete, this removes the mismatched certs so they regenerate with a CN
+	// tracking the new chain_id — otherwise federation's requireChainCN silently fails.
+	reconcileCACommonName(certsDir, cfg.ChainID, cfg.Quorum.Enabled, logger)
 	if !tlsca.CertsExist(certsDir) {
 		// Auto-generate self-signed certs for HTTPS. The CA CommonName tracks the
 		// unique chain_id (reconciled above); fall back to the legacy label only
@@ -1285,8 +1303,23 @@ func initCometBFTConfig(home string) error {
 		return fmt.Errorf("save genesis: %w", err)
 	}
 
-	// Write minimal config.toml
+	// Write minimal config.toml.
+	//
+	// NOTE: SAGE builds the RUNNING CometBFT configuration in code at startup (see
+	// runServe → config.DefaultConfig() + explicit overrides), NOT from this file. The
+	// [consensus] and [mempool] values below are written for reference/tooling only
+	// and are NOT read at runtime — editing them has no effect. They are kept here in
+	// step with the actual code-set runtime values so a reader isn't misled:
+	//   consensus.create_empty_blocks = false  — an IDLE chain mints no blocks; a
+	//     mempool tx mints the next block (plus one trailing empty proof block). See
+	//     docs/reference/concepts/block-production-and-idle.md.
+	//   consensus.timeout_commit = 1s (personal) / 3s (quorum)
+	//   mempool.size = 5000 (CometBFT default)
 	configToml := fmt.Sprintf(`# SAGE Personal — CometBFT config
+#
+# The [consensus]/[mempool] values below are NOT read at runtime — SAGE sets the
+# running config in code (see node.go); editing them has no effect. They reflect
+# personal-mode runtime for reference (quorum mode uses timeout_commit = 3s).
 proxy_app = "kvstore"
 moniker = "sage-personal"
 
@@ -1298,11 +1331,10 @@ laddr = ""
 
 [consensus]
 timeout_commit = "1s"
-create_empty_blocks = true
-create_empty_blocks_after = "5s"
+create_empty_blocks = false
 
 [mempool]
-size = 1000
+size = 5000
 `, cmtRPCAddr())
 	return os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configToml), 0600)
 }

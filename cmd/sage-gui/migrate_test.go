@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestMigrateOnUpgrade_FirstRun(t *testing.T) {
@@ -87,7 +91,7 @@ func TestMigrateOnUpgrade_VersionChangedSameFork_PreservesState(t *testing.T) {
 
 	os.MkdirAll(badgerDir, 0700)
 	os.MkdirAll(cometDir, 0700)
-	os.WriteFile(sqlitePath, []byte("fake-sqlite-data"), 0600)
+	makeMemoriesDB(t, sqlitePath, 10)
 	os.WriteFile(filepath.Join(badgerDir, "000001.vlog"), []byte("badger"), 0600)
 	os.MkdirAll(filepath.Join(cometDir, "blockstore.db"), 0700)
 	os.MkdirAll(filepath.Join(cometDir, "state.db"), 0700)
@@ -149,7 +153,7 @@ func TestMigrateOnUpgrade_PreV75_LegacyInstall_RunsReset(t *testing.T) {
 
 			os.MkdirAll(badgerDir, 0700)
 			os.MkdirAll(cometDir, 0700)
-			os.WriteFile(sqlitePath, []byte("fake-sqlite-data"), 0600)
+			makeMemoriesDB(t, sqlitePath, 10)
 			os.WriteFile(filepath.Join(badgerDir, "000001.vlog"), []byte("badger"), 0600)
 			os.MkdirAll(filepath.Join(cometDir, "blockstore.db"), 0700)
 			os.MkdirAll(filepath.Join(cometDir, "state.db"), 0700)
@@ -176,8 +180,8 @@ func TestMigrateOnUpgrade_PreV75_LegacyInstall_RunsReset(t *testing.T) {
 				t.Error("blockstore.db must be removed")
 			}
 
-			if sqlData, _ := os.ReadFile(sqlitePath); string(sqlData) != "fake-sqlite-data" {
-				t.Error("SQLite must survive the reset (only Badger + CometBFT wipe)")
+			if n, present, err := memoriesRowCount(context.Background(), sqlitePath); err != nil || !present || n != 10 {
+				t.Errorf("SQLite must survive the reset with all rows (only Badger + CometBFT wipe); got %d present=%v", n, present)
 			}
 
 			if got := readForkVersion(filepath.Join(tmpDir, forkVersionFile)); got != ConsensusForkVersion {
@@ -268,7 +272,7 @@ func TestMigrateOnUpgrade_ForkBump_RunsReset(t *testing.T) {
 
 	os.MkdirAll(badgerDir, 0700)
 	os.MkdirAll(cometDir, 0700)
-	os.WriteFile(sqlitePath, []byte("fake-sqlite-data"), 0600)
+	makeMemoriesDB(t, sqlitePath, 10)
 	os.WriteFile(filepath.Join(badgerDir, "000001.vlog"), []byte("badger"), 0600)
 	os.MkdirAll(filepath.Join(cometDir, "blockstore.db"), 0700)
 	os.MkdirAll(filepath.Join(cometDir, "state.db"), 0700)
@@ -303,8 +307,8 @@ func TestMigrateOnUpgrade_ForkBump_RunsReset(t *testing.T) {
 		t.Errorf("validator state not reset: %s", pvState)
 	}
 
-	if sqlData, _ := os.ReadFile(sqlitePath); string(sqlData) != "fake-sqlite-data" {
-		t.Error("SQLite must survive a fork-bump reset (only Badger + CometBFT wipe)")
+	if n, present, err := memoriesRowCount(context.Background(), sqlitePath); err != nil || !present || n != 10 {
+		t.Errorf("SQLite must survive a fork-bump reset with all rows (only Badger + CometBFT wipe); got %d present=%v", n, present)
 	}
 
 	backupDir := filepath.Join(tmpDir, "backups")
@@ -381,57 +385,140 @@ func TestMigrateOnUpgrade_DevVersion(t *testing.T) {
 	}
 }
 
-// TestVerifyBackupSize_EmptySourcePasses: zero-byte source has no memories
-// to lose, so backup verification is trivially satisfied.
-func TestVerifyBackupSize_EmptySourcePasses(t *testing.T) {
-	if err := verifyBackupSize(0, 0, "/tmp/x"); err != nil {
-		t.Errorf("empty source must pass, got: %v", err)
+// makeMemoriesDB writes a sqlite DB at path with a memories table holding n rows,
+// optionally padded with a wide free-able column so a later VACUUM can shrink it a
+// lot (to model a fragmented DB).
+func makeMemoriesDB(t *testing.T, path string, n int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
 	}
-	if err := verifyBackupSize(0, 100, "/tmp/x"); err != nil {
-		t.Errorf("empty source with non-empty backup must pass, got: %v", err)
+	defer func() { _ = db.Close() }()
+	if _, err := db.Exec(`CREATE TABLE memories (memory_id TEXT PRIMARY KEY, status TEXT, content TEXT)`); err != nil {
+		t.Fatalf("create: %v", err)
 	}
-}
-
-// TestVerifyBackupSize_EmptyBackupOfNonEmptySourceRejects: a backup that
-// landed at 0 bytes for a populated source is a clear partial-write or
-// silent-truncation signal — must refuse the rebuild. Error must reassure
-// the operator that the live database is intact.
-func TestVerifyBackupSize_EmptyBackupOfNonEmptySourceRejects(t *testing.T) {
-	err := verifyBackupSize(1<<20, 0, "/tmp/backup.db")
-	if err == nil {
-		t.Fatal("expected reject when backup is empty but source is non-empty")
-	}
-	if !strings.Contains(err.Error(), "intact") || !strings.Contains(err.Error(), "empty") {
-		t.Errorf("error must lead with reassurance ('intact') and mention the symptom ('empty'), got: %v", err)
+	for i := 0; i < n; i++ {
+		if _, err := db.Exec(`INSERT INTO memories VALUES (?, 'committed', ?)`, i, strings.Repeat("x", 4096)); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
 	}
 }
 
-// TestVerifyBackupSize_SuspectShrinkageRejects: a backup that's only ~50%
-// of source size cannot be explained by VACUUM compaction — refuse. Error
-// must reassure the operator and suggest a remediation path.
-func TestVerifyBackupSize_SuspectShrinkageRejects(t *testing.T) {
-	srcSize := int64(1 << 20)
-	tooSmall := srcSize / 2
-	err := verifyBackupSize(srcSize, tooSmall, "/tmp/backup.db")
+// TestVerifyBackup_FragmentedVacuumAccepted is the F1 regression: a VACUUM INTO
+// backup of a heavily-fragmented DB is >5% smaller than the source yet perfectly
+// valid — the old size gate falsely rejected it. It must now pass.
+func TestVerifyBackup_FragmentedVacuumAccepted(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "sage.db")
+	makeMemoriesDB(t, src, 200)
+	// Fragment: delete 80% of rows, leaving lots of free pages.
+	db, _ := sql.Open("sqlite", src)
+	if _, err := db.Exec(`DELETE FROM memories WHERE CAST(memory_id AS INTEGER) >= 40`); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	_ = db.Close()
+
+	backup := filepath.Join(dir, "backup.db")
+	if err := vacuumBackup(src, backup); err != nil {
+		t.Fatalf("vacuum backup: %v", err)
+	}
+	si, _ := os.Stat(src)
+	bi, _ := os.Stat(backup)
+	if bi.Size() >= (si.Size()*19)/20 {
+		t.Skip("backup did not shrink >5%; fragmentation model insufficient on this platform")
+	}
+	if err := verifyBackup(src, backup); err != nil {
+		t.Errorf("a valid VACUUM backup of a fragmented DB must pass, got: %v", err)
+	}
+}
+
+// TestVerifyBackup_RawCopyAccepted: when VACUUM INTO fails, resetChainState falls
+// back to a byte-for-byte file copy. Verify such a copy (identical bytes, full row
+// count, larger-or-equal size) passes the content check.
+func TestVerifyBackup_RawCopyAccepted(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "sage.db")
+	makeMemoriesDB(t, src, 50)
+	backup := filepath.Join(dir, "backup.db")
+	raw, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBackup(src, backup); err != nil {
+		t.Errorf("a raw byte-for-byte copy must pass verify, got: %v", err)
+	}
+}
+
+// TestVerifyBackup_MissingOrEmptyRejected covers the trivial failure modes.
+func TestVerifyBackup_MissingOrEmptyRejected(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "sage.db")
+	makeMemoriesDB(t, src, 5)
+
+	if err := verifyBackup(src, filepath.Join(dir, "nope.db")); err == nil {
+		t.Error("missing backup must be rejected")
+	}
+	empty := filepath.Join(dir, "empty.db")
+	if err := os.WriteFile(empty, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBackup(src, empty); err == nil {
+		t.Error("empty backup must be rejected")
+	}
+}
+
+// TestVerifyBackup_TruncatedRowsRejected: a backup with FEWER memories than the live
+// DB is the real truncation signal and must be refused, with the intact reassurance.
+func TestVerifyBackup_TruncatedRowsRejected(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "sage.db")
+	backup := filepath.Join(dir, "backup.db")
+	makeMemoriesDB(t, src, 100)
+	makeMemoriesDB(t, backup, 40) // fewer rows -> truncation
+	err := verifyBackup(src, backup)
 	if err == nil {
-		t.Fatalf("expected reject when backup is %d bytes vs source %d", tooSmall, srcSize)
+		t.Fatal("a backup missing memories must be rejected")
 	}
 	if !strings.Contains(err.Error(), "intact") {
-		t.Errorf("error must lead with 'intact' reassurance, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "disk space") {
-		t.Errorf("error must hint at remediation ('disk space'), got: %v", err)
+		t.Errorf("error must reassure with 'intact', got: %v", err)
 	}
 }
 
-// TestVerifyBackupSize_VacuumCompactionAccepted: VACUUM INTO can shrink a
-// fragmented DB by a few percent. Anything within 5% of source is fine.
-func TestVerifyBackupSize_VacuumCompactionAccepted(t *testing.T) {
-	srcSize := int64(1 << 20)
-	for _, backupSize := range []int64{srcSize, srcSize - srcSize/100, (srcSize * 19) / 20} {
-		if err := verifyBackupSize(srcSize, backupSize, "/tmp/backup.db"); err != nil {
-			t.Errorf("legitimate post-VACUUM backup of %d bytes (source %d) must pass, got: %v", backupSize, srcSize, err)
-		}
+// TestVerifyBackup_CorruptRejected: a non-sqlite / garbage backup fails quick_check.
+func TestVerifyBackup_CorruptRejected(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "sage.db")
+	makeMemoriesDB(t, src, 5)
+	corrupt := filepath.Join(dir, "corrupt.db")
+	if err := os.WriteFile(corrupt, []byte("this is not a sqlite database, at all, nope"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBackup(src, corrupt); err == nil {
+		t.Error("a corrupt backup must be rejected")
+	}
+}
+
+// TestVerifyBackup_FreshSourceNoMemoriesTable: a source without a memories table
+// (fresh/foreign DB) skips the row check but still requires a structurally sound
+// backup.
+func TestVerifyBackup_FreshSourceNoMemoriesTable(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "sage.db")
+	db, _ := sql.Open("sqlite", src)
+	if _, err := db.Exec(`CREATE TABLE other (x INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	backup := filepath.Join(dir, "backup.db")
+	if err := vacuumBackup(src, backup); err != nil {
+		t.Fatalf("vacuum: %v", err)
+	}
+	if err := verifyBackup(src, backup); err != nil {
+		t.Errorf("a valid backup of a memories-less DB must pass, got: %v", err)
 	}
 }
 
