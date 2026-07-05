@@ -4589,7 +4589,9 @@ function SettingsPage({ onRunSetup }) {
                                 </div>
                             `}
                             <div class="settings-row"><span class="label">${statusDot(!!(health?.embedder?.reranker?.enabled))} Reranker</span><span class="value" style="color: ${health?.embedder?.reranker?.enabled ? '#10b981' : '#6b7280'}">${health?.embedder?.reranker?.enabled ? (health.embedder.reranker.model || 'On') : 'Off'}</span></div>
-                            <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span><span class="value" style="color: ${encrypted ? '#10b981' : '#6b7280'}">${encrypted ? 'AES-256-GCM' : 'Off'}</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span>${encrypted
+                                ? html`<span class="value" style="color:#10b981">AES-256-GCM</span>`
+                                : html`<span style="display:flex;align-items:center;gap:8px;"><span class="value" style="color:#6b7280">Off</span><button class="btn btn-primary" style="padding:4px 12px;font-size:12px;" title="Encrypt all memories at rest with a passphrase (Security tab)" onClick=${() => setSettingsTab('security')}>Enable →</button></span>`}</div>
                             <div class="settings-row"><span class="label">Version</span><span class="value">${ver}</span></div>
                             <div class="settings-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>
                             <div class="settings-row"><span class="label">API Endpoint</span><span class="value">${window.location.origin}</span></div>
