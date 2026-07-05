@@ -1291,3 +1291,187 @@ func TestSageRecall_HybridDisabledByEnv(t *testing.T) {
 	assert.Equal(t, 0, hybridHits, "hybrid endpoint must NOT be hit when disabled")
 	assert.Equal(t, 0, embedHits, "embed must NOT be hit when hybrid disabled and FTS path chosen")
 }
+
+// --- Recall-degradation signalling (agent-facing) ---
+//
+// These verify the recall_mode / semantic_degraded / degraded_reason fields so
+// a silent keyword-only fallback (embedder down, hybrid failed, or a
+// non-semantic hash node) is visible to the calling agent instead of looking
+// identical to a full semantic recall.
+
+// The hybrid branch runs ONLY on a non-semantic node (isSemanticMode()==false),
+// so even a successful hybrid recall is semantically degraded — its vector arm is
+// hash noise. The default config (SAGE_RECALL_HYBRID on) on a hash node must surface
+// this, or the most common degradation would look like a healthy hybrid recall.
+func TestSageRecall_Signal_HybridOnHashNode_Degraded(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"semantic": false, "provider": "hash", "ready": true})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1, 0.2, 0.3}})
+	})
+	mux.HandleFunc("/v1/memory/hybrid", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results":     []map[string]any{{"memory_id": "m1", "content": "c", "status": "committed"}},
+			"total_count": 1,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRecall(context.Background(), map[string]any{"query": "x"})
+	require.NoError(t, err)
+	m := result.(map[string]any)
+	assert.Equal(t, "hybrid", m["recall_mode"], "it did run hybrid RRF")
+	assert.Equal(t, true, m["semantic_degraded"], "hybrid on a hash node has no meaningful vectors — must be flagged degraded")
+	reason, hasReason := m["degraded_reason"].(string)
+	assert.True(t, hasReason && reason != "", "a degraded recall must carry a reason")
+}
+
+func TestSageRecall_Signal_HybridFallbackFlaggedKeywordOnly(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"semantic": false, "provider": "hash", "ready": true})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1, 0.2, 0.3}})
+	})
+	mux.HandleFunc("/v1/memory/hybrid", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]any{"title": "Not Found", "detail": "not registered"})
+	})
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results":     []map[string]any{{"memory_id": "m-fts", "content": "c", "status": "committed"}},
+			"total_count": 1,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRecall(context.Background(), map[string]any{"query": "x"})
+	require.NoError(t, err)
+	m := result.(map[string]any)
+	assert.Equal(t, "keyword_only", m["recall_mode"])
+	assert.Equal(t, true, m["semantic_degraded"])
+	reason, _ := m["degraded_reason"].(string)
+	assert.Contains(t, reason, "hybrid recall failed")
+}
+
+func TestSageRecall_Signal_NonSemanticNodeKeywordOnly(t *testing.T) {
+	t.Setenv("SAGE_RECALL_HYBRID", "0") // force the legacy FTS5-only branch
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"semantic": false, "provider": "hash", "ready": true})
+	})
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results":     []map[string]any{{"memory_id": "m-fts", "content": "c", "status": "committed"}},
+			"total_count": 1,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRecall(context.Background(), map[string]any{"query": "x"})
+	require.NoError(t, err)
+	m := result.(map[string]any)
+	assert.Equal(t, "keyword_only", m["recall_mode"])
+	assert.Equal(t, true, m["semantic_degraded"])
+	reason, _ := m["degraded_reason"].(string)
+	assert.Contains(t, reason, "non-semantic")
+}
+
+func TestSageRecall_Signal_SemanticNotDegraded(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"semantic": true, "provider": "ollama", "ready": true})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1, 0.2, 0.3}})
+	})
+	mux.HandleFunc("/v1/memory/query", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results":     []map[string]any{{"memory_id": "m-sem", "content": "c", "status": "committed"}},
+			"total_count": 1,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRecall(context.Background(), map[string]any{"query": "x"})
+	require.NoError(t, err)
+	m := result.(map[string]any)
+	assert.Equal(t, "semantic_only", m["recall_mode"])
+	assert.Equal(t, false, m["semantic_degraded"])
+}
+
+// TestIsSemanticMode_ProbeFailureNotCached guards the core cache fix: a failed
+// /v1/embed/info probe must NOT be cached as semantic=false for the server
+// lifetime. The next call must re-probe and recover when the embedder returns.
+func TestIsSemanticMode_ProbeFailureNotCached(t *testing.T) {
+	infoCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		infoCalls++
+		if infoCalls == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable) // embedder transiently down
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"semantic": true, "provider": "ollama", "ready": true})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	assert.False(t, s.isSemanticMode(context.Background()), "probe failure defaults to non-semantic for this call")
+	// The failure must not have been cached — a second call re-probes and the
+	// now-healthy embedder flips the verdict to semantic.
+	assert.True(t, s.isSemanticMode(context.Background()), "must re-probe after a failed probe and recover")
+	assert.Equal(t, 2, infoCalls, "failed probe must not be cached; second call must re-probe")
+}
+
+func TestSageTurn_Signal_KeywordOnlyOnHashNode(t *testing.T) {
+	ts := mockSageAPI(t) // mock reports semantic=false (hash)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolTurn(context.Background(), map[string]any{
+		"topic": "what do I know about SAGE",
+	})
+	require.NoError(t, err)
+	m := result.(map[string]any)
+	assert.Equal(t, "keyword_only", m["recall_mode"])
+	assert.Equal(t, true, m["semantic_degraded"])
+	reason, _ := m["degraded_reason"].(string)
+	assert.Contains(t, reason, "non-semantic")
+}

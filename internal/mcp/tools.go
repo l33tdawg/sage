@@ -486,6 +486,12 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 // HTTP error returned by /v1/memory/search.
 const vaultEncryptedSearchMarker = "text search unavailable: content is vault-encrypted"
 
+// nonSemanticRecallReason explains a keyword-quality recall without over-claiming
+// the cause: isSemanticMode() returns false BOTH for a genuinely non-semantic hash
+// provider AND for a transient /v1/embed/info probe failure, so the message covers
+// both rather than hard-asserting "hash mode".
+const nonSemanticRecallReason = "no semantic embedder available (non-semantic hash provider or embedder unreachable); recall is keyword-quality"
+
 func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, error) {
 	query, _ := params["query"].(string)
 	if query == "" {
@@ -502,23 +508,49 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 	// Response type shared by both paths.
 	var queryResp recallResp
 
+	// Track which path actually served the request so the caller can tell a
+	// full semantic/hybrid recall apart from a silent keyword-only degrade
+	// (embedder down, hybrid failed, or a non-semantic hash node).
+	var recallMode string // "semantic_only" | "hybrid" | "keyword_only"
+	var degraded bool     // true when recall dropped to keyword-only
+	var degradedReason string
+
 	if s.isSemanticMode(ctx) {
+		recallMode = "semantic_only"
 		if err := s.recallSemantic(ctx, query, domain, topK, minConf, &queryResp); err != nil {
 			return nil, err
 		}
 	} else if hybridRecallEnabled() {
 		// Hybrid path: BM25 ⊕ vector cosine fused via Reciprocal Rank Fusion.
-		// Falls back to the legacy FTS5-only search path if hybrid 404s or
-		// errors so older nodes still respond. The fallback also catches the
-		// vault-encrypted marker via the legacy retry below.
+		// This branch only runs when isSemanticMode() is false — the node has NO
+		// usable semantic embedder (non-semantic hash provider, or /v1/embed/info
+		// unreachable), so the hybrid vector arm is hash noise and recall is
+		// keyword-quality. Flag it degraded even on the happy hybrid path; the
+		// caller sees recall_mode="hybrid" but semantic_degraded=true.
+		recallMode = "hybrid"
+		degraded = true
+		degradedReason = nonSemanticRecallReason
 		if hybridErr := s.recallHybrid(ctx, query, domain, topK, minConf, &queryResp); hybridErr != nil {
 			fmt.Fprintf(os.Stderr, "SAGE MCP: hybrid recall failed (%v); falling back to FTS5 path\n", hybridErr)
-			if legacyErr := s.recallFTSWithFallback(ctx, query, domain, topK, minConf, &queryResp); legacyErr != nil {
+			fallbackMode, legacyErr := s.recallFTSWithFallback(ctx, query, domain, topK, minConf, &queryResp)
+			if legacyErr != nil {
 				return nil, legacyErr
+			}
+			recallMode = fallbackMode
+			if fallbackMode == "semantic_only" {
+				// The vault-encrypted retry actually served semantically — not a degrade.
+				degraded = false
+				degradedReason = ""
+			} else {
+				degradedReason = fmt.Sprintf("hybrid recall failed (%v); fell back to keyword-only FTS5", hybridErr)
 			}
 		}
 	} else {
-		// FTS5 path: full-text search when embeddings aren't semantic.
+		// FTS5 path: full-text search when embeddings aren't semantic. By
+		// definition this is keyword-only — the node has no semantic embedder.
+		recallMode = "keyword_only"
+		degraded = true
+		degradedReason = nonSemanticRecallReason
 		searchReq, _ := json.Marshal(map[string]any{
 			"query":          query,
 			"domain_tag":     domain,
@@ -535,14 +567,14 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 			// calls take the right path.
 			if strings.Contains(searchErr.Error(), vaultEncryptedSearchMarker) {
 				fmt.Fprintf(os.Stderr, "SAGE MCP: /v1/memory/search reports vault-encrypted; retrying with semantic path\n")
-				semanticTrue := true
-				s.semanticMu.Lock()
-				s.semanticMode = &semanticTrue
-				s.semanticCacheAge = time.Now()
-				s.semanticMu.Unlock()
+				s.setSemanticMode(true)
 				if retryErr := s.recallSemantic(ctx, query, domain, topK, minConf, &queryResp); retryErr != nil {
 					return nil, retryErr
 				}
+				// Actually served semantically — not a degrade after all.
+				recallMode = "semantic_only"
+				degraded = false
+				degradedReason = ""
 			} else {
 				return nil, fmt.Errorf("search memories: %w", searchErr)
 			}
@@ -567,10 +599,16 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 		memories = append(memories, entry)
 	}
 
-	return map[string]any{
-		"memories":    memories,
-		"total_count": queryResp.TotalCount,
-	}, nil
+	out := map[string]any{
+		"memories":          memories,
+		"total_count":       queryResp.TotalCount,
+		"recall_mode":       recallMode,
+		"semantic_degraded": degraded,
+	}
+	if degradedReason != "" {
+		out["degraded_reason"] = degradedReason
+	}
+	return out, nil
 }
 
 // recallResp is the response shape returned by both /v1/memory/query (semantic
@@ -633,8 +671,11 @@ func (s *Server) recallHybrid(ctx context.Context, query, domain string, topK in
 
 // recallFTSWithFallback runs the legacy FTS5 path and applies the
 // belt-and-braces vault-encrypted retry. Extracted so hybrid recall can
-// fall back to it cleanly when /v1/memory/hybrid isn't available.
-func (s *Server) recallFTSWithFallback(ctx context.Context, query, domain string, topK int, minConf float64, out *recallResp) error {
+// fall back to it cleanly when /v1/memory/hybrid isn't available. Returns the
+// mode that actually served the request ("keyword_only", or "semantic_only"
+// when the vault-encrypted marker forced a semantic retry) so the caller can
+// report recall quality accurately instead of assuming keyword-only.
+func (s *Server) recallFTSWithFallback(ctx context.Context, query, domain string, topK int, minConf float64, out *recallResp) (string, error) {
 	searchReq, _ := json.Marshal(map[string]any{
 		"query":          query,
 		"domain_tag":     domain,
@@ -646,16 +687,15 @@ func (s *Server) recallFTSWithFallback(ctx context.Context, query, domain string
 	if searchErr := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, out); searchErr != nil {
 		if strings.Contains(searchErr.Error(), vaultEncryptedSearchMarker) {
 			fmt.Fprintf(os.Stderr, "SAGE MCP: /v1/memory/search reports vault-encrypted; retrying with semantic path\n")
-			semanticTrue := true
-			s.semanticMu.Lock()
-			s.semanticMode = &semanticTrue
-			s.semanticCacheAge = time.Now()
-			s.semanticMu.Unlock()
-			return s.recallSemantic(ctx, query, domain, topK, minConf, out)
+			s.setSemanticMode(true)
+			if err := s.recallSemantic(ctx, query, domain, topK, minConf, out); err != nil {
+				return "", err
+			}
+			return "semantic_only", nil
 		}
-		return fmt.Errorf("search memories: %w", searchErr)
+		return "", fmt.Errorf("search memories: %w", searchErr)
 	}
-	return nil
+	return "keyword_only", nil
 }
 
 // recallSemantic runs the embedding + cosine-similarity recall path. Used by
@@ -667,6 +707,10 @@ func (s *Server) recallSemantic(ctx context.Context, query, domain string, topK 
 		Embedding []float32 `json:"embedding"`
 	}
 	if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
+		// Embedder just failed — drop the cached "semantic" verdict so the next
+		// recall re-probes /v1/embed/info instead of repeatedly trusting a dead
+		// embedder for the rest of the process lifetime.
+		s.invalidateSemanticMode()
 		return fmt.Errorf("get embedding: %w", err)
 	}
 
@@ -882,7 +926,20 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 		TotalCount int `json:"total_count"`
 	}
 
-	if s.isSemanticMode(ctx) {
+	// Tell the agent which recall path actually ran so a keyword-only fallback
+	// (non-semantic hash node or a dead embedder) isn't mistaken for full
+	// semantic recall. Mirrors the fields on toolRecall's result map.
+	semantic := s.isSemanticMode(ctx)
+	if semantic {
+		result["recall_mode"] = "semantic_only"
+		result["semantic_degraded"] = false
+	} else {
+		result["recall_mode"] = "keyword_only"
+		result["semantic_degraded"] = true
+		result["degraded_reason"] = nonSemanticRecallReason
+	}
+
+	if semantic {
 		// Semantic path: embed topic → cosine similarity search.
 		embedReq, _ := json.Marshal(map[string]string{"text": topic})
 		var embedResp struct {
@@ -890,6 +947,11 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 		}
 		if err := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); err != nil {
 			result["recall_error"] = err.Error()
+			result["semantic_degraded"] = true
+			result["degraded_reason"] = "embed_failed: " + err.Error()
+			// Embedder just failed — re-probe next turn instead of trusting a
+			// stale "semantic" verdict for the rest of the session.
+			s.invalidateSemanticMode()
 		} else {
 			queryReq, _ := json.Marshal(map[string]any{
 				"embedding":      embedResp.Embedding,
@@ -901,6 +963,8 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 			})
 			if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, &recallResp); err != nil {
 				result["recall_error"] = err.Error()
+				result["semantic_degraded"] = true
+				result["degraded_reason"] = "query_failed: " + err.Error()
 			}
 		}
 	} else {
@@ -1626,11 +1690,43 @@ func (s *Server) getRecallDefaults(ctx context.Context) (topK int, minConf float
 	return 5, 0
 }
 
-// isSemanticMode returns true if the embedding provider produces semantically meaningful vectors.
-// Cached for the lifetime of the server (provider doesn't change at runtime).
+// semanticCacheTTL bounds how long a successful /v1/embed/info probe is
+// trusted. The provider rarely changes at runtime, but it CAN (Ollama
+// started/stopped, or the node reconfigured), so we re-probe periodically
+// instead of pinning the verdict for the whole process lifetime. Probe
+// FAILURES are never cached (see isSemanticMode) so a transient embedder
+// outage can't silently lock recall onto the keyword-only path forever.
+const semanticCacheTTL = 5 * time.Minute
+
+// setSemanticMode caches a freshly-probed embedding-mode verdict under the
+// cache mutex. Centralises the locking idiom shared by isSemanticMode and the
+// vault-encrypted retry paths.
+func (s *Server) setSemanticMode(v bool) {
+	s.semanticMu.Lock()
+	s.semanticMode = &v
+	s.semanticCacheAge = time.Now()
+	s.semanticMu.Unlock()
+}
+
+// invalidateSemanticMode clears the cached verdict so the next isSemanticMode
+// call re-probes /v1/embed/info. Called when an embed request fails mid-session
+// (embedder down or provider swapped) so a stale "semantic" verdict isn't
+// trusted for the rest of the process lifetime.
+func (s *Server) invalidateSemanticMode() {
+	s.semanticMu.Lock()
+	s.semanticMode = nil
+	s.semanticCacheAge = time.Time{}
+	s.semanticMu.Unlock()
+}
+
+// isSemanticMode returns true if the embedding provider produces semantically
+// meaningful vectors. Successful probes are cached for semanticCacheTTL; probe
+// FAILURES are NOT cached, so a transient /v1/embed/info outage can't silently
+// pin every subsequent recall to the keyword-only path for the server's
+// lifetime — it re-probes next call and recovers when the embedder returns.
 func (s *Server) isSemanticMode(ctx context.Context) bool {
 	s.semanticMu.Lock()
-	if s.semanticMode != nil {
+	if s.semanticMode != nil && time.Since(s.semanticCacheAge) < semanticCacheTTL {
 		v := *s.semanticMode
 		s.semanticMu.Unlock()
 		return v
@@ -1640,15 +1736,17 @@ func (s *Server) isSemanticMode(ctx context.Context) bool {
 	var infoResp struct {
 		Semantic bool `json:"semantic"`
 	}
-	semantic := false
-	if err := s.doSignedJSON(ctx, "GET", "/v1/embed/info", nil, &infoResp); err == nil {
-		semantic = infoResp.Semantic
+	if err := s.doSignedJSON(ctx, "GET", "/v1/embed/info", nil, &infoResp); err != nil {
+		// Probe failed — the embedder/node is unreachable right now. Do NOT
+		// cache this: treat recall as non-semantic for THIS call only and
+		// re-probe next time so a mid-session recovery is picked up. Signal on
+		// stderr; agents see the degrade via the recall_mode/semantic_degraded
+		// fields on the recall result.
+		fmt.Fprintf(os.Stderr, "SAGE MCP: /v1/embed/info probe failed (%v); treating recall as non-semantic for this call, will re-probe\n", err)
+		return false
 	}
-	s.semanticMu.Lock()
-	s.semanticMode = &semantic
-	s.semanticCacheAge = time.Now()
-	s.semanticMu.Unlock()
-	return semantic
+	s.setSemanticMode(infoResp.Semantic)
+	return infoResp.Semantic
 }
 
 // getMemoryMode returns the current memory mode preference ("full" or "bookend").
