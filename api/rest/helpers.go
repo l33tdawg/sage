@@ -15,12 +15,20 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeProblem writes an RFC 7807 Problem Details JSON response.
+// writeProblem writes an RFC 7807 Problem Details JSON response with the
+// default status-derived problem type.
 func writeProblem(w http.ResponseWriter, status int, title, detail string) {
+	writeProblemTyped(w, status, fmt.Sprintf("https://sage.dev/errors/%d", status), title, detail)
+}
+
+// writeProblemTyped is writeProblem with an explicit problem type URI, for
+// responses that must stay machine-distinguishable from other errors sharing
+// the same status code (e.g. the mempool-full 429 vs the rate-limiter 429).
+func writeProblemTyped(w http.ResponseWriter, status int, problemType, title, detail string) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"type":   fmt.Sprintf("https://sage.dev/errors/%d", status),
+		"type":   problemType,
 		"title":  title,
 		"status": status,
 		"detail": detail,

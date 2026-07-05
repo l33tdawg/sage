@@ -580,6 +580,12 @@ func runServe() (rerr error) {
 	// Create REST server
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
 	restServer.SetSuppCache(app.SuppCache)
+	// Backpressure signals: hand the REST layer the REAL runtime mempool cap.
+	// cometCfg comes from config.DefaultConfig() above with Mempool.Size never
+	// overridden (CometBFT default 5000) — plumbing it instead of hardcoding
+	// means any future code-side override propagates automatically. The
+	// on-disk config.toml [mempool] size is reference-only and never read.
+	restServer.SetMempoolCap(cometCfg.Mempool.Size)
 	// v8.0: wire the off-consensus fork-gate accessor so REST handlers
 	// flip to ancestor-walk access checks once the chain reports a post-fork
 	// height. Advisory only — the consensus path uses app.postV8Fork(height).

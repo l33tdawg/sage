@@ -47,6 +47,7 @@ type Server struct {
 	embedder    embedding.Provider // Embedding provider (Ollama or hash)
 	OnEvent     EventCallback      // Optional: called when notable events occur
 	suppCache   SuppCacheWriter    // Bridges off-chain data (embeddings) to ABCI for consensus-first writes
+	mempool     *mempoolSampler    // TTL-cached CometBFT mempool depth for backpressure signals
 
 	// nodeOperatorID is the hex-encoded ed25519 public key of the local
 	// node operator (~/.sage/agent.key). When a request's X-Agent-ID
@@ -152,6 +153,7 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 		logger:      logger,
 		signingKey:  signingKey,
 		embedder:    embedProvider,
+		mempool:     newMempoolSampler(cometbftRPC, DefaultMempoolMaxTxs),
 	}
 	s.router = s.setupRouter()
 	return s
@@ -161,6 +163,15 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 // Must be called before the server starts accepting requests.
 func (s *Server) SetSuppCache(cache SuppCacheWriter) {
 	s.suppCache = cache
+}
+
+// SetMempoolCap wires the node's REAL runtime CometBFT mempool size
+// (cometCfg.Mempool.Size in cmd/sage-gui/node.go) so mempool_pct in the
+// backpressure signals is computed against the actual cap rather than the
+// DefaultMempoolMaxTxs fallback. Call before the server starts accepting
+// requests. Non-positive values are ignored.
+func (s *Server) SetMempoolCap(n int) {
+	s.mempool.setMaxTxs(n)
 }
 
 // SetPostV8ForkAccessor wires a dynamic predicate that reports whether the
@@ -265,7 +276,7 @@ func (s *Server) setupRouter() chi.Router {
 		AllowedOrigins:   corsOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Content-Type", "X-Agent-ID", "X-Signature", "X-Timestamp"},
-		ExposedHeaders:   []string{"X-Request-ID"},
+		ExposedHeaders:   []string{"X-Request-ID", "X-Sage-Mempool-Pct", "Retry-After"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
@@ -331,6 +342,10 @@ func (s *Server) setupRouter() chi.Router {
 		// Validator endpoints
 		r.Get("/v1/validator/pending", s.handleGetPending)
 		r.Get("/v1/validator/epoch", s.handleGetEpoch)
+
+		// Chain backpressure signal — TTL-cached mempool depth vs the runtime
+		// cap so writers can self-throttle without polling raw CometBFT RPC.
+		r.Get("/v1/chain/backpressure", s.handleChainBackpressure)
 
 		// Embedding endpoints (local Ollama, no cloud)
 		r.Post("/v1/embed", s.handleEmbed)

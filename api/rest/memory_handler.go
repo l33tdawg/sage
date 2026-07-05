@@ -175,6 +175,10 @@ type cometCommitResponse struct {
 	Error *struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
+		// Data carries the actionable detail for mempool rejections —
+		// CometBFT returns message="Internal error" with the real cause
+		// ("mempool is full: number of txs N (max: M)") in error.data.
+		Data string `json:"data"`
 	} `json:"error"`
 }
 
@@ -490,6 +494,17 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast submit tx")
 		status, publicMsg := broadcastErrorPublic(err)
+		if isMempoolFullErr(err) {
+			// Chain backpressure, not a client fault: tell the writer when
+			// to come back (one block interval drains the mempool) and
+			// stamp the distinct problem type so this 429 is
+			// distinguishable from the rate limiter's quota 429. Header
+			// must be set before writeProblemTyped calls WriteHeader —
+			// mirrors middleware/ratelimit.go.
+			w.Header().Set("Retry-After", "1")
+			writeProblemTyped(w, status, mempoolFullProblemType, "Mempool full", publicMsg)
+			return
+		}
 		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
@@ -534,6 +549,14 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 			"memory_type":  req.MemoryType,
 			"confidence":   req.ConfidenceScore,
 		})
+	}
+
+	// Backpressure hint for streaming writers: current mempool fill fraction
+	// (0..1) from the ~1s-TTL cached sampler, so clients can self-throttle
+	// with zero extra round-trips. Best-effort — omitted when the probe
+	// fails, and must be set before writeJSON calls WriteHeader.
+	if smp, ok := s.mempool.sample(); ok {
+		w.Header().Set("X-Sage-Mempool-Pct", formatMempoolPct(smp.Pct))
 	}
 
 	writeJSON(w, http.StatusCreated, SubmitMemoryResponse{
@@ -1494,6 +1517,12 @@ func (s *Server) broadcastTxCommitWithHeight(txBytes []byte) (string, int64, err
 	}
 
 	if result.Error != nil {
+		if result.Error.Data != "" {
+			// error.data carries the real cause for mempool rejections
+			// (message is just "Internal error") — fold it in so
+			// broadcastErrorPublic can classify the failure.
+			return "", 0, fmt.Errorf("broadcast error: %s: %s", result.Error.Message, result.Error.Data)
+		}
 		return "", 0, fmt.Errorf("broadcast error: %s", result.Error.Message)
 	}
 
@@ -1529,12 +1558,33 @@ func broadcastErrorPublic(err error) (int, string) {
 		return http.StatusUnauthorized, "agent identity verification failed"
 	case strings.Contains(msg, "not registered"):
 		return http.StatusNotFound, "not found"
+	case strings.Contains(msg, "mempool is full"):
+		// CometBFT backpressure, not a fault. handleSubmitMemory upgrades
+		// this to Retry-After + the distinct mempool-full problem type;
+		// other broadcast callers at least surface the right status
+		// instead of an opaque 500.
+		return http.StatusTooManyRequests, "mempool full, retry later"
 	case strings.Contains(msg, "tx rejected in CheckTx"):
 		return http.StatusBadRequest, "request rejected"
 	case strings.Contains(msg, "tx rejected in FinalizeBlock"):
 		return http.StatusBadRequest, "request rejected"
 	}
 	return http.StatusInternalServerError, "internal error"
+}
+
+// mempoolFullProblemType is the RFC 7807 problem type stamped on the 429
+// returned when CometBFT rejects a broadcast because its mempool is full.
+// Distinct from the rate limiter's status-derived type
+// (https://sage.dev/errors/429) so clients can tell chain backpressure
+// ("everyone slow down") from a per-agent quota breach ("you slow down").
+const mempoolFullProblemType = "https://sage.dev/errors/mempool-full"
+
+// isMempoolFullErr reports whether a broadcast error is CometBFT's
+// mempool-is-full rejection. The detail arrives in the JSON-RPC error.data
+// field ("mempool is full: number of txs N (max: M)"), which
+// broadcastTxCommitWithHeight folds into the wrapped error string.
+func isMempoolFullErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "mempool is full")
 }
 
 func memoryTypeToTx(mt string) tx.MemoryType {
