@@ -25,6 +25,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`concepts/clearance-classification.md`](concepts/clearance-classification.md) | Per-record classification (0–4), the REST-vs-wire default gotcha, and the per-record query gate. |
 | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, and the five-gate query pipeline. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
+| [`concepts/block-production-and-idle.md`](concepts/block-production-and-idle.md) | Why an idle chain mints **no** blocks (SAGE has no heartbeat), when a block *is* minted, and how to tell healthy-idle from actually-stuck. Read this before alarming on a frozen block height. |
 | [`concepts/content-validation-gate.md`](concepts/content-validation-gate.md) | The optional Layer-2 content-validation gate (`outcome_class`-keyed reject hook) and the deployment **arming seam** — both the stateless `contentvalidator.SetProvider` and the context-aware `SetProviderWithContext` (exposes the on-chain `RoleResolver` for signer-authority checks) — enabling it without patching the cmd entrypoints. |
 | [`federation-and-brain-api.md`](federation-and-brain-api.md) | The v11 HTTP surface: cross-network federation (`/fed/v1/*` mTLS listener, `/v1/federation/*` operator REST, `/v1/dashboard/federation/*` proxy) and the memory train-of-thought endpoint (`GET /v1/dashboard/memory/{id}/related`). All off-consensus; only tx-33/34 reach chain state. |
 | [`reranker-and-setup.md`](reranker-and-setup.md) | The v11 local-engine and setup surface: first-run onboarding, recall-tuning clamps, managed semantic memory setup (`/v1/dashboard/embeddings/*`, pinned Ollama runtime + readiness-gated model pull), the reranker config endpoint (`kind` field + verify-on-enable), the managed llama.cpp sidecar (`/v1/dashboard/reranker/setup/*`, pinned assets + sha256 + adopt-not-respawn), the TEI vs llama.cpp rerank dialects, and `embedding_provider` stamped at insert. All off-consensus. |
@@ -41,6 +42,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | Sign a request correctly | **Request signing** below |
 | Know what "committed" actually means | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) |
 | Know if a memory will decay | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) |
+| Understand why your chain's block height isn't moving | [`concepts/block-production-and-idle.md`](concepts/block-production-and-idle.md) |
 | Configure SAGE via environment variables | [`environment-variables.md`](environment-variables.md) |
 
 ---

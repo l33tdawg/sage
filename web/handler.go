@@ -2157,6 +2157,31 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 			chain["mempool_bytes"] = mempool.Result.TotalBytes
 		}
 	}
+	// Derived liveness signals. SAGE runs create_empty_blocks=false, so an IDLE chain
+	// (no pending txs, no recent block) is HEALTHY by design — its height simply stops
+	// advancing; a chain with PENDING txs but no recent block is STUCK. Surfacing this
+	// server-side lets curl/monitoring distinguish the two without re-deriving the rule
+	// (see docs/reference/concepts/block-production-and-idle.md). idleAfterSeconds
+	// mirrors the dashboard's 30s threshold.
+	const idleAfterSeconds = 30
+	if bt, ok := chain["block_time"].(string); ok && bt != "" {
+		// Skip a height-0 chain that has never produced a block (CometBFT reports the
+		// zero time "0001-01-01…"), whose age would be absurd and whose idle state is
+		// not yet meaningful.
+		if t, perr := time.Parse(time.RFC3339Nano, bt); perr == nil && t.Year() > 1 {
+			ageSec := int64(time.Since(t).Seconds())
+			chain["last_block_age_seconds"] = ageSec
+			// Only derive idle/stuck when the mempool depth is actually KNOWN. If the
+			// num_unconfirmed_txs RPC failed, mempool_txs is absent — a missing count
+			// would read as 0 and could mislabel a stuck chain (pending txs, no block)
+			// as idle. Require the count before flagging either state.
+			if s, ok := chain["mempool_txs"].(string); ok {
+				nTxs, _ := strconv.Atoi(s)
+				chain["idle"] = nTxs == 0 && ageSec > idleAfterSeconds
+				chain["stuck"] = nTxs > 0 && ageSec > idleAfterSeconds
+			}
+		}
+	}
 	// Peer details
 	netReq, _ := http.NewRequestWithContext(r.Context(), "GET", cometRPC+"/net_info", nil)
 	if netResp, netErr := cometClient.Do(netReq); netErr == nil {
