@@ -18,6 +18,11 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, "127.0.0.1:8080", cfg.RESTAddr)
 	assert.Equal(t, filepath.Join(home, "data"), cfg.DataDir)
 	assert.Equal(t, filepath.Join(home, "agent.key"), cfg.AgentKey)
+
+	// Voter defaults (runs-or-exits guarantee): on by default, 2s poll, not required.
+	assert.True(t, cfg.Voter.Enabled)
+	assert.Equal(t, "2s", cfg.Voter.PollInterval)
+	assert.False(t, cfg.Voter.Required)
 }
 
 func TestLoadConfig_Missing(t *testing.T) {
@@ -51,6 +56,90 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	assert.Equal(t, "ollama", loaded.Embedding.Provider)
 	assert.Equal(t, "http://localhost:11434", loaded.Embedding.BaseURL)
 	assert.Equal(t, ":9090", loaded.RESTAddr)
+}
+
+func TestLoadConfig_VoterEnvOverrides(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	t.Setenv("SAGE_VOTER_ENABLED", "false")
+	t.Setenv("SAGE_VOTER_POLL_INTERVAL", "500ms")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.False(t, cfg.Voter.Enabled)
+	assert.Equal(t, "500ms", cfg.Voter.PollInterval)
+	assert.False(t, cfg.Voter.Required)
+}
+
+func TestLoadConfig_VoterRequiredEnv(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	t.Setenv("SAGE_VOTER_REQUIRED", "true")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.True(t, cfg.Voter.Required)
+	assert.True(t, cfg.Voter.Enabled, "required voter stays enabled by default")
+}
+
+// TestLoadConfig_VoterRequiredDisabledConflict pins the load-time guard:
+// voter.required=true with voter.enabled=false is contradictory ("must vote"
+// vs "never vote") and refuses to boot rather than guessing which wins.
+func TestLoadConfig_VoterRequiredDisabledConflict(t *testing.T) {
+	t.Run("via env", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("SAGE_HOME", tmp)
+		t.Setenv("SAGE_VOTER_ENABLED", "false")
+		t.Setenv("SAGE_VOTER_REQUIRED", "true")
+
+		_, err := LoadConfig()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "voter.required")
+	})
+
+	t.Run("via yaml", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("SAGE_HOME", tmp)
+		yamlCfg := "voter:\n  enabled: false\n  required: true\n"
+		require.NoError(t, os.WriteFile(filepath.Join(tmp, "config.yaml"), []byte(yamlCfg), 0600))
+
+		_, err := LoadConfig()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "voter.required")
+	})
+}
+
+// TestLoadConfig_VoterPartialYAML pins that a voter block naming only some keys
+// keeps the defaults for the rest (yaml decodes over the defaulted struct).
+func TestLoadConfig_VoterPartialYAML(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	yamlCfg := "voter:\n  poll_interval: 10s\n"
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "config.yaml"), []byte(yamlCfg), 0600))
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.True(t, cfg.Voter.Enabled, "enabled default survives a partial voter block")
+	assert.Equal(t, "10s", cfg.Voter.PollInterval)
+	assert.False(t, cfg.Voter.Required)
+}
+
+// TestPersistChainID_KeepsVoterDefault guards the raw round-trip in
+// persistChainID: a config.yaml WITHOUT a voter block must not come back with
+// an explicit voter.enabled=false (the field defaults to true, so the raw
+// re-marshal has to seed the default or it silently disables the voter).
+func TestPersistChainID_KeepsVoterDefault(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "config.yaml"), []byte("rest_addr: :9090\n"), 0600))
+
+	require.NoError(t, persistChainID("sage-test-chain"))
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "sage-test-chain", cfg.ChainID)
+	assert.Equal(t, ":9090", cfg.RESTAddr)
+	assert.True(t, cfg.Voter.Enabled, "chain_id rewrite must not flip the voter default off")
 }
 
 func TestSageHome_EnvVar(t *testing.T) {

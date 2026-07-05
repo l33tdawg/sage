@@ -27,6 +27,7 @@ type Config struct {
 	Encryption EncryptionConfig `yaml:"encryption"`
 	Quorum     QuorumConfig     `yaml:"quorum"`
 	Federation FederationConfig `yaml:"federation,omitempty"`
+	Voter      VoterConfig      `yaml:"voter"`
 	DataDir    string           `yaml:"data_dir"`
 	RESTAddr   string           `yaml:"rest_addr"`
 	AgentKey   string           `yaml:"agent_key_file"`
@@ -74,6 +75,23 @@ type FederationConfig struct {
 	ListenAddr string `yaml:"listen_addr,omitempty"`
 }
 
+// VoterConfig controls the per-node memory auto-voter — the goroutine that
+// signs MemoryVote/GovVote txs with the node's own consensus key so submitted
+// memories reach quorum (runs-or-exits guarantee, v11).
+type VoterConfig struct {
+	// Enabled starts the auto-voter (default true). Disabling it is an explicit
+	// operator choice — submitted memories then stay proposed until some other
+	// validator votes them through — so a false here logs Info, not Warn.
+	Enabled bool `yaml:"enabled"`
+	// PollInterval is how often pending memories are scanned, as a Go duration
+	// string (default "2s"). Unset/unparsable falls back to the default.
+	PollInterval string `yaml:"poll_interval,omitempty"`
+	// Required makes a voter that cannot start (missing/invalid consensus key)
+	// a fatal boot error instead of a warning, so the node either votes or
+	// exits — it never silently serves voter-less. Default false.
+	Required bool `yaml:"required,omitempty"`
+}
+
 // QuorumConfig controls multi-validator consensus mode.
 type QuorumConfig struct {
 	Enabled bool     `yaml:"enabled"`            // Enable quorum mode (multi-validator)
@@ -101,6 +119,18 @@ type EmbeddingConfig struct {
 	BaseURL   string `yaml:"base_url,omitempty"` // Ollama or OpenAI-compatible base
 }
 
+// defaultVoterConfig is the voter default block. Factored out because the
+// default is Enabled=TRUE (a zero VoterConfig means "voter off"), so every
+// Config that isn't decoded over LoadConfig's defaults — see persistChainID's
+// raw round-trip — must seed this explicitly or an absent voter block would
+// silently become an explicit voter.enabled=false on the next rewrite.
+func defaultVoterConfig() VoterConfig {
+	return VoterConfig{
+		Enabled:      true,
+		PollInterval: "2s",
+	}
+}
+
 // DefaultConfig returns the default configuration.
 func DefaultConfig(home string) *Config {
 	return &Config{
@@ -108,6 +138,7 @@ func DefaultConfig(home string) *Config {
 			Provider:  "hash",
 			Dimension: 768,
 		},
+		Voter:    defaultVoterConfig(),
 		DataDir:  filepath.Join(home, "data"),
 		RESTAddr: "127.0.0.1:8080",
 		AgentKey: filepath.Join(home, "agent.key"),
@@ -138,6 +169,9 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			applyEnvOverrides(cfg)
+			if vErr := cfg.validate(); vErr != nil {
+				return nil, vErr
+			}
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("read config: %w", err)
@@ -148,6 +182,9 @@ func LoadConfig() (*Config, error) {
 	}
 
 	applyEnvOverrides(cfg)
+	if vErr := cfg.validate(); vErr != nil {
+		return nil, vErr
+	}
 
 	// Expand ~ and ensure absolute paths
 	cfg.DataDir = expandHome(cfg.DataDir)
@@ -160,6 +197,15 @@ func LoadConfig() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// validate rejects contradictory configuration after the file + env merge.
+// Load-time, so a misconfigured node refuses to boot instead of guessing.
+func (cfg *Config) validate() error {
+	if cfg.Voter.Required && !cfg.Voter.Enabled {
+		return fmt.Errorf("invalid config: voter.required=true but voter.enabled=false — a required voter cannot be disabled (fix the voter block in config.yaml or SAGE_VOTER_ENABLED/SAGE_VOTER_REQUIRED)")
+	}
+	return nil
 }
 
 // applyEnvOverrides applies environment-variable overrides to cfg in place.
@@ -200,6 +246,37 @@ func applyEnvOverrides(cfg *Config) {
 		if n, err := strconv.Atoi(envDim); err == nil && n > 0 {
 			cfg.Embedding.Dimension = n
 		}
+	}
+	// Memory auto-voter overrides (runs-or-exits guarantee, v11).
+	if v := os.Getenv("SAGE_VOTER_ENABLED"); v != "" {
+		if b, ok := envBool("SAGE_VOTER_ENABLED", v); ok {
+			cfg.Voter.Enabled = b
+		}
+	}
+	if envInterval := os.Getenv("SAGE_VOTER_POLL_INTERVAL"); envInterval != "" {
+		cfg.Voter.PollInterval = envInterval
+	}
+	if v := os.Getenv("SAGE_VOTER_REQUIRED"); v != "" {
+		if b, ok := envBool("SAGE_VOTER_REQUIRED", v); ok {
+			cfg.Voter.Required = b
+		}
+	}
+}
+
+// envBool parses a boolean env override, accepting the strconv.ParseBool set plus the
+// common yes/no/on/off spellings. An unrecognized non-empty value is a likely operator
+// mistake — and for a fail-fast safety flag like SAGE_VOTER_REQUIRED, silently treating
+// "yes" as false would leave the operator thinking the gate is armed when it isn't — so
+// it warns to stderr and reports ok=false rather than defaulting quietly.
+func envBool(name, val string) (value bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "1", "t", "true", "yes", "y", "on":
+		return true, true
+	case "0", "f", "false", "no", "n", "off":
+		return false, true
+	default:
+		fmt.Fprintf(os.Stderr, "SAGE: %s=%q is not a recognized boolean (use true/false); ignoring\n", name, val)
+		return false, false
 	}
 }
 
@@ -243,7 +320,11 @@ func persistChainID(chainID string) error {
 	}
 
 	// Unmarshal into a RAW Config (no path expansion) so paths round-trip verbatim.
-	var raw Config
+	// Voter defaults ARE seeded: its default is enabled=true, so without the seed
+	// a config that omits the voter block would re-marshal as an explicit
+	// voter.enabled=false and silently disable the auto-voter on the next boot.
+	// (Keys present in the file still win — the seed only fills absent ones.)
+	raw := Config{Voter: defaultVoterConfig()}
 	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
 		return fmt.Errorf("parse config: %w", parseErr)
 	}

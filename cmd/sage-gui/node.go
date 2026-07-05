@@ -512,6 +512,18 @@ func runServe() (rerr error) {
 	cmtLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(os.Stderr))
 	cmtLogger = cmtlog.NewFilter(cmtLogger, cmtlog.AllowError()) // Quiet CometBFT logs
 
+	// Runs-or-exits guarantee (voter.required / SAGE_VOTER_REQUIRED): a node that
+	// cannot vote must exit BEFORE CometBFT or the HTTP server comes up, not warn
+	// and serve voter-less. voter.Run itself refuses an invalid key and returns
+	// immediately from its goroutine, so the key has to be validated HERE — after
+	// this gate a nil key only warns (legacy behavior). required+disabled is
+	// already rejected at LoadConfig, so no voter-enabled check is needed.
+	if cfg.Voter.Required {
+		if loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger) == nil {
+			return fmt.Errorf("voter.required=true but the consensus key (%s) is missing or invalid — memory auto-voter cannot start; fix the key or unset voter.required", cometCfg.PrivValidatorKeyFile())
+		}
+	}
+
 	// Create the node controller — manages CometBFT lifecycle for redeployment
 	nodeCtrl := NewSageNodeController(cometCfg, app, pv, nodeKey, cmtLogger, logger, cfg.DataDir)
 
@@ -980,30 +992,58 @@ func runServe() (rerr error) {
 	// node's OWN consensus validator key (priv_validator_key.json). No validator-set
 	// replacement — the genesis/quorum validator set already keys each node by this
 	// identity, so the node's votes count toward the same 2/3 quorum the chain tallies.
-	if selfKey := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); selfKey != nil {
+	selfKey := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger)
+
+	// Legacy single-node chain repairs run whenever the consensus key is available —
+	// INDEPENDENT of voter.enabled. They fix validator-set / dedup damage from retired
+	// code paths, not voting cadence, so disabling the voter must not disable them.
+	if selfKey != nil {
 		selfID := hex.EncodeToString(selfKey.Public().(ed25519.PublicKey))
-		// Backward-compat: repair a legacy single-node chain that previously ran the
-		// retired 4-archetype RegisterAppValidators path — whether the persisted set
-		// lacks this node's consensus key (votes rejected) or carries it alongside the
-		// 4 phantom archetypes (governance quorum unreachable, issue #37). The guard
-		// makes this impossible on a quorum chain.
+		// Repair a legacy single-node chain that previously ran the retired
+		// 4-archetype RegisterAppValidators path — whether the persisted set lacks this
+		// node's consensus key (votes rejected) or carries it alongside the 4 phantom
+		// archetypes (governance quorum unreachable, issue #37). Guarded off on quorum.
 		if changed, rErr := app.ReconcileSelfValidator(selfID, deriveArchetypeIDs(selfKey), !cfg.Quorum.Enabled); rErr != nil {
 			logger.Warn().Err(rErr).Msg("legacy validator reconcile skipped")
 		} else if changed {
 			logger.Warn().Str("self", selfID[:16]).Msg("legacy app-validators replaced by node consensus key (single-node repair)")
 		}
-		// Backward-compat: resurrect memories the pre-v10.4.2 voter wrongly
-		// deprecated as "duplicates" of their own proposed row (dedup self-match).
-		// Runs AFTER ReconcileSelfValidator so a just-collapsed legacy set passes
-		// the repair's set-is-exactly-{selfID} guard; the voter below then
-		// re-votes the resurrected memories into committed within a few ticks.
+		// Resurrect memories the pre-v10.4.2 voter wrongly deprecated as "duplicates"
+		// of their own proposed row (dedup self-match). Runs AFTER ReconcileSelfValidator
+		// so a just-collapsed legacy set passes the repair's set-is-exactly-{selfID}
+		// guard; the voter (if enabled) re-votes the resurrected memories into committed.
 		if repaired, rErr := app.RepairSelfDupRejectedMemories(ctx, selfID, !cfg.Quorum.Enabled); rErr != nil {
 			logger.Warn().Err(rErr).Msg("self-dup-reject memory repair incomplete — will retry next startup")
 		} else if repaired > 0 {
 			logger.Warn().Int("memories", repaired).Msg("memories wrongly deprecated by the dedup self-match bug restored to proposed (single-node repair)")
 		}
-		go voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: 2 * time.Second}, logger)
-	} else {
+	}
+
+	switch {
+	case !cfg.Voter.Enabled:
+		// Explicit operator choice (voter.enabled=false / SAGE_VOTER_ENABLED=false),
+		// not a degraded state — so Info, not Warn. Submitted memories stay proposed
+		// until some other validator votes them through.
+		logger.Info().Msg("memory auto-voter disabled by config (voter.enabled=false)")
+	case selfKey != nil:
+		// Poll interval from config (voter.poll_interval / SAGE_VOTER_POLL_INTERVAL);
+		// unset/unparsable falls back to the historical 2s. Liveness-only knob, so
+		// a bad value warns rather than refusing to boot.
+		pollInterval := 2 * time.Second
+		if raw := cfg.Voter.PollInterval; raw != "" {
+			if d, perr := time.ParseDuration(raw); perr == nil && d > 0 {
+				pollInterval = d
+			} else {
+				logger.Warn().Str("poll_interval", raw).Msg("invalid voter.poll_interval — using default 2s")
+			}
+		}
+		go voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval}, logger)
+	case cfg.Voter.Required:
+		// Normally unreachable — the pre-serve gate before StartChain already refused
+		// to boot — but a key that rots between the gate and here must still honor the
+		// runs-or-exits contract.
+		return fmt.Errorf("voter.required=true but no usable consensus key — memory auto-voter cannot start")
+	default:
 		logger.Warn().Msg("no consensus key — memory auto-voter disabled")
 	}
 	if cfg.Quorum.Enabled {

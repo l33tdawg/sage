@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -22,9 +24,11 @@ import (
 
 	"github.com/l33tdawg/sage/api/rest"
 	sageabci "github.com/l33tdawg/sage/internal/abci"
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/tlsca"
+	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/voter"
 )
 
@@ -45,6 +49,7 @@ func main() {
 	abciAddr := flag.String("abci-addr", envOrDefault("ABCI_ADDR", ""), "ABCI server listen address (e.g. tcp://0.0.0.0:26658). If set, runs as standalone ABCI server; otherwise embeds CometBFT in-process")
 	cometRPC := flag.String("comet-rpc", envOrDefault("COMET_RPC", "http://127.0.0.1:26657"), "CometBFT RPC endpoint for REST API tx broadcast")
 	validatorKeyFile := flag.String("validator-key-file", os.Getenv("VALIDATOR_KEY_FILE"), "priv_validator_key.json for the memory auto-voter in socket mode (in-process mode uses the key under --home). If unset in socket mode, no voter runs")
+	requireVoter := flag.Bool("require-voter", envBoolOrDefault("VOTER_REQUIRED", false), "Exit non-zero at startup if the memory auto-voter cannot start (missing/unreadable/invalid validator key) instead of serving without a voter")
 	tlsCert := flag.String("tls-cert", os.Getenv("TLS_CERT"), "TLS certificate file for REST API (PEM)")
 	tlsKey := flag.String("tls-key", os.Getenv("TLS_KEY"), "TLS private key file for REST API (PEM)")
 	tlsCA := flag.String("tls-ca", os.Getenv("TLS_CA"), "CA certificate for TLS verification (PEM)")
@@ -88,43 +93,80 @@ func main() {
 		logger.Warn().Msg(warn)
 	}
 
+	// Seed the replay-nonce allocator from the chain's committed nonces (same
+	// wiring as cmd/sage-gui/node.go): the app-v9 consensus gate rejects any tx
+	// whose nonce <= the signer's highest committed nonce, so a restarted amid
+	// voter must resume ABOVE the chain instead of trusting the wall clock to
+	// exceed it. Local badger read, keyed exactly like the consensus path
+	// (auth.PublicKeyToAgentID), consulted at most once per key. Liveness-only,
+	// never in the AppHash. GetNonce returns 0 for an unseen key -> no-op seed.
+	badgerStore := app.GetBadgerStore()
+	tx.SetNonceFloorFunc(func(pub ed25519.PublicKey) (uint64, bool) {
+		n, gerr := badgerStore.GetNonce(auth.PublicKeyToAgentID(pub))
+		if gerr != nil || n == 0 {
+			return 0, false
+		}
+		return n, true
+	})
+
 	health.SetPostgresHealth(true)
 	logger.Info().Msg("SAGE ABCI application created")
 
 	if *abciAddr != "" {
 		// ── Standalone ABCI server mode (Docker: separate CometBFT container) ──
-		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *validatorKeyFile, *tlsCert, *tlsKey, *tlsCA, health, logger)
+		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *validatorKeyFile, *tlsCert, *tlsKey, *tlsCA, *requireVoter, health, logger)
 	} else {
 		// ── In-process mode (single binary: ABCI + CometBFT embedded) ──
 		if *cometHome == "" {
 			logger.Fatal().Msg("CometBFT home directory is required in in-process mode (--home or COMETBFT_HOME)")
 		}
-		runInProcess(app, *cometHome, *restAddr, *metricsAddr, *tlsCert, *tlsKey, *tlsCA, health, logger)
+		runInProcess(app, *cometHome, *restAddr, *metricsAddr, *tlsCert, *tlsKey, *tlsCA, *requireVoter, health, logger)
 	}
 }
 
-// startMemoryVoter launches the per-node memory auto-voter if a consensus key is
-// available. The voter signs MemoryVote/GovVote txs with the node's own validator
-// key (no validator-set replacement) so submitted memories reach the 2/3 quorum on
-// a real multi-node chain. keyFile empty or unreadable → logged and skipped.
-func startMemoryVoter(ctx context.Context, app *sageabci.SageApp, cometRPC, keyFile string, logger zerolog.Logger) {
+// startMemoryVoter launches the per-node memory auto-voter. The voter signs
+// MemoryVote/GovVote txs with the node's own validator key (no validator-set
+// replacement) so submitted memories reach the 2/3 quorum on a real multi-node
+// chain. Returns an error — rather than only warning — when no voter can run
+// (keyFile empty, unreadable, or invalid); the caller decides whether that is
+// fatal (--require-voter / VOTER_REQUIRED) or logged-and-tolerated (default).
+func startMemoryVoter(ctx context.Context, app *sageabci.SageApp, cometRPC, keyFile string, logger zerolog.Logger) error {
 	if keyFile == "" {
-		logger.Warn().Msg("validator key not set — memory auto-voter disabled (set --validator-key-file / VALIDATOR_KEY_FILE)")
-		return
+		return fmt.Errorf("validator key not set (set --validator-key-file / VALIDATOR_KEY_FILE)")
 	}
 	key, err := voter.LoadPrivValidatorKey(keyFile)
 	if err != nil {
-		logger.Warn().Err(err).Str("key_file", keyFile).Msg("cannot load validator key — memory auto-voter disabled")
-		return
+		return fmt.Errorf("load validator key %s: %w", keyFile, err)
 	}
 	go voter.Run(ctx, app, app.GetOffchainStore(), voter.Config{Key: key, CometRPC: cometRPC, PollInterval: 2 * time.Second}, logger)
+	return nil
+}
+
+// requireVoterKeyOrExit is the --require-voter / VOTER_REQUIRED fail-fast gate:
+// called BEFORE any listener starts, it exits non-zero when the memory
+// auto-voter's consensus key is missing/unreadable/invalid, so the daemon can
+// never silently serve without a voter (every submitted memory would strand at
+// proposed forever). Without the flag, boot proceeds and startMemoryVoter's
+// error is merely logged (legacy warn-and-continue behavior).
+func requireVoterKeyOrExit(keyFile string, logger zerolog.Logger) {
+	if keyFile == "" {
+		logger.Fatal().Msg("--require-voter / VOTER_REQUIRED set but no validator key configured (set --validator-key-file / VALIDATOR_KEY_FILE) — refusing to serve without the memory auto-voter")
+	}
+	if _, err := voter.LoadPrivValidatorKey(keyFile); err != nil {
+		logger.Fatal().Err(err).Str("key_file", keyFile).Msg("--require-voter / VOTER_REQUIRED set but the validator key is unusable — refusing to serve without the memory auto-voter")
+	}
 }
 
 // runABCIServer starts the ABCI app as a TCP server for an external CometBFT node.
-func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC, validatorKeyFile, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC, validatorKeyFile, tlsCert, tlsKey, tlsCA string, requireVoter bool, health *metrics.HealthChecker, logger zerolog.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cmtLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(os.Stdout))
+
+	// Runs-or-exits guarantee: validate the voter's key before any listener is up.
+	if requireVoter {
+		requireVoterKeyOrExit(validatorKeyFile, logger)
+	}
 
 	srv, err := abciserver.NewServer(abciAddr, "socket", app)
 	if err != nil {
@@ -149,15 +191,23 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 
 	// Socket mode: the consensus key lives with the separate CometBFT process, so
 	// the voter needs it supplied explicitly (operator mounts priv_validator_key.json
-	// readable to amid via --validator-key-file). Absent → no voter.
-	startMemoryVoter(ctx, app, cometRPC, validatorKeyFile, logger)
+	// readable to amid via --validator-key-file). Absent → no voter (or no boot at
+	// all under --require-voter, enforced by the pre-serve gate above).
+	if err := startMemoryVoter(ctx, app, cometRPC, validatorKeyFile, logger); err != nil {
+		if requireVoter {
+			// Normally unreachable — requireVoterKeyOrExit already refused to serve —
+			// but a key that rots between the gate and here must not slip through.
+			logger.Fatal().Err(err).Msg("memory auto-voter cannot start (--require-voter / VOTER_REQUIRED)")
+		}
+		logger.Warn().Err(err).Msg("memory auto-voter disabled")
+	}
 
 	// Wait for shutdown
 	waitForShutdown(nil, nil, health, logger)
 }
 
 // runInProcess embeds CometBFT in the same process as the ABCI app.
-func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCert, tlsKey, tlsCA string, requireVoter bool, health *metrics.HealthChecker, logger zerolog.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cometCfg, err := loadCometConfig(cometHome)
@@ -165,6 +215,12 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCe
 		logger.Warn().Err(err).Msg("failed to parse CometBFT config, using defaults")
 		cometCfg = config.DefaultConfig()
 		cometCfg.SetRoot(cometHome)
+	}
+
+	// Runs-or-exits guarantee: validate the voter's key before CometBFT or any
+	// listener starts. In-process the key is the one under --home.
+	if requireVoter {
+		requireVoterKeyOrExit(cometCfg.PrivValidatorKeyFile(), logger)
 	}
 
 	pv := privval.LoadFilePV(
@@ -213,7 +269,14 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCe
 
 	// In-process: the consensus key is right here under --home; the voter signs
 	// memory votes with it (same key CometBFT validates blocks with).
-	startMemoryVoter(ctx, app, cometRPC, cometCfg.PrivValidatorKeyFile(), logger)
+	if err := startMemoryVoter(ctx, app, cometRPC, cometCfg.PrivValidatorKeyFile(), logger); err != nil {
+		if requireVoter {
+			// Normally unreachable — requireVoterKeyOrExit already refused to serve —
+			// but a key that rots between the gate and here must not slip through.
+			logger.Fatal().Err(err).Msg("memory auto-voter cannot start (--require-voter / VOTER_REQUIRED)")
+		}
+		logger.Warn().Err(err).Msg("memory auto-voter disabled")
+	}
 
 	// Health checks with node status
 	go healthLoop(app, cometNode, health)
@@ -329,6 +392,27 @@ func envOrDefault(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+// envBoolOrDefault parses key as a boolean ("true", "1", "false", ...); unset
+// or unparsable values yield defaultVal.
+func envBoolOrDefault(key string, defaultVal bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultVal
+	}
+	// Accept the strconv.ParseBool set plus common yes/no/on/off. An unrecognized
+	// value on a fail-fast safety flag (VOTER_REQUIRED) must not silently disarm the
+	// gate — warn loudly and keep the default.
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "t", "true", "yes", "y", "on":
+		return true
+	case "0", "f", "false", "no", "n", "off":
+		return false
+	default:
+		fmt.Fprintf(os.Stderr, "amid: %s=%q is not a recognized boolean (use true/false); using default %v\n", key, v, defaultVal)
+		return defaultVal
+	}
 }
 
 func loadCometConfig(home string) (*config.Config, error) {
