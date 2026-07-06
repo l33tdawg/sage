@@ -61,8 +61,11 @@ if [ -f "${PROJECT_ROOT}/LICENSE" ]; then
     cp "${PROJECT_ROOT}/LICENSE" "$STAGING_DIR/"
 fi
 
-# Create tarball
-TARBALL="sage-gui_${VERSION}_linux_amd64.tar.gz"
+# Create tarball.
+# NOTE: this bundle MUST NOT reuse the goreleaser "sage-gui_<v>_..." name — that
+# archive is a different (binary-only) artifact already recorded in checksums.txt,
+# and a same-named --clobber upload would overwrite it and invalidate its hash.
+TARBALL="sage-desktop_${VERSION}_linux_amd64.tar.gz"
 echo "==> Creating tarball..."
 tar -czf "${BUILD_DIR}/${TARBALL}" -C "$BUILD_DIR" "sage-${VERSION}-linux-amd64"
 

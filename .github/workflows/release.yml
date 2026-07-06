@@ -91,17 +91,30 @@ jobs:
       - name: Create stable-name copy for direct download links
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          cp "dist/linux-amd64/sage-gui_${VERSION}_linux_amd64.tar.gz" \
+          cp "dist/linux-amd64/sage-desktop_${VERSION}_linux_amd64.tar.gz" \
              "dist/linux-amd64/sage-desktop-linux-amd64.tar.gz"
 
       - name: Upload Linux desktop bundle to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # The desktop bundle is built outside goreleaser → absent from its
+          # checksums.txt; publish a sibling .sha256 per asset (bare filenames,
+          # so `sha256sum -c sage-desktop-….tar.gz.sha256` works from a download
+          # dir), matching the DMG/EXE jobs. The bundle is uploaded ONLY under the
+          # sage-desktop_* namespace so it can never clobber the goreleaser
+          # sage-gui_* tarball that checksums.txt certifies.
           VERSION="${GITHUB_REF_NAME#v}"
+          cd dist/linux-amd64
+          for f in "sage-desktop_${VERSION}_linux_amd64.tar.gz" \
+                   "sage-desktop-linux-amd64.tar.gz"; do
+            sha256sum "$f" > "$f.sha256"
+          done
           gh release upload "${{ github.ref_name }}" \
-            "dist/linux-amd64/sage-gui_${VERSION}_linux_amd64.tar.gz" \
-            "dist/linux-amd64/sage-desktop-linux-amd64.tar.gz" \
+            "sage-desktop_${VERSION}_linux_amd64.tar.gz" \
+            "sage-desktop_${VERSION}_linux_amd64.tar.gz.sha256" \
+            "sage-desktop-linux-amd64.tar.gz" \
+            "sage-desktop-linux-amd64.tar.gz.sha256" \
             --clobber
 
   macos-dmg:
