@@ -2176,9 +2176,14 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 			// would read as 0 and could mislabel a stuck chain (pending txs, no block)
 			// as idle. Require the count before flagging either state.
 			if s, ok := chain["mempool_txs"].(string); ok {
-				nTxs, _ := strconv.Atoi(s)
-				chain["idle"] = nTxs == 0 && ageSec > idleAfterSeconds
-				chain["stuck"] = nTxs > 0 && ageSec > idleAfterSeconds
+				// Only derive idle/stuck when the count actually PARSES. A CometBFT
+				// RPC error payload decodes to an empty Result, so mempool_txs can be
+				// present but "" — treating that as 0 would mislabel an unknown-depth
+				// chain as idle. Skip both flags when the depth is not a real number.
+				if nTxs, err := strconv.Atoi(s); err == nil {
+					chain["idle"] = nTxs == 0 && ageSec > idleAfterSeconds
+					chain["stuck"] = nTxs > 0 && ageSec > idleAfterSeconds
+				}
 			}
 		}
 	}

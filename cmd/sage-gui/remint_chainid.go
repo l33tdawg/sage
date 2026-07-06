@@ -160,7 +160,7 @@ func remintLegacyChainID(dataDir string, cfg *Config, logger zerolog.Logger) (mi
 
 	logger.Info().Str("old_chain_id", curID).
 		Msg("legacy shared chain_id detected — re-minting a unique network identity so federation works (memories are backed up and preserved)")
-	fmt.Fprintf(os.Stderr, "\n  SAGE: your node used the shared legacy network id %q, which blocks connecting to other people's networks.\n  Re-minting a unique id now — your memories are backed up first and never touched.\n  (If you had already connected to another network, you'll need to reconnect once.)\n\n", curID)
+	fmt.Fprintf(os.Stderr, "\n  SAGE: your node used the shared legacy network id %q, which blocks connecting to other people's networks.\n  Re-minting a unique id now — your memories are backed up first and preserved.\n  (If you had already connected to another network, you'll need to reconnect once.)\n\n", curID)
 
 	badgerPath := filepath.Join(dataDir, "badger")
 	sqlitePath := filepath.Join(dataDir, "sage.db")

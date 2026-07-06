@@ -1399,7 +1399,6 @@ size = 5000
 	return os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configToml), 0600)
 }
 
-// createEmbeddingProvider creates the configured embedding provider.
 // startEmbedderWatchdog probes the embedding provider every 30s so /ready reflects
 // real semantic-recall availability (a down provider degrades hybrid recall to
 // keyword-only). It prefers the optional Pinger for a live check — an Ollama Ping hits
@@ -1473,6 +1472,7 @@ func truncateString(s string, max int) string {
 	return string(r[:max]) + "…"
 }
 
+// createEmbeddingProvider creates the configured embedding provider.
 func createEmbeddingProvider(cfg *Config, logger zerolog.Logger) embedding.Provider {
 	switch cfg.Embedding.Provider {
 	case "ollama":
