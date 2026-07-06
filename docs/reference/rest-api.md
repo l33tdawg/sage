@@ -1160,8 +1160,10 @@ Returns **HTTP 503** (problem+json) when the CometBFT RPC probe fails.
 Every successful `POST /v1/memory/submit` also carries an **`X-Sage-Mempool-Pct`**
 response header (e.g. `"0.42"`), so streaming writers can self-throttle with zero
 extra round-trips. A memory submit rejected because the mempool is full now returns
-**HTTP 503 + `Retry-After`** (a distinct RFC-7807 problem type) instead of an opaque
-500.
+**HTTP 429 + `Retry-After`** with a distinct RFC-7807 problem type
+(`https://sage.dev/errors/mempool-full`, separate from the rate limiter's
+`.../errors/429`) instead of an opaque 500 — treat it as backpressure and retry after
+the hinted interval, not as a per-agent rate-limit quota breach.
 
 ---
 

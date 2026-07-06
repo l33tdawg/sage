@@ -332,15 +332,23 @@ func localValidatorPubKey(cometHome string) ([]byte, error) {
 // agreements anyway), so this strands no peer. Quorum CAs come from the shared
 // genesis flow and are left alone. Returns true if certs were removed.
 func reconcileCACommonName(certsDir, chainID string, quorum bool, logger zerolog.Logger) bool {
-	if quorum || chainID == "" || !tlsca.CertsExist(certsDir) {
+	if quorum || chainID == "" {
 		return false
 	}
+	// Check the CA CommonName whenever the CA is readable — do NOT gate on
+	// tlsca.CertsExist, which only inspects the NODE cert/key. A stale legacy-CN CA can
+	// linger with the node cert absent (e.g. a partial cert write after re-mint); if we
+	// skipped that case, the auto-gen would reuse the legacy-CN CA (LoadOrGenerateCA
+	// does no CN check) and sign a node cert under the wrong CN, so peers' requireChainCN
+	// rejects every join for the whole re-mint boot. Reading the CA directly catches it.
 	caCert, err := tlsca.ReadCert(filepath.Join(certsDir, tlsca.CACertFile))
 	if err != nil {
-		// Inconsistent state: node cert/key exist (CertsExist) but the CA is missing
-		// or unreadable — e.g. a partial rotation that removed the CA but not the node
-		// cert. Leaving it means the auto-gen (gated on CertsExist) is skipped and the
-		// node presents a node cert with no CA. Clear all four to force a clean regen.
+		// CA missing or unreadable. If node cert/key exist without a readable CA (a
+		// partial rotation), clear all four so the auto-gen makes a consistent set. If
+		// nothing exists (a fresh certs dir), there is nothing to reconcile.
+		if !tlsca.CertsExist(certsDir) {
+			return false
+		}
 		logger.Warn().Err(err).Msg("TLS node cert present but CA missing/unreadable — clearing certs to regenerate a consistent set")
 		removeOwnCerts(certsDir)
 		return true

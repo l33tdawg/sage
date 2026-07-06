@@ -9,8 +9,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/l33tdawg/sage/internal/store"
+
 	_ "modernc.org/sqlite"
 )
+
+// TestResetChainState_RefusesWhileInstanceLive locks the #1 data-safety fix: with
+// another instance holding the BadgerDB directory lock (as a serving node does),
+// resetChainState must refuse rather than delete the SQLite -wal/-shm sidecars and
+// wipe chain state out from under the live process.
+func TestResetChainState_RefusesWhileInstanceLive(t *testing.T) {
+	dataDir := t.TempDir()
+	badgerPath := filepath.Join(dataDir, "badger")
+	bs, err := store.NewBadgerStore(badgerPath)
+	if err != nil {
+		t.Fatalf("open badger (simulating a live node): %v", err)
+	}
+	defer func() { _ = bs.CloseBadger() }()
+
+	err = resetChainState(dataDir, badgerPath,
+		filepath.Join(dataDir, "cometbft"), filepath.Join(dataDir, "sage.db"), "v11.0.2")
+	if err == nil {
+		t.Fatal("resetChainState must refuse while another instance holds the Badger lock")
+	}
+	if !strings.Contains(err.Error(), "another SAGE instance is running") {
+		t.Fatalf("expected live-instance refusal, got: %v", err)
+	}
+}
 
 func TestMigrateOnUpgrade_FirstRun(t *testing.T) {
 	tmpDir := t.TempDir()

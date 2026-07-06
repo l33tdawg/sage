@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/l33tdawg/sage/internal/store"
+
 	_ "modernc.org/sqlite" // Pure Go SQLite driver
 )
 
@@ -123,6 +125,28 @@ func migrateOnUpgrade(dataDir string) (migrated bool, err error) {
 // fork-version gate can call it conditionally rather than on every version
 // string change.
 func resetChainState(dataDir, badgerPath, cometHome, sqlitePath, lastVersion string) error {
+	// Step -1: Refuse to run while another SAGE instance is live on this home.
+	// A serving node holds BadgerDB's directory lock; if we proceeded we would delete
+	// the SQLite -wal/-shm sidecars and wipe chain state out from under the running
+	// process — silently losing memories it is still committing and risking a
+	// two-writer corruption of sage.db. The lock is the AUTHORITATIVE signal (it holds
+	// regardless of the RPC address, which an env-var mismatch could hide from the
+	// serveIsRunning probe), so every caller — migrateOnUpgrade, remintLegacyChainID,
+	// repairChainState — is protected here rather than at one call site. Mirrors the
+	// live-instance guard in repairChainState.
+	if bs, openErr := store.NewBadgerStore(badgerPath); openErr != nil {
+		// BadgerDB has no typed open error. A SERVING node fails the open with the
+		// directory-lock message — the only case that means "stop, the node is running".
+		// Any OTHER failure (corrupt/unreadable index, or a fresh/empty dir) is not a
+		// liveness signal: reset rebuilds badger from the SQLite memories without
+		// needing a readable index, so fall through.
+		if strings.Contains(openErr.Error(), "Another process is using this Badger database") {
+			return fmt.Errorf("your memories are intact — another SAGE instance is running on this home; stop it and retry before any chain rebuild: %w", openErr)
+		}
+	} else {
+		_ = bs.CloseBadger()
+	}
+
 	// Step 0: Protect the vault key — back it up before touching anything.
 	// The vault key is irreplaceable: if lost, all encrypted memories become
 	// permanently unrecoverable.

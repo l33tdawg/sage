@@ -221,6 +221,21 @@ func TestReconcileCACommonName(t *testing.T) {
 		require.True(t, removed, "inconsistent CA-missing state must be cleared for regen")
 		require.False(t, certsPresent(certsDir))
 	})
+
+	t.Run("stale-cn-with-node-certs-missing-regenerated", func(t *testing.T) {
+		// The #3 partial state: a stale legacy-CN CA lingers but the node cert/key were
+		// never written (e.g. a disk-full partial write on the re-mint boot). CertsExist
+		// is false, so the old gate skipped the CN check and the node would present the
+		// legacy-CN CA for the whole boot. The CN mismatch must now be caught anyway.
+		certsDir := filepath.Join(t.TempDir(), "certs")
+		writeCAWithCN(t, certsDir, "sage-personal") // CA CN = sage-ca-sage-personal
+		require.NoError(t, os.Remove(filepath.Join(certsDir, tlsca.NodeCertFile)))
+		require.NoError(t, os.Remove(filepath.Join(certsDir, tlsca.NodeKeyFile)))
+		require.False(t, certsPresent(certsDir), "node cert/key absent (CertsExist=false)")
+		removed := reconcileCACommonName(certsDir, "sage-personal-xyz234abcdef", false, zerolog.Nop())
+		require.True(t, removed, "a stale-CN CA must be rotated even when node certs are absent")
+		require.NoFileExists(t, filepath.Join(certsDir, tlsca.CACertFile), "stale CA must be removed so auto-gen makes a correct-CN one")
+	})
 }
 
 // TestRemint_DialedPeer_Skipped: a node whose CometBFT address book records a dialed
