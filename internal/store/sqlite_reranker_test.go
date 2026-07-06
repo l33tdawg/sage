@@ -152,3 +152,26 @@ func TestSetReranker_NilDisables(t *testing.T) {
 	assert.NotEqual(t, "db-query-perf", results[0].MemoryID,
 		"with reranker disabled, RRF ordering rules")
 }
+
+// Regression lock (reported on 10.5.2): the reranker/RRF ordering score must NEVER
+// leak into a result's ConfidenceScore. That field is the STORED institutional
+// confidence; exposing the retrieval score there broke min_confidence and
+// confidence-aware clients. Every seeded record stores 0.85; the fake reranker
+// assigns 0.99 to the winner and 0.01 to the rest. The returned records must all
+// still carry 0.85, proving the ordering score stays separate from confidence.
+func TestSearchHybrid_RerankPreservesStoredConfidence(t *testing.T) {
+	s := newTestStore(t)
+	seedHybridCorpus(t, s) // testMemory stores ConfidenceScore 0.85 for every record
+	fake := &fakeReranker{winnerSubstr: "n+1 query"}
+	s.SetReranker(fake, 2)
+
+	results, err := s.SearchHybrid(context.Background(),
+		"jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 3})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Equal(t, "db-query-perf", results[0].MemoryID, "rerank winner must lead")
+	for _, r := range results {
+		assert.InDelta(t, 0.85, r.ConfidenceScore, 1e-9,
+			"result %s must carry the STORED confidence (0.85), not the rerank score (0.99/0.01)", r.MemoryID)
+	}
+}
