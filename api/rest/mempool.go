@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -153,7 +154,9 @@ func (m *mempoolSampler) snapshotLocked() mempoolSample {
 // are JSON STRINGS (CometBFT encodes int64 that way) — same decode shape as
 // the dashboard health probe in web/handler.go.
 func (m *mempoolSampler) fetch() (txs int, totalBytes int64, err error) {
-	req, err := http.NewRequest(http.MethodGet, m.cometRPC+"/num_unconfirmed_txs", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), m.client.Timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.cometRPC+"/num_unconfirmed_txs", nil)
 	if err != nil {
 		return 0, 0, fmt.Errorf("create mempool probe: %w", err)
 	}
