@@ -19,6 +19,13 @@ func ThresholdFor(op ProposalOp) (num, den int64) {
 	case OpDomainReassign:
 		return 3, 4
 	default:
+		// Default 2/3, incl. OpMemoryDomainRepair (app-v16). ThresholdFor is
+		// fork-UNAWARE, so it must not special-case a new op number: a pre-fork
+		// op==6 proposal (createable via the generic gov path before app-v16) is
+		// evaluated here during replay, and changing its threshold retroactively
+		// would diverge historical quorum outcomes / the AppHash. The repair op's
+		// safety comes from admin-propose + a supermajority + the idempotent,
+		// existence-and-registered-domain-guarded apply — not a stricter quorum.
 		return 2, 3
 	}
 }

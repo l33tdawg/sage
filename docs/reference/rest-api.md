@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.1.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.2.0. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -38,7 +38,7 @@ Include `X-Nonce` on current clients. If `X-Nonce` is absent, the server accepts
 
 Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (FinalizeBlock completes). Default timeout 60 s; override via `SAGE_TX_COMMIT_TIMEOUT_MS`.
 
-**Request body** (`memory_handler.go:29-45`):
+**Request body** (`memory_handler.go:30-46`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -76,7 +76,7 @@ Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (F
 }
 ```
 
-**Auth:** Ed25519 required. Agent must have write access to `domain_tag` if per-domain access control is configured (`memory_handler.go:382-385`). Observer-role agents are rejected.
+**Auth:** Ed25519 required. Agent must have write access to `domain_tag` if per-domain access control is configured (`memory_handler.go:425-428`). Observer-role agents are rejected.
 
 **curl example:**
 
@@ -101,14 +101,14 @@ curl -X POST http://localhost:8080/v1/memory/submit \
 
 Vector similarity search. Requires a precomputed embedding.
 
-**Request body** (`memory_handler.go:55-66`):
+**Request body** (`memory_handler.go:56-73`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `embedding` | []float32 | yes | Query vector; must match stored embedding dimension |
 | `domain_tag` | string | no | Filter to domain |
 | `provider` | string | no | Provider filter |
-| `min_confidence` | float64 | no | Minimum decayed confidence threshold |
+| `min_confidence` | float64 | no | Minimum **decayed** confidence threshold — enforced against the same decayed value returned in `confidence_score`, not the stored value (see note below) |
 | `status_filter` | string | no | `proposed`, `validated`, `committed`, `challenged`, `deprecated` |
 | `top_k` | int | no | Max results; default 10 |
 | `cursor` | string | no | Opaque pagination cursor from previous response |
@@ -127,6 +127,8 @@ Vector similarity search. Requires a precomputed embedding.
       "memory_type": "fact",
       "domain_tag": "go-debugging",
       "confidence_score": 0.91,
+      "initial_confidence": 0.95,
+      "corroboration_count": 2,
       "classification": 0,
       "status": "committed",
       "parent_hash": "",
@@ -143,11 +145,13 @@ Vector similarity search. Requires a precomputed embedding.
 }
 ```
 
-`confidence_score` in the response is the **decayed** value (time decay + corroboration boost applied server-side), not the raw submitted value.
+`confidence_score` in the response is the **decayed** value (time decay + corroboration boost applied server-side), not the raw submitted value. `initial_confidence` is the **stored** (undecayed) value — the on-chain confidence set at submission (corroboration never rewrites it) — so a client can see the authoritative floor alongside the decayed score without re-deriving it. It is present for local memories and omitted for federated results (where only the serving peer's already-decayed value is available).
+
+`min_confidence` is enforced against the **decayed** `confidence_score`, not the stored column. The store applies it over the full candidate set *before* the top-K trim, so: a result returned by a `min_confidence=X` query always satisfies `confidence_score >= X` (including federated results, which are re-checked against the floor on the requesting side); a corroboration-boosted memory whose stored value is below `X` but whose decayed value clears it is still returned; and `top_k` is filled with qualifying records rather than truncated. This full-corpus guarantee holds unconditionally only for `POST /v1/memory/query` on SQLite, whose `QuerySimilar` scans every candidate; on `/v1/memory/search` (FTS), `/v1/memory/hybrid` (via its FTS leaf), and on Postgres deployments the floor is instead evaluated over the top `decayFilterScanCap` (1000) rank/distance-ordered candidates, so a record that would qualify but ranks beyond that pool may not surface. Open tasks are exempt from decay, so an open task is judged by its stored confidence. (Prior to v11.2.0 the floor compared the stored column, which both leaked aged memories below the floor and dropped boosted ones above it.)
 
 `filtered` is present when agent-isolation RBAC or per-record classification gates silently hid records. Check the `X-SAGE-Filter-Applied` response header for the same info. Values in `by`: `rbac_submitting_agents`, `classification`.
 
-**Access control stacking** (`memory_handler.go:533-589`): Domain access is checked first (agent's `DomainAccess` policy), then multi-org gate (if domain has a registered owner), then agent-isolation RBAC. These are alternatives — passing domain access disables agent isolation for that call.
+**Access control stacking** (`memory_handler.go:638-697`): Domain access is checked first (agent's `DomainAccess` policy), then multi-org gate (if domain has a registered owner), then agent-isolation RBAC. These are alternatives — passing domain access disables agent isolation for that call.
 
 **curl example:**
 
@@ -167,7 +171,7 @@ curl -X POST http://localhost:8080/v1/memory/query \
 
 Full-text search (FTS5/BM25). Same access control as `/v1/memory/query`.
 
-**Request body** (`memory_handler.go:737-744`):
+**Request body** (`memory_handler.go:976-987`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -187,7 +191,7 @@ Full-text search (FTS5/BM25). Same access control as `/v1/memory/query`.
 
 Fused FTS5 + vector search via Reciprocal Rank Fusion. Requires at least one of `query` or `embedding`. Supports query expansions for multi-variant recall.
 
-**Request body** (`memory_handler.go:928-946`):
+**Request body** (`memory_handler.go:1203-1216`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
@@ -230,7 +234,7 @@ Fetch a single memory with votes and corroborations.
 }
 ```
 
-Access control: agent-isolation RBAC + multi-org classification gate apply. Own memories always visible. 403 if agent cannot see the submitter or lacks org clearance for the memory's classification. (`memory_handler.go:1119-1193`)
+Access control: agent-isolation RBAC + multi-org classification gate apply. Own memories always visible. 403 if agent cannot see the submitter or lacks org clearance for the memory's classification. (`memory_handler.go:1445-1490`)
 
 ---
 
@@ -310,6 +314,16 @@ Challenge an existing memory. Broadcasts `TxTypeMemoryChallenge`.
 
 **Response** (HTTP 200): `{"message": "Challenge submitted successfully.", "tx_hash": "<hex>"}`
 
+**Error responses** (deprecation gate; `vote_handler.go:241`, `memory_handler.go:1675-1684`):
+
+| Status | Meaning |
+|---|---|
+| 403 Forbidden | Authenticated but not authorized to deprecate — `not authorized to deprecate this memory (need domain ownership or a level-3 modify grant)`. Also the status for a **pre-app-v16** legacy no-recorded-domain reject (it is an authorization failure there; app-v16 promotes the legacy case to the actionable 409 below). |
+| 404 Not Found | (app-v16) No on-chain memory record for that id — `unknown memory: no on-chain record for that memory id`. |
+| 409 Conflict | (app-v16) The target is a legacy memory with an on-chain record but no recorded domain (committed before app-v8.4) — `memory has no recorded domain (legacy pre-app-v8.4 record); deprecation is blocked until its domain is repaired via an OpMemoryDomainRepair governance proposal (app-v16)`. Deprecation stays blocked until an `OpMemoryDomainRepair` governance proposal backfills the domain; retry then succeeds. |
+
+The 404/409 split is app-v16 behavior. Pre-app-v16 (and on a chain that has not activated app-v16) the legacy no-recorded-domain case returns `403` (an authorization failure), not the actionable `409`.
+
 ---
 
 ### `POST /v1/memory/{memory_id}/forget`
@@ -323,6 +337,8 @@ Semantic alias for challenge (`vote_handler.go:255-325`). Submits a `TxTypeMemor
 | `reason` | string | no |
 
 **Response** (HTTP 200): `{"message": "Memory forgotten.", "tx_hash": "<hex>"}`
+
+**Error responses:** identical to `/challenge` (same deprecation gate) — `403` not authorized (or a pre-app-v16 legacy reject), `404` unknown memory id, and `409` legacy no-recorded-domain (repair via an `OpMemoryDomainRepair` governance proposal). See the challenge section above.
 
 ---
 
@@ -834,13 +850,13 @@ Submit a governance proposal. Broadcasts `TxTypeGovPropose`.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `operation` | string | yes | `add_validator`, `remove_validator`, `update_power`, `domain_reassign` |
+| `operation` | string | yes | `add_validator`, `remove_validator`, `update_power`, `domain_reassign`, `memory_domain_repair` |
 | `target_id` | string | yes | Hex validator pubkey for validator ops; domain keying ID for `domain_reassign` |
 | `reason` | string | yes | |
 | `target_pubkey` | string | no | Hex Ed25519 pubkey, required for `add_validator` |
 | `target_power` | int64 | no | Validator power for add/update ops |
 | `expiry_blocks` | int64 | no | 0 = chain default |
-| `payload` | string | no | Base64-encoded operation-specific body. For `domain_reassign`: base64(JSON `{domain, new_owner_id, parent_domain, open_to_shared}`). The executing `POST /v1/domain/reassign` tx must reproduce this payload byte-for-byte. |
+| `payload` | string | no | Base64-encoded operation-specific body. For `domain_reassign`: base64(JSON `{domain, new_owner_id, parent_domain, open_to_shared}`). The executing `POST /v1/domain/reassign` tx must reproduce this payload byte-for-byte. For `memory_domain_repair` (app-v16, 2/3 quorum): base64(JSON `[{"memory_id","domain"}]`) — the backfill applies directly on proposal execution (no follow-up tx), writing the on-chain domain only for a memory that exists, has no domain yet, and whose target domain is registered. |
 
 **Response** (HTTP 200):
 

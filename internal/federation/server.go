@@ -311,12 +311,21 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 	if topK > maxFedTopK {
 		topK = maxFedTopK
 	}
+	now := time.Now()
 	opts := store.QueryOptions{
-		DomainTag:     req.DomainTag,
-		MinConfidence: req.MinConfidence,
-		StatusFilter:  string(memory.StatusCommitted), // committed-only, non-negotiable
-		TopK:          topK,
-		Tags:          req.Tags,
+		DomainTag:    req.DomainTag,
+		StatusFilter: string(memory.StatusCommitted), // committed-only, non-negotiable
+		TopK:         topK,
+		Tags:         req.Tags,
+	}
+	// min_confidence is a DECAYED floor (parity with local recall): the store filters
+	// the decayed value over the full candidate set before trim — so top_k is filled
+	// and corroboration-boosted memories aren't starved — pinned to `now` so it
+	// matches the ConfidenceScore serialized below. Read-only serving path; no
+	// consensus/AppHash concern.
+	if req.MinConfidence > 0 {
+		opts.DecayFloor = req.MinConfidence
+		opts.DecayNow = now
 	}
 
 	var records []*memory.MemoryRecord
@@ -352,7 +361,6 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Per-record treaty enforcement (defense in depth over the store filter):
 	// domain coverage, committed status, classification ≤ ceiling.
-	now := time.Now()
 	results := make([]*MemoryResult, 0, len(records))
 	hidden := 0
 	for _, rec := range records {
@@ -374,7 +382,13 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 			hidden++
 			continue
 		}
-		corrs, _ := m.memStore.GetCorroborations(r.Context(), rec.MemoryID)
+		corrs, corrErr := m.memStore.GetCorroborations(r.Context(), rec.MemoryID)
+		if corrErr != nil && req.MinConfidence > 0 {
+			// Fail closed under a floor: a boost-less (understated) confidence could
+			// wrongly drop this record on the requesting side. Hide rather than mislead.
+			hidden++
+			continue
+		}
 		results = append(results, &MemoryResult{
 			MemoryID:           rec.MemoryID,
 			SubmittingAgent:    rec.SubmittingAgent,
@@ -382,7 +396,7 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 			ContentHash:        hex.EncodeToString(rec.ContentHash),
 			MemoryType:         string(rec.MemoryType),
 			DomainTag:          rec.DomainTag,
-			ConfidenceScore:    memory.ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, now, len(corrs), rec.DomainTag),
+			ConfidenceScore:    memory.ComputeConfidenceForRecord(rec, now, len(corrs)),
 			CorroborationCount: len(corrs),
 			Classification:     int(memClass),
 			Status:             string(rec.Status),

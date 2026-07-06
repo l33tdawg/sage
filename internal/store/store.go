@@ -68,14 +68,68 @@ type EpochScore struct {
 
 // QueryOptions defines parameters for similarity queries.
 type QueryOptions struct {
-	DomainTag        string   `json:"domain_tag,omitempty"`
-	Provider         string   `json:"provider,omitempty"`
-	MinConfidence    float64  `json:"min_confidence,omitempty"`
-	StatusFilter     string   `json:"status_filter,omitempty"`
-	TopK             int      `json:"top_k"`
-	Cursor           string   `json:"cursor,omitempty"`
-	SubmittingAgents []string `json:"submitting_agents,omitempty"` // RBAC: restrict to these agent IDs
-	Tags             []string `json:"tags,omitempty"`              // any-match filter on user-defined tags (SQLite-only)
+	DomainTag     string  `json:"domain_tag,omitempty"`
+	Provider      string  `json:"provider,omitempty"`
+	MinConfidence float64 `json:"min_confidence,omitempty"` // stored-column floor (SQL, undecayed) — legacy; recall paths use DecayFloor
+	StatusFilter  string  `json:"status_filter,omitempty"`
+	TopK          int     `json:"top_k"`
+	Cursor        string  `json:"cursor,omitempty"`
+	// DecayFloor, when > 0, drops records whose task-aware DECAYED confidence
+	// (memory.ComputeConfidenceForRecord — time decay + corroboration boost, open
+	// tasks exempt) is below the floor. Unlike MinConfidence it is applied in Go
+	// over the full candidate set BEFORE the top-K trim, so top_k is filled with
+	// qualifying records and corroboration-boosted memories are not starved. It is
+	// OPT-IN and read-only: only REST/federation recall sets it, so consensus tx
+	// execution (which never sets it) invokes no wall-clock read and stays
+	// deterministic. DecayNow pins the evaluation instant so a caller can keep the
+	// serialized confidence exactly consistent with the filter decision.
+	DecayFloor       float64   `json:"-"`
+	DecayNow         time.Time `json:"-"`
+	SubmittingAgents []string  `json:"submitting_agents,omitempty"` // RBAC: restrict to these agent IDs
+	Tags             []string  `json:"tags,omitempty"`              // any-match filter on user-defined tags (SQLite-only)
+}
+
+// decayFilterScanCap bounds how many rank/distance-ordered candidates a
+// SQL-LIMIT-trimmed recall (SearchByText, PostgresStore.QuerySimilar) scans when a
+// DecayFloor is active. The decayed floor cannot be expressed in SQL, so the method
+// over-fetches this many top-ranked rows, filters them in Go, and trims to top_k —
+// generous enough that qualifying records are effectively never missed, bounded so
+// a pathological query can't scan the whole corpus. (SQLite QuerySimilar already
+// scans every candidate, so it needs no cap.)
+const decayFilterScanCap = 1000
+
+// recordIDs extracts the memory IDs from a record slice, order-preserving.
+func recordIDs(recs []*memory.MemoryRecord) []string {
+	ids := make([]string, len(recs))
+	for i, r := range recs {
+		ids[i] = r.MemoryID
+	}
+	return ids
+}
+
+// applyDecayFloor drops records whose task-aware decayed confidence
+// (memory.ComputeConfidenceForRecord — time decay + corroboration boost, with open
+// tasks exempt from decay) is below floor, preserving input order. counts must map
+// every record's ID to its corroboration count (batch-fetched by the caller so the
+// boost is included). A zero/negative floor or empty input returns recs unchanged;
+// now defaults to time.Now() when zero. The filter runs in place over recs' backing
+// array, so callers must use the returned slice. Because it is reached only when a
+// caller sets a positive floor (REST/federation recall, never consensus tx paths),
+// the wall-clock default never executes during deterministic block execution.
+func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, counts map[string]int) []*memory.MemoryRecord {
+	if floor <= 0 || len(recs) == 0 {
+		return recs
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	out := recs[:0]
+	for _, r := range recs {
+		if memory.ComputeConfidenceForRecord(r, now, counts[r.MemoryID]) >= floor {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // ListOptions defines parameters for listing memories.

@@ -1,4 +1,4 @@
-<!-- Verified against code at SAGE v11.1.0. Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against code at SAGE v11.2.0. Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
@@ -61,7 +61,7 @@ Authenticated reachability / identity preflight (`handleStatus`, `server.go:271-
 
 ### `POST /fed/v1/query`
 
-Scoped read-only recall served to an authenticated peer (`handleQuery`, `server.go:282-400`). Authorization is **agreement-level**: OUR side of the treaty (allowed domains, `MaxClearance` ceiling, committed-only) is enforced; local-agent RBAC is deliberately NOT consulted (a foreign chain has no local org membership).
+Scoped read-only recall served to an authenticated peer (`handleQuery`, `server.go:282-414`). Authorization is **agreement-level**: OUR side of the treaty (allowed domains, `MaxClearance` ceiling, committed-only) is enforced; local-agent RBAC is deliberately NOT consulted (a foreign chain has no local org membership).
 
 **Request body** (`QueryRequest`, `types.go:44-56`):
 
@@ -83,7 +83,7 @@ Scoped read-only recall served to an authenticated peer (`handleQuery`, `server.
 | `results` | []MemoryResult | see `MemoryResult`, `types.go:62-76` |
 | `total_count` | int | length of `results` |
 
-Per-record enforcement runs as defense in depth over the store filter (`server.go:353-392`): non-committed, out-of-domain, or above-ceiling records are dropped. A classification read error hides the record (fail closed). The count of records hidden by the classification ceiling is **logged, never returned** - disclosing it would turn the response into an existence/keyword oracle (`types.go:82-88`).
+Per-record enforcement runs as defense in depth over the store filter (`server.go:366-407`): non-committed, out-of-domain, or above-ceiling records are dropped. A classification read error hides the record (fail closed). The count of records hidden by the classification ceiling is **logged, never returned** - disclosing it would turn the response into an existence/keyword oracle (`types.go:82-88`).
 
 ### `POST /fed/v1/receipt`
 

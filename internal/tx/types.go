@@ -82,6 +82,11 @@ const (
 	// supermajority. The execution tx (TxTypeDomainReassign) references
 	// the accepted proposal by ID and consumes it once.
 	GovOpDomainReassign GovProposalOp = 4
+	// (5 is OpUpgrade, created via UpgradePropose — never the generic GovPropose path.)
+	// GovOpMemoryDomainRepair (app-v16) authorizes a governance-attested backfill of
+	// legacy memories' on-chain domain records; the proposal Payload is the JSON
+	// []MemoryDomainRepairEntry. Numerically matches governance.OpMemoryDomainRepair=6.
+	GovOpMemoryDomainRepair GovProposalOp = 6
 )
 
 // VoteDecision represents a validator's vote on a proposed memory.
@@ -320,6 +325,17 @@ type DomainReassign struct {
 	ParentDomain string // TransferDomain.parentDomain; must match existing parent or be empty
 	ProposalID   string // hex(32), links to the accepted gov_propose
 	OpenToShared bool   // also write shared_domain:<name>
+}
+
+// MemoryDomainRepairEntry is one {memory_id → domain} backfill in an
+// OpMemoryDomainRepair (app-v16) governance proposal. The proposal Payload is the
+// JSON encoding of a []MemoryDomainRepairEntry — the supermajority-attested source
+// of truth for legacy memories' on-chain domain, which otherwise lives only in each
+// node's off-chain SQLite mirror. Applied idempotently: skipped for a memory that
+// doesn't exist on-chain or already has a recorded domain.
+type MemoryDomainRepairEntry struct {
+	MemoryID string `json:"memory_id"`
+	Domain   string `json:"domain"`
 }
 
 // CoCommitCoauthor is one foreign counter-signer of a co-committed envelope.

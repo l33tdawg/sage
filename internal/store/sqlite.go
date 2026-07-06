@@ -1306,24 +1306,35 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		return scored[i].similarity > scored[j].similarity
 	})
 
-	// opts.TopK was capped to [1, 100] at function entry (lines 896-901),
-	// but make an explicit local guard so CodeQL sees the bound at the
-	// allocation site — defence-in-depth against future refactors that
-	// might bypass the entry-time clamp.
+	// Materialize in similarity order, then apply the decayed-confidence floor (if
+	// any) over the FULL candidate set BEFORE the top-K trim, so top_k is filled
+	// with qualifying records instead of being truncated by a decay-blind
+	// stored-column pre-filter (which both leaked aged sub-floor memories and
+	// starved corroboration-boosted ones).
+	ordered := make([]*memory.MemoryRecord, len(scored))
+	for i := range scored {
+		ordered[i] = scored[i].record
+	}
+	if opts.DecayFloor > 0 {
+		counts, cErr := s.GetCorroborationCounts(ctx, recordIDs(ordered))
+		if cErr != nil {
+			return nil, fmt.Errorf("query similar decay floor: %w", cErr)
+		}
+		ordered = applyDecayFloor(ordered, opts.DecayFloor, opts.DecayNow, counts)
+	}
+
+	// opts.TopK was capped to [1, 100] at function entry, but make an explicit
+	// local guard so CodeQL sees the bound at the allocation site — defence-in-depth
+	// against future refactors that might bypass the entry-time clamp.
 	limit := opts.TopK
 	const maxLimit = 1000
 	if limit < 0 || limit > maxLimit {
 		limit = maxLimit
 	}
-	if limit > len(scored) {
-		limit = len(scored)
+	if limit > len(ordered) {
+		limit = len(ordered)
 	}
-
-	results := make([]*memory.MemoryRecord, limit)
-	for i := 0; i < limit; i++ {
-		results[i] = scored[i].record
-	}
-	return results, nil
+	return ordered[:limit], nil
 }
 
 // SearchByText performs full-text search using FTS5 with BM25 ranking.
@@ -1391,7 +1402,13 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 	}
 
 	sqlStr += " ORDER BY rank LIMIT ?"
-	args = append(args, opts.TopK)
+	scanLimit := opts.TopK
+	if opts.DecayFloor > 0 {
+		// Over-fetch: the decayed floor can't be a SQL predicate, so pull a bounded
+		// rank-ordered pool and filter it in Go below, before trimming to top_k.
+		scanLimit = decayFilterScanCap
+	}
+	args = append(args, scanLimit)
 
 	rows, err := s.conn.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
@@ -1432,6 +1449,17 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		}
 
 		results = append(results, &r)
+	}
+	// Decayed-confidence floor (if any) over the over-fetched pool, before trim.
+	if opts.DecayFloor > 0 {
+		counts, cErr := s.GetCorroborationCounts(ctx, recordIDs(results))
+		if cErr != nil {
+			return nil, fmt.Errorf("search by text decay floor: %w", cErr)
+		}
+		results = applyDecayFloor(results, opts.DecayFloor, opts.DecayNow, counts)
+		if len(results) > opts.TopK {
+			results = results[:opts.TopK]
+		}
 	}
 	return results, nil
 }
@@ -1485,15 +1513,22 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 	var bm25Results, vectorResults []*memory.MemoryRecord
 	if query != "" && s.vault == nil {
 		r, err := s.SearchByText(ctx, query, subOpts)
-		if err == nil {
+		if err != nil {
+			// Under a decayed floor a leaf error is fail-closed (e.g. corroboration
+			// counts unavailable) — propagate rather than degrade to a partial,
+			// floor-unenforced recall. Without a floor, BM25 failure is best-effort
+			// and vector results alone still produce a recall.
+			if subOpts.DecayFloor > 0 {
+				return nil, err
+			}
+		} else {
 			bm25Results = r
 		}
-		// BM25 failure is best-effort; vector results alone still produce a recall.
 	}
 
 	if len(embedding) > 0 {
 		r, err := s.QuerySimilar(ctx, embedding, subOpts)
-		if err != nil && len(bm25Results) == 0 {
+		if err != nil && (subOpts.DecayFloor > 0 || len(bm25Results) == 0) {
 			return nil, err
 		}
 		vectorResults = r

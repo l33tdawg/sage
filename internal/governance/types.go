@@ -35,6 +35,16 @@ const (
 	// turns UpgradePropose from a single-signer self-activating op (pre-app-v8)
 	// into a supermajority-gated one (post-app-v8).
 	OpUpgrade ProposalOp = 5
+	// OpMemoryDomainRepair (app-v16) authorizes a governance-attested backfill of
+	// the on-chain memory→domain records (memdomain:) that legacy memories
+	// committed before app-v8.4 never received. The correct domain for those
+	// memories exists only in each node's off-chain SQLite mirror, so it can only
+	// enter consensus via a supermajority-attested proposal payload — a JSON array
+	// of {memory_id, domain} entries. Uses the DEFAULT 2/3 quorum (ThresholdFor is
+	// fork-unaware, so a new op must not retroactively change quorum — see quorum.go).
+	// Applied directly at proposal execution (like OpUpgrade), fork-gated to app-v16,
+	// idempotent, and skips unknown, already-domained, or unregistered-target IDs.
+	OpMemoryDomainRepair ProposalOp = 6
 )
 
 // ProposalStatus represents the current state of a governance proposal.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,14 @@ type mockMemoryStore struct {
 	setTagsCtxErrAtCall error
 	// lastQueryTags captures the Tags slice from the most recent QuerySimilar call.
 	lastQueryTags []string
+	// lastQueryOpts captures the full QueryOptions from the most recent
+	// QuerySimilar / SearchByText call so tests can assert what actually reached the
+	// store — e.g. that the handler moved min_confidence onto DecayFloor and zeroed
+	// the stored-column MinConfidence.
+	lastQueryOpts store.QueryOptions
+	// corrCountErr, when set, makes GetCorroborationCounts fail — used to exercise
+	// the handler's fail-closed-under-a-floor path for the serialized confidence.
+	corrCountErr error
 }
 
 func newMockMemoryStore() *mockMemoryStore {
@@ -100,10 +109,12 @@ func (m *mockMemoryStore) UpdateStatus(_ context.Context, memoryID string, statu
 
 func (m *mockMemoryStore) QuerySimilar(_ context.Context, embedding []float32, opts store.QueryOptions) ([]*memory.MemoryRecord, error) {
 	m.lastQueryTags = opts.Tags
+	m.lastQueryOpts = opts
 	results := make([]*memory.MemoryRecord, 0, len(m.memories))
 	for _, rec := range m.memories {
 		results = append(results, rec)
 	}
+	results = m.applyStoreFilters(results, opts)
 	if opts.TopK > 0 && len(results) > opts.TopK {
 		results = results[:opts.TopK]
 	}
@@ -111,7 +122,48 @@ func (m *mockMemoryStore) QuerySimilar(_ context.Context, embedding []float32, o
 }
 
 func (m *mockMemoryStore) SearchByText(_ context.Context, query string, opts store.QueryOptions) ([]*memory.MemoryRecord, error) {
-	return nil, nil
+	m.lastQueryOpts = opts
+	q := strings.ToLower(query)
+	results := make([]*memory.MemoryRecord, 0, len(m.memories))
+	for _, rec := range m.memories {
+		if q == "" || strings.Contains(strings.ToLower(rec.Content), q) {
+			results = append(results, rec)
+		}
+	}
+	results = m.applyStoreFilters(results, opts)
+	if opts.TopK > 0 && len(results) > opts.TopK {
+		results = results[:opts.TopK]
+	}
+	return results, nil
+}
+
+// applyStoreFilters mirrors the confidence filtering the real stores apply so tests
+// exercise the same contract: the legacy stored-column MinConfidence (SQL
+// confidence_score >= X, decay-blind) AND the DecayFloor (task-aware decayed value
+// over the full candidate set, using the batched corroboration counts). Recall
+// handlers move min_confidence onto DecayFloor and zero MinConfidence; keeping both
+// here means a regression that forgets to zero MinConfidence (re-starving
+// corroboration-boosted memories) is caught end-to-end.
+func (m *mockMemoryStore) applyStoreFilters(recs []*memory.MemoryRecord, opts store.QueryOptions) []*memory.MemoryRecord {
+	if opts.MinConfidence <= 0 && opts.DecayFloor <= 0 {
+		return recs
+	}
+	now := opts.DecayNow
+	if now.IsZero() {
+		now = time.Now()
+	}
+	out := recs[:0]
+	for _, r := range recs {
+		if opts.MinConfidence > 0 && r.ConfidenceScore < opts.MinConfidence {
+			continue
+		}
+		if opts.DecayFloor > 0 &&
+			memory.ComputeConfidenceForRecord(r, now, len(m.corroborations[r.MemoryID])) < opts.DecayFloor {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func (m *mockMemoryStore) SearchHybrid(ctx context.Context, query string, embedding []float32, opts store.QueryOptions) ([]*memory.MemoryRecord, error) {
@@ -213,8 +265,17 @@ func (m *mockMemoryStore) GetLinkedMemories(_ context.Context, _ string) ([]memo
 	return nil, nil
 }
 
-func (m *mockMemoryStore) GetCorroborationCounts(_ context.Context, _ []string) (map[string]int, error) {
-	return map[string]int{}, nil
+func (m *mockMemoryStore) GetCorroborationCounts(_ context.Context, ids []string) (map[string]int, error) {
+	if m.corrCountErr != nil {
+		return nil, m.corrCountErr
+	}
+	out := make(map[string]int, len(ids))
+	for _, id := range ids {
+		if n := len(m.corroborations[id]); n > 0 {
+			out[id] = n
+		}
+	}
+	return out, nil
 }
 
 func (m *mockMemoryStore) GetLinksAmong(_ context.Context, _ []string) ([]memory.MemoryLink, error) {

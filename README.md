@@ -51,7 +51,19 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.1.0
+## What's New in v11.2.0
+
+**Two correctness fixes: `min_confidence` recall now filters the value it reports, and legacy "un-forgettable" memories can be deprecated again.** v11.2.0 introduces a new consensus fork **`app-v16`** that ships **dormant** — it changes no live-chain behavior until operators activate it via a governance vote. The recall fix is off-consensus and active on upgrade.
+
+- **`min_confidence` filters the decayed confidence it reports.** Recall (`/v1/memory/query`, `/search`, `/hybrid`, and `sage_recall`) filtered `min_confidence` against the *stored* confidence but returned the *decayed* value — so a `min_confidence=0.7` query could hand back a result whose `confidence_score` was 0.54. The floor is now enforced on the same decayed, task-aware value that's serialized, over the full candidate set before the top-K trim (so corroboration-boosted memories aren't starved and `top_k` fills correctly). A new **`initial_confidence`** field exposes the stored value alongside the decayed one; open tasks are exempt from decay; federated results are re-checked against the floor.
+- **Legacy "no recorded domain" memories can be deprecated again (opt-in fork).** Memories committed before `app-v8.4` never received an on-chain domain record, so `forget()`/`challenge()` rejected them — with a cryptic error — even for their owner. The new **`app-v16`** fork adds a governance-attested **domain repair** (`OpMemoryDomainRepair`, 2/3 supermajority) that backfills the missing domain — idempotent, existence-guarded, never overwriting — after which normal deprecation works. The deprecation gate now returns an actionable **409** (legacy, needs repair) / **404** (unknown id) / **403** (unauthorized) instead of a generic rejection, and new submits must carry a domain so the state can't recur. **`app-v16` activates only via a governance `{Name:"app-v16", TargetAppVersion:16}` upgrade** — the release binary changes no consensus behavior until you vote it in.
+
+SDK 11.2.0.
+
+## Older releases
+
+<details>
+<summary>v11.1.0 — cross-node federation fix + health/observability polish</summary>
 
 **Federation actually works between separate nodes now, plus health/observability polish.** v11.1.0 changes **no consensus rule, AppHash, transaction, or key-encoding**; `app-v15` remains the active v11 consensus fork. The one upgrade-time behavior change is a one-time local **network-identity re-mint** on legacy nodes (details below) — your memories are backed up first and preserved.
 
@@ -66,8 +78,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Safer upgrades + a security fix.** The pre-upgrade backup is verified by content (integrity + memory row-count parity) rather than file size, and an un-checkpointable write-ahead log aborts the migration instead of being discarded. Archive extraction for the managed Ollama runtime now validates symlink/hardlink targets against the extract root (CodeQL `go/unsafe-unzip-symlink`).
 
 SDK 11.1.0.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.0.2 — managed Ollama setup + docs polish</summary>

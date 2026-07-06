@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.1.0. -->
+<!-- Reconciled through SAGE v11.2.0. -->
 
 # Memory Lifecycle
 
-Verified against code at SAGE v11.1.0.
+Verified against code at SAGE v11.2.0.
 
 ## Overview
 
@@ -96,6 +96,8 @@ A committed memory may be challenged via `TxTypeMemoryChallenge`. Current chains
 
 There is no separate voting round for challenges. The challenged memory transitions from `committed` → `deprecated` in the same `processMemoryChallenge` call that includes the tx.
 
+**app-v16 — domainless-forget remediation.** The deprecation gate keys off the on-chain `memdomain:<memoryID>` record. Legacy memories committed before app-v8.4 never received one, so the gate rejected even the owner's challenge/forget with a generic "no recorded domain" denial (Code 91). app-v16 hardens the gate to split that into two distinct denials — both still DENY (Code 91, no new authorization): a legacy record predating app-v8.4 ("repair via an `OpMemoryDomainRepair` governance proposal") versus a genuinely unknown memory ("no memory record and no recorded domain") (`app.go:3708-3726`). The domained-but-unauthorized case is unchanged (Code 92). To unblock a legacy record, an **`OpMemoryDomainRepair`** governance proposal (`governance.ProposalOp = 6`, app-v16-gated) backfills the missing domain: it is created through the normal admin-gated propose path with a JSON payload of `[{"memory_id":"…","domain":"…"}]`, requires the default **2/3 supermajority** (`ThresholdFor` is fork-unaware, so a new op must not retroactively change quorum — replay parity), and on execution writes `memdomain:` only for a memory that already exists on-chain, has no domain yet, and whose target domain is already registered — idempotent, never overwriting, skipping unknown, already-domained, or unregistered-target IDs (`applyMemoryDomainRepair`, `app.go:6742`). After repair, a normal challenge/forget by an authorized agent deprecates as usual. app-v16 also requires every submit to carry a non-empty `domain_tag`, so the domainless state cannot recur.
+
 The `validTransitions` map (`lifecycle.go:9`) does list `challenged → committed` as a valid transition, indicating a path exists to reinstate a challenged memory, but no handler currently drives that transition via a tx type.
 
 ### 7. Corroborate (does not change status)
@@ -114,7 +116,7 @@ The `validTransitions` map (`lifecycle.go:9`) does list `challenged → committe
 | Access grants / domain owners  | BadgerDB (on-chain) | Keys `grant:<domain>:<agentID>`, `domain:<name>`. Written via tx, not REST-only.             |
 | Full content, embedding vector  | PostgreSQL (off-chain) | Written in `Commit`; node-local until replicated by PostgreSQL shared service.              |
 | Corroborations                  | PostgreSQL (off-chain) | Written in `Commit`. Count read at query time for confidence computation.                    |
-| **Tags**                        | **SQLite only (node-local)** | `SetTags`/`GetTags` are **no-ops on PostgresStore** (`store/postgres.go:1383-1395`). Tags exist only in personal (SQLite) mode deployments and are never on-chain. The `QueryOptions.Tags` field is explicitly noted: "any-match filter on user-defined tags (SQLite-only)" (`store/store.go:77`). |
+| **Tags**                        | **SQLite only (node-local)** | `SetTags`/`GetTags` are **no-ops on PostgresStore** (`store/postgres.go:1383-1395`). Tags exist only in personal (SQLite) mode deployments and are never on-chain. The `QueryOptions.Tags` field is explicitly noted: "any-match filter on user-defined tags (SQLite-only)" (`store/store.go:89`). |
 | Embedding vector (supplementary) | Process-local SupplementaryCache → PostgreSQL | Staged in-process pre-broadcast; only the receiving node has it in cache. |
 | Knowledge triples               | PostgreSQL (off-chain) | Staged via SupplementaryCache, flushed in Commit.                                            |
 
@@ -157,7 +159,7 @@ Where:
 | `vuln_intel`| 0.01      | ~69 days       |
 | (default)   | 0.005     | ~139 days      |
 
-Confidence is **computed at query time**, not stored. The PostgreSQL column holds `conf₀`. `handleQueryMemory` calls `memory.ComputeConfidence` per record (`memory_handler.go:655`) and returns the decayed value.
+Confidence is **computed at query time**, not stored. The PostgreSQL column holds `conf₀`. `handleQueryMemory` calls `memory.ComputeConfidenceForRecord` per record (`memory_handler.go:786`) — the task-aware variant, so open tasks are exempt from decay — and returns the decayed value.
 
 **Task exception** (`confidence.go:29-33`): open tasks (`memory_type=task` with `task_status` in `{planned, in_progress}`) **never decay** — `ComputeConfidenceForRecord` short-circuits and returns `conf₀` unchanged.
 

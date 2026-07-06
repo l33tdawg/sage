@@ -74,6 +74,17 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 		return nil, fmt.Errorf("ensure governance schema: %w", err)
 	}
 
+	// Same rationale: the memories.task_status column postdates the earliest
+	// Postgres-quorum deployments, and v11.2 recall (GetMemory / QuerySimilar)
+	// now SELECTs COALESCE(task_status, '') — which is a plan-time undefined_column
+	// error, not a maskable NULL, on a legacy schema. Self-heal so those
+	// deployments don't 500 every read after upgrade (also heals the pre-existing
+	// UpdateTaskStatus / GetOpenTasks breakage on the same DBs).
+	if err := s.ensureMemoriesSchema(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ensure memories schema: %w", err)
+	}
+
 	return s, nil
 }
 
@@ -218,6 +229,35 @@ func (s *PostgresStore) ensureGovSchema(ctx context.Context) error {
 	})
 }
 
+// memoriesSchemaLockKey serializes concurrent memories-table migrations across
+// quorum nodes (distinct from the agent/gov keys).
+const memoriesSchemaLockKey int64 = 0x5341_4745_4D45_4D53 // "SAGEMEMS"
+
+// ensureMemoriesSchema backfills the memories.task_status column on a legacy
+// Postgres deployment whose init.sql predates the task-memory feature. v11.2 recall
+// (GetMemory / QuerySimilar) SELECTs COALESCE(task_status, ”), which on a schema
+// missing the column is a plan-time undefined_column (42703) error — a total read
+// outage — not a NULL that COALESCE can mask. Idempotent (ADD COLUMN IF NOT EXISTS)
+// and serialized via a transaction-scoped advisory lock, mirroring
+// ensureAgentSchema/ensureGovSchema. Must stay in sync with deploy/init.sql.
+func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
+	return s.RunInTx(ctx, func(tx OffchainStore) error {
+		ps := tx.(*PostgresStore)
+		if _, err := ps.db.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, memoriesSchemaLockKey); err != nil {
+			return fmt.Errorf("acquire memories schema lock: %w", err)
+		}
+		// Match deploy/init.sql:24 and the SQLite migration exactly: DEFAULT '' + the
+		// same CHECK, no NOT NULL (recall COALESCEs NULL→''). Existing rows take the
+		// '' default, which satisfies the CHECK; IF NOT EXISTS is idempotent so a
+		// current/fresh DB (already has the column + CHECK from init.sql) is untouched.
+		if _, err := ps.db.Exec(ctx,
+			`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_status TEXT DEFAULT '' CHECK (task_status IN ('', 'planned', 'in_progress', 'done', 'dropped'))`); err != nil {
+			return fmt.Errorf("migrate memories.task_status: %w", err)
+		}
+		return nil
+	})
+}
+
 func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryRecord) error {
 	var emb *pgvector.Vector
 	if len(record.Embedding) > 0 {
@@ -283,17 +323,18 @@ func (s *PostgresStore) RekeyUnreadableMemories(_ context.Context, _ *vault.Vaul
 func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory.MemoryRecord, error) {
 	row := s.db.QueryRow(ctx,
 		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at
+			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at,
+			COALESCE(task_status, '')
 		FROM memories WHERE memory_id = $1`, memoryID)
 
 	var r memory.MemoryRecord
-	var mt, st string
+	var mt, st, taskStatus string
 	var emb *pgvector.Vector
 	var parentHash *string
 
 	err := row.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 		&emb, &r.EmbeddingHash, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
-		&st, &parentHash, &r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt)
+		&st, &parentHash, &r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt, &taskStatus)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, fmt.Errorf("memory not found: %s", memoryID)
@@ -303,6 +344,7 @@ func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory
 
 	r.MemoryType = memory.MemoryType(mt)
 	r.Status = memory.MemoryStatus(st)
+	r.TaskStatus = memory.TaskStatus(taskStatus)
 	if emb != nil {
 		r.Embedding = emb.Slice()
 	}
@@ -346,7 +388,7 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding,
 		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
-		committed_at, deprecated_at, embedding <=> $1 AS distance
+		committed_at, deprecated_at, COALESCE(task_status, ''), embedding <=> $1 AS distance
 		FROM memories WHERE embedding IS NOT NULL`
 	args := []any{pgvector.NewVector(embedding)}
 	argIdx := 2
@@ -383,8 +425,14 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 	// opts.Tags is ignored on PostgresStore — tags are a SQLite-only feature
 	// (PostgresStore.SetTags is a no-op, so no tagged memories can exist).
 
+	scanLimit := opts.TopK
+	if opts.DecayFloor > 0 {
+		// Over-fetch: the decayed floor isn't a SQL predicate, so pull a bounded
+		// distance-ordered pool and filter it in Go below, before trimming to top_k.
+		scanLimit = decayFilterScanCap
+	}
 	query += fmt.Sprintf(" ORDER BY embedding <=> $1 LIMIT $%d", argIdx)
-	args = append(args, opts.TopK)
+	args = append(args, scanLimit)
 
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
@@ -395,20 +443,21 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 	results := make([]*memory.MemoryRecord, 0)
 	for rows.Next() {
 		var r memory.MemoryRecord
-		var mt, st string
+		var mt, st, taskStatus string
 		var emb *pgvector.Vector
 		var parentHash *string
 		var distance float64
 
 		scanErr := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 			&emb, &mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore,
-			&st, &parentHash, &r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt, &distance)
+			&st, &parentHash, &r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt, &taskStatus, &distance)
 		if scanErr != nil {
 			return nil, fmt.Errorf("scan row: %w", scanErr)
 		}
 
 		r.MemoryType = memory.MemoryType(mt)
 		r.Status = memory.MemoryStatus(st)
+		r.TaskStatus = memory.TaskStatus(taskStatus)
 		if emb != nil {
 			r.Embedding = emb.Slice()
 		}
@@ -418,6 +467,17 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		results = append(results, &r)
 	}
 
+	// Decayed-confidence floor (if any) over the over-fetched pool, before trim.
+	if opts.DecayFloor > 0 {
+		counts, cErr := s.GetCorroborationCounts(ctx, recordIDs(results))
+		if cErr != nil {
+			return nil, fmt.Errorf("query similar decay floor: %w", cErr)
+		}
+		results = applyDecayFloor(results, opts.DecayFloor, opts.DecayNow, counts)
+		if len(results) > opts.TopK {
+			results = results[:opts.TopK]
+		}
+	}
 	return results, nil
 }
 

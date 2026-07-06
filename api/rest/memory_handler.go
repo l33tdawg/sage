@@ -110,13 +110,24 @@ const (
 
 // MemoryResult is a memory record with computed confidence.
 type MemoryResult struct {
-	MemoryID        string  `json:"memory_id"`
-	SubmittingAgent string  `json:"submitting_agent"`
-	Content         string  `json:"content"`
-	ContentHash     string  `json:"content_hash"`
-	MemoryType      string  `json:"memory_type"`
-	DomainTag       string  `json:"domain_tag"`
+	MemoryID        string `json:"memory_id"`
+	SubmittingAgent string `json:"submitting_agent"`
+	Content         string `json:"content"`
+	ContentHash     string `json:"content_hash"`
+	MemoryType      string `json:"memory_type"`
+	DomainTag       string `json:"domain_tag"`
+	// ConfidenceScore is the DECAYED confidence: the stored value after time decay
+	// and the corroboration boost, computed at read time. This is the number the
+	// min_confidence floor is enforced against (rest-api.md).
 	ConfidenceScore float64 `json:"confidence_score"`
+	// InitialConfidence is the STORED (undecayed) confidence — the on-chain value
+	// set at submission (corroboration never rewrites it), before any time decay. Exposing it
+	// alongside the decayed ConfidenceScore lets a reader see the authoritative
+	// floor without re-deriving it (the two diverge as a memory ages). A pointer so
+	// a legitimate stored 0.0 still serializes (a plain omitempty float would drop
+	// it); non-nil for local memories, nil for federated results, where only the
+	// serving peer's already-decayed value is available. (v11.2.0)
+	InitialConfidence *float64 `json:"initial_confidence,omitempty"`
 	// CorroborationCount is the number of distinct corroborations backing this
 	// memory — the multiplier behind the corroboration boost in ConfidenceScore.
 	// Exposing it lets readers distinguish a low score caused by no corroboration
@@ -566,6 +577,50 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// setDecayFloor moves a min_confidence request onto the store's DECAYED-confidence
+// floor (store.QueryOptions.DecayFloor): the store then filters on the decayed value
+// over the full candidate set before the top-K trim — so top_k is filled with
+// qualifying records and corroboration-boosted memories are not starved — pinned to
+// `now` so the value the store filters on is exactly the one this handler serializes
+// below. The legacy stored-column MinConfidence filter is disabled so it cannot also
+// run (it is decay-blind in both directions). No-op when no floor is requested, so
+// the fast path is unchanged. `now` must be the same instant used for serialization.
+func setDecayFloor(opts *store.QueryOptions, now time.Time) {
+	if opts.MinConfidence > 0 {
+		opts.DecayFloor = opts.MinConfidence
+		opts.DecayNow = now
+		opts.MinConfidence = 0
+	}
+}
+
+// initialConfidencePtr returns a pointer to a stored (undecayed) confidence for the
+// InitialConfidence response field — a pointer, not an omitempty float, so a
+// legitimate stored 0.0 still serializes; nil is reserved for federated results.
+func initialConfidencePtr(v float64) *float64 { return &v }
+
+// corroborationCounts batch-fetches corroboration counts for a set of records,
+// keyed by memory ID — one query in place of the per-record GetCorroborations N+1
+// the recall loops used to run. These feed the SERIALIZED confidence_score. On a
+// store error it returns (nil, err): the caller may degrade to no boost (a slightly
+// low displayed score) on the no-floor path, but MUST fail closed under a
+// min_confidence floor — otherwise a boosted record the store correctly kept could
+// serialize a confidence_score below the floor the caller queried with.
+func (s *Server) corroborationCounts(ctx context.Context, records []*memory.MemoryRecord) (map[string]int, error) {
+	if len(records) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(records))
+	for i, rec := range records {
+		ids[i] = rec.MemoryID
+	}
+	counts, err := s.store.GetCorroborationCounts(ctx, ids)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("batch corroboration count failed")
+		return nil, err
+	}
+	return counts, nil
+}
+
 // handleQueryMemory handles POST /v1/memory/query.
 func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	var req QueryMemoryRequest
@@ -656,6 +711,10 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
+	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
+	// store as DecayFloor, which filters the decayed value over the full candidate
+	// set before the top-K trim, pinned to `start` so it matches what we serialize.
+	setDecayFloor(&opts, start)
 
 	var records []*memory.MemoryRecord
 	records, err = s.store.QuerySimilar(r.Context(), req.Embedding, opts)
@@ -667,8 +726,16 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 
 	metrics.RecordQuery(req.DomainTag, time.Since(start))
 
-	// Apply confidence decay and classification filtering.
-	now := time.Now()
+	// Serialize with task-aware decay (open tasks don't decay), pinned to the same
+	// instant the store filtered on; classification filtering as before.
+	now := start
+	corrCounts, ccErr := s.corroborationCounts(r.Context(), records)
+	if opts.DecayFloor > 0 && ccErr != nil {
+		// Fail closed under a floor: without accurate corroboration counts a boosted
+		// record the store kept could serialize below the floor. (No floor: degrade.)
+		writeProblem(w, http.StatusInternalServerError, "Recall error", "Failed to compute confidence scores.")
+		return
+	}
 	results := make([]*MemoryResult, 0, len(records))
 	hiddenByClassification := 0
 	for _, rec := range records {
@@ -712,9 +779,11 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Get corroboration count for confidence decay.
-		corrs, _ := s.store.GetCorroborations(r.Context(), rec.MemoryID)
-		currentConf := memory.ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, now, len(corrs), rec.DomainTag)
+		// Corroboration count (batch-fetched) feeds the boost; task-aware compute so
+		// open tasks serialize their non-decaying stored confidence. The store already
+		// applied the decayed floor over the full candidate set, so no drop here.
+		corrCount := corrCounts[rec.MemoryID]
+		currentConf := memory.ComputeConfidenceForRecord(rec, now, corrCount)
 
 		results = append(results, &MemoryResult{
 			MemoryID:           rec.MemoryID,
@@ -724,7 +793,8 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 			MemoryType:         string(rec.MemoryType),
 			DomainTag:          rec.DomainTag,
 			ConfidenceScore:    currentConf,
-			CorroborationCount: len(corrs),
+			InitialConfidence:  initialConfidencePtr(rec.ConfidenceScore),
+			CorroborationCount: corrCount,
 			Classification:     int(memClass),
 			Status:             string(rec.Status),
 			ParentHash:         rec.ParentHash,
@@ -732,6 +802,8 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 			CommittedAt:        rec.CommittedAt,
 		})
 	}
+	// The store enforced the decayed floor over the full candidate set and filled
+	// top_k, so there is nothing to drop or cap here.
 
 	// Update agent's last activity timestamp on recall
 	if queryAgentID != "" && s.agentStore != nil {
@@ -870,6 +942,14 @@ func (s *Server) mergeFederatedRecall(r *http.Request, resp *QueryMemoryResponse
 			continue
 		}
 		for _, fr := range outcome.Results {
+			// Enforce the caller's decayed floor on peer results too: fr.ConfidenceScore
+			// is already the serving peer's decayed value, so this keeps the
+			// min_confidence contract ("every returned result satisfies confidence_score
+			// >= X") intact across the federation bridge — including against peers on an
+			// older build whose serving side still filtered on the stored column.
+			if fedReq.MinConfidence > 0 && fr.ConfidenceScore < fedReq.MinConfidence {
+				continue
+			}
 			info.Merged++
 			resp.Results = append(resp.Results, &MemoryResult{
 				MemoryID:           fr.MemoryID,
@@ -983,6 +1063,10 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
+	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
+	// store as DecayFloor, which filters the decayed value over the full candidate
+	// set before the top-K trim, pinned to `start` so it matches what we serialize.
+	setDecayFloor(&opts, start)
 
 	records, err := s.store.SearchByText(r.Context(), req.Query, opts)
 	if err != nil {
@@ -993,8 +1077,16 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 
 	metrics.RecordQuery(req.DomainTag, time.Since(start))
 
-	// Apply confidence decay and classification filtering (same as handleQueryMemory).
-	now := time.Now()
+	// Serialize with task-aware decay (same as handleQueryMemory), pinned to the
+	// store's filter instant.
+	now := start
+	corrCounts, ccErr := s.corroborationCounts(r.Context(), records)
+	if opts.DecayFloor > 0 && ccErr != nil {
+		// Fail closed under a floor: without accurate corroboration counts a boosted
+		// record the store kept could serialize below the floor. (No floor: degrade.)
+		writeProblem(w, http.StatusInternalServerError, "Recall error", "Failed to compute confidence scores.")
+		return
+	}
 	results := make([]*MemoryResult, 0, len(records))
 	hiddenByClassification := 0
 	for _, rec := range records {
@@ -1030,8 +1122,8 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		corrs, _ := s.store.GetCorroborations(r.Context(), rec.MemoryID)
-		currentConf := memory.ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, now, len(corrs), rec.DomainTag)
+		corrCount := corrCounts[rec.MemoryID]
+		currentConf := memory.ComputeConfidenceForRecord(rec, now, corrCount)
 
 		results = append(results, &MemoryResult{
 			MemoryID:           rec.MemoryID,
@@ -1041,7 +1133,8 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 			MemoryType:         string(rec.MemoryType),
 			DomainTag:          rec.DomainTag,
 			ConfidenceScore:    currentConf,
-			CorroborationCount: len(corrs),
+			InitialConfidence:  initialConfidencePtr(rec.ConfidenceScore),
+			CorroborationCount: corrCount,
 			Classification:     int(memClass),
 			Status:             string(rec.Status),
 			ParentHash:         rec.ParentHash,
@@ -1049,6 +1142,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 			CommittedAt:        rec.CommittedAt,
 		})
 	}
+	// The store enforced the decayed floor and filled top_k; nothing to cap here.
 
 	// Update agent last activity
 	if queryAgentID != "" && s.agentStore != nil {
@@ -1208,6 +1302,10 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
+	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
+	// store as DecayFloor. Carried on the fused opts, both hybrid sub-queries filter
+	// the decayed value before their trim, pinned to `start` for serialize-parity.
+	setDecayFloor(&opts, start)
 
 	records, err := s.runHybridWithExpansions(r.Context(), req, opts)
 	if err != nil {
@@ -1218,7 +1316,15 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 
 	metrics.RecordQuery(req.DomainTag, time.Since(start))
 
-	now := time.Now()
+	// Serialize with task-aware decay, pinned to the store's filter instant.
+	now := start
+	corrCounts, ccErr := s.corroborationCounts(r.Context(), records)
+	if opts.DecayFloor > 0 && ccErr != nil {
+		// Fail closed under a floor: without accurate corroboration counts a boosted
+		// record the store kept could serialize below the floor. (No floor: degrade.)
+		writeProblem(w, http.StatusInternalServerError, "Recall error", "Failed to compute confidence scores.")
+		return
+	}
 	results := make([]*MemoryResult, 0, len(records))
 	hiddenByClassification := 0
 	for _, rec := range records {
@@ -1254,8 +1360,8 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 			}
 		}
 
-		corrs, _ := s.store.GetCorroborations(r.Context(), rec.MemoryID)
-		currentConf := memory.ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, now, len(corrs), rec.DomainTag)
+		corrCount := corrCounts[rec.MemoryID]
+		currentConf := memory.ComputeConfidenceForRecord(rec, now, corrCount)
 
 		results = append(results, &MemoryResult{
 			MemoryID:           rec.MemoryID,
@@ -1265,7 +1371,8 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 			MemoryType:         string(rec.MemoryType),
 			DomainTag:          rec.DomainTag,
 			ConfidenceScore:    currentConf,
-			CorroborationCount: len(corrs),
+			InitialConfidence:  initialConfidencePtr(rec.ConfidenceScore),
+			CorroborationCount: corrCount,
 			Classification:     int(memClass),
 			Status:             string(rec.Status),
 			ParentHash:         rec.ParentHash,
@@ -1273,6 +1380,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 			CommittedAt:        rec.CommittedAt,
 		})
 	}
+	// The store enforced the decayed floor and filled top_k; nothing to cap here.
 
 	if queryAgentID != "" && s.agentStore != nil {
 		if updateErr := s.agentStore.UpdateAgentLastSeen(r.Context(), queryAgentID, time.Now()); updateErr != nil {
@@ -1385,7 +1493,7 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	corrs, _ := s.store.GetCorroborations(r.Context(), memoryID)
 
 	// Apply confidence decay.
-	currentConf := memory.ComputeConfidence(rec.ConfidenceScore, rec.CreatedAt, time.Now(), len(corrs), rec.DomainTag)
+	currentConf := memory.ComputeConfidenceForRecord(rec, time.Now(), len(corrs))
 
 	// Surface the on-chain classification so GET /v1/memory/{id} matches the
 	// `classification` field the query/search/hybrid responses already return
@@ -1564,6 +1672,20 @@ func broadcastErrorPublic(err error) (int, string) {
 		// other broadcast callers at least surface the right status
 		// instead of an opaque 500.
 		return http.StatusTooManyRequests, "mempool full, retry later"
+	// app-v16 deprecation-gate outcomes. These keys are matched BEFORE the generic
+	// FinalizeBlock catch (the same error string would otherwise collapse to a
+	// 400 "request rejected") and are ORDERED: the app-v16 "unknown memory" reject
+	// also ends with "not authorized to deprecate", so the "no memory record" 404
+	// must win over the 403. The 409 keys on the post-fork-only phrase "legacy
+	// memory predating app-v8.4", so a PRE-app-v16 chain's domainless reject (which
+	// lacks that phrase) falls through to the 403 authz case, not a 409 that would
+	// advise an unavailable remediation.
+	case strings.Contains(msg, "legacy memory predating app-v8.4"):
+		return http.StatusConflict, "memory has no recorded domain (legacy pre-app-v8.4 record); deprecation is blocked until its domain is repaired via an OpMemoryDomainRepair governance proposal (app-v16)"
+	case strings.Contains(msg, "no memory record"):
+		return http.StatusNotFound, "unknown memory: no on-chain record for that memory id"
+	case strings.Contains(msg, "not authorized to deprecate"):
+		return http.StatusForbidden, "not authorized to deprecate this memory (need domain ownership or a level-3 modify grant)"
 	case strings.Contains(msg, "tx rejected in CheckTx"):
 		return http.StatusBadRequest, "request rejected"
 	case strings.Contains(msg, "tx rejected in FinalizeBlock"):
@@ -2055,9 +2177,14 @@ func (s *Server) runHybridWithExpansions(ctx context.Context, req HybridSearchMe
 	for _, v := range variants {
 		got, err := s.store.SearchHybrid(ctx, v.query, v.embedding, opts)
 		if err != nil {
-			// A single variant failing shouldn't drop the whole recall —
-			// the user paid for an expansion, not a fragility tax. Log and
-			// continue with the variants that did succeed.
+			// Under a decayed floor, fail closed: a swallowed leaf error would
+			// silently return a partial, floor-unenforced recall.
+			if opts.DecayFloor > 0 {
+				return nil, err
+			}
+			// Otherwise a single variant failing shouldn't drop the whole recall —
+			// the user paid for an expansion, not a fragility tax. Log and continue
+			// with the variants that did succeed.
 			s.logger.Warn().Err(err).Str("variant_query", v.query).Msg("expansion variant SearchHybrid failed; skipping")
 			continue
 		}

@@ -409,6 +409,15 @@ type SageApp struct {
 	// are wired now so the next behavioral fork only adds rule logic + AppHash handling.
 	appV15AppliedHeight int64 // 0 => fork dormant
 
+	// appV16AppliedHeight gates the app-v16 fork (v11.2): the domainless-forget
+	// remediation. It enables (a) the OpMemoryDomainRepair governance backfill of
+	// legacy memdomain: records, and (b) the hardened deprecation gate (split the
+	// domain=="" reject into legacy-vs-unknown; require a domain at submit so the
+	// state can't recur). INDEPENDENT/additive gate; strict >, 0 by default, so
+	// every existing chain replays byte-identically. Activated via
+	// {Name:"app-v16", TargetAppVersion:16}.
+	appV16AppliedHeight int64 // 0 => fork dormant
+
 	// retainBlocks, when > 0, is the number of most-recent blocks Commit asks
 	// CometBFT to keep: ResponseCommit.RetainHeight = height - retainBlocks
 	// (clamped at 0 = keep everything). Pruning is LOCAL and advisory — it never
@@ -513,6 +522,12 @@ const appV14UpgradeName = "app-v14"
 // it — harmless because the gate is empty (a governance activation with zero
 // behavior/AppHash change).
 const appV15UpgradeName = "app-v15"
+
+// appV16UpgradeName is the canonical activation-record name for the app-v16 fork
+// (v11.2 domainless-forget remediation). Governance-activated via
+// {Name:"app-v16", TargetAppVersion:16}; validated purely as
+// CanonicalUpgradeName(16) == "app-v16" — no allowlist.
+const appV16UpgradeName = "app-v16"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -845,6 +860,24 @@ func (app *SageApp) postAppV15Fork(height int64) bool {
 	return app.appV15AppliedHeight > 0 && height > app.appV15AppliedHeight
 }
 
+// postAppV16Fork is the consensus-side fork-gate predicate for app-v16 (v11.2:
+// domainless-forget remediation — OpMemoryDomainRepair backfill + hardened
+// deprecation gate). Strict greater-than mirrors the other additive gates so the
+// activation block itself commits under pre-fork rules and replay is boundary-safe.
+// Every existing chain (none has activated app-v16) returns false, so historical
+// blocks replay byte-identically. (Template: postAppV15Fork.)
+func (app *SageApp) postAppV16Fork(height int64) bool {
+	return app.appV16AppliedHeight > 0 && height > app.appV16AppliedHeight
+}
+
+// postAppV16Rules reports whether app-v16's consensus rules are in force at this
+// height. app-v16 is the highest independent gate, so this collapses to exactly
+// postAppV16Fork and historical blocks replay byte-identically (kept as a named
+// predicate for callsite clarity and future skip-ahead subsumption).
+func (app *SageApp) postAppV16Rules(height int64) bool {
+	return app.postAppV16Fork(height)
+}
+
 // postAppV8Rules reports whether app-v8's consensus rules (consensus-path
 // signature verification + quorum/admin-gated upgrade governance) are in force
 // at this height. app-v7/v8/v9/v10 are INDEPENDENT gates — governance MAY
@@ -860,7 +893,7 @@ func (app *SageApp) postAppV15Fork(height int64) bool {
 // higher gates are 0, so this collapses to exactly postAppV8Fork and historical
 // blocks replay byte-identically.
 func (app *SageApp) postAppV8Rules(height int64) bool {
-	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height)
+	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height)
 }
 
 // postAppV9Rules reports whether app-v9's consensus rules (consensus-path
@@ -871,7 +904,7 @@ func (app *SageApp) postAppV8Rules(height int64) bool {
 // postAppV9Fork on every existing chain (appV10/appV11AppliedHeight==0), so replay
 // is byte-identical.
 func (app *SageApp) postAppV9Rules(height int64) bool {
-	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height)
+	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height)
 }
 
 // postAppV10Rules reports whether app-v10's consensus rules (corroboration
@@ -883,7 +916,7 @@ func (app *SageApp) postAppV9Rules(height int64) bool {
 // when app-v11 landed — app-v10 was the highest fork until then and needed no
 // subsumption helper.
 func (app *SageApp) postAppV10Rules(height int64) bool {
-	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height)
+	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height)
 }
 
 // postAppV11Rules reports whether app-v11's consensus rules (the per-node
@@ -894,7 +927,7 @@ func (app *SageApp) postAppV10Rules(height int64) bool {
 // postAppV11Fork on every existing chain (appV12AppliedHeight==0), so
 // historical blocks replay byte-identically.
 func (app *SageApp) postAppV11Rules(height int64) bool {
-	return app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height)
+	return app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height)
 }
 
 // postAppV12Rules reports whether app-v12's consensus rule (the FLAWED
@@ -930,7 +963,7 @@ func (app *SageApp) postAppV13Rules(height int64) bool {
 // replay byte-identically. Do NOT OR this into postAppV12Rules/postAppV13Rules —
 // those are mutually-exclusive AppHash-REPLACEMENT rules, deliberately non-subsumed.
 func (app *SageApp) postAppV15Rules(height int64) bool {
-	return app.postAppV15Fork(height)
+	return app.postAppV15Fork(height) || app.postAppV16Fork(height)
 }
 
 // refreshAppV9Fork populates appV9AppliedHeight from the persisted upgrade
@@ -1071,6 +1104,21 @@ func (app *SageApp) refreshAppV15Fork() {
 		return
 	}
 	app.appV15AppliedHeight = rec.AppliedHeight
+}
+
+// refreshAppV16Fork populates appV16AppliedHeight from the persisted upgrade
+// record on construction. Returns a nil-record on every chain that has not
+// activated app-v16, so the gate stays dormant and replay is unaffected.
+func (app *SageApp) refreshAppV16Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV16UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV16UpgradeName).Msg("read app-v16 applied-upgrade record")
+		return
+	}
+	if rec == nil {
+		return
+	}
+	app.appV16AppliedHeight = rec.AppliedHeight
 }
 
 // recordAppV9Branch records which branch (pre/post app-v9) a gated handler took,
@@ -1479,6 +1527,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshAppV13Fork()
 	app.refreshAppV14Fork()
 	app.refreshAppV15Fork()
+	app.refreshAppV16Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -1536,6 +1585,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshAppV13Fork()
 	app.refreshAppV14Fork()
 	app.refreshAppV15Fork()
+	app.refreshAppV16Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1601,8 +1651,10 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV16AppliedHeight > 0:
+		return 16 // app-v16 (domainless-forget remediation, v11.2) — independent gate, highest version, must rank first (16 > 15)
 	case app.appV15AppliedHeight > 0:
-		return 15 // app-v15 (empty fork-gate scaffolding, v11) — independent gate, highest version, must rank first (15 > 14)
+		return 15 // app-v15 (empty fork-gate scaffolding, v11) — independent gate, ranks above app-v14 (15 > 14)
 	case app.appV14AppliedHeight > 0:
 		return 14 // app-v14 (content-validator gate deactivation, v10.7.0) — independent gate, ranks above app-v13 (14 > 13)
 	case app.appV13AppliedHeight > 0:
@@ -1635,13 +1687,13 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v15). It is the readiness ceiling for upgrade
+// fork gate for (currently app-v16). It is the readiness ceiling for upgrade
 // auto-voting: a validator must never vote to activate an upgrade it cannot
 // execute — doing so would commit consensus version.app=N while the binary
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 15
+const maxSupportedAppVersion uint64 = 16
 
 // MaxSupportedAppVersion returns the highest app version this binary has a
 // compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
@@ -2182,6 +2234,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if plan.Name == appV15UpgradeName {
 			app.appV15AppliedHeight = req.Height
 		}
+		if plan.Name == appV16UpgradeName {
+			app.appV16AppliedHeight = req.Height
+		}
 		if plan.Name == appV12UpgradeName {
 			app.appV12AppliedHeight = req.Height
 		}
@@ -2585,6 +2640,16 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
+	// app-v16: a memory MUST carry a domain. Pre-app-v16 an empty domain_tag created
+	// a domainless memory (no memdomain: key) that could never be deprecated — the
+	// legacy state this fork remediates. Reject it at submit so it cannot recur.
+	// (The REST submit handler already requires a domain; this closes the raw-tx
+	// path.) Fork-gated (postAppV16Rules, strict >) and placed BEFORE any write, so
+	// pre-fork blocks replay byte-identically.
+	if app.postAppV16Rules(height) && submit.DomainTag == "" {
+		return &abcitypes.ExecTxResult{Code: 11, Log: "memory submit rejected: a non-empty domain_tag is required (app-v16)"}
+	}
+
 	// Domain write-access check: if the domain has a registered owner, verify the agent has write access.
 	// If the domain doesn't exist, auto-register it with the submitting agent as owner.
 	// Reserved shared domains (e.g. "general", "self") are writable by any authenticated agent
@@ -2870,6 +2935,15 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 	env := parsedTx.CoCommitSubmit
 	if env == nil {
 		return &abcitypes.ExecTxResult{Code: 93, Log: "missing CoCommitSubmit payload"}
+	}
+
+	// app-v16: a co-committed memory MUST carry a domain, same as processMemorySubmit.
+	// Otherwise it lands as a domainless committed record (SetMemoryHash below writes
+	// no memdomain: when env.Domain=="") that can never be deprecated — recreating the
+	// legacy state this fork remediates. Reject BEFORE any write. Fork-gated
+	// (postAppV16Rules, strict >) so pre-fork blocks replay byte-identically.
+	if app.postAppV16Rules(height) && env.Domain == "" {
+		return &abcitypes.ExecTxResult{Code: 95, Log: "co-commit rejected: a non-empty domain is required (app-v16)"}
 	}
 
 	// LOCAL submitter identity (the node broadcasting to its own chain).
@@ -3642,6 +3716,21 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 			return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: domain lookup failed: %v", dErr)}
 		}
 		if domain == "" {
+			// No recorded domain. Under app-v16, split the reject so integrators can
+			// tell a real LEGACY memory (exists on-chain but predates the app-v8.4
+			// memdomain: key) from a bogus/never-submitted ID, and point them at the
+			// remediation. BOTH still deny — we never bypass the modify gate here
+			// (that was the ungated-deprecate hole); the fix is an
+			// OpMemoryDomainRepair governance backfill of the domain, after which
+			// normal deprecation authorizes. Fork-gated (postAppV16Rules, strict >),
+			// so pre-fork blocks keep the original single message and replay
+			// byte-identically.
+			if app.postAppV16Rules(height) {
+				if _, _, hErr := app.badgerStore.GetMemoryHash(challenge.MemoryID); hErr == nil {
+					return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: memory %s has no recorded domain (legacy memory predating app-v8.4); deprecation is blocked until its domain is repaired via an OpMemoryDomainRepair governance proposal", challenge.MemoryID)}
+				}
+				return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: unknown memory %s (no memory record and no recorded domain); not authorized to deprecate", challenge.MemoryID)}
+			}
 			// Legacy/undomained memory, or a memoryID that was never submitted:
 			// nothing to authorize against. Deny-by-default rather than bypass the
 			// modify gate (a pre-v8.4 memory with no memdomain: key, or a bogus ID).
@@ -5758,6 +5847,23 @@ func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ tim
 		return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: OpUpgrade must be created via UpgradePropose, not GovPropose"}
 	}
 
+	// app-v16: OpMemoryDomainRepair proposals must carry a valid, non-empty backfill
+	// payload — the {memory_id, domain} list is the whole point of the op. Reject a
+	// malformed/empty one at propose time so a supermajority-passed proposal never
+	// fails at apply. Fork-gated (postAppV16Rules) so pre-fork chains — where op==6
+	// was an undefined no-op that created an inert proposal — replay byte-identically.
+	if app.postAppV16Rules(height) && op == governance.OpMemoryDomainRepair {
+		var entries []tx.MemoryDomainRepairEntry
+		if uErr := json.Unmarshal(gp.Payload, &entries); uErr != nil || len(entries) == 0 {
+			return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: OpMemoryDomainRepair requires a non-empty JSON [{memory_id,domain}] payload"}
+		}
+		for _, e := range entries {
+			if e.MemoryID == "" || e.Domain == "" {
+				return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: OpMemoryDomainRepair entries require non-empty memory_id and domain"}
+			}
+		}
+	}
+
 	proposalID, propErr := app.govEngine.Propose(
 		proposerID, op, gp.TargetID, gp.TargetPubKey,
 		gp.TargetPower, gp.ExpiryBlocks, gp.Reason, height,
@@ -6533,6 +6639,17 @@ func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, 
 		return nil, app.applyUpgradeProposal(proposal, height)
 	}
 
+	// app-v16: OpMemoryDomainRepair applies its {memory_id → domain} backfill
+	// directly at proposal execution (like OpUpgrade — no validator-set effect and
+	// no 32-byte pubkey target, so it MUST be dispatched BEFORE the pubkey derivation
+	// below, whose length guard would otherwise reject it). Gated behind
+	// postAppV16Rules so a pre-fork op==6 proposal (creatable only via the generic
+	// gov path on a chain predating this gate) falls through to the unknown-op error
+	// below exactly as before — historical replay stays byte-identical.
+	if proposal.Operation == governance.OpMemoryDomainRepair && app.postAppV16Rules(height) {
+		return nil, app.applyMemoryDomainRepair(proposal, height)
+	}
+
 	pubKeyBytes := proposal.TargetPubKey
 	if len(pubKeyBytes) == 0 {
 		// Derive from target ID (which is hex-encoded pubkey for non-app validators)
@@ -6622,6 +6739,63 @@ func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, 
 	}
 }
 
+// applyMemoryDomainRepair executes an OpMemoryDomainRepair (app-v16) proposal: it
+// backfills the on-chain memdomain: record for legacy memories that predate app-v8.4
+// (and so never received one), from the supermajority-attested {memory_id, domain}
+// payload. Idempotent and defensive: it writes SetMemoryDomain ONLY for a memory that
+// (a) exists on-chain (GetMemoryHash succeeds — skips a bogus/never-submitted ID) and
+// (b) has no domain recorded yet (skips one already domained), and it never
+// overwrites. Iteration is in payload order, which is byte-identical across replicas
+// (same proposal payload), so no explicit sort is needed for determinism; every input
+// is committed Badger state + the payload bytes, so each replica computes the same
+// writes and the AppHash stays in lockstep. Dispatched from applyGovernanceProposal
+// under postAppV16Rules.
+func (app *SageApp) applyMemoryDomainRepair(proposal *governance.ProposalState, height int64) error {
+	var entries []tx.MemoryDomainRepairEntry
+	if err := json.Unmarshal(proposal.Payload, &entries); err != nil {
+		return fmt.Errorf("memory domain repair: decode payload: %w", err)
+	}
+	repaired := 0
+	for _, e := range entries {
+		if e.MemoryID == "" || e.Domain == "" {
+			continue
+		}
+		// Existence: only a real, submitted memory gets a domain. GetMemoryHash
+		// errors on an unknown ID — skip it (never fabricate authorization state).
+		if _, _, hErr := app.badgerStore.GetMemoryHash(e.MemoryID); hErr != nil {
+			continue
+		}
+		// Idempotent: repair only fills the gap — never overwrite an existing domain.
+		existing, dErr := app.badgerStore.GetMemoryDomain(e.MemoryID)
+		if dErr != nil {
+			return fmt.Errorf("memory domain repair: domain lookup %s: %w", e.MemoryID, dErr)
+		}
+		if existing != "" {
+			continue
+		}
+		// The target domain must already be REGISTERED (have an owner). This (a)
+		// keeps the backfill honest — a legacy memory's domain was auto-registered
+		// at its original submit, so the real target always resolves — and (b) closes
+		// a capture hole: repairing into an unregistered/shared domain would leave the
+		// memory owned by nobody, so whoever registered that domain NEXT would inherit
+		// deprecate authority over it. Deterministic committed-state read → AppHash-safe.
+		if owner, ownErr := app.badgerStore.GetDomainOwner(e.Domain); ownErr != nil || owner == "" {
+			continue
+		}
+		if err := app.badgerStore.SetMemoryDomain(e.MemoryID, e.Domain); err != nil {
+			return fmt.Errorf("memory domain repair: set domain %s: %w", e.MemoryID, err)
+		}
+		repaired++
+	}
+	app.logger.Info().
+		Str("proposal_id", proposal.ProposalID).
+		Int("entries", len(entries)).
+		Int("repaired", repaired).
+		Int64("height", height).
+		Msg("app-v16 memory domain repair applied")
+	return nil
+}
+
 // persistValidators saves the current validator set to BadgerDB.
 func (app *SageApp) persistValidators() {
 	valMap := make(map[string]int64)
@@ -6646,6 +6820,8 @@ func opToString(op governance.ProposalOp) string {
 		return "domain_reassign"
 	case governance.OpUpgrade:
 		return "upgrade"
+	case governance.OpMemoryDomainRepair:
+		return "memory_domain_repair"
 	default:
 		return fmt.Sprintf("unknown_%d", op)
 	}

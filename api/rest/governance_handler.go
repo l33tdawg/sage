@@ -305,7 +305,12 @@ func parseGovOp(s string) (tx.GovProposalOp, error) {
 		return tx.GovOpUpdatePower, nil
 	case "domain_reassign":
 		return tx.GovOpDomainReassign, nil
+	case "memory_domain_repair":
+		// app-v16: backfill legacy memories' on-chain domain. Payload is a base64
+		// JSON [{"memory_id","domain"}] array (like domain_reassign, this op is
+		// REST-only — the MCP tool exposes only the payload-less validator ops).
+		return tx.GovOpMemoryDomainRepair, nil
 	default:
-		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, domain_reassign")
+		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, domain_reassign, memory_domain_repair")
 	}
 }

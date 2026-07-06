@@ -1,4 +1,4 @@
-Verified against SDK source at SAGE v11.1.0. Package: sage-agent-sdk.
+Verified against SDK source at SAGE v11.2.0. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
@@ -1078,6 +1078,7 @@ Source: `sdk/python/src/sage_sdk/models.py`
 | `memory_type` | `MemoryType` | |
 | `domain_tag` | `str` | |
 | `confidence_score` | `float` | 0–1 |
+| `initial_confidence` | `float \| None` | Stored (undecayed) confidence; `None` for federated results and pre-11.2 servers |
 | `status` | `MemoryStatus` | |
 | `parent_hash` | `str \| None` | |
 | `task_status` | `str \| None` | |

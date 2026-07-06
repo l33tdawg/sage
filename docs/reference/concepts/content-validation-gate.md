@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.1.0 (registry.go:67/84/109, app.go:704-729/2688-2718, provider.go:98/107/132/139/147). -->
+<!-- Reconciled through SAGE v11.2.0 (registry.go:67/84/109, app.go:704-729/2688-2718, provider.go:98/107/132/139/147). -->
 
 # Layer-2 content-validation gate (and how a deployment arms it)
 
-Verified against code at SAGE v11.1.0.
+Verified against code at SAGE v11.2.0.
 
 SAGE ships an optional, deployment-agnostic **content-validation gate**: a
 consensus-path hook that can REJECT a memory submission based on the *shape of

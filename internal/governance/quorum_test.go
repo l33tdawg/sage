@@ -256,6 +256,10 @@ func TestThresholdFor(t *testing.T) {
 		{OpRemoveValidator, 2, 3},
 		{OpUpdatePower, 2, 3},
 		{OpDomainReassign, 3, 4},
+		// OpMemoryDomainRepair (app-v16) uses the DEFAULT 2/3 — ThresholdFor is
+		// fork-unaware and must not retroactively change a new op's quorum (replay
+		// parity); its safety is admin-propose + supermajority + guarded apply.
+		{OpMemoryDomainRepair, 2, 3},
 	}
 	for _, tc := range cases {
 		num, den := ThresholdFor(tc.op)

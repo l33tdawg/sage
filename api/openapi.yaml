@@ -147,6 +147,17 @@ components:
           description: >-
             Current confidence at query time: the agent-assigned score after
             time decay and the corroboration boost are applied.
+        initial_confidence:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: >-
+            Stored (undecayed) confidence — the on-chain value set at submission
+            (corroboration never rewrites it), before time decay. Sibling to the
+            decayed confidence_score. Present for local memories; omitted (absent)
+            for federated results, where only the serving peer's already-decayed
+            value is available. Not guaranteed on every result.
         corroboration_count:
           type: integer
           minimum: 0
@@ -906,8 +917,13 @@ components:
             - remove_validator
             - update_power
             - domain_reassign
+            - memory_domain_repair
           description: >-
-            Governance operation. `domain_reassign` (v8.0) is the
+            Governance operation. `memory_domain_repair` (app-v16, 2/3 quorum) is
+            the domainless-forget remediation — it carries a base64 JSON
+            `[{"memory_id","domain"}]` array in `payload` and backfills legacy
+            memories' on-chain domain directly on proposal execution.
+            `domain_reassign` (v8.0) is the
             access-control recovery primitive — it carries the target
             DomainReassign body via the `payload` field rather than the
             scalar target_* fields.

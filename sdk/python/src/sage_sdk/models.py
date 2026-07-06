@@ -55,6 +55,9 @@ class MemoryRecord(BaseModel):
     memory_type: MemoryType
     domain_tag: str
     confidence_score: float = Field(ge=0, le=1)
+    # Stored (undecayed) confidence, sibling to the decayed confidence_score.
+    # None for federated results and pre-11.2 servers that don't emit it.
+    initial_confidence: float | None = Field(default=None, ge=0, le=1)
     status: MemoryStatus
     parent_hash: str | None = None
     task_status: str | None = None
