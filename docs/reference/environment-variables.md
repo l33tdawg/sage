@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.0.2. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
+<!-- Reconciled through SAGE v11.0.3. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
 
 # SAGE Reference — Environment Variables
 
@@ -40,6 +40,24 @@ notes which.
 | `SAGE_FED_RECEIPT_TIMEOUT_MS` | Timeout (ms) for federation receipt fetches. | `20000` (20s) | federation | `internal/federation/client.go:21-28` |
 | `SAGE_UI_DIR` | Filesystem directory for serving web UI assets instead of the embedded bundle. | embedded assets | web | `web/handler.go:522-526` |
 | `SAGE_GRAPH_MAX_NODES` | Maximum graph nodes returned by the web graph endpoint. | `500` | web | `web/handler.go:1238-1241` |
+
+---
+
+## Memory auto-voter (v11.0.3)
+
+The per-node voter turns submitted memories from `proposed` into `committed`. See
+[`concepts/voter-operations.md`](concepts/voter-operations.md). Env values accept
+`true/false/yes/no/on/off`; an unrecognized value warns rather than silently
+disarming the flag. `sage-gui` also reads these from a `voter:` block in `config.yaml`
+(env wins).
+
+| Variable | What it does | Default | Read by | Source |
+|----------|--------------|---------|---------|--------|
+| `SAGE_VOTER_ENABLED` | Whether the auto-voter runs. `false` is an explicit "no auto-voter" choice — memories stay `proposed` until another validator votes them through. | `true` | sage-gui | `cmd/sage-gui/config.go` (`applyEnvOverrides`) |
+| `SAGE_VOTER_POLL_INTERVAL` | Voter poll cadence (Go duration, e.g. `2s`). Unset/invalid falls back to `2s`. | `2s` | sage-gui | `cmd/sage-gui/config.go` |
+| `SAGE_VOTER_REQUIRED` | If `true`, the node **refuses to boot** when no usable consensus key is available, instead of serving voterless. Guards a deployment that needs guaranteed auto-commit. | `false` | sage-gui | `cmd/sage-gui/config.go` |
+| `VOTER_REQUIRED` | `amid` equivalent of `SAGE_VOTER_REQUIRED` — sets the default for the `--require-voter` flag (fatal-exit when the validator key is missing/unreadable). | `false` | amid | `cmd/amid/main.go` |
+| `VALIDATOR_KEY_FILE` | `amid` socket mode: `priv_validator_key.json` for the auto-voter (in-process mode uses the key under `--home`). Without it in socket mode, no voter runs unless `--require-voter` forces a failure. | (none) | amid, REST | `cmd/amid/main.go`, `api/rest/server.go` |
 
 ---
 

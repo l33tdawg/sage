@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.0.2. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.0.3. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -84,7 +84,7 @@ All authenticated REST endpoints use an Ed25519 signed-request scheme. The signe
 
 ---
 
-## Related docs (reconciled through v11.0.2)
+## Related docs (reconciled through v11.0.3)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

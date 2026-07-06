@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.0.2. -->
+<!-- Reconciled through SAGE v11.0.3. -->
 
 # Memory Lifecycle
 
-Verified against code at SAGE v11.0.2.
+Verified against code at SAGE v11.0.3.
 
 ## Overview
 
@@ -75,7 +75,7 @@ CometBFT calls `CheckTx` (`internal/abci/app.go:504-537`). The ABCI app decodes 
 
 ### 5. Voting → Committed or Deprecated
 
-Each validator (in personal mode: the single node's own auto-voter; in multi-node mode: every validator node, each voting with its own consensus key, plus agents via REST `/v1/memory/{id}/vote`) broadcasts a `TxTypeMemoryVote` tx.
+Each validator (in personal mode: the single node's own auto-voter; in multi-node mode: every validator node, each voting with its own consensus key) broadcasts a `TxTypeMemoryVote` tx. Note `POST /v1/memory/{id}/vote` signs with the **node's** validator key, not a per-agent identity, so all REST votes through one node collapse into that node's single validator slot — see [`voter-operations.md`](voter-operations.md) §8.
 
 `processMemoryVote` (`app.go:991-1041`):
 - Rejects votes from non-validators.

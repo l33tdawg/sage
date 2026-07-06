@@ -11,7 +11,7 @@ SAGE has two distinct deployment models with fundamentally different threat mode
 | **Who** | One user, one local operator | Multiple agents, teams, organizations |
 | **Trust model** | User IS the only validator | Byzantine fault tolerance across validators |
 | **Database** | Local BadgerDB/SQLite stores in `~/.sage/data/` | BadgerDB consensus state plus off-chain mirror |
-| **Release** | v11.0.2 current release | v11.0.2 quorum/federation surface |
+| **Release** | v11.0.3 current release | v11.0.2 quorum/federation surface |
 
 Many concerns raised about the enterprise codebase do not apply to SAGE Personal, and vice versa. Each item below is tagged with which deployment it affects.
 
@@ -108,7 +108,7 @@ The `make byzantine` target and GitHub Actions CI job spin up a 4-validator Dock
 
 The following boundaries describe the current v11 codebase:
 
-**SAGE Personal (sage-gui v11.0.2):**
+**SAGE Personal (sage-gui v11.0.3):**
 - Designed for single-user, single-machine use. Not a networked service.
 - No authentication — anyone with access to your machine can access the API on localhost.
 - SQLite database supports optional AES-256-GCM encryption at rest (Synaptic Ledger). Enable from CEREBRUM Settings → Security.
