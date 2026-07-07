@@ -9423,6 +9423,9 @@ function OverviewPage({ sse }) {
     // ---- section 1: chain health ----
     const CHAIN_IDLE_AFTER_MS = 30000;
     const chain = health?.chain || null;
+    // SAGE version for the node card — live build version from /health, trimmed to
+    // base semver (same source as the header badge), not the stale hardcoded const.
+    const sageVer = (m => m ? 'v' + m[0] : SAGE_VERSION)((health?.version || '').match(/\d+\.\d+\.\d+/));
     const blockElapsed = chain?.block_time ? Date.now() - new Date(chain.block_time).getTime() : null;
     const chainIdle = blockElapsed !== null && blockElapsed > CHAIN_IDLE_AFTER_MS;
     const ageS = blockElapsed !== null ? blockElapsed / 1000 : null;
@@ -9560,7 +9563,7 @@ function OverviewPage({ sse }) {
             <div style="display:flex;gap:24px;flex-wrap:wrap;">
                 <div style="text-align:right;">
                     <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);">SAGE</div>
-                    <div style="font-size:15px;font-weight:600;color:var(--text);">${SAGE_VERSION}</div>
+                    <div style="font-size:15px;font-weight:600;color:var(--text);">${sageVer}</div>
                 </div>
                 <div style="text-align:right;">
                     <div style="font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--text-muted);">Uptime</div>
