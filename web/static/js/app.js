@@ -2238,6 +2238,7 @@ function SearchPage() {
     // in local time, then toISOString() converts to the UTC the backend stores.
     function computeRange(preset, cf, ct) {
         const now = Date.now();
+        if (preset === '1h') return { from: new Date(now - 3600e3).toISOString(), to: '' };
         if (preset === '24h') return { from: new Date(now - 24 * 3600e3).toISOString(), to: '' };
         if (preset === '7d') return { from: new Date(now - 7 * 24 * 3600e3).toISOString(), to: '' };
         if (preset === '30d') return { from: new Date(now - 30 * 24 * 3600e3).toISOString(), to: '' };
@@ -2396,6 +2397,7 @@ function SearchPage() {
                 `}
                 <select class="filter-select" value=${datePreset} onChange=${handleDatePreset} title="Filter by when the memory was created">
                     <option value="">Any time</option>
+                    <option value="1h">Last hour</option>
                     <option value="24h">Last 24 hours</option>
                     <option value="7d">Last 7 days</option>
                     <option value="30d">Last 30 days</option>
