@@ -87,6 +87,8 @@ type QueryOptions struct {
 	DecayNow         time.Time `json:"-"`
 	SubmittingAgents []string  `json:"submitting_agents,omitempty"` // RBAC: restrict to these agent IDs
 	Tags             []string  `json:"tags,omitempty"`              // any-match filter on user-defined tags (SQLite-only)
+	CreatedFrom      string    `json:"created_from,omitempty"`      // ISO-8601 lower bound on created_at (inclusive)
+	CreatedTo        string    `json:"created_to,omitempty"`        // ISO-8601 upper bound on created_at (inclusive)
 }
 
 // decayFilterScanCap bounds how many rank/distance-ordered candidates a
@@ -140,6 +142,8 @@ type ListOptions struct {
 	Status           string
 	SubmittingAgent  string   // filter memories by agent_id (single)
 	SubmittingAgents []string // RBAC: restrict to these agent IDs
+	CreatedFrom      string   // ISO-8601 lower bound on created_at (inclusive); "" = no lower bound
+	CreatedTo        string   // ISO-8601 upper bound on created_at (inclusive); "" = no upper bound
 	Limit            int
 	Offset           int
 	Sort             string // "newest", "oldest", "confidence"

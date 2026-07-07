@@ -205,7 +205,8 @@ async function loadGraph(fetchUrl) {
     return { live: true,
       nodes: srcNodes.map(n=>({ id:n.id, domain:n.domain||'unknown', label:n.content||n.id,
         status:n.status||'committed', corroboration_count:n.corroboration_count||0,
-        confidence: typeof n.confidence==='number'?n.confidence:0.5, memory_type:n.memory_type||'' })),
+        confidence: typeof n.confidence==='number'?n.confidence:0.5, memory_type:n.memory_type||'',
+        created_at:n.created_at||'' })),
       links: srcEdges.map(e=>({ source:e.source, target:e.target, link_type:e.type||'related' })),
       total: (g && g.total) || 0, domainCounts: (g && g.domain_counts) || null,
       domainLast: (g && g.domain_last) || null };
@@ -233,11 +234,13 @@ export function mountMriBrain(container, opts = {}) {
         <div class="cls">A complementary-learning-systems view: SAGE is the <b>hippocampus</b>
           (episodic capture); corroboration + decay is the <b>sleep/consolidation</b> cycle.</div>
         <div class="seg">Nodes — memories</div>
-        <div class="row"><span class="k">◍</span><div class="t"><b>Size + glow = corroboration</b><br><span>settled knowledge, pulled to the core</span></div></div>
+        <div class="row"><span class="k">◍</span><div class="t"><b>Size + glow = corroboration</b><br><span>settled knowledge glows brighter</span></div></div>
         <div class="row"><span class="k">◌</span><div class="t"><b>Fade = confidence decay</b><br><span>the forgetting curve</span></div></div>
         <div class="row"><span class="k">⊘</span><div class="t"><b>Greyed = challenged / pruned</b><br><span>synaptic pruning</span></div></div>
         <div class="seg">Position</div>
-        <div class="row"><span class="k">⊙</span><div class="t"><b>Depth = how established</b><br><span>centre = settled / corroborated → rim = new & fresh</span></div></div>
+        <div class="row"><span class="k">⊙</span><div class="t"><b>Depth = age</b><br><span>rim = fresh ideas (easy to reach) → stem / core = oldest</span></div></div>
+        <div class="row"><span class="k">✦</span><div class="t"><b>Glowing halo = fresh idea</b><br><span>created today, pulled to the surface</span></div></div>
+        <div class="row"><span class="k">◈</span><div class="t"><b>Angle = domain</b><br><span>each topic is a radial stream</span></div></div>
         <div class="row"><span class="k">◉</span><div class="t"><b>Click a memory</b><br><span>see its train of thought</span></div></div>
       </div>
       <div class="seg">Lobes — domains</div><div class="lobes"></div>
@@ -287,7 +290,7 @@ export function mountMriBrain(container, opts = {}) {
   // domain brightened toward white by corroboration (so the bloom pass makes
   // consolidated memories glow); alpha = confidence (decay); challenged/
   // deprecated greyed.
-  const nodeVal = n => 1.4 + (n.corroboration_count||0)*1.1 + (n.confidence||0)*0.8;
+  const nodeVal = n => 1.4 + (n.corroboration_count||0)*1.1 + (n.confidence||0)*0.8 + (n._fresh||0)*2.2;
   function nodeColorRGBA(n){
     // Focus mode: everything outside the clicked memory's train of thought fades
     // back so the related constellation stands out.
@@ -296,34 +299,55 @@ export function mountMriBrain(container, opts = {}) {
     if(n.status==='challenged') return 'rgba(150,162,185,0.55)';
     const [r,g,b]=hexToRgb(domainColor(n.domain));
     const boost=Math.min(1,(n.corroboration_count||0)/8);
-    const br=r+(255-r)*boost*0.5, bg=g+(255-g)*boost*0.5, bb=b+(255-b)*boost*0.5;
-    return `rgba(${br|0},${bg|0},${bb|0},${(0.6+(n.confidence||0)*0.4).toFixed(2)})`;
+    let br=r+(255-r)*boost*0.5, bg=g+(255-g)*boost*0.5, bb=b+(255-b)*boost*0.5;
+    let a=0.6+(n.confidence||0)*0.4;
+    // Freshness halo: "fresh ideas" (memories from the last day) are pushed toward a
+    // bright accent at full opacity so the bloom pass gives them an outer glow, fading
+    // out over ~24h as the idea settles.
+    const fr=n._fresh||0;
+    if(fr>0){ br+=(90-br)*0.72*fr; bg+=(220-bg)*0.72*fr; bb+=(255-bb)*0.72*fr; a=Math.max(a,0.85+0.15*fr); }
+    return `rgba(${br|0},${bg|0},${bb|0},${a.toFixed(2)})`;
   }
 
-  // Deterministic anatomical placement — NO force simulation. domain -> azimuthal
-  // lobe, consolidation -> radial depth (hippocampus centre -> cortex surface),
-  // inside a brain-shaped ellipsoid. Positions are pinned (fx/fy/fz), so there is
-  // zero per-tick cost no matter how many nodes; the layout is a pure formula and
-  // is stable across reloads (a node always lands in the same place).
-  const EX=205, EY=140, EZ=240;
+  // Deterministic placement — NO force simulation. domain -> azimuthal lobe (each
+  // topic is a radial stream), AGE -> radial depth: the NEWEST memories ("fresh
+  // ideas") sit on the outer cortex surface (large, easy to click, glowing) and
+  // memories settle INWARD toward the stem/core as they age; memories from the same
+  // period share a shell regardless of topic. Positions are pinned (fx/fy/fz), so the
+  // layout is a pure formula, stable across reloads, with zero per-tick cost.
+  // Node placement ellipsoid, sized to sit INSIDE the procedural brain hull. The hull
+  // (mesh scale 185, proportions x0.86/y0.80/z1.20) has smooth half-extents ~159/148/222,
+  // but the cortical folding cuts sulci ~17 deep and a ~37-deep sagittal fissure at the
+  // top midline, so the REAL inner surface is tighter. EX/EY/EZ * maxDepth(0.80) land at
+  // ~136/126/182 - comfortably inside even the folded/dipped surface so dots don't poke
+  // through, while EY still lifts the fresh outer shell toward the crown.
+  const EX=170, EY=158, EZ=228, DAY=86400000, AGE_WINDOW=90*DAY;
   const hsh=(s,seed)=>{ s=s||''; let h=(seed>>>0)||1; for(let i=0;i<s.length;i++) h=Math.imul(h^s.charCodeAt(i),16777619); return ((h>>>0)%10000)/10000; };
   function placeNodes(nodes){
     const ds=[...new Set(nodes.map(n=>n.domain))], nd=Math.max(1,ds.length), di={};
     ds.forEach((k,i)=>{ di[k]=i; domainColor(k); });
+    const now=Date.now();
     nodes.forEach(n=>{
+      const t=Date.parse(n.created_at);
+      // AGE over a fixed recency WINDOW (last 90 days): today -> 0 (fresh, outer
+      // surface), anything 90+ days old -> 1 (clamped to the inner stem/core). A fixed
+      // window (not min/max of ALL history) spreads the relevant-recent memories across
+      // the full radius instead of crushing them into a thin outer band.
+      const age=isNaN(t)?1:Math.max(0, Math.min(1, (now-t)/AGE_WINDOW));
+      n._age=age;
+      n._fresh=isNaN(t)?0:Math.max(0, Math.min(1, 1-(now-t)/DAY)); // 1 = created in the last 24h
+      const recency=1-age;
       const az=((di[n.domain]||0)/nd)*Math.PI*2 + (hsh(n.id,1)-0.5)*(Math.PI*2/nd)*0.82;
-      const el=(hsh(n.id,2)-0.5)*Math.PI*0.92;
-      // radius FILLS the lobe volume (cube-root → uniform density, not a hollow
-      // shell) - this is the PRIMARY driver so the whole brain stays populated.
-      // Corroboration then applies a gentle INWARD pull, so settled knowledge
-      // drifts toward the core and fresh memories sit a little further out,
-      // WITHOUT emptying the centre (most memories are uncorroborated). Capped
-      // at 0.86 so no dot spills outside the brain-shaped mesh.
-      const cons=Math.min(1,(n.corroboration_count||0)/8);
-      const depth=Math.max(0.10, Math.min(0.86, 0.28 + Math.cbrt(hsh(n.id,3))*0.52 - cons*0.22));
+      const el=(hsh(n.id,2)-0.5)*Math.PI*0.96;
+      // radius grows with RECENCY: newest fill the outer shell (spread out, easy to
+      // click); oldest converge toward the inner stem/core. Capped at 0.80 so dots stay
+      // inside the folded cortical surface.
+      const depth=Math.max(0.12, Math.min(0.80, 0.16 + Math.pow(recency, 0.6)*0.66));
       const ce=Math.cos(el);
       n.fx=n.x=EX*depth*ce*Math.cos(az);
-      n.fy=n.y=EY*depth*Math.sin(el);
+      // oldest sink DOWN toward the brainstem; newest keep the full vertical spread of
+      // the outer shell.
+      n.fy=n.y=EY*depth*Math.sin(el) - age*EY*0.18;
       n.fz=n.z=EZ*depth*ce*Math.sin(az);
     });
   }

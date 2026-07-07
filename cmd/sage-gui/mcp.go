@@ -700,6 +700,7 @@ func sagePermissionsConfig(settings map[string]any) map[string]any {
 		"mcp__sage__sage_task",
 		"mcp__sage__sage_backlog",
 		"mcp__sage__sage_register",
+		"mcp__sage__sage_rename",
 		"mcp__sage__sage_timeline",
 	}
 

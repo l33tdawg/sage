@@ -1383,6 +1383,16 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		sqlStr += " AND m.status = ?"
 		args = append(args, opts.StatusFilter)
 	}
+	// Date-range filter on the joined memories row; same ISO-8601 lexicographic
+	// compare as ListMemories (see note there).
+	if opts.CreatedFrom != "" {
+		sqlStr += " AND m.created_at >= ?"
+		args = append(args, opts.CreatedFrom)
+	}
+	if opts.CreatedTo != "" {
+		sqlStr += " AND m.created_at <= ?"
+		args = append(args, opts.CreatedTo)
+	}
 	if len(opts.SubmittingAgents) > 0 {
 		placeholders := make([]string, len(opts.SubmittingAgents))
 		for i, a := range opts.SubmittingAgents {
@@ -1843,6 +1853,24 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		query += filter
 		countQuery += filter
 		args = append(args, opts.Tag)
+	}
+	// created_at is stored as ISO-8601 UTC text (RFC3339Nano, e.g.
+	// 2026-07-07T03:49:13.7Z; trailing-zero fractions are elided). The fixed
+	// date/time-to-seconds prefix makes a lexicographic >=/<= range compare a valid
+	// chronological filter at day/second granularity. Callers pass precise ISO bounds;
+	// the dashboard sends a fraction-less whole-second upper bound so a boundary-second
+	// row (which sorts after any ".fffZ") is not wrongly excluded.
+	if opts.CreatedFrom != "" {
+		filter := " AND created_at >= ?"
+		query += filter
+		countQuery += filter
+		args = append(args, opts.CreatedFrom)
+	}
+	if opts.CreatedTo != "" {
+		filter := " AND created_at <= ?"
+		query += filter
+		countQuery += filter
+		args = append(args, opts.CreatedTo)
 	}
 	if len(opts.SubmittingAgents) > 0 {
 		placeholders := make([]string, len(opts.SubmittingAgents))

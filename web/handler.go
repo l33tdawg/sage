@@ -985,6 +985,8 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		Provider:        q.Get("provider"),
 		Status:          q.Get("status"),
 		SubmittingAgent: q.Get("agent"),
+		CreatedFrom:     q.Get("from"),
+		CreatedTo:       q.Get("to"),
 		Limit:           limit,
 		Offset:          offset,
 		Sort:            q.Get("sort"),
@@ -1029,6 +1031,8 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 			StatusFilter:     opts.Status,
 			TopK:             limit,
 			SubmittingAgents: opts.SubmittingAgents,
+			CreatedFrom:      opts.CreatedFrom,
+			CreatedTo:        opts.CreatedTo,
 		}
 		if opts.Tag != "" {
 			qopts.Tags = []string{opts.Tag} // honor the tag filter on the FTS path too (the fallback already did)
@@ -1051,7 +1055,9 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 			pool, _, perr := h.store.ListMemories(r.Context(), store.ListOptions{
 				DomainTag: opts.DomainTag, Tag: opts.Tag, Provider: opts.Provider,
 				Status: opts.Status, SubmittingAgent: opts.SubmittingAgent,
-				SubmittingAgents: opts.SubmittingAgents, Limit: 1000, Sort: "newest",
+				SubmittingAgents: opts.SubmittingAgents,
+				CreatedFrom:      opts.CreatedFrom, CreatedTo: opts.CreatedTo,
+				Limit: 1000, Sort: "newest",
 			})
 			if perr != nil {
 				writeError(w, http.StatusInternalServerError, perr.Error())

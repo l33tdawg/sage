@@ -43,6 +43,8 @@ export async function fetchMemories(params = {}) {
     if (params.sort) q.set('sort', params.sort);
     if (params.agent) q.set('agent', params.agent);
     if (params.tag) q.set('tag', params.tag);
+    if (params.from) q.set('from', params.from);
+    if (params.to) q.set('to', params.to);
     if (params.q) q.set('q', params.q);
     const res = await fetch(`${API_BASE}/v1/dashboard/memory/list?${q}`);
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.statusText);

@@ -1593,7 +1593,7 @@ function TagEditor({ memoryId }) {
     `;
 }
 
-function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
+function MemoryDetail({ memory, onClose, onDelete, onNavigate, onUpdate, inline }) {
     const [confirming, setConfirming] = useState(false);
     const [agentInfo, setAgentInfo] = useState(null);
     const [visible, setVisible] = useState(false);
@@ -1623,7 +1623,12 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
         } else {
             setVisible(false);
         }
-    }, [memory]);
+        // Depend on the memory IDENTITY, not the object reference. In inline mode the
+        // parent (SearchPage) rebuilds the memory object literal on every re-render, so
+        // a [memory] dep would re-fire this reset effect on every keystroke/checkbox and
+        // wipe an in-progress domain edit / revert a saved badge / disarm a pending delete.
+        // Keying on the id fires only when a genuinely different memory opens.
+    }, [memory && (memory.id || memory.memory_id)]);
 
     const displayMemory = memory || lastMemory;
     const agentId = displayMemory?.agent || displayMemory?.submitting_agent;
@@ -1658,7 +1663,7 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
         try {
             const res = await updateMemory(m.id || m.memory_id, { domain: nd });
             if (res && res.error) { showToast(res.error, 'error'); }
-            else { setDomainOverride(nd); setEditingDomain(false); showToast(`Domain changed to ${nd}`, 'success'); }
+            else { setDomainOverride(nd); setEditingDomain(false); showToast(`Domain changed to ${nd}`, 'success'); if (onUpdate) onUpdate(); }
         } catch (e) { showToast('Failed to change domain: ' + (e.message || e), 'error'); }
         setSavingDomain(false);
     }
@@ -1668,13 +1673,7 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
     const conf = m.confidence;
     const color = getDomainColor(m.domain);
 
-    return html`
-        <div class="detail-overlay ${visible ? 'open' : ''}" onTransitionEnd=${handleTransitionEnd}>
-            <div class="detail-header">
-                <h2>Memory Detail</h2>
-                <button class="detail-close" onClick=${onClose}>×</button>
-            </div>
-            <div class="detail-body">
+    const bodyContent = html`
                 <div class="detail-section">
                     <label>Content</label>
                     <div class="detail-content">${m.content || 'No content available'}</div>
@@ -1695,11 +1694,7 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
                         <label>Domain</label>
                         ${editingDomain ? html`
                             <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-                                <input list="md-domain-list" class="filter-select" style="padding:4px 8px;font-size:12px;min-width:130px;"
-                                    value=${domainInput} autofocus
-                                    onInput=${e => setDomainInput(e.target.value)}
-                                    onKeyDown=${e => { if (e.key === 'Enter') saveDomain(); if (e.key === 'Escape') setEditingDomain(false); }} />
-                                <datalist id="md-domain-list">${domainList.map(d => html`<option value=${d}></option>`)}</datalist>
+                                <${Combobox} value=${domainInput} onInput=${setDomainInput} onSelect=${setDomainInput} options=${domainList} placeholder="domain..." onEnter=${saveDomain} style="min-width:150px;" />
                                 <button class="btn" style="padding:3px 9px;font-size:11px;" disabled=${savingDomain} onClick=${saveDomain}>${savingDomain ? 'Saving...' : 'Save'}</button>
                                 <button class="btn btn-secondary" style="padding:3px 9px;font-size:11px;" disabled=${savingDomain} onClick=${() => setEditingDomain(false)}>Cancel</button>
                             </div>
@@ -1780,6 +1775,22 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate }) {
                     </button>
                     ${confirming && html`<span style="font-size: 12px; color: var(--danger); margin-left: 12px;">Click again to confirm</span>`}
                 </div>
+    `;
+
+    // Inline mode: render the detail body directly inside an expanded search card
+    // (no fixed right-hand overlay, no header/close chrome). Panel mode keeps the
+    // slide-from-right overlay for any caller that still opens the side panel.
+    if (inline) {
+        return html`<div class="detail-inline">${bodyContent}</div>`;
+    }
+    return html`
+        <div class="detail-overlay ${visible ? 'open' : ''}" onTransitionEnd=${handleTransitionEnd}>
+            <div class="detail-header">
+                <h2>Memory Detail</h2>
+                <button class="detail-close" onClick=${onClose}>×</button>
+            </div>
+            <div class="detail-body">
+                ${bodyContent}
             </div>
         </div>
     `;
@@ -2117,7 +2128,45 @@ function TasksPage({ sse }) {
 // Search Page
 // ============================================================================
 
-function SearchPage({ onSelectMemory }) {
+// Dark-themed combobox: an input with a filtered, on-theme suggestion dropdown.
+// Replaces the native <datalist>, whose popup renders as an unstyleable white box.
+function Combobox({ value, onInput, onSelect, options, placeholder, onEnter, style }) {
+    const [open, setOpen] = useState(false);
+    const [hi, setHi] = useState(-1);
+    const box = useRef(null);
+    const q = (value || '').toLowerCase();
+    const filtered = (options || []).filter(o => o.toLowerCase().includes(q)).slice(0, 60);
+    useEffect(() => {
+        const onDoc = e => { if (box.current && !box.current.contains(e.target)) setOpen(false); };
+        document.addEventListener('mousedown', onDoc);
+        return () => document.removeEventListener('mousedown', onDoc);
+    }, []);
+    const pick = o => { onSelect(o); setOpen(false); setHi(-1); };
+    return html`
+        <div ref=${box} class="combobox" style=${'position:relative;' + (style || '')}>
+            <input class="filter-select" style="width:100%;padding-right:26px;" placeholder=${placeholder} value=${value}
+                onFocus=${() => setOpen(true)}
+                onClick=${() => setOpen(true)}
+                onInput=${e => { onInput(e.target.value); setOpen(true); setHi(-1); }}
+                onKeyDown=${e => {
+                    if (e.key === 'ArrowDown') { e.preventDefault(); setOpen(true); setHi(h => Math.min(h + 1, filtered.length - 1)); }
+                    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(h - 1, -1)); }
+                    else if (e.key === 'Enter') { if (open && hi >= 0 && filtered[hi]) { e.preventDefault(); pick(filtered[hi]); } else if (onEnter) onEnter(); }
+                    else if (e.key === 'Escape') { setOpen(false); }
+                }} />
+            <span class="combobox-caret ${open ? 'open' : ''}">▾</span>
+            ${open && filtered.length > 0 && html`
+                <div class="combobox-pop">
+                    ${filtered.map((o, i) => html`
+                        <div class="combobox-opt ${i === hi ? 'hi' : ''}" onMouseDown=${e => { e.preventDefault(); pick(o); }} onMouseEnter=${() => setHi(i)}>${o}</div>
+                    `)}
+                </div>
+            `}
+        </div>
+    `;
+}
+
+function SearchPage() {
     const [query, setQuery] = useState('');
     const [results, setResults] = useState([]);
     const [total, setTotal] = useState(0);
@@ -2134,7 +2183,14 @@ function SearchPage({ onSelectMemory }) {
     const [bulkDomain, setBulkDomain] = useState('');
     const [bulkTag, setBulkTag] = useState('');
     const [bulkBusy, setBulkBusy] = useState(false);
+    const [expandedId, setExpandedId] = useState(null); // which card is expanded inline
+    const [datePreset, setDatePreset] = useState(''); // '' | '24h' | '7d' | '30d' | 'custom'
+    const [customFrom, setCustomFrom] = useState(''); // YYYY-MM-DD
+    const [customTo, setCustomTo] = useState(''); // YYYY-MM-DD
+    const [dateRange, setDateRange] = useState({ from: '', to: '' }); // resolved ISO bounds
+    const [sortOrder, setSortOrder] = useState('newest'); // newest | oldest | confidence
     const searchTimer = useRef(null);
+    const reqSeq = useRef(0); // last-issued-wins guard for out-of-order loadMemories responses
 
     const toggleSelect = (id, e) => {
         if (e) e.stopPropagation();
@@ -2161,7 +2217,66 @@ function SearchPage({ onSelectMemory }) {
     }
     const bulkMoveDomain = () => { const d = bulkDomain.trim(); if (!d) return; runBulk(ids => bulkUpdateMemories(ids, { domain: d }), `Moved %n memories to ${d}`); };
     const bulkAddTag = () => { const t = bulkTag.trim(); if (!t) return; runBulk(ids => bulkUpdateMemories(ids, { addTags: [t] }), `Tagged %n memories "${t}"`); };
-    const bulkDeprecate = () => { if (!window.confirm(`Deprecate ${selected.size} selected memories? They stay on-chain but are marked deprecated.`)) return; runBulk(ids => Promise.all(ids.map(id => deleteMemory(id))), 'Deprecated %n memories'); };
+    const bulkForget = () => {
+        const ids = Array.from(selected);
+        if (!ids.length) return;
+        // Double-confirm when any selected memory is a durable fact.
+        const factCount = results.filter(m => selected.has(m.memory_id) && m.memory_type === 'fact').length;
+        // Be honest when the result set is capped: bulk actions only touch the loaded page.
+        const capNote = total > results.length ? ` Note: only the ${results.length} loaded on this page are affected, not all ${total} matching this filter.` : '';
+        if (!window.confirm(`Forget ${ids.length} selected ${ids.length === 1 ? 'memory' : 'memories'}? They stay on-chain but are marked deprecated (audit-only).${capNote}`)) return;
+        if (factCount > 0 && !window.confirm(`Careful: ${factCount} of these ${factCount === 1 ? 'is a durable FACT' : 'are durable FACTS'} (high-confidence, long-term knowledge). Forget ${factCount === 1 ? 'it' : 'them'} anyway?`)) return;
+        runBulk(idList => Promise.all(idList.map(id => deleteMemory(id))), 'Forgot %n memories');
+    };
+
+    const toggleSelectAll = () => {
+        setSelected(prev => (prev.size === results.length && results.length > 0) ? new Set() : new Set(results.map(m => m.memory_id)));
+    };
+
+    // Resolve a preset (or custom YYYY-MM-DD inputs) into ISO created_at bounds.
+    // Presets are relative-to-now; custom expands to start/end of the chosen days
+    // in local time, then toISOString() converts to the UTC the backend stores.
+    function computeRange(preset, cf, ct) {
+        const now = Date.now();
+        if (preset === '24h') return { from: new Date(now - 24 * 3600e3).toISOString(), to: '' };
+        if (preset === '7d') return { from: new Date(now - 7 * 24 * 3600e3).toISOString(), to: '' };
+        if (preset === '30d') return { from: new Date(now - 30 * 24 * 3600e3).toISOString(), to: '' };
+        if (preset === 'custom') {
+            // Stored timestamps are RFC3339Nano with trailing-zero fractions elided, and
+            // created_at is compared as lexicographic TEXT, so both bounds must be built so
+            // no sub-second variant of the boundary second sorts outside them:
+            //  - LOWER bound padded to 9 fractional digits ("...00.000000000Z") so it sorts
+            //    at/before every ".fffZ" and whole-second form of the start second.
+            //  - UPPER bound is the whole-second end-of-day with NO fraction ("...59Z"),
+            //    which sorts AFTER every ".fffZ" ('Z' > '.') and the bare whole-second row.
+            return {
+                from: cf ? new Date(cf + 'T00:00:00').toISOString().replace(/\.\d+Z$/, '.000000000Z') : '',
+                to: ct ? new Date(ct + 'T23:59:59').toISOString().replace(/\.\d+Z$/, 'Z') : '',
+            };
+        }
+        return { from: '', to: '' };
+    }
+    function handleDatePreset(e) {
+        const v = e.target.value;
+        setDatePreset(v);
+        // Always reconcile the applied range with the new selection. Switching TO
+        // 'custom' with empty inputs clears the range (computeRange returns no bounds),
+        // so the result set matches the visibly-empty custom date inputs instead of
+        // silently keeping the previous preset's filter.
+        const r = computeRange(v, customFrom, customTo);
+        setDateRange(r);
+        loadMemories(query, agentFilter, domainFilter, tagFilter, statusFilter, r.from, r.to);
+    }
+    function applyCustomRange(cf, ct) {
+        const r = computeRange('custom', cf, ct);
+        setDateRange(r);
+        loadMemories(query, agentFilter, domainFilter, tagFilter, statusFilter, r.from, r.to);
+    }
+    function handleSort(e) {
+        const v = e.target.value;
+        setSortOrder(v);
+        loadMemories(query, agentFilter, domainFilter, tagFilter, statusFilter, dateRange.from, dateRange.to, v);
+    }
 
     useEffect(() => {
         loadMemories();
@@ -2171,34 +2286,46 @@ function SearchPage({ onSelectMemory }) {
         return () => clearTimeout(searchTimer.current); // drop any pending debounced search on unmount
     }, []);
 
-    async function loadMemories(search, agent, domain, tag, status = statusFilter) {
+    async function loadMemories(search, agent, domain, tag, status = statusFilter, from = dateRange.from, to = dateRange.to, sort = sortOrder) {
+        // Any explicit load supersedes a pending debounced search — otherwise that
+        // timer fires later with a stale filter closure and clobbers this result.
+        clearTimeout(searchTimer.current);
+        // Last-issued-wins: tag this request so an older/broader response that resolves
+        // out of order can't overwrite a newer one.
+        const myReq = ++reqSeq.current;
         setLoading(true);
         setError(null);
         try {
-            const params = { limit: search ? 200 : 100, sort: 'newest' };
+            const params = { limit: search ? 200 : 100, sort };
             if (agent) params.agent = agent;
             if (domain) params.domain = domain;
             if (tag) params.tag = tag;
             if (status) params.status = status;
+            if (from) params.from = from;
+            if (to) params.to = to;
             if (search) params.q = search; // real server-side FTS/keyword search over the whole base
             const data = await fetchMemories(params);
+            if (myReq !== reqSeq.current) return; // a newer load started; drop this stale response
             const memories = data.memories || [];
             setResults(memories);
             setTotal(data.total || memories.length);
             // Prune the bulk selection to what is actually on screen - a
             // filter/search change must not leave invisible memories armed
-            // for Move/Tag/Deprecate.
+            // for Move/Tag/Forget.
             setSelected(prev => {
                 if (prev.size === 0) return prev;
                 const visible = new Set(memories.map(m => m.memory_id));
                 const next = new Set([...prev].filter(id => visible.has(id)));
                 return next.size === prev.size ? prev : next;
             });
+            // Collapse an inline-expanded card that filtered out of the new result set.
+            setExpandedId(prev => (prev && memories.some(m => m.memory_id === prev)) ? prev : null);
         } catch (err) {
+            if (myReq !== reqSeq.current) return;
             setResults([]);
             setError(err && err.message ? err.message : 'Failed to load memories');
         }
-        setLoading(false);
+        if (myReq === reqSeq.current) setLoading(false);
     }
 
     function handleSearch(e) {
@@ -2262,7 +2389,26 @@ function SearchPage({ onSelectMemory }) {
                         ${agents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.agent_id.slice(0, 8)}...)</option>`)}
                     </select>
                 `}
-                <span style="font-size: 12px; color: var(--text-muted); align-self: center;">${loading ? 'Searching...' : `${results.length} ${results.length === 1 ? 'memory' : 'memories'}`}</span>
+                <select class="filter-select" value=${datePreset} onChange=${handleDatePreset} title="Filter by when the memory was created">
+                    <option value="">Any time</option>
+                    <option value="24h">Last 24 hours</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="30d">Last 30 days</option>
+                    <option value="custom">Custom range...</option>
+                </select>
+                ${datePreset === 'custom' && html`
+                    <input type="date" class="filter-select" style="min-width:140px;" value=${customFrom} title="From date"
+                        onChange=${e => { setCustomFrom(e.target.value); applyCustomRange(e.target.value, customTo); }} />
+                    <span style="align-self:center;color:var(--text-muted);font-size:12px;">to</span>
+                    <input type="date" class="filter-select" style="min-width:140px;" value=${customTo} title="To date"
+                        onChange=${e => { setCustomTo(e.target.value); applyCustomRange(customFrom, e.target.value); }} />
+                `}
+                <select class="filter-select" value=${sortOrder} onChange=${handleSort} title="Sort order (applies when not text-searching)">
+                    <option value="newest">Newest first</option>
+                    <option value="oldest">Oldest first</option>
+                    <option value="confidence">Highest confidence</option>
+                </select>
+                <span style="font-size: 12px; color: var(--text-muted); align-self: center;">${loading ? 'Searching...' : (total > results.length ? `showing ${results.length} of ${total}` : `${results.length} ${results.length === 1 ? 'memory' : 'memories'}`)}</span>
             </div>
             <div class="memory-list">
                 ${error && html`
@@ -2274,30 +2420,26 @@ function SearchPage({ onSelectMemory }) {
                 ${selected.size > 0 && html`
                     <div style="position:sticky;top:0;z-index:5;display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--bg-elevated);border:1px solid var(--primary);border-radius:8px;padding:10px 12px;margin-bottom:12px;">
                         <span style="font-weight:700;color:var(--primary);white-space:nowrap;">${selected.size} selected</span>
-                        <input list="bulk-domain-list" class="filter-select" style="min-width:130px;" placeholder="Move to domain..." value=${bulkDomain} onInput=${e => setBulkDomain(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') bulkMoveDomain(); }} />
-                        <datalist id="bulk-domain-list">${domains.map(d => html`<option value=${d}></option>`)}</datalist>
+                        <${Combobox} value=${bulkDomain} onInput=${setBulkDomain} onSelect=${setBulkDomain} options=${domains} placeholder="Move to domain..." onEnter=${bulkMoveDomain} style="min-width:150px;" />
                         <button class="btn" disabled=${bulkBusy || !bulkDomain.trim()} onClick=${bulkMoveDomain}>Move</button>
                         <input class="filter-select" style="min-width:110px;" placeholder="Add tag..." value=${bulkTag} onInput=${e => setBulkTag(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') bulkAddTag(); }} />
                         <button class="btn" disabled=${bulkBusy || !bulkTag.trim()} onClick=${bulkAddTag}>Tag</button>
-                        <button class="btn btn-danger" disabled=${bulkBusy} onClick=${bulkDeprecate}>Deprecate</button>
+                        <button class="btn btn-danger" disabled=${bulkBusy} onClick=${bulkForget}>Forget</button>
                         <button class="btn btn-secondary" style="margin-left:auto;" onClick=${clearSelection}>Clear</button>
                     </div>
                 `}
-                ${results.map(m => { const mid = m.memory_id; const isSel = selected.has(mid); return html`
-                    <div class="memory-card" style=${isSel ? 'outline:2px solid var(--primary);outline-offset:-1px;' : ''} onClick=${() => onSelectMemory({
-                        id: m.memory_id,
-                        content: m.content,
-                        domain: m.domain_tag,
-                        confidence: m.confidence_score,
-                        status: m.status,
-                        memory_type: m.memory_type,
-                        created_at: m.created_at,
-                        agent: m.submitting_agent,
-                        corroboration_count: m.corroboration_count,
-                        content_hash: m.content_hash,
-                        committed_at: m.committed_at,
-                        provider: m.provider,
-                    })}>
+                ${results.length > 0 && html`
+                    <label style="display:flex;align-items:center;gap:10px;padding:2px 6px 10px;cursor:pointer;">
+                        <input type="checkbox"
+                            ref=${el => { if (el) el.indeterminate = selected.size > 0 && selected.size < results.length; }}
+                            checked=${selected.size === results.length && results.length > 0}
+                            onChange=${toggleSelectAll}
+                            style="cursor:pointer;width:15px;height:15px;" aria-label="Select all loaded results" />
+                        <span style="font-size:12px;color:var(--text-muted);">${total > results.length ? `Select all ${results.length} on this page` : 'Select all'}</span>
+                    </label>
+                `}
+                ${results.map(m => { const mid = m.memory_id; const isSel = selected.has(mid); const isOpen = expandedId === mid; return html`
+                    <div class="memory-card ${isOpen ? 'expanded' : ''}" style=${isSel ? 'outline:2px solid var(--primary);outline-offset:-1px;' : ''} onClick=${() => setExpandedId(isOpen ? null : mid)}>
                         <div class="memory-card-header">
                             <input type="checkbox" style="cursor:pointer;width:15px;height:15px;flex:none;" checked=${isSel} onClick=${e => toggleSelect(mid, e)} title="Select for bulk actions" />
                             <span class="domain-badge" style="background: ${getDomainColor(m.domain_tag)}20; color: ${getDomainColor(m.domain_tag)};">
@@ -2306,21 +2448,44 @@ function SearchPage({ onSelectMemory }) {
                             <span style="font-size: 12px; font-weight: 600; color: ${confidenceColor(m.confidence_score)};margin-left:auto;">
                                 ${(m.confidence_score * 100).toFixed(0)}%
                             </span>
+                            <button type="button" class="memory-card-caret ${isOpen ? 'open' : ''}" aria-expanded=${isOpen} aria-label=${isOpen ? 'Collapse details' : 'Expand details'} onClick=${e => { e.stopPropagation(); setExpandedId(isOpen ? null : mid); }}>▾</button>
                         </div>
                         <div class="memory-card-content">${m.content || 'No content'}</div>
                         <div class="memory-card-footer">
                             <span>${m.memory_type} | ${m.status}</span>
                             <span>${m.created_at ? timeAgo(m.created_at) : ''}</span>
                         </div>
+                        ${isOpen && html`
+                            <div class="memory-card-detail" onClick=${e => e.stopPropagation()}>
+                                <${MemoryDetail} inline=${true} memory=${{
+                                    id: m.memory_id,
+                                    content: m.content,
+                                    domain: m.domain_tag,
+                                    confidence: m.confidence_score,
+                                    status: m.status,
+                                    memory_type: m.memory_type,
+                                    created_at: m.created_at,
+                                    agent: m.submitting_agent,
+                                    corroboration_count: m.corroboration_count,
+                                    content_hash: m.content_hash,
+                                    committed_at: m.committed_at,
+                                    provider: m.provider,
+                                }}
+                                    onClose=${() => setExpandedId(null)}
+                                    onDelete=${() => { setExpandedId(null); loadMemories(query, agentFilter, domainFilter, tagFilter); }}
+                                    onUpdate=${() => loadMemories(query, agentFilter, domainFilter, tagFilter)}
+                                    onNavigate=${(p) => { window.location.hash = '#/' + p; }} />
+                            </div>
+                        `}
                     </div>
                 `; })}
                 ${results.length === 0 && !loading && !error && html`
-                    ${(query || agentFilter || domainFilter || tagFilter)
+                    ${(query || agentFilter || domainFilter || tagFilter || datePreset)
                         ? html`<${EmptyState} icon="search"
                             headline="No memories match"
                             hint="Full-text search across your whole memory base by content or domain. Try a shorter or different term, or clear the filters."
                             actionLabel="Clear search"
-                            onAction=${() => { setQuery(''); setAgentFilter(''); setDomainFilter(''); setTagFilter(''); setStatusFilter('active'); clearSelection(); loadMemories('', '', '', '', 'active'); }} />`
+                            onAction=${() => { setQuery(''); setAgentFilter(''); setDomainFilter(''); setTagFilter(''); setStatusFilter('active'); setDatePreset(''); setCustomFrom(''); setCustomTo(''); setDateRange({ from: '', to: '' }); clearSelection(); loadMemories('', '', '', '', 'active', '', ''); }} />`
                         : html`<${EmptyState} icon="brain"
                             headline="No memories yet"
                             hint="Your brain is empty. Import an existing memory export or connect an agent over MCP, and committed memories will show up here to search."
@@ -9506,7 +9671,6 @@ function App() {
     const [authState, setAuthState] = useState('loading'); // loading | login | ready
     const [isEncrypted, setIsEncrypted] = useState(false);
     const [page, setPage] = useState('brain');
-    const [selectedMemory, setSelectedMemory] = useState(null);
     const [sseConnected, setSseConnected] = useState(false);
     const [showHelp, setShowHelp] = useState(false);
     const [showOnboarding, setShowOnboarding] = useState(false);
@@ -9704,10 +9868,6 @@ function App() {
         window.location.hash = p === 'brain' ? '/' : '/' + p;
     }
 
-    const onSelectMemory = useCallback((node) => {
-        setSelectedMemory(node);
-    }, []);
-
     return html`<${TooltipsContext.Provider} value=${tooltipsEnabled}>
         <${ToastContainer} />
         <${ReembedBanner} />
@@ -9774,19 +9934,12 @@ function App() {
 
             ${page === 'overview' && html`<${OverviewPage} sse=${sseRef.current} />`}
             ${page === 'brain' && html`<${MriView} sse=${sseRef.current} />`}
-            ${page === 'search' && html`<${SearchPage} onSelectMemory=${onSelectMemory} />`}
+            ${page === 'search' && html`<${SearchPage} />`}
             ${page === 'tasks' && html`<${TasksPage} sse=${sseRef.current} />`}
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}
             ${page === 'network' && html`<${NetworkPage} sse=${sseRef.current} />`}
             ${page === 'federation' && html`<${FederationPage} />`}
             ${page === 'settings' && html`<${SettingsPage} onRunSetup=${() => setShowOnboarding(true)} />`}
-
-            <${MemoryDetail}
-                memory=${selectedMemory}
-                onClose=${() => setSelectedMemory(null)}
-                onDelete=${() => setSelectedMemory(null)}
-                onNavigate=${(p) => { setPage(p); window.location.hash = '#/' + p; }}
-            />
         </div>
         ${showHelp && html`<${HelpOverlay} onClose=${() => setShowHelp(false)} initialSection=${helpSection} />`}
     </${TooltipsContext.Provider}>`;

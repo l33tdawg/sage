@@ -191,6 +191,22 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolRegister,
 		},
+		"sage_rename": {
+			Name: "sage_rename",
+			Description: "Rename this agent. Sets the display name (and optional bio) that appears in the CEREBRUM dashboard and to other agents on the network. " +
+				"Use this to give yourself a meaningful, human-readable identity instead of the default provider/project name (e.g. 'claude-code/sage'). " +
+				"Self-only: an agent can only rename itself. Your permanent registration name and your agent_id never change. " +
+				"Omitting boot_bio preserves your existing bio; passing it replaces the bio.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":     map[string]any{"type": "string", "description": "New display name for this agent (what shows up in CEREBRUM)"},
+					"boot_bio": map[string]any{"type": "string", "description": "Optional short bio/description. Omit to keep the current bio; provide to replace it."},
+				},
+				"required": []string{"name"},
+			},
+			Handler: s.toolRename,
+		},
 		"sage_reflect": {
 			Name: "sage_reflect",
 			Description: "End-of-task reflection. Call this after completing a significant task to store what went right (dos) and what went wrong (don'ts). " +
@@ -1495,6 +1511,60 @@ func (s *Server) toolRegister(ctx context.Context, params map[string]any) (any, 
 		"registered_name": resp.RegisteredName,
 		"status":          resp.Status,
 		"on_chain_height": resp.OnChainHeight,
+	}, nil
+}
+
+// toolRename updates this agent's mutable display name (and optionally its bio)
+// via the self-only AgentUpdate transaction. The immutable registered_name and
+// the agent_id are never touched. CEREBRUM renders the mutable Name, so the new
+// name shows up on the next dashboard refresh.
+func (s *Server) toolRename(ctx context.Context, params map[string]any) (any, error) {
+	name := stringParam(params, "name", "")
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+
+	// The AgentUpdate tx overwrites BootBio unconditionally, so a name-only rename
+	// would wipe an existing bio. Only change the bio when the caller explicitly
+	// passes boot_bio; otherwise read the current bio and preserve it. Fail CLOSED:
+	// if we cannot read the current bio, abort rather than silently committing an
+	// empty bio to consensus.
+	bootBio := ""
+	if _, ok := params["boot_bio"]; ok {
+		bootBio = stringParam(params, "boot_bio", "")
+	} else {
+		if s.agentID == "" {
+			return nil, fmt.Errorf("rename aborted: cannot resolve own agent id to preserve the existing bio; pass boot_bio explicitly to set it")
+		}
+		var cur struct {
+			BootBio string `json:"boot_bio"`
+		}
+		if err := s.doSignedJSON(ctx, "GET", "/v1/agent/"+s.agentID, nil, &cur); err != nil {
+			return nil, fmt.Errorf("rename aborted: could not read current bio to preserve it (pass boot_bio explicitly to override): %w", err)
+		}
+		bootBio = cur.BootBio
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"name":     name,
+		"boot_bio": bootBio,
+	})
+	var resp struct {
+		AgentID string `json:"agent_id"`
+		Name    string `json:"name"`
+		Status  string `json:"status"`
+		TxHash  string `json:"tx_hash"`
+	}
+	if err := s.doSignedJSON(ctx, "PUT", "/v1/agent/update", body, &resp); err != nil {
+		return nil, fmt.Errorf("rename agent: %w", err)
+	}
+
+	return map[string]any{
+		"agent_id": resp.AgentID,
+		"name":     resp.Name,
+		"status":   resp.Status,
+		"tx_hash":  resp.TxHash,
+		"message":  fmt.Sprintf("Renamed to %q. This name now shows in CEREBRUM and to other agents on the network.", resp.Name),
 	}, nil
 }
 

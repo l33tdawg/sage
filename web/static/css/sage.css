@@ -1153,6 +1153,80 @@ body {
     color: var(--text-muted);
 }
 
+/* Inline slide-down memory detail (replaces the right-hand panel on Search) */
+.memory-card.expanded {
+    border-color: var(--primary);
+    background: var(--bg-elevated);
+}
+.memory-card-caret {
+    margin-left: 10px;
+    font-size: 11px;
+    color: var(--text-muted);
+    transition: transform 0.15s ease-out;
+    flex: none;
+    background: none;
+    border: none;
+    padding: 2px 4px;
+    cursor: pointer;
+    line-height: 1;
+}
+.memory-card-caret:hover { color: var(--primary); }
+.memory-card-caret:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; border-radius: 4px; }
+.memory-card-caret.open { transform: rotate(180deg); }
+
+/* Dark-themed combobox (replaces the native white <datalist> popup) */
+.combobox-caret {
+    position: absolute;
+    right: 9px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 10px;
+    color: var(--text-muted);
+    pointer-events: none;
+    transition: transform 0.15s ease-out;
+}
+.combobox-caret.open { transform: translateY(-50%) rotate(180deg); }
+.combobox-pop {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    min-width: 100%;
+    max-height: 260px;
+    overflow-y: auto;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    z-index: 60;
+    box-shadow: 0 10px 34px rgba(0,0,0,0.55);
+    padding: 4px;
+}
+.combobox-opt {
+    padding: 7px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+.combobox-opt:hover, .combobox-opt.hi {
+    background: var(--bg-surface);
+    color: var(--primary);
+}
+.memory-card-detail {
+    margin-top: 12px;
+    padding-top: 4px;
+    border-top: 1px solid var(--border);
+    cursor: default;
+    animation: cardDetailReveal 0.18s ease-out;
+}
+@keyframes cardDetailReveal {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+.detail-inline { cursor: default; padding-top: 12px; }
+.detail-inline .detail-section { margin-bottom: 16px; }
+.detail-inline .detail-content { max-height: 320px; overflow-y: auto; }
+
 /* Settings page */
 .settings-page {
     flex: 1;
