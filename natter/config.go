@@ -83,20 +83,24 @@ type WSSConfig struct {
 
 // RelayConfig maps onto go-libp2p's circuitv2 relay.Resources.
 //
-// Bandwidth-budget math for the defaults (documented so the numbers are not
-// cargo-culted): a Hetzner CAX11 ships with ~20 TB/mo of traffic. One relayed
-// circuit is capped at CircuitDataBytes per DIRECTION per CircuitDuration
-// window (the relay resets the circuit when either cap is hit; a client can
-// reconnect, so the effective sustained rate of one abusive session is
-// 2*CircuitDataBytes/CircuitDuration). With the defaults below —
-// 64 MiB / 10 min — one continuously-held circuit tops out at:
-//
-//	2 * 64 MiB / 600 s  ≈ 0.21 MiB/s  ≈ 540 GiB/month  ≈ 2.7% of 20 TB
-//
-// so a single relayed session cannot drain the budget. Aggregate abuse is
-// bounded by MaxCircuits (per peer) and the per-IP/per-ASN reservation caps.
-// Relay traffic is a FALLBACK path — well-behaved SAGE peers upgrade to a
-// direct connection via DCUtR hole punching and stop consuming relay data.
+// What the caps below DO and DON'T bound (documented honestly so the numbers
+// are not cargo-culted): CircuitDataBytes / CircuitDuration bound a SINGLE
+// circuit's footprint — it is torn down when either cap is hit. They do NOT
+// bound sustained throughput, because a client hits the 64 MiB cap in seconds
+// at line rate and go-libp2p imposes no delay before it opens a fresh circuit.
+// So the binding limit on one peer's relay bandwidth is its CONCURRENCY, not
+// the per-circuit byte cap: with MaxCircuits=8 a determined peer can keep 8
+// circuits saturated continuously (each resetting and instantly reopening),
+// i.e. ~8× line rate — NOT the ~0.21 MiB/s a naive cap/duration calc suggests.
+// Aggregate abuse across peers is bounded by MaxReservations and the
+// per-IP/per-ASN reservation caps (concurrency limits), and relay traffic is a
+// FALLBACK — well-behaved SAGE peers upgrade to a direct connection via DCUtR
+// and stop consuming relay data. A true bandwidth ceiling (per-reservation
+// aggregate byte budget over a rolling window, or a circuit-reopen rate limit)
+// is a Sprint-3 hardening TODO; until then, keep MaxCircuits/MaxReservations
+// conservative and watch egress on the box. On a ~20 TB/mo Hetzner box the
+// practical backstop today is those concurrency caps plus egress monitoring,
+// not the per-circuit data cap.
 type RelayConfig struct {
 	// MaxReservations is the total number of active relay reservations
 	// (i.e. how many NAT'd SAGE nodes can be "camped" on this relay).
@@ -208,6 +212,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Relay.CircuitDataBytes <= 0 {
 		return fmt.Errorf("relay.circuit_data_bytes must be > 0")
+	}
+	if c.Relay.BufferSize <= 0 {
+		// A zero/negative copy buffer makes the relay copy loop read into an
+		// empty slice forever (0,nil), busy-spinning at 100% CPU on the first
+		// relayed byte. Guard it like its siblings.
+		return fmt.Errorf("relay.buffer_size must be > 0")
 	}
 	if c.Relay.CircuitDuration.Std() <= 0 {
 		return fmt.Errorf("relay.circuit_duration must be > 0")

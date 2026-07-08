@@ -36,7 +36,7 @@ point your nodes at anyone's natter (or none) without extending trust.
 
 ## Build
 
-Requires Go 1.22+.
+Requires Go 1.25+ (see `go.mod`).
 
 ```sh
 cd natter
