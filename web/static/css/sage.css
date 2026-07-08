@@ -4342,8 +4342,11 @@ input[type="range"]::-moz-range-thumb {
 .fed-sync-chip.pending { background: rgba(245,158,11,0.15); color: #f59e0b; }
 .fed-sync-chip.rejected { background: rgba(239,68,68,0.15); color: #ef4444; }
 .fed-sync-chip.failed { background: rgba(127,127,127,0.16); color: var(--text-muted); }
-.fed-sync-rejects { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.fed-sync-rejects { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
 .fed-sync-rejects code { background: rgba(127,127,127,0.16); padding: 1px 5px; border-radius: 4px; }
+.fed-sync-rejects-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px; }
+.fed-sync-reject-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.fed-sync-resend, .fed-sync-resend-all { padding: 2px 10px; font-size: 11px; flex: none; }
 
 /* Channel gate */
 .fed-gate-q { font-size: 15px; font-weight: 500; margin: 18px 0 14px; line-height: 1.4; }

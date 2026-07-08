@@ -82,6 +82,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	r.Get("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncGet)
 	r.Put("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncSet)
 	r.Get("/v1/dashboard/federation/connections/{chain_id}/sync/status", h.handleFedSyncStatus)
+	r.Post("/v1/dashboard/federation/connections/{chain_id}/sync/resend", h.handleFedSyncResend)
 
 	r.Post("/v1/dashboard/federation/join/host/create", h.handleFedHostCreate)
 	r.Post("/v1/dashboard/federation/join/host/scan-return", h.handleFedHostScanReturn)
@@ -382,6 +383,36 @@ func (h *DashboardHandler) handleFedSyncSet(w http.ResponseWriter, r *http.Reque
 	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": saved})
 }
 
+// handleFedSyncResend requeues rejected/failed outbox rows back to pending so
+// the operator can retry after fixing the cause (peer widened consent, content
+// changed, etc.). Body {"memory_id":"..."} resends one; empty body resends all
+// rejected+failed for the connection.
+func (h *DashboardHandler) handleFedSyncResend(w http.ResponseWriter, r *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	chain := chi.URLParam(r, "chain_id")
+	ss := h.syncStore()
+	if ss == nil {
+		fedWriteErr(w, http.StatusNotImplemented, "Domain sync requires the SQLite store backend.")
+		return
+	}
+	var body struct {
+		MemoryID string `json:"memory_id"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body) // optional
+	n, err := ss.RequeueSyncOutbox(r.Context(), chain, body.MemoryID)
+	if err != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Failed to requeue.")
+		return
+	}
+	// Nudge the drainer so it retries promptly instead of waiting for the tick.
+	if fn, ok := h.Federation.(interface{ NudgeSync() }); ok {
+		fn.NudgeSync()
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{"requeued": n})
+}
+
 func (h *DashboardHandler) handleFedSyncStatus(w http.ResponseWriter, r *http.Request) {
 	if !h.fedReady(w) {
 		return
@@ -403,6 +434,7 @@ func (h *DashboardHandler) handleFedSyncStatus(w http.ResponseWriter, r *http.Re
 		domains = []string{}
 	}
 	rejected, _ := ss.ListSyncOutbox(ctx, chain, store.SyncStateRejected, 50)
+	failed, _ := ss.ListSyncOutbox(ctx, chain, store.SyncStateFailed, 50)
 	pending, _ := ss.ListSyncOutbox(ctx, chain, store.SyncStatePending, 50)
 	type row struct {
 		MemoryID string `json:"memory_id"`
@@ -420,6 +452,7 @@ func (h *DashboardHandler) handleFedSyncStatus(w http.ResponseWriter, r *http.Re
 		"sync_domains":    domains,
 		"outbox_counts":   counts,
 		"rejected":        toRows(rejected),
+		"failed":          toRows(failed),
 		"pending":         toRows(pending),
 	}
 	if st, ok := h.Federation.SyncReconcileInfo(chain); ok {

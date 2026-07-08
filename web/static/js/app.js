@@ -6,7 +6,7 @@ embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pu
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
-fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedReadiness, fedSyncGet, fedSyncSet, fedSyncStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
+fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedReadiness, fedSyncGet, fedSyncSet, fedSyncStatus, fedSyncResend, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 
@@ -10760,6 +10760,15 @@ function FedSyncPanel({ conn }) {
 
     const counts = (status && status.outbox_counts) || {};
     const rejected = (status && status.rejected) || [];
+    const failed = (status && status.failed) || [];
+    const stuck = [...rejected.map(r => ({ ...r, kind: 'rejected' })), ...failed.map(r => ({ ...r, kind: 'failed' }))];
+    const resend = async (memoryId) => {
+        try {
+            const r = await fedSyncResend(chain, memoryId);
+            showToast(memoryId ? 'Resending…' : `Resending ${r.requeued || 0}…`, 'info');
+            setTimeout(async () => { try { setStatus(await fedSyncStatus(chain)); } catch (e) {} }, 1500);
+        } catch (e) { showToast(String(e.message || e), 'error'); }
+    };
     const peerConsent = status && status.peer_consented_domains;
     const peerUnsupported = status && status.peer_unsupported;
     // Both-sides-consent gap: topics we share that the peer hasn't turned on.
@@ -10802,8 +10811,15 @@ function FedSyncPanel({ conn }) {
                 ${!counts.delivered && !counts.pending && !counts.rejected && !counts.failed ? html`<span class="muted">nothing queued yet</span>` : ''}
             </div>`}
         </div>
-        ${rejected.length > 0 && html`<div class="fed-sync-rejects">
-            ${rejected.slice(0, 8).map(r => html`<div key=${r.memory_id} class="muted">• <code>${(r.memory_id || '').slice(0, 10)}</code> — ${prettySyncReason(r.reason)}</div>`)}
+        ${stuck.length > 0 && html`<div class="fed-sync-rejects">
+            <div class="fed-sync-rejects-head">
+                <span class="muted">${stuck.length} not delivered</span>
+                <button class="btn fed-sync-resend-all" onClick=${() => resend('')}>Resend all</button>
+            </div>
+            ${stuck.slice(0, 10).map(r => html`<div key=${r.memory_id} class="fed-sync-reject-row">
+                <span class="muted">• <code>${(r.memory_id || '').slice(0, 10)}</code> — ${prettySyncReason(r.reason)}</span>
+                <button class="btn fed-sync-resend" title="Try sending this again" onClick=${() => resend(r.memory_id)}>Resend</button>
+            </div>`)}
         </div>`}
     </div>`;
 }

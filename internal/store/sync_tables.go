@@ -411,6 +411,30 @@ func (s *SQLiteStore) ListSyncOutbox(ctx context.Context, remoteChainID, state s
 	return out, rows.Err()
 }
 
+// RequeueSyncOutbox resets terminal-but-recoverable rows (rejected / failed)
+// back to pending & due now, so the operator can retry after fixing whatever
+// caused the rejection (e.g. the peer widened consent, or content changed). If
+// memoryID is empty, every rejected/failed row for the chain is requeued;
+// otherwise just that one. Delivered rows are left alone. Returns how many
+// rows were requeued.
+func (s *SQLiteStore) RequeueSyncOutbox(ctx context.Context, remoteChainID, memoryID string) (int, error) {
+	q := `UPDATE sync_outbox
+	         SET state = 'pending', attempts = 0, last_error = NULL,
+	             next_attempt_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+	       WHERE remote_chain_id = ? AND state IN ('rejected','failed')`
+	args := []any{remoteChainID}
+	if memoryID != "" {
+		q += ` AND memory_id = ?`
+		args = append(args, memoryID)
+	}
+	res, err := s.writeExecContext(ctx, q, args...)
+	if err != nil {
+		return 0, fmt.Errorf("requeue sync outbox: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // PurgeSyncOutbox removes ALL outbox rows for a peer chain (agreement
 // revocation path).
 func (s *SQLiteStore) PurgeSyncOutbox(ctx context.Context, remoteChainID string) error {

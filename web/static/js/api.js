@@ -805,6 +805,7 @@ export function fedSettingSet(enabled) { return fedPost('/v1/dashboard/settings/
 export function fedSyncGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`); }
 export function fedSyncSet(chainId, domains) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`, { domains }); }
 export function fedSyncStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync/status`); }
+export function fedSyncResend(chainId, memoryId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync/resend`, memoryId ? { memory_id: memoryId } : {}); }
 export function fedRevoke(chainId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/revoke`); }
 export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/status`); }
 

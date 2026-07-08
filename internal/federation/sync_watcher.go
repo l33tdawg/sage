@@ -104,6 +104,10 @@ func (m *Manager) syncMetaFor(ctx context.Context, ss *store.SQLiteStore, id str
 	return cand.DomainTag, cand.Classification, true
 }
 
+// NudgeSync wakes the outbox drainer immediately (exported for the dashboard
+// resend action). Nil-safe and non-blocking, like nudgeSync.
+func (m *Manager) NudgeSync() { m.nudgeSync() }
+
 // nudgeSync wakes the drainer without waiting for the ticker. Non-blocking
 // (buffered-1 channel: a pending nudge already covers this one) and nil-safe
 // (the drainer may be disabled — Postgres backend — or not started in tests).
