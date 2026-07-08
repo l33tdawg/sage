@@ -6,7 +6,7 @@ embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pu
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
-fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedReadiness, fedSyncGet, fedSyncSet, fedSyncStatus, fedSyncResend, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
+fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedSyncResend, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 
@@ -4740,8 +4740,8 @@ function FederationSettingRow() {
         try {
             const r = await fedSettingSet(next);
             setSt({ ...st, enabled: next });
-            if (r.restarting) showToast('Saved — restarting to apply…', 'info');
-            else showToast('Federation setting saved', 'success');
+            if (r.restarting) { showToast('Saved — restarting to apply…', 'info'); }
+            else { showToast('Federation setting saved', 'success'); setBusy(false); }
         } catch (e) { showToast(String(e.message || e), 'error'); setBusy(false); }
     };
     return html`<div class="settings-row">
@@ -10703,6 +10703,7 @@ function prettySyncReason(code) {
         rejected_clearance: 'above the clearance limit for this connection',
         rejected_not_consented: "they haven't turned on sync for this topic yet",
         rejected_domain_scope: 'outside the shared scope',
+        rejected_write_access: "their node's federation agent can't write to this topic yet — they need to grant it access, then Resend",
         'sender vault locked': 'waiting for this node to be unlocked',
         'peer does not support sync': 'the other node is on an older SAGE without sync',
     };
@@ -10912,7 +10913,12 @@ function FederationPage() {
     useEffect(() => { if (mode === 'landing') load(); }, [mode]);
 
     const [openChain, setOpenChain] = useState('');
-    const [warming, setWarming] = useState(false); // fork-ladder warm-up on a fresh node
+    // Start hidden-until-known: keep the join cards down until the first
+    // readiness result, so a fresh (warming) node never briefly shows cards
+    // that would start a ceremony doomed to fail. On a ready/mature node the
+    // first poll resolves in ~a frame and the cards appear. onState(true) is
+    // also called on a readiness error (older binary), so cards still show.
+    const [warming, setWarming] = useState(true); // fork-ladder warm-up on a fresh node
     const revoke = async (chain) => {
         if (!confirm(`Turn off the connection to ${chain}? This does NOT erase anything - it just stops the two networks from reaching each other.`)) return;
         try { await fedRevoke(chain); showToast(`Disconnected from ${chain}`, 'success'); load(); }
