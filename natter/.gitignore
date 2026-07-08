@@ -1,0 +1,7 @@
+# Build artifacts
+bin/
+/natter
+
+# Runtime state — never commit an identity key or live config
+natter.key
+natter.yaml

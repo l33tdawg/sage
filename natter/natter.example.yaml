@@ -1,0 +1,67 @@
+# natter.example.yaml — SAGE's libp2p connectivity service (relay/rendezvous)
+#
+# Copy to natter.yaml (or pass -config /etc/natter/natter.yaml) and edit.
+# Every key shown here has a sane built-in default; you only need to override
+# what differs on your box. Nothing is hardcoded to natter.sage.delivery —
+# self-hosting your own natter is a first-class, supported setup.
+
+# libp2p listen multiaddrs. The reference deployment listens on:
+#   - QUIC/UDP 4001  (preferred transport)
+#   - TCP 4001       (compatibility)
+#   - WSS on TCP 443 (for SAGE nodes behind egress-443-only firewalls)
+# Port 443 requires either CAP_NET_BIND_SERVICE (the shipped systemd unit
+# grants it) or running behind a port redirect. A /wss listener REQUIRES the
+# wss.cert_file / wss.key_file paths below — natter refuses to start otherwise.
+listen_addrs:
+  - /ip4/0.0.0.0/udp/4001/quic-v1
+  - /ip4/0.0.0.0/tcp/4001
+  # - /ip4/0.0.0.0/tcp/443/wss
+
+# Persistent ed25519 identity. Generated on first run (mode 0600) and reused
+# forever after: the derived peer ID is published in SAGE bootstrap config,
+# so KEEP THIS FILE (and back it up) — losing it changes the relay's identity
+# and strands every node that pinned it.
+identity_key_path: /var/lib/natter/natter.key
+
+# Local /healthz endpoint for systemd watchdog / uptime checks.
+# Keep this bound to localhost; it is not meant to be public.
+health_addr: 127.0.0.1:8090
+
+# A relay must be publicly reachable to be useful, so we skip AutoNAT
+# self-detection and advertise as public by default. Set to false only when
+# testing a natter instance behind NAT.
+force_reachability_public: true
+
+# TLS material for the /wss listener. On the reference Hetzner deployment
+# these are the Let's Encrypt live paths for natter.sage.delivery.
+# After certbot renews, restart natter (deploy hook) — certs load at startup.
+wss:
+  cert_file: ""   # e.g. /etc/letsencrypt/live/natter.sage.delivery/fullchain.pem
+  key_file: ""    # e.g. /etc/letsencrypt/live/natter.sage.delivery/privkey.pem
+
+# Circuit Relay v2 resource limits.
+#
+# Budget math (Hetzner CAX11, ~20 TB/mo included traffic): one relayed
+# circuit is capped at circuit_data_bytes per DIRECTION per circuit_duration
+# window, so a single continuously-abused session tops out at
+#   2 * 64 MiB / 10 min ≈ 0.21 MiB/s ≈ 540 GiB/month ≈ 2.7% of 20 TB.
+# Aggregate abuse is bounded by max_circuits (per peer) and the per-IP /
+# per-ASN reservation caps. Relaying is a FALLBACK: healthy SAGE peers
+# upgrade to a direct connection via DCUtR and stop consuming relay data.
+relay:
+  max_reservations: 512          # total NAT'd nodes that can camp on this relay
+  max_circuits: 8                # open relayed connections per peer
+  reservation_ttl: 1h            # client must refresh its slot this often
+  circuit_duration: 10m          # per-circuit lifetime cap
+  circuit_data_bytes: 67108864   # 64 MiB per direction per circuit
+  buffer_size: 2048              # per-circuit copy buffer (bytes)
+  max_reservations_per_ip: 8
+  max_reservations_per_asn: 32
+
+# AutoNAT dial-back service rate limits. AutoNAT makes natter dial addresses
+# claimed by clients — unbounded, that is a port-scan/amplification primitive,
+# so keep these conservative.
+autonat:
+  rate_limit_global: 60      # dial-backs per interval, total
+  rate_limit_per_peer: 3     # dial-backs per interval, per peer
+  rate_limit_interval: 1m
