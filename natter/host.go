@@ -14,6 +14,7 @@ import (
 	quic "github.com/libp2p/go-libp2p/p2p/transport/quic"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	ws "github.com/libp2p/go-libp2p/p2p/transport/websocket"
+	ma "github.com/multiformats/go-multiaddr"
 	"github.com/rs/zerolog"
 )
 
@@ -137,6 +138,19 @@ func buildHost(cfg *Config, priv crypto.PrivKey) (host.Host, error) {
 	}
 	if cfg.ForceReachabilityPublic {
 		opts = append(opts, libp2p.ForceReachabilityPublic())
+	}
+	// Explicit announce addresses override the (possibly broken/loopback-only)
+	// auto-detected set, so the relay hands clients a reachable public address.
+	if len(cfg.AnnounceAddrs) > 0 {
+		announce := make([]ma.Multiaddr, 0, len(cfg.AnnounceAddrs))
+		for _, s := range cfg.AnnounceAddrs {
+			a, maErr := ma.NewMultiaddr(s)
+			if maErr != nil {
+				return nil, fmt.Errorf("invalid announce_addr %q: %w", s, maErr)
+			}
+			announce = append(announce, a)
+		}
+		opts = append(opts, libp2p.AddrsFactory(func([]ma.Multiaddr) []ma.Multiaddr { return announce }))
 	}
 
 	h, err := libp2p.New(opts...)

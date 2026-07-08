@@ -57,6 +57,17 @@ type Config struct {
 	// this defaults to true; self-hosters testing behind NAT can disable it.
 	ForceReachabilityPublic bool `yaml:"force_reachability_public"`
 
+	// AnnounceAddrs, when set, are the exact multiaddrs the relay advertises to
+	// peers INSTEAD of its auto-detected interface addresses. Required on a
+	// server whose public address libp2p cannot infer — a cloud box behind a
+	// 1:1 NAT, or a kernel where interface enumeration fails (e.g. some newer
+	// Linux where netlink RIB queries return "address family not supported", so
+	// the host would otherwise advertise only 127.0.0.1). Give the transport
+	// multiaddrs WITHOUT the /p2p/<peer-id> suffix — libp2p appends it. Example:
+	//   - /ip4/203.0.113.7/udp/4001/quic-v1
+	//   - /ip4/203.0.113.7/tcp/4001
+	AnnounceAddrs []string `yaml:"announce_addrs,omitempty"`
+
 	WSS     WSSConfig     `yaml:"wss"`
 	Relay   RelayConfig   `yaml:"relay"`
 	AutoNAT AutoNATConfig `yaml:"autonat"`
