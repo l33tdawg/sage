@@ -1,0 +1,64 @@
+# systemd unit for natter — SAGE's libp2p connectivity service.
+#
+# Install:
+#   sudo useradd --system --home /var/lib/natter --shell /usr/sbin/nologin natter
+#   sudo cp natter /usr/local/bin/natter
+#   sudo mkdir -p /etc/natter && sudo cp natter.example.yaml /etc/natter/natter.yaml
+#   sudo cp deploy/natter.service /etc/systemd/system/natter.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now natter
+#
+# The unit is hardened: natter needs no privileges beyond binding its ports
+# and writing its identity key/state under /var/lib/natter.
+
+[Unit]
+Description=Natter - SAGE libp2p connectivity service (Circuit Relay v2 / AutoNAT / DCUtR)
+Documentation=https://github.com/l33tdawg/sage/tree/main/natter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=natter
+Group=natter
+ExecStart=/usr/local/bin/natter -config /etc/natter/natter.yaml
+Restart=on-failure
+RestartSec=5s
+
+# State: identity key + any future state live here (matches
+# identity_key_path: /var/lib/natter/natter.key in the example config).
+StateDirectory=natter
+ConfigurationDirectory=natter
+
+# Binding :443 for WSS needs CAP_NET_BIND_SERVICE; everything else is dropped.
+# Remove both Capability lines if you don't listen below port 1024.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Hardening. ProtectSystem=strict makes the whole FS read-only for the
+# service except the ReadWritePaths below — a compromised natter can affect
+# availability and connection metadata only, never the host or SAGE state.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/natter
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Relay workloads hold many sockets.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
