@@ -166,25 +166,40 @@ func (h *DashboardHandler) handleFedReadiness(w http.ResponseWriter, r *http.Req
 		cometRPC = "http://127.0.0.1:26657"
 	}
 	appVersion, height := 0, 0
-	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, cometRPC+"/status", nil)
 	client := &http.Client{Timeout: 4 * time.Second}
-	if resp, err := client.Do(req); err == nil {
-		defer func() { _ = resp.Body.Close() }()
-		var st struct {
-			Result struct {
-				NodeInfo struct {
-					ProtocolVersion struct {
-						App string `json:"app"`
-					} `json:"protocol_version"`
-				} `json:"node_info"`
-				SyncInfo struct {
-					LatestBlockHeight string `json:"latest_block_height"`
-				} `json:"sync_info"`
-			} `json:"result"`
+	// LIVE app version comes from /abci_info: /status's node_info.protocol_version
+	// is frozen at the last handshake/restart and does NOT advance as forks
+	// activate, so it would report a stale (lower) version and keep the warm-up
+	// panel up forever after a restart.
+	if req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, cometRPC+"/abci_info", nil); req != nil {
+		if resp, err := client.Do(req); err == nil {
+			defer func() { _ = resp.Body.Close() }()
+			var ai struct {
+				Result struct {
+					Response struct {
+						AppVersion string `json:"app_version"`
+					} `json:"response"`
+				} `json:"result"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&ai) == nil {
+				appVersion, _ = strconv.Atoi(ai.Result.Response.AppVersion)
+			}
 		}
-		if json.NewDecoder(resp.Body).Decode(&st) == nil {
-			appVersion, _ = strconv.Atoi(st.Result.NodeInfo.ProtocolVersion.App)
-			height, _ = strconv.Atoi(st.Result.SyncInfo.LatestBlockHeight)
+	}
+	// Block height (live) from /status.
+	if req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, cometRPC+"/status", nil); req != nil {
+		if resp, err := client.Do(req); err == nil {
+			defer func() { _ = resp.Body.Close() }()
+			var st struct {
+				Result struct {
+					SyncInfo struct {
+						LatestBlockHeight string `json:"latest_block_height"`
+					} `json:"sync_info"`
+				} `json:"result"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&st) == nil {
+				height, _ = strconv.Atoi(st.Result.SyncInfo.LatestBlockHeight)
+			}
 		}
 	}
 	ready := appVersion >= federationMinAppVersion
