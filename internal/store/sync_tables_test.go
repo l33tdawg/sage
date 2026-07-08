@@ -33,7 +33,7 @@ func TestSyncDomainsRoundTrip(t *testing.T) {
 		t.Fatalf("expected no sync domains, got %v", got)
 	}
 
-	if err := s.SetSyncDomains(ctx, "chain-b", []string{"hr", "eng.public"}); err != nil {
+	if err = s.SetSyncDomains(ctx, "chain-b", []string{"hr", "eng.public"}); err != nil {
 		t.Fatalf("SetSyncDomains: %v", err)
 	}
 	got, err = s.GetSyncDomains(ctx, "chain-b")
@@ -45,7 +45,7 @@ func TestSyncDomainsRoundTrip(t *testing.T) {
 	}
 
 	// Replace-all semantics: a second Set fully overwrites the first.
-	if err := s.SetSyncDomains(ctx, "chain-b", []string{"ops"}); err != nil {
+	if err = s.SetSyncDomains(ctx, "chain-b", []string{"ops"}); err != nil {
 		t.Fatalf("SetSyncDomains replace: %v", err)
 	}
 	got, _ = s.GetSyncDomains(ctx, "chain-b")
@@ -54,7 +54,7 @@ func TestSyncDomainsRoundTrip(t *testing.T) {
 	}
 
 	// Empty domain rejected, and the failed tx must not clobber existing rows.
-	if err := s.SetSyncDomains(ctx, "chain-b", []string{"good", ""}); err == nil {
+	if err = s.SetSyncDomains(ctx, "chain-b", []string{"good", ""}); err == nil {
 		t.Fatal("expected error for empty domain")
 	}
 	got, _ = s.GetSyncDomains(ctx, "chain-b")
@@ -63,7 +63,7 @@ func TestSyncDomainsRoundTrip(t *testing.T) {
 	}
 
 	// Chain iteration set + revocation purge.
-	if err := s.SetSyncDomains(ctx, "chain-c", []string{"hr"}); err != nil {
+	if err = s.SetSyncDomains(ctx, "chain-c", []string{"hr"}); err != nil {
 		t.Fatalf("SetSyncDomains chain-c: %v", err)
 	}
 	chains, err := s.ListSyncDomainChains(ctx)
@@ -95,7 +95,7 @@ func TestSyncOutboxLifecycle(t *testing.T) {
 	if err != nil || created {
 		t.Fatalf("duplicate enqueue must be ignored: created=%v err=%v", created, err)
 	}
-	if _, err := s.EnqueueSyncOutbox(ctx, "chain-b", "mem-2"); err != nil {
+	if _, err = s.EnqueueSyncOutbox(ctx, "chain-b", "mem-2"); err != nil {
 		t.Fatalf("enqueue mem-2: %v", err)
 	}
 
@@ -116,10 +116,10 @@ func TestSyncOutboxLifecycle(t *testing.T) {
 	}
 
 	// Terminal + retry transitions.
-	if err := s.MarkSyncOutboxDelivered(ctx, "chain-b", "mem-1"); err != nil {
+	if err = s.MarkSyncOutboxDelivered(ctx, "chain-b", "mem-1"); err != nil {
 		t.Fatalf("MarkSyncOutboxDelivered: %v", err)
 	}
-	if err := s.MarkSyncOutboxRetry(ctx, "chain-b", "mem-2", 3, time.Now().Add(-time.Second), "http 503"); err != nil {
+	if err = s.MarkSyncOutboxRetry(ctx, "chain-b", "mem-2", 3, time.Now().Add(-time.Second), "http 503"); err != nil {
 		t.Fatalf("MarkSyncOutboxRetry: %v", err)
 	}
 	counts, err := s.CountSyncOutboxByState(ctx, "chain-b")
@@ -141,7 +141,7 @@ func TestSyncOutboxLifecycle(t *testing.T) {
 	}
 
 	// A future next_attempt_at keeps the row out of the due set.
-	if err := s.MarkSyncOutboxRetry(ctx, "chain-b", "mem-2", 4, time.Now().Add(time.Hour), "http 503"); err != nil {
+	if err = s.MarkSyncOutboxRetry(ctx, "chain-b", "mem-2", 4, time.Now().Add(time.Hour), "http 503"); err != nil {
 		t.Fatalf("retry with future backoff: %v", err)
 	}
 	claimed, _ = s.ClaimDueSyncOutbox(ctx, "chain-b", 10)
@@ -150,13 +150,13 @@ func TestSyncOutboxLifecycle(t *testing.T) {
 	}
 
 	// Rejected rows carry last_error for the status surface.
-	if _, err := s.EnqueueSyncOutbox(ctx, "chain-b", "mem-3"); err != nil {
+	if _, err = s.EnqueueSyncOutbox(ctx, "chain-b", "mem-3"); err != nil {
 		t.Fatalf("enqueue mem-3: %v", err)
 	}
-	if _, err := s.ClaimDueSyncOutbox(ctx, "chain-b", 10); err != nil {
+	if _, err = s.ClaimDueSyncOutbox(ctx, "chain-b", 10); err != nil {
 		t.Fatalf("claim mem-3: %v", err)
 	}
-	if err := s.MarkSyncOutboxRejected(ctx, "chain-b", "mem-3", SyncOutcomeRejectedDupXDomain); err != nil {
+	if err = s.MarkSyncOutboxRejected(ctx, "chain-b", "mem-3", SyncOutcomeRejectedDupXDomain); err != nil {
 		t.Fatalf("MarkSyncOutboxRejected: %v", err)
 	}
 	rejected, err := s.ListSyncOutbox(ctx, "chain-b", SyncStateRejected, 10)

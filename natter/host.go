@@ -23,9 +23,9 @@ import (
 // stable across restarts: it is published as SAGE bootstrap config, and a
 // changed peer ID would strand every federation node that pinned it.
 func loadOrCreateIdentity(path string, log zerolog.Logger) (crypto.PrivKey, error) {
-	raw, err := os.ReadFile(path)
+	raw, readErr := os.ReadFile(path)
 	switch {
-	case err == nil:
+	case readErr == nil:
 		// Warn (don't fail) on loose permissions: the key only grants the
 		// natter identity — a leaked key lets someone impersonate the RELAY,
 		// not any federation peer, so this is an availability concern only.
@@ -39,7 +39,7 @@ func loadOrCreateIdentity(path string, log zerolog.Logger) (crypto.PrivKey, erro
 		}
 		return priv, nil
 
-	case os.IsNotExist(err):
+	case os.IsNotExist(readErr):
 		priv, _, err := crypto.GenerateEd25519Key(rand.Reader)
 		if err != nil {
 			return nil, fmt.Errorf("generate ed25519 identity: %w", err)
@@ -62,7 +62,7 @@ func loadOrCreateIdentity(path string, log zerolog.Logger) (crypto.PrivKey, erro
 		return priv, nil
 
 	default:
-		return nil, fmt.Errorf("read identity key %s: %w", path, err)
+		return nil, fmt.Errorf("read identity key %s: %w", path, readErr)
 	}
 }
 

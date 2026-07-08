@@ -385,7 +385,7 @@ func (s *Server) handleSyncDomainsSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req SyncDomainsRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err = decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid body", "Expected {\"domains\": [\"...\"]}.")
 		return
 	}
@@ -411,7 +411,7 @@ func (s *Server) handleSyncDomainsSet(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := ss.SetSyncDomains(r.Context(), remoteChainID, req.Domains); err != nil {
+	if err = ss.SetSyncDomains(r.Context(), remoteChainID, req.Domains); err != nil {
 		s.logger.Error().Err(err).Str("remote", remoteChainID).Msg("set sync domains failed")
 		writeProblem(w, http.StatusInternalServerError, "Write error", "Failed to persist sync domains.")
 		return

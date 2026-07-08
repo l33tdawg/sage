@@ -226,7 +226,7 @@ func (h *DashboardHandler) handleFedReadiness(w http.ResponseWriter, r *http.Req
 // but won't accept inbound connections — no one can join or reach this node.
 func (h *DashboardHandler) handleGetFederationSetting(w http.ResponseWriter, _ *http.Request) {
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"enabled":     h.FederationEnabled,
+		"enabled":      h.FederationEnabled,
 		"configurable": h.SetFederationEnabledFn != nil,
 	})
 }

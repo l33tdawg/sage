@@ -64,7 +64,7 @@ func run(configPath string, log zerolog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer h.Close()
+	defer func() { _ = h.Close() }()
 
 	var rly *relay.Relay
 	if cfg.Relay.RelayEnabled() {
@@ -72,7 +72,7 @@ func run(configPath string, log zerolog.Logger) error {
 		if err != nil {
 			return err
 		}
-		defer rly.Close()
+		defer func() { _ = rly.Close() }()
 		log.Info().
 			Str("version", version).
 			Int("relay_max_reservations", cfg.Relay.MaxReservations).

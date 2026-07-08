@@ -202,7 +202,7 @@ relay:
 	}
 
 	// Missing file with mustExist=true is an error...
-	if _, err := LoadConfig(filepath.Join(dir, "nope.yaml"), true); err == nil {
+	if _, err = LoadConfig(filepath.Join(dir, "nope.yaml"), true); err == nil {
 		t.Error("expected error for missing explicit config")
 	}
 	// ...but falls back to defaults when the default path is absent.

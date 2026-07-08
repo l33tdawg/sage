@@ -177,9 +177,9 @@ func (m *Manager) syncScan(ctx context.Context, ss *store.SQLiteStore, agreement
 // syncDrain claims one batch and delivers it.
 func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
 	chain := agreement.RemoteChainID
-	claimed, err := ss.ClaimDueSyncOutbox(ctx, chain, SyncPushMaxItems)
-	if err != nil {
-		m.logger.Warn().Err(err).Str("peer", chain).Msg("sync: claim failed")
+	claimed, claimErr := ss.ClaimDueSyncOutbox(ctx, chain, SyncPushMaxItems)
+	if claimErr != nil {
+		m.logger.Warn().Err(claimErr).Str("peer", chain).Msg("sync: claim failed")
 		return
 	}
 	if len(claimed) == 0 {
