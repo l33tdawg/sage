@@ -680,7 +680,9 @@ func runServe() (rerr error) {
 	dashboard.FederationEnabled = cfg.Federation.Enabled
 	dashboard.SetFederationEnabledFn = func(enabled bool) error {
 		cfg.Federation.Enabled = enabled
-		return SaveConfig(cfg)
+		// Raw round-trip (NOT SaveConfig(cfg)) so the operator's tilde/relative
+		// paths aren't rewritten to runtime-expanded absolutes by the toggle.
+		return persistFederationEnabled(enabled)
 	}
 	// Guest side of Flow 3: the joining node's dashboard drives the ceremony and
 	// stages the bundle; it's applied at the next startup (before stores open).
@@ -890,6 +892,17 @@ func runServe() (rerr error) {
 		if n := fedMgr.LoadSeedsIntoCache(); n > 0 {
 			logger.Info().Int("agreements", n).Msg("federation: restored peer seeds into cache after boot")
 		}
+		// v11.5 domain-sync drainer + commit-tail watcher are OUTBOUND-only (this
+		// node pushes to a peer's /fed/v1/sync/push); they do NOT need this node's
+		// inbound mTLS listener. Wire them here, gated only on the manager
+		// existing — NOT on cfg.Federation.Enabled — so that turning the inbound
+		// listener OFF (Settings toggle) does not silently stop replicating to
+		// established peers, matching how recall/receipt delivery already survive
+		// the toggle ("off = outbound-only"). No-op on non-SQLite backends.
+		// SetSyncNotifier MUST follow StartSyncDrainer (it nudges the channel the
+		// drainer creates).
+		fedMgr.StartSyncDrainer(ctx)
+		app.SetSyncNotifier(fedMgr.SyncWatcher())
 	}
 
 	// TLS listener: encrypted REST on a separate port.
@@ -988,14 +1001,8 @@ func runServe() (rerr error) {
 			// Periodic reaper for expired join sessions / guest drafts / rate-limit
 			// map (seed hygiene + staged-CA rollback + unbounded-growth guard).
 			fedMgr.StartMaintenance(ctx)
-			// v11.5 domain-sync outbox drainer (scan + deliver). Internally a
-			// no-op with a log line on non-SQLite backends.
-			fedMgr.StartSyncDrainer(ctx)
-			// Commit-tail watcher: low-latency enqueue of just-committed
-			// memories (the drainer's poll scan stays the correctness
-			// backstop). MUST come after StartSyncDrainer — the watcher
-			// nudges the channel the drainer creates.
-			app.SetSyncNotifier(fedMgr.SyncWatcher())
+			// (Domain-sync drainer + commit-tail watcher are wired above in the
+			// fedMgr block — outbound-only, not gated on the inbound listener.)
 			go func() {
 				logger.Info().Str("addr", fedAddr).Str("chain_id", cfg.ChainID).Msg("federation mTLS listener starting")
 				if fedServeErr := fedServer.ListenAndServeTLS("", ""); fedServeErr != nil && fedServeErr != http.ErrServerClosed {

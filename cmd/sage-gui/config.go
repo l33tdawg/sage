@@ -360,6 +360,42 @@ func persistChainID(chainID string) error {
 	return os.WriteFile(configPath, out, 0600)
 }
 
+// persistFederationEnabled flips ONLY federation.enabled in config.yaml via the
+// same raw round-trip as persistChainID, so the operator's tilde/relative
+// DataDir/AgentKey survive the Settings toggle (a full SaveConfig(cfg) would
+// bake runtime-expanded absolute paths into the file — the exact drift the raw
+// round-trip exists to avoid).
+func persistFederationEnabled(enabled bool) error {
+	home := SageHome()
+	if err := os.MkdirAll(home, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	configPath := filepath.Join(home, "config.yaml")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			cfg := DefaultConfig(home)
+			cfg.Federation.Enabled = enabled
+			return SaveConfig(cfg)
+		}
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
+	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
+		return fmt.Errorf("parse config: %w", parseErr)
+	}
+	if raw.Federation.Enabled == enabled {
+		return nil // no drift
+	}
+	raw.Federation.Enabled = enabled
+	out, err := yaml.Marshal(&raw)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(configPath, out, 0600)
+}
+
 // SaveConfig writes the configuration to ~/.sage/config.yaml.
 func SaveConfig(cfg *Config) error {
 	home := SageHome()

@@ -355,7 +355,10 @@ func (m *Manager) broadcastSyncSubmit(localID string, item *SyncItem) (string, s
 		case syncBcastDuplicate:
 			return SyncOutcomeDuplicate, ""
 		case syncBcastScopeReject:
-			return SyncOutcomeRejectedScope, ""
+			// FinalizeBlock rejected the submit tx for lack of RBAC write access
+			// on the receiver — a per-attempt consensus cost, so a distinct
+			// outcome the sender attempts-caps (NOT the cheap gate-scope reject).
+			return SyncOutcomeRejectedWriteAccess, ""
 		default:
 			if err != nil {
 				m.logger.Warn().Err(err).Str("local", localID).Msg("sync: submit broadcast failed")

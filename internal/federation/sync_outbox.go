@@ -351,6 +351,13 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			// bring-up race (backlog pushed before the peer finishes configuring
 			// consent) self-heal no matter how late the consent arrives.
 			retry(row, true, false, syncBackoffMax, truncateString(outcome, 200))
+		case SyncOutcomeRejectedWriteAccess:
+			// The receiver ADMITTED the item but its federation agent lacks RBAC
+			// write access on the domain, so the submit tx was block-included
+			// and rejected at FinalizeBlock — a full consensus round burned per
+			// attempt. Like the finding-#14 dead-end, cap it (canFail=true)
+			// rather than retry forever; the operator grants access + Resends.
+			retry(row, true, true, syncBackoff(row.Attempts+1), outcome)
 		default:
 			// SyncOutcomeRetry: the peer ATTEMPTED a broadcast that came back
 			// non-terminal. This conflates transient (receiver vault locked,

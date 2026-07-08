@@ -256,6 +256,16 @@ func (h *DashboardHandler) handleSetFederationSetting(w http.ResponseWriter, r *
 		return
 	}
 	h.FederationEnabled = body.Enabled
+	// Where in-process re-exec is unsupported (Windows), the setting is already
+	// persisted — it just needs a manual restart to take effect. Say so plainly
+	// instead of promising a restart that will fail and silently self-revert.
+	if !restartInProcessSupported() {
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"ok": true, "enabled": body.Enabled, "restarting": false,
+			"message": "Saved. Restart SAGE to apply the federation change.",
+		})
+		return
+	}
 	execPath, err := os.Executable()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "cannot determine binary path")

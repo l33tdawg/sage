@@ -35,6 +35,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -85,6 +86,16 @@ type SyncOrigin struct {
 type CommittedHashMatch struct {
 	MemoryID  string
 	DomainTag string
+}
+
+// likeEscapeSubtree builds the LIKE pattern that matches a domain's subtree
+// ("hr" -> "hr.%"), escaping any LIKE metacharacters in the domain itself so a
+// tag containing % or _ can't widen the match (defense-in-depth: sync_domains
+// are validated concrete at the CRUD layer, but the store shouldn't rely on
+// that). Pair with `ESCAPE '\'` in the query.
+func likeEscapeSubtree(domain string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(domain) + ".%"
 }
 
 // migrateSyncTables creates the three domain-sync tables on first boot.
@@ -520,10 +531,10 @@ func (s *SQLiteStore) ListSyncOriginIDs(ctx context.Context, originChainID, doma
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT origin_memory_id FROM sync_origin
-		 WHERE origin_chain_id = ? AND (domain_tag = ? OR domain_tag LIKE ?)
+		 WHERE origin_chain_id = ? AND (domain_tag = ? OR domain_tag LIKE ? ESCAPE '\')
 		   AND origin_memory_id > ? AND outcome = 'admitted'
 		 ORDER BY origin_memory_id ASC
-		 LIMIT ?`, originChainID, domain, domain+".%", after, limit)
+		 LIMIT ?`, originChainID, domain, likeEscapeSubtree(domain), after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list sync origin ids: %w", err)
 	}
@@ -601,15 +612,15 @@ func (s *SQLiteStore) ListSyncCandidates(ctx context.Context, remoteChainID stri
 	}
 	clause := ""
 	args := make([]any, 0, len(domains)*2+2)
-	for i, d := range domains {
+	for _, d := range domains {
 		if d == "" {
-			continue
+			continue // guard on emitted-clause count below, NOT the loop index
 		}
-		if i > 0 {
+		if clause != "" {
 			clause += " OR "
 		}
-		clause += "(m.domain_tag = ? OR m.domain_tag LIKE ?)"
-		args = append(args, d, d+".%")
+		clause += `(m.domain_tag = ? OR m.domain_tag LIKE ? ESCAPE '\')`
+		args = append(args, d, likeEscapeSubtree(d))
 	}
 	if clause == "" {
 		return nil, nil

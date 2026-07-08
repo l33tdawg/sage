@@ -177,7 +177,15 @@ const (
 	SyncOutcomeRejectedClearance  = "rejected_clearance"
 	SyncOutcomeRejectedConsent    = "rejected_not_consented"
 	SyncOutcomeRejectedScope      = "rejected_domain_scope"
-	SyncOutcomeRetry              = "retry"
+	// SyncOutcomeRejectedWriteAccess: the receiver ADMITTED the item through
+	// consent/scope/clearance but the receiver's federation operator agent
+	// lacks RBAC write access to the domain on its chain, so the locally-signed
+	// submit tx was included in a block and REJECTED at FinalizeBlock. Distinct
+	// from the cheap gate-level rejected_domain_scope: this one costs the
+	// receiver a full consensus round per attempt, so the sender treats it as a
+	// #14-class dead-end (attempts-capped), not an infinite cheap retry.
+	SyncOutcomeRejectedWriteAccess = "rejected_write_access"
+	SyncOutcomeRetry               = "retry"
 )
 
 // SyncItem is one memory offered for replication. Content travels raw (the
@@ -230,12 +238,15 @@ type SyncDigestRequest struct {
 // the client's 16MB read limit, cheap to serve).
 const SyncDigestMaxIDs = 2000
 
-// SyncDigestResponse enumerates the receiver's ADMISSION set — every origin
-// id it has recorded a decision for, INCLUDING terminal rejections, so the
-// sender never re-offers refused items. Deliberately NOT the committed set:
-// the receiver's sovereign voter may deprecate a copy later without
-// re-opening delivery. ConsentedDomains surfaces asymmetric consent instead
-// of silently dropping (the sender can show "peer has not consented to X").
+// SyncDigestResponse enumerates the receiver's ADMISSION set — every origin id
+// it has ADMITTED (sync_origin.outcome='admitted'); terminal rejections are NOT
+// recorded and so are NOT listed here. This is what lets anti-entropy skip
+// re-offering already-admitted items after a sender-side outbox loss; a
+// previously-rejected item may be re-offered and simply re-rejected (idempotent,
+// content-derived on the receiver). Deliberately NOT the committed set: the
+// receiver's sovereign voter may deprecate a copy later without re-opening
+// delivery. ConsentedDomains surfaces asymmetric consent instead of silently
+// dropping (the sender can show "peer has not consented to X").
 type SyncDigestResponse struct {
 	Consented        bool     `json:"consented"`
 	ConsentedDomains []string `json:"consented_domains"`
