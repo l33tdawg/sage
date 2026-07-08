@@ -63,6 +63,9 @@ func (f *fakeFederation) GuestRequest(context.Context, string, string, federatio
 func (f *fakeFederation) GuestConfirm(context.Context, string, string, federation.ScopeWire) (string, error) {
 	return "", errors.New("na")
 }
+func (f *fakeFederation) SyncReconcileInfo(string) (federation.SyncReconcileStatus, bool) {
+	return federation.SyncReconcileStatus{}, false
+}
 
 func TestFederatedRecallMergesRemoteResults(t *testing.T) {
 	srv, memStore, _ := newTestServer(t, "")

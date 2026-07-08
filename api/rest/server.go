@@ -101,6 +101,9 @@ type FederationService interface {
 	GuestScan(ctx context.Context, uri, guestEndpoint string) (*federation.GuestScanResult, error)
 	GuestRequest(ctx context.Context, sessionID, guestEndpoint string, scope federation.ScopeWire) (*federation.GuestRequestResult, error)
 	GuestConfirm(ctx context.Context, sessionID, guestEndpoint string, hostScope federation.ScopeWire) (string, error)
+
+	// v11.5 domain sync: per-peer anti-entropy bookkeeping for the status surface.
+	SyncReconcileInfo(remoteChainID string) (federation.SyncReconcileStatus, bool)
 }
 
 // SuppCacheWriter is the interface the REST server uses to store supplementary data
@@ -318,6 +321,7 @@ func (s *Server) setupRouter() chi.Router {
 		// v11.5 domain-sync consent (local, off-consensus; operator-only)
 		r.Put("/v1/federation/cross/{chain_id}/sync", s.handleSyncDomainsSet)
 		r.Get("/v1/federation/cross/{chain_id}/sync", s.handleSyncDomainsGet)
+		r.Get("/v1/federation/cross/{chain_id}/sync/status", s.handleSyncStatus)
 
 		// v11 real-TOTP JOIN ceremony - the operator's localhost control surface
 		// (the guided guest/host wizards). Node-operator-only; off-consensus.

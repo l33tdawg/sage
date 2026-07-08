@@ -207,3 +207,46 @@ Powers the MRI click-to-explore "train of thought" board. Cookie-authed dashboar
 **`RelatedMemory`** (`memory_related.go:38-50`): `id`, `content` (≤160 chars), `domain`, `confidence`, `corroboration_count`, `status`, `created_at` (RFC 3339), `memory_type`, `kind` (`do` | `dont` | `observation` | `note` - the board columns, `classifyKind`, `:56-68`), `relation` (`chain` | `same-topic` | `similar` | `same-lobe`), `score`.
 
 **Trust boundary:** read-only over local chain state; no consensus writes, no federation calls.
+
+---
+
+## v11.5 Domain sync (shared-domain replication)
+
+Opt-in replication of committed memories in consented domain subtrees to a federation peer - store-and-forward on top of the same mTLS transport and treaty scope as recall exchange. Everything is off-consensus (no fork): copies enter the receiving chain only as ordinary locally-signed `TxTypeMemorySubmit` transactions that the receiver's own consensus gates re-validate.
+
+### Consent model
+
+Consent is **local, per side, and can only narrow the treaty**. Each operator configures `sync_domains` for a peer (`PUT /v1/federation/cross/{chain_id}/sync`, operator-only); every entry must be concrete (no `*`) and subtree-covered by the on-chain agreement's `allowed_domains`. It is deliberately **not** a field on the on-chain `cross_fed` record. The receiver enforces its **own** rows on every incoming push, so asymmetric consent means less flows, never more. Subtree semantics throughout: consenting `hr` covers `hr.public`.
+
+### `POST /fed/v1/sync/push` (peer-facing, behind peerAuth)
+
+`{items: [{origin_chain_id, origin_memory_id, origin_created_at, domain, classification, memory_type, confidence_score, content, content_hash, tags}]}` - max 8 items, 64KB content each; `content_hash` must equal sha256(content). The origin chain **must** equal the authenticated peer (no third-chain forwarding). Handler: `internal/federation/sync_server.go` `handleSyncPush`.
+
+Admission gates, in order: treaty `allowed_domains` -> receiver's own `sync_domains` consent -> `classification <= max_clearance` -> idempotency replay from the `sync_origin` ledger -> cross-domain duplicate check (identical committed content in a **different** domain is terminally rejected and surfaced, never silently moved; same domain is an idempotent duplicate-success) -> vault-locked retry NACK -> admit via a locally-signed submit tx with the deterministic id `hex(sha256("sync1|" + origin_chain + "|" + origin_memory_id))`.
+
+Per-item outcomes: `accepted`, `duplicate`, `rejected_cross_domain_dup`, `rejected_clearance`, `rejected_not_consented`, `rejected_domain_scope`, `retry`.
+
+### `POST /fed/v1/sync/digest` (peer-facing, behind peerAuth)
+
+Anti-entropy: the sender asks what the receiver has **already decided** about its memories in a domain subtree. `{domain, after, limit}` -> `{consented, consented_domains, origin_memory_ids (sorted asc), next_cursor}` - cursor-paged, 2000 ids per page. Answered from the admission ledger **including terminal rejections** (refused items are never re-offered) and deliberately not from the committed set: the receiver's sovereign lifecycle can deprecate a copy later without re-opening delivery. Handler: `handleSyncDigest`, same file.
+
+`GET /fed/v1/status` now advertises `capabilities: ["sync"]` when the backend supports it; pre-v11.5 peers 404 on the sync routes and the sender parks deliveries on a 1-hour backoff.
+
+### Operator surface (`/v1/federation/cross/{chain_id}/sync*`, operator-only)
+
+| Route | Purpose |
+|---|---|
+| `PUT .../sync` | Replace the consented sync-domain set (validated against the active agreement). |
+| `GET .../sync` | Read it back. |
+| `GET .../sync/status` | Outbox counts per state, rejected rows with reasons, pending retry schedule, last anti-entropy run, the peer's advertised consent, peer-unsupported flag. |
+
+Revoking an agreement (either revoke path) purges the peer's sync consent and queued deliveries.
+
+### Delivery semantics - the honest version
+
+- **Sender**: a 30s drainer scans committed memories in consented subtrees into a durable outbox (`sync_outbox`, survives restarts; recovery is the scan itself - no watermark), delivers in batches of 8, and re-runs **every** gate at send time (re-scoped agreements, re-domained or re-classified memories drop out). A commit-tail hook accelerates delivery; the poll is the correctness backstop. Backoff `min(30s * 2^attempts, 1h)`. Vault-locked content defers without burning attempts.
+- **"Delivered" means handed to the peer's pipeline.** The copy lands `proposed` (co-commit-style direct commit does not apply) and the receiver's own voter governs it. Peer lifecycle stays sovereign: decay, corroboration, and deprecation never propagate in either direction.
+- **The copy's on-chain author is the receiving node's operator agent** - everything entering chain state is a locally-signed tx. Origin truth (`origin_chain_id`, `origin_memory_id`, `origin_created_at`) lives in the receiver's off-consensus `sync_origin` ledger.
+- **A synced copy is never re-forwarded** (no A->B->C fan-out): the sender excludes copies at scan time and the receiver rejects any push whose origin is not the authenticated peer.
+- Copies arrive **without embeddings** (semantic recall needs a receiver-side re-embed; keyword/FTS recall works immediately). Tag replication is a non-goal in v11.5.
+- SQLite-only: Postgres-backed nodes disable sync loudly (501 on the routes, drainer no-op, no `sync` capability).

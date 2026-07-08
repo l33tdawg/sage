@@ -430,6 +430,84 @@ func (s *Server) handleSyncDomainsSet(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSyncStatus handles GET /v1/federation/cross/{chain_id}/sync/status —
+// the operator's observability surface for one peer's replication state:
+// per-state outbox counts, the terminal rejections with their reasons (the
+// B-D1 "surface, never silently move" requirement lands here), the pending
+// retry schedule, and the anti-entropy bookkeeping (last reconcile, the
+// peer's advertised consent, unsupported flag).
+func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireNodeOperator(w, r) {
+		return
+	}
+	remoteChainID := chi.URLParam(r, "chain_id")
+	if err := federation.ValidateChainID(remoteChainID); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid remote chain id", err.Error())
+		return
+	}
+	ss := s.syncStore()
+	if ss == nil {
+		writeProblem(w, http.StatusNotImplemented, "Sync unavailable", "Domain sync requires the SQLite store backend.")
+		return
+	}
+	ctx := r.Context()
+	counts, err := ss.CountSyncOutboxByState(ctx, remoteChainID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read outbox counts.")
+		return
+	}
+	domains, err := ss.GetSyncDomains(ctx, remoteChainID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read sync domains.")
+		return
+	}
+	if domains == nil {
+		domains = []string{}
+	}
+	rejected, err := ss.ListSyncOutbox(ctx, remoteChainID, store.SyncStateRejected, 50)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read rejected rows.")
+		return
+	}
+	pending, err := ss.ListSyncOutbox(ctx, remoteChainID, store.SyncStatePending, 50)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read pending rows.")
+		return
+	}
+	type outboxRow struct {
+		MemoryID      string `json:"memory_id"`
+		Reason        string `json:"reason,omitempty"`
+		Attempts      int    `json:"attempts,omitempty"`
+		NextAttemptAt string `json:"next_attempt_at,omitempty"`
+	}
+	rejectedRows := make([]outboxRow, 0, len(rejected))
+	for _, it := range rejected {
+		rejectedRows = append(rejectedRows, outboxRow{MemoryID: it.MemoryID, Reason: it.LastError})
+	}
+	pendingRows := make([]outboxRow, 0, len(pending))
+	for _, it := range pending {
+		pendingRows = append(pendingRows, outboxRow{
+			MemoryID: it.MemoryID, Reason: it.LastError,
+			Attempts: it.Attempts, NextAttemptAt: it.NextAttemptAt.UTC().Format(time.RFC3339),
+		})
+	}
+	resp := map[string]any{
+		"remote_chain_id": remoteChainID,
+		"sync_domains":    domains,
+		"outbox_counts":   counts,
+		"rejected":        rejectedRows,
+		"pending":         pendingRows,
+	}
+	if s.federation != nil {
+		if st, ok := s.federation.SyncReconcileInfo(remoteChainID); ok {
+			resp["last_reconcile"] = st.LastReconcile.UTC().Format(time.RFC3339)
+			resp["peer_consented_domains"] = st.PeerConsented
+			resp["peer_unsupported"] = st.PeerUnsupported
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handleSyncDomainsGet handles GET /v1/federation/cross/{chain_id}/sync.
 func (s *Server) handleSyncDomainsGet(w http.ResponseWriter, r *http.Request) {
 	if !s.requireNodeOperator(w, r) {
