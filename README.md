@@ -51,7 +51,18 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.3.1
+## What's New in v11.4.0
+
+**Handing a memory's domain to another agent is now one click from the search results themselves.** v11.4.0 is a dashboard-only feature release: it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork** - `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. The new control reuses the existing v11.3 on-chain reassignment path, so there is no new transaction and no server change.
+
+- **"Transfer to agent" from the memory selection.** The Search-page bulk action bar gains a "Transfer to agent" action alongside Move, Tag, and Forget: select one or more memories, pick a new owner, and their whole RBAC domain's ownership is handed over on-chain. This complements the existing filter-row "Transfer domain ownership" button (which starts from a source agent) with a second, more direct entry point that starts from the memories you are looking at. Both drive the same honest whole-domain transfer: it moves the **entire domain** (every memory in it, including ones not selected), transfers **ownership plus read/write access, not authorship** (`submitting_agent` stays immutable and auditable), and the previous owner is fully revoked. When a selection spans several domains, each is transferred in turn, and the confirmation copy spells out that unselected memories move too.
+
+SDK 11.4.0.
+
+## Older releases
+
+<details>
+<summary>v11.3.1 - x/crypto SSH-advisory bump + tx-encoder overflow guard</summary>
 
 **A security-hygiene patch: `golang.org/x/crypto` is bumped past the recent SSH advisories, and a latent transaction-encoding overflow is closed.** v11.3.1 changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Both fixes sit off the consensus hot path.
 
@@ -59,8 +70,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **The transaction encoder bounds the payload length.** `EncodeTx` now rejects a payload larger than `MaxInt32` up front, so the total-length arithmetic cannot overflow and the 4-byte length prefix cannot silently truncate a pathologically oversized transaction. This mirrors the guard `DecodeTx` already had and resolves a CodeQL allocation-size-overflow finding. No real transaction approaches this size, so behavior is unchanged for all valid traffic.
 
 SDK 11.3.1.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.3.0 - on-chain RBAC domain-ownership transfer + enforcing access matrix</summary>

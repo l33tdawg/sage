@@ -20,7 +20,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.3.1';
+const SAGE_VERSION = 'v11.4.0';
 
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
@@ -2306,27 +2306,73 @@ function SearchPage() {
         } catch (e) { showToast('Failed to load agent domains: ' + (e.message || e), 'error'); }
     }
 
+    // Seed the whole-domain transfer modal from the current memory SELECTION
+    // (the second, ergonomic entry point). The honest RBAC unit is still the
+    // WHOLE domain, so we derive the distinct domains the selected memories live
+    // in and transfer each in full - the modal copy makes clear that unselected
+    // memories in those domains move too. No source agent needs picking: the
+    // per-domain author (best-effort mirror source) is read off the memories and
+    // the real owner flip happens on-chain regardless.
+    function startSelectionTransfer() {
+        const selMems = results.filter(m => selected.has(m.memory_id));
+        if (selMems.length === 0) return;
+        const authorByDomain = {};
+        const domains = [];
+        for (const m of selMems) {
+            const d = m.domain_tag;
+            if (!d || authorByDomain[d] !== undefined) continue;
+            authorByDomain[d] = m.submitting_agent || '';
+            domains.push({ domain: d });
+        }
+        if (domains.length === 0) { showToast('Selected memories have no domain to transfer.', 'warning'); return; }
+        setDomXfer({
+            fromSelection: true,
+            sourceAgentId: '',
+            sourceName: `${selected.size} selected ${selected.size === 1 ? 'memory' : 'memories'}`,
+            authorByDomain,
+            domains,
+            step: domains.length === 1 ? 'target' : 'domains',
+            selectedDomain: domains.length === 1 ? domains[0] : null,
+        });
+    }
+
     // Transfer the whole selected domain's RBAC ownership to the target agent.
     // Surfaces the server's honest status/grant_deferred/message rather than
-    // pretending success.
+    // pretending success. Handles both entry points: the filter-row flow (source
+    // is the picked agent) and the selection flow (source is the domain's author,
+    // used only for the off-chain mirror; on multi-domain selections it loops
+    // back to the remaining domains after each transfer).
     async function handleDomainOwnershipTransfer(targetId) {
         if (!domXfer?.selectedDomain) return;
+        const dom = domXfer.selectedDomain.domain;
+        const sourceId = domXfer.sourceAgentId
+            || (domXfer.authorByDomain ? (domXfer.authorByDomain[dom] || '') : '');
         setXferring(true);
         try {
             const res = await reassignDomainOwnership({
-                source_agent_id: domXfer.sourceAgentId,
+                source_agent_id: sourceId,
                 target_agent_id: targetId,
-                domain: domXfer.selectedDomain.domain,
+                domain: dom,
             });
-            setDomXfer(null);
             await loadMemories(query, agentFilter, domainFilter, tagFilter);
             const status = res.status || 'ok';
-            let msg = res.message || `Domain "${domXfer.selectedDomain.domain}" ownership transferred.`;
+            let msg = res.message || `Domain "${dom}" ownership transferred.`;
             if (res.grant_deferred) {
                 msg += ' The read/write grant to the new owner was deferred (their signing key is not held on this node) - issue it from the Agents access matrix once that agent is available.';
             }
             const level = status === 'error' ? 'error' : ((status === 'partial' || res.grant_deferred) ? 'warning' : 'success');
             showToast(msg, level, 9000);
+            if (domXfer.fromSelection) {
+                const remaining = (domXfer.domains || []).filter(d => d.domain !== dom);
+                if (remaining.length > 0) {
+                    setDomXfer(prev => ({ ...prev, domains: remaining, step: 'domains', selectedDomain: null }));
+                } else {
+                    setDomXfer(null);
+                    clearSelection();
+                }
+            } else {
+                setDomXfer(null);
+            }
         } catch (e) { showToast('Transfer failed: ' + (e.message || e), 'error'); }
         setXferring(false);
     }
@@ -2402,6 +2448,7 @@ function SearchPage() {
                         <button class="btn" disabled=${bulkBusy || !bulkDomain.trim()} onClick=${bulkMoveDomain}>Move</button>
                         <input class="filter-select" style="min-width:110px;" placeholder="Add tag..." value=${bulkTag} onInput=${e => setBulkTag(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') bulkAddTag(); }} />
                         <button class="btn" disabled=${bulkBusy || !bulkTag.trim()} onClick=${bulkAddTag}>Tag</button>
+                        <button class="btn" disabled=${bulkBusy || xferring} title="Transfer the full RBAC ownership of the selected memories' domain(s) to another agent (moves the whole domain, not just the selection)" onClick=${startSelectionTransfer}>Transfer to agent…</button>
                         <button class="btn btn-danger" disabled=${bulkBusy} onClick=${bulkForget}>Forget</button>
                         <button class="btn btn-secondary" style="margin-left:auto;" onClick=${clearSelection}>Clear</button>
                     </div>
@@ -2481,13 +2528,15 @@ function SearchPage() {
                         <div class="wizard-body" style="padding:20px;">
                             ${domXfer.step === 'domains' ? html`
                                 <p style="color:var(--text-dim);margin-bottom:8px;">
-                                    Pick a domain to hand from <strong>${domXfer.sourceName}</strong> to another agent.
+                                    ${domXfer.fromSelection
+                                        ? html`Pick which domain to transfer. These are the domains your <strong>${domXfer.sourceName}</strong> live in.`
+                                        : html`Pick a domain to hand from <strong>${domXfer.sourceName}</strong> to another agent.`}
                                 </p>
                                 <p style="color:var(--text-muted);font-size:12px;line-height:1.5;margin-bottom:16px;">
-                                    This moves the <strong>entire domain</strong> - every memory in it, including any not shown in the current results - not just labels. Authorship (the submitting agent recorded on each memory) is left unchanged; only on-chain RBAC ownership and read/write access move to the new owner. The source agent loses access to the domain.
+                                    This moves the <strong>entire domain</strong> - every memory in it, including any not shown in the current results${domXfer.fromSelection ? html` and any you did not select` : ''} - not just labels. Authorship (the submitting agent recorded on each memory) is left unchanged; only on-chain RBAC ownership and read/write access move to the new owner. The source agent loses access to the domain.
                                 </p>
                                 ${domXfer.domains.length === 0 ? html`
-                                    <p style="color:var(--text-muted);font-size:13px;font-style:italic;">This agent has no domains to transfer.</p>
+                                    <p style="color:var(--text-muted);font-size:13px;font-style:italic;">${domXfer.fromSelection ? 'The selected memories have no domain to transfer.' : 'This agent has no domains to transfer.'}</p>
                                 ` : html`
                                     <div style="display:flex;flex-direction:column;gap:6px;max-height:340px;overflow-y:auto;">
                                         ${domXfer.domains.map(d => html`
@@ -2502,21 +2551,25 @@ function SearchPage() {
                                 `}
                             ` : html`
                                 <div style="margin-bottom:16px;">
-                                    <button class="btn" onClick=${() => setDomXfer(prev => ({ ...prev, step: 'domains', selectedDomain: null }))}
-                                        style="font-size:12px;padding:4px 12px;margin-bottom:12px;">
-                                        ← Back to domains
-                                    </button>
+                                    ${(domXfer.domains && domXfer.domains.length > 1) || !domXfer.fromSelection ? html`
+                                        <button class="btn" onClick=${() => setDomXfer(prev => ({ ...prev, step: 'domains', selectedDomain: null }))}
+                                            style="font-size:12px;padding:4px 12px;margin-bottom:12px;">
+                                            ← Back to domains
+                                        </button>
+                                    ` : ''}
                                     <p style="color:var(--text-dim);">
                                         Transfer ownership of
                                         <span class="domain-badge" style="display:inline-flex;margin:0 4px;background:${getDomainColor(domXfer.selectedDomain.domain)}20;color:${getDomainColor(domXfer.selectedDomain.domain)};">${domXfer.selectedDomain.domain}</span>
-                                        from <strong>${domXfer.sourceName}</strong> to:
+                                        ${domXfer.fromSelection ? html`to:` : html`from <strong>${domXfer.sourceName}</strong> to:`}
                                     </p>
                                     <p style="color:var(--text-muted);font-size:12px;line-height:1.5;margin-top:8px;">
-                                        Transfers the ENTIRE domain (every memory in it, including ones not shown here). Authorship is unchanged; only RBAC ownership and read/write access move to the target, and <strong style="color:var(--text-dim);">${domXfer.sourceName}</strong> loses access to this domain afterwards.
+                                        Transfers the ENTIRE domain (every memory in it, including ones not shown here${domXfer.fromSelection ? html` and any you did not select` : ''}). Authorship is unchanged; only RBAC ownership and read/write access move to the target, and the current owner loses access to this domain afterwards.
                                     </p>
                                 </div>
                                 ${(() => {
-                                    const targets = agents.filter(a => a.status !== 'removed' && a.agent_id !== domXfer.sourceAgentId);
+                                    const excludeId = domXfer.sourceAgentId
+                                        || (domXfer.authorByDomain && domXfer.selectedDomain ? (domXfer.authorByDomain[domXfer.selectedDomain.domain] || '') : '');
+                                    const targets = agents.filter(a => a.status !== 'removed' && a.agent_id !== excludeId);
                                     return targets.length === 0 ? html`
                                         <p style="color:var(--text-muted);font-size:13px;font-style:italic;">No other agents are available to receive this domain. Register another agent first.</p>
                                     ` : html`
