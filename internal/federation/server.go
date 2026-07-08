@@ -52,6 +52,7 @@ func (m *Manager) Router() http.Handler {
 		r.Get("/fed/v1/status", m.handleStatus)
 		r.Post("/fed/v1/query", m.handleQuery)
 		r.Post("/fed/v1/receipt", m.handleReceipt)
+		r.Post("/fed/v1/sync/push", m.handleSyncPush) // v11.5 domain sync
 	})
 	// The pre-agreement JOIN ceremony routes sit behind joinAuth, NOT peerAuth
 	// (no active agreement exists yet during a join).
@@ -267,9 +268,15 @@ func peerFromCtx(ctx context.Context) *peerIdentity {
 	return p
 }
 
-// handleStatus — authenticated reachability/identity preflight.
+// handleStatus — authenticated reachability/identity preflight. Capabilities
+// advertises optional route groups so senders can feature-detect: "sync" only
+// when the backend actually supports it (SQLite-only).
 func (m *Manager) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, &StatusResponse{ChainID: m.localChainID, Time: time.Now().Unix()})
+	var caps []string
+	if m.syncStore() != nil {
+		caps = append(caps, CapabilitySync)
+	}
+	writeJSON(w, http.StatusOK, &StatusResponse{ChainID: m.localChainID, Time: time.Now().Unix(), Capabilities: caps})
 }
 
 // handleQuery serves a scoped read-only recall to an authenticated peer.

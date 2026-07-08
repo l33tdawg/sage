@@ -140,6 +140,13 @@ func (s *SQLiteStore) SetVaultExpected(expected bool) {
 	s.vaultExpected = expected
 }
 
+// VaultLocked reports whether writes would currently be rejected because
+// encryption is expected but the vault has not been unlocked. Callers that
+// stage work (e.g. sync admission) use this to defer instead of failing.
+func (s *SQLiteStore) VaultLocked() bool {
+	return s.vaultExpected && s.vault == nil
+}
+
 // encryptContent encrypts a string if the vault is set.
 // Returns the original string if no vault and encryption is not expected.
 // Returns an error if encryption is expected but vault is locked.

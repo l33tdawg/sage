@@ -116,6 +116,9 @@ type ReceiptPushResponse struct {
 type StatusResponse struct {
 	ChainID string `json:"chain_id"`
 	Time    int64  `json:"time"`
+	// Capabilities advertises optional route groups (e.g. "sync"). Additive:
+	// pre-v11.5 peers omit it, and senders treat absence as unsupported.
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 // DeliveryResult is the per-peer outcome of a receipt fan-out.
@@ -133,4 +136,77 @@ type PeerRecallOutcome struct {
 	ChainID string
 	Results []*MemoryResult
 	Err     error
+}
+
+// ---- v11.5 domain-sync wire protocol (/fed/v1/sync/*) -----------------------
+//
+// Sync admission is the ONE deliberate exception to "foreign data is never
+// written": a pushed item reaches chain state EXCLUSIVELY by being wrapped in
+// a locally-signed TxTypeMemorySubmit broadcast through CometBFT, where the
+// receiver's own consensus gates (write access, domain requirement, terminal-
+// status guard) re-validate it. Federation code still never writes BadgerDB
+// or InsertMemory directly.
+
+// CapabilitySync advertises the /fed/v1/sync/* routes on StatusResponse so a
+// sender can feature-detect before queueing (pre-v11.5 peers 404 instead).
+const CapabilitySync = "sync"
+
+const (
+	// SyncPushMaxItems bounds one push batch: 8 blocking broadcast_tx_commit
+	// admits fit inside the federation listener's write budget; bigger
+	// batches are a protocol error, not a truncation.
+	SyncPushMaxItems = 8
+	// SyncMaxItemContent bounds one item's content bytes (sender enforces at
+	// enqueue; receiver rejects the batch as malformed on violation).
+	SyncMaxItemContent = 64 * 1024
+)
+
+// Wire outcomes for one pushed item. Terminal rejections are recorded in the
+// receiver's sync_origin ledger and replayed on redelivery; "retry" records
+// nothing and invites the sender's backoff.
+const (
+	SyncOutcomeAccepted           = "accepted"
+	SyncOutcomeDuplicate          = "duplicate" // success-equivalent: already admitted / already present in the same domain
+	SyncOutcomeRejectedXDomainDup = "rejected_cross_domain_dup"
+	SyncOutcomeRejectedClearance  = "rejected_clearance"
+	SyncOutcomeRejectedConsent    = "rejected_not_consented"
+	SyncOutcomeRejectedScope      = "rejected_domain_scope"
+	SyncOutcomeRetry              = "retry"
+)
+
+// SyncItem is one memory offered for replication. Content travels raw (the
+// /fed/v1/query MemoryResult precedent); content_hash must equal
+// sha256(content) — the receiver verifies before admitting. Classification,
+// type, and confidence are sender-asserted; the receiver enforces its own
+// clearance ceiling and its voter governs the copy's lifecycle.
+type SyncItem struct {
+	OriginChainID   string   `json:"origin_chain_id"`
+	OriginMemoryID  string   `json:"origin_memory_id"`
+	OriginCreatedAt string   `json:"origin_created_at,omitempty"`
+	Domain          string   `json:"domain"`
+	Classification  int      `json:"classification"`
+	MemoryType      string   `json:"memory_type,omitempty"`
+	ConfidenceScore float64  `json:"confidence_score,omitempty"`
+	Content         string   `json:"content"`
+	ContentHash     string   `json:"content_hash"`
+	Tags            []string `json:"tags,omitempty"`
+}
+
+// SyncPushRequest is the body of POST /fed/v1/sync/push.
+type SyncPushRequest struct {
+	Items []SyncItem `json:"items"`
+}
+
+// SyncItemResult is the per-item admission outcome. Reasons are enum codes
+// only — they never echo receiver content (the sender already possesses the
+// item, so per-item outcomes are not an oracle the way query hiding is).
+type SyncItemResult struct {
+	OriginMemoryID string `json:"origin_memory_id"`
+	Outcome        string `json:"outcome"`
+	LocalMemoryID  string `json:"local_memory_id,omitempty"`
+}
+
+// SyncPushResponse is the body of a successful push.
+type SyncPushResponse struct {
+	Results []SyncItemResult `json:"results"`
 }
