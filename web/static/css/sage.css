@@ -4262,6 +4262,24 @@ input[type="range"]::-moz-range-thumb {
 }
 .fed-green-dot { font-weight: 700; }
 
+/* Master ON/OFF switch at the top of the Federation panel (mirrors the Settings toggle). */
+.fed-master {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    background: var(--bg-elevated); border: 1px solid var(--border-light);
+    border-radius: var(--radius-lg); padding: 16px 18px; margin: 14px 0 18px;
+    border-left: 3px solid var(--text-muted);
+}
+.fed-master.on { border-left-color: var(--accent); }
+.fed-master.off { border-left-color: var(--text-muted); }
+.fed-master-loading { justify-content: flex-start; }
+.fed-master-main { min-width: 0; }
+.fed-master-title { font-weight: 600; font-size: 15px; display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.fed-master-desc { font-size: 12px; line-height: 1.45; }
+.fed-off-note {
+    background: var(--bg-surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 10px 14px; font-size: 13px; margin: 0 0 18px;
+}
+
 .fed-roles { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 20px 0 28px; }
 .fed-role-card {
     text-align: left; background: var(--bg-elevated); border: 1px solid var(--border-light);

@@ -71,6 +71,14 @@ function HelpTip({ text, align }) {
     </span>`;
 }
 
+// statusDot — the small green/grey liveness dot used across status rows.
+// MODULE-scope so any component can use it (SettingsPage, FederationSettingRow,
+// FederationMasterSwitch, …). A `function` declaration (hoisted) so callers that
+// appear earlier in the file resolve it regardless of order.
+function statusDot(active) {
+    return html`<span class="status-dot ${active ? 'active' : 'inactive'}"></span>`;
+}
+
 // PageHelp — contextual "?" button that opens the CEREBRUM guide to a specific section.
 // Place this in any page header to give users one-click access to relevant help.
 function PageHelp({ section, label }) {
@@ -4721,20 +4729,23 @@ function RerankerSetupModal({ onClose, onDone }) {
     `;
 }
 
-// FederationSettingRow - Settings toggle for the inbound federation listener.
-// OFF = the node can still reach OUT (recall/receipt), but won't accept inbound
-// connections, so no one can join or reach it. Flipping it persists config and
-// restarts the node (non-destructive; re-unlock the vault after).
+// FederationSettingRow - Settings toggle for federation. The SAME control also
+// lives at the top of the Federation panel (FederationMasterSwitch); both call
+// fedSettingGet/fedSettingSet, so flipping either place is equivalent and the
+// user never has to hunt for it. OFF = the node accepts no inbound connections
+// (it can still reach OUT to peers already linked); no one can join or reach it.
+// Flipping it persists config and restarts the node (non-destructive; re-unlock
+// the vault after).
 function FederationSettingRow() {
     const [st, setSt] = useState(null); // {enabled, configurable}
     const [busy, setBusy] = useState(false);
     useEffect(() => { fedSettingGet().then(setSt).catch(() => setSt({ enabled: false, configurable: false })); }, []);
-    if (!st) return html`<div class="settings-row"><span class="label">Federation (inbound)</span><span class="value muted">…</span></div>`;
+    if (!st) return html`<div class="settings-row"><span class="label">Federation</span><span class="value muted">…</span></div>`;
     const toggle = async () => {
         const next = !st.enabled;
         const msg = next
-            ? 'Turn ON inbound federation?\n\nThe node will restart and start accepting connections from networks you link with. The listener only accepts peers pinned to an agreement you approved.'
-            : 'Turn OFF inbound federation?\n\nThe node will restart and stop accepting inbound connections. You can still reach out to peers you already connected with, but no one can join or reach you until you turn it back on. Nothing is deleted.';
+            ? 'Turn ON federation?\n\nThe node will restart and start accepting connections from networks you link with. The listener only accepts peers pinned to an agreement you approved.'
+            : 'Turn OFF federation?\n\nThe node will restart and stop accepting inbound connections. You can still reach out to peers you already connected with, but no one can join or reach you until you turn it back on. Nothing is deleted.';
         if (!confirm(msg)) return;
         setBusy(true);
         try {
@@ -4745,7 +4756,7 @@ function FederationSettingRow() {
         } catch (e) { showToast(String(e.message || e), 'error'); setBusy(false); }
     };
     return html`<div class="settings-row">
-        <span class="label">${statusDot(st.enabled)} Federation (inbound) <${HelpTip} text="Whether this node accepts inbound connections from other SAGE networks. Off = outbound-only (you can reach peers you linked with, but no one can join or reach you). The listener only admits peers pinned to an agreement you approved." /></span>
+        <span class="label">${statusDot(st.enabled)} Federation <${HelpTip} text="Whether this node accepts inbound connections from other SAGE networks. Off = outbound-only (you can reach peers you linked with, but no one can join or reach you). The same switch is at the top of the Federation panel. The listener only admits peers pinned to an agreement you approved." /></span>
         ${st.configurable
             ? html`<span style="display:flex;align-items:center;gap:8px;">
                 <span class="value" style="color:${st.enabled ? 'var(--accent)' : 'var(--text-muted)'}">${st.enabled ? 'On' : 'Off'}</span>
@@ -4846,10 +4857,7 @@ function SettingsPage({ onRunSetup }) {
     const countdownDisplay = liveCountdown !== null ? (liveCountdown / 1000).toFixed(1) + 's' : '--';
     const countdownPct = liveCountdown !== null ? Math.min(100, (liveCountdown / BLOCK_INTERVAL_MS) * 100) : 0;
 
-    // Status indicator dot
-    const statusDot = (active) => html`
-        <span class="status-dot ${active ? 'active' : 'inactive'}"></span>
-    `;
+    // (statusDot is now a module-scope helper — see near the top of this file.)
 
     // Helper: format nanosecond duration to human-readable
     const formatDuration = (nsStr) => {
@@ -10899,6 +10907,53 @@ function FederationWarmup({ onState }) {
     </div>`;
 }
 
+// FederationMasterSwitch - the ONE master ON/OFF gate for federation, living at
+// the top of the Federation panel (federation is opt-in; the switch is here, not
+// buried in Settings). OFF by default: the node accepts no inbound connections
+// and opens no :8444 listener until the operator turns it on here. ON accepts
+// connections from linked networks whether the peer is on the LAN or reached
+// over a route the operator provides — admission is by agreement pin, so the
+// switch doesn't care which network the peer came from. Flipping it persists
+// config + restarts the node (re-unlock the vault after on an encrypted node).
+// onChange lets the page gate the join/host cards on the switch being ON.
+function FederationMasterSwitch({ onChange }) {
+    const [st, setSt] = useState(null); // {enabled, configurable}
+    const [busy, setBusy] = useState(false);
+    const emit = (v) => { onChange && onChange(v); };
+    useEffect(() => {
+        fedSettingGet()
+            .then(s => { setSt(s); emit(!!s.enabled); })
+            .catch(() => { setSt({ enabled: false, configurable: false }); emit(false); });
+    }, []);
+    if (!st) return html`<div class="fed-master fed-master-loading"><span class="muted">Checking federation…</span></div>`;
+    const toggle = async () => {
+        const next = !st.enabled;
+        const msg = next
+            ? 'Turn ON federation?\n\nThe node will restart and start accepting connections from networks you link with — on your LAN or over any route you provide. It only admits peers pinned to an agreement you approved. (Re-unlock your vault after the restart.)'
+            : 'Turn OFF federation?\n\nThe node will restart and stop accepting inbound connections. Existing links stay saved and nothing is deleted — no one can reach you until you turn it back on.';
+        if (!confirm(msg)) return;
+        setBusy(true);
+        try {
+            const r = await fedSettingSet(next);
+            setSt({ ...st, enabled: next });
+            emit(next);
+            if (r.restarting) { showToast('Saved — restarting to apply…', 'info'); }
+            else { showToast(next ? 'Federation is on' : 'Federation is off', 'success'); setBusy(false); }
+        } catch (e) { showToast(String(e.message || e), 'error'); setBusy(false); }
+    };
+    return html`<div class="fed-master ${st.enabled ? 'on' : 'off'}">
+        <div class="fed-master-main">
+            <div class="fed-master-title">${statusDot(st.enabled)} Federation is ${st.enabled ? 'on' : 'off'}</div>
+            <div class="fed-master-desc muted">${st.enabled
+                ? 'This node accepts connections from networks you link with — on your LAN or any route you provide. It only admits peers pinned to an agreement you approved.'
+                : 'Turn this on to connect your SAGE to another SAGE. Until then this node stays private — it accepts no inbound connections.'}</div>
+        </div>
+        ${st.configurable
+            ? html`<button class="btn ${st.enabled ? '' : 'btn-primary'}" style="white-space:nowrap;" disabled=${busy} onClick=${toggle}>${busy ? '…' : (st.enabled ? 'Turn off' : 'Turn on')}</button>`
+            : html`<span class="value muted" title="This build can't restart itself — set federation.enabled in config.yaml and restart manually.">${st.enabled ? 'On (via config)' : 'Off (via config)'}</span>`}
+    </div>`;
+}
+
 // FederationPage - the 8th sidebar section landing: role fork + connections list.
 function FederationPage() {
     const [mode, setMode] = useState('landing'); // landing | guest | host
@@ -10919,6 +10974,7 @@ function FederationPage() {
     // first poll resolves in ~a frame and the cards appear. onState(true) is
     // also called on a readiness error (older binary), so cards still show.
     const [warming, setWarming] = useState(true); // fork-ladder warm-up on a fresh node
+    const [fedOn, setFedOn] = useState(null); // master switch: null=unknown, then bool
     const revoke = async (chain) => {
         if (!confirm(`Turn off the connection to ${chain}? This does NOT erase anything - it just stops the two networks from reaching each other.`)) return;
         try { await fedRevoke(chain); showToast(`Disconnected from ${chain}`, 'success'); load(); }
@@ -10933,9 +10989,11 @@ function FederationPage() {
             <h1>Federation</h1>
             <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> on the same LAN, VPN, or a reachable route you provide. Built-in internet/NAT traversal is planned for v11.5. This is not the same as adding an agent to your own SAGE (do that under <strong>Agents</strong>), or the validator quorum your own agents form (also under Agents). Federation links two separate brains.</p>
             <${FedGreenRail} />
+            <${FederationMasterSwitch} onChange=${setFedOn} />
             ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
-            <${FederationWarmup} onState=${(ready) => setWarming(!ready)} />
-            ${!warming && html`<div class="fed-roles">
+            ${fedOn === false && html`<div class="fed-off-note muted">Federation is off, so joining or hosting a connection is unavailable. Turn it on above to connect.</div>`}
+            ${fedOn && html`<${FederationWarmup} onState=${(ready) => setWarming(!ready)} />`}
+            ${fedOn && !warming && html`<div class="fed-roles">
                 <button class="fed-role-card" onClick=${() => setMode('guest')}>
                     <div class="fed-role-glyph">${icons.federation}</div>
                     <div class="fed-role-title">Join someone's network</div>
@@ -10948,16 +11006,18 @@ function FederationPage() {
                 </button>
             </div>`}
 
-            <div class="fed-conns">
+            ${(fedOn || (conns && conns.length > 0)) && html`<div class="fed-conns">
                 <h3>Your connections <${HelpTip} text="Each row is a treaty with another SAGE. The dot is green when the connection is active and unexpired. The domains listed are the only knowledge shared across the link - everything else stays private." /></h3>
                 ${conns && conns.length > 0 && html`<div class="fed-conns-explain muted">Connecting lets each side <strong>borrow answers</strong> live within the shared topics. To also <strong>copy</strong> a topic's memories across, open a connection and turn on sync — it stays off until both sides do.</div>`}
                 ${conns === null && html`<div class="muted">Loading…</div>`}
                 ${conns && conns.length === 0 && html`
                     <${EmptyState} icon="federation"
                         headline="No connections yet"
-                        hint="Link your whole SAGE to another SAGE to share memories across networks. Join someone's network with a code they share, or host one and hand out a code."
-                        actionLabel="Join someone's network"
-                        onAction=${() => setMode('guest')} />
+                        hint=${fedOn
+                            ? "Link your whole SAGE to another SAGE to share memories across networks. Join someone's network with a code they share, or host one and hand out a code."
+                            : "Turn federation on above to link your whole SAGE to another SAGE and share memories across networks."}
+                        actionLabel=${fedOn ? 'Join someone’s network' : null}
+                        onAction=${fedOn ? (() => setMode('guest')) : null} />
                     ${localChain && html`<div class="muted" style="text-align:center;margin-top:4px;">Your network id: <code>${localChain}</code></div>`}
                 `}
                 ${conns && conns.map(c => html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
@@ -10972,7 +11032,7 @@ function FederationPage() {
                     </div>
                     ${openChain === c.remote_chain_id && c.status === 'active' && !c.expired && html`<${FedSyncPanel} conn=${c} />`}
                 </div>`)}
-            </div>
+            </div>`}
         </div>
     </div>`;
 }

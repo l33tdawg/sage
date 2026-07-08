@@ -136,18 +136,19 @@ func defaultVoterConfig() VoterConfig {
 	}
 }
 
-// defaultFederationConfig is the federation default block. Enabled=TRUE so the
-// inbound mTLS listener starts on a fresh node and the guided JOIN wizard just
-// works — the listener requires a client cert pinned to an active cross_fed
-// agreement (unpinned peers are rejected at the TLS handshake) and the join
-// routes sit behind joinAuth, so exposing :8444 by default is the point, not a
-// risk. Like the voter default, this MUST be seeded on every config that isn't
-// decoded over LoadConfig's defaults (persistChainID's raw round-trip), or an
-// absent federation block would re-marshal as an implicit disable and the
-// listener would silently never start on the next boot — the exact bug this
-// fixes.
+// defaultFederationConfig is the federation default block. Enabled=FALSE:
+// federation is OPT-IN. A fresh node accepts NO inbound connections and opens
+// no :8444 listener until the operator flips the master switch in the
+// Federation panel (which persists enabled=true and restarts). This keeps an
+// upgrade from silently opening an inbound port — the operator turns it on when
+// they actually want to connect two brains. The block is still seeded on every
+// raw round-trip (persistChainID / persistFederationEnabled) for symmetry with
+// the voter default and to keep federation.enabled written EXPLICITLY rather
+// than relying on an absent key; with the default now false, an absent block
+// and an explicit enabled:false are equivalent (both = off), so this can no
+// longer cause a surprise disable.
 func defaultFederationConfig() FederationConfig {
-	return FederationConfig{Enabled: true}
+	return FederationConfig{Enabled: false}
 }
 
 // DefaultConfig returns the default configuration.
@@ -340,11 +341,11 @@ func persistChainID(chainID string) error {
 	}
 
 	// Unmarshal into a RAW Config (no path expansion) so paths round-trip verbatim.
-	// Voter AND federation defaults are seeded: both default to enabled=true, so
-	// without the seed a config that omits either block would re-marshal as an
-	// implicit disable and silently kill the auto-voter / federation listener on
-	// the next boot. (Keys present in the file still win — the seed only fills
-	// absent ones.)
+	// Voter AND federation defaults are seeded so absent blocks re-marshal to
+	// their intended defaults: the voter default is enabled=true (without the
+	// seed an omitted voter block would silently kill the auto-voter on the next
+	// boot), and the federation default is enabled=false (opt-in). (Keys present
+	// in the file still win — the seed only fills absent ones.)
 	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
 	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
 		return fmt.Errorf("parse config: %w", parseErr)

@@ -58,40 +58,41 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	assert.Equal(t, ":9090", loaded.RESTAddr)
 }
 
-// TestFederationEnabledByDefault: fresh nodes must start the inbound listener.
-func TestFederationEnabledByDefault(t *testing.T) {
+// TestFederationDisabledByDefault: federation is OPT-IN. A fresh node must NOT
+// start the inbound listener until the operator turns it on in the panel.
+func TestFederationDisabledByDefault(t *testing.T) {
 	tmp := t.TempDir()
-	assert.True(t, DefaultConfig(tmp).Federation.Enabled, "federation must default ON")
+	assert.False(t, DefaultConfig(tmp).Federation.Enabled, "federation must default OFF (opt-in)")
 }
 
-// TestFederationOffPersists is the regression for the omitempty footgun: with
-// the default now true, an explicit enabled=false must survive a Save/Load
-// round-trip (omitempty would strip the zero-valued section and the default
-// would silently re-enable it — you could never turn federation off).
-func TestFederationOffPersists(t *testing.T) {
+// TestFederationEnabledPersists: with the default now false, an explicit
+// enabled=true (the operator opting in) must survive a Save/Load round-trip,
+// and toggling back off must also stick. Guards against an omitempty footgun
+// stripping the section and reverting to the default.
+func TestFederationEnabledPersists(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("SAGE_HOME", tmp)
 
 	cfg := DefaultConfig(tmp)
-	require.True(t, cfg.Federation.Enabled)
-	cfg.Federation.Enabled = false // operator turns it off
+	require.False(t, cfg.Federation.Enabled)
+	cfg.Federation.Enabled = true // operator opts in
 	require.NoError(t, SaveConfig(cfg))
 
 	loaded, err := LoadConfig()
 	require.NoError(t, err)
-	assert.False(t, loaded.Federation.Enabled, "explicit federation OFF must survive a round-trip")
+	assert.True(t, loaded.Federation.Enabled, "explicit federation ON must survive a round-trip")
 
-	// And back on.
-	loaded.Federation.Enabled = true
+	// And back off.
+	loaded.Federation.Enabled = false
 	require.NoError(t, SaveConfig(loaded))
 	again, err := LoadConfig()
 	require.NoError(t, err)
-	assert.True(t, again.Federation.Enabled)
+	assert.False(t, again.Federation.Enabled)
 }
 
-// TestFederationDefaultWhenSectionAbsent: an existing config that predates the
-// federation section (all v11.4.x configs, since the old omitempty stripped it)
-// gets the default TRUE on load — so upgrades enable the listener.
+// TestFederationDefaultWhenSectionAbsent: a config with no federation section
+// (older configs, or one written before opt-in) loads with the default OFF — an
+// upgrade never silently opens the inbound port; the operator opts in.
 func TestFederationDefaultWhenSectionAbsent(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("SAGE_HOME", tmp)
@@ -100,7 +101,7 @@ func TestFederationDefaultWhenSectionAbsent(t *testing.T) {
 		[]byte("embedding:\n  provider: hash\n  dimension: 768\nvoter:\n  enabled: true\n"), 0600))
 	loaded, err := LoadConfig()
 	require.NoError(t, err)
-	assert.True(t, loaded.Federation.Enabled, "absent federation section defaults to enabled")
+	assert.False(t, loaded.Federation.Enabled, "absent federation section defaults to OFF (opt-in)")
 }
 
 func TestLoadConfig_VoterEnvOverrides(t *testing.T) {
