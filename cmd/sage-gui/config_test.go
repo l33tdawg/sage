@@ -58,6 +58,51 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	assert.Equal(t, ":9090", loaded.RESTAddr)
 }
 
+// TestFederationEnabledByDefault: fresh nodes must start the inbound listener.
+func TestFederationEnabledByDefault(t *testing.T) {
+	tmp := t.TempDir()
+	assert.True(t, DefaultConfig(tmp).Federation.Enabled, "federation must default ON")
+}
+
+// TestFederationOffPersists is the regression for the omitempty footgun: with
+// the default now true, an explicit enabled=false must survive a Save/Load
+// round-trip (omitempty would strip the zero-valued section and the default
+// would silently re-enable it — you could never turn federation off).
+func TestFederationOffPersists(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+
+	cfg := DefaultConfig(tmp)
+	require.True(t, cfg.Federation.Enabled)
+	cfg.Federation.Enabled = false // operator turns it off
+	require.NoError(t, SaveConfig(cfg))
+
+	loaded, err := LoadConfig()
+	require.NoError(t, err)
+	assert.False(t, loaded.Federation.Enabled, "explicit federation OFF must survive a round-trip")
+
+	// And back on.
+	loaded.Federation.Enabled = true
+	require.NoError(t, SaveConfig(loaded))
+	again, err := LoadConfig()
+	require.NoError(t, err)
+	assert.True(t, again.Federation.Enabled)
+}
+
+// TestFederationDefaultWhenSectionAbsent: an existing config that predates the
+// federation section (all v11.4.x configs, since the old omitempty stripped it)
+// gets the default TRUE on load — so upgrades enable the listener.
+func TestFederationDefaultWhenSectionAbsent(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	// A config with NO federation section.
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "config.yaml"),
+		[]byte("embedding:\n  provider: hash\n  dimension: 768\nvoter:\n  enabled: true\n"), 0600))
+	loaded, err := LoadConfig()
+	require.NoError(t, err)
+	assert.True(t, loaded.Federation.Enabled, "absent federation section defaults to enabled")
+}
+
 func TestLoadConfig_VoterEnvOverrides(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("SAGE_HOME", tmp)

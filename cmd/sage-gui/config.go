@@ -26,7 +26,12 @@ type Config struct {
 	Embedding  EmbeddingConfig  `yaml:"embedding"`
 	Encryption EncryptionConfig `yaml:"encryption"`
 	Quorum     QuorumConfig     `yaml:"quorum"`
-	Federation FederationConfig `yaml:"federation,omitempty"`
+	// NOT omitempty: the default is enabled=true, so a zero FederationConfig
+	// (enabled=false, the operator's explicit "off") must be written as
+	// `federation: {enabled: false}`. With omitempty the off-state would be
+	// stripped and LoadConfig's default-true would silently re-enable it — you
+	// could never turn federation off.
+	Federation FederationConfig `yaml:"federation"`
 	Voter      VoterConfig      `yaml:"voter"`
 	DataDir    string           `yaml:"data_dir"`
 	RESTAddr   string           `yaml:"rest_addr"`
@@ -131,6 +136,20 @@ func defaultVoterConfig() VoterConfig {
 	}
 }
 
+// defaultFederationConfig is the federation default block. Enabled=TRUE so the
+// inbound mTLS listener starts on a fresh node and the guided JOIN wizard just
+// works — the listener requires a client cert pinned to an active cross_fed
+// agreement (unpinned peers are rejected at the TLS handshake) and the join
+// routes sit behind joinAuth, so exposing :8444 by default is the point, not a
+// risk. Like the voter default, this MUST be seeded on every config that isn't
+// decoded over LoadConfig's defaults (persistChainID's raw round-trip), or an
+// absent federation block would re-marshal as an implicit disable and the
+// listener would silently never start on the next boot — the exact bug this
+// fixes.
+func defaultFederationConfig() FederationConfig {
+	return FederationConfig{Enabled: true}
+}
+
 // DefaultConfig returns the default configuration.
 func DefaultConfig(home string) *Config {
 	return &Config{
@@ -138,10 +157,11 @@ func DefaultConfig(home string) *Config {
 			Provider:  "hash",
 			Dimension: 768,
 		},
-		Voter:    defaultVoterConfig(),
-		DataDir:  filepath.Join(home, "data"),
-		RESTAddr: "127.0.0.1:8080",
-		AgentKey: filepath.Join(home, "agent.key"),
+		Voter:      defaultVoterConfig(),
+		Federation: defaultFederationConfig(),
+		DataDir:    filepath.Join(home, "data"),
+		RESTAddr:   "127.0.0.1:8080",
+		AgentKey:   filepath.Join(home, "agent.key"),
 	}
 }
 
@@ -320,11 +340,12 @@ func persistChainID(chainID string) error {
 	}
 
 	// Unmarshal into a RAW Config (no path expansion) so paths round-trip verbatim.
-	// Voter defaults ARE seeded: its default is enabled=true, so without the seed
-	// a config that omits the voter block would re-marshal as an explicit
-	// voter.enabled=false and silently disable the auto-voter on the next boot.
-	// (Keys present in the file still win — the seed only fills absent ones.)
-	raw := Config{Voter: defaultVoterConfig()}
+	// Voter AND federation defaults are seeded: both default to enabled=true, so
+	// without the seed a config that omits either block would re-marshal as an
+	// implicit disable and silently kill the auto-voter / federation listener on
+	// the next boot. (Keys present in the file still win — the seed only fills
+	// absent ones.)
+	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
 	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
 		return fmt.Errorf("parse config: %w", parseErr)
 	}

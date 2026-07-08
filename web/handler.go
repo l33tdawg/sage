@@ -209,6 +209,14 @@ type DashboardHandler struct {
 	// then re-binds P2P to the LAN on the next restart). Wired in cmd/sage-gui.
 	SetNetworkMode func(enabled bool) error
 
+	// FederationEnabled is the current federation.enabled config value, surfaced
+	// read-only in Settings. SetFederationEnabledFn persists a change to
+	// config.yaml; the node starts/stops the inbound mTLS listener on the next
+	// restart (the toggle re-execs, mirroring network mode). Both wired in
+	// cmd/sage-gui; a nil setter disables the Settings toggle.
+	FederationEnabled      bool
+	SetFederationEnabledFn func(enabled bool) error
+
 	// GuestJoin drives the JOINING node's "Join a network" ceremony (Flow 3,
 	// guest side). GuestNodeIDFn returns this node's CometBFT p2p node id (for
 	// the hello proof) and WritePendingJoinFn stages the decrypted bundle for
@@ -432,6 +440,8 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Get("/v1/dashboard/settings/reranker/detect", h.handleDetectReranker)
 			r.Get("/v1/dashboard/settings/onboarding", h.handleGetOnboarding)
 			r.Post("/v1/dashboard/settings/onboarding", h.handleSaveOnboarding)
+			r.Get("/v1/dashboard/settings/federation", h.handleGetFederationSetting)
+			r.Post("/v1/dashboard/settings/federation", h.handleSetFederationSetting)
 			r.Get("/v1/dashboard/settings/cleanup", h.handleGetCleanupSettings)
 			r.Post("/v1/dashboard/settings/cleanup", h.handleSaveCleanupSettings)
 			r.Post("/v1/dashboard/cleanup/run", h.handleRunCleanup)

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -135,6 +137,67 @@ func (h *DashboardHandler) handleFedLanEndpoint(w http.ResponseWriter, _ *http.R
 		"suggested_endpoint": suggested,
 		"candidates":         out,
 	})
+}
+
+// --- Federation on/off (Settings surface) -----------------------------------
+
+// handleGetFederationSetting reports whether the inbound federation listener is
+// enabled. Off means the node can still reach OUT (recall, receipt delivery)
+// but won't accept inbound connections — no one can join or reach this node.
+func (h *DashboardHandler) handleGetFederationSetting(w http.ResponseWriter, _ *http.Request) {
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"enabled":     h.FederationEnabled,
+		"configurable": h.SetFederationEnabledFn != nil,
+	})
+}
+
+// handleSetFederationSetting persists federation.enabled and restarts the node
+// so the inbound listener starts/stops. Mirrors network-mode's re-exec:
+// non-destructive (chain + memories preserved), operator re-unlocks the vault
+// after restart. A no-op restart when the value is unchanged.
+func (h *DashboardHandler) handleSetFederationSetting(w http.ResponseWriter, r *http.Request) {
+	if h.SetFederationEnabledFn == nil {
+		writeError(w, http.StatusServiceUnavailable, "federation toggle not available on this node")
+		return
+	}
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "expected {\"enabled\": bool}")
+		return
+	}
+	if body.Enabled == h.FederationEnabled {
+		writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "enabled": body.Enabled, "restarting": false})
+		return
+	}
+	if err := h.SetFederationEnabledFn(body.Enabled); err != nil {
+		writeError(w, http.StatusInternalServerError, "save federation setting: "+err.Error())
+		return
+	}
+	h.FederationEnabled = body.Enabled
+	execPath, err := os.Executable()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "cannot determine binary path")
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"ok": true, "enabled": body.Enabled, "restarting": true,
+		"message": "Saving and restarting to apply the federation change…",
+	})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+	// Re-exec after the response is flushed (handleRestart pattern). Only
+	// returns on failure; revert config so it never diverges from the live process.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		if rErr := restartSelf(execPath); rErr != nil {
+			log.Printf("federation toggle: restart failed, reverting: %v", rErr)
+			_ = h.SetFederationEnabledFn(!body.Enabled)
+			h.FederationEnabled = !body.Enabled
+		}
+	}()
 }
 
 // --- v11.5 domain-sync consent + status -------------------------------------

@@ -796,6 +796,9 @@ export function fedConnections() { return fedFetch('/v1/dashboard/federation/con
 // Suggested LAN endpoint to advertise in a join code (server-detected, so it is
 // never localhost - which a peer on another machine can't reach).
 export function fedLanEndpoint() { return fedFetch('/v1/dashboard/federation/lan-endpoint'); }
+// Federation on/off (Settings).
+export function fedSettingGet() { return fedFetch('/v1/dashboard/settings/federation'); }
+export function fedSettingSet(enabled) { return fedPost('/v1/dashboard/settings/federation', { enabled }); }
 // v11.5 domain-sync consent + status (per connection).
 export function fedSyncGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`); }
 export function fedSyncSet(chainId, domains) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`, { domains }); }

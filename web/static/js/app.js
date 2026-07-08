@@ -4721,6 +4721,40 @@ function RerankerSetupModal({ onClose, onDone }) {
     `;
 }
 
+// FederationSettingRow - Settings toggle for the inbound federation listener.
+// OFF = the node can still reach OUT (recall/receipt), but won't accept inbound
+// connections, so no one can join or reach it. Flipping it persists config and
+// restarts the node (non-destructive; re-unlock the vault after).
+function FederationSettingRow() {
+    const [st, setSt] = useState(null); // {enabled, configurable}
+    const [busy, setBusy] = useState(false);
+    useEffect(() => { fedSettingGet().then(setSt).catch(() => setSt({ enabled: false, configurable: false })); }, []);
+    if (!st) return html`<div class="settings-row"><span class="label">Federation (inbound)</span><span class="value muted">…</span></div>`;
+    const toggle = async () => {
+        const next = !st.enabled;
+        const msg = next
+            ? 'Turn ON inbound federation?\n\nThe node will restart and start accepting connections from networks you link with. The listener only accepts peers pinned to an agreement you approved.'
+            : 'Turn OFF inbound federation?\n\nThe node will restart and stop accepting inbound connections. You can still reach out to peers you already connected with, but no one can join or reach you until you turn it back on. Nothing is deleted.';
+        if (!confirm(msg)) return;
+        setBusy(true);
+        try {
+            const r = await fedSettingSet(next);
+            setSt({ ...st, enabled: next });
+            if (r.restarting) showToast('Saved — restarting to apply…', 'info');
+            else showToast('Federation setting saved', 'success');
+        } catch (e) { showToast(String(e.message || e), 'error'); setBusy(false); }
+    };
+    return html`<div class="settings-row">
+        <span class="label">${statusDot(st.enabled)} Federation (inbound) <${HelpTip} text="Whether this node accepts inbound connections from other SAGE networks. Off = outbound-only (you can reach peers you linked with, but no one can join or reach you). The listener only admits peers pinned to an agreement you approved." /></span>
+        ${st.configurable
+            ? html`<span style="display:flex;align-items:center;gap:8px;">
+                <span class="value" style="color:${st.enabled ? 'var(--accent)' : 'var(--text-muted)'}">${st.enabled ? 'On' : 'Off'}</span>
+                <button class="btn" style="padding:4px 12px;font-size:12px;" disabled=${busy} onClick=${toggle}>${busy ? '…' : (st.enabled ? 'Turn off →' : 'Turn on →')}</button>
+              </span>`
+            : html`<span class="value" style="color:${st.enabled ? 'var(--accent)' : 'var(--text-muted)'}">${st.enabled ? 'On' : 'Off'}</span>`}
+    </div>`;
+}
+
 function SettingsPage({ onRunSetup }) {
     const [settingsTab, setSettingsTab] = useState('overview');
     const [stats, setStats] = useState(null);
@@ -4937,6 +4971,7 @@ function SettingsPage({ onRunSetup }) {
                             <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span>${encrypted
                                 ? html`<span class="value" style="color:var(--accent)">AES-256-GCM</span>`
                                 : html`<span style="display:flex;align-items:center;gap:8px;"><span class="value" style="color:var(--text-muted)">Off</span><button class="btn btn-primary" style="padding:4px 12px;font-size:12px;" title="Encrypt all memories at rest with a passphrase (Security tab)" onClick=${() => setSettingsTab('security')}>Enable →</button></span>`}</div>
+                            <${FederationSettingRow} />
                             <div class="settings-row"><span class="label">Version</span><span class="value">${ver}</span></div>
                             <div class="settings-row"><span class="label">Uptime</span><span class="value">${uptime}</span></div>
                             <div class="settings-row"><span class="label">API Endpoint</span><span class="value">${window.location.origin}</span></div>

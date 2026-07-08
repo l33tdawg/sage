@@ -675,6 +675,13 @@ func runServe() (rerr error) {
 		cfg.Quorum.Enabled = enabled
 		return SaveConfig(cfg)
 	}
+	// Federation on/off, surfaced in Settings (the toggle re-execs to start/stop
+	// the inbound mTLS listener). Outbound recall/receipt delivery is unaffected.
+	dashboard.FederationEnabled = cfg.Federation.Enabled
+	dashboard.SetFederationEnabledFn = func(enabled bool) error {
+		cfg.Federation.Enabled = enabled
+		return SaveConfig(cfg)
+	}
 	// Guest side of Flow 3: the joining node's dashboard drives the ceremony and
 	// stages the bundle; it's applied at the next startup (before stores open).
 	dashboard.GuestNodeIDFn = func() (string, error) {
