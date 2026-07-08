@@ -14,12 +14,19 @@ package federation
 //           change), load decrypted content, deliver via SyncPush, map the
 //           per-item outcomes onto outbox states.
 //
-// Failure taxonomy (locked by the build map):
+// Failure taxonomy:
 //   accepted/duplicate            -> delivered (terminal)
-//   rejected_* per-item outcomes  -> rejected (terminal, last_error surfaced)
-//   retry outcome / transport err -> pending, attempts+1, exp backoff
+//   B-D1 cross-domain dup         -> rejected (terminal, content-derived)
+//   transport err (PEER OFFLINE)  -> pending, backoff, NEVER gives up (delivers
+//                                    whenever the peer returns — a closed laptop
+//                                    for a week still gets its backlog)
+//   config reject (consent/scope/ -> pending, 1h floor, NEVER gives up (self-
+//     clearance)                     heals when the operator widens scope)
 //   ErrSyncUnsupported            -> pending, 1h floor ("peer lacks sync")
 //   sender vault locked           -> pending, short delay, attempts UNCHANGED
+//   "retry" outcome (peer broad-  -> pending, backoff, EVENTUALLY fails (attempts
+//     cast attempted, non-term)      cap) — the only give-up path, to bound a
+//                                    permanently-rejecting receiver's churn
 //   memory gone / oversized       -> failed (terminal local)
 //
 // SQLite discipline: every claim/update is a single-row write; no store
@@ -186,22 +193,28 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 	// SQLite writes are local and fast, so a background context is safe.
 	writeCtx := context.Background()
 
-	// retry returns a claimed row to pending. bumpAttempts=false is for
-	// not-the-item's-fault deferrals (vault locked, peer not upgraded) so they
-	// never hit the attempts cap. When attempts reach syncMaxAttempts the row
-	// is failed terminal instead of retried forever (bounds churn from a
-	// persistently-rejecting receiver).
-	retry := func(row store.SyncOutboxItem, bumpAttempts bool, delay time.Duration, reason string) {
+	// retry returns a claimed row to pending. Two independent knobs:
+	//   bumpAttempts — grow the backoff (attempts drives syncBackoff), and
+	//   canFail      — allow the give-up cap to fire.
+	// canFail is TRUE ONLY for failures that will NEVER succeed no matter how
+	// long we wait: a receiver that keeps actively rejecting the item via a
+	// SUCCESSFUL push (the deterministic-dead-end / churn case). It is FALSE for
+	// everything transient or environmental — peer OFFLINE (transport error,
+	// closed laptop, network gap), peer not upgraded, sender vault locked, a
+	// local DB read hiccup — because those resolve when the environment
+	// recovers, and giving up would silently lose memories queued while the peer
+	// was away (the exact "close the laptop overnight" data-loss gap).
+	retry := func(row store.SyncOutboxItem, bumpAttempts, canFail bool, delay time.Duration, reason string) {
 		attempts := row.Attempts
 		if bumpAttempts {
 			attempts++
-			if attempts >= syncMaxAttempts {
-				if err := ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID,
-					truncateString("gave up after "+reason, 200)); err != nil {
-					m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: fail mark failed")
-				}
-				return
+		}
+		if canFail && attempts >= syncMaxAttempts {
+			if err := ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID,
+				truncateString("gave up after "+reason, 200)); err != nil {
+				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: fail mark failed")
 			}
+			return
 		}
 		if err := ss.MarkSyncOutboxRetry(writeCtx, chain, row.MemoryID, attempts, time.Now().Add(delay), reason); err != nil {
 			m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: retry mark failed")
@@ -219,7 +232,7 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 				_ = ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID, "memory no longer available")
 			} else {
 				// Transient read error (SQLITE_BUSY, IO): retry, don't lose it.
-				retry(row, true, syncBackoff(row.Attempts+1), "memory read error")
+				retry(row, true, false, syncBackoff(row.Attempts+1), "memory read error")
 			}
 			continue
 		}
@@ -232,7 +245,7 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		if rec.Content == store.VaultLockedPlaceholder {
 			// Sender vault locked: defer WITHOUT burning attempts, never push
 			// the placeholder literal.
-			retry(row, false, syncVaultRetryDelay, "sender vault locked")
+			retry(row, false, false, syncVaultRetryDelay, "sender vault locked")
 			continue
 		}
 		if rec.Content == "" {
@@ -255,7 +268,7 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		if err != nil {
 			// Fail CLOSED on the egress boundary: an unreadable classification
 			// is never treated as "low".
-			retry(row, true, syncBackoff(row.Attempts+1), "classification read failed")
+			retry(row, true, false, syncBackoff(row.Attempts+1), "classification read failed")
 			continue
 		}
 		if cls > int(agreement.MaxClearance) {
@@ -296,9 +309,9 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			if err == ErrSyncUnsupported {
 				// Not the item's fault — don't count toward the cap; park at
 				// the 1h floor until the peer upgrades.
-				retry(row, false, syncBackoffMax, "peer does not support sync")
+				retry(row, false, false, syncBackoffMax, "peer does not support sync")
 			} else {
-				retry(row, true, syncBackoff(row.Attempts+1), truncateString(reason, 200))
+				retry(row, true, false, syncBackoff(row.Attempts+1), truncateString(reason, 200))
 			}
 		}
 		return
@@ -315,7 +328,8 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		outcome, ok := byID[row.MemoryID]
 		if !ok {
 			// Peer omitted this row's id — retry rather than silently drop.
-			retry(row, true, syncBackoff(row.Attempts+1), "peer omitted result")
+			// Cheap (no re-broadcast on the peer), so never give up on it.
+			retry(row, true, false, syncBackoff(row.Attempts+1), "peer omitted result")
 			continue
 		}
 		switch outcome {
@@ -330,14 +344,21 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: rejected mark failed")
 			}
 		case SyncOutcomeRejectedConsent, SyncOutcomeRejectedScope, SyncOutcomeRejectedClearance:
-			// Receiver-CONFIG-dependent: the operator may widen consent /
-			// clearance / treaty scope later, so keep RETRYABLE (long backoff,
-			// attempts-capped) instead of poisoning the item permanently. This
-			// is what lets the bring-up race (backlog pushed before the peer
-			// finishes configuring consent) self-heal.
-			retry(row, true, syncBackoffMax, truncateString(outcome, 200))
-		default: // SyncOutcomeRetry or anything unknown — redeliver later.
-			retry(row, true, syncBackoff(row.Attempts+1), "peer asked to retry")
+			// Receiver-CONFIG-dependent and CHEAP (rejected at the gate, no
+			// broadcast): the operator may widen consent / clearance / treaty
+			// scope at any point — minutes or days later — so retry at the 1h
+			// floor forever rather than giving up. Never-fail is what lets the
+			// bring-up race (backlog pushed before the peer finishes configuring
+			// consent) self-heal no matter how late the consent arrives.
+			retry(row, true, false, syncBackoffMax, truncateString(outcome, 200))
+		default:
+			// SyncOutcomeRetry: the peer ATTEMPTED a broadcast that came back
+			// non-terminal. This conflates transient (receiver vault locked,
+			// timeout) with a deterministic dead-end (content-validator reject),
+			// and each attempt costs the receiver a consensus broadcast — so
+			// this is the ONE case that eventually gives up (attempts cap),
+			// bounding the churn from a permanently-rejecting receiver.
+			retry(row, true, true, syncBackoff(row.Attempts+1), "peer asked to retry")
 		}
 	}
 }

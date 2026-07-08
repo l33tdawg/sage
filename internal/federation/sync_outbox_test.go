@@ -311,6 +311,46 @@ func TestSyncAttemptsCapFailsRow(t *testing.T) {
 	assert.Equal(t, 1, counts[store.SyncStateFailed], "capped -> failed, no infinite churn")
 }
 
+// TestSyncOfflinePeerNeverGivesUp is the "closed laptop overnight" regression:
+// a peer that is UNREACHABLE (transport error) must keep the memory queued
+// indefinitely — never marked failed — so it delivers whenever the peer returns.
+// Only a peer that ACTIVELY rejects via a successful broadcast may eventually
+// give up (covered by TestSyncAttemptsCapFailsRow).
+func TestSyncOfflinePeerNeverGivesUp(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	seedCommitted(t, ms, "m-away", "hr", "written while the peer was offline")
+
+	// Peer is unreachable: SyncPush returns a transport error every time.
+	m.syncPushFn = func(_ context.Context, _ string, _ *SyncPushRequest) (*SyncPushResponse, error) {
+		return nil, fmt.Errorf("peer chain-b unreachable: dial tcp: connect: connection refused")
+	}
+	// Far more ticks than the attempts cap — an offline peer must NOT be failed.
+	for i := 0; i < syncMaxAttempts+8; i++ {
+		m.syncTick(ctx, ms)
+		_ = ms.MarkSyncOutboxRetry(ctx, "chain-b", "m-away", i+1, time.Now().Add(-time.Second), "unreachable")
+	}
+	counts, err := ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.NoError(t, err)
+	assert.Zero(t, counts[store.SyncStateFailed], "an offline peer must never be given up on")
+	assert.Equal(t, 1, counts[store.SyncStatePending], "the memory stays queued for when the peer returns")
+
+	// Peer comes back online — it delivers.
+	m.syncPushFn = func(_ context.Context, _ string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		res := make([]SyncItemResult, len(req.Items))
+		for i, it := range req.Items {
+			res[i] = SyncItemResult{OriginMemoryID: it.OriginMemoryID, Outcome: SyncOutcomeAccepted}
+		}
+		return &SyncPushResponse{Results: res}, nil
+	}
+	require.NoError(t, ms.MarkSyncOutboxRetry(ctx, "chain-b", "m-away", 99, time.Now().Add(-time.Second), "due"))
+	m.syncTick(ctx, ms)
+	counts, _ = ms.CountSyncOutboxByState(ctx, "chain-b")
+	assert.Equal(t, 1, counts[store.SyncStateDelivered], "backlog delivers once the peer is reachable again")
+}
+
 func TestSyncResultsMatchedByOriginNotIndex(t *testing.T) {
 	ctx := context.Background()
 	m, ms, bs := newDrainTestManager(t)
