@@ -6,7 +6,7 @@ embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pu
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
-fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedSyncGet, fedSyncSet, fedSyncStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
+fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedReadiness, fedSyncGet, fedSyncSet, fedSyncStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 
@@ -10808,6 +10808,80 @@ function FedSyncPanel({ conn }) {
     </div>`;
 }
 
+// FederationWarmup - shown centrally on the Federation page while a freshly
+// minted node walks the app-version fork ladder to the point where cross-network
+// agreements become valid (app-v15). A brand-new node can't complete a JOIN
+// until then, so instead of letting the ceremony fail at the final step we
+// explain what's happening and show a live time estimate. onReady fires once the
+// node crosses the threshold so the page flips to the normal join UI.
+function FederationWarmup({ onState }) {
+    const [rd, setRd] = useState(undefined); // undefined=loading, null=error, obj=data
+    const rate = useRef({ h: null, t: null, bps: null });
+    const [eta, setEta] = useState(null);    // seconds remaining (estimate)
+
+    useEffect(() => {
+        let live = true;
+        const poll = async () => {
+            try {
+                const r = await fedReadiness();
+                if (!live) return;
+                setRd(r);
+                onState && onState(!!r.ready);
+                if (r.ready) return;
+                const now = Date.now(), prev = rate.current;
+                if (prev.h != null && r.block_height > prev.h && now > prev.t) {
+                    const bps = (r.block_height - prev.h) / ((now - prev.t) / 1000);
+                    rate.current.bps = prev.bps ? (prev.bps * 0.6 + bps * 0.4) : bps; // smoothed
+                }
+                rate.current.h = r.block_height; rate.current.t = now;
+                const bps = rate.current.bps;
+                if (bps && bps > 0 && r.estimated_blocks_remaining > 0) {
+                    setEta(Math.round(r.estimated_blocks_remaining / bps));
+                }
+            } catch (e) {
+                // Readiness endpoint missing (older binary) or unreachable: don't
+                // block the page — assume ready and let the normal join UI show.
+                if (live) { setRd(null); onState && onState(true); }
+            }
+        };
+        poll();
+        const id = setInterval(poll, 4000);
+        return () => { live = false; clearInterval(id); };
+    }, []);
+
+    // 1s tick so the timer feels alive; each poll re-syncs it.
+    useEffect(() => {
+        if (eta == null) return;
+        const id = setInterval(() => setEta(s => (s == null ? s : Math.max(0, s - 1))), 1000);
+        return () => clearInterval(id);
+    }, [eta != null]);
+
+    if (rd === undefined) return html`<div class="fed-warmup"><div class="muted">Checking federation status…</div></div>`;
+    if (rd === null || rd.ready) return null;
+
+    const stage = rd.app_version || 0, total = rd.required_version || 15;
+    const pct = Math.max(4, Math.round((stage / total) * 100));
+    const fmt = (s) => {
+        if (s == null) return null;
+        if (s <= 5) return 'any moment now';
+        const m = Math.floor(s / 60), sec = s % 60;
+        if (m >= 1) return `${m}m ${String(sec).padStart(2, '0')}s`;
+        return `${sec}s`;
+    };
+
+    return html`<div class="fed-warmup">
+        <div class="fed-warmup-ring"></div>
+        <h2>Federation is warming up</h2>
+        <p class="fed-warmup-lead">Your SAGE is bringing its secure cross-network layer online. On a brand-new node this finishes on its own and only has to happen once — you don't need to do anything.</p>
+        <div class="fed-warmup-bar"><div class="fed-warmup-fill" style="width:${pct}%"></div></div>
+        <div class="fed-warmup-stage">Stage ${stage} of ${total}</div>
+        ${eta != null
+            ? html`<div class="fed-warmup-eta">Estimated time remaining <strong>${fmt(eta)}</strong></div>`
+            : html`<div class="fed-warmup-eta muted">Estimating time remaining…</div>`}
+        <p class="fed-warmup-note muted">You can leave this page — it keeps working in the background. Connecting to another network becomes available the moment this completes.</p>
+    </div>`;
+}
+
 // FederationPage - the 8th sidebar section landing: role fork + connections list.
 function FederationPage() {
     const [mode, setMode] = useState('landing'); // landing | guest | host
@@ -10822,6 +10896,7 @@ function FederationPage() {
     useEffect(() => { if (mode === 'landing') load(); }, [mode]);
 
     const [openChain, setOpenChain] = useState('');
+    const [warming, setWarming] = useState(false); // fork-ladder warm-up on a fresh node
     const revoke = async (chain) => {
         if (!confirm(`Turn off the connection to ${chain}? This does NOT erase anything - it just stops the two networks from reaching each other.`)) return;
         try { await fedRevoke(chain); showToast(`Disconnected from ${chain}`, 'success'); load(); }
@@ -10837,7 +10912,8 @@ function FederationPage() {
             <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> on the same LAN, VPN, or a reachable route you provide. Built-in internet/NAT traversal is planned for v11.5. This is not the same as adding an agent to your own SAGE (do that under <strong>Agents</strong>), or the validator quorum your own agents form (also under Agents). Federation links two separate brains.</p>
             <${FedGreenRail} />
             ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
-            <div class="fed-roles">
+            <${FederationWarmup} onState=${(ready) => setWarming(!ready)} />
+            ${!warming && html`<div class="fed-roles">
                 <button class="fed-role-card" onClick=${() => setMode('guest')}>
                     <div class="fed-role-glyph">${icons.federation}</div>
                     <div class="fed-role-title">Join someone's network</div>
@@ -10848,7 +10924,7 @@ function FederationPage() {
                     <div class="fed-role-title">Let someone join mine</div>
                     <div class="fed-role-desc">You'll show a code for them to scan.</div>
                 </button>
-            </div>
+            </div>`}
 
             <div class="fed-conns">
                 <h3>Your connections <${HelpTip} text="Each row is a treaty with another SAGE. The dot is green when the connection is active and unexpired. The domains listed are the only knowledge shared across the link - everything else stays private." /></h3>

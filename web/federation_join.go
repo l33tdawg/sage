@@ -75,6 +75,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	r.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
 
 	r.Get("/v1/dashboard/federation/lan-endpoint", h.handleFedLanEndpoint)
+	r.Get("/v1/dashboard/federation/readiness", h.handleFedReadiness)
 
 	// v11.5 domain-sync consent + status (operator-only surface, but the
 	// dashboard IS the operator here — cookie-authed local control plane).
@@ -136,6 +137,69 @@ func (h *DashboardHandler) handleFedLanEndpoint(w http.ResponseWriter, _ *http.R
 		"port":               fedDefaultPort,
 		"suggested_endpoint": suggested,
 		"candidates":         out,
+	})
+}
+
+// --- Federation readiness (fork-ladder warm-up) -----------------------------
+
+// federationMinAppVersion is the app version at which cross_fed agreements
+// (tx-33 CrossFedSet / tx-34 CrossFedRevoke) become valid — app-v15. A freshly
+// minted chain starts at app_version 1 and the auto-advance watchdog walks the
+// fork ladder up to the binary ceiling (~200 blocks per fork), so a brand-new
+// node cannot complete a JOIN (the final tx-33 broadcast is rejected as
+// "unknown tx type") until it reaches this version. The Federation page shows a
+// warm-up countdown until then.
+const federationMinAppVersion = 15
+
+// forkDelayBlocks is the hard per-fork activation delay floor
+// (defaultUpgradeDelayBlocks in the ABCI app). Used only to ESTIMATE the
+// remaining warm-up — the real timing also depends on block rate, which the
+// frontend measures live.
+const forkDelayBlocks = 200
+
+// handleFedReadiness reports whether federation agreements can be created yet
+// (app_version >= federationMinAppVersion) plus the current app version and
+// block height, so the Federation page can render a warm-up estimate.
+func (h *DashboardHandler) handleFedReadiness(w http.ResponseWriter, r *http.Request) {
+	cometRPC := h.CometBFTRPC
+	if cometRPC == "" {
+		cometRPC = "http://127.0.0.1:26657"
+	}
+	appVersion, height := 0, 0
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, cometRPC+"/status", nil)
+	client := &http.Client{Timeout: 4 * time.Second}
+	if resp, err := client.Do(req); err == nil {
+		defer func() { _ = resp.Body.Close() }()
+		var st struct {
+			Result struct {
+				NodeInfo struct {
+					ProtocolVersion struct {
+						App string `json:"app"`
+					} `json:"protocol_version"`
+				} `json:"node_info"`
+				SyncInfo struct {
+					LatestBlockHeight string `json:"latest_block_height"`
+				} `json:"sync_info"`
+			} `json:"result"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&st) == nil {
+			appVersion, _ = strconv.Atoi(st.Result.NodeInfo.ProtocolVersion.App)
+			height, _ = strconv.Atoi(st.Result.SyncInfo.LatestBlockHeight)
+		}
+	}
+	ready := appVersion >= federationMinAppVersion
+	remainingForks := federationMinAppVersion - appVersion
+	if remainingForks < 0 {
+		remainingForks = 0
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"ready":            ready,
+		"app_version":      appVersion,
+		"required_version": federationMinAppVersion,
+		"block_height":     height,
+		// A ROUGH block-count estimate to the enabling fork; the frontend turns
+		// this into a time estimate using the block rate it measures live.
+		"estimated_blocks_remaining": remainingForks * forkDelayBlocks,
 	})
 }
 
