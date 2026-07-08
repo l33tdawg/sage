@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -68,6 +69,8 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/federation/connections/{chain_id}/revoke", h.handleFedRevoke)
 	r.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
 
+	r.Get("/v1/dashboard/federation/lan-endpoint", h.handleFedLanEndpoint)
+
 	r.Post("/v1/dashboard/federation/join/host/create", h.handleFedHostCreate)
 	r.Post("/v1/dashboard/federation/join/host/scan-return", h.handleFedHostScanReturn)
 	r.Get("/v1/dashboard/federation/join/host/{session_id}", h.handleFedHostStatus)
@@ -78,6 +81,51 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/federation/join/guest/request", h.handleFedGuestRequest)
 	r.Get("/v1/dashboard/federation/join/guest/{session_id}/status", h.handleFedGuestStatus)
 	r.Post("/v1/dashboard/federation/join/guest/confirm", h.handleFedGuestConfirm)
+}
+
+// --- LAN endpoint suggestion (fix the localhost-in-join-code footgun) -------
+
+// fedDefaultPort is the standard federation listener port (node.go default
+// 0.0.0.0:8444, and the placeholder in every wizard field). An operator who
+// runs a custom port edits the suggested endpoint in the wizard.
+const fedDefaultPort = 8444
+
+// FedLanCandidate is one address a JOINING peer on another machine could use to
+// reach this node's federation listener.
+type FedLanCandidate struct {
+	Endpoint  string `json:"endpoint"`
+	IP        string `json:"ip"`
+	Iface     string `json:"iface"`
+	IsPrivate bool   `json:"is_private"`
+}
+
+// handleFedLanEndpoint suggests the federation endpoint to advertise in a join
+// code. The browser only knows location.hostname — usually "localhost" when the
+// dashboard is opened on the same machine — which a DIFFERENT laptop can never
+// route to (that was the v11.4.0 "dial tcp 127.0.0.1:8444: connection refused"
+// on the guest: the host had baked localhost into its code). So we enumerate
+// this host's routable LAN addresses server-side (physical-LAN-private first)
+// and let the wizard default to the most-likely-reachable one.
+func (h *DashboardHandler) handleFedLanEndpoint(w http.ResponseWriter, _ *http.Request) {
+	cands := directIPv4Candidates()
+	out := make([]FedLanCandidate, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, FedLanCandidate{
+			Endpoint:  fmt.Sprintf("https://%s:%d", c.IP, fedDefaultPort),
+			IP:        c.IP,
+			Iface:     c.Iface,
+			IsPrivate: c.IsPrivate,
+		})
+	}
+	suggested := ""
+	if len(out) > 0 {
+		suggested = out[0].Endpoint // ranked: physical-LAN-private wins
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{
+		"port":               fedDefaultPort,
+		"suggested_endpoint": suggested,
+		"candidates":         out,
+	})
 }
 
 // --- Connections list / revoke / status ------------------------------------

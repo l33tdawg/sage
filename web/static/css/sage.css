@@ -4302,6 +4302,8 @@ input[type="range"]::-moz-range-thumb {
 .fed-field { margin: 14px 0; }
 .fed-field label { display: block; font-size: 13px; color: var(--text-dim); margin-bottom: 6px; }
 .fed-err { background: var(--danger-tint); border: 1px solid var(--danger); color: var(--danger); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 14px; font-size: 13px; }
+.fed-warn { background: var(--warn-tint, rgba(245,158,11,0.12)); border: 1px solid var(--warn, #f59e0b); color: var(--warn, #f59e0b); border-radius: var(--radius); padding: 8px 12px; margin-top: 8px; font-size: 12.5px; line-height: 1.45; }
+.fed-warn code { background: rgba(127,127,127,0.16); padding: 1px 5px; border-radius: 4px; }
 
 /* Channel gate */
 .fed-gate-q { font-size: 15px; font-weight: 500; margin: 18px 0 14px; line-height: 1.4; }

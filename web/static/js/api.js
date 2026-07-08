@@ -786,6 +786,9 @@ function fedPost(path, body) {
 
 // Connections list / disconnect / reachability.
 export function fedConnections() { return fedFetch('/v1/dashboard/federation/connections'); }
+// Suggested LAN endpoint to advertise in a join code (server-detected, so it is
+// never localhost - which a peer on another machine can't reach).
+export function fedLanEndpoint() { return fedFetch('/v1/dashboard/federation/lan-endpoint'); }
 export function fedRevoke(chainId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/revoke`); }
 export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/status`); }
 

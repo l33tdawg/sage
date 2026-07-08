@@ -6,7 +6,7 @@ embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pu
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
-fedConnections, fedRevoke, fedPeerStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
+fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 
@@ -10302,6 +10302,41 @@ function FedShareForm({ value, onChange }) {
     </div>`;
 }
 
+// isLoopbackEndpoint - true when an advertised federation endpoint points at
+// this machine's own loopback. A join code carrying localhost/127.0.0.1/::1 is
+// almost always wrong: the OTHER laptop will dial its OWN loopback and get
+// "connection refused" (the v11.4.0 LAN-join bug). Same-machine testing is the
+// only legitimate case, so we warn rather than block.
+function isLoopbackEndpoint(ep) {
+    const s = String(ep || '').toLowerCase();
+    return s.includes('localhost') || s.includes('127.0.0.1') || s.includes('[::1]') || s.includes('//::1');
+}
+
+// useLanEndpoint - resolves the endpoint the wizard should advertise. Starts
+// from location.hostname (works for same-machine tests) but immediately asks
+// the node for its real routable LAN address, because the browser only knows
+// the hostname the operator typed (usually "localhost"). Returns [endpoint,
+// setEndpoint, detecting]; setEndpoint keeps the manual field editable.
+function useLanEndpoint() {
+    const [endpoint, setEndpoint] = useState(`https://${location.hostname}:8444`);
+    const touched = useRef(false);
+    const set = (v) => { touched.current = true; setEndpoint(v); };
+    useEffect(() => {
+        let live = true;
+        fedLanEndpoint()
+            .then(r => {
+                // Only auto-fill when the operator hasn't typed their own, and
+                // only if the current value is a useless loopback address.
+                if (live && !touched.current && r && r.suggested_endpoint && isLoopbackEndpoint(endpoint)) {
+                    setEndpoint(r.suggested_endpoint);
+                }
+            })
+            .catch(() => {});
+        return () => { live = false; };
+    }, []);
+    return [endpoint, set];
+}
+
 // FedChannelGate - the physical-object question (redteam #2). Distinguishes a
 // code held as a PHYSICAL object from a transmitted image. A shared screen /
 // forwarded image / pure phone call routes to the spoken-code (Tier-4) path,
@@ -10316,6 +10351,7 @@ function FedChannelGate({ endpoint, onEndpoint, onChoose }) {
             <input class="fed-share-input" value=${endpoint} onInput=${e => onEndpoint(e.target.value)}
                 placeholder="https://192.168.1.20:8444" />
             <div class="muted">Usually https://[your computer's address]:8444 on your network.</div>
+            ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This is a localhost address — the other computer can't reach it. Use this machine's network address (e.g. <code>https://192.168.1.20:8444</code>), not <code>localhost</code>.</div>`}
         </div>
         <div class="fed-gate-q">Are you looking at their code as a physical thing they're holding - in the same room, or held up to the camera on a call YOU placed to someone you trust?</div>
         <div class="fed-gate-choices">
@@ -10330,7 +10366,7 @@ function FedChannelGate({ endpoint, onEndpoint, onChoose }) {
 // GuestJoinWizard - "Join a network". Maps to guest STEP 1-4.
 function GuestJoinWizard({ onExit }) {
     const [step, setStep] = useState('channel');
-    const [endpoint, setEndpoint] = useState(`https://${location.hostname}:8444`);
+    const [endpoint, setEndpoint] = useLanEndpoint();
     const [tier4, setTier4] = useState(false);
     const [scan, setScan] = useState(null);       // {session_id, host_chain, host_endpoint, host_pin, return_uri}
     const [scopeG, setScopeG] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
@@ -10458,7 +10494,7 @@ function GuestJoinWizard({ onExit }) {
 // HostJoinWizard - "Let someone join". Maps to host H1-H7.
 function HostJoinWizard({ onExit }) {
     const [step, setStep] = useState('create');
-    const [endpoint, setEndpoint] = useState(`https://${location.hostname}:8444`);
+    const [endpoint, setEndpoint] = useLanEndpoint();
     const [session, setSession] = useState(null);   // {session_id, otpauth_uri, host_pin}
     const [view, setView] = useState(null);          // host status view
     const [grant, setGrant] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
@@ -10526,6 +10562,7 @@ function HostJoinWizard({ onExit }) {
             <div class="fed-field">
                 <label>Your network address (how they'll reach you)</label>
                 <input class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:8444" />
+                ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This is a localhost address — whoever scans your code will dial their OWN computer and fail. Use this machine's network address (e.g. <code>https://192.168.1.10:8444</code>).</div>`}
             </div>
             <button class="btn btn-primary" disabled=${busy} onClick=${doCreate}>${busy ? 'Working…' : 'Show my connection code'}</button>
         </div>`}
