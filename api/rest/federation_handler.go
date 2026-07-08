@@ -4,12 +4,14 @@ import (
 	"encoding/hex"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/federation"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -223,6 +225,17 @@ func (s *Server) handleCrossFedRevoke(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, status, "Revoke rejected", msg)
 		return
 	}
+	// Off-consensus sync purge: consent + queued deliveries die with the
+	// agreement (tx-34 touches only chain state; node-local sync tables are
+	// this handler's job, mirroring Manager.RevokeAgreement's seed/CA purge).
+	if ss := s.syncStore(); ss != nil {
+		if purgeErr := ss.DeleteSyncDomains(r.Context(), remoteChainID); purgeErr != nil {
+			s.logger.Warn().Err(purgeErr).Str("remote", remoteChainID).Msg("revoke: sync domains purge failed")
+		}
+		if purgeErr := ss.PurgeSyncOutbox(r.Context(), remoteChainID); purgeErr != nil {
+			s.logger.Warn().Err(purgeErr).Str("remote", remoteChainID).Msg("revoke: sync outbox purge failed")
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"remote_chain_id": remoteChainID,
 		"tx_hash":         hash,
@@ -309,5 +322,139 @@ func (s *Server) handleCrossFedPeerStatus(w http.ResponseWriter, r *http.Request
 		"remote_chain_id": remoteChainID,
 		"reachable":       true,
 		"peer_time":       status.Time,
+	})
+}
+
+// ---- v11.5 domain-sync consent (sync_domains) -------------------------------
+//
+// Sync consent is LOCAL, off-consensus state: which domains this operator has
+// agreed to replicate with a given peer. It is deliberately NOT a field on the
+// on-chain cross_fed record (extending tx-33's positional codec would be a
+// fork) — each side configures its own set, and the receiving side enforces
+// its OWN rows on every incoming push, so asymmetric consent narrows, never
+// widens, what crosses the link. Operator-only in both directions: this is
+// node configuration with data-residency consequences, not agent surface.
+
+// SyncDomainsRequest is the JSON body for PUT /v1/federation/cross/{chain_id}/sync.
+type SyncDomainsRequest struct {
+	Domains []string `json:"domains"`
+}
+
+// maxSyncDomainsREST bounds a single consent set — generous for real
+// deployments, small enough to keep validation and status surfaces cheap.
+const maxSyncDomainsREST = 100
+
+// syncStore returns the SQLite store the sync tables live on, or nil when this
+// node runs another backend. Sync is SQLite-only (mcp_tokens precedent): the
+// Postgres store has no sync tables and must refuse loudly, not half-run.
+func (s *Server) syncStore() *store.SQLiteStore {
+	ss, _ := s.store.(*store.SQLiteStore)
+	return ss
+}
+
+// handleSyncDomainsSet handles PUT /v1/federation/cross/{chain_id}/sync —
+// replaces the consented sync-domain set for one agreement.
+func (s *Server) handleSyncDomainsSet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireNodeOperator(w, r) {
+		return
+	}
+	remoteChainID := chi.URLParam(r, "chain_id")
+	if err := federation.ValidateChainID(remoteChainID); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid remote chain id", err.Error())
+		return
+	}
+	ss := s.syncStore()
+	if ss == nil {
+		writeProblem(w, http.StatusNotImplemented, "Sync unavailable", "Domain sync requires the SQLite store backend.")
+		return
+	}
+	if s.badgerStore == nil {
+		writeProblem(w, http.StatusNotImplemented, "No chain state", "This node has no on-chain store wired.")
+		return
+	}
+	// Consent only attaches to a live agreement: the on-chain record is the
+	// treaty; sync_domains can only narrow inside it.
+	_, _, _, expiresAt, allowedDomains, _, status, err := s.badgerStore.GetCrossFed(remoteChainID)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "No agreement", "No federation agreement exists for this chain.")
+		return
+	}
+	if status != "active" || (expiresAt != 0 && time.Now().Unix() >= expiresAt) {
+		writeProblem(w, http.StatusConflict, "Agreement not active", "Sync consent requires an active, unexpired agreement.")
+		return
+	}
+
+	var req SyncDomainsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid body", "Expected {\"domains\": [\"...\"]}.")
+		return
+	}
+	if len(req.Domains) > maxSyncDomainsREST {
+		writeProblem(w, http.StatusBadRequest, "Too many domains", "A sync consent set is capped at 100 domains.")
+		return
+	}
+	for _, d := range req.Domains {
+		if d == "" {
+			writeProblem(w, http.StatusBadRequest, "Invalid domain", "Sync domains must be non-empty.")
+			return
+		}
+		if d == "*" {
+			// Concrete domains only. A wildcard here would be consent-by-
+			// default for every future domain — the AllowedDepts
+			// stored-but-unenforced trap in a different costume.
+			writeProblem(w, http.StatusBadRequest, "Invalid domain", "Sync domains must be concrete (no \"*\").")
+			return
+		}
+		if !federation.DomainAllowed(allowedDomains, d) {
+			writeProblem(w, http.StatusBadRequest, "Domain outside agreement",
+				"Sync domain "+strconv.Quote(d)+" is not covered by the agreement's allowed domains.")
+			return
+		}
+	}
+	if err := ss.SetSyncDomains(r.Context(), remoteChainID, req.Domains); err != nil {
+		s.logger.Error().Err(err).Str("remote", remoteChainID).Msg("set sync domains failed")
+		writeProblem(w, http.StatusInternalServerError, "Write error", "Failed to persist sync domains.")
+		return
+	}
+	saved, err := ss.GetSyncDomains(r.Context(), remoteChainID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read back sync domains.")
+		return
+	}
+	if saved == nil {
+		saved = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"remote_chain_id": remoteChainID,
+		"sync_domains":    saved,
+	})
+}
+
+// handleSyncDomainsGet handles GET /v1/federation/cross/{chain_id}/sync.
+func (s *Server) handleSyncDomainsGet(w http.ResponseWriter, r *http.Request) {
+	if !s.requireNodeOperator(w, r) {
+		return
+	}
+	remoteChainID := chi.URLParam(r, "chain_id")
+	if err := federation.ValidateChainID(remoteChainID); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid remote chain id", err.Error())
+		return
+	}
+	ss := s.syncStore()
+	if ss == nil {
+		writeProblem(w, http.StatusNotImplemented, "Sync unavailable", "Domain sync requires the SQLite store backend.")
+		return
+	}
+	domains, err := ss.GetSyncDomains(r.Context(), remoteChainID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read sync domains.")
+		return
+	}
+	if domains == nil {
+		domains = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"remote_chain_id": remoteChainID,
+		"sync_domains":    domains,
 	})
 }

@@ -315,6 +315,9 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/federation/cross", s.handleCrossFedList)
 		r.Post("/v1/federation/cross/{chain_id}/revoke", s.handleCrossFedRevoke)
 		r.Get("/v1/federation/cross/{chain_id}/status", s.handleCrossFedPeerStatus)
+		// v11.5 domain-sync consent (local, off-consensus; operator-only)
+		r.Put("/v1/federation/cross/{chain_id}/sync", s.handleSyncDomainsSet)
+		r.Get("/v1/federation/cross/{chain_id}/sync", s.handleSyncDomainsGet)
 
 		// v11 real-TOTP JOIN ceremony - the operator's localhost control surface
 		// (the guided guest/host wizards). Node-operator-only; off-consensus.

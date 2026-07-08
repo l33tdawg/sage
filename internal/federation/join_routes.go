@@ -25,6 +25,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/internal/netguard"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
 	"github.com/l33tdawg/sage/internal/totp"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -975,6 +976,19 @@ func (m *Manager) RevokeAgreement(remoteChainID string) (string, error) {
 	// Off-consensus purge (zeroize seed cache + delete seed files + drop cached CA).
 	m.purgeSeed(remoteChainID)
 	m.invalidateCACache(remoteChainID)
+	// v11.5 domain-sync purge: consent + queued deliveries die with the
+	// agreement. Best-effort — a failed purge must not fail the revoke (the
+	// send-time ActiveAgreement gate already stops delivery); the drainer's
+	// scan finds no consent rows and goes quiet.
+	if ss, ok := m.memStore.(*store.SQLiteStore); ok && ss != nil {
+		ctx := context.Background()
+		if err := ss.DeleteSyncDomains(ctx, remoteChainID); err != nil {
+			m.logger.Warn().Err(err).Str("remote", remoteChainID).Msg("revoke: sync domains purge failed")
+		}
+		if err := ss.PurgeSyncOutbox(ctx, remoteChainID); err != nil {
+			m.logger.Warn().Err(err).Str("remote", remoteChainID).Msg("revoke: sync outbox purge failed")
+		}
+	}
 	return hash, nil
 }
 
