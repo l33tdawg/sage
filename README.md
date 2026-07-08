@@ -51,7 +51,19 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.3.0
+## What's New in v11.3.1
+
+**A security-hygiene patch: `golang.org/x/crypto` is bumped past the recent SSH advisories, and a latent transaction-encoding overflow is closed.** v11.3.1 changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Both fixes sit off the consensus hot path.
+
+- **`golang.org/x/crypto` 0.51.0 to 0.52.0.** Clears a batch of Dependabot advisories against `x/crypto`. Every one of them is in `x/crypto/ssh`, which SAGE does not import (it uses only `argon2` and `hkdf`), so there was no reachable code path - the bump is dependency hygiene that closes the alerts rather than a fix for any live exposure.
+- **The transaction encoder bounds the payload length.** `EncodeTx` now rejects a payload larger than `MaxInt32` up front, so the total-length arithmetic cannot overflow and the 4-byte length prefix cannot silently truncate a pathologically oversized transaction. This mirrors the guard `DecodeTx` already had and resolves a CodeQL allocation-size-overflow finding. No real transaction approaches this size, so behavior is unchanged for all valid traffic.
+
+SDK 11.3.1.
+
+## Older releases
+
+<details>
+<summary>v11.3.0 - on-chain RBAC domain-ownership transfer + enforcing access matrix</summary>
 
 **Transferring a domain to another agent, and setting who can read and write it, are now real on-chain RBAC operations from CEREBRUM - and the access matrix finally enforces what it shows.** v11.3.0 changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, unchanged from v11.2.x. The RBAC domain-ownership transfer is built entirely from **existing** on-chain transactions - `DomainReassign` (tx-30), `AccessGrant` (tx-6), and `AccessRevoke` (tx-7), gated by an existing `gov_propose` (`operation=domain_reassign`) - so there is no new transaction and no new fork. There is exactly **one consensus-path code change** (`applyGovernanceProposal` now returns early for `OpDomainReassign` instead of falling through to validator-pubkey derivation, which logged a spurious error on every reassign), and it is proven **AppHash-neutral**: the caller appends a validator update only when the result is non-nil, so both the old error path and the new clean return append nothing - identical validator updates and state writes, so historical replay stays byte-identical, with only the error log gone. Memory **authorship (`submitting_agent`) is never rewritten** by any v11.3 path.
 
@@ -62,8 +74,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **The version badge reads live.** The CEREBRUM version badge (header and Overview node card) now reads the live node version from `/health` instead of a hard-coded constant, with the fallback constant kept in sync with the release.
 
 SDK 11.3.0.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.2.1 - sage_turn resilient to transient Ollama embed flakiness</summary>

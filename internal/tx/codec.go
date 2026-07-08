@@ -26,6 +26,12 @@ func EncodeTx(tx *ParsedTx) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Bound the payload length so the totalLen arithmetic below cannot overflow
+	// and the uint32 length prefix (written on line ~64) cannot silently
+	// truncate. Mirrors the DecodeTx guard that rejects payloadLen > MaxInt32.
+	if len(payload) > math.MaxInt32 {
+		return nil, fmt.Errorf("%w: payload too large (%d bytes)", ErrInvalidTxData, len(payload))
+	}
 
 	sig := tx.Signature
 	if sig == nil {
