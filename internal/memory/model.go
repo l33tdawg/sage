@@ -37,29 +37,31 @@ const (
 
 // MemoryRecord represents a memory object in the SAGE system.
 type MemoryRecord struct {
-	MemoryID        string       `json:"memory_id"`
-	SubmittingAgent string       `json:"submitting_agent"`
-	Content         string       `json:"content"`
-	ContentHash     []byte       `json:"content_hash"`
-	Embedding       []float32    `json:"embedding,omitempty"`
-	EmbeddingHash   []byte       `json:"embedding_hash,omitempty"`
-	MemoryType      MemoryType   `json:"memory_type"`
-	DomainTag       string       `json:"domain_tag"`
-	Provider        string       `json:"provider,omitempty"`
+	MemoryID        string     `json:"memory_id"`
+	SubmittingAgent string     `json:"submitting_agent"`
+	Content         string     `json:"content"`
+	ContentHash     []byte     `json:"content_hash"`
+	Embedding       []float32  `json:"embedding,omitempty"`
+	EmbeddingHash   []byte     `json:"embedding_hash,omitempty"`
+	MemoryType      MemoryType `json:"memory_type"`
+	DomainTag       string     `json:"domain_tag"`
+	Provider        string     `json:"provider,omitempty"`
 	// EmbeddingProvider records which EMBEDDER produced Embedding ("ollama",
 	// ...; empty = none/unknown, i.e. needs re-embed). Distinct from Provider,
 	// which is the submitting agent's LLM identity.
-	EmbeddingProvider string  `json:"embedding_provider,omitempty"`
-	ConfidenceScore   float64 `json:"confidence_score"`
-	Status          MemoryStatus `json:"status"`
-	ParentHash      string       `json:"parent_hash,omitempty"`
-	TaskStatus      TaskStatus   `json:"task_status,omitempty"`
+	EmbeddingProvider string       `json:"embedding_provider,omitempty"`
+	ConfidenceScore   float64      `json:"confidence_score"`
+	Status            MemoryStatus `json:"status"`
+	ParentHash        string       `json:"parent_hash,omitempty"`
+	TaskStatus        TaskStatus   `json:"task_status,omitempty"`
 	// Assignee is the agent_id a task is assigned to / claimed by (empty = open to
 	// any agent). Populated only on the task read paths.
-	Assignee        string       `json:"assignee,omitempty"`
-	CreatedAt       time.Time    `json:"created_at"`
-	CommittedAt     *time.Time   `json:"committed_at,omitempty"`
-	DeprecatedAt    *time.Time   `json:"deprecated_at,omitempty"`
+	Assignee       string     `json:"assignee,omitempty"`
+	TaskPickedUpBy string     `json:"task_picked_up_by,omitempty"`
+	TaskPickedUpAt *time.Time `json:"task_picked_up_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	CommittedAt    *time.Time `json:"committed_at,omitempty"`
+	DeprecatedAt   *time.Time `json:"deprecated_at,omitempty"`
 	// CorroborationCount is a display-only augmentation (not persisted on this
 	// struct) populated by list/detail handlers so the UI can show how many
 	// agents have backed a memory toward consensus.

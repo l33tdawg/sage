@@ -580,6 +580,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// Migration: add task support (task_status column + update CHECK constraint).
 	s.migrateTaskSupport(ctx)
 	s.migrateTaskAssignee(ctx)
+	s.migrateTaskPickup(ctx)
 
 	// Migration: add embedding_provider column. MUST run AFTER migrateTaskSupport,
 	// which recreates the memories table from a fixed schema (and would otherwise
@@ -689,6 +690,21 @@ func (s *SQLiteStore) migrateTaskAssignee(ctx context.Context) {
 	}
 	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN assignee TEXT DEFAULT ''`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_assignee ON memories(assignee) WHERE assignee != ''`)
+}
+
+// migrateTaskPickup records when an agent actually claims/starts an assigned
+// task. Dashboard assignment alone intentionally leaves these fields empty.
+func (s *SQLiteStore) migrateTaskPickup(ctx context.Context) {
+	row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='task_picked_up_at'`)
+	var count int
+	if err := row.Scan(&count); err == nil && count == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_picked_up_at TEXT`)
+	}
+	row = s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='task_picked_up_by'`)
+	if err := row.Scan(&count); err == nil && count == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_picked_up_by TEXT DEFAULT ''`)
+		_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_task_picked_up_by ON memories(task_picked_up_by) WHERE task_picked_up_by != ''`)
+	}
 }
 
 // migrateTaskSupport adds task_status column and updates the memory_type CHECK constraint
@@ -3737,8 +3753,8 @@ func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int)
 	return records, nil
 }
 
-// populateTaskAssignees fills rec.Assignee for the given task records. assignee
-// is not part of scanMemoryRow's fixed column set, so the board reads it here.
+// populateTaskAssignees fills task board-only fields that are not part of
+// scanMemoryRow's fixed column set.
 func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memory.MemoryRecord) {
 	if len(records) == 0 {
 		return
@@ -3750,20 +3766,34 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 		args[i] = rec.MemoryID
 	}
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT memory_id, COALESCE(assignee, '') FROM memories WHERE memory_id IN (`+strings.Join(ph, ",")+`)`, args...)
+		`SELECT memory_id, COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at
+		 FROM memories WHERE memory_id IN (`+strings.Join(ph, ",")+`)`, args...)
 	if err != nil {
 		return
 	}
 	defer func() { _ = rows.Close() }()
-	amap := make(map[string]string, len(records))
+	type taskBoardFields struct {
+		assignee   string
+		pickedBy   string
+		pickedUpAt *time.Time
+	}
+	byID := make(map[string]taskBoardFields, len(records))
 	for rows.Next() {
-		var id, a string
-		if rows.Scan(&id, &a) == nil {
-			amap[id] = a
+		var id, a, pickedBy string
+		var pickedAt *string
+		if rows.Scan(&id, &a, &pickedBy, &pickedAt) == nil {
+			byID[id] = taskBoardFields{
+				assignee:   a,
+				pickedBy:   pickedBy,
+				pickedUpAt: parseTimePtr(pickedAt),
+			}
 		}
 	}
 	for _, rec := range records {
-		rec.Assignee = amap[rec.MemoryID]
+		fields := byID[rec.MemoryID]
+		rec.Assignee = fields.assignee
+		rec.TaskPickedUpBy = fields.pickedBy
+		rec.TaskPickedUpAt = fields.pickedUpAt
 	}
 }
 
@@ -3774,8 +3804,10 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 // two agents doing the same work.
 func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (bool, error) {
 	res, err := s.writeExecContext(ctx,
-		`UPDATE memories SET assignee = ? WHERE memory_id = ? AND memory_type = 'task' AND COALESCE(assignee, '') IN ('', ?)`,
-		agentID, memoryID, agentID)
+		`UPDATE memories
+		 SET assignee = ?, task_picked_up_by = ?, task_picked_up_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		 WHERE memory_id = ? AND memory_type = 'task' AND COALESCE(assignee, '') IN ('', ?)`,
+		agentID, agentID, memoryID, agentID)
 	if err != nil {
 		return false, fmt.Errorf("claim task: %w", err)
 	}
@@ -3787,7 +3819,9 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (
 // clears the assignment. Only affects task-type memories.
 func (s *SQLiteStore) SetTaskAssignee(ctx context.Context, memoryID, assignee string) error {
 	res, err := s.writeExecContext(ctx,
-		`UPDATE memories SET assignee = ? WHERE memory_id = ? AND memory_type = 'task'`, assignee, memoryID)
+		`UPDATE memories
+		 SET assignee = ?, task_picked_up_by = '', task_picked_up_at = NULL
+		 WHERE memory_id = ? AND memory_type = 'task'`, assignee, memoryID)
 	if err != nil {
 		return fmt.Errorf("set task assignee: %w", err)
 	}

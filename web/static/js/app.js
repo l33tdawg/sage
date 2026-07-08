@@ -1740,6 +1740,7 @@ function TasksPage({ sse }) {
     const [adding, setAdding] = useState(false);
     const [showOldDone, setShowOldDone] = useState(false);
     const [agentList, setAgentList] = useState([]);
+    const [clearingColumn, setClearingColumn] = useState('');
     const draggingRef = useRef(false);
     const reloadTimer = useRef(null);
     const movedThisSession = useRef(new Set()); // keeps just-completed old cards visible (see isRecentDone)
@@ -1772,12 +1773,27 @@ function TasksPage({ sse }) {
         fetchAgents().then(d => setAgentList(d.agents || [])).catch(() => {});
     }, []);
 
+    useEffect(() => {
+        if (tab !== 'board') return;
+        const id = setInterval(() => {
+            fetchAgents().then(d => setAgentList(d.agents || [])).catch(() => {});
+        }, 15000);
+        return () => clearInterval(id);
+    }, [tab]);
+
     async function doAssign(taskId, assignee) {
-        setTasks(prev => prev.map(t => t.memory_id === taskId ? { ...t, assignee } : t)); // optimistic
+        setTasks(prev => prev.map(t => t.memory_id === taskId
+            ? { ...t, assignee, task_status: assignee ? 'in_progress' : t.task_status, task_picked_up_by: '', task_picked_up_at: '' }
+            : t)); // optimistic
         try {
             const res = await assignTask(taskId, assignee);
             if (res && res.error) { showToast('Could not assign: ' + res.error, 'error'); loadTasks(); }
-            else showToast(assignee ? `Assigned to ${agentName(assignee)}` : 'Task unassigned', 'success');
+            else {
+                if (res && res.task_status) {
+                    setTasks(prev => prev.map(t => t.memory_id === taskId ? { ...t, task_status: res.task_status } : t));
+                }
+                showToast(assignee ? `Assigned to ${agentName(assignee)} and moved to In Progress` : 'Task unassigned', 'success');
+            }
         } catch (e) { showToast('Could not assign task', 'error'); loadTasks(); }
     }
 
@@ -1824,6 +1840,37 @@ function TasksPage({ sse }) {
             showToast('Could not move task: ' + (e.message || 'network error'), 'error');
             loadTasks(); // revert on error
         }
+    }
+
+    async function clearColumn(col, colTasks) {
+        if (!colTasks.length || clearingColumn) return;
+        const count = colTasks.length;
+        const terminal = col.key === 'done' || col.key === 'dropped';
+        const action = terminal
+            ? 'forget them from normal views. They stay audit-only on-chain.'
+            : 'move them to Dropped.';
+        if (!window.confirm(`Clear ${count} ${col.label} task${count !== 1 ? 's' : ''}? This will ${action}`)) return;
+
+        setClearingColumn(col.key);
+        const ids = colTasks.map(t => t.memory_id);
+        const previousTasks = tasks;
+        try {
+            if (terminal) {
+                setTasks(prev => prev.filter(t => !ids.includes(t.memory_id)));
+                await Promise.all(ids.map(id => deleteMemory(id)));
+                showToast(`Cleared ${count} ${col.label} task${count !== 1 ? 's' : ''}`, 'success');
+            } else {
+                ids.forEach(id => movedThisSession.current.add(id));
+                setTasks(prev => prev.map(t => ids.includes(t.memory_id) ? { ...t, task_status: 'dropped' } : t));
+                await Promise.all(ids.map(id => updateTaskStatus(id, 'dropped')));
+                showToast(`Moved ${count} ${col.label} task${count !== 1 ? 's' : ''} to Dropped`, 'success');
+            }
+            loadTasks();
+        } catch (e) {
+            setTasks(previousTasks);
+            showToast('Could not clear column: ' + (e.message || 'network error'), 'error');
+        }
+        setClearingColumn('');
     }
 
     async function handleAddTask(e) {
@@ -1888,6 +1935,26 @@ function TasksPage({ sse }) {
         setDragging(null);
         setDragOver(null);
         scheduleReload(); // pick up any refresh deferred during the drag
+    }
+
+    function taskWorkState(task) {
+        if (task.task_status !== 'in_progress' || !task.assignee) return null;
+        if (!task.task_picked_up_at) {
+            return { tone: 'queued', label: `${agentName(task.assignee)} assigned - waiting for pickup` };
+        }
+        const agent = agentList.find(a => a.agent_id === task.assignee);
+        const name = agent ? agent.name : agentName(task.assignee);
+        if (!agent || !agent.last_seen) {
+            return { tone: 'unknown', label: `${name} picked up this task - no recent heartbeat` };
+        }
+        const ageMs = Date.now() - new Date(agent.last_seen).getTime();
+        if (ageMs < 5 * 60 * 1000) {
+            return { tone: 'live', label: `${name} picked up this task and is active now` };
+        }
+        if (ageMs < 60 * 60 * 1000) {
+            return { tone: 'warm', label: `${name} picked up this task - last seen ${timeAgo(agent.last_seen)}` };
+        }
+        return { tone: 'cold', label: `${name} picked up this task - offline since ${timeAgo(agent.last_seen)}` };
     }
 
     const taskAuthors = [...new Set(tasks.map(t => t.provider).filter(Boolean))].sort();
@@ -1986,13 +2053,27 @@ function TasksPage({ sse }) {
                                 <span class="kanban-column-icon" style="color:${col.color}">${col.icon}</span>
                                 <span class="kanban-column-label">${col.label}</span>
                                 <span class="kanban-column-count">${colTasks.length}</span>
+                                ${colTasks.length > 0 && html`
+                                    <button class="kanban-column-clear"
+                                        title=${col.key === 'done' || col.key === 'dropped' ? `Clear ${col.label} from board` : `Move all ${col.label} tasks to Dropped`}
+                                        disabled=${clearingColumn === col.key}
+                                        onClick=${e => { e.stopPropagation(); clearColumn(col, colTasks); }}>
+                                        ${clearingColumn === col.key ? '...' : 'Clear'}
+                                    </button>
+                                `}
                             </div>
                             <div class="kanban-cards">
                                 ${colTasks.map(task => html`
+                                    ${(() => {
+                                        const workState = taskWorkState(task);
+                                        return html`
                                     <div class="kanban-card ${dragging === task.memory_id ? 'dragging' : ''}"
                                          draggable="true"
                                          onDragStart=${e => handleDragStart(e, task)}
                                          onDragEnd=${() => { draggingRef.current = false; scheduleReload(); }}>
+                                        ${workState && html`
+                                            <span class="kanban-work-led ${workState.tone}" title=${workState.label} aria-label=${workState.label}></span>
+                                        `}
                                         <div class="kanban-card-content">${task.content.replace(/^\[TASK\]\s*/i, '')}</div>
                                         <div class="kanban-card-meta">
                                             <span class="domain-badge" style="background:${getDomainColor(task.domain_tag)}20;color:${getDomainColor(task.domain_tag)};font-size:10px;padding:2px 6px;">
@@ -2028,6 +2109,8 @@ function TasksPage({ sse }) {
                                             </div>
                                         ` : null}
                                     </div>
+                                        `;
+                                    })()}
                                 `)}
                                 ${colTasks.length === 0 && html`
                                     <div class="kanban-empty">${loading ? 'Loading...' : 'No tasks'}</div>

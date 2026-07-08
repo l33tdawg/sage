@@ -1748,10 +1748,16 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		Provider        string `json:"provider"`
 		SubmittingAgent string `json:"submitting_agent"`
 		// Assignee: the agent_id a task is assigned to / claimed by (board only).
-		Assignee string `json:"assignee"`
+		Assignee       string `json:"assignee"`
+		TaskPickedUpBy string `json:"task_picked_up_by"`
+		TaskPickedUpAt string `json:"task_picked_up_at,omitempty"`
 	}
 	results := make([]taskResult, 0, len(tasks))
 	for _, t := range tasks {
+		taskPickedUpAt := ""
+		if t.TaskPickedUpAt != nil {
+			taskPickedUpAt = t.TaskPickedUpAt.Format("2006-01-02T15:04:05Z")
+		}
 		results = append(results, taskResult{
 			MemoryID:        t.MemoryID,
 			Content:         t.Content,
@@ -1762,6 +1768,8 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 			Provider:        t.Provider,
 			SubmittingAgent: t.SubmittingAgent,
 			Assignee:        t.Assignee,
+			TaskPickedUpBy:  t.TaskPickedUpBy,
+			TaskPickedUpAt:  taskPickedUpAt,
 		})
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{"tasks": results, "total": len(results)})
@@ -1816,7 +1824,8 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 }
 
 // handleAssignTask assigns (or, with an empty assignee, unassigns) a task to a
-// specific agent from the dashboard - so a human can hand work to one agent.
+// specific agent from the dashboard. Assigning is treated as handing the job to
+// that agent now, so the card moves to In Progress immediately.
 func (h *DashboardHandler) handleAssignTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if id == "" {
@@ -1831,14 +1840,23 @@ func (h *DashboardHandler) handleAssignTask(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if err := h.store.SetTaskAssignee(r.Context(), id, strings.TrimSpace(body.Assignee)); err != nil {
+	assignee := strings.TrimSpace(body.Assignee)
+	if err := h.store.SetTaskAssignee(r.Context(), id, assignee); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
+	}
+	taskStatus := ""
+	if assignee != "" {
+		taskStatus = string(memory.TaskStatusInProgress)
+		if err := h.store.UpdateTaskStatus(r.Context(), id, memory.TaskStatusInProgress); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	if h.SSE != nil {
 		h.SSE.Broadcast(SSEEvent{Type: EventTask, MemoryID: id})
 	}
-	writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "assignee": body.Assignee})
+	writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "assignee": assignee, "task_status": taskStatus})
 }
 
 // handleCreateTaskDashboard creates a new task from the CEREBRUM dashboard.
