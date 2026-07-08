@@ -970,6 +970,9 @@ func runServe() (rerr error) {
 			// Periodic reaper for expired join sessions / guest drafts / rate-limit
 			// map (seed hygiene + staged-CA rollback + unbounded-growth guard).
 			fedMgr.StartMaintenance(ctx)
+			// v11.5 domain-sync outbox drainer (scan + deliver). Internally a
+			// no-op with a log line on non-SQLite backends.
+			fedMgr.StartSyncDrainer(ctx)
 			go func() {
 				logger.Info().Str("addr", fedAddr).Str("chain_id", cfg.ChainID).Msg("federation mTLS listener starting")
 				if fedServeErr := fedServer.ListenAndServeTLS("", ""); fedServeErr != nil && fedServeErr != http.ErrServerClosed {

@@ -2,6 +2,7 @@ package federation
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/x509"
 	"fmt"
@@ -77,6 +78,11 @@ type Manager struct {
 	// calls: each blocks up to the commit timeout, so an unbounded push flood
 	// would otherwise pin a goroutine per push. A small pool caps the hold.
 	broadcastSem chan struct{}
+
+	// syncPushFn is the outbox drainer's delivery seam: nil in production
+	// (the drainer calls m.SyncPush, the real mTLS client), non-nil only in
+	// tests so drain logic is testable without a TLS peer.
+	syncPushFn func(ctx context.Context, remoteChainID string, req *SyncPushRequest) (*SyncPushResponse, error)
 
 	// seedMu guards seedCache — per-agreement TOTP seeds (v11 join ceremony),
 	// keyed by remote chain id → the candidate seeds (current + previous epoch

@@ -166,17 +166,17 @@ func (s *SQLiteStore) encryptContent(plaintext string) (string, error) {
 
 // decryptContent decrypts a string if it's encrypted.
 // Returns the original string if not encrypted or no vault.
-// vaultLockedPlaceholder is returned for encrypted content when no vault key is
+// VaultLockedPlaceholder is returned for encrypted content when no vault key is
 // available. It is NOT real content — callers that need plaintext (e.g. re-embed)
 // must treat it as undecryptable, never store or embed it.
-const vaultLockedPlaceholder = "[encrypted — vault locked]"
+const VaultLockedPlaceholder = "[encrypted — vault locked]"
 
 func (s *SQLiteStore) decryptContent(stored string) (string, error) {
 	if !strings.HasPrefix(stored, encPrefix) {
 		return stored, nil // not encrypted
 	}
 	if s.vault == nil {
-		return vaultLockedPlaceholder, nil
+		return VaultLockedPlaceholder, nil
 	}
 	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, encPrefix))
 	if err != nil {
@@ -1019,7 +1019,7 @@ func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit int) ([]
 		// letting the caller embed the placeholder or mis-tag readable memories as
 		// unreadable — a genuine key-mismatch (decErr != nil) is different and is
 		// reported per-row via Decryptable=false.
-		if dec == vaultLockedPlaceholder {
+		if dec == VaultLockedPlaceholder {
 			return nil, fmt.Errorf("vault key unavailable — unlock before re-embedding")
 		}
 		it.Decryptable = decErr == nil

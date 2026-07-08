@@ -525,3 +525,81 @@ func (s *SQLiteStore) FindCommittedByContentHashDomains(ctx context.Context, con
 	}
 	return out, rows.Err()
 }
+
+// ---- sender-side scan ----
+
+// SyncCandidate is one committed memory eligible for enqueueing toward a peer.
+type SyncCandidate struct {
+	MemoryID       string
+	DomainTag      string
+	Classification int
+}
+
+// ListSyncCandidates returns committed memories inside the consented domain
+// subtrees that have no outbox row for the peer AND are not themselves synced
+// copies (loop prevention folded into SQL: any memory with a sync_origin
+// local_memory_id mapping is never re-forwarded to anyone). Subtree semantics
+// match DomainAllowed: a consented "hr" covers "hr" and "hr.public". Pure
+// anti-join on (status, domain) — deliberately NOT a committed_at watermark
+// (legacy rows have committed_at NULL and unindexed), so the same call is
+// both the steady-state scan and restart recovery.
+func (s *SQLiteStore) ListSyncCandidates(ctx context.Context, remoteChainID string, domains []string, limit int) ([]SyncCandidate, error) {
+	if len(domains) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	clause := ""
+	args := make([]any, 0, len(domains)*2+2)
+	for i, d := range domains {
+		if d == "" {
+			continue
+		}
+		if i > 0 {
+			clause += " OR "
+		}
+		clause += "(m.domain_tag = ? OR m.domain_tag LIKE ?)"
+		args = append(args, d, d+".%")
+	}
+	if clause == "" {
+		return nil, nil
+	}
+	args = append(args, remoteChainID, limit)
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT m.memory_id, m.domain_tag, m.classification FROM memories m
+		 WHERE m.status = 'committed' AND (`+clause+`)
+		   AND NOT EXISTS (SELECT 1 FROM sync_outbox o
+		                    WHERE o.remote_chain_id = ? AND o.memory_id = m.memory_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_origin so
+		                    WHERE so.local_memory_id = m.memory_id)
+		 ORDER BY m.created_at ASC
+		 LIMIT ?`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list sync candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SyncCandidate
+	for rows.Next() {
+		var c SyncCandidate
+		if err := rows.Scan(&c.MemoryID, &c.DomainTag, &c.Classification); err != nil {
+			return nil, fmt.Errorf("scan sync candidate: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// GetMemoryClassificationLocal reads the mirror's classification column (the
+// sender-side clearance gate; the receiver independently enforces its own
+// ceiling). Errors, including not-found, must be treated fail-closed by the
+// caller — never default a missing row toward disclosure.
+func (s *SQLiteStore) GetMemoryClassificationLocal(ctx context.Context, memoryID string) (int, error) {
+	var c int
+	err := s.conn.QueryRowContext(ctx,
+		`SELECT classification FROM memories WHERE memory_id = ?`, memoryID).Scan(&c)
+	if err != nil {
+		return 0, fmt.Errorf("get local classification: %w", err)
+	}
+	return c, nil
+}

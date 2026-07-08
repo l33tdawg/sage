@@ -1,0 +1,288 @@
+package federation
+
+// Sender side of v11.5 domain sync: the outbox drainer.
+//
+// One goroutine, one ticker. Each tick, per peer chain with sync consent:
+//
+//   scan  — anti-join the committed set in the consented subtrees against the
+//           outbox (ListSyncCandidates also excludes synced copies: never
+//           re-forward). Doubles as restart recovery by construction — no
+//           watermark to lose. Enqueue gates: active agreement, treaty
+//           domain scope, local classification <= treaty ceiling.
+//   drain — claim up to one push batch (CAS pending->delivering), re-run
+//           EVERY gate at send time (agreements re-scope, classifications
+//           change), load decrypted content, deliver via SyncPush, map the
+//           per-item outcomes onto outbox states.
+//
+// Failure taxonomy (locked by the build map):
+//   accepted/duplicate            -> delivered (terminal)
+//   rejected_* per-item outcomes  -> rejected (terminal, last_error surfaced)
+//   retry outcome / transport err -> pending, attempts+1, exp backoff
+//   ErrSyncUnsupported            -> pending, 1h floor ("peer lacks sync")
+//   sender vault locked           -> pending, short delay, attempts UNCHANGED
+//   memory gone / oversized       -> failed (terminal local)
+//
+// SQLite discipline: every claim/update is a single-row write; no store
+// transaction ever spans the network call (ABCI Commit's flush panics the
+// node if the write lock is starved).
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"time"
+
+	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/store"
+)
+
+const (
+	// syncDrainInterval is the steady-state tick. The commit-tail watcher
+	// (build step 6) nudges delivery sooner; this ticker is the correctness
+	// backstop, so it can stay coarse.
+	syncDrainInterval = 30 * time.Second
+	// syncScanLimit bounds new enqueues per (agreement, tick) so a huge
+	// backfill trickles instead of flooding the outbox in one transaction
+	// storm; the anti-join finds the remainder next tick.
+	syncScanLimit = 200
+	// syncPushTimeout is the per-peer delivery deadline, derived from
+	// context.Background() + mergeCancel like receipt fan-out (a hung peer
+	// must not stall the whole drain loop past this).
+	syncPushTimeout = 20 * time.Second
+
+	syncBackoffBase = 30 * time.Second
+	syncBackoffMax  = time.Hour
+	// syncVaultRetryDelay reschedules vault-locked deferrals: cheap to poll
+	// (no network) but pointless to hammer; attempts are NOT incremented.
+	syncVaultRetryDelay = 2 * time.Minute
+)
+
+// StartSyncDrainer launches the outbox goroutine. No-op (with one log line)
+// on non-SQLite backends — sync is SQLite-only and must disable loudly.
+func (m *Manager) StartSyncDrainer(ctx context.Context) {
+	ss := m.syncStore()
+	if ss == nil {
+		m.logger.Info().Msg("domain sync disabled: store backend is not SQLite")
+		return
+	}
+	go func() {
+		// Immediate first pass: restart recovery should not wait a tick.
+		m.syncTick(ctx, ss)
+		t := time.NewTicker(syncDrainInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				m.syncTick(ctx, ss)
+			}
+		}
+	}()
+}
+
+// syncTick runs one scan+drain pass over every peer with sync consent.
+func (m *Manager) syncTick(ctx context.Context, ss *store.SQLiteStore) {
+	chains, err := ss.ListSyncDomainChains(ctx)
+	if err != nil {
+		m.logger.Warn().Err(err).Msg("sync: list consent chains failed")
+		return
+	}
+	for _, chain := range chains {
+		if ctx.Err() != nil {
+			return
+		}
+		agreement, err := m.ActiveAgreement(chain)
+		if err != nil {
+			// Revoked/expired/missing agreement: consent rows linger until the
+			// revoke purge, but nothing moves — fail closed and quiet.
+			continue
+		}
+		consented, err := ss.GetSyncDomains(ctx, chain)
+		if err != nil || len(consented) == 0 {
+			continue
+		}
+		m.syncScan(ctx, ss, agreement, consented)
+		m.syncDrain(ctx, ss, agreement, consented)
+	}
+}
+
+// syncScan enqueues committed memories from the consented subtrees.
+func (m *Manager) syncScan(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
+	cands, err := ss.ListSyncCandidates(ctx, agreement.RemoteChainID, consented, syncScanLimit)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("peer", agreement.RemoteChainID).Msg("sync: candidate scan failed")
+		return
+	}
+	for _, c := range cands {
+		// Enqueue gates (all re-run at send time; these just keep junk out of
+		// the queue): treaty scope + local classification ceiling.
+		if !DomainAllowed(agreement.AllowedDomains, c.DomainTag) {
+			continue
+		}
+		if c.Classification > int(agreement.MaxClearance) {
+			continue
+		}
+		if _, err := ss.EnqueueSyncOutbox(ctx, agreement.RemoteChainID, c.MemoryID); err != nil {
+			m.logger.Warn().Err(err).Str("memory", c.MemoryID).Msg("sync: enqueue failed")
+		}
+	}
+}
+
+// syncDrain claims one batch and delivers it.
+func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
+	chain := agreement.RemoteChainID
+	claimed, err := ss.ClaimDueSyncOutbox(ctx, chain, SyncPushMaxItems)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("peer", chain).Msg("sync: claim failed")
+		return
+	}
+	if len(claimed) == 0 {
+		return
+	}
+
+	retry := func(row store.SyncOutboxItem, bumpAttempts bool, delay time.Duration, reason string) {
+		attempts := row.Attempts
+		if bumpAttempts {
+			attempts++
+		}
+		if err := ss.MarkSyncOutboxRetry(ctx, chain, row.MemoryID, attempts, time.Now().Add(delay), reason); err != nil {
+			m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: retry mark failed")
+		}
+	}
+
+	// Build the batch, re-running every gate at send time.
+	items := make([]SyncItem, 0, len(claimed))
+	itemRows := make([]store.SyncOutboxItem, 0, len(claimed))
+	for _, row := range claimed {
+		rec, err := ss.GetMemory(ctx, row.MemoryID)
+		if err != nil {
+			// The memory is gone (forgotten/deleted after enqueue): terminal.
+			_ = ss.MarkSyncOutboxFailed(ctx, chain, row.MemoryID, "memory no longer available")
+			continue
+		}
+		if rec.Status != memory.StatusCommitted {
+			// Deprecated (or otherwise no longer committed) since enqueue:
+			// lifecycle is sovereign and does NOT propagate — terminal skip.
+			_ = ss.MarkSyncOutboxFailed(ctx, chain, row.MemoryID, "memory no longer committed")
+			continue
+		}
+		if rec.Content == store.VaultLockedPlaceholder {
+			// Sender vault locked: defer WITHOUT burning attempts, never push
+			// the placeholder literal.
+			retry(row, false, syncVaultRetryDelay, "sender vault locked")
+			continue
+		}
+		if rec.Content == "" {
+			// Hash-only co-commit rows whose content backfill never arrived.
+			_ = ss.MarkSyncOutboxFailed(ctx, chain, row.MemoryID, "no content available")
+			continue
+		}
+		if len(rec.Content) > SyncMaxItemContent {
+			_ = ss.MarkSyncOutboxFailed(ctx, chain, row.MemoryID, "content too large")
+			continue
+		}
+		if !DomainAllowed(agreement.AllowedDomains, rec.DomainTag) || !DomainAllowed(consented, rec.DomainTag) {
+			// Agreement re-scoped narrower, consent changed, or the memory was
+			// re-domained (v11.3 reassign) since enqueue.
+			_ = ss.MarkSyncOutboxRejected(ctx, chain, row.MemoryID, "domain out of scope at send time")
+			continue
+		}
+		cls, err := ss.GetMemoryClassificationLocal(ctx, row.MemoryID)
+		if err != nil {
+			// Fail CLOSED on the egress boundary: an unreadable classification
+			// is never treated as "low".
+			retry(row, true, syncBackoff(row.Attempts+1), "classification read failed")
+			continue
+		}
+		if cls > int(agreement.MaxClearance) {
+			_ = ss.MarkSyncOutboxRejected(ctx, chain, row.MemoryID, "classification above agreement ceiling")
+			continue
+		}
+		items = append(items, SyncItem{
+			OriginChainID:   m.localChainID,
+			OriginMemoryID:  row.MemoryID,
+			OriginCreatedAt: rec.CreatedAt.UTC().Format(time.RFC3339),
+			Domain:          rec.DomainTag,
+			Classification:  cls,
+			MemoryType:      string(rec.MemoryType),
+			ConfidenceScore: rec.ConfidenceScore,
+			Content:         rec.Content,
+			ContentHash:     contentHashHex(rec.Content),
+			Tags:            nil, // tag replication is a documented v11.5 non-goal
+		})
+		itemRows = append(itemRows, row)
+	}
+	if len(items) == 0 {
+		return
+	}
+
+	// Deliver. Deadline is our own (context.Background()), merged with the
+	// node lifecycle ctx — the receipt fan-out pattern.
+	pctx, cancel := context.WithTimeout(context.Background(), syncPushTimeout)
+	pctx = mergeCancel(pctx, ctx)
+	defer cancel()
+	push := m.syncPushFn
+	if push == nil {
+		push = m.SyncPush
+	}
+	resp, err := push(pctx, chain, &SyncPushRequest{Items: items})
+	if err != nil {
+		delay, reason := syncBackoff(0), err.Error()
+		for _, row := range itemRows {
+			if err == ErrSyncUnsupported {
+				retry(row, true, syncBackoffMax, "peer does not support sync")
+			} else {
+				retry(row, true, syncBackoff(row.Attempts+1), truncateString(reason, 200))
+			}
+		}
+		_ = delay
+		return
+	}
+
+	// Map per-item outcomes. SyncPush already verified 1:1 result binding.
+	for i, res := range resp.Results {
+		row := itemRows[i]
+		switch res.Outcome {
+		case SyncOutcomeAccepted, SyncOutcomeDuplicate:
+			if err := ss.MarkSyncOutboxDelivered(ctx, chain, row.MemoryID); err != nil {
+				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: delivered mark failed")
+			}
+		case SyncOutcomeRejectedXDomainDup, SyncOutcomeRejectedClearance,
+			SyncOutcomeRejectedConsent, SyncOutcomeRejectedScope:
+			if err := ss.MarkSyncOutboxRejected(ctx, chain, row.MemoryID, res.Outcome); err != nil {
+				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: rejected mark failed")
+			}
+		default: // SyncOutcomeRetry or anything unknown — redeliver later.
+			retry(row, true, syncBackoff(row.Attempts+1), "peer asked to retry")
+		}
+	}
+}
+
+// syncBackoff is min(30s * 2^attempts, 1h), shift-capped.
+func syncBackoff(attempts int) time.Duration {
+	if attempts < 0 {
+		attempts = 0
+	}
+	if attempts > 7 { // 30s << 7 = 64m > cap
+		return syncBackoffMax
+	}
+	d := syncBackoffBase << uint(attempts) // #nosec G115 -- bounded 0-7
+	if d > syncBackoffMax {
+		return syncBackoffMax
+	}
+	return d
+}
+
+// contentHashHex is the wire content-hash form (hex sha256 of the content).
+func contentHashHex(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+func truncateString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
