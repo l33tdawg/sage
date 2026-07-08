@@ -51,15 +51,29 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.4.0
+## What's New in v11.4.5
+
+**Federation grows up: it's opt-in behind one master switch, it survives restarts and hours-long peer outages, and a topic's memories can now be copied across a link, not just borrowed live.** v11.4.5 is an off-consensus reliability and federation-UX release - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Everything here lives on the federation transport (mTLS on `:8444`, outside consensus) and the dashboard; domain sync admits a copied memory as an ordinary locally-signed `MemorySubmit` on the receiver's own chain, so there is no new transaction and no fork.
+
+- **Federation is opt-in now, behind one switch.** A fresh or upgraded node accepts **no** inbound connections until you turn federation on - upgrading never silently opens the `:8444` port. The Federation panel gains a master **On/Off** switch at the top, and the same toggle stays in Settings, so the control is discoverable in both places. While it's off, the join/host cards are hidden with a nudge to turn it on; when on, the listener still only admits peers pinned to an agreement you approved (on your LAN or a route you provide).
+- **Domain sync (preview): copy a topic across a link, not just borrow answers.** A federated connection has always let each side *borrow* answers live within shared topics; now you can also *copy* a topic's memories across so they live on both brains. It's built from a durable outbox, an anti-entropy digest that reconciles what each side is missing, and a commit-tail watcher, and it stays **off until both sides turn it on** for a given topic. Copied memories are admitted on the receiver as ordinary locally-signed submissions - no new transaction type, no fork.
+- **Federation survives being offline.** A peer that goes dark for hours no longer costs you the backlog: transport and environmental errors (peer offline, not-yet-upgraded, vault locked) no longer count toward the give-up cap, so queued memories keep retrying and drain when the peer returns. The rotating-seed cache is now loaded at boot, so federation no longer stops working after a node restart. Undeliverable and rejected items surface in the dashboard with a **resend** control and an out-of-office-style reason, so nothing fails silently.
+- **A dashboard crash is fixed.** The Settings page (and the new Federation panel) could hit a `ReferenceError` that froze the section; the shared status-dot helper is now module-scoped so both render cleanly.
+- **Groundwork for v11.5 internet federation.** The optional `natter` connectivity service (a separate binary, outside the SAGE trust boundary) gains a coordinator-only mode and explicit address advertisement for cloud hosts - plumbing for the NAT-traversal/relay work that lands as the v11.5 headline. Built-in internet traversal is **not** in v11.4.5 yet; federation today is LAN or a route you provide.
+
+SDK 11.4.5.
+
+## Older releases
+
+<details>
+<summary>v11.4.0 - search-selection "Transfer to agent" entry point for domain reassign</summary>
 
 **Handing a memory's domain to another agent is now one click from the search results themselves.** v11.4.0 is a dashboard-only feature release: it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork** - `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. The new control reuses the existing v11.3 on-chain reassignment path, so there is no new transaction and no server change.
 
 - **"Transfer to agent" from the memory selection.** The Search-page bulk action bar gains a "Transfer to agent" action alongside Move, Tag, and Forget: select one or more memories, pick a new owner, and their whole RBAC domain's ownership is handed over on-chain. This complements the existing filter-row "Transfer domain ownership" button (which starts from a source agent) with a second, more direct entry point that starts from the memories you are looking at. Both drive the same honest whole-domain transfer: it moves the **entire domain** (every memory in it, including ones not selected), transfers **ownership plus read/write access, not authorship** (`submitting_agent` stays immutable and auditable), and the previous owner is fully revoked. When a selection spans several domains, each is transferred in turn, and the confirmation copy spells out that unselected memories move too.
 
 SDK 11.4.0.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.3.1 - x/crypto SSH-advisory bump + tx-encoder overflow guard</summary>
