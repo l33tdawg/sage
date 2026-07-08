@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/relay"
 	ma "github.com/multiformats/go-multiaddr"
 	"github.com/rs/zerolog"
 )
@@ -65,19 +66,29 @@ func run(configPath string, log zerolog.Logger) error {
 	}
 	defer h.Close()
 
-	rly, err := startRelay(h, cfg.Relay)
-	if err != nil {
-		return err
+	var rly *relay.Relay
+	if cfg.Relay.RelayEnabled() {
+		rly, err = startRelay(h, cfg.Relay)
+		if err != nil {
+			return err
+		}
+		defer rly.Close()
+		log.Info().
+			Str("version", version).
+			Int("relay_max_reservations", cfg.Relay.MaxReservations).
+			Int("relay_max_circuits_per_peer", cfg.Relay.MaxCircuits).
+			Int64("relay_circuit_data_bytes", cfg.Relay.CircuitDataBytes).
+			Dur("relay_circuit_duration", cfg.Relay.CircuitDuration.Std()).
+			Msg("circuit relay v2 + AutoNAT service online")
+	} else {
+		// Coordinator-only: AutoNAT reachability + identify, no relaying. NOTE
+		// this also disables DCUtR brokering (the relay is DCUtR's bootstrap
+		// channel), so two NAT'd peers cannot connect THROUGH natter — only
+		// already-reachable peers benefit. See RelayConfig.Enabled.
+		log.Warn().
+			Str("version", version).
+			Msg("relay DISABLED (relay.enabled=false): AutoNAT-only coordinator — natter will NOT broker hole-punches for NAT'd peers")
 	}
-	defer rly.Close()
-
-	log.Info().
-		Str("version", version).
-		Int("relay_max_reservations", cfg.Relay.MaxReservations).
-		Int("relay_max_circuits_per_peer", cfg.Relay.MaxCircuits).
-		Int64("relay_circuit_data_bytes", cfg.Relay.CircuitDataBytes).
-		Dur("relay_circuit_duration", cfg.Relay.CircuitDuration.Std()).
-		Msg("circuit relay v2 + AutoNAT service online")
 
 	printBootstrapBanner(h)
 
@@ -102,8 +113,10 @@ func run(configPath string, log zerolog.Logger) error {
 			log.Warn().Err(err).Msg("health server shutdown")
 		}
 	}
-	if err := rly.Close(); err != nil {
-		log.Warn().Err(err).Msg("relay close")
+	if rly != nil {
+		if err := rly.Close(); err != nil {
+			log.Warn().Err(err).Msg("relay close")
+		}
 	}
 	if err := h.Close(); err != nil {
 		return fmt.Errorf("close libp2p host: %w", err)

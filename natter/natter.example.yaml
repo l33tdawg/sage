@@ -41,14 +41,20 @@ wss:
 
 # Circuit Relay v2 resource limits.
 #
-# Budget math (Hetzner CAX11, ~20 TB/mo included traffic): one relayed
-# circuit is capped at circuit_data_bytes per DIRECTION per circuit_duration
-# window, so a single continuously-abused session tops out at
-#   2 * 64 MiB / 10 min ≈ 0.21 MiB/s ≈ 540 GiB/month ≈ 2.7% of 20 TB.
-# Aggregate abuse is bounded by max_circuits (per peer) and the per-IP /
-# per-ASN reservation caps. Relaying is a FALLBACK: healthy SAGE peers
-# upgrade to a direct connection via DCUtR and stop consuming relay data.
+# Relaying is a FALLBACK for when DCUtR hole-punching fails (symmetric NAT,
+# CGNAT, strict firewalls). Healthy peers upgrade to a DIRECT connection and
+# stop using relay data. NOTE the per-circuit caps below bound a single
+# circuit's footprint, NOT sustained throughput (a circuit hits the byte cap in
+# seconds and can reopen), so the real bandwidth backstop is the concurrency
+# caps (max_circuits, max_reservations, per-IP/per-ASN) plus egress monitoring.
 relay:
+  # enabled: true                # relay ON by default. Set false for an
+  #   AutoNAT-ONLY coordinator (no relaying). CAUTION: this also disables DCUtR
+  #   brokering (the relay is the hole-punch bootstrap channel), so two NAT'd
+  #   peers won't connect through natter at all. If you want "punch, but no slow
+  #   fallback", DON'T disable — instead set circuit_data_bytes/circuit_duration
+  #   tiny (e.g. 262144 / 30s): enough for the handshake, too small to relay a
+  #   real stream, so a failed punch fails fast.
   max_reservations: 512          # total NAT'd nodes that can camp on this relay
   max_circuits: 8                # open relayed connections per peer
   reservation_ttl: 1h            # client must refresh its slot this often

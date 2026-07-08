@@ -102,6 +102,22 @@ type WSSConfig struct {
 // practical backstop today is those concurrency caps plus egress monitoring,
 // not the per-circuit data cap.
 type RelayConfig struct {
+	// Enabled turns the Circuit Relay v2 SERVICE on/off. A *bool so an absent
+	// key keeps the built-in default (ON) instead of unmarshaling to the
+	// zero-value false. When false, natter runs as a COORDINATOR ONLY (AutoNAT
+	// reachability + identify) and does NOT relay any connection.
+	//
+	// IMPORTANT nuance (libp2p couples these): DCUtR hole-punching is
+	// bootstrapped OVER a relayed connection — the relay is the channel the two
+	// peers use to coordinate the simultaneous open. So turning the relay fully
+	// OFF also removes natter's ability to broker a hole-punch; two NAT'd peers
+	// then cannot connect through natter at all. If the goal is "punch, but no
+	// SLOW DATA FALLBACK when the punch fails", do NOT disable the relay —
+	// instead keep it enabled and set CircuitDataBytes/CircuitDuration tiny
+	// (e.g. 256 KiB / 30 s): big enough for the DCUtR handshake, too small to
+	// sustain a data stream, so a failed punch fails fast instead of crawling
+	// through natter.
+	Enabled *bool `yaml:"enabled"`
 	// MaxReservations is the total number of active relay reservations
 	// (i.e. how many NAT'd SAGE nodes can be "camped" on this relay).
 	MaxReservations int `yaml:"max_reservations"`
@@ -144,6 +160,7 @@ func DefaultConfig() *Config {
 		HealthAddr:              "127.0.0.1:8090",
 		ForceReachabilityPublic: true,
 		Relay: RelayConfig{
+			Enabled:               boolPtr(true),
 			MaxReservations:       512,
 			MaxCircuits:           8,
 			ReservationTTL:        Duration(time.Hour),
@@ -160,6 +177,12 @@ func DefaultConfig() *Config {
 		},
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }
+
+// RelayEnabled reports whether the Circuit Relay v2 service should run. A nil
+// pointer (key absent from the file) means the built-in default: ON.
+func (rc RelayConfig) RelayEnabled() bool { return rc.Enabled == nil || *rc.Enabled }
 
 // LoadConfig reads the YAML file at path over the defaults and validates the
 // result. If the file does not exist and mustExist is false (the user did not
