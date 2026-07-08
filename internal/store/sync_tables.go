@@ -234,6 +234,23 @@ func (s *SQLiteStore) EnqueueSyncOutbox(ctx context.Context, remoteChainID, memo
 	return n > 0, nil
 }
 
+// ResetDeliveringToPending returns all rows stuck in 'delivering' back to
+// 'pending' — crash/shutdown recovery. A row is claimed (pending->delivering)
+// before a network push; if the process dies before the outcome is recorded,
+// the row would otherwise be stranded (nothing re-claims 'delivering', and
+// both re-enqueue paths anti-join the outbox). Call once at drainer start,
+// BEFORE the first scan. next_attempt_at is left as-is so a mid-backoff row
+// resumes its schedule rather than firing immediately.
+func (s *SQLiteStore) ResetDeliveringToPending(ctx context.Context) (int, error) {
+	res, err := s.writeExecContext(ctx,
+		`UPDATE sync_outbox SET state = 'pending' WHERE state = 'delivering'`)
+	if err != nil {
+		return 0, fmt.Errorf("reset delivering rows: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ClaimDueSyncOutbox claims up to limit due pending rows for one peer chain,
 // flipping them pending -> delivering. Same CAS shape as ClaimTask: the
 // UPDATE's WHERE clause is the mutual exclusion, so an overlapping drainer
@@ -461,12 +478,18 @@ func (s *SQLiteStore) IsSyncedCopy(ctx context.Context, localMemoryID string) (b
 	return n > 0, nil
 }
 
-// ListSyncOriginIDs pages the admission set for one origin chain + domain
+// ListSyncOriginIDs pages the ADMITTED set for one origin chain + domain
 // SUBTREE (an asked "hr" covers recorded "hr.public" — DomainAllowed
 // semantics, matching how consent is expressed), sorted ascending by
-// origin_memory_id — the anti-entropy digest source. Includes terminal
-// rejections on purpose: the sender must never re-offer an item the receiver
-// terminally refused. after is an exclusive cursor ("" = from the start).
+// origin_memory_id — the anti-entropy digest source.
+//
+// ADMITTED-ONLY on purpose: the digest answers "what has the receiver
+// accepted", so the sender backfills anything not on the list. Rejections are
+// deliberately NOT recorded (see the handler) and NOT surfaced here — a
+// rejection is receiver-config-dependent (consent/clearance) and must be able
+// to succeed on a later push after the operator adjusts scope; and settling a
+// reconciled row as "delivered" off a rejection record would be a lie. after
+// is an exclusive cursor ("" = from the start).
 func (s *SQLiteStore) ListSyncOriginIDs(ctx context.Context, originChainID, domain, after string, limit int) ([]string, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 2000
@@ -474,7 +497,7 @@ func (s *SQLiteStore) ListSyncOriginIDs(ctx context.Context, originChainID, doma
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT origin_memory_id FROM sync_origin
 		 WHERE origin_chain_id = ? AND (domain_tag = ? OR domain_tag LIKE ?)
-		   AND origin_memory_id > ?
+		   AND origin_memory_id > ? AND outcome = 'admitted'
 		 ORDER BY origin_memory_id ASC
 		 LIMIT ?`, originChainID, domain, domain+".%", after, limit)
 	if err != nil {

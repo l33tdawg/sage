@@ -844,6 +844,20 @@ List active federations for an org.
 
 ---
 
+### v11.5 domain-sync consent + status (`/v1/federation/cross/{chain_id}/sync*`)
+
+Node-operator-only, off-consensus. Full wire protocol (the `/fed/v1/sync/*` push + anti-entropy digest, the consent model, delivery semantics) is documented in [`federation-and-brain-api.md`](federation-and-brain-api.md#v115-domain-sync-shared-domain-replication); this is the operator control surface.
+
+| Route | Purpose |
+|---|---|
+| `PUT /v1/federation/cross/{chain_id}/sync` | Replace the consented sync-domain set: `{"domains": ["hr","eng.public"]}`. Each entry must be concrete (no `*`) and subtree-covered by the agreement's `allowed_domains`; consent can only narrow the treaty, never widen it. Requires an active, unexpired agreement (`404`/`409` otherwise). |
+| `GET /v1/federation/cross/{chain_id}/sync` | Read back the consented set. |
+| `GET /v1/federation/cross/{chain_id}/sync/status` | `outbox_counts` per state (`pending`/`delivering`/`delivered`/`rejected`/`failed`), `rejected` rows with reasons (the B-D1 cross-domain-dup surface), `pending` rows with `attempts`/`next_attempt_at` (vault-deferred rows show `reason: "sender vault locked"` and do not accrue attempts), plus anti-entropy bookkeeping: `last_reconcile`, the peer's advertised `peer_consented_domains`, and `peer_unsupported`. |
+
+Revoking an agreement purges its sync consent and queued deliveries. Domain sync is SQLite-only; on a Postgres-backed node these routes return `501` and the drainer is a no-op.
+
+---
+
 ## 6. Governance / Voting
 
 ### `POST /v1/governance/propose`

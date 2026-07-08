@@ -23,9 +23,14 @@ func (m *Manager) SyncWatcher() func([]string) {
 }
 
 // onCommitted enqueues just-committed memories toward every consented peer.
-// Runs on the Commit tail's dispatch goroutine: SQLite reads only (the
-// mirror row is guaranteed flushed by the notifier contract) — NEVER Badger,
-// which runs a flush ahead of the mirror during the next FinalizeBlock.
+// Runs on the Commit tail's dispatch goroutine. Memory METADATA is read from
+// the SQLite mirror (guaranteed flushed by the notifier contract) — never
+// from Badger, which runs a flush ahead. It does consult ActiveAgreement
+// (a Badger db.View through the store's own MVCC, so concurrency-safe), which
+// may reflect a slightly newer agreement height than this commit; that is
+// harmless because every gate is RE-EVALUATED at send time, so a stale-vs-
+// fresh scope read only affects whether a row is enqueued now or one tick
+// later, never whether out-of-scope data is delivered.
 func (m *Manager) onCommitted(ids []string) {
 	ss := m.syncStore()
 	if ss == nil || len(ids) == 0 {

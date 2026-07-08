@@ -20,6 +20,21 @@ import (
 // retry budget.
 var ErrSyncUnsupported = errors.New("peer does not support domain sync")
 
+// classifySyncStatus maps an HTTP status from a /fed/v1/sync/* call onto the
+// three outcomes both SyncPush and SyncDigest share. Extracted so the
+// load-bearing unsupported-peer detection (404/405/501, distinct from auth
+// churn) is unit-testable and a refactor that breaks it fails a test.
+func classifySyncStatus(status int) (ok bool, unsupported bool) {
+	switch status {
+	case http.StatusOK:
+		return true, false
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // SyncPush delivers one batch of items to a peer's sync admission handler.
 func (m *Manager) SyncPush(ctx context.Context, remoteChainID string, req *SyncPushRequest) (*SyncPushResponse, error) {
 	agreement, err := m.ActiveAgreement(remoteChainID)
@@ -30,12 +45,10 @@ func (m *Manager) SyncPush(ctx context.Context, remoteChainID string, req *SyncP
 	if err != nil {
 		return nil, err
 	}
-	switch status {
-	case http.StatusOK:
-		// fall through to decode
-	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
-		return nil, ErrSyncUnsupported
-	default:
+	if ok, unsupported := classifySyncStatus(status); !ok {
+		if unsupported {
+			return nil, ErrSyncUnsupported
+		}
 		return nil, fmt.Errorf("peer %s returned %d: %s", remoteChainID, status, truncate(body, 200))
 	}
 	var out SyncPushResponse
@@ -62,11 +75,10 @@ func (m *Manager) SyncDigest(ctx context.Context, remoteChainID string, req *Syn
 	if err != nil {
 		return nil, err
 	}
-	switch status {
-	case http.StatusOK:
-	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
-		return nil, ErrSyncUnsupported
-	default:
+	if ok, unsupported := classifySyncStatus(status); !ok {
+		if unsupported {
+			return nil, ErrSyncUnsupported
+		}
 		return nil, fmt.Errorf("peer %s returned %d: %s", remoteChainID, status, truncate(body, 200))
 	}
 	var out SyncDigestResponse

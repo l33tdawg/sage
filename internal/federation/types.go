@@ -4,13 +4,15 @@
 // read-only recall proxy (Mode 1 — exchange), and the co-commit receipt
 // exchange (Mode 2 — cross-anchor delivery).
 //
-// NOTHING in this package runs on the consensus path. Foreign query results are
+// NOTHING in this package writes chain state DIRECTLY. Foreign query results are
 // merged into REST responses only — never written to InsertMemory, BadgerDB, or
-// anything AppHash-visible. Peer receipts reach chain state exclusively as
-// verbatim signed bytes inside a TxTypeCoCommitAttest broadcast through
-// CometBFT, where processCoCommitAttest re-verifies everything under consensus
-// rules. All trust checks here fail CLOSED: unreachable peer, revoked or
-// expired agreement, missing remote CA, or SPKI pin mismatch each deny.
+// anything AppHash-visible. Where federation data DOES reach chain state it does
+// so exclusively as a signed transaction broadcast through CometBFT, which
+// re-verifies everything under consensus rules: peer receipts as verbatim bytes
+// inside a TxTypeCoCommitAttest, and (v11.5 domain sync) an accepted push as a
+// locally-signed TxTypeMemorySubmit — see handleSyncPush. All trust checks here
+// fail CLOSED: unreachable peer, revoked or expired agreement, missing remote
+// CA, or SPKI pin mismatch each deny.
 package federation
 
 import "time"
@@ -116,8 +118,9 @@ type ReceiptPushResponse struct {
 type StatusResponse struct {
 	ChainID string `json:"chain_id"`
 	Time    int64  `json:"time"`
-	// Capabilities advertises optional route groups (e.g. "sync"). Additive:
-	// pre-v11.5 peers omit it, and senders treat absence as unsupported.
+	// Capabilities advertises optional route groups (e.g. "sync"). Additive
+	// courtesy signal; the authoritative unsupported-peer detection is the
+	// 404/405/501 on the sync routes themselves (see CapabilitySync).
 	Capabilities []string `json:"capabilities,omitempty"`
 }
 
@@ -147,8 +150,11 @@ type PeerRecallOutcome struct {
 // status guard) re-validate it. Federation code still never writes BadgerDB
 // or InsertMemory directly.
 
-// CapabilitySync advertises the /fed/v1/sync/* routes on StatusResponse so a
-// sender can feature-detect before queueing (pre-v11.5 peers 404 instead).
+// CapabilitySync advertises the /fed/v1/sync/* routes on StatusResponse.
+// Informational only in v11.5: the sender detects an unsupported peer from the
+// push/digest 404/405/501 (mapped to ErrSyncUnsupported), which is the
+// load-bearing check; this field is a courtesy preflight signal, not consulted
+// before enqueueing.
 const CapabilitySync = "sync"
 
 const (

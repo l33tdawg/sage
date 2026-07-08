@@ -37,12 +37,14 @@ func TestSyncDigestPagingAndConsent(t *testing.T) {
 	peer := testPeer(2, "hr")
 	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
 
-	// Admission ledger: two admitted (one in a subdomain), one terminal
-	// rejection — ALL must appear in the digest (never re-offer refused).
+	// Admission ledger: three ADMITTED (one in a subdomain, one in eng). In
+	// the corrected model only ADMITTED decisions are recorded at all, so a
+	// rejected item simply has no row — the digest is admitted-only, and a
+	// rejected item stays re-offerable (it re-evaluates on the next push).
 	for _, o := range []store.SyncOrigin{
 		{OriginChainID: "chain-b", OriginMemoryID: "m-01", DomainTag: "hr", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-1"},
 		{OriginChainID: "chain-b", OriginMemoryID: "m-02", DomainTag: "hr.public", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-2"},
-		{OriginChainID: "chain-b", OriginMemoryID: "m-03", DomainTag: "hr", Outcome: store.SyncOutcomeRejectedDupXDomain},
+		{OriginChainID: "chain-b", OriginMemoryID: "m-03", DomainTag: "hr", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-3"},
 		{OriginChainID: "chain-b", OriginMemoryID: "m-04", DomainTag: "eng", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-4"},
 	} {
 		require.NoError(t, ms.RecordSyncOrigin(ctx, o))
@@ -58,7 +60,7 @@ func TestSyncDigestPagingAndConsent(t *testing.T) {
 
 	_, resp = digestAs(t, m, peer, SyncDigestRequest{Domain: "hr", Limit: 2, After: resp.NextCursor})
 	require.NotNil(t, resp)
-	assert.Equal(t, []string{"m-03"}, resp.OriginMemoryIDs, "terminal rejection included")
+	assert.Equal(t, []string{"m-03"}, resp.OriginMemoryIDs)
 	assert.Empty(t, resp.NextCursor)
 
 	// Unconsented domain: honest consent=false, ledger still answered.

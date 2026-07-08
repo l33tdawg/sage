@@ -30,6 +30,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/memory"
@@ -55,6 +56,12 @@ const (
 	// syncVaultRetryDelay reschedules vault-locked deferrals: cheap to poll
 	// (no network) but pointless to hammer; attempts are NOT incremented.
 	syncVaultRetryDelay = 2 * time.Minute
+	// syncMaxAttempts bounds redelivery: a row that keeps failing for
+	// attempt-counting reasons (transport errors, a persistently-rejecting
+	// receiver) is marked failed rather than retried forever. At the capped
+	// 1h backoff this is ~half a day of trying. Deferrals that pass
+	// bumpAttempts=false (vault locked, peer not upgraded) never reach it.
+	syncMaxAttempts = 12
 )
 
 // StartSyncDrainer launches the outbox goroutine. No-op (with one log line)
@@ -69,6 +76,16 @@ func (m *Manager) StartSyncDrainer(ctx context.Context) {
 	// (runServe calls StartSyncDrainer, THEN SetSyncNotifier).
 	m.syncNudge = make(chan struct{}, 1)
 	nudge := m.syncNudge
+
+	// Crash recovery: any row left 'delivering' by a previous process death
+	// (or a shutdown that cancelled the outcome write) is returned to
+	// 'pending' before the first scan, so it can be re-claimed.
+	if n, err := ss.ResetDeliveringToPending(context.Background()); err != nil {
+		m.logger.Warn().Err(err).Msg("sync: reset delivering rows failed")
+	} else if n > 0 {
+		m.logger.Info().Int("rows", n).Msg("sync: recovered stranded delivering rows on startup")
+	}
+
 	go func() {
 		// Immediate first pass: restart recovery should not wait a tick.
 		m.syncTick(ctx, ss)
@@ -162,12 +179,31 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		return
 	}
 
+	// State-recording writes use a NON-CANCELABLE context: once a row is
+	// claimed (pending->delivering), its outcome MUST be recorded even if the
+	// node is shutting down mid-batch — otherwise the row is stranded in
+	// 'delivering' (nothing re-claims it, and startup reset only runs once).
+	// SQLite writes are local and fast, so a background context is safe.
+	writeCtx := context.Background()
+
+	// retry returns a claimed row to pending. bumpAttempts=false is for
+	// not-the-item's-fault deferrals (vault locked, peer not upgraded) so they
+	// never hit the attempts cap. When attempts reach syncMaxAttempts the row
+	// is failed terminal instead of retried forever (bounds churn from a
+	// persistently-rejecting receiver).
 	retry := func(row store.SyncOutboxItem, bumpAttempts bool, delay time.Duration, reason string) {
 		attempts := row.Attempts
 		if bumpAttempts {
 			attempts++
+			if attempts >= syncMaxAttempts {
+				if err := ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID,
+					truncateString("gave up after "+reason, 200)); err != nil {
+					m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: fail mark failed")
+				}
+				return
+			}
 		}
-		if err := ss.MarkSyncOutboxRetry(ctx, chain, row.MemoryID, attempts, time.Now().Add(delay), reason); err != nil {
+		if err := ss.MarkSyncOutboxRetry(writeCtx, chain, row.MemoryID, attempts, time.Now().Add(delay), reason); err != nil {
 			m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: retry mark failed")
 		}
 	}
@@ -178,14 +214,19 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 	for _, row := range claimed {
 		rec, err := ss.GetMemory(ctx, row.MemoryID)
 		if err != nil {
-			// The memory is gone (forgotten/deleted after enqueue): terminal.
-			_ = ss.MarkSyncOutboxFailed(ctx, chain, row.MemoryID, "memory no longer available")
+			if strings.Contains(err.Error(), "not found") {
+				// The memory is genuinely gone (forgotten/deleted): terminal.
+				_ = ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID, "memory no longer available")
+			} else {
+				// Transient read error (SQLITE_BUSY, IO): retry, don't lose it.
+				retry(row, true, syncBackoff(row.Attempts+1), "memory read error")
+			}
 			continue
 		}
 		if rec.Status != memory.StatusCommitted {
 			// Deprecated (or otherwise no longer committed) since enqueue:
 			// lifecycle is sovereign and does NOT propagate — terminal skip.
-			_ = ss.MarkSyncOutboxFailed(ctx, chain, row.MemoryID, "memory no longer committed")
+			_ = ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID, "memory no longer committed")
 			continue
 		}
 		if rec.Content == store.VaultLockedPlaceholder {
@@ -196,17 +237,18 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		}
 		if rec.Content == "" {
 			// Hash-only co-commit rows whose content backfill never arrived.
-			_ = ss.MarkSyncOutboxFailed(ctx, chain, row.MemoryID, "no content available")
+			_ = ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID, "no content available")
 			continue
 		}
 		if len(rec.Content) > SyncMaxItemContent {
-			_ = ss.MarkSyncOutboxFailed(ctx, chain, row.MemoryID, "content too large")
+			_ = ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID, "content too large")
 			continue
 		}
 		if !DomainAllowed(agreement.AllowedDomains, rec.DomainTag) || !DomainAllowed(consented, rec.DomainTag) {
 			// Agreement re-scoped narrower, consent changed, or the memory was
-			// re-domained (v11.3 reassign) since enqueue.
-			_ = ss.MarkSyncOutboxRejected(ctx, chain, row.MemoryID, "domain out of scope at send time")
+			// re-domained (v11.3 reassign) since enqueue — a property of the
+			// sender's own state, so terminal.
+			_ = ss.MarkSyncOutboxRejected(writeCtx, chain, row.MemoryID, "domain out of scope at send time")
 			continue
 		}
 		cls, err := ss.GetMemoryClassificationLocal(ctx, row.MemoryID)
@@ -217,7 +259,7 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			continue
 		}
 		if cls > int(agreement.MaxClearance) {
-			_ = ss.MarkSyncOutboxRejected(ctx, chain, row.MemoryID, "classification above agreement ceiling")
+			_ = ss.MarkSyncOutboxRejected(writeCtx, chain, row.MemoryID, "classification above agreement ceiling")
 			continue
 		}
 		items = append(items, SyncItem{
@@ -249,31 +291,51 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 	}
 	resp, err := push(pctx, chain, &SyncPushRequest{Items: items})
 	if err != nil {
-		delay, reason := syncBackoff(0), err.Error()
+		reason := err.Error()
 		for _, row := range itemRows {
 			if err == ErrSyncUnsupported {
-				retry(row, true, syncBackoffMax, "peer does not support sync")
+				// Not the item's fault — don't count toward the cap; park at
+				// the 1h floor until the peer upgrades.
+				retry(row, false, syncBackoffMax, "peer does not support sync")
 			} else {
 				retry(row, true, syncBackoff(row.Attempts+1), truncateString(reason, 200))
 			}
 		}
-		_ = delay
 		return
 	}
 
-	// Map per-item outcomes. SyncPush already verified 1:1 result binding.
-	for i, res := range resp.Results {
-		row := itemRows[i]
-		switch res.Outcome {
+	// Map per-item outcomes BY ORIGIN ID, not array index: a misbehaving (but
+	// authenticated) peer that permutes its results must not cause us to mark
+	// the wrong outbox row. SyncPush already verified the count matches.
+	byID := make(map[string]string, len(resp.Results))
+	for _, res := range resp.Results {
+		byID[res.OriginMemoryID] = res.Outcome
+	}
+	for _, row := range itemRows {
+		outcome, ok := byID[row.MemoryID]
+		if !ok {
+			// Peer omitted this row's id — retry rather than silently drop.
+			retry(row, true, syncBackoff(row.Attempts+1), "peer omitted result")
+			continue
+		}
+		switch outcome {
 		case SyncOutcomeAccepted, SyncOutcomeDuplicate:
-			if err := ss.MarkSyncOutboxDelivered(ctx, chain, row.MemoryID); err != nil {
+			if err := ss.MarkSyncOutboxDelivered(writeCtx, chain, row.MemoryID); err != nil {
 				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: delivered mark failed")
 			}
-		case SyncOutcomeRejectedXDomainDup, SyncOutcomeRejectedClearance,
-			SyncOutcomeRejectedConsent, SyncOutcomeRejectedScope:
-			if err := ss.MarkSyncOutboxRejected(ctx, chain, row.MemoryID, res.Outcome); err != nil {
+		case SyncOutcomeRejectedXDomainDup:
+			// Content-derived on the receiver — will not change without a
+			// deprecation there, so terminal on our side.
+			if err := ss.MarkSyncOutboxRejected(writeCtx, chain, row.MemoryID, outcome); err != nil {
 				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: rejected mark failed")
 			}
+		case SyncOutcomeRejectedConsent, SyncOutcomeRejectedScope, SyncOutcomeRejectedClearance:
+			// Receiver-CONFIG-dependent: the operator may widen consent /
+			// clearance / treaty scope later, so keep RETRYABLE (long backoff,
+			// attempts-capped) instead of poisoning the item permanently. This
+			// is what lets the bring-up race (backlog pushed before the peer
+			// finishes configuring consent) self-heal.
+			retry(row, true, syncBackoffMax, truncateString(outcome, 200))
 		default: // SyncOutcomeRetry or anything unknown — redeliver later.
 			retry(row, true, syncBackoff(row.Attempts+1), "peer asked to retry")
 		}
@@ -395,7 +457,11 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 			}
 			enqueued++
 			if decided[c.MemoryID] {
-				_ = ss.MarkSyncOutboxDelivered(ctx, chain, c.MemoryID)
+				// The digest is ADMITTED-only, so a hit means the peer has
+				// genuinely accepted this item — settle the freshly-enqueued
+				// row as delivered rather than re-pushing it. (Rejections are
+				// never in the digest, so we never falsely settle one.)
+				_ = ss.MarkSyncOutboxDelivered(context.Background(), chain, c.MemoryID)
 			}
 		}
 	}

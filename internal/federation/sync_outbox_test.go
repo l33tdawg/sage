@@ -216,6 +216,133 @@ func TestSyncDrainSendTimeGates(t *testing.T) {
 	assert.Len(t, rejected, 2)
 }
 
+func TestSyncDeliveringRowsRecoverOnStartup(t *testing.T) {
+	ctx := context.Background()
+	_, ms, _ := newDrainTestManager(t)
+
+	// Simulate a crash mid-delivery: claim rows (pending->delivering) and die
+	// before recording an outcome.
+	for _, id := range []string{"m-1", "m-2"} {
+		_, err := ms.EnqueueSyncOutbox(ctx, "chain-b", id)
+		require.NoError(t, err)
+	}
+	claimed, err := ms.ClaimDueSyncOutbox(ctx, "chain-b", 10)
+	require.NoError(t, err)
+	require.Len(t, claimed, 2)
+	counts, _ := ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.Equal(t, 2, counts[store.SyncStateDelivering], "rows stuck delivering after simulated crash")
+
+	// Startup recovery returns them to pending so they can be re-claimed.
+	n, err := ms.ResetDeliveringToPending(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+	counts, _ = ms.CountSyncOutboxByState(ctx, "chain-b")
+	assert.Equal(t, 2, counts[store.SyncStatePending])
+	assert.Equal(t, 0, counts[store.SyncStateDelivering])
+	reclaimed, err := ms.ClaimDueSyncOutbox(ctx, "chain-b", 10)
+	require.NoError(t, err)
+	assert.Len(t, reclaimed, 2, "recovered rows are claimable again")
+}
+
+func TestSyncBringUpRaceSelfHeals(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	seedCommitted(t, ms, "m-early", "hr", "pushed before peer consented")
+
+	// Round 1: the receiver has not configured consent yet -> not_consented.
+	consented := false
+	m.syncPushFn = func(_ context.Context, _ string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		results := make([]SyncItemResult, len(req.Items))
+		for i, it := range req.Items {
+			out := SyncOutcomeRejectedConsent
+			if consented {
+				out = SyncOutcomeAccepted
+			}
+			results[i] = SyncItemResult{OriginMemoryID: it.OriginMemoryID, Outcome: out}
+		}
+		return &SyncPushResponse{Results: results}, nil
+	}
+	m.syncTick(ctx, ms)
+
+	// The item is NOT terminally rejected: config-dependent rejections stay
+	// retryable (pending) so a later consent change delivers them.
+	counts, err := ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts[store.SyncStatePending], "not_consented is retryable, not terminal")
+	assert.Zero(t, counts[store.SyncStateRejected])
+
+	// The row is backed off into the future; force it due to simulate the
+	// next eligible tick after the operator consents.
+	require.NoError(t, ms.MarkSyncOutboxRetry(ctx, "chain-b", "m-early", 1, time.Now().Add(-time.Second), "was not consented"))
+	consented = true
+	m.syncTick(ctx, ms)
+
+	counts, err = ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts[store.SyncStateDelivered], "self-heals once the peer consents")
+}
+
+func TestSyncAttemptsCapFailsRow(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	seedCommitted(t, ms, "m-stuck", "hr", "peer keeps saying retry")
+
+	m.syncPushFn = func(_ context.Context, _ string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		results := make([]SyncItemResult, len(req.Items))
+		for i, it := range req.Items {
+			results[i] = SyncItemResult{OriginMemoryID: it.OriginMemoryID, Outcome: SyncOutcomeRetry}
+		}
+		return &SyncPushResponse{Results: results}, nil
+	}
+
+	// Drive it up to the cap, forcing each backoff due.
+	for i := 0; i < 15; i++ {
+		m.syncTick(ctx, ms)
+		_ = ms.MarkSyncOutboxRetry(ctx, "chain-b", "m-stuck", i+1, time.Now().Add(-time.Second), "retry")
+	}
+	// After enough attempts the row is failed terminal, not retried forever.
+	m.syncTick(ctx, ms)
+	counts, err := ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts[store.SyncStateFailed], "capped -> failed, no infinite churn")
+}
+
+func TestSyncResultsMatchedByOriginNotIndex(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	seedCommitted(t, ms, "aaa", "hr", "first")
+	seedCommitted(t, ms, "bbb", "hr", "second")
+
+	// Peer returns results in REVERSED order with distinct outcomes: aaa
+	// accepted, bbb cross-domain-dup. Index-based mapping would swap them.
+	m.syncPushFn = func(_ context.Context, _ string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		out := map[string]string{"aaa": SyncOutcomeAccepted, "bbb": SyncOutcomeRejectedXDomainDup}
+		results := make([]SyncItemResult, 0, len(req.Items))
+		// Emit in reverse of the request order.
+		for i := len(req.Items) - 1; i >= 0; i-- {
+			id := req.Items[i].OriginMemoryID
+			results = append(results, SyncItemResult{OriginMemoryID: id, Outcome: out[id]})
+		}
+		return &SyncPushResponse{Results: results}, nil
+	}
+	m.syncTick(ctx, ms)
+
+	delivered, err := ms.ListSyncOutbox(ctx, "chain-b", store.SyncStateDelivered, 10)
+	require.NoError(t, err)
+	require.Len(t, delivered, 1)
+	assert.Equal(t, "aaa", delivered[0].MemoryID, "accepted outcome bound to the right row")
+	rejected, err := ms.ListSyncOutbox(ctx, "chain-b", store.SyncStateRejected, 10)
+	require.NoError(t, err)
+	require.Len(t, rejected, 1)
+	assert.Equal(t, "bbb", rejected[0].MemoryID, "rejection bound to the right row")
+}
+
 func TestSyncBackoff(t *testing.T) {
 	assert.Equal(t, 30*time.Second, syncBackoff(0))
 	assert.Equal(t, time.Minute, syncBackoff(1))

@@ -30,6 +30,7 @@ package federation
 //  9. Admit via broadcast; classify the ABCI result; record the decision.
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
@@ -213,18 +214,33 @@ func validateSyncItem(peerChainID string, item *SyncItem) error {
 }
 
 // admitSyncItem runs gates 3-9 for one item and returns its outcome.
+//
+// LEDGER POLICY: only ADMITTED decisions are persisted to sync_origin.
+// Rejections are receiver-config-dependent (consent/clearance/scope can be
+// widened by the operator; a cross-domain dup can be deprecated away), so
+// persisting them would permanently poison a later legitimate push — the
+// classic bring-up race where a backlog arrives before the operator finishes
+// configuring consent. Rejections are cheap to re-evaluate (no broadcast), so
+// they are returned on the wire and NOT recorded; a subsequent push re-runs
+// the gates fresh. The sender keeps such rows retryable (config-dependent) or
+// terminally rejected (content-derived) on its own side.
 func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *peerIdentity, consented []string, item *SyncItem) SyncItemResult {
 	ctx := r.Context()
 	out := SyncItemResult{OriginMemoryID: item.OriginMemoryID}
 
-	record := func(outcome, localID string) {
-		if err := ss.RecordSyncOrigin(ctx, store.SyncOrigin{
+	// recordAdmitted persists an admission with a NON-CANCELABLE context: the
+	// on-chain copy (or the pre-existing match) is irreversible, so the
+	// provenance + loop-prevention + idempotency record must land even if the
+	// sender disconnected and cancelled r.Context(). A missing record would
+	// let the copy be re-forwarded (loop-prevention bypass).
+	recordAdmitted := func(localID string) {
+		if err := ss.RecordSyncOrigin(context.Background(), store.SyncOrigin{
 			OriginChainID:   item.OriginChainID,
 			OriginMemoryID:  item.OriginMemoryID,
 			OriginCreatedAt: item.OriginCreatedAt,
 			LocalMemoryID:   localID,
 			DomainTag:       item.Domain,
-			Outcome:         outcome,
+			Outcome:         store.SyncOutcomeAdmitted,
 		}); err != nil {
 			m.logger.Error().Err(err).Str("origin", item.OriginMemoryID).Msg("sync: record origin failed")
 		}
@@ -232,51 +248,64 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 
 	// Gate 3 — treaty scope.
 	if !DomainAllowed(peer.Agreement.AllowedDomains, item.Domain) {
-		record(store.SyncOutcomeRejectedDomainScope, "")
 		out.Outcome = SyncOutcomeRejectedScope
 		return out
 	}
 	// Gate 4 — receiver consent (concrete rows only; DomainAllowed gives the
 	// same subtree semantics: consented "hr" covers item domain "hr.public").
 	if !DomainAllowed(consented, item.Domain) {
-		record(store.SyncOutcomeRejectedNotConsented, "")
 		out.Outcome = SyncOutcomeRejectedConsent
 		return out
 	}
 	// Gate 5 — clearance ceiling.
 	if item.Classification > int(peer.Agreement.MaxClearance) {
-		record(store.SyncOutcomeRejectedClearance, "")
 		out.Outcome = SyncOutcomeRejectedClearance
 		return out
 	}
-	// Gate 6 — idempotency: replay a recorded decision verbatim.
+	// Gate 6 — idempotency: replay a recorded ADMISSION verbatim (only
+	// admissions are recorded, so a hit is always a prior success).
 	if prior, err := ss.GetSyncOrigin(ctx, item.OriginChainID, item.OriginMemoryID); err == nil {
-		out.Outcome, out.LocalMemoryID = replaySyncOutcome(prior)
+		out.Outcome = SyncOutcomeDuplicate
+		out.LocalMemoryID = prior.LocalMemoryID
 		return out
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		out.Outcome = SyncOutcomeRetry
 		return out
 	}
-	// Gate 7 — B-D1 cross-domain duplicate (committed-only, domain-aware).
+	// Gate 7 — B-D1 cross-domain duplicate, SCOPED to the treaty. Only
+	// consider committed matches in domains this peer is already allowed to
+	// see: a match in a NON-treaty domain must not influence the outcome, or
+	// the reject/accept split becomes a presence oracle for content the peer
+	// can never read (cross-domain leak).
 	matches, err := ss.FindCommittedByContentHashDomains(ctx, item.ContentHash)
 	if err != nil {
 		out.Outcome = SyncOutcomeRetry
 		return out
 	}
+	visibleDup := false
 	for _, mt := range matches {
+		if !DomainAllowed(peer.Agreement.AllowedDomains, mt.DomainTag) {
+			continue // invisible to the peer — must not leak via the outcome
+		}
 		if mt.DomainTag == item.Domain {
 			// Same content already committed in the SAME domain: idempotent
-			// success, mapped to the existing local row.
-			record(store.SyncOutcomeAdmitted, mt.MemoryID)
+			// success. Record with an EMPTY local_memory_id — the matched row
+			// may be this chain's OWN native memory (a genuine cross-chain
+			// content collision), and tagging a native memory as a synced copy
+			// would suppress its onward replication forever. We still tell the
+			// sender where it landed on the wire (informational only).
+			recordAdmitted("")
 			out.Outcome = SyncOutcomeDuplicate
 			out.LocalMemoryID = mt.MemoryID
 			return out
 		}
+		visibleDup = true
 	}
-	if len(matches) > 0 {
-		// Identical content lives in a DIFFERENT domain: reject + surface,
-		// never silently move (locked decision B-D1).
-		record(store.SyncOutcomeRejectedDupXDomain, "")
+	if visibleDup {
+		// Identical content lives in a DIFFERENT treaty-visible domain:
+		// reject + surface, never silently move (locked decision B-D1). Not
+		// recorded — a later deprecation of the other copy should let this
+		// succeed.
 		out.Outcome = SyncOutcomeRejectedXDomainDup
 		return out
 	}
@@ -290,38 +319,14 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 	// Gate 9 — admit through consensus.
 	localID := syncMemoryID(item.OriginChainID, item.OriginMemoryID)
 	outcome, txHash := m.broadcastSyncSubmit(localID, item)
-	switch outcome {
-	case SyncOutcomeAccepted, SyncOutcomeDuplicate:
-		record(store.SyncOutcomeAdmitted, localID)
+	if outcome == SyncOutcomeAccepted || outcome == SyncOutcomeDuplicate {
+		recordAdmitted(localID)
+		out.LocalMemoryID = localID
 		m.logger.Info().Str("origin", item.OriginChainID+"/"+item.OriginMemoryID).
 			Str("local", localID).Str("tx", txHash).Str("outcome", outcome).Msg("sync: item admitted")
-	case SyncOutcomeRejectedScope:
-		record(store.SyncOutcomeRejectedDomainScope, "")
 	}
 	out.Outcome = outcome
-	if outcome == SyncOutcomeAccepted || outcome == SyncOutcomeDuplicate {
-		out.LocalMemoryID = localID
-	}
 	return out
-}
-
-// replaySyncOutcome maps a recorded sync_origin decision back onto the wire.
-func replaySyncOutcome(prior *store.SyncOrigin) (string, string) {
-	switch prior.Outcome {
-	case store.SyncOutcomeAdmitted:
-		return SyncOutcomeDuplicate, prior.LocalMemoryID
-	case store.SyncOutcomeRejectedDupXDomain:
-		return SyncOutcomeRejectedXDomainDup, ""
-	case store.SyncOutcomeRejectedClearance:
-		return SyncOutcomeRejectedClearance, ""
-	case store.SyncOutcomeRejectedNotConsented:
-		return SyncOutcomeRejectedConsent, ""
-	case store.SyncOutcomeRejectedDomainScope:
-		return SyncOutcomeRejectedScope, ""
-	default:
-		// Unknown ledger state — fail toward redelivery rather than lying.
-		return SyncOutcomeRetry, ""
-	}
 }
 
 // broadcastSyncSubmit wraps the item in a locally-signed TxTypeMemorySubmit

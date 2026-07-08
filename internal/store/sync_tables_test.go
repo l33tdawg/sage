@@ -226,8 +226,10 @@ func TestListSyncOriginIDsPagination(t *testing.T) {
 	ctx := context.Background()
 	s := newSyncTestStore(t)
 
-	// Terminal rejections are part of the digest set on purpose: the sender
-	// must never re-offer refused items.
+	// The digest is ADMITTED-only: rejections are not recorded at all, so a
+	// rejected item (m-02 here, seeded as a rejection) must be ABSENT — it
+	// stays re-offerable on the next push instead of being permanently
+	// suppressed. m-04 (eng) is a different domain, m-05 a different chain.
 	for _, o := range []SyncOrigin{
 		{OriginChainID: "chain-a", OriginMemoryID: "m-01", DomainTag: "hr", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l-01"},
 		{OriginChainID: "chain-a", OriginMemoryID: "m-02", DomainTag: "hr", Outcome: SyncOutcomeRejectedDupXDomain},
@@ -240,19 +242,20 @@ func TestListSyncOriginIDsPagination(t *testing.T) {
 		}
 	}
 
+	// hr admitted set for chain-a is [m-01, m-03] (m-02 rejected -> absent).
 	page1, err := s.ListSyncOriginIDs(ctx, "chain-a", "hr", "", 2)
 	if err != nil {
 		t.Fatalf("ListSyncOriginIDs page1: %v", err)
 	}
-	if len(page1) != 2 || page1[0] != "m-01" || page1[1] != "m-02" {
-		t.Fatalf("unexpected page1: %v", page1)
+	if len(page1) != 2 || page1[0] != "m-01" || page1[1] != "m-03" {
+		t.Fatalf("unexpected page1 (admitted-only, rejection excluded): %v", page1)
 	}
 	page2, err := s.ListSyncOriginIDs(ctx, "chain-a", "hr", page1[1], 2)
 	if err != nil {
 		t.Fatalf("ListSyncOriginIDs page2: %v", err)
 	}
-	if len(page2) != 1 || page2[0] != "m-03" {
-		t.Fatalf("unexpected page2 (domain+chain scoping): %v", page2)
+	if len(page2) != 0 {
+		t.Fatalf("expected empty page2 (only 2 admitted hr rows): %v", page2)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
@@ -263,14 +264,20 @@ type SageApp struct {
 	// in after construction so existing NewSageApp callers don't break.
 	snapshotScheduler *SnapshotScheduler
 
-	// syncNotifier is the v11.5 domain-sync Commit-tail hook: when non-nil it
+	// syncNotifier is the v11.5 domain-sync Commit-tail hook: when set it
 	// receives the memory IDs whose status became committed in this block,
 	// strictly AFTER the offchain flush + SaveState (so the SQLite mirror row
 	// is guaranteed visible to the callback). Dispatched on a fresh goroutine
 	// (the snapshotScheduler.Tick fast/non-blocking contract). NEVER reads or
 	// writes consensus state — purely a low-latency nudge; the federation
 	// drainer's poll scan is the correctness backstop.
-	syncNotifier func([]string)
+	//
+	// An atomic.Pointer (not a bare field) because SetSyncNotifier is wired
+	// after the federation Manager is built, which on an existing chain can be
+	// AFTER the consensus loop has begun producing blocks — so the install
+	// races Commit's read. The atomic makes that publish/read data-race-free;
+	// nil load = disabled, a no-op.
+	syncNotifier atomic.Pointer[func([]string)]
 
 	// v8AppliedHeight is the block at which the v8.0 access-control fork
 	// activated. Zero means not yet activated — handlers must take the
@@ -5506,7 +5513,7 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 	// mirror), so filtering the just-flushed writes catches them all. A block
 	// replay after a flush panic legitimately re-fires this — the watcher's
 	// enqueue is INSERT OR IGNORE idempotent by design.
-	if app.syncNotifier != nil {
+	if notify := app.syncNotifier.Load(); notify != nil {
 		var committed []string
 		for _, pw := range flushedWrites {
 			if pw.writeType != "status_update" {
@@ -5517,8 +5524,8 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			}
 		}
 		if len(committed) > 0 {
-			notify := app.syncNotifier
-			go notify(committed)
+			fn := *notify
+			go fn(committed)
 		}
 	}
 
@@ -5547,11 +5554,15 @@ func (app *SageApp) SetRetainBlocks(n int64) {
 }
 
 // SetSyncNotifier installs the domain-sync commit hook (see the field doc).
-// nil is allowed (disables the nudge; the drainer's poll scan still syncs).
-// Call once during boot before the chain produces blocks; not safe to call
-// concurrently with Commit — same contract as SetSnapshotScheduler.
+// nil disables the nudge (the drainer's poll scan still syncs). Safe to call
+// concurrently with Commit: the store is an atomic.Pointer, so the install is
+// race-free even when the consensus loop is already running.
 func (app *SageApp) SetSyncNotifier(fn func([]string)) {
-	app.syncNotifier = fn
+	if fn == nil {
+		app.syncNotifier.Store(nil)
+		return
+	}
+	app.syncNotifier.Store(&fn)
 }
 
 // flushPendingWrites executes all buffered writes against the given store (which

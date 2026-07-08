@@ -165,3 +165,6 @@ integrations/levelup/paper4/
 # Tracked (open-source, generic stats engine):
 #   integrations/levelup/experiment_protocol.py
 #   integrations/levelup/.gitignore
+
+# Go build cache (created when GOCACHE points into the repo)
+.gocache/
