@@ -879,6 +879,17 @@ func runServe() (rerr error) {
 		// the same Manager directly - the browser has a session, not the operator
 		// signing key, so it cannot reach the agent-signed REST endpoints.
 		dashboard.SetFederation(fedMgr)
+		// Restore the per-agreement TOTP seed cache from disk so an established
+		// federation SURVIVES a restart. The cache is otherwise only populated
+		// during the JOIN ceremony, so without this the fail-closed X-Sig-Version=3
+		// gate returns "federation locked" for every peer after the first restart
+		// (and outbound falls back to v2, which the peer then rejects) — federation
+		// silently breaks on reboot. Seeds are stored at the 0600-plaintext floor
+		// (the fed manager has no vault passphrase wired), so this loads cleanly
+		// on both encrypted and unencrypted nodes.
+		if n := fedMgr.LoadSeedsIntoCache(); n > 0 {
+			logger.Info().Int("agreements", n).Msg("federation: restored peer seeds into cache after boot")
+		}
 	}
 
 	// TLS listener: encrypted REST on a separate port.
