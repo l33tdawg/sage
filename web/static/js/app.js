@@ -10316,25 +10316,47 @@ function isLoopbackEndpoint(ep) {
 // from location.hostname (works for same-machine tests) but immediately asks
 // the node for its real routable LAN address, because the browser only knows
 // the hostname the operator typed (usually "localhost"). Returns [endpoint,
-// setEndpoint, detecting]; setEndpoint keeps the manual field editable.
+// setEndpoint, candidates]; setEndpoint keeps the manual field editable and
+// candidates drives the picker when the machine is multi-homed.
 function useLanEndpoint() {
     const [endpoint, setEndpoint] = useState(`https://${location.hostname}:8444`);
+    const [candidates, setCandidates] = useState([]);
     const touched = useRef(false);
     const set = (v) => { touched.current = true; setEndpoint(v); };
     useEffect(() => {
         let live = true;
         fedLanEndpoint()
             .then(r => {
+                if (!live || !r) return;
+                if (Array.isArray(r.candidates)) setCandidates(r.candidates);
                 // Only auto-fill when the operator hasn't typed their own, and
                 // only if the current value is a useless loopback address.
-                if (live && !touched.current && r && r.suggested_endpoint && isLoopbackEndpoint(endpoint)) {
+                if (!touched.current && r.suggested_endpoint && isLoopbackEndpoint(endpoint)) {
                     setEndpoint(r.suggested_endpoint);
                 }
             })
             .catch(() => {});
         return () => { live = false; };
     }, []);
-    return [endpoint, set];
+    return [endpoint, set, candidates];
+}
+
+// FedEndpointPicker - a labeled address chooser for multi-homed machines (VPN +
+// Wi-Fi + Ethernet), where no heuristic can pick the single right interface. On
+// a single-NIC box it renders nothing (the auto-fill already got it). Mirrors
+// the connect-remote candidate <select> idiom.
+function FedEndpointPicker({ candidates, endpoint, onPick }) {
+    if (!candidates || candidates.length < 2) return null;
+    const idx = candidates.findIndex(c => c.endpoint === endpoint);
+    return html`<div class="fed-field">
+        <label>Detected addresses on this computer</label>
+        <select class="fed-share-input" value=${idx >= 0 ? String(idx) : 'custom'}
+            onChange=${e => { const i = parseInt(e.target.value, 10); if (candidates[i]) onPick(candidates[i].endpoint); }}>
+            ${idx < 0 && html`<option value="custom">Custom — ${endpoint}</option>`}
+            ${candidates.map((c, i) => html`<option value=${String(i)}>${c.iface} — ${c.ip} ${c.is_private ? '(local network)' : '(direct/overlay)'}</option>`)}
+        </select>
+        <div class="muted">Pick the one on the same network as the other computer. Wi-Fi/Ethernet on a home or office network is usually the "local network" one.</div>
+    </div>`;
 }
 
 // FedChannelGate - the physical-object question (redteam #2). Distinguishes a
@@ -10342,7 +10364,7 @@ function useLanEndpoint() {
 // forwarded image / pure phone call routes to the spoken-code (Tier-4) path,
 // never presented as equal to in-person. Also collects the guest's own reachable
 // address (where the host will connect back).
-function FedChannelGate({ endpoint, onEndpoint, onChoose }) {
+function FedChannelGate({ endpoint, onEndpoint, candidates, onChoose }) {
     return html`<div class="fed-step">
         <h2>Connect to another network</h2>
         <${FedGreenRail} />
@@ -10353,6 +10375,7 @@ function FedChannelGate({ endpoint, onEndpoint, onChoose }) {
             <div class="muted">Usually https://[your computer's address]:8444 on your network.</div>
             ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This is a localhost address — the other computer can't reach it. Use this machine's network address (e.g. <code>https://192.168.1.20:8444</code>), not <code>localhost</code>.</div>`}
         </div>
+        <${FedEndpointPicker} candidates=${candidates} endpoint=${endpoint} onPick=${onEndpoint} />
         <div class="fed-gate-q">Are you looking at their code as a physical thing they're holding - in the same room, or held up to the camera on a call YOU placed to someone you trust?</div>
         <div class="fed-gate-choices">
             <button class="btn btn-primary" onClick=${() => onChoose(false)}>Yes - same room, or their phone on my camera</button>
@@ -10366,7 +10389,7 @@ function FedChannelGate({ endpoint, onEndpoint, onChoose }) {
 // GuestJoinWizard - "Join a network". Maps to guest STEP 1-4.
 function GuestJoinWizard({ onExit }) {
     const [step, setStep] = useState('channel');
-    const [endpoint, setEndpoint] = useLanEndpoint();
+    const [endpoint, setEndpoint, lanCandidates] = useLanEndpoint();
     const [tier4, setTier4] = useState(false);
     const [scan, setScan] = useState(null);       // {session_id, host_chain, host_endpoint, host_pin, return_uri}
     const [scopeG, setScopeG] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
@@ -10423,7 +10446,7 @@ function GuestJoinWizard({ onExit }) {
         </div>
         ${err && html`<div class="fed-err">${err}</div>`}
 
-        ${step === 'channel' && html`<${FedChannelGate} endpoint=${endpoint} onEndpoint=${setEndpoint}
+        ${step === 'channel' && html`<${FedChannelGate} endpoint=${endpoint} onEndpoint=${setEndpoint} candidates=${lanCandidates}
             onChoose=${(t) => { setTier4(t); setStep('scan'); }} />`}
 
         ${step === 'scan' && html`<div class="fed-step">
@@ -10494,7 +10517,7 @@ function GuestJoinWizard({ onExit }) {
 // HostJoinWizard - "Let someone join". Maps to host H1-H7.
 function HostJoinWizard({ onExit }) {
     const [step, setStep] = useState('create');
-    const [endpoint, setEndpoint] = useLanEndpoint();
+    const [endpoint, setEndpoint, lanCandidates] = useLanEndpoint();
     const [session, setSession] = useState(null);   // {session_id, otpauth_uri, host_pin}
     const [view, setView] = useState(null);          // host status view
     const [grant, setGrant] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
@@ -10564,6 +10587,7 @@ function HostJoinWizard({ onExit }) {
                 <input class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:8444" />
                 ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This is a localhost address — whoever scans your code will dial their OWN computer and fail. Use this machine's network address (e.g. <code>https://192.168.1.10:8444</code>).</div>`}
             </div>
+            <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
             <button class="btn btn-primary" disabled=${busy} onClick=${doCreate}>${busy ? 'Working…' : 'Show my connection code'}</button>
         </div>`}
 
