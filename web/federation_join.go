@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/internal/federation"
+	"github.com/l33tdawg/sage/internal/store"
 )
 
 // v11 real-TOTP federation JOIN ceremony - the dashboard (cookie-authed) proxy
@@ -36,6 +38,7 @@ type FederationJoinDriver interface {
 	RevokeAgreement(remoteChainID string) (string, error)
 	PeerStatus(ctx context.Context, remoteChainID string) (*federation.StatusResponse, error)
 	LocalChainID() string
+	SyncReconcileInfo(remoteChainID string) (federation.SyncReconcileStatus, bool)
 }
 
 // SetFederation wires the JOIN ceremony driver (call before RegisterRoutes).
@@ -70,6 +73,12 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	r.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
 
 	r.Get("/v1/dashboard/federation/lan-endpoint", h.handleFedLanEndpoint)
+
+	// v11.5 domain-sync consent + status (operator-only surface, but the
+	// dashboard IS the operator here — cookie-authed local control plane).
+	r.Get("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncGet)
+	r.Put("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncSet)
+	r.Get("/v1/dashboard/federation/connections/{chain_id}/sync/status", h.handleFedSyncStatus)
 
 	r.Post("/v1/dashboard/federation/join/host/create", h.handleFedHostCreate)
 	r.Post("/v1/dashboard/federation/join/host/scan-return", h.handleFedHostScanReturn)
@@ -126,6 +135,159 @@ func (h *DashboardHandler) handleFedLanEndpoint(w http.ResponseWriter, _ *http.R
 		"suggested_endpoint": suggested,
 		"candidates":         out,
 	})
+}
+
+// --- v11.5 domain-sync consent + status -------------------------------------
+
+// syncStore returns the SQLite store the sync tables live on, or nil on any
+// other backend (sync is SQLite-only).
+func (h *DashboardHandler) syncStore() *store.SQLiteStore {
+	ss, _ := h.store.(*store.SQLiteStore)
+	return ss
+}
+
+// findAgreement returns the active cross_fed record for a chain, or nil.
+func (h *DashboardHandler) findAgreement(chain string) *store.CrossFedRecord {
+	if h.BadgerStore == nil {
+		return nil
+	}
+	records, err := h.BadgerStore.ListCrossFed()
+	if err != nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	for i := range records {
+		r := records[i]
+		if r.RemoteChainID == chain {
+			if r.Status != "active" || (r.ExpiresAt != 0 && now >= r.ExpiresAt) {
+				return nil
+			}
+			return &r
+		}
+	}
+	return nil
+}
+
+func (h *DashboardHandler) handleFedSyncGet(w http.ResponseWriter, r *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	chain := chi.URLParam(r, "chain_id")
+	ss := h.syncStore()
+	if ss == nil {
+		fedWriteErr(w, http.StatusNotImplemented, "Domain sync requires the SQLite store backend.")
+		return
+	}
+	domains, err := ss.GetSyncDomains(r.Context(), chain)
+	if err != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Failed to read sync domains.")
+		return
+	}
+	if domains == nil {
+		domains = []string{}
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": domains})
+}
+
+func (h *DashboardHandler) handleFedSyncSet(w http.ResponseWriter, r *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	chain := chi.URLParam(r, "chain_id")
+	ss := h.syncStore()
+	if ss == nil {
+		fedWriteErr(w, http.StatusNotImplemented, "Domain sync requires the SQLite store backend.")
+		return
+	}
+	agreement := h.findAgreement(chain)
+	if agreement == nil {
+		fedWriteErr(w, http.StatusConflict, "No active agreement for this connection.")
+		return
+	}
+	var body struct {
+		Domains []string `json:"domains"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected {\"domains\": [...]}.")
+		return
+	}
+	if len(body.Domains) > 100 {
+		fedWriteErr(w, http.StatusBadRequest, "A sync consent set is capped at 100 domains.")
+		return
+	}
+	for _, d := range body.Domains {
+		if d == "" {
+			fedWriteErr(w, http.StatusBadRequest, "Sync domains must be non-empty.")
+			return
+		}
+		if d == "*" {
+			fedWriteErr(w, http.StatusBadRequest, "Sync domains must be concrete (no \"*\").")
+			return
+		}
+		if !federation.DomainAllowed(agreement.AllowedDomains, d) {
+			fedWriteErr(w, http.StatusBadRequest, "Domain "+strconv.Quote(d)+" is not covered by the agreement's shared domains.")
+			return
+		}
+	}
+	if err := ss.SetSyncDomains(r.Context(), chain, body.Domains); err != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Failed to save sync domains.")
+		return
+	}
+	saved, _ := ss.GetSyncDomains(r.Context(), chain)
+	if saved == nil {
+		saved = []string{}
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": saved})
+}
+
+func (h *DashboardHandler) handleFedSyncStatus(w http.ResponseWriter, r *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	chain := chi.URLParam(r, "chain_id")
+	ss := h.syncStore()
+	if ss == nil {
+		fedWriteErr(w, http.StatusNotImplemented, "Domain sync requires the SQLite store backend.")
+		return
+	}
+	ctx := r.Context()
+	counts, err := ss.CountSyncOutboxByState(ctx, chain)
+	if err != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Failed to read sync status.")
+		return
+	}
+	domains, _ := ss.GetSyncDomains(ctx, chain)
+	if domains == nil {
+		domains = []string{}
+	}
+	rejected, _ := ss.ListSyncOutbox(ctx, chain, store.SyncStateRejected, 50)
+	pending, _ := ss.ListSyncOutbox(ctx, chain, store.SyncStatePending, 50)
+	type row struct {
+		MemoryID string `json:"memory_id"`
+		Reason   string `json:"reason,omitempty"`
+	}
+	toRows := func(items []store.SyncOutboxItem) []row {
+		out := make([]row, 0, len(items))
+		for _, it := range items {
+			out = append(out, row{MemoryID: it.MemoryID, Reason: it.LastError})
+		}
+		return out
+	}
+	resp := map[string]any{
+		"remote_chain_id": chain,
+		"sync_domains":    domains,
+		"outbox_counts":   counts,
+		"rejected":        toRows(rejected),
+		"pending":         toRows(pending),
+	}
+	if st, ok := h.Federation.SyncReconcileInfo(chain); ok {
+		resp["peer_consented_domains"] = st.PeerConsented
+		resp["peer_unsupported"] = st.PeerUnsupported
+		if !st.LastReconcile.IsZero() {
+			resp["last_reconcile"] = st.LastReconcile.UTC().Format(time.RFC3339)
+		}
+	}
+	fedWriteJSON(w, http.StatusOK, resp)
 }
 
 // --- Connections list / revoke / status ------------------------------------

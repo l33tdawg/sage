@@ -6,7 +6,7 @@ embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pu
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
-fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
+fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedSyncGet, fedSyncSet, fedSyncStatus, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 
@@ -10655,6 +10655,124 @@ function HostJoinWizard({ onExit }) {
     </div>`;
 }
 
+// jsDomainAllowed mirrors federation.DomainAllowed: "*" wildcard, exact match,
+// or dotted-ancestor coverage ("hr" covers "hr.public").
+function jsDomainAllowed(allowed, d) {
+    return (allowed || []).some(a => a === '*' || (a && d && (a === d || d.startsWith(a + '.'))));
+}
+
+// prettySyncReason turns a sync reject/enum code into human copy.
+function prettySyncReason(code) {
+    const map = {
+        rejected_cross_domain_dup: 'already exists on their side under a different topic',
+        rejected_clearance: 'above the clearance limit for this connection',
+        rejected_not_consented: "they haven't turned on sync for this topic yet",
+        rejected_domain_scope: 'outside the shared scope',
+        'sender vault locked': 'waiting for this node to be unlocked',
+        'peer does not support sync': 'the other node is on an older SAGE without sync',
+    };
+    return map[code] || code || 'unknown';
+}
+
+// FedSyncPanel - per-connection domain-sync control. Domain sync COPIES a shared
+// topic's memories to the peer (vs. recall, which only borrows answers live). It
+// is off until BOTH sides switch a topic on. This panel is where an operator
+// turns it on and sees what's flowing.
+function FedSyncPanel({ conn }) {
+    const chain = conn.remote_chain_id;
+    const allowed = (conn.allowed_domains || []).filter(d => d && d !== '*');
+    const wildcard = (conn.allowed_domains || []).includes('*');
+    const [saved, setSaved] = useState(null);      // saved sync_domains array
+    const [sel, setSel] = useState(null);          // working Set
+    const [status, setStatus] = useState(null);
+    const [addVal, setAddVal] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState('');
+
+    const load = async () => {
+        try {
+            const g = await fedSyncGet(chain);
+            const ds = g.sync_domains || [];
+            setSaved(ds); setSel(new Set(ds)); setErr('');
+        } catch (e) { setErr(String(e.message || e)); setSaved([]); setSel(new Set()); }
+        try { setStatus(await fedSyncStatus(chain)); } catch (e) {}
+    };
+    useEffect(() => { load(); }, [chain]);
+
+    if (sel === null) return html`<div class="fed-sync-detail muted">Loading…</div>`;
+
+    const rows = Array.from(new Set([...allowed, ...sel])).sort();
+    const toggle = (d) => { const n = new Set(sel); n.has(d) ? n.delete(d) : n.add(d); setSel(n); };
+    const dirty = saved && (sel.size !== saved.length || [...sel].some(d => !saved.includes(d)));
+    const addDomain = () => {
+        const d = addVal.trim();
+        if (!d) return;
+        if (d === '*') { setErr('Use a concrete topic, not "*".'); return; }
+        if (!wildcard && !jsDomainAllowed(conn.allowed_domains, d)) { setErr(`"${d}" is outside this connection's shared topics.`); return; }
+        const n = new Set(sel); n.add(d); setSel(n); setAddVal(''); setErr('');
+    };
+    const save = async () => {
+        setBusy(true); setErr('');
+        try {
+            const r = await fedSyncSet(chain, [...sel]);
+            const ds = r.sync_domains || [];
+            setSaved(ds); setSel(new Set(ds));
+            showToast('Sync updated', 'success');
+            setStatus(await fedSyncStatus(chain));
+        } catch (e) { setErr(String(e.message || e)); }
+        setBusy(false);
+    };
+
+    const counts = (status && status.outbox_counts) || {};
+    const rejected = (status && status.rejected) || [];
+    const peerConsent = status && status.peer_consented_domains;
+    const peerUnsupported = status && status.peer_unsupported;
+    // Both-sides-consent gap: topics we share that the peer hasn't turned on.
+    const oneSided = peerConsent ? [...sel].filter(d => !jsDomainAllowed(peerConsent, d)) : [];
+
+    return html`<div class="fed-sync-detail">
+        <div class="fed-sync-explain">
+            <strong>Copying memories (sync) is off until you turn it on.</strong>
+            Connecting lets you borrow answers live. To actually <em>copy</em> a topic's memories to ${chain},
+            switch it on below — and they must switch the same topic on their side. Nothing crosses until both do.
+        </div>
+
+        ${rows.length === 0 && !wildcard && html`<div class="muted">This connection shares no topics, so there's nothing to sync.</div>`}
+        ${(rows.length > 0 || wildcard) && html`<div class="fed-sync-domains">
+            ${rows.map(d => html`<label class="fed-sync-row" key=${d}>
+                <input type="checkbox" checked=${sel.has(d)} onChange=${() => toggle(d)} />
+                <span class="fed-sync-dom">${d}</span>
+                ${!allowed.includes(d) && html`<span class="fed-sync-tag muted">added</span>`}
+                ${oneSided.includes(d) && sel.has(d) && html`<span class="fed-sync-tag warn" title="They haven't turned this on yet">one-sided</span>`}
+            </label>`)}
+        </div>`}
+
+        <div class="fed-sync-add">
+            <input class="fed-share-input" placeholder=${wildcard ? 'Add a topic to sync (e.g. hr.public)' : 'Add a specific sub-topic'}
+                value=${addVal} onInput=${e => setAddVal(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') addDomain(); }} />
+            <button class="btn" onClick=${addDomain}>Add</button>
+        </div>
+
+        ${err && html`<div class="fed-warn">${err}</div>`}
+        ${oneSided.length > 0 && html`<div class="fed-sync-note">You're sharing <strong>${oneSided.join(', ')}</strong>, but ${chain} hasn't turned ${oneSided.length > 1 ? 'those' : 'that'} on their side yet — nothing will arrive there until they do.</div>`}
+        ${peerUnsupported && html`<div class="fed-sync-note">${chain} is on an older SAGE that doesn't support sync yet — anything you enable is queued and will deliver once they upgrade.</div>`}
+
+        <div class="fed-sync-actions">
+            <button class="btn btn-primary" disabled=${!dirty || busy} onClick=${save}>${busy ? 'Saving…' : 'Save sync topics'}</button>
+            ${status && html`<div class="fed-sync-status">
+                ${counts.delivered ? html`<span class="fed-sync-chip ok">${counts.delivered} copied</span>` : ''}
+                ${counts.pending ? html`<span class="fed-sync-chip pending">${counts.pending} pending</span>` : ''}
+                ${counts.rejected ? html`<span class="fed-sync-chip rejected">${counts.rejected} rejected</span>` : ''}
+                ${counts.failed ? html`<span class="fed-sync-chip failed">${counts.failed} failed</span>` : ''}
+                ${!counts.delivered && !counts.pending && !counts.rejected && !counts.failed ? html`<span class="muted">nothing queued yet</span>` : ''}
+            </div>`}
+        </div>
+        ${rejected.length > 0 && html`<div class="fed-sync-rejects">
+            ${rejected.slice(0, 8).map(r => html`<div key=${r.memory_id} class="muted">• <code>${(r.memory_id || '').slice(0, 10)}</code> — ${prettySyncReason(r.reason)}</div>`)}
+        </div>`}
+    </div>`;
+}
+
 // FederationPage - the 8th sidebar section landing: role fork + connections list.
 function FederationPage() {
     const [mode, setMode] = useState('landing'); // landing | guest | host
@@ -10668,6 +10786,7 @@ function FederationPage() {
     };
     useEffect(() => { if (mode === 'landing') load(); }, [mode]);
 
+    const [openChain, setOpenChain] = useState('');
     const revoke = async (chain) => {
         if (!confirm(`Turn off the connection to ${chain}? This does NOT erase anything - it just stops the two networks from reaching each other.`)) return;
         try { await fedRevoke(chain); showToast(`Disconnected from ${chain}`, 'success'); load(); }
@@ -10698,6 +10817,7 @@ function FederationPage() {
 
             <div class="fed-conns">
                 <h3>Your connections <${HelpTip} text="Each row is a treaty with another SAGE. The dot is green when the connection is active and unexpired. The domains listed are the only knowledge shared across the link - everything else stays private." /></h3>
+                ${conns && conns.length > 0 && html`<div class="fed-conns-explain muted">Connecting lets each side <strong>borrow answers</strong> live within the shared topics. To also <strong>copy</strong> a topic's memories across, open a connection and turn on sync — it stays off until both sides do.</div>`}
                 ${conns === null && html`<div class="muted">Loading…</div>`}
                 ${conns && conns.length === 0 && html`
                     <${EmptyState} icon="federation"
@@ -10707,13 +10827,17 @@ function FederationPage() {
                         onAction=${() => setMode('guest')} />
                     ${localChain && html`<div class="muted" style="text-align:center;margin-top:4px;">Your network id: <code>${localChain}</code></div>`}
                 `}
-                ${conns && conns.map(c => html`<div class="fed-conn-row" key=${c.remote_chain_id}>
-                    <div class="fed-conn-main">
-                        <span class="fed-conn-status ${c.status === 'active' && !c.expired ? 'on' : 'off'}"></span>
-                        <span class="fed-conn-name">${c.remote_chain_id}</span>
-                        <span class="fed-conn-meta muted">${c.expired ? 'expired' : c.status} · ${(c.allowed_domains || []).join(', ') || 'no domains'}</span>
+                ${conns && conns.map(c => html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
+                    <div class="fed-conn-row">
+                        <button class="fed-conn-main fed-conn-expand" onClick=${() => setOpenChain(openChain === c.remote_chain_id ? '' : c.remote_chain_id)} disabled=${!(c.status === 'active' && !c.expired)}>
+                            <span class="fed-conn-status ${c.status === 'active' && !c.expired ? 'on' : 'off'}"></span>
+                            <span class="fed-conn-name">${c.remote_chain_id}</span>
+                            <span class="fed-conn-meta muted">${c.expired ? 'expired' : c.status} · ${(c.allowed_domains || []).join(', ') || 'no domains'}</span>
+                            ${c.status === 'active' && !c.expired && html`<span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>`}
+                        </button>
+                        ${c.status === 'active' && html`<button class="btn btn-danger fed-conn-off" onClick=${() => revoke(c.remote_chain_id)}>Turn off</button>`}
                     </div>
-                    ${c.status === 'active' && html`<button class="btn btn-danger fed-conn-off" onClick=${() => revoke(c.remote_chain_id)}>Turn off</button>`}
+                    ${openChain === c.remote_chain_id && c.status === 'active' && !c.expired && html`<${FedSyncPanel} conn=${c} />`}
                 </div>`)}
             </div>
         </div>

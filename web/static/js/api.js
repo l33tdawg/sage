@@ -783,12 +783,23 @@ function fedPost(path, body) {
         body: JSON.stringify(body || {}),
     });
 }
+function fedPut(path, body) {
+    return fedFetch(path, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+    });
+}
 
 // Connections list / disconnect / reachability.
 export function fedConnections() { return fedFetch('/v1/dashboard/federation/connections'); }
 // Suggested LAN endpoint to advertise in a join code (server-detected, so it is
 // never localhost - which a peer on another machine can't reach).
 export function fedLanEndpoint() { return fedFetch('/v1/dashboard/federation/lan-endpoint'); }
+// v11.5 domain-sync consent + status (per connection).
+export function fedSyncGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`); }
+export function fedSyncSet(chainId, domains) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`, { domains }); }
+export function fedSyncStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync/status`); }
 export function fedRevoke(chainId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/revoke`); }
 export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/status`); }
 
