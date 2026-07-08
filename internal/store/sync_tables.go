@@ -461,20 +461,22 @@ func (s *SQLiteStore) IsSyncedCopy(ctx context.Context, localMemoryID string) (b
 	return n > 0, nil
 }
 
-// ListSyncOriginIDs pages the admission set for one origin chain + domain,
-// sorted ascending by origin_memory_id — the anti-entropy digest source.
-// Includes terminal rejections on purpose: the sender must never re-offer an
-// item the receiver terminally refused. after is an exclusive cursor ("" =
-// from the start).
+// ListSyncOriginIDs pages the admission set for one origin chain + domain
+// SUBTREE (an asked "hr" covers recorded "hr.public" — DomainAllowed
+// semantics, matching how consent is expressed), sorted ascending by
+// origin_memory_id — the anti-entropy digest source. Includes terminal
+// rejections on purpose: the sender must never re-offer an item the receiver
+// terminally refused. after is an exclusive cursor ("" = from the start).
 func (s *SQLiteStore) ListSyncOriginIDs(ctx context.Context, originChainID, domain, after string, limit int) ([]string, error) {
 	if limit <= 0 || limit > 2000 {
 		limit = 2000
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT origin_memory_id FROM sync_origin
-		 WHERE origin_chain_id = ? AND domain_tag = ? AND origin_memory_id > ?
+		 WHERE origin_chain_id = ? AND (domain_tag = ? OR domain_tag LIKE ?)
+		   AND origin_memory_id > ?
 		 ORDER BY origin_memory_id ASC
-		 LIMIT ?`, originChainID, domain, after, limit)
+		 LIMIT ?`, originChainID, domain, domain+".%", after, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list sync origin ids: %w", err)
 	}

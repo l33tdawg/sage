@@ -210,3 +210,29 @@ type SyncItemResult struct {
 type SyncPushResponse struct {
 	Results []SyncItemResult `json:"results"`
 }
+
+// SyncDigestRequest is the body of POST /fed/v1/sync/digest — the SENDER asks
+// the RECEIVER "what have you already decided about my memories in this
+// domain". After is an exclusive origin_memory_id cursor ("" = start).
+type SyncDigestRequest struct {
+	Domain string `json:"domain"`
+	After  string `json:"after,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+// SyncDigestMaxIDs caps one digest page (~140KB of 64-char ids — well under
+// the client's 16MB read limit, cheap to serve).
+const SyncDigestMaxIDs = 2000
+
+// SyncDigestResponse enumerates the receiver's ADMISSION set — every origin
+// id it has recorded a decision for, INCLUDING terminal rejections, so the
+// sender never re-offers refused items. Deliberately NOT the committed set:
+// the receiver's sovereign voter may deprecate a copy later without
+// re-opening delivery. ConsentedDomains surfaces asymmetric consent instead
+// of silently dropping (the sender can show "peer has not consented to X").
+type SyncDigestResponse struct {
+	Consented        bool     `json:"consented"`
+	ConsentedDomains []string `json:"consented_domains"`
+	OriginMemoryIDs  []string `json:"origin_memory_ids"`
+	NextCursor       string   `json:"next_cursor,omitempty"`
+}

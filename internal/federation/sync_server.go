@@ -124,6 +124,64 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, &SyncPushResponse{Results: results})
 }
 
+// handleSyncDigest implements POST /fed/v1/sync/digest (behind peerAuth):
+// the authenticated peer asks what we have already decided about ITS
+// memories in a domain subtree. Answered from the sync_origin admission
+// ledger — including terminal rejections (never re-offer refused items),
+// deliberately NOT from the committed set (sovereign lifecycle: a later
+// local deprecation must not re-open delivery). Consent asymmetry is
+// surfaced, not silently dropped.
+func (m *Manager) handleSyncDigest(w http.ResponseWriter, r *http.Request) {
+	peer := peerFromCtx(r.Context())
+	if peer == nil {
+		httpError(w, http.StatusForbidden, "unauthenticated")
+		return
+	}
+	ss := m.syncStore()
+	if ss == nil {
+		httpError(w, http.StatusNotImplemented, "domain sync requires the SQLite store backend")
+		return
+	}
+	var req SyncDigestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Domain == "" {
+		httpError(w, http.StatusBadRequest, "domain is required")
+		return
+	}
+	consented, err := ss.GetSyncDomains(r.Context(), peer.ChainID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "consent lookup failed")
+		return
+	}
+	if consented == nil {
+		consented = []string{}
+	}
+	limit := req.Limit
+	if limit <= 0 || limit > SyncDigestMaxIDs {
+		limit = SyncDigestMaxIDs
+	}
+	ids, err := ss.ListSyncOriginIDs(r.Context(), peer.ChainID, req.Domain, req.After, limit)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "digest read failed")
+		return
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	resp := &SyncDigestResponse{
+		Consented:        DomainAllowed(consented, req.Domain),
+		ConsentedDomains: consented,
+		OriginMemoryIDs:  ids,
+	}
+	if len(ids) == limit {
+		resp.NextCursor = ids[len(ids)-1]
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // validateSyncItem enforces the structural (protocol-level) invariants.
 func validateSyncItem(peerChainID string, item *SyncItem) error {
 	if item.OriginMemoryID == "" || item.OriginChainID == "" {

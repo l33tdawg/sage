@@ -85,6 +85,21 @@ func (m *Manager) StartSyncDrainer(ctx context.Context) {
 			}
 		}
 	}()
+	// Anti-entropy reconciler: its own goroutine so a slow paging pass never
+	// starves the delivery loop.
+	go func() {
+		m.syncReconcileAll(ctx, ss)
+		t := time.NewTicker(syncReconcileInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				m.syncReconcileAll(ctx, ss)
+			}
+		}
+	}()
 }
 
 // syncTick runs one scan+drain pass over every peer with sync consent.
@@ -262,6 +277,131 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		default: // SyncOutcomeRetry or anything unknown — redeliver later.
 			retry(row, true, syncBackoff(row.Attempts+1), "peer asked to retry")
 		}
+	}
+}
+
+// ---- anti-entropy reconciliation ----
+
+const (
+	syncReconcileInterval   = time.Hour
+	syncReconcileMaxPages   = 50  // per (peer, domain) per cycle
+	syncReconcileMaxEnqueue = 500 // per peer per cycle; the remainder next cycle
+	syncDigestTimeout       = 4 * time.Second
+)
+
+// SyncReconcileStatus is per-peer anti-entropy bookkeeping for the status
+// surface.
+type SyncReconcileStatus struct {
+	LastReconcile   time.Time `json:"last_reconcile"`
+	PeerConsented   []string  `json:"peer_consented_domains"`
+	PeerUnsupported bool      `json:"peer_unsupported"`
+}
+
+// SyncReconcileInfo returns the last reconcile bookkeeping for one peer.
+func (m *Manager) SyncReconcileInfo(remoteChainID string) (SyncReconcileStatus, bool) {
+	m.syncStatusMu.Lock()
+	defer m.syncStatusMu.Unlock()
+	st, ok := m.syncReconcile[remoteChainID]
+	return st, ok
+}
+
+func (m *Manager) setSyncReconcileInfo(remoteChainID string, st SyncReconcileStatus) {
+	m.syncStatusMu.Lock()
+	defer m.syncStatusMu.Unlock()
+	if m.syncReconcile == nil {
+		m.syncReconcile = make(map[string]SyncReconcileStatus)
+	}
+	m.syncReconcile[remoteChainID] = st
+}
+
+// syncReconcileAll runs one anti-entropy pass over every consented peer.
+func (m *Manager) syncReconcileAll(ctx context.Context, ss *store.SQLiteStore) {
+	chains, err := ss.ListSyncDomainChains(ctx)
+	if err != nil {
+		return
+	}
+	for _, chain := range chains {
+		if ctx.Err() != nil {
+			return
+		}
+		agreement, aErr := m.ActiveAgreement(chain)
+		if aErr != nil {
+			continue
+		}
+		consented, cErr := ss.GetSyncDomains(ctx, chain)
+		if cErr != nil || len(consented) == 0 {
+			continue
+		}
+		m.reconcilePeer(ctx, ss, agreement, consented)
+	}
+}
+
+// reconcilePeer pages the peer's admission digest per consented domain and
+// backfills the local outbox: candidates the peer has NOT seen are enqueued
+// normally; candidates the peer has ALREADY decided (possible only when the
+// local outbox was lost/rebuilt — normally a decided item has a terminal
+// outbox row) are settled as delivered without redelivery churn. The steady-
+// state scan already covers new work; this pass exists for outbox loss and
+// for surfacing the peer's consent posture.
+func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
+	chain := agreement.RemoteChainID
+	digest := m.syncDigestFn
+	if digest == nil {
+		digest = m.SyncDigest
+	}
+	status := SyncReconcileStatus{LastReconcile: time.Now()}
+	enqueued := 0
+	for _, domain := range consented {
+		decided := make(map[string]bool)
+		after := ""
+		for page := 0; page < syncReconcileMaxPages; page++ {
+			dctx, cancel := context.WithTimeout(context.Background(), syncDigestTimeout)
+			dctx = mergeCancel(dctx, ctx)
+			resp, dErr := digest(dctx, chain, &SyncDigestRequest{Domain: domain, After: after})
+			cancel()
+			if dErr == ErrSyncUnsupported {
+				status.PeerUnsupported = true
+				m.setSyncReconcileInfo(chain, status)
+				return
+			}
+			if dErr != nil {
+				// Transient: finish what we have, next cycle retries.
+				m.logger.Debug().Err(dErr).Str("peer", chain).Msg("sync reconcile: digest page failed")
+				break
+			}
+			status.PeerConsented = resp.ConsentedDomains
+			for _, id := range resp.OriginMemoryIDs {
+				decided[id] = true
+			}
+			if resp.NextCursor == "" {
+				break
+			}
+			after = resp.NextCursor
+		}
+		cands, lErr := ss.ListSyncCandidates(ctx, chain, []string{domain}, syncReconcileMaxEnqueue)
+		if lErr != nil {
+			continue
+		}
+		for _, c := range cands {
+			if enqueued >= syncReconcileMaxEnqueue {
+				break
+			}
+			if !DomainAllowed(agreement.AllowedDomains, c.DomainTag) || c.Classification > int(agreement.MaxClearance) {
+				continue
+			}
+			created, eErr := ss.EnqueueSyncOutbox(ctx, chain, c.MemoryID)
+			if eErr != nil || !created {
+				continue
+			}
+			enqueued++
+			if decided[c.MemoryID] {
+				_ = ss.MarkSyncOutboxDelivered(ctx, chain, c.MemoryID)
+			}
+		}
+	}
+	m.setSyncReconcileInfo(chain, status)
+	if enqueued > 0 {
+		m.nudgeSync()
 	}
 }
 

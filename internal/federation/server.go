@@ -52,7 +52,8 @@ func (m *Manager) Router() http.Handler {
 		r.Get("/fed/v1/status", m.handleStatus)
 		r.Post("/fed/v1/query", m.handleQuery)
 		r.Post("/fed/v1/receipt", m.handleReceipt)
-		r.Post("/fed/v1/sync/push", m.handleSyncPush) // v11.5 domain sync
+		r.Post("/fed/v1/sync/push", m.handleSyncPush)     // v11.5 domain sync
+		r.Post("/fed/v1/sync/digest", m.handleSyncDigest) // v11.5 anti-entropy
 	})
 	// The pre-agreement JOIN ceremony routes sit behind joinAuth, NOT peerAuth
 	// (no active agreement exists yet during a join).

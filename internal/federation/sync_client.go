@@ -50,3 +50,28 @@ func (m *Manager) SyncPush(ctx context.Context, remoteChainID string, req *SyncP
 	}
 	return &out, nil
 }
+
+// SyncDigest fetches one page of the peer's admission set for a domain
+// subtree (anti-entropy reconciliation).
+func (m *Manager) SyncDigest(ctx context.Context, remoteChainID string, req *SyncDigestRequest) (*SyncDigestResponse, error) {
+	agreement, err := m.ActiveAgreement(remoteChainID)
+	if err != nil {
+		return nil, err
+	}
+	body, status, err := m.doPeerRequest(ctx, agreement, http.MethodPost, "/fed/v1/sync/digest", req)
+	if err != nil {
+		return nil, err
+	}
+	switch status {
+	case http.StatusOK:
+	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusNotImplemented:
+		return nil, ErrSyncUnsupported
+	default:
+		return nil, fmt.Errorf("peer %s returned %d: %s", remoteChainID, status, truncate(body, 200))
+	}
+	var out SyncDigestResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode sync digest response: %w", err)
+	}
+	return &out, nil
+}

@@ -92,6 +92,16 @@ type Manager struct {
 	// SetSyncNotifier in runServe, so the watcher never sees a half-built channel.
 	syncNudge chan struct{}
 
+	// syncDigestFn is the anti-entropy seam (same pattern as syncPushFn):
+	// nil in production (m.SyncDigest), non-nil only in tests.
+	syncDigestFn func(ctx context.Context, remoteChainID string, req *SyncDigestRequest) (*SyncDigestResponse, error)
+
+	// syncStatusMu guards syncReconcile — per-peer anti-entropy bookkeeping
+	// (last run, the peer's advertised consent, unsupported flag) surfaced by
+	// the sync status endpoint. Node-local observability only.
+	syncStatusMu  sync.Mutex
+	syncReconcile map[string]SyncReconcileStatus
+
 	// seedMu guards seedCache — per-agreement TOTP seeds (v11 join ceremony),
 	// keyed by remote chain id → the candidate seeds (current + previous epoch
 	// during a rotation cutover). Populated once at unlock; zeroized on
