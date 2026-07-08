@@ -973,6 +973,11 @@ func runServe() (rerr error) {
 			// v11.5 domain-sync outbox drainer (scan + deliver). Internally a
 			// no-op with a log line on non-SQLite backends.
 			fedMgr.StartSyncDrainer(ctx)
+			// Commit-tail watcher: low-latency enqueue of just-committed
+			// memories (the drainer's poll scan stays the correctness
+			// backstop). MUST come after StartSyncDrainer — the watcher
+			// nudges the channel the drainer creates.
+			app.SetSyncNotifier(fedMgr.SyncWatcher())
 			go func() {
 				logger.Info().Str("addr", fedAddr).Str("chain_id", cfg.ChainID).Msg("federation mTLS listener starting")
 				if fedServeErr := fedServer.ListenAndServeTLS("", ""); fedServeErr != nil && fedServeErr != http.ErrServerClosed {

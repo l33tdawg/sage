@@ -84,6 +84,14 @@ type Manager struct {
 	// tests so drain logic is testable without a TLS peer.
 	syncPushFn func(ctx context.Context, remoteChainID string, req *SyncPushRequest) (*SyncPushResponse, error)
 
+	// syncNudge wakes the outbox drainer ahead of its ticker when the commit
+	// watcher enqueues new work. Buffered-1 (a pending nudge covers all
+	// batches until consumed). Created by StartSyncDrainer BEFORE its
+	// goroutine launches; nil when the drainer is disabled — nudgeSync is
+	// nil-safe. Wiring order matters: StartSyncDrainer runs before
+	// SetSyncNotifier in runServe, so the watcher never sees a half-built channel.
+	syncNudge chan struct{}
+
 	// seedMu guards seedCache — per-agreement TOTP seeds (v11 join ceremony),
 	// keyed by remote chain id → the candidate seeds (current + previous epoch
 	// during a rotation cutover). Populated once at unlock; zeroized on

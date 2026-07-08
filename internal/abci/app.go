@@ -263,6 +263,15 @@ type SageApp struct {
 	// in after construction so existing NewSageApp callers don't break.
 	snapshotScheduler *SnapshotScheduler
 
+	// syncNotifier is the v11.5 domain-sync Commit-tail hook: when non-nil it
+	// receives the memory IDs whose status became committed in this block,
+	// strictly AFTER the offchain flush + SaveState (so the SQLite mirror row
+	// is guaranteed visible to the callback). Dispatched on a fresh goroutine
+	// (the snapshotScheduler.Tick fast/non-blocking contract). NEVER reads or
+	// writes consensus state — purely a low-latency nudge; the federation
+	// drainer's poll scan is the correctness backstop.
+	syncNotifier func([]string)
+
 	// v8AppliedHeight is the block at which the v8.0 access-control fork
 	// activated. Zero means not yet activated — handlers must take the
 	// pre-fork (v7.1.1-equivalent) branch. Populated from the persisted
@@ -5431,8 +5440,13 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 	// drop: consensus has already committed these writes on-chain, so losing
 	// them from the offchain store would produce divergence the read API
 	// cannot detect.
+	// flushedWrites survives the pendingWrites nil-out below so the sync
+	// notifier at the Commit tail can filter what actually flushed. A flush
+	// failure panics before the tail, so this never reports unflushed writes.
+	var flushedWrites []pendingWrite
 	if len(app.pendingWrites) > 0 {
 		writes := app.pendingWrites
+		flushedWrites = writes
 		maxRetries := app.flushMaxRetries
 		if maxRetries <= 0 {
 			maxRetries = defaultFlushMaxRetries
@@ -5486,6 +5500,28 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 		app.snapshotScheduler.Tick(app.state.Height, app.state.AppHash)
 	}
 
+	// v11.5 domain-sync watcher: report this block's committed memory IDs,
+	// post-flush and post-SaveState. status_update -> committed is the single
+	// choke point for every commit transition (quorum path + co-commit
+	// mirror), so filtering the just-flushed writes catches them all. A block
+	// replay after a flush panic legitimately re-fires this — the watcher's
+	// enqueue is INSERT OR IGNORE idempotent by design.
+	if app.syncNotifier != nil {
+		var committed []string
+		for _, pw := range flushedWrites {
+			if pw.writeType != "status_update" {
+				continue
+			}
+			if su, ok := pw.data.(*statusUpdate); ok && su.Status == memory.StatusCommitted {
+				committed = append(committed, su.MemoryID)
+			}
+		}
+		if len(committed) > 0 {
+			notify := app.syncNotifier
+			go notify(committed)
+		}
+	}
+
 	// Ask CometBFT to prune blocks older than the retain window (issue #40).
 	// RetainHeight is advisory and LOCAL — it never enters the AppHash, so a
 	// node may prune (or not) independently of its peers. 0 means keep
@@ -5508,6 +5544,14 @@ func (app *SageApp) SetRetainBlocks(n int64) {
 		n = 0
 	}
 	app.retainBlocks = n
+}
+
+// SetSyncNotifier installs the domain-sync commit hook (see the field doc).
+// nil is allowed (disables the nudge; the drainer's poll scan still syncs).
+// Call once during boot before the chain produces blocks; not safe to call
+// concurrently with Commit — same contract as SetSnapshotScheduler.
+func (app *SageApp) SetSyncNotifier(fn func([]string)) {
+	app.syncNotifier = fn
 }
 
 // flushPendingWrites executes all buffered writes against the given store (which

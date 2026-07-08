@@ -590,6 +590,23 @@ func (s *SQLiteStore) ListSyncCandidates(ctx context.Context, remoteChainID stri
 	return out, rows.Err()
 }
 
+// GetSyncCandidateByID resolves one COMMITTED memory's sync metadata
+// (domain + classification) from the mirror, or (nil, nil) when the row is
+// absent or not committed — the commit-tail watcher's per-ID lookup.
+func (s *SQLiteStore) GetSyncCandidateByID(ctx context.Context, memoryID string) (*SyncCandidate, error) {
+	row := s.conn.QueryRowContext(ctx, `
+		SELECT memory_id, COALESCE(domain_tag, ''), classification FROM memories
+		 WHERE memory_id = ? AND status = 'committed'`, memoryID)
+	var c SyncCandidate
+	if err := row.Scan(&c.MemoryID, &c.DomainTag, &c.Classification); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get sync candidate: %w", err)
+	}
+	return &c, nil
+}
+
 // GetMemoryClassificationLocal reads the mirror's classification column (the
 // sender-side clearance gate; the receiver independently enforces its own
 // ceiling). Errors, including not-found, must be treated fail-closed by the

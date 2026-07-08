@@ -65,6 +65,10 @@ func (m *Manager) StartSyncDrainer(ctx context.Context) {
 		m.logger.Info().Msg("domain sync disabled: store backend is not SQLite")
 		return
 	}
+	// The nudge channel must exist before the commit watcher can be wired
+	// (runServe calls StartSyncDrainer, THEN SetSyncNotifier).
+	m.syncNudge = make(chan struct{}, 1)
+	nudge := m.syncNudge
 	go func() {
 		// Immediate first pass: restart recovery should not wait a tick.
 		m.syncTick(ctx, ss)
@@ -75,6 +79,8 @@ func (m *Manager) StartSyncDrainer(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				m.syncTick(ctx, ss)
+			case <-nudge:
 				m.syncTick(ctx, ss)
 			}
 		}
