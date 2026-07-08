@@ -606,6 +606,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// (v6.8.0 — required so /oauth/authorize can validate redirect_uri).
 	s.migrateOAuthClients(ctx)
 
+	// Migration: add domain-sync tables (v11.5 — sync_domains consent,
+	// sync_outbox store-and-forward queue, sync_origin admission ledger).
+	s.migrateSyncTables(ctx)
+
 	// FTS5 full-text search index on memory content.
 	// Used as a fallback when semantic embeddings are unavailable (hash mode).
 	_, _ = s.writeExecContext(ctx, `
