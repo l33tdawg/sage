@@ -454,6 +454,7 @@ func (s *JoinStore) CheckConfirm(id string, certSPKI, guestSig, guestAckSig []by
 	// HOST_APPROVED) and is rejected, so the host broadcasts its tx-33 once.
 	ctx := &ConfirmContext{
 		GuestChain:    js.GuestChain,
+		GuestName:     js.GuestName,
 		GuestPin:      append([]byte(nil), js.ApprovedGuestPin...),
 		GuestEndpoint: js.ApprovedGuestEnd,
 		Seed:          append([]byte(nil), js.Seed...),
@@ -481,6 +482,7 @@ func (s *JoinStore) CheckConfirm(id string, certSPKI, guestSig, guestAckSig []by
 // pointer.
 type ConfirmContext struct {
 	GuestChain      string
+	GuestName       string // friendly label the guest chose (cosmetic; for local display)
 	GuestPin        []byte
 	GuestEndpoint   string
 	Seed            []byte // the ceremony's own seed (NOT re-resolved by chain id)

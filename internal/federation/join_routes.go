@@ -437,8 +437,25 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 		return m.undoPartialHostConfirm(sessionID, ctx, "host seed commit failed", sErr)
 	}
 	m.joins.MarkActive(sessionID)
+	m.rememberPeerName(ctx.GuestChain, ctx.GuestName)
 	m.logger.Info().Str("guest", ctx.GuestChain).Str("tx", txHash).Msg("federation join activated (host side)")
 	return txHash, m.localChainID, nil
+}
+
+// rememberPeerName stores a peer's friendly label for local display (connections
+// list). Best-effort: a nil/Postgres store or a write error never affects the
+// ceremony — the label is cosmetic.
+func (m *Manager) rememberPeerName(remoteChainID, name string) {
+	if name == "" {
+		return
+	}
+	ss := m.syncStore()
+	if ss == nil {
+		return
+	}
+	if err := ss.SetPeerName(context.Background(), remoteChainID, name); err != nil {
+		m.logger.Debug().Err(err).Str("peer", remoteChainID).Msg("could not store peer display name (cosmetic)")
+	}
 }
 
 // undoPartialHostConfirm rolls back a host confirm that broadcast tx-33 but then
@@ -910,6 +927,7 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 		m.logger.Warn().Err(err).Str("host", d.hostChain).Msg("guest active but host confirm failed (one-sided window)")
 		return txHash, fmt.Errorf("your side is connected but the host has not confirmed yet: %w", err)
 	}
+	m.rememberPeerName(d.hostChain, d.hostName)
 	m.dropGuestDraft(sessionID)
 	m.logger.Info().Str("host", d.hostChain).Str("tx", txHash).Msg("federation join activated (guest side)")
 	return txHash, nil

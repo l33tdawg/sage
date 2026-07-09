@@ -138,6 +138,53 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		`CREATE INDEX IF NOT EXISTS idx_sync_origin_domain ON sync_origin(origin_chain_id, domain_tag)`)
 	_, _ = s.writeExecContext(ctx,
 		`CREATE INDEX IF NOT EXISTS idx_sync_origin_local ON sync_origin(local_memory_id) WHERE local_memory_id != ''`)
+	// fed_peer_names: the friendly label a peer network chose for itself, learned
+	// at join time. Purely a local display convenience (the connections list shows
+	// it in place of the raw chain id); never authoritative, never on-chain.
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS fed_peer_names (
+		remote_chain_id TEXT PRIMARY KEY,
+		name            TEXT NOT NULL,
+		updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	)`)
+}
+
+// ---- fed_peer_names (local display labels for federated peers) ----
+
+// SetPeerName records (or clears, when name=="") the friendly label a peer
+// network reported for itself at join time. Best-effort display metadata; a
+// failure never blocks the ceremony.
+func (s *SQLiteStore) SetPeerName(ctx context.Context, remoteChainID, name string) error {
+	if remoteChainID == "" {
+		return fmt.Errorf("remote_chain_id is required")
+	}
+	if name == "" {
+		_, err := s.writeExecContext(ctx, `DELETE FROM fed_peer_names WHERE remote_chain_id = ?`, remoteChainID)
+		return err
+	}
+	_, err := s.writeExecContext(ctx, `
+		INSERT INTO fed_peer_names (remote_chain_id, name) VALUES (?, ?)
+		ON CONFLICT(remote_chain_id) DO UPDATE SET name = excluded.name,
+			updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`, remoteChainID, name)
+	return err
+}
+
+// GetPeerNames returns every known peer display label keyed by remote chain id.
+func (s *SQLiteStore) GetPeerNames(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT remote_chain_id, name FROM fed_peer_names`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string)
+	for rows.Next() {
+		var id, name string
+		if scanErr := rows.Scan(&id, &name); scanErr != nil {
+			return nil, scanErr
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
 }
 
 // ---- sync_domains ----

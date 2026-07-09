@@ -11251,7 +11251,7 @@ function FederationPage() {
                     <div class="fed-conn-row">
                         <button class="fed-conn-main fed-conn-expand" onClick=${() => setOpenChain(openChain === c.remote_chain_id ? '' : c.remote_chain_id)} disabled=${!(c.status === 'active' && !c.expired)}>
                             <span class="fed-conn-status ${c.status === 'active' && !c.expired ? 'on' : 'off'}"></span>
-                            <span class="fed-conn-name">${c.remote_chain_id}</span>
+                            <span class="fed-conn-name" title=${c.peer_name ? c.remote_chain_id : ''}>${c.peer_name || c.remote_chain_id}</span>
                             <span class="fed-conn-meta muted">${c.expired ? 'expired' : c.status} · ${(c.allowed_domains || []).join(', ') || 'no domains'}</span>
                             ${c.status === 'active' && !c.expired && html`<span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>`}
                         </button>

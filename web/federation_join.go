@@ -484,6 +484,7 @@ func (h *DashboardHandler) handleFedSyncStatus(w http.ResponseWriter, r *http.Re
 // FedConnection is one cross_fed agreement for the Connections view.
 type FedConnection struct {
 	RemoteChainID  string   `json:"remote_chain_id"`
+	PeerName       string   `json:"peer_name,omitempty"` // friendly label the peer chose (cosmetic)
 	Endpoint       string   `json:"endpoint"`
 	MaxClearance   int      `json:"max_clearance"`
 	AllowedDomains []string `json:"allowed_domains"`
@@ -548,11 +549,18 @@ func (h *DashboardHandler) handleFedConnections(w http.ResponseWriter, _ *http.R
 			fedWriteErr(w, http.StatusInternalServerError, "Failed to list connections.")
 			return
 		}
+		// Best-effort friendly labels for the connections list (cosmetic; a
+		// missing/Postgres store just falls back to the raw chain id in the UI).
+		var peerNames map[string]string
+		if ss := h.syncStore(); ss != nil {
+			peerNames, _ = ss.GetPeerNames(context.Background())
+		}
 		now := time.Now().Unix()
 		conns := make([]FedConnection, 0, len(records))
 		for _, rec := range records {
 			conns = append(conns, FedConnection{
 				RemoteChainID:  rec.RemoteChainID,
+				PeerName:       peerNames[rec.RemoteChainID],
 				Endpoint:       rec.Endpoint,
 				MaxClearance:   int(rec.MaxClearance),
 				AllowedDomains: rec.AllowedDomains,
