@@ -51,18 +51,31 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.4.7
+## What's New in v11.4.8
 
-**Security dependencies are current, agent pipeline replies are claimant-bound, and release gates now cover the nested natter module.** v11.4.7 is an off-consensus security and release-hardening patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Everything here lives in dependency pins, local SQLite pipeline metadata, federation seed-at-rest handling, and CI/release automation.
+**The join ceremony guardrails are tighter, and the release pipeline is cleaner.** v11.4.8 is an off-consensus reliability and release-maintenance patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
 
-- **Natter dependency security refresh.** The nested `natter` Go module now carries the patched `quic-go`, `x/crypto`, and `x/net` dependency line, plus the matching `x/*` tidy updates. This keeps the optional connectivity service ready for the v11.5 internet-federation work without spending an app-version slot.
+- **Join ceremony endpoint handling stays LAN-first.** The federation join client accepts only localhost/private-LAN endpoints, canonicalizes the base URL, and re-checks the destination in the HTTP transport at dial time.
+- **Train-of-thought columns read cleaner.** Empty MRI related-memory columns now say "None yet" instead of a placeholder dash.
+- **Release automation pins move in lockstep.** The analysis workflow now keeps its setup and reporting steps on the same action version, avoiding mixed-version release noise.
+- **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.8.
+
+SDK 11.4.8.
+
+## Older releases
+
+<details>
+<summary>v11.4.7 - dependency refresh + release hardening</summary>
+
+**Dependencies are current, agent pipeline replies are claimant-bound, and release gates now cover the nested natter module.** v11.4.7 is an off-consensus dependency and release-hardening patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Everything here lives in dependency pins, local SQLite pipeline metadata, federation seed-at-rest handling, and CI/release automation.
+
+- **Natter dependency refresh.** The nested `natter` Go module now carries the updated `quic-go`, `x/crypto`, and `x/net` dependency line, plus the matching `x/*` tidy updates. This keeps the optional connectivity service ready for the v11.5 internet-federation work without spending an app-version slot.
 - **Agent pipeline claim/result hardening.** Pipeline claims now record `claimed_by`, and result submission is accepted only from the authenticated claimant (or a safe legacy recipient path for already-claimed pre-upgrade rows). Unrelated callers still get anti-enumeration 404s, senders can read their own pipe status but cannot complete recipient work, and failed/forged result attempts no longer create auto-journal memories.
 - **Federation TOTP seeds follow the vault.** When a node starts with the vault already unlocked, federation TOTP seeds are wrapped at rest using that passphrase; legacy plaintext seed envelopes still load for backward compatibility. Changing the passphrase clears stale in-memory seed candidates before reload.
 - **Release gates now see the real tree.** CI and release workflows now lint/test the nested `natter` module, run a cheap first-party JavaScript syntax check, and Dependabot is configured for root Go, `natter`, npm, the Python SDK, and GitHub Actions.
 
 SDK 11.4.7.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.4.6 - network name + join reliability + QR lightbox + agent grouping</summary>

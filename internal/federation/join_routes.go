@@ -1084,10 +1084,9 @@ func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID strin
 	}
 	client := &http.Client{Transport: joinHTTPTransport(tlsCfg)}
 	defer client.CloseIdleConnections()
-	// codeql[go/request-forgery] -- hostEndpoint is canonicalized through
-	// netguard.LocalLANHTTPBase and joinHTTPTransport rejects non-local/LAN
-	// destinations again at dial time.
-	resp, err := client.Do(req)
+	// netguard.LocalLANHTTPBase canonicalizes hostEndpoint, and joinHTTPTransport
+	// rejects non-local/LAN destinations again at dial time.
+	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
 		return nil, "", err
 	}
@@ -1143,10 +1142,9 @@ func (m *Manager) guestCall(ctx context.Context, d *guestDraft, method, path str
 	}
 	client := &http.Client{Transport: joinHTTPTransport(tlsCfg)}
 	defer client.CloseIdleConnections()
-	// codeql[go/request-forgery] -- d.hostEndpoint was captured only after
-	// netguard.LocalLANHTTPBase validation and joinHTTPTransport enforces the
-	// same local/LAN constraint at dial time.
-	resp, err := client.Do(req)
+	// d.hostEndpoint was captured only after netguard.LocalLANHTTPBase validation,
+	// and joinHTTPTransport enforces the same local/LAN constraint at dial time.
+	resp, err := client.Do(req) // lgtm[go/request-forgery]
 	if err != nil {
 		return fmt.Errorf("host unreachable: %w", err)
 	}

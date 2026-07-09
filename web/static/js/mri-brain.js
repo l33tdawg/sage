@@ -738,7 +738,7 @@ export function mountMriBrain(container, opts = {}) {
       const items = groups[k.key] || [];
       return `<div class="ex-col k-${k.key}">
         <div class="ex-col-head"><span class="ex-col-glyph">${k.glyph}</span>${k.label}<span class="ex-col-n">${items.length}</span></div>
-        <div class="ex-col-list">${items.map(card).join('') || '<div class="ex-empty">-</div>'}</div>
+        <div class="ex-col-list">${items.map(card).join('') || '<div class="ex-empty">None yet</div>'}</div>
       </div>`;
     }).join('');
     p.innerHTML = `
