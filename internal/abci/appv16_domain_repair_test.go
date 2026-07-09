@@ -138,7 +138,7 @@ func TestAppV16_RepairIdempotentSkipsUnknownAndDomained(t *testing.T) {
 // 15 and every node halts on the next CometBFT handshake (the maxSupportedAppVersion
 // footgun).
 func TestAppV16_VersionRegistered(t *testing.T) {
-	assert.Equal(t, uint64(16), MaxSupportedAppVersion(), "binary must advertise a v16 fork gate")
+	assert.GreaterOrEqual(t, MaxSupportedAppVersion(), uint64(16), "binary must advertise at least a v16 fork gate")
 
 	app := setupTestApp(t)
 	assert.Equal(t, uint64(1), app.currentAppVersion(), "no gate ⇒ version 1")
