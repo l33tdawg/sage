@@ -2758,6 +2758,49 @@ input[type="range"]::-moz-range-thumb {
 /* Agent list (vertical accordion) */
 .agent-list { display: flex; flex-direction: column; gap: 12px; }
 
+/* Local visual grouping (drag one agent onto another to group) */
+.agent-group-tip { font-size: 12px; margin: 0 0 10px; }
+.agent-group {
+    border: 1px dashed var(--border-light, var(--border));
+    border-radius: var(--radius-lg);
+    padding: 10px 10px 4px; margin-bottom: 4px;
+    display: flex; flex-direction: column; gap: 12px;
+    transition: border-color 0.15s, background 0.15s;
+}
+.agent-group.drop-target { border-color: var(--primary); background: var(--primary-dim); }
+.agent-group-head { display: flex; align-items: center; gap: 10px; padding: 2px 4px; }
+.agent-group-collapse {
+    background: none; border: none; color: var(--text-dim); cursor: pointer;
+    font-size: 14px; padding: 0 4px; line-height: 1;
+}
+.agent-group-name {
+    flex: 1; background: transparent; border: 1px solid transparent;
+    border-radius: var(--radius); color: var(--text); font-weight: 600;
+    font-size: 14px; padding: 4px 8px; min-width: 0;
+}
+.agent-group-name:hover { border-color: var(--border); }
+.agent-group-name:focus { border-color: var(--primary); background: var(--bg-deep); outline: none; }
+.agent-group-count {
+    font-size: 11px; color: var(--text-muted); background: var(--bg-elevated);
+    border-radius: 999px; padding: 2px 8px; min-width: 20px; text-align: center;
+}
+.agent-group-dissolve {
+    background: none; border: 1px solid var(--border); color: var(--text-dim);
+    border-radius: var(--radius); cursor: pointer; font-size: 11px; padding: 3px 8px;
+}
+.agent-group-dissolve:hover { border-color: var(--primary); color: var(--primary); }
+.agent-group-item { transition: opacity 0.15s; border-radius: var(--radius-lg); }
+.agent-group-item.dragging { opacity: 0.4; }
+.agent-group-item.drop-target { outline: 2px solid var(--primary); outline-offset: 2px; }
+.agent-ungroup-zone {
+    border: 1px dashed var(--border-light, var(--border)); border-radius: var(--radius-lg);
+    padding: 14px; text-align: center; color: var(--text-muted); font-size: 12px;
+    transition: border-color 0.15s, background 0.15s;
+}
+.agent-ungroup-zone.drop-target { border-color: var(--primary); background: var(--primary-dim); color: var(--primary); }
+.agent-card-row[draggable="true"] { cursor: grab; }
+.agent-card-row[draggable="true"]:active { cursor: grabbing; }
+
 /* Collapsed card row */
 .agent-card-row {
     background: var(--bg-surface); border: 1px solid var(--border);

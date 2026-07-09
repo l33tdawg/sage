@@ -6672,6 +6672,50 @@ function ActivityTab({ agent }) {
     `;
 }
 
+// --- Agent grouping (local, visual-only) ---
+// Groups are a purely local convenience for arranging the Agents list — which
+// agents live on which machine, which are federated, etc. They are stored in
+// localStorage keyed by agent_id and NEVER touch the chain or the server.
+const AGENT_GROUPS_KEY = 'sage.agentGroups.v1';
+
+function loadAgentGroups() {
+    try {
+        const raw = localStorage.getItem(AGENT_GROUPS_KEY);
+        if (!raw) return { groups: [] };
+        const m = JSON.parse(raw);
+        if (!m || !Array.isArray(m.groups)) return { groups: [] };
+        // Sanitize: every group needs an id, name, members[].
+        m.groups = m.groups
+            .filter(g => g && g.id)
+            .map(g => ({ id: String(g.id), name: String(g.name || 'Group'), collapsed: !!g.collapsed, members: Array.isArray(g.members) ? g.members.map(String) : [] }));
+        return m;
+    } catch (e) { return { groups: [] }; }
+}
+
+function saveAgentGroups(model) {
+    try { localStorage.setItem(AGENT_GROUPS_KEY, JSON.stringify(model)); } catch (e) {}
+}
+
+// newGroupId derives a stable-enough local id from the current members without
+// Date.now()/Math.random() (kept deterministic + dependency-free).
+function newGroupId(seedA, seedB) {
+    return 'g-' + String(seedA || '').slice(0, 6) + '-' + String(seedB || '').slice(0, 6);
+}
+
+// groupOfAgent returns the group a given agent_id belongs to, or null.
+function groupOfAgent(model, agentId) {
+    return (model.groups || []).find(g => g.members.includes(agentId)) || null;
+}
+
+// removeFromAllGroups strips an agent from every group and drops any group left
+// with fewer than 2 members (a group of one isn't a group).
+function removeFromAllGroups(model, agentId) {
+    const groups = (model.groups || [])
+        .map(g => ({ ...g, members: g.members.filter(m => m !== agentId) }))
+        .filter(g => g.members.length >= 1);
+    return { ...model, groups };
+}
+
 // --- Network Page (Accordion) ---
 function NetworkPage({ sse }) {
     const [agents, setAgents] = useState([]);
@@ -6679,6 +6723,37 @@ function NetworkPage({ sse }) {
     const [showWizard, setShowWizard] = useState(false);
     const [expandedId, setExpandedId] = useState(null);
     const [expandedTab, setExpandedTab] = useState('overview');
+    // Local, visual-only agent grouping (localStorage; never on-chain).
+    const [groupModel, setGroupModel] = useState(loadAgentGroups);
+    const [dragAgentId, setDragAgentId] = useState(null);   // agent_id being dragged
+    const [dropHint, setDropHint] = useState(null);          // 'group:<id>' | 'ungrouped' | 'agent:<id>'
+    const commitGroups = (m) => { setGroupModel(m); saveAgentGroups(m); };
+
+    // Drag one agent onto another -> put both in a group (the user's stated
+    // gesture). If the target is already grouped, the dragged agent joins that
+    // group; otherwise a new group is created holding both.
+    const groupAgents = (dragId, targetId) => {
+        if (!dragId || !targetId || dragId === targetId) return;
+        let m = removeFromAllGroups(groupModel, dragId);
+        const targetGroup = groupOfAgent(m, targetId);
+        if (targetGroup) {
+            m = { ...m, groups: m.groups.map(g => g.id === targetGroup.id ? { ...g, members: [...g.members, dragId] } : g) };
+        } else {
+            const id = newGroupId(targetId, dragId);
+            m = { ...m, groups: [...m.groups, { id, name: 'New group', collapsed: false, members: [targetId, dragId] }] };
+        }
+        commitGroups(m);
+    };
+    const joinGroup = (dragId, groupId) => {
+        if (!dragId) return;
+        let m = removeFromAllGroups(groupModel, dragId);
+        m = { ...m, groups: m.groups.map(g => g.id === groupId ? { ...g, members: [...g.members.filter(x => x !== dragId), dragId] } : g) };
+        commitGroups(m);
+    };
+    const ungroupAgent = (agentId) => commitGroups(removeFromAllGroups(groupModel, agentId));
+    const renameGroup = (groupId, name) => commitGroups({ ...groupModel, groups: groupModel.groups.map(g => g.id === groupId ? { ...g, name } : g) });
+    const toggleGroupCollapse = (groupId) => commitGroups({ ...groupModel, groups: groupModel.groups.map(g => g.id === groupId ? { ...g, collapsed: !g.collapsed } : g) });
+    const dissolveGroup = (groupId) => commitGroups({ ...groupModel, groups: groupModel.groups.filter(g => g.id !== groupId) });
     const [showRemoveConfirm, setShowRemoveConfirm] = useState(null);
     const [redeployStatus, setRedeployStatus] = useState(null);
     const [allDomains, setAllDomains] = useState([]);
@@ -7210,13 +7285,25 @@ function NetworkPage({ sse }) {
                 </div>
             </div>
 
+            ${agents.length > 1 && html`<div class="agent-group-tip muted">Drag an agent onto another to group them — a handy way to arrange them by machine or purpose. Grouping is just for your view here; it changes nothing on the network.</div>`}
             <div class="agent-list">
-                ${agents.map(agent => {
+                ${(() => {
+                    const grouped = groupModel.groups
+                        .map(g => ({ group: g, members: g.members.map(id => agents.find(a => a.agent_id === id)).filter(Boolean) }))
+                        .filter(x => x.members.length > 0);
+                    const groupedIds = new Set(grouped.flatMap(x => x.members.map(a => a.agent_id)));
+                    const ungrouped = agents.filter(a => !groupedIds.has(a.agent_id));
+                    const renderAgentRow = (agent) => {
                     const isExpanded = expandedId === agent.agent_id;
                     const isLastAdmin = agent.role === 'admin' && agents.filter(a => a.role === 'admin' && a.status !== 'removed').length <= 1;
                     return html`
-                        <div key=${agent.agent_id}>
+                        <div key=${agent.agent_id} class="agent-group-item ${dropHint === 'agent:' + agent.agent_id ? 'drop-target' : ''} ${dragAgentId === agent.agent_id ? 'dragging' : ''}"
+                            onDragOver=${e => { if (dragAgentId && dragAgentId !== agent.agent_id) { e.preventDefault(); e.stopPropagation(); setDropHint('agent:' + agent.agent_id); } }}
+                            onDrop=${e => { if (dragAgentId && dragAgentId !== agent.agent_id) { e.preventDefault(); e.stopPropagation(); groupAgents(dragAgentId, agent.agent_id); setDropHint(null); } }}>
                             <div class="agent-card-row ${isExpanded ? 'expanded' : ''}"
+                                draggable=${true}
+                                onDragStart=${e => { setDragAgentId(agent.agent_id); if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'; }}
+                                onDragEnd=${() => { setDragAgentId(null); setDropHint(null); }}
                                 onClick=${() => toggleExpand(agent)} role="button"
                                 aria-expanded=${isExpanded} tabIndex="0"
                                 onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleExpand(agent); } }}>
@@ -7376,7 +7463,33 @@ function NetworkPage({ sse }) {
                             </div>
                         </div>
                     `;
-                })}
+                    };
+                    return html`
+                        ${grouped.map(({ group, members }) => html`
+                            <div class="agent-group ${dropHint === 'group:' + group.id ? 'drop-target' : ''}" key=${group.id}
+                                onDragOver=${e => { if (dragAgentId) { e.preventDefault(); setDropHint('group:' + group.id); } }}
+                                onDragLeave=${() => setDropHint(h => h === 'group:' + group.id ? null : h)}
+                                onDrop=${e => { e.preventDefault(); if (dragAgentId) joinGroup(dragAgentId, group.id); setDropHint(null); }}>
+                                <div class="agent-group-head">
+                                    <button class="agent-group-collapse" onClick=${() => toggleGroupCollapse(group.id)} title=${group.collapsed ? 'Expand' : 'Collapse'}>${group.collapsed ? '▸' : '▾'}</button>
+                                    <input class="agent-group-name" value=${group.name} onInput=${e => renameGroup(group.id, e.target.value)} spellcheck="false" aria-label="Group name" />
+                                    <span class="agent-group-count">${members.length}</span>
+                                    <button class="agent-group-dissolve" onClick=${() => dissolveGroup(group.id)} title="Ungroup — keeps every agent, just removes the grouping">Ungroup</button>
+                                </div>
+                                ${!group.collapsed && members.map(renderAgentRow)}
+                            </div>
+                        `)}
+                        ${dragAgentId && groupOfAgent(groupModel, dragAgentId) ? html`
+                            <div class="agent-ungroup-zone ${dropHint === 'ungrouped' ? 'drop-target' : ''}"
+                                onDragOver=${e => { e.preventDefault(); setDropHint('ungrouped'); }}
+                                onDragLeave=${() => setDropHint(h => h === 'ungrouped' ? null : h)}
+                                onDrop=${e => { e.preventDefault(); ungroupAgent(dragAgentId); setDropHint(null); }}>
+                                Drop here to remove from its group
+                            </div>
+                        ` : ''}
+                        ${ungrouped.map(renderAgentRow)}
+                    `;
+                })()}
 
                 <div class="agent-card-add" onClick=${() => setShowWizard(true)}>
                     <div class="agent-card-add-icon">+</div>
