@@ -105,14 +105,30 @@ var joinB32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // JoinStore is the host-side session registry: TTL'd, single-ceremony, with a
 // per-session fail cap and a TLS-connection rate limiter (never XFF, RT-3).
+//
+// Two limiters, split by whether the route submits a confirm code or just reads
+// state. `rl` (strict) governs the state-changing, code-submitting routes
+// (/join/request, /join/confirm) — the actual abuse vector, additionally capped
+// per session by joinMaxFailPerSid. `rlRead` (generous) governs the read-only
+// polling routes (/join/ca, /join/status): a bound guest polls status every ~2s
+// for the whole ceremony (a minute or more of human back-and-forth), which is
+// legitimate traffic that a 20/min strict cap would wrongly throttle — leaving
+// the guest stuck mid-ceremony, unable to see the host's approval. A read GET
+// carries no code, so it cannot brute-force anything; the generous cap still
+// bounds a spray while letting real polling through.
 type JoinStore struct {
 	mu       sync.Mutex
 	sessions map[string]*JoinSession
 	rl       *connRateLimiter
+	rlRead   *connRateLimiter
 }
 
 func NewJoinStore() *JoinStore {
-	return &JoinStore{sessions: make(map[string]*JoinSession), rl: newConnRateLimiter()}
+	return &JoinStore{
+		sessions: make(map[string]*JoinSession),
+		rl:       newConnRateLimiter(connMaxAttempts),
+		rlRead:   newConnRateLimiter(connMaxReadAttempts),
+	}
 }
 
 // Create opens a host-side session and returns it (state CREATED). The host
@@ -203,6 +219,13 @@ func (js *JoinSession) attestation(hostScope [32]byte) [32]byte {
 // AllowConn reports whether a request from connKey (a TLS-connection-derived
 // key, NOT XFF) is within the rate limit.
 func (s *JoinStore) AllowConn(connKey string, now time.Time) bool { return s.rl.allow(connKey, now) }
+
+// AllowConnRead is the generous limiter for read-only polling routes
+// (/join/ca, /join/status). Separate budget from AllowConn so a bound guest's
+// legitimate ~2s status poll over a multi-minute ceremony is never throttled.
+func (s *JoinStore) AllowConnRead(connKey string, now time.Time) bool {
+	return s.rlRead.allow(connKey, now)
+}
 
 // SetExpectedGuest records the guest CA SPKI + endpoint the host scanned off the
 // guest's return QR (§2.2.5) over the authenticated visual channel. This is the
@@ -572,24 +595,37 @@ func (s *JoinStore) Cleanup(now time.Time) {
 func (s *JoinStore) Maintain(now time.Time) {
 	s.Cleanup(now)
 	s.rl.sweep(now)
+	s.rlRead.sweep(now)
 }
 
 // connRateLimiter is the RT-3 rate limiter - keyed on a TLS-connection-derived
 // value the caller supplies (never X-Forwarded-For). Same token-bucket shape as
 // web/pairing.go's redeemRateLimiter, re-keyed safely for the direct-connect
-// federation listener.
+// federation listener. The per-window cap is set per instance so a strict
+// (code-submitting) and a generous (read-only polling) limiter can coexist.
 type connRateLimiter struct {
-	mu       sync.Mutex
-	attempts map[string][]time.Time
+	mu          sync.Mutex
+	maxAttempts int
+	attempts    map[string][]time.Time
 }
 
 const (
+	// connMaxAttempts caps the state-changing, code-submitting routes
+	// (/join/request, /join/confirm) per source per window. Kept tight — these
+	// are the abuse vector, and joinMaxFailPerSid separately caps code guesses
+	// per session.
 	connMaxAttempts = 20
-	connWindow      = 1 * time.Minute
+	// connMaxReadAttempts caps the read-only routes (/join/ca, /join/status).
+	// Generous because a bound guest legitimately polls status every ~2s for the
+	// full ceremony; at 30/min a strict cap wrongly throttles the poll and the
+	// guest never sees the host's approval. A read carries no code, so it cannot
+	// brute-force — the cap only bounds a spray.
+	connMaxReadAttempts = 240
+	connWindow          = 1 * time.Minute
 )
 
-func newConnRateLimiter() *connRateLimiter {
-	return &connRateLimiter{attempts: make(map[string][]time.Time)}
+func newConnRateLimiter(maxAttempts int) *connRateLimiter {
+	return &connRateLimiter{maxAttempts: maxAttempts, attempts: make(map[string][]time.Time)}
 }
 
 func (rl *connRateLimiter) allow(key string, now time.Time) bool {
@@ -602,7 +638,7 @@ func (rl *connRateLimiter) allow(key string, now time.Time) bool {
 			fresh = append(fresh, t)
 		}
 	}
-	if len(fresh) >= connMaxAttempts {
+	if len(fresh) >= rl.maxAttempts {
 		rl.attempts[key] = fresh
 		return false
 	}

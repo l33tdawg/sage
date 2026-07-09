@@ -10450,6 +10450,7 @@ function GuestJoinWizard({ onExit }) {
     const [hostScope, setHostScope] = useState(null);
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
+    const [pollNote, setPollNote] = useState('');
 
     const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
 
@@ -10477,19 +10478,27 @@ function GuestJoinWizard({ onExit }) {
     };
 
     // Poll host status while showing our code (waiting for host approval #1).
+    // After a run of failed checks we surface a soft "still trying" note so a
+    // genuinely stalled connection shows a reason instead of an eternal spinner.
     useEffect(() => {
         if (step !== 'yourcode' || !scan) return;
         let live = true;
+        let misses = 0;
         const tick = async () => {
             try {
                 const s = await fedGuestStatus(scan.session_id);
                 if (!live) return;
+                misses = 0; setPollNote('');
                 if (s.aborted) { setErr('They stopped the connection.'); setStep('channel'); return; }
                 if (s.host_approved) { setHostScope(s.host_scope || {}); setStep('theircode'); }
-            } catch (e) { /* transient; keep polling */ }
+            } catch (e) {
+                if (!live) return;
+                misses += 1;
+                if (misses >= 4) setPollNote("Still trying to reach the other computer. Make sure it's on and you're both on the same network.");
+            }
         };
         const id = setInterval(tick, 2000); tick();
-        return () => { live = false; clearInterval(id); };
+        return () => { live = false; clearInterval(id); setPollNote(''); };
     }, [step, scan]);
 
     return html`<div class="fed-wizard">
@@ -10535,6 +10544,7 @@ function GuestJoinWizard({ onExit }) {
             <${BigCode} code=${codes.code_g} />
             <p class="fed-read-instr">Call them and read this code. It proves you're really connected to each other - not someone in the middle.</p>
             <div class="fed-waiting"><span class="fed-spinner"></span> Waiting for them to check your code…</div>
+            ${pollNote && html`<div class="fed-tier4-note" style="margin-top:10px;">${pollNote}</div>`}
             <${TwoOfTwoMeter} n=${0} />
         </div>`}
 

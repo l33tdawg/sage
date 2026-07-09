@@ -147,12 +147,18 @@ type JoinCAResp struct {
 // mountJoinRoutes attaches the join ceremony routes under joinAuth. Called from
 // Router() so they share the listener but not peerAuth.
 func (m *Manager) mountJoinRoutes(r chi.Router) {
+	// Code-submitting / state-changing routes: strict per-source rate limit.
 	r.Group(func(r chi.Router) {
-		r.Use(m.joinAuth)
-		r.Get("/fed/v1/join/ca", m.handleJoinCA)
+		r.Use(m.joinAuth(false))
 		r.Post("/fed/v1/join/request", m.handleJoinRequest)
-		r.Get("/fed/v1/join/status", m.handleJoinStatus)
 		r.Post("/fed/v1/join/confirm", m.handleJoinConfirm)
+	})
+	// Read-only routes: generous rate limit so a bound guest's ~2s status poll
+	// over a multi-minute ceremony is never throttled (the stuck-guest bug).
+	r.Group(func(r chi.Router) {
+		r.Use(m.joinAuth(true))
+		r.Get("/fed/v1/join/ca", m.handleJoinCA)
+		r.Get("/fed/v1/join/status", m.handleJoinStatus)
 	})
 }
 
@@ -160,28 +166,36 @@ func (m *Manager) mountJoinRoutes(r chi.Router) {
 // connection (never X-Forwarded-For, RT-3), caps the body, and threads the
 // presented client-cert leaf SPKI into the request context for per-session
 // binding. It does NOT require an active agreement (that is the whole point).
-func (m *Manager) joinAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			httpError(w, http.StatusForbidden, "client certificate required")
-			return
-		}
-		// RT-3: key the limiter on the direct TCP peer (this is a direct-connect
-		// listener - no trusted proxy - so r.RemoteAddr is the real connection),
-		// NOT any forwarded header.
-		connKey := r.RemoteAddr
-		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			connKey = host
-		}
-		if !m.joins.AllowConn(connKey, time.Now()) {
-			httpError(w, http.StatusTooManyRequests, "too many join attempts")
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, joinBodyCap)
-		spki := SPKIFingerprint(r.TLS.PeerCertificates[0])
-		ctx := context.WithValue(r.Context(), joinCertSPKIKey{}, spki)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+// readOnly selects the generous read limiter (status polling) vs. the strict
+// code-submitting limiter.
+func (m *Manager) joinAuth(readOnly bool) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+				httpError(w, http.StatusForbidden, "client certificate required")
+				return
+			}
+			// RT-3: key the limiter on the direct TCP peer (this is a direct-connect
+			// listener - no trusted proxy - so r.RemoteAddr is the real connection),
+			// NOT any forwarded header.
+			connKey := r.RemoteAddr
+			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+				connKey = host
+			}
+			allowed := m.joins.AllowConn(connKey, time.Now())
+			if readOnly {
+				allowed = m.joins.AllowConnRead(connKey, time.Now())
+			}
+			if !allowed {
+				httpError(w, http.StatusTooManyRequests, "too many join attempts")
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, joinBodyCap)
+			spki := SPKIFingerprint(r.TLS.PeerCertificates[0])
+			ctx := context.WithValue(r.Context(), joinCertSPKIKey{}, spki)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
 }
 
 func joinCertSPKI(ctx context.Context) []byte {
