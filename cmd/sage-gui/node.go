@@ -684,6 +684,14 @@ func runServe() (rerr error) {
 		// paths aren't rewritten to runtime-expanded absolutes by the toggle.
 		return persistFederationEnabled(enabled)
 	}
+	// Friendly network name (rename): persist to config.yaml via the same raw
+	// round-trip. The dashboard also pushes it to the live Manager so the next
+	// join ceremony carries it without a restart.
+	dashboard.SetNetworkNameFn = func(name string) error {
+		clean := sanitizeNetworkName(name)
+		cfg.NetworkName = clean
+		return persistNetworkName(clean)
+	}
 	// Guest side of Flow 3: the joining node's dashboard drives the ceremony and
 	// stages the bundle; it's applied at the next startup (before stores open).
 	dashboard.GuestNodeIDFn = func() (string, error) {
@@ -869,6 +877,7 @@ func runServe() (rerr error) {
 	} else {
 		fedMgr = federation.NewManager(federation.Config{
 			LocalChainID: cfg.ChainID,
+			NetworkName:  sanitizeNetworkName(cfg.NetworkName),
 			CertsDir:     certsDir,
 			CometRPC:     cometRPC,
 			AgentKey:     fedAgentKey,

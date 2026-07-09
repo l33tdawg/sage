@@ -40,6 +40,7 @@ type JoinSession struct {
 
 	// Guest-side material (bound at the first Request - one-guest-identity).
 	GuestChain    string
+	GuestName     string // friendly label the guest chose (cosmetic, unauthenticated)
 	GuestAgentPub []byte // guest node-operator ed25519 pub (verifies guest_sig/ack over E)
 	GuestPin      []byte
 	GuestEndpoint string
@@ -249,6 +250,7 @@ func (s *JoinStore) SetExpectedGuest(id string, pin []byte, endpoint string, now
 // GuestRequestInput carries everything the first /join/request binds.
 type GuestRequestInput struct {
 	GuestChain    string
+	GuestName     string // friendly label (cosmetic, unauthenticated — NOT folded into E)
 	GuestAgentPub []byte
 	GuestNonce    []byte
 	GuestPin      []byte
@@ -317,6 +319,9 @@ func (s *JoinStore) Request(id string, now time.Time, in GuestRequestInput) (*Jo
 	}
 	firstBind := js.GuestChain == ""
 	js.GuestChain = in.GuestChain
+	// GuestName is cosmetic + unauthenticated: stored for display only, never
+	// folded into E and never a re-approval trigger. Refreshed each request.
+	js.GuestName = in.GuestName
 	js.GuestAgentPub = append([]byte(nil), in.GuestAgentPub...)
 	js.GuestNonce = append([]byte(nil), in.GuestNonce...)
 	js.GuestPin = append([]byte(nil), in.GuestPin...)

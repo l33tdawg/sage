@@ -4351,6 +4351,16 @@ input[type="range"]::-moz-range-thumb {
 .fed-conn-off { flex: none; }
 
 /* Wizard shell */
+/* Network name (friendly rename) */
+.fed-netname { margin: 12px 0; padding: 14px 16px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.fed-netname-view { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fed-netname-label { font-size: 12px; }
+.fed-netname-value { font-size: 18px; font-weight: 700; color: var(--text); margin: 2px 0; }
+.fed-netname-id { font-size: 11px; }
+.fed-netname-id code, .fed-netname-view code { font-size: 11px; }
+.fed-netname-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
+.fed-netname-row .fed-share-input { flex: 1; }
+
 .fed-wizard { max-width: 560px; margin: 0 auto; }
 .fed-wizard-head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .fed-wizard-title { font-weight: 600; color: var(--text-dim); }

@@ -27,6 +27,11 @@ type Config struct {
 	// read off-consensus from genesis/config — the receiver side of every
 	// chain-qualified signature and the self-federation guard.
 	LocalChainID string
+	// NetworkName is this node's operator-chosen FRIENDLY label, shown to peers
+	// during the join ceremony in place of the raw chain id. Cosmetic and
+	// UNAUTHENTICATED — never used for any trust decision. Empty = peers see the
+	// chain id. Runtime-updatable via Manager.SetNetworkName.
+	NetworkName string
 	// CertsDir is the node's TLS material directory (~/.sage/certs): node
 	// cert/key for both listener and client, remote CAs under federation/.
 	CertsDir string
@@ -134,6 +139,29 @@ type Manager struct {
 	// (txHash, height). Defaults to broadcastTxCommit; overridable in tests so
 	// the join ceremony can be driven without a live CometBFT node.
 	broadcastFn func(txBytes []byte) (string, int64, error)
+
+	// nameMu guards networkName — the friendly, operator-editable label peers
+	// see during the join ceremony. Runtime-mutable (dashboard rename) without a
+	// node restart, so it is read under the lock every time a ceremony message
+	// is built. Cosmetic + unauthenticated; never a trust input.
+	nameMu      sync.RWMutex
+	networkName string
+}
+
+// NetworkName returns this node's current friendly label (may be empty).
+func (m *Manager) NetworkName() string {
+	m.nameMu.RLock()
+	defer m.nameMu.RUnlock()
+	return m.networkName
+}
+
+// SetNetworkName updates the friendly label at runtime (dashboard rename). The
+// caller is responsible for sanitizing + persisting; this only refreshes the
+// value the live ceremony hands to peers.
+func (m *Manager) SetNetworkName(name string) {
+	m.nameMu.Lock()
+	m.networkName = name
+	m.nameMu.Unlock()
 }
 
 // broadcast dispatches an encoded tx through the (possibly test-injected) path.
@@ -153,6 +181,7 @@ func NewManager(cfg Config) *Manager {
 	pub, _ := cfg.AgentKey.Public().(ed25519.PublicKey)
 	return &Manager{
 		localChainID: cfg.LocalChainID,
+		networkName:  cfg.NetworkName,
 		certsDir:     cfg.CertsDir,
 		cometRPC:     cfg.CometRPC,
 		agentKey:     cfg.AgentKey,

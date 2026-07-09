@@ -87,9 +87,10 @@ func (s ScopeWire) digest() [32]byte {
 type JoinRequestWire struct {
 	SessionID     string    `json:"session_id"`
 	GuestChain    string    `json:"guest_chain"`
-	GuestAgentID  string    `json:"guest_agent_id"` // hex ed25519 operator pub
-	GuestNonce    string    `json:"guest_nonce"`    // hex 16B
-	GuestPin      string    `json:"guest_pin"`      // hex 32B SPKI (must equal the scanned anchor)
+	GuestName     string    `json:"guest_name,omitempty"` // friendly label (cosmetic, unauthenticated)
+	GuestAgentID  string    `json:"guest_agent_id"`       // hex ed25519 operator pub
+	GuestNonce    string    `json:"guest_nonce"`          // hex 16B
+	GuestPin      string    `json:"guest_pin"`            // hex 32B SPKI (must equal the scanned anchor)
 	GuestCAPEM    string    `json:"guest_ca_pem"`
 	GuestEndpoint string    `json:"guest_endpoint"`
 	Scope         ScopeWire `json:"scope"` // guest's scope_G inputs
@@ -136,8 +137,9 @@ type JoinConfirmResp struct {
 // validates it against the scanned x_sage_pin (SPKI) - the transport is not the
 // authenticator, the pin is.
 type JoinCAResp struct {
-	ChainID string `json:"chain_id"`
-	CAPEM   string `json:"ca_pem"`
+	ChainID  string `json:"chain_id"`
+	HostName string `json:"host_name,omitempty"` // friendly label (cosmetic, unauthenticated)
+	CAPEM    string `json:"ca_pem"`
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +223,7 @@ func (m *Manager) handleJoinCA(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, "own CA unavailable")
 		return
 	}
-	writeJSON(w, http.StatusOK, &JoinCAResp{ChainID: m.localChainID, CAPEM: string(caPEM)})
+	writeJSON(w, http.StatusOK, &JoinCAResp{ChainID: m.localChainID, HostName: sanitizeName(m.NetworkName()), CAPEM: string(caPEM)})
 }
 
 // handleJoinRequest binds the guest to the session, asserts the presented guest
@@ -301,6 +303,7 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 
 	bound, bErr := m.joins.Request(req.SessionID, now, GuestRequestInput{
 		GuestChain:      req.GuestChain,
+		GuestName:       sanitizeName(req.GuestName),
 		GuestAgentPub:   guestAgentPub,
 		GuestNonce:      guestNonce,
 		GuestPin:        guestPin,
@@ -515,6 +518,7 @@ type HostSessionView struct {
 	SessionID    string     `json:"session_id"`
 	State        string     `json:"state"`
 	GuestChain   string     `json:"guest_chain,omitempty"`
+	GuestName    string     `json:"guest_name,omitempty"` // friendly label the guest chose (cosmetic)
 	GuestScope   *ScopeWire `json:"guest_scope,omitempty"`
 	CodeG        string     `json:"code_g,omitempty"` // host compares this to what the guest reads (approval #1)
 	CodeH        string     `json:"code_h,omitempty"` // host reads this back (after approval)
@@ -535,6 +539,7 @@ func (m *Manager) HostSessionStatus(sessionID string) (*HostSessionView, error) 
 		SessionID:    sessionID,
 		State:        js.State,
 		GuestChain:   js.GuestChain,
+		GuestName:    js.GuestName,
 		Approved:     js.Approved,
 		Active:       js.State == JoinActive,
 		ExpectsGuest: len(js.ExpectedGuestPin) == 32,
@@ -599,6 +604,7 @@ func (m *Manager) HostAbort(sessionID string) { m.joins.Abort(sessionID) }
 type guestDraft struct {
 	sessionID    string
 	hostChain    string
+	hostName     string // host's friendly label (cosmetic, from the CA fetch)
 	hostEndpoint string
 	hostPin      []byte
 	hostCAPEM    []byte
@@ -687,6 +693,7 @@ func (m *Manager) dropGuestDraft(sessionID string) {
 type GuestScanResult struct {
 	SessionID    string `json:"session_id"`
 	HostChain    string `json:"host_chain"`
+	HostName     string `json:"host_name,omitempty"` // host's friendly label (cosmetic)
 	HostEndpoint string `json:"host_endpoint"`
 	HostPinHex   string `json:"host_pin"`
 	ReturnURI    string `json:"return_uri"` // the guest's pin-only return QR (host scans it)
@@ -714,7 +721,8 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 	}
 	sessionID := strings.ToUpper(joinB32.EncodeToString(enr.SessionB))
 	// Fetch the host CA over the join listener (payload is pin-authenticated).
-	caPEM, err := m.fetchHostCA(ctx, enr.Endpoint, sessionID)
+	// hostName is the host's cosmetic label from the same response.
+	caPEM, hostName, err := m.fetchHostCA(ctx, enr.Endpoint, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("could not fetch host CA: %w", err)
 	}
@@ -735,6 +743,7 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 	m.putGuestDraft(&guestDraft{
 		sessionID:    sessionID,
 		hostChain:    enr.ChainID,
+		hostName:     hostName,
 		hostEndpoint: enr.Endpoint,
 		hostPin:      append([]byte(nil), enr.Pin...),
 		hostCAPEM:    caPEM,
@@ -745,6 +754,7 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 	return &GuestScanResult{
 		SessionID:    sessionID,
 		HostChain:    enr.ChainID,
+		HostName:     hostName,
 		HostEndpoint: enr.Endpoint,
 		HostPinHex:   hex.EncodeToString(enr.Pin),
 		ReturnURI:    returnURI,
@@ -783,6 +793,7 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 	body := &JoinRequestWire{
 		SessionID:     sessionID,
 		GuestChain:    m.localChainID,
+		GuestName:     sanitizeName(m.NetworkName()),
 		GuestAgentID:  hex.EncodeToString(m.agentPub),
 		GuestNonce:    hex.EncodeToString(guestNonce),
 		GuestPin:      hex.EncodeToString(ownPin),
@@ -1030,25 +1041,28 @@ func (m *Manager) commitPairSeed(remoteChain string, remotePin, seed []byte) err
 // fetchHostCA GETs the host CA PEM over the join listener. The transport is not
 // the authenticator (InsecureSkipVerify); the caller validates the returned PEM
 // against the scanned pin.
-func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID string) ([]byte, error) {
+// fetchHostCA returns the host's CA PEM (pin-validated by the caller) plus the
+// host's friendly label (cosmetic, sanitized, may be empty). The label rides the
+// same response but carries no authority — only the CAPEM feeds the pin check.
+func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID string) (caPEM []byte, hostName string, err error) {
 	tlsCfg, err := m.joinBootstrapTLS()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	base, err := netguard.LocalLANHTTPBase(hostEndpoint, "https")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	u, err := netguard.JoinPath(base, "/fed/v1/join/ca")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	u += "?session_id=" + url.QueryEscape(sessionID)
 	reqCtx, cancel := context.WithTimeout(ctx, joinCAFetchTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
 	defer client.CloseIdleConnections()
@@ -1056,24 +1070,24 @@ func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID strin
 	// localhost/RFC1918/ULA-only via validateJoinEndpoint/netguard.
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, joinBodyCap))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("host returned %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("host returned %d", resp.StatusCode)
 	}
 	var out JoinCAResp
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if out.CAPEM == "" {
-		return nil, fmt.Errorf("host returned an empty CA")
+		return nil, "", fmt.Errorf("host returned an empty CA")
 	}
-	return []byte(out.CAPEM), nil
+	return []byte(out.CAPEM), sanitizeName(out.HostName), nil
 }
 
 // guestCall performs a signed-by-mTLS ceremony call to the host, verifying the
@@ -1191,6 +1205,48 @@ func validateJoinEndpoint(endpoint string) error {
 	}
 	return nil
 }
+
+// maxNetworkNameLen bounds a friendly network label on the wire. Matches the
+// dashboard-side cap; enforced again here because inbound peer names are
+// untrusted (a hostile peer could send an oversized/control-laden label).
+const maxNetworkNameLen = 48
+
+// sanitizeName normalizes a friendly network label from ANY source (the local
+// operator OR an untrusted peer over the wire): strips control chars (incl.
+// newlines that would forge log lines or split a UI row), collapses internal
+// whitespace, trims, and caps the length. The label is purely cosmetic and is
+// NEVER an authorization input — the CA pin / SAS is the identity anchor — but
+// it is displayed verbatim, so it must be defanged. Returns "" for a blank
+// input (callers fall back to the chain id).
+func sanitizeName(name string) string {
+	var b strings.Builder
+	lastSpace := false
+	for _, r := range name {
+		if r == '\t' || r == '\n' || r == '\r' || r == ' ' {
+			if b.Len() > 0 {
+				lastSpace = true
+			}
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		if lastSpace {
+			b.WriteByte(' ')
+			lastSpace = false
+		}
+		b.WriteRune(r)
+		if len([]rune(b.String())) >= maxNetworkNameLen {
+			break
+		}
+	}
+	return b.String()
+}
+
+// SanitizeNetworkName is the exported entry point for the dashboard/REST layer
+// to defang an operator-supplied friendly label before persisting/displaying it.
+// Same rules as the inbound-peer sanitizer.
+func SanitizeNetworkName(name string) string { return sanitizeName(name) }
 
 // sidForQR renders a base32 session id string in the exact form the QR carries
 // (uppercase, matching ParseEnrollment's decode).

@@ -6,7 +6,7 @@ embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pu
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
-fedConnections, fedRevoke, fedPeerStatus, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedSyncResend, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
+fedConnections, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedSyncResend, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 
@@ -10658,7 +10658,7 @@ function GuestJoinWizard({ onExit }) {
         ${step === 'return' && scan && html`<div class="fed-step">
             <${FedGreenRail} />
             <h3>Now show them YOUR code</h3>
-            <p class="muted">Connecting to <strong>${scan.host_chain}</strong>. Hold this up to their camera, or send it for them to paste.</p>
+            <p class="muted">Connecting to <strong>${scan.host_name || scan.host_chain}</strong>${scan.host_name ? html` <span style="font-size:11px;">(id: <code>${scan.host_chain}</code>)</span>` : ''}. Hold this up to their camera, or send it for them to paste.</p>
             <${FedQr} text=${scan.return_uri} caption="Their SAGE scans this to check it's really you." />
             <div class="fed-step-actions">
                 <button class="btn btn-primary" onClick=${() => setStep('share')}>They've got my code - next</button>
@@ -10828,7 +10828,8 @@ function HostJoinWizard({ onExit }) {
 
         ${step === 'review' && view && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h3>Someone using the name "${view.guest_chain}" wants to connect</h3>
+            <h3>${view.guest_name ? html`<strong>${view.guest_name}</strong> wants to connect` : html`Someone using the name "${view.guest_chain}" wants to connect`}</h3>
+            ${view.guest_name && html`<div class="muted" style="font-size:12px;margin-top:-4px;">Their network id: <code>${view.guest_chain}</code> — the name is just a label they chose; the code you check next is what proves it's really them.</div>`}
             ${view.guest_scope && html`<${FedScopeSummary} scope=${view.guest_scope} heading="They'll let YOU reach:" />`}
             <h4>What can they read on YOUR network?</h4>
             <p class="muted">Conservative by default. Blank shares nothing.</p>
@@ -11132,6 +11133,53 @@ function FederationMasterSwitch({ onChange }) {
     </div>`;
 }
 
+// NetworkNameEditor - inline rename of THIS network's friendly label. The label
+// is what peers see during a join (instead of the raw chain id); the chain id
+// stays the immutable technical identity, shown small beneath.
+function NetworkNameEditor() {
+    const [st, setSt] = useState(null);   // {name, chain_id, configurable}
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState('');
+    const [busy, setBusy] = useState(false);
+    useEffect(() => { fedGetNetworkName().then(setSt).catch(() => setSt(null)); }, []);
+    if (!st) return null;
+    const display = st.name || st.chain_id;
+    const save = async () => {
+        setBusy(true);
+        try {
+            const r = await fedSetNetworkName(draft);
+            setSt({ ...st, name: r.name });
+            setEditing(false);
+            showToast('Network name updated', 'success');
+        } catch (e) { showToast(String(e.message || e), 'error'); }
+        setBusy(false);
+    };
+    return html`<div class="fed-netname">
+        ${!editing ? html`
+            <div class="fed-netname-view">
+                <div>
+                    <div class="fed-netname-label muted">Your network</div>
+                    <div class="fed-netname-value">${display}</div>
+                    ${st.name ? html`<div class="fed-netname-id muted" title="The permanent technical id — this never changes">id: <code>${st.chain_id}</code></div>` : ''}
+                </div>
+                ${st.configurable && html`<button class="btn" onClick=${() => { setDraft(st.name || ''); setEditing(true); }}>${st.name ? 'Rename' : 'Give it a name'}</button>`}
+            </div>
+        ` : html`
+            <div class="fed-netname-edit">
+                <label class="fed-netname-label muted">Name this network — this is what people see when you connect</label>
+                <div class="fed-netname-row">
+                    <input class="fed-share-input" maxlength="48" value=${draft} placeholder="e.g. Dhillon's MacBook"
+                        onInput=${e => setDraft(e.target.value)}
+                        onKeyDown=${e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }} autofocus />
+                    <button class="btn btn-primary" disabled=${busy} onClick=${save}>${busy ? '…' : 'Save'}</button>
+                    <button class="btn" disabled=${busy} onClick=${() => setEditing(false)}>Cancel</button>
+                </div>
+                <div class="muted" style="font-size:12px;margin-top:4px;">A friendly label only. It doesn't change your permanent id and isn't used to verify anyone — the scan/spoken code still does that.</div>
+            </div>
+        `}
+    </div>`;
+}
+
 // FederationPage - the 8th sidebar section landing: role fork + connections list.
 function FederationPage() {
     const [mode, setMode] = useState('landing'); // landing | guest | host
@@ -11168,6 +11216,7 @@ function FederationPage() {
             <p class="fed-landing-sub muted">Link your <strong>whole SAGE</strong> to <strong>someone else's SAGE</strong> so the two can share the topics you choose. It works when both computers can reach each other — the same Wi‑Fi or office network today; connecting across the internet is coming soon. This is different from adding an AI tool to your own SAGE (do that under <strong>Agents</strong>) — here you're linking two separate brains.</p>
             <${FedGreenRail} />
             <${FederationMasterSwitch} onChange=${setFedOn} />
+            ${fedOn && html`<${NetworkNameEditor} />`}
             ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
             ${fedOn === false && html`<div class="fed-off-note muted">Federation is off, so joining or hosting a connection is unavailable. Turn it on above to connect.</div>`}
             ${fedOn && html`<${FederationWarmup} onState=${(ready) => setWarming(!ready)} />`}

@@ -217,6 +217,12 @@ type DashboardHandler struct {
 	FederationEnabled      bool
 	SetFederationEnabledFn func(enabled bool) error
 
+	// SetNetworkNameFn persists the friendly network label to config.yaml. Wired
+	// in cmd/sage-gui; a nil setter disables renaming in Settings. The dashboard
+	// also pushes the new name to the live federation Manager (SetNetworkName) so
+	// a rename takes effect for the next join ceremony without a restart.
+	SetNetworkNameFn func(name string) error
+
 	// GuestJoin drives the JOINING node's "Join a network" ceremony (Flow 3,
 	// guest side). GuestNodeIDFn returns this node's CometBFT p2p node id (for
 	// the hello proof) and WritePendingJoinFn stages the decrypted bundle for

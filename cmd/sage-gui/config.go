@@ -45,6 +45,16 @@ type Config struct {
 	// before CometBFT is up and for the federation identity/collision guard.
 	ChainID string `yaml:"chain_id,omitempty"`
 
+	// NetworkName is the operator-chosen FRIENDLY label for this network — a
+	// nickname shown in the dashboard and to federation peers during the join
+	// ceremony (so a peer sees "Dhillon's Mac" instead of the raw chain_id).
+	// Unlike ChainID it IS user-editable (dashboard Settings). It is purely
+	// cosmetic and UNAUTHENTICATED: it never enters chain state, never the CA
+	// CommonName, and is NEVER used for any trust/authorization decision — the
+	// scanned QR pin / spoken SAS remain the sole identity anchors. Empty => the
+	// dashboard falls back to showing the chain_id.
+	NetworkName string `yaml:"network_name,omitempty"`
+
 	// RetainBlocks is the CometBFT block-retention window: Commit reports
 	// RetainHeight = height - RetainBlocks, and CometBFT prunes blocks BELOW
 	// that height — the retain height itself survives, so the blockstore keeps
@@ -390,6 +400,83 @@ func persistFederationEnabled(enabled bool) error {
 		return nil // no drift
 	}
 	raw.Federation.Enabled = enabled
+	out, err := yaml.Marshal(&raw)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return os.WriteFile(configPath, out, 0600)
+}
+
+// maxNetworkNameLen bounds the friendly network label. Long enough for
+// "Dhillon's MacBook Pro (office)", short enough that a hostile peer can't blow
+// out the ceremony UI or a log line with it.
+const maxNetworkNameLen = 48
+
+// sanitizeNetworkName normalizes an operator- OR peer-supplied network label:
+// trims surrounding whitespace, strips control characters (incl. newlines that
+// would let a hostile peer forge extra log lines or split a UI row), collapses
+// internal runs of whitespace to single spaces, and caps the length. Returns ""
+// for an all-blank/all-control input, which callers treat as "unset" (fall back
+// to the chain_id). Applied on BOTH the local set path and every inbound
+// peer-supplied name, since the label is displayed verbatim and is untrusted.
+func sanitizeNetworkName(name string) string {
+	var b strings.Builder
+	lastSpace := false
+	for _, r := range name {
+		if r == '\t' || r == '\n' || r == '\r' || r == ' ' {
+			if b.Len() > 0 {
+				lastSpace = true
+			}
+			continue
+		}
+		if r < 0x20 || r == 0x7f {
+			continue // drop other control chars entirely
+		}
+		if lastSpace {
+			b.WriteByte(' ')
+			lastSpace = false
+		}
+		b.WriteRune(r)
+		if b.Len() >= maxNetworkNameLen {
+			break
+		}
+	}
+	out := b.String()
+	if len([]rune(out)) > maxNetworkNameLen {
+		out = string([]rune(out)[:maxNetworkNameLen])
+	}
+	return out
+}
+
+// persistNetworkName writes ONLY network_name into config.yaml via the same raw
+// round-trip as persistChainID/persistFederationEnabled, so the operator's
+// tilde/relative DataDir/AgentKey survive the rename (a full SaveConfig would
+// bake runtime-expanded absolute paths into the file). The name is sanitized by
+// the caller.
+func persistNetworkName(name string) error {
+	home := SageHome()
+	if err := os.MkdirAll(home, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	configPath := filepath.Join(home, "config.yaml")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			cfg := DefaultConfig(home)
+			cfg.NetworkName = name
+			return SaveConfig(cfg)
+		}
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
+	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
+		return fmt.Errorf("parse config: %w", parseErr)
+	}
+	if raw.NetworkName == name {
+		return nil // no drift
+	}
+	raw.NetworkName = name
 	out, err := yaml.Marshal(&raw)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)

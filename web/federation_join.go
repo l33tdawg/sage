@@ -40,6 +40,8 @@ type FederationJoinDriver interface {
 	RevokeAgreement(remoteChainID string) (string, error)
 	PeerStatus(ctx context.Context, remoteChainID string) (*federation.StatusResponse, error)
 	LocalChainID() string
+	NetworkName() string
+	SetNetworkName(name string)
 	SyncReconcileInfo(remoteChainID string) (federation.SyncReconcileStatus, bool)
 }
 
@@ -70,6 +72,8 @@ func (h *DashboardHandler) fedReady(w http.ResponseWriter) bool {
 // registerFederationRoutes mounts the JOIN proxy inside the dashboard's
 // authenticated group (called from RegisterRoutes).
 func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
+	r.Get("/v1/dashboard/federation/network-name", h.handleGetNetworkName)
+	r.Put("/v1/dashboard/federation/network-name", h.handleSetNetworkName)
 	r.Get("/v1/dashboard/federation/connections", h.handleFedConnections)
 	r.Post("/v1/dashboard/federation/connections/{chain_id}/revoke", h.handleFedRevoke)
 	r.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
@@ -487,11 +491,57 @@ type FedConnection struct {
 	Expired        bool     `json:"expired"`
 }
 
+// handleGetNetworkName returns the local network's friendly label + the raw
+// chain id (the immutable technical identity shown alongside it), and whether
+// renaming is available on this build.
+func (h *DashboardHandler) handleGetNetworkName(w http.ResponseWriter, _ *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{
+		"name":         h.Federation.NetworkName(),
+		"chain_id":     h.Federation.LocalChainID(),
+		"configurable": h.SetNetworkNameFn != nil,
+	})
+}
+
+// handleSetNetworkName renames the local network: sanitizes the label, persists
+// it to config.yaml, and pushes it to the live federation Manager so the next
+// join ceremony carries it (no restart). The label is cosmetic + unauthenticated
+// — it never affects trust or the chain id.
+func (h *DashboardHandler) handleSetNetworkName(w http.ResponseWriter, r *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	if h.SetNetworkNameFn == nil {
+		fedWriteErr(w, http.StatusNotImplemented, "Renaming the network is not available on this build.")
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		fedWriteErr(w, http.StatusBadRequest, "Invalid request body.")
+		return
+	}
+	name := federation.SanitizeNetworkName(body.Name)
+	if err := h.SetNetworkNameFn(name); err != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Could not save the network name.")
+		return
+	}
+	h.Federation.SetNetworkName(name)
+	fedWriteJSON(w, http.StatusOK, map[string]any{"name": name, "chain_id": h.Federation.LocalChainID()})
+}
+
 func (h *DashboardHandler) handleFedConnections(w http.ResponseWriter, _ *http.Request) {
 	if !h.fedReady(w) {
 		return
 	}
-	out := map[string]any{"local_chain_id": h.Federation.LocalChainID(), "connections": []FedConnection{}}
+	out := map[string]any{
+		"local_chain_id":     h.Federation.LocalChainID(),
+		"local_network_name": h.Federation.NetworkName(),
+		"connections":        []FedConnection{},
+	}
 	if h.BadgerStore != nil {
 		records, err := h.BadgerStore.ListCrossFed()
 		if err != nil {

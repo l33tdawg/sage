@@ -807,6 +807,8 @@ export function fedSyncSet(chainId, domains) { return fedPut(`/v1/dashboard/fede
 export function fedSyncStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync/status`); }
 export function fedSyncResend(chainId, memoryId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync/resend`, memoryId ? { memory_id: memoryId } : {}); }
 export function fedRevoke(chainId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/revoke`); }
+export function fedGetNetworkName() { return fedFetch('/v1/dashboard/federation/network-name'); }
+export function fedSetNetworkName(name) { return fedPut('/v1/dashboard/federation/network-name', { name }); }
 export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/status`); }
 
 // Host wizard.
