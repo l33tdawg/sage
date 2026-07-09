@@ -10173,33 +10173,57 @@ function BigCode({ code }) {
 
 // FedQr - renders a scannable QR from a string via the vendored encoder, with a
 // copyable text fallback so the flow never dead-ends if rendering fails.
+// paintQr renders a QR into an element at the given pixel size. Shared by the
+// inline QR and the enlarged lightbox so both stay pixel-for-pixel identical.
+function paintQr(el, text, size) {
+    if (!el || !text || !window.QRCode) return false;
+    el.innerHTML = '';
+    try {
+        // eslint-disable-next-line no-new
+        new window.QRCode(el, {
+            text, width: size, height: size,
+            colorDark: '#0b1220', colorLight: '#ffffff',
+            correctLevel: window.QRCode.CorrectLevel ? window.QRCode.CorrectLevel.L : 1,
+        });
+        return true;
+    } catch (e) { return false; }
+}
+
 function FedQr({ text, size = 220, caption }) {
     const ref = useRef(null);
+    const bigRef = useRef(null);
     const [copied, setCopied] = useState(false);
     const [rendered, setRendered] = useState(false);
+    const [big, setBig] = useState(false);
+    useEffect(() => { setRendered(paintQr(ref.current, text, size)); }, [text, size]);
+
+    // Enlarged view: fill most of the viewport height so a laptop camera held up
+    // to the screen can lock on from across a desk.
     useEffect(() => {
-        if (!ref.current || !text) return;
-        ref.current.innerHTML = '';
-        try {
-            if (window.QRCode) {
-                // eslint-disable-next-line no-new
-                new window.QRCode(ref.current, {
-                    text, width: size, height: size,
-                    colorDark: '#0b1220', colorLight: '#ffffff',
-                    correctLevel: window.QRCode.CorrectLevel ? window.QRCode.CorrectLevel.L : 1,
-                });
-                setRendered(true);
-            }
-        } catch (e) { setRendered(false); }
-    }, [text, size]);
+        if (!big) return;
+        const px = Math.min(Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.8), 640);
+        paintQr(bigRef.current, text, px);
+        const onKey = (e) => { if (e.key === 'Escape') setBig(false); };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [big, text]);
+
     const copy = async () => {
         try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (e) {}
     };
     return html`<div class="fed-qr">
-        <div class="fed-qr-canvas" ref=${ref}></div>
+        <div class="fed-qr-canvas" ref=${ref} onClick=${() => rendered && setBig(true)}
+            role="button" title="Click to enlarge for scanning"></div>
         ${!rendered && html`<div class="fed-qr-fallback muted">QR unavailable - share the code below instead.</div>`}
         ${caption && html`<div class="fed-qr-caption muted">${caption}</div>`}
-        <button class="btn fed-copy-btn" onClick=${copy}>${copied ? '✓ Copied' : 'Copy code instead'}</button>
+        <div class="fed-qr-actions" style="display:flex;gap:8px;">
+            ${rendered && html`<button class="btn fed-qr-enlarge" onClick=${() => setBig(true)}>⤢ Make it bigger</button>`}
+            <button class="btn fed-copy-btn" onClick=${copy}>${copied ? '✓ Copied' : 'Copy code instead'}</button>
+        </div>
+        ${big && html`<div class="fed-qr-lightbox" onClick=${() => setBig(false)}>
+            <div class="fed-qr-lightbox-canvas" ref=${bigRef} onClick=${e => e.stopPropagation()}></div>
+            <div class="fed-qr-lightbox-hint">Point the other computer's camera at this. Click anywhere or press Esc to close.</div>
+        </div>`}
     </div>`;
 }
 
@@ -10594,6 +10618,26 @@ function HostJoinWizard({ onExit }) {
         catch (e) { fail(e); }
         setBusy(false);
     };
+
+    // Show the code straight away: as soon as the node resolves a real network
+    // address (not a useless localhost one), mint the session and jump to the QR
+    // so the common case is zero clicks. If only a loopback address is known we
+    // stay on the address screen so the operator can correct it first.
+    const autoTried = useRef(false);
+    useEffect(() => {
+        if (autoTried.current || step !== 'create' || session || busy) return;
+        if (!endpoint || isLoopbackEndpoint(endpoint)) return;
+        autoTried.current = true;
+        doCreate();
+    }, [endpoint, step, session, busy]);
+
+    // "Wrong address?" from the QR screen: burn the auto-minted session and go
+    // back to the address form (re-minting is intentional — the code embeds it).
+    const editAddress = async () => {
+        try { if (session) await fedHostAbort(session.session_id); } catch (e) {}
+        autoTried.current = true; // don't immediately re-auto-create; let them edit
+        setSession(null); setView(null); setStep('create');
+    };
     const doScanReturn = async (uri) => {
         setBusy(true); setErr('');
         try { await fedHostScanReturn(session.session_id, uri); setStep('waiting'); }
@@ -10648,7 +10692,7 @@ function HostJoinWizard({ onExit }) {
             <div class="fed-field">
                 <label>Your network address (how they'll reach you)</label>
                 <input class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:8444" />
-                ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This is a localhost address — whoever scans your code will dial their OWN computer and fail. Use this machine's network address (e.g. <code>https://192.168.1.10:8444</code>).</div>`}
+                ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This address only works on this computer, so anyone who scans your code would reach their own machine instead. Pick this computer's address on your network below (e.g. <code>https://192.168.1.10:8444</code>).</div>`}
             </div>
             <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
             <button class="btn btn-primary" disabled=${busy} onClick=${doCreate}>${busy ? 'Working…' : 'Show my connection code'}</button>
@@ -10657,8 +10701,9 @@ function HostJoinWizard({ onExit }) {
         ${step === 'showqr' && session && html`<div class="fed-step">
             <${FedGreenRail} />
             <h3>Have them scan this</h3>
-            <${FedQr} text=${session.otpauth_uri} caption="Their SAGE app - or Google Authenticator - points at this." />
-            <p class="muted">Best done in the same room, or held up to a video call you trust.</p>
+            <${FedQr} text=${session.otpauth_uri} caption="Point the other computer's camera at this — tap “Make it bigger” if it won't focus." />
+            <p class="muted">Best done in the same room, or held up to a video call you trust.
+                <button class="fed-linkbtn" onClick=${editAddress}>Wrong address? Edit it</button></p>
             <h3>Then scan their code back</h3>
             <${FedScanInput} onValue=${doScanReturn} busy=${busy} />
         </div>`}
@@ -11007,7 +11052,7 @@ function FederationPage() {
     return html`<div class="page fed-page">
         <div class="fed-landing">
             <h1>Federation</h1>
-            <p class="fed-landing-sub muted">Connect your <strong>whole SAGE</strong> to <strong>another SAGE</strong> on the same LAN, VPN, or a reachable route you provide. Built-in internet/NAT traversal is planned for v11.5. This is not the same as adding an agent to your own SAGE (do that under <strong>Agents</strong>), or the validator quorum your own agents form (also under Agents). Federation links two separate brains.</p>
+            <p class="fed-landing-sub muted">Link your <strong>whole SAGE</strong> to <strong>someone else's SAGE</strong> so the two can share the topics you choose. It works when both computers can reach each other — the same Wi‑Fi or office network today; connecting across the internet is coming soon. This is different from adding an AI tool to your own SAGE (do that under <strong>Agents</strong>) — here you're linking two separate brains.</p>
             <${FedGreenRail} />
             <${FederationMasterSwitch} onChange=${setFedOn} />
             ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
