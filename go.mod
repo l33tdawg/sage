@@ -10,7 +10,7 @@ require (
 	github.com/go-chi/httprate v0.14.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
-	github.com/klauspost/compress v1.17.11
+	github.com/klauspost/compress v1.19.0
 	github.com/pgvector/pgvector-go v0.2.2
 	github.com/prometheus/client_golang v1.21.0
 	github.com/rs/zerolog v1.33.0
