@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -71,6 +73,18 @@ func (n *ceremonyNode) count() int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	return n.broadcasts
+}
+
+func TestJoinHTTPTransportRejectsNonLocalLANDial(t *testing.T) {
+	tr := joinHTTPTransport(&tls.Config{MinVersion: tls.VersionTLS13})
+	_, err := tr.DialContext(context.Background(), "tcp", "8.8.8.8:443")
+	if err == nil || !strings.Contains(err.Error(), "refusing non-local/LAN host") {
+		t.Fatalf("public IP dial err=%v, want local/LAN refusal", err)
+	}
+	_, err = tr.DialContext(context.Background(), "tcp", "example.com:443")
+	if err == nil || !strings.Contains(err.Error(), "refusing non-local/LAN host") {
+		t.Fatalf("DNS host dial err=%v, want local/LAN refusal", err)
+	}
 }
 
 // TestJoinCeremonyHappyPath drives the full real-TOTP JOIN end to end over the

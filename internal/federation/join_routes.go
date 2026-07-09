@@ -1082,10 +1082,11 @@ func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID strin
 	if err != nil {
 		return nil, "", err
 	}
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	client := &http.Client{Transport: joinHTTPTransport(tlsCfg)}
 	defer client.CloseIdleConnections()
-	// lgtm[go/request-forgery] -- hostEndpoint is HTTPS and
-	// localhost/RFC1918/ULA-only via validateJoinEndpoint/netguard.
+	// codeql[go/request-forgery] -- hostEndpoint is canonicalized through
+	// netguard.LocalLANHTTPBase and joinHTTPTransport rejects non-local/LAN
+	// destinations again at dial time.
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, "", err
@@ -1140,8 +1141,11 @@ func (m *Manager) guestCall(ctx context.Context, d *guestDraft, method, path str
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	client := &http.Client{Transport: joinHTTPTransport(tlsCfg)}
 	defer client.CloseIdleConnections()
+	// codeql[go/request-forgery] -- d.hostEndpoint was captured only after
+	// netguard.LocalLANHTTPBase validation and joinHTTPTransport enforces the
+	// same local/LAN constraint at dial time.
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("host unreachable: %w", err)
@@ -1197,6 +1201,23 @@ func (m *Manager) joinClientTLS(hostCAPEM, hostPin []byte) (*tls.Config, error) 
 			return verifyChainAgainstCA(rawCerts, caCert, x509.ExtKeyUsageServerAuth)
 		},
 	}, nil
+}
+
+func joinHTTPTransport(tlsCfg *tls.Config) *http.Transport {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	return &http.Transport{
+		TLSClientConfig: tlsCfg,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, fmt.Errorf("join dial: invalid address: %w", err)
+			}
+			if !netguard.LocalLANHost(host) {
+				return nil, fmt.Errorf("join dial: refusing non-local/LAN host %q", host)
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+		},
+	}
 }
 
 func (m *Manager) loadNodeKeyPair() (tls.Certificate, error) {
