@@ -895,11 +895,18 @@ func runServe() (rerr error) {
 		// during the JOIN ceremony, so without this the fail-closed X-Sig-Version=3
 		// gate returns "federation locked" for every peer after the first restart
 		// (and outbound falls back to v2, which the peer then rejects) — federation
-		// silently breaks on reboot. Seeds are stored at the 0600-plaintext floor
-		// (the fed manager has no vault passphrase wired), so this loads cleanly
-		// on both encrypted and unencrypted nodes.
-		if n := fedMgr.LoadSeedsIntoCache(); n > 0 {
-			logger.Info().Int("agreements", n).Msg("federation: restored peer seeds into cache after boot")
+		// silently breaks on reboot. When the vault was unlocked at boot, reuse
+		// that passphrase so federation seeds are wrapped at rest in the same
+		// protection domain; plaintext legacy seed envelopes still load for
+		// backward compatibility.
+		var restoredSeeds int
+		if vaultPassphrase != "" {
+			restoredSeeds = fedMgr.SetVaultPassphrase(vaultPassphrase)
+		} else {
+			restoredSeeds = fedMgr.LoadSeedsIntoCache()
+		}
+		if restoredSeeds > 0 {
+			logger.Info().Int("agreements", restoredSeeds).Msg("federation: restored peer seeds into cache after boot")
 		}
 		// v11.5 domain-sync drainer + commit-tail watcher are OUTBOUND-only (this
 		// node pushes to a peer's /fed/v1/sync/push); they do NOT need this node's

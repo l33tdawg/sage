@@ -502,6 +502,7 @@ type PipelineMessage struct {
 	Result       string     `json:"result,omitempty"`
 	Status       string     `json:"status"` // pending, claimed, completed, expired, failed
 	CreatedAt    time.Time  `json:"created_at"`
+	ClaimedBy    string     `json:"claimed_by,omitempty"`
 	ClaimedAt    *time.Time `json:"claimed_at,omitempty"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	ExpiresAt    time.Time  `json:"expires_at"`
@@ -514,7 +515,7 @@ type PipelineStore interface {
 	GetPipeline(ctx context.Context, pipeID string) (*PipelineMessage, error)
 	GetInbox(ctx context.Context, agentID, provider string, limit int) ([]*PipelineMessage, error)
 	ClaimPipeline(ctx context.Context, pipeID, agentID string) error
-	CompletePipeline(ctx context.Context, pipeID, result, journalID string) error
+	CompletePipeline(ctx context.Context, pipeID, agentID, result, journalID string) error
 	GetCompletedForSender(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error)
 	ListPipelines(ctx context.Context, status string, limit int) ([]*PipelineMessage, error)
 	PipelineStats(ctx context.Context) (map[string]int, error)

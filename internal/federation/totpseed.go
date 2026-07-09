@@ -18,17 +18,31 @@ func decodeB64(s string) ([]byte, error) { return base64.StdEncoding.DecodeStrin
 // (Argon2id+AES-GCM) — a strictly stronger protection domain than agent.key.
 // Empty (default) uses the 0600-plaintext floor. Must be set before
 // LoadSeedsIntoCache. Also (re)loads any established seeds into the cache.
-func (m *Manager) SetVaultPassphrase(pass string) {
+func (m *Manager) SetVaultPassphrase(pass string) int {
 	m.seedMu.Lock()
 	m.vaultPassphrase = pass
+	m.clearSeedCacheLocked()
 	m.seedMu.Unlock()
-	m.LoadSeedsIntoCache()
+	return m.LoadSeedsIntoCache()
 }
 
 func (m *Manager) getVaultPassphrase() string {
 	m.seedMu.RLock()
 	defer m.seedMu.RUnlock()
 	return m.vaultPassphrase
+}
+
+func (m *Manager) clearSeedCacheLocked() {
+	if m.seedCache == nil {
+		m.seedCache = make(map[string][][]byte)
+		return
+	}
+	for chain, candidates := range m.seedCache {
+		for _, seed := range candidates {
+			zeroize(seed)
+		}
+		delete(m.seedCache, chain)
+	}
 }
 
 // Per-agreement TOTP seed lifecycle (v11 join ceremony, §2.8). Node-local,
@@ -210,6 +224,9 @@ func (m *Manager) loadSeedFromDisk(path string) ([]byte, bool) {
 func (m *Manager) cacheSeed(remoteChainID string, seed []byte) {
 	m.seedMu.Lock()
 	defer m.seedMu.Unlock()
+	if m.seedCache == nil {
+		m.seedCache = make(map[string][][]byte)
+	}
 	m.seedCache[remoteChainID] = [][]byte{append([]byte(nil), seed...)}
 }
 
@@ -218,6 +235,9 @@ func (m *Manager) cacheSeed(remoteChainID string, seed []byte) {
 func (m *Manager) appendSeedCandidate(remoteChainID string, seed []byte) {
 	m.seedMu.Lock()
 	defer m.seedMu.Unlock()
+	if m.seedCache == nil {
+		m.seedCache = make(map[string][][]byte)
+	}
 	m.seedCache[remoteChainID] = append(m.seedCache[remoteChainID], append([]byte(nil), seed...))
 }
 

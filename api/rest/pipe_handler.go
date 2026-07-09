@@ -168,6 +168,7 @@ func (s *Server) handlePipeInbox(w http.ResponseWriter, r *http.Request) {
 	for _, item := range items {
 		_ = pipeStore.ClaimPipeline(r.Context(), item.PipeID, agentID)
 		item.Status = "claimed"
+		item.ClaimedBy = agentID
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -187,6 +188,17 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pipeNotFoundDetail := fmt.Sprintf("No pipeline message with id %s.", pipeID)
+	msg, err := pipeStore.GetPipeline(r.Context(), pipeID)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "Pipeline message not found", pipeNotFoundDetail)
+		return
+	}
+	if !s.callerCanClaimPipe(r.Context(), agentID, msg) {
+		writeProblem(w, http.StatusNotFound, "Pipeline message not found", pipeNotFoundDetail)
+		return
+	}
+
 	if err := pipeStore.ClaimPipeline(r.Context(), pipeID, agentID); err != nil {
 		writeProblem(w, http.StatusConflict, "Claim failed", err.Error())
 		return
@@ -201,6 +213,7 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 // handlePipeResult submits a result for a claimed pipeline item and triggers auto-journal.
 func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 	pipeID := chi.URLParam(r, "pipe_id")
+	agentID := middleware.ContextAgentID(r.Context())
 
 	var req struct {
 		Result string `json:"result"`
@@ -224,6 +237,14 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 	msg, err := pipeStore.GetPipeline(r.Context(), pipeID)
 	if err != nil {
 		writeProblem(w, http.StatusNotFound, "Pipeline message not found", err.Error())
+		return
+	}
+	if !s.callerCanViewPipe(r.Context(), agentID, msg) {
+		writeProblem(w, http.StatusNotFound, "Pipeline message not found", fmt.Sprintf("No pipeline message with id %s.", pipeID))
+		return
+	}
+	if msg.ClaimedBy != agentID && (msg.ClaimedBy != "" || !s.callerCanClaimPipe(r.Context(), agentID, msg)) {
+		writeProblem(w, http.StatusConflict, "Completion failed", fmt.Sprintf("pipeline message %s not available for completion by this agent", pipeID))
 		return
 	}
 
@@ -254,7 +275,7 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 	journalID := s.autoJournalPipeline(r.Context(), summary)
 
 	// Complete the pipeline
-	if err := pipeStore.CompletePipeline(r.Context(), pipeID, req.Result, journalID); err != nil {
+	if err := pipeStore.CompletePipeline(r.Context(), pipeID, agentID, req.Result, journalID); err != nil {
 		writeProblem(w, http.StatusConflict, "Completion failed", err.Error())
 		return
 	}
@@ -279,6 +300,24 @@ func (s *Server) callerCanViewPipe(ctx context.Context, callerID string, msg *st
 		return true
 	}
 	if msg.ToProvider != "" && s.agentStore != nil {
+		if a, err := s.agentStore.GetAgent(ctx, callerID); err == nil && a != nil && a.Provider == msg.ToProvider {
+			return true
+		}
+	}
+	return s.callerIsOperatorOrAdmin(ctx, callerID)
+}
+
+// callerCanClaimPipe reports whether callerID is the addressed recipient for
+// this pipe (direct agent or provider match) or an operator/admin. Senders can
+// read their own pipe status/results, but they do not claim the work item.
+func (s *Server) callerCanClaimPipe(ctx context.Context, callerID string, msg *store.PipelineMessage) bool {
+	if callerID == "" || msg == nil {
+		return false
+	}
+	if callerID == msg.ToAgent {
+		return true
+	}
+	if msg.ToProvider != "" && msg.ToAgent == "" && s.agentStore != nil {
 		if a, err := s.agentStore.GetAgent(ctx, callerID); err == nil && a != nil && a.Provider == msg.ToProvider {
 			return true
 		}

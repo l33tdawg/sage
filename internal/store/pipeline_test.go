@@ -53,9 +53,14 @@ func TestPipelineRoundTrip(t *testing.T) {
 
 	// Claim it
 	require.NoError(t, s.ClaimPipeline(ctx, "pipe-test-001", "agent-bob"))
+	gotClaimed, err := s.GetPipeline(ctx, "pipe-test-001")
+	require.NoError(t, err)
+	assert.Equal(t, "agent-bob", gotClaimed.ClaimedBy)
 
 	// Double claim should fail
 	err = s.ClaimPipeline(ctx, "pipe-test-001", "agent-charlie")
+	assert.Error(t, err)
+	err = s.CompletePipeline(ctx, "pipe-test-001", "agent-charlie", "forged result", "journal-forged")
 	assert.Error(t, err)
 
 	// Should no longer appear in inbox
@@ -64,7 +69,7 @@ func TestPipelineRoundTrip(t *testing.T) {
 	assert.Len(t, inbox3, 0)
 
 	// Complete it
-	require.NoError(t, s.CompletePipeline(ctx, "pipe-test-001", "Found 5 papers", "journal-001"))
+	require.NoError(t, s.CompletePipeline(ctx, "pipe-test-001", "agent-bob", "Found 5 papers", "journal-001"))
 
 	// Get completed — should show result
 	got2, err := s.GetPipeline(ctx, "pipe-test-001")

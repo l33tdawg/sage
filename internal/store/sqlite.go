@@ -4004,14 +4004,21 @@ func (s *SQLiteStore) migratePipeline(ctx context.Context) {
 		status        TEXT NOT NULL DEFAULT 'pending'
 		              CHECK (status IN ('pending','claimed','completed','expired','failed')),
 		created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		claimed_by    TEXT NOT NULL DEFAULT '',
 		claimed_at    TEXT,
 		completed_at  TEXT,
 		expires_at    TEXT NOT NULL,
 		journal_id    TEXT
 	)`)
+	var hasClaimedBy int
+	_ = s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('pipeline_messages') WHERE name='claimed_by'`).Scan(&hasClaimedBy)
+	if hasClaimedBy == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE pipeline_messages ADD COLUMN claimed_by TEXT NOT NULL DEFAULT ''`)
+	}
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_provider ON pipeline_messages(to_provider, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_agent ON pipeline_messages(to_agent, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_from_agent ON pipeline_messages(from_agent, status)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_claimed_by ON pipeline_messages(claimed_by, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_expires ON pipeline_messages(status, expires_at)`)
 }
 
@@ -4027,14 +4034,14 @@ func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) 
 func (s *SQLiteStore) GetPipeline(ctx context.Context, pipeID string) (*PipelineMessage, error) {
 	row := s.conn.QueryRowContext(ctx,
 		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
-		        COALESCE(result, ''), status, created_at, claimed_at, completed_at, expires_at, COALESCE(journal_id, '')
+		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, '')
 		 FROM pipeline_messages WHERE pipe_id = ?`, pipeID)
 
 	var m PipelineMessage
 	var createdAt, expiresAt string
 	var claimedAt, completedAt *string
 	if err := row.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
-		&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &claimedAt, &completedAt,
+		&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &m.ClaimedBy, &claimedAt, &completedAt,
 		&expiresAt, &m.JournalID); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("pipeline message not found: %s", pipeID)
@@ -4079,8 +4086,9 @@ func (s *SQLiteStore) GetInbox(ctx context.Context, agentID, provider string, li
 
 func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string) error {
 	res, err := s.writeExecContext(ctx,
-		`UPDATE pipeline_messages SET status = 'claimed', claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		 WHERE pipe_id = ? AND status = 'pending'`, pipeID)
+		`UPDATE pipeline_messages SET status = 'claimed', claimed_by = ?, claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		 WHERE pipe_id = ? AND status = 'pending'`,
+		agentID, pipeID)
 	if err != nil {
 		return err
 	}
@@ -4091,17 +4099,17 @@ func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string)
 	return nil
 }
 
-func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, result, journalID string) error {
+func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, result, journalID string) error {
 	res, err := s.writeExecContext(ctx,
-		`UPDATE pipeline_messages SET status = 'completed', result = ?, journal_id = ?,
+		`UPDATE pipeline_messages SET status = 'completed', result = ?, journal_id = ?, claimed_by = CASE WHEN claimed_by = '' THEN ? ELSE claimed_by END,
 		        completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		 WHERE pipe_id = ? AND status = 'claimed'`, result, journalID, pipeID)
+		 WHERE pipe_id = ? AND status = 'claimed' AND (claimed_by = ? OR claimed_by = '')`, result, journalID, agentID, pipeID, agentID)
 	if err != nil {
 		return err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("pipeline message %s not available for completion (must be claimed first)", pipeID)
+		return fmt.Errorf("pipeline message %s not available for completion by %s (must be claimed by this agent first)", pipeID, agentID)
 	}
 	return nil
 }

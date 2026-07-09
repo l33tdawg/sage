@@ -51,7 +51,21 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.4.6
+## What's New in v11.4.7
+
+**Security dependencies are current, agent pipeline replies are claimant-bound, and release gates now cover the nested natter module.** v11.4.7 is an off-consensus security and release-hardening patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Everything here lives in dependency pins, local SQLite pipeline metadata, federation seed-at-rest handling, and CI/release automation.
+
+- **Natter dependency security refresh.** The nested `natter` Go module now carries the patched `quic-go`, `x/crypto`, and `x/net` dependency line, plus the matching `x/*` tidy updates. This keeps the optional connectivity service ready for the v11.5 internet-federation work without spending an app-version slot.
+- **Agent pipeline claim/result hardening.** Pipeline claims now record `claimed_by`, and result submission is accepted only from the authenticated claimant (or a safe legacy recipient path for already-claimed pre-upgrade rows). Unrelated callers still get anti-enumeration 404s, senders can read their own pipe status but cannot complete recipient work, and failed/forged result attempts no longer create auto-journal memories.
+- **Federation TOTP seeds follow the vault.** When a node starts with the vault already unlocked, federation TOTP seeds are wrapped at rest using that passphrase; legacy plaintext seed envelopes still load for backward compatibility. Changing the passphrase clears stale in-memory seed candidates before reload.
+- **Release gates now see the real tree.** CI and release workflows now lint/test the nested `natter` module, run a cheap first-party JavaScript syntax check, and Dependabot is configured for root Go, `natter`, npm, the Python SDK, and GitHub Actions.
+
+SDK 11.4.7.
+
+## Older releases
+
+<details>
+<summary>v11.4.6 - network name + join reliability + QR lightbox + agent grouping</summary>
 
 **Give your network a real name, connect without getting stuck, and scan a code your laptop camera can actually read.** v11.4.6 is an off-consensus federation reliability + UX release - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Everything here lives on the federation transport (mTLS on `:8444`, outside consensus), a local display table, and the dashboard.
 
@@ -62,8 +76,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **ChatGPT setup wizard reads straight.** The "Connect to ChatGPT" wizard's callout used to point at a flow that can't list ChatGPT (OpenAI connectors need a public URL), and a mixed-content banner rendered scrambled. Both are fixed - the copy now says plainly that ChatGPT always needs the tunnel, and the banner lays out in order.
 
 SDK 11.4.6.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.4.5 - federation opt-in + domain-sync preview + reliability</summary>

@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
@@ -139,6 +141,8 @@ func pipeRouterAs(s *Server, callerID string) http.Handler {
 		})
 	})
 	r.Get("/v1/pipe/{pipe_id}", s.handlePipeStatus)
+	r.Put("/v1/pipe/{pipe_id}/claim", s.handlePipeClaim)
+	r.Put("/v1/pipe/{pipe_id}/result", s.handlePipeResult)
 	return r
 }
 
@@ -178,4 +182,72 @@ func TestPipeStatus_Authorization(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, missing.Code)
 	assert.Equal(t, missing.Body.String(), other.Body.String(),
 		"exists-but-forbidden and genuine-not-found 404 bodies must be identical for the same id")
+}
+
+func TestPipeClaimAndResult_Authorization(t *testing.T) {
+	s, memStore := newPipeServer(t)
+	from := "00000000000000000000000000000000000000000000000000000000000000f1"
+	to := "00000000000000000000000000000000000000000000000000000000000000d2"
+	stranger := "00000000000000000000000000000000000000000000000000000000000000c3"
+	require.NoError(t, memStore.InsertPipeline(context.Background(), &store.PipelineMessage{
+		PipeID: "pipe-claim-1", FromAgent: from, ToAgent: to, Intent: "ask", Payload: "PIPE PAYLOAD SECRET", Status: "pending",
+		CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}))
+
+	claim := func(caller string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		pipeRouterAs(s, caller).ServeHTTP(rr, httptest.NewRequest(http.MethodPut, "/v1/pipe/pipe-claim-1/claim", nil))
+		return rr
+	}
+
+	rr := claim(from)
+	require.Equal(t, http.StatusNotFound, rr.Code, "sender may read results, but cannot claim recipient work")
+	assert.NotContains(t, rr.Body.String(), "PIPE PAYLOAD SECRET")
+	msg, err := memStore.GetPipeline(context.Background(), "pipe-claim-1")
+	require.NoError(t, err)
+	assert.Equal(t, "pending", msg.Status)
+	assert.Empty(t, msg.ClaimedBy)
+
+	rr = claim(stranger)
+	require.Equal(t, http.StatusNotFound, rr.Code, "non-party cannot claim")
+	msg, err = memStore.GetPipeline(context.Background(), "pipe-claim-1")
+	require.NoError(t, err)
+	assert.Equal(t, "pending", msg.Status)
+
+	rr = claim(to)
+	require.Equal(t, http.StatusOK, rr.Code)
+	msg, err = memStore.GetPipeline(context.Background(), "pipe-claim-1")
+	require.NoError(t, err)
+	assert.Equal(t, "claimed", msg.Status)
+	assert.Equal(t, to, msg.ClaimedBy)
+
+	resultBody := strings.NewReader(`{"result":"forged"}`)
+	rr = httptest.NewRecorder()
+	pipeRouterAs(s, stranger).ServeHTTP(rr, httptest.NewRequest(http.MethodPut, "/v1/pipe/pipe-claim-1/result", resultBody))
+	require.Equal(t, http.StatusNotFound, rr.Code, "non-party cannot submit result or learn pipe exists")
+	msg, err = memStore.GetPipeline(context.Background(), "pipe-claim-1")
+	require.NoError(t, err)
+	assert.Equal(t, "claimed", msg.Status)
+	assert.Empty(t, msg.Result)
+	assert.Empty(t, msg.JournalID)
+
+	resultBody = strings.NewReader(`{"result":"sender forged"}`)
+	rr = httptest.NewRecorder()
+	pipeRouterAs(s, from).ServeHTTP(rr, httptest.NewRequest(http.MethodPut, "/v1/pipe/pipe-claim-1/result", resultBody))
+	require.Equal(t, http.StatusConflict, rr.Code, "sender can read but cannot complete another agent's claim")
+	msg, err = memStore.GetPipeline(context.Background(), "pipe-claim-1")
+	require.NoError(t, err)
+	assert.Equal(t, "claimed", msg.Status)
+	assert.Empty(t, msg.Result)
+	assert.Empty(t, msg.JournalID, "failed result must not auto-journal")
+
+	resultBody = strings.NewReader(`{"result":"done"}`)
+	rr = httptest.NewRecorder()
+	pipeRouterAs(s, to).ServeHTTP(rr, httptest.NewRequest(http.MethodPut, "/v1/pipe/pipe-claim-1/result", resultBody))
+	require.Equal(t, http.StatusOK, rr.Code)
+	msg, err = memStore.GetPipeline(context.Background(), "pipe-claim-1")
+	require.NoError(t, err)
+	assert.Equal(t, "completed", msg.Status)
+	assert.Equal(t, "done", msg.Result)
+	assert.NotEmpty(t, msg.JournalID)
 }

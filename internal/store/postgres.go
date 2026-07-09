@@ -1941,7 +1941,7 @@ func (s *PostgresStore) ClaimPipeline(_ context.Context, _, _ string) error {
 	return fmt.Errorf("ClaimPipeline not implemented for PostgresStore")
 }
 
-func (s *PostgresStore) CompletePipeline(_ context.Context, _, _, _ string) error {
+func (s *PostgresStore) CompletePipeline(_ context.Context, _, _, _, _ string) error {
 	return fmt.Errorf("CompletePipeline not implemented for PostgresStore")
 }
 
