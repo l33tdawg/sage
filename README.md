@@ -51,7 +51,22 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.4.5
+## What's New in v11.4.6
+
+**Give your network a real name, connect without getting stuck, and scan a code your laptop camera can actually read.** v11.4.6 is an off-consensus federation reliability + UX release - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Everything here lives on the federation transport (mTLS on `:8444`, outside consensus), a local display table, and the dashboard.
+
+- **Name your network.** Your network was only ever identified by its raw id (something like `sage-personal-ybly7j6fzxp5n4zsvomjzway4w`) - so when someone tried to join you, that unreadable string was all you saw. You can now give your network a **friendly name** (e.g. "Dhillon's MacBook") from the Federation page. Peers see it during a join - the host's review step reads *"Dhillon's Mac wants to connect"* - and it labels the row in each side's connections list. The name is a cosmetic label carried alongside the permanent id, which never changes: it's **not** used to verify anyone (the scanned/spoken code still is that anchor), and it never touches the chain.
+- **Joining no longer gets stuck at the last step.** A guest waiting for the host's approval polls for it every couple of seconds; that legitimate polling could trip the join listener's abuse rate-limit, so the host's approval sometimes never reached the guest and the ceremony hung on "waiting for them." The rate limit now separates read-only status polling (generous) from code-submitting steps (still tight), so a normal join always completes; a stalled connection now surfaces a reason instead of spinning forever.
+- **A QR your webcam can lock onto.** Scanning with a laptop's built-in camera pointed at another laptop across a desk was fiddly. Click the QR (or **"Make it bigger"**) to blow it up to a full-screen, high-contrast code. The host's connection code also shows **immediately** now instead of behind an extra click, and the whole join flow is centered and written in plainer language.
+- **Arrange your agents into groups.** On the Agents page you can now **drag one agent onto another to group them** - handy for organizing by machine or purpose - with collapsible, renamable groups. It's a local view convenience only; it changes nothing on the network.
+- **ChatGPT setup wizard reads straight.** The "Connect to ChatGPT" wizard's callout used to point at a flow that can't list ChatGPT (OpenAI connectors need a public URL), and a mixed-content banner rendered scrambled. Both are fixed - the copy now says plainly that ChatGPT always needs the tunnel, and the banner lays out in order.
+
+SDK 11.4.6.
+
+## Older releases
+
+<details>
+<summary>v11.4.5 - federation opt-in + domain-sync preview + reliability</summary>
 
 **Federation grows up: it's opt-in behind one master switch, it survives restarts and hours-long peer outages, and a topic's memories can now be copied across a link, not just borrowed live.** v11.4.5 is an off-consensus reliability and federation-UX release - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Everything here lives on the federation transport (mTLS on `:8444`, outside consensus) and the dashboard; domain sync admits a copied memory as an ordinary locally-signed `MemorySubmit` on the receiver's own chain, so there is no new transaction and no fork.
 
@@ -62,8 +77,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Groundwork for v11.5 internet federation.** The optional `natter` connectivity service (a separate binary, outside the SAGE trust boundary) gains a coordinator-only mode and explicit address advertisement for cloud hosts - plumbing for the NAT-traversal/relay work that lands as the v11.5 headline. Built-in internet traversal is **not** in v11.4.5 yet; federation today is LAN or a route you provide.
 
 SDK 11.4.5.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.4.0 - search-selection "Transfer to agent" entry point for domain reassign</summary>

@@ -175,7 +175,7 @@ func (s *SQLiteStore) GetPeerNames(ctx context.Context) (map[string]string, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make(map[string]string)
 	for rows.Next() {
 		var id, name string
