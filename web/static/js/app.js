@@ -20,7 +20,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.4.8';
+const SAGE_VERSION = 'v11.4.9';
 
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
@@ -6778,11 +6778,8 @@ function NetworkPage({ sse }) {
     const [mergeTarget, setMergeTarget] = useState(null); // {source, target}
     const [merging, setMerging] = useState(false);
 
-    // External-client wizard state (v6.7.3). remoteWizardTarget tailors the
-    // shared RemoteAccessWizard's final step: 'chatgpt' → OAuth connector fields,
-    // 'tool' → bearer paste blocks for a remote IDE client.
+    // External-client wizard state.
     const [showChatGPTWizard, setShowChatGPTWizard] = useState(false);
-    const [remoteWizardTarget, setRemoteWizardTarget] = useState('chatgpt');
     const [showCursorPanel, setShowCursorPanel] = useState(false);
     // Same-machine connect entry (Phase 5b-1)
     const [showConnectTool, setShowConnectTool] = useState(false);
@@ -7259,16 +7256,16 @@ function NetworkPage({ sse }) {
 
             <div class="ext-clients-section">
                 <div class="ext-clients-header">
-                    <h3>Connect external clients <${HelpTip} text="Wire SAGE up to ChatGPT, Cursor, Cline, or Claude Desktop. Local-first — your tunnel, your domain, your bearer. SAGE never proxies through anyone's cloud." /></h3>
+                    <h3>Connect external clients <${HelpTip} text="Wire SAGE up to ChatGPT, Cursor, Cline, or Claude Desktop. ChatGPT uses OpenAI Secure MCP Tunnel; local tools use generated MCP config." /></h3>
                 </div>
                 <div class="ext-clients-grid">
                     <div class="ext-client-card" role="button" tabIndex="0"
-                        onClick=${() => { setRemoteWizardTarget('chatgpt'); setShowChatGPTWizard(true); }}
-                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setRemoteWizardTarget('chatgpt'); setShowChatGPTWizard(true); } }}>
+                        onClick=${() => setShowChatGPTWizard(true)}
+                        onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowChatGPTWizard(true); } }}>
                         <div class="ext-client-icon">🤖</div>
                         <div class="ext-client-info">
                             <div class="ext-client-title">Connect to ChatGPT</div>
-                            <div class="ext-client-desc">6-click wizard: cloudflared tunnel + DNS + autostart + bearer token. Requires a domain on Cloudflare.</div>
+                            <div class="ext-client-desc">Uses OpenAI Secure MCP Tunnel. No domain, no public URL, no inbound firewall rule.</div>
                         </div>
                         <div class="ext-client-cta">Setup wizard →</div>
                     </div>
@@ -7552,10 +7549,10 @@ function NetworkPage({ sse }) {
                 </div>
             `}
             ${showWizard && html`<${AddAgentWizard} onClose=${() => setShowWizard(false)} onCreated=${() => { setShowWizard(false); loadAgents(); }} />`}
-            ${showChatGPTWizard && html`<${RemoteAccessWizard} agents=${agents} target=${remoteWizardTarget} onClose=${() => setShowChatGPTWizard(false)} />`}
+            ${showChatGPTWizard && html`<${ChatGPTTunnelWizard} onClose=${() => setShowChatGPTWizard(false)} />`}
             ${showCursorPanel && html`<${CursorSetupPanel} agents=${agents} onClose=${() => setShowCursorPanel(false)} />`}
             ${showConnectTool && html`<${ConnectToolModal} agents=${agents}
-                onOpenChatGPT=${(t) => { setRemoteWizardTarget(t || 'chatgpt'); setShowConnectTool(false); setShowChatGPTWizard(true); }}
+                onOpenChatGPT=${() => { setShowConnectTool(false); setShowChatGPTWizard(true); }}
                 onClose=${() => setShowConnectTool(false)} />`}
             ${showJoinGuest && html`<${NetworkJoinGuestPanel} onClose=${() => setShowJoinGuest(false)} />`}
             ${showRemoveConfirm && html`<${RemoveConfirmModal} agent=${showRemoveConfirm} onConfirm=${() => handleRemove(showRemoveConfirm)} onCancel=${() => setShowRemoveConfirm(null)} />`}
@@ -7954,6 +7951,97 @@ function AddAgentWizard({ onClose, onCreated }) {
                             </button>
                         `
                     }
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function shellQuote(s) {
+    return JSON.stringify(String(s));
+}
+
+function ChatGPTTunnelWizard({ onClose }) {
+    const [tunnelId, setTunnelId] = useState('');
+    const [profile, setProfile] = useState('sage-chatgpt');
+    const cleanTunnelId = tunnelId.trim();
+    const cleanProfile = (profile.trim() || 'sage-chatgpt').replace(/[^A-Za-z0-9_.-]/g, '-');
+    const mcpCommand = 'sage-gui mcp';
+    const profileArg = shellQuote(cleanProfile);
+    const tunnelArg = shellQuote(cleanTunnelId || 'tunnel_...');
+    const commandArg = shellQuote(mcpCommand);
+    const initCommand = `tunnel-client init \\
+  --sample sample_mcp_stdio_local \\
+  --profile ${profileArg} \\
+  --tunnel-id ${tunnelArg} \\
+  --mcp-command ${commandArg}`;
+    const doctorCommand = `tunnel-client doctor --profile ${profileArg} --explain`;
+    const runCommand = `tunnel-client run --profile ${profileArg}`;
+    const fullRunbook = `export CONTROL_PLANE_API_KEY="sk-..."
+
+${initCommand}
+
+${doctorCommand}
+${runCommand}`;
+
+    return html`
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
+            <div class="wizard-modal" style="max-width:720px;max-height:85vh;display:flex;flex-direction:column;">
+                <div class="wizard-header">
+                    <h2>Connect ChatGPT</h2>
+                    <button class="detail-close" onClick=${onClose}>×</button>
+                </div>
+                <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
+                    <div style="display:flex;align-items:flex-start;gap:12px;background:var(--success-tint);border:1px solid rgba(16,185,129,0.28);border-radius:8px;padding:14px;margin-bottom:16px;">
+                        <span style="color:var(--accent);font-size:18px;">✓</span>
+                        <div>
+                            <strong>Use OpenAI Secure MCP Tunnel.</strong>
+                            <div style="color:var(--text-dim);font-size:13px;margin-top:3px;">
+                                ChatGPT connects through OpenAI's tunnel client to SAGE's local stdio MCP server. No domain, no inbound firewall, no public SAGE URL.
+                            </div>
+                        </div>
+                    </div>
+
+                    <h3 style="margin:0 0 8px;">1. Create an OpenAI tunnel</h3>
+                    <p style="color:var(--text-dim);margin-top:0;">
+                        In OpenAI Platform, create or open a Secure MCP Tunnel and copy its <code>tunnel_id</code>.
+                        Make sure the tunnel is associated with the ChatGPT workspace where you will create the developer-mode app.
+                    </p>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+                        <a class="btn" href="https://platform.openai.com/settings/organization/tunnels" target="_blank" rel="noopener">Open tunnel settings →</a>
+                        <a class="btn" href="https://developers.openai.com/api/docs/guides/secure-mcp-tunnels" target="_blank" rel="noopener">Open OpenAI guide →</a>
+                    </div>
+
+                    <div class="wizard-field">
+                        <label>OpenAI tunnel_id</label>
+                        <input class="wizard-input" value=${tunnelId} onInput=${e => setTunnelId(e.target.value)}
+                            placeholder="tunnel_0123456789abcdef0123456789abcdef" spellcheck="false" />
+                    </div>
+                    <div class="wizard-field">
+                        <label>Local profile name</label>
+                        <input class="wizard-input" value=${profile} onInput=${e => setProfile(e.target.value)}
+                            placeholder="sage-chatgpt" spellcheck="false" />
+                    </div>
+
+                    <h3 style="margin:18px 0 8px;">2. Run the tunnel client beside SAGE</h3>
+                    <p style="color:var(--text-dim);margin-top:0;">
+                        Install <code>tunnel-client</code> from the OpenAI tunnel page, then run this on the same computer as SAGE.
+                        The runtime API key is read by <code>tunnel-client</code>; SAGE never stores it.
+                    </p>
+                    <${ChatGPTCopyField} label="Full command block" value=${fullRunbook} multiline=${true} />
+                    <${ChatGPTCopyField} label="MCP command used by the tunnel" value=${mcpCommand} />
+                    <${ChatGPTCopyField} label="Doctor command" value=${doctorCommand} />
+                    <${ChatGPTCopyField} label="Run command" value=${runCommand} />
+
+                    <h3 style="margin:18px 0 8px;">3. Select the tunnel in ChatGPT</h3>
+                    <p style="color:var(--text-dim);margin-top:0;">
+                        In ChatGPT, open Settings → Plugins, create a developer-mode app, choose <strong>Tunnel</strong>,
+                        and select this tunnel. Keep <code>${runCommand}</code> running while ChatGPT uses SAGE.
+                    </p>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <a class="btn btn-primary" href="https://chatgpt.com/plugins" target="_blank" rel="noopener">Open ChatGPT Plugins →</a>
+                        <button class="btn" onClick=${onClose}>Done</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -8359,7 +8447,7 @@ function RemoteAccessWizard({ agents, onClose, target }) {
 
 // ChatGPTCopyField — labeled value with one-click copy. Used in the final
 // "paste into ChatGPT" card.
-function ChatGPTCopyField({ label, value, sensitive }) {
+function ChatGPTCopyField({ label, value, sensitive, multiline }) {
     const [copied, setCopied] = useState(false);
     const [revealed, setRevealed] = useState(!sensitive);
     const onCopy = async () => {
@@ -8371,9 +8459,11 @@ function ChatGPTCopyField({ label, value, sensitive }) {
     };
     const display = sensitive && !revealed ? '•'.repeat(Math.min(value.length, 24)) : value;
     return html`
-        <div style="display:grid;grid-template-columns:180px 1fr auto;gap:8px;align-items:center;margin-bottom:8px;">
+        <div style="display:grid;grid-template-columns:180px 1fr auto;gap:8px;align-items:${multiline ? 'start' : 'center'};margin-bottom:8px;">
             <div style="font-size:12px;color:var(--text-dim);">${label}</div>
-            <code style="background:var(--bg-elev);padding:6px 8px;border-radius:3px;font-size:12px;word-break:break-all;">${display}</code>
+            ${multiline
+                ? html`<pre style="background:var(--bg-elev);padding:8px;border-radius:3px;font-size:12px;white-space:pre-wrap;word-break:break-word;margin:0;color:var(--text);">${display}</pre>`
+                : html`<code style="background:var(--bg-elev);padding:6px 8px;border-radius:3px;font-size:12px;word-break:break-all;">${display}</code>`}
             <div style="display:flex;gap:4px;">
                 ${sensitive && html`<button class="btn" style="padding:4px 8px;font-size:11px;" onClick=${() => setRevealed(!revealed)}>${revealed ? 'Hide' : 'Show'}</button>`}
                 <button class="btn" style="padding:4px 8px;font-size:11px;" onClick=${onCopy}>${copied ? 'Copied!' : 'Copy'}</button>
@@ -8418,7 +8508,7 @@ function CursorSetupPanel({ agents, onClose }) {
                         config for Cursor, Cline, or Claude Desktop automatically (a local stdio connection, no certificate to trust).
                         The bearer-over-HTTPS method below is a manual alternative for clients that specifically need a URL.
                     </div>
-                    <p>These clients can also take a bearer token directly — <strong>no tunnel, no public URL, no Cloudflare account needed</strong>. They run on the same machine as SAGE and talk to <code>https://localhost:8443</code>.</p>
+                    <p>These clients can also take a bearer token directly — <strong>no tunnel, no public URL, no external account needed</strong>. They run on the same machine as SAGE and talk to <code>https://localhost:8443</code>.</p>
                     <p style="font-size:12px;color:var(--text-muted);">Heads up: <code>localhost:8443</code> uses SAGE's self-signed certificate. Stock Cursor/Cline reject that over a URL, so the stdio path above (or Claude Desktop, which prompts to trust it) is the reliable choice.</p>
 
                     ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
@@ -8518,39 +8608,37 @@ function remoteMcpJson(kind, url, token, selfSigned) {
 }`;
 }
 
-// RemotePasteBlocks — renders BOTH client families' paste blocks (used by the
-// RemoteAccessWizard's tool step, where the specific tool wasn't carried
-// through the tunnel handoff). url has a valid cert when it's the tunnel; pass
-// selfSigned only for a self-signed LAN URL.
+// RemotePasteBlocks — renders BOTH client families' paste blocks for an
+// operator-managed HTTPS endpoint or a direct LAN URL.
 function RemotePasteBlocks({ url, token, selfSigned }) {
     const preStyle = 'background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);';
     return html`
         <p style="font-size:12px;color:var(--text-dim);margin:14px 0 4px;"><strong>Cursor / Cline</strong> — url + bearer header (Cursor: <code>~/.cursor/mcp.json</code> or Settings → MCP):</p>
         <pre style=${preStyle}>${remoteMcpJson('url', url, token, selfSigned)}</pre>
-        ${selfSigned && html`<div class="warning-banner" style="margin-top:8px;">Stock Cursor/Cline will reject a self-signed certificate — use the public tunnel URL for these.</div>`}
+        ${selfSigned && html`<div class="warning-banner" style="margin-top:8px;">Stock Cursor/Cline will reject a self-signed certificate — use a trusted HTTPS endpoint for these.</div>`}
         <p style="font-size:12px;color:var(--text-dim);margin:16px 0 4px;"><strong>Windsurf / Claude Desktop</strong> — stdio via <code>mcp-remote</code> (needs Node.js on the other machine):</p>
         <pre style=${preStyle}>${remoteMcpJson('mcp-remote', url, token, selfSigned)}</pre>
     `;
 }
 
-// REMOTE_PROVIDERS — tools/chats running on ANOTHER computer that reach this
+// REMOTE_PROVIDERS — tools running on ANOTHER computer that reach this
 // node over the network (Flow 2). kind drives the paste block we generate:
 //   'url'        — the client speaks HTTP+SSE with url+headers (Cursor, Cline)
 //   'mcp-remote' — the client is stdio-only, so it bridges via the mcp-remote npx shim (Windsurf, Claude Desktop)
-//   'oauth'      — a hosted chat that needs a public URL + OAuth (ChatGPT); routed to the dedicated tunnel wizard
+//   'openai-tunnel' — ChatGPT via OpenAI Secure MCP Tunnel; routed to the dedicated wizard
 const REMOTE_PROVIDERS = [
     { key: 'cursor', name: 'Cursor / Cline', icon: '\u{1F4BB}', kind: 'url' },
     { key: 'windsurf', name: 'Windsurf', icon: '\u{1F30A}', kind: 'mcp-remote' },
     { key: 'claude-desktop', name: 'Claude Desktop', icon: '\u{1F5A5}️', kind: 'mcp-remote' },
-    { key: 'chatgpt', name: 'ChatGPT / hosted chat', icon: '\u{1F4AC}', kind: 'oauth' },
+    { key: 'chatgpt', name: 'ChatGPT', icon: '\u{1F4AC}', kind: 'openai-tunnel' },
 ];
 
 // RemoteConnectPanel — Flow 2 body. A tool on another computer can only reach
-// this node via a public tunnel or a direct LAN bind, so we first ask the node
+// this node via a direct LAN bind or an operator-managed reachable URL, so we first ask the node
 // how it's reachable (connectRemoteUrl), then walk the user through: pick tool
 // → (bearer clients) mint a token + copy a paste block against the reachable
-// URL, or (ChatGPT) hand off to the tunnel/OAuth wizard. When there's NO remote
-// path we say so plainly and offer to set one up.
+// URL, or (ChatGPT) hand off to the OpenAI tunnel wizard. When there's NO remote
+// path we say so plainly.
 function RemoteConnectPanel({ agents, onOpenChatGPT }) {
     const [info, setInfo] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -8632,7 +8720,7 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
             <pre style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);">${remoteMcpJson('mcp-remote', baseUrl, token, isSelfSigned)}</pre>
             ${isSelfSigned && html`<div class="warning-banner" style="margin-top:8px;">
                 This LAN URL uses a self-signed certificate — the <code>NODE_TLS_REJECT_UNAUTHORIZED</code> line above tells
-                mcp-remote to accept it. The public tunnel path has a real certificate and doesn't need it.
+                mcp-remote to accept it. A trusted HTTPS endpoint has a real certificate and doesn't need it.
             </div>`}
         `;
     };
@@ -8649,34 +8737,30 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                     onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickTool(p.key); } }}>
                     <div class="connect-card-icon">${p.icon}</div>
                     <h4>${p.name}</h4>
-                    <p>${p.kind === 'oauth' ? 'OAuth + public URL' : (p.kind === 'url' ? 'URL + bearer' : 'stdio via mcp-remote')}</p>
+                    <p>${p.kind === 'openai-tunnel' ? 'OpenAI tunnel' : (p.kind === 'url' ? 'URL + bearer' : 'stdio via mcp-remote')}</p>
                 </div>
             `)}
         </div>
 
-        ${selected && selected.kind === 'oauth' && html`
+        ${selected && selected.kind === 'openai-tunnel' && html`
             <div class="summary-card" style="padding:18px;margin-top:12px;">
-                <p style="margin-top:0;">ChatGPT (and other hosted chats) need a <strong>public HTTPS URL and OAuth</strong> —
-                    they can't reach a bare localhost or LAN address. The dedicated wizard sets up the Cloudflare tunnel,
-                    mints the token, and gives you the exact fields to paste into ChatGPT's connector.</p>
-                ${info.has_tunnel
-                    ? html`<p style="color:var(--accent-green);margin:0 0 12px;">✓ A tunnel is already configured (<code>${info.tunnel_hostname}</code>) — the wizard will reuse it.</p>`
-                    : html`<p style="color:var(--text-dim);margin:0 0 12px;">No tunnel yet — the wizard will walk you through creating one.</p>`}
+                <p style="margin-top:0;">ChatGPT uses <strong>OpenAI Secure MCP Tunnel</strong> to reach SAGE on this computer.
+                    SAGE runs its normal stdio MCP server; OpenAI's tunnel client carries the connection without a public SAGE URL.</p>
                 <button class="btn btn-primary" onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}>Open the ChatGPT setup wizard →</button>
             </div>
         `}
 
-        ${selected && selected.kind !== 'oauth' && !info.has_tunnel && !info.lan_exposed && html`
+        ${selected && selected.kind !== 'openai-tunnel' && !info.has_tunnel && !info.lan_exposed && html`
             <div class="summary-card" style="padding:18px;margin-top:12px;">
                 <h4 style="margin-top:0;">This node isn't reachable from another computer yet</h4>
                 <p style="color:var(--text-dim);">SAGE is listening on localhost only, so a tool on a different machine
-                    has no way in. Give it a public URL — a stable HTTPS address that works from anywhere. The wizard sets up
-                    the tunnel, then hands you the paste block for your tool.</p>
-                <button class="btn btn-primary" onClick=${() => onOpenChatGPT && onOpenChatGPT('tool')}>Set up a public tunnel →</button>
+                    has no way in. Put the other tool on the same LAN/VPN, switch SAGE to listen on that network, or give SAGE
+                    an HTTPS endpoint you manage. ChatGPT has its own OpenAI Secure MCP Tunnel path.</p>
+                <button class="btn" onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}>Use the ChatGPT tunnel path →</button>
             </div>
         `}
 
-        ${selected && selected.kind !== 'oauth' && (info.has_tunnel || info.lan_exposed) && html`
+        ${selected && selected.kind !== 'openai-tunnel' && (info.has_tunnel || info.lan_exposed) && html`
             <div style="margin-top:12px;">
                 ${(info.has_tunnel && info.lan_exposed) && html`
                     <div class="wizard-field">
@@ -8684,7 +8768,7 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                         <div style="display:flex;gap:16px;font-size:13px;margin-top:4px;">
                             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
                                 <input type="radio" name="rc-base" checked=${base === 'tunnel'} onChange=${() => setBase('tunnel')} />
-                                Public tunnel <span style="color:var(--text-muted);">(${info.tunnel_hostname})</span>
+                                HTTPS endpoint <span style="color:var(--text-muted);">(${info.tunnel_hostname})</span>
                             </label>
                             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
                                 <input type="radio" name="rc-base" checked=${base === 'lan'} onChange=${() => setBase('lan')} />
@@ -8713,12 +8797,12 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                     </div>
                     ${base === 'tunnel' && html`
                         <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px;">
-                            The cloudflared tunnel must be running on this machine for the tool to connect. If it can't reach SAGE, confirm the tunnel is up.
+                            The configured tunnel or remote endpoint must be running on this machine for the tool to connect.
                         </div>
                     `}
                     ${base === 'lan' && lanCand && !lanCand.is_private && html`
                         <div class="warning-banner" style="margin:0 0 10px;">
-                            <strong>${lanCand.ip} is not a private LAN address.</strong> It may be reachable from the public internet — anyone with the bearer could connect, and mcp-remote is told to skip certificate checks. Prefer the public tunnel (a real certificate) unless you know this address is safe.
+                            <strong>${lanCand.ip} is not a private LAN address.</strong> It may be reachable from the public internet — anyone with the bearer could connect, and mcp-remote is told to skip certificate checks. Prefer a trusted HTTPS endpoint unless you know this address is safe.
                         </div>
                     `}
                 `}
@@ -8731,12 +8815,12 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                             <strong>${selected.name} can't use the local-network URL.</strong> It's served with a self-signed
                             certificate and stock Cursor/Cline reject that with no override.
                             ${info.has_tunnel
-                                ? html` Use the public tunnel — it has a real certificate.`
-                                : html` Set up a public tunnel (a real certificate) and this tool will connect cleanly.`}
+                                ? html` Use the configured HTTPS endpoint — it has a real certificate.`
+                                : html` Use a LAN/VPN address with a trusted certificate, or a reachable HTTPS endpoint you manage.`}
                         </div>
                         ${info.has_tunnel
-                            ? html`<button class="btn btn-primary" style="margin-top:10px;" onClick=${() => setBase('tunnel')}>Use the public tunnel instead →</button>`
-                            : html`<button class="btn btn-primary" style="margin-top:10px;" onClick=${() => onOpenChatGPT && onOpenChatGPT('tool')}>Set up a public tunnel →</button>`}
+                            ? html`<button class="btn btn-primary" style="margin-top:10px;" onClick=${() => setBase('tunnel')}>Use the HTTPS endpoint instead →</button>`
+                            : html`<button class="btn" style="margin-top:10px;" onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}>Use the ChatGPT tunnel path →</button>`}
                     `
                     : html`
                         ${!minted && html`
@@ -8837,11 +8921,18 @@ function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
                                 <p>Claude Code, Codex, Cursor, Windsurf, or Claude Desktop running right here. SAGE writes its config.</p>
                             </div>
                             <div class="connect-card" style="text-align:left;" role="button" tabIndex="0"
+                                onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}
+                                onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenChatGPT && onOpenChatGPT('chatgpt'); } }}>
+                                <div class="connect-card-icon">\u{1F4AC}</div>
+                                <h4>ChatGPT</h4>
+                                <p>Use OpenAI Secure MCP Tunnel. No domain, no public SAGE URL, no inbound firewall rule.</p>
+                            </div>
+                            <div class="connect-card" style="text-align:left;" role="button" tabIndex="0"
                                 onClick=${() => setView('flow2')}
                                 onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setView('flow2'); } }}>
-                                <div class="connect-card-icon">\u{1F4AC}</div>
-                                <h4>On another computer (AI chat/tool)</h4>
-                                <p>A hosted chat or a tool on a different machine that reaches SAGE over the network.</p>
+                                <div class="connect-card-icon">\u{1F310}</div>
+                                <h4>On another computer (AI tool)</h4>
+                                <p>Cursor, Cline, Windsurf, or Claude Desktop on a different machine using a LAN/VPN or reachable HTTPS endpoint.</p>
                             </div>
                             <div class="connect-card" style="text-align:left;" role="button" tabIndex="0"
                                 onClick=${() => setView('flow3')}
@@ -9229,7 +9320,6 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
     const [rerankOn, setRerankOn] = useState(false);
     const [showConnect, setShowConnect] = useState(false);
     const [showChatGPT, setShowChatGPT] = useState(false);
-    const [chatGPTTarget, setChatGPTTarget] = useState('chatgpt');
 
     const refreshEmb = () => embeddingsStatus().then(setEmb).catch(() => setEmb(null));
     const refreshAgents = () => fetchAgents().then(d => setAgents(d.agents || [])).catch(() => {});
@@ -9320,9 +9410,9 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
         ${showEmbedSetup && html`<${EmbeddingsSetupModal} onClose=${() => { setShowEmbedSetup(false); refreshEmb(); }} onDone=${refreshEmb} />`}
         ${showRerankSetup && html`<${RerankerSetupModal} onClose=${() => { setShowRerankSetup(false); refreshRerank(); }} onDone=${refreshRerank} />`}
         ${showConnect && html`<${ConnectToolModal} agents=${agents}
-            onOpenChatGPT=${(t) => { setChatGPTTarget(t || 'chatgpt'); setShowConnect(false); setShowChatGPT(true); }}
+            onOpenChatGPT=${() => { setShowConnect(false); setShowChatGPT(true); }}
             onClose=${() => { setShowConnect(false); refreshAgents(); }} />`}
-        ${showChatGPT && html`<${RemoteAccessWizard} agents=${agents} target=${chatGPTTarget} onClose=${() => setShowChatGPT(false)} />`}
+        ${showChatGPT && html`<${ChatGPTTunnelWizard} onClose=${() => setShowChatGPT(false)} />`}
     `;
 }
 

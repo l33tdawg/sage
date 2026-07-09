@@ -581,11 +581,9 @@ export async function submitGovVote(proposalId, decision) {
     return res.json();
 }
 
-// ─── ChatGPT Setup Wizard API (v6.7.3) ───
-// Local-first orchestration — these endpoints help the user wire SAGE up
-// to ChatGPT's MCP connector without touching a terminal. SAGE never
-// proxies through anyone's cloud; the user owns the cloudflared tunnel
-// end-to-end.
+// ─── Legacy remote tunnel API (v6.7.3) ───
+// Kept for existing local installs that already use the old remote-URL wizard.
+// ChatGPT setup now uses OpenAI Secure MCP Tunnel from the dashboard runbook.
 
 export async function wizardCheckCloudflared() {
     const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/check-cloudflared`, { method: 'POST' });
@@ -649,10 +647,10 @@ export async function connectProvider(provider, { path, token } = {}) {
 }
 
 // ─── Remote connect (Phase 5b-2) ───
-// Reports how a tool on ANOTHER computer can reach this node: a public tunnel
-// (has_tunnel + tunnel_mcp_url + oauth urls) and/or a direct LAN bind
-// (lan_exposed + lan_mcp_url + self_signed). When neither is present the tool
-// cannot reach this node yet and the UI offers to set up a tunnel.
+// Reports how a tool on ANOTHER computer can reach this node: an existing
+// operator-managed HTTPS endpoint (has_tunnel + tunnel_mcp_url + oauth urls)
+// and/or a direct LAN bind (lan_exposed + lan_mcp_url + self_signed). When
+// neither is present the tool cannot reach this node yet.
 export async function connectRemoteUrl() {
     const res = await fetch(`${API_BASE}/v1/dashboard/connect/remote-url`);
     if (!res.ok) {

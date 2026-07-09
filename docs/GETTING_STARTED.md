@@ -144,9 +144,9 @@ The dashboard's **Connect an AI tool** flow (in the onboarding wizard, and on th
 
 For Claude Code, Codex, Cursor, Windsurf, or Claude Desktop running on the same computer as SAGE. Pick the tool, give a project folder if it is a per-project client (Claude Code, Codex, Cursor), and click Connect. SAGE **writes the config file itself** and the agent registers its own on-chain identity on first connect. Restart the tool and it picks up its SAGE connection. You manage its identity and permissions afterward on the Agents page.
 
-### 2. Remote MCP (another computer or a hosted chat)
+### 2. Remote MCP (ChatGPT or another computer)
 
-For a hosted chat like ChatGPT, or a tool on a different machine that reaches SAGE over the network. A guided wizard gives SAGE a public URL through **your own cloudflared tunnel** (it can install cloudflared for you, does the one-time Cloudflare login, creates the tunnel, routes DNS, and mints a bearer token). Local-first by design: your tunnel, your domain, your bearer token. SAGE never proxies through anyone else's cloud. Bearer-only clients that run on the same machine (Cursor, Cline, Claude Desktop) can also connect directly to `https://localhost:8443` without a tunnel.
+For ChatGPT, the dashboard uses **OpenAI Secure MCP Tunnel**. The wizard gives you the `tunnel-client` commands for SAGE's local stdio MCP server, so ChatGPT can reach SAGE without a domain, public SAGE URL, or inbound firewall rule. For other tools on a different machine, use the LAN/VPN flow or a reachable HTTPS endpoint you manage. Bearer-only clients that run on the same machine (Cursor, Cline, Claude Desktop) can also connect directly to `https://localhost:8443` without a tunnel.
 
 ### 3. LAN pairing (another computer on your network joins your SAGE)
 

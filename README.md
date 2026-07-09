@@ -51,7 +51,21 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.4.8
+## What's New in v11.4.9
+
+**ChatGPT setup now follows OpenAI's official Secure MCP Tunnel path.** v11.4.9 is an off-consensus UX and packaging patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
+
+- **ChatGPT is first-class in Connect an AI tool.** The setup menu now shows ChatGPT directly instead of hiding it behind the generic remote-tool branch.
+- **OpenAI Secure MCP Tunnel is the ChatGPT path.** The wizard gives a copyable `tunnel-client` runbook for SAGE's local stdio MCP server. No domain, no public SAGE URL, and no inbound firewall rule.
+- **Remote-tool copy is clearer.** Non-ChatGPT remote tools now point to LAN/VPN or a reachable HTTPS endpoint you manage instead of mixing those cases into the ChatGPT flow.
+- **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.9.
+
+SDK 11.4.9.
+
+## Older releases
+
+<details>
+<summary>v11.4.8 - join hardening + release maintenance</summary>
 
 **The join ceremony guardrails are tighter, and the release pipeline is cleaner.** v11.4.8 is an off-consensus reliability and release-maintenance patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
 
@@ -61,8 +75,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.8.
 
 SDK 11.4.8.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.4.7 - dependency refresh + release hardening</summary>

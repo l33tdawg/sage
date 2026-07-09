@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.4.0 is the current release.** This document looks forward from v11 to the v11.5 slate. Everything past v11 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.4.9 is the current release.** This document looks forward from v11 to the v11.5 slate. Everything past v11 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -15,7 +15,7 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 - **First-run onboarding wizard.** Fresh nodes get a three-step welcome (orientation, semantic memory, connect an AI tool). Closing it marks onboarding done; it is re-runnable any time from **Settings > Maintenance > Run setup**.
 - **Guided semantic-memory setup.** One flow turns on the bundled embedder (Ollama + `nomic-embed-text`): detect Ollama, pull the model, re-embed existing memories as a durable background job with a progress banner that survives reloads, then switch recall over. Includes recovery-key backup and honest handling of undecryptable memories (surfaced, not silently dropped).
 - **One-click managed reranker.** After a single consent click, SAGE downloads a pinned, sha256-checksum-verified llama.cpp engine build and the `bge-reranker-v2-m3` cross-encoder model, then runs and manages the sidecar process itself (loopback only, nothing leaves the machine). Recall results-per-query (k) is tunable 3-20. Bring-your-own TEI-compatible servers are still supported.
-- **Connect-an-AI-tool flows.** A single dashboard flow branches three ways: same-machine one-click config writing (Claude Code, Codex, Cursor, Windsurf, Claude Desktop), remote MCP over the operator's own cloudflared tunnel (local-first, no shared cloud), and LAN node-join (another computer becomes a peer node sharing this node's memory).
+- **Connect-an-AI-tool flows.** A single dashboard flow branches three ways: same-machine one-click config writing (Claude Code, Codex, Cursor, Windsurf, Claude Desktop), ChatGPT through OpenAI Secure MCP Tunnel, remote MCP over LAN/VPN or an operator-managed HTTPS endpoint, and LAN node-join (another computer becomes a peer node sharing this node's memory).
 
 ### Federation
 
