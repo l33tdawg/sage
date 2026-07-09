@@ -8035,10 +8035,20 @@ function RemoteAccessWizard({ agents, onClose, target }) {
                                 <li>A free <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener" style="color:var(--accent);">Cloudflare account</a></li>
                                 <li>A domain on Cloudflare DNS (a <code>.xyz</code> is ~$1/year if you don't already own one)</li>
                             </ul>
-                            <div class="warning-banner" style="margin-top:16px;">
-                                <strong>Don't want to own a domain?</strong> If the tool is on <em>this</em> computer, cancel and use the
-                                <em>Connect an AI tool → On this computer</em> flow instead — those clients need no public URL at all.
-                            </div>
+                            ${forChatGPT ? html`
+                                <div class="warning-banner" style="margin-top:16px;">
+                                    <strong>ChatGPT itself always needs this tunnel.</strong> OpenAI's connectors only reach
+                                    public HTTPS URLs — they can't see your localhost — so there's no domain-free path for
+                                    ChatGPT. But if the tool you actually want to connect runs on <em>this</em> computer
+                                    (Claude Code, Codex, Cursor, Windsurf, Claude Desktop), cancel and use
+                                    <em>Connect an AI tool → On this computer</em> — those clients need no public URL at all.
+                                </div>
+                            ` : html`
+                                <div class="warning-banner" style="margin-top:16px;">
+                                    <strong>Don't want to own a domain?</strong> If the tool is on <em>this</em> computer, cancel and use the
+                                    <em>Connect an AI tool → On this computer</em> flow instead — those clients need no public URL at all.
+                                </div>
+                            `}
                         </div>
                     `}
 

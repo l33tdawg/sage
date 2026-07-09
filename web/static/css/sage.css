@@ -3488,11 +3488,11 @@ input[type="range"]::-moz-range-thumb {
 .summary-row .label { color: var(--text-muted); }
 .summary-row .value { color: var(--text); font-weight: 500; }
 
-/* Warning banner */
+/* Warning banner. Block, not flex: the content is a sentence with inline
+   <strong>/<em> children — flex would lay each text run out as a separate
+   column item and scramble the reading order. */
 .warning-banner {
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    display: block;
     padding: 12px 16px;
     background: var(--warning-tint);
     border: 1px solid rgba(245, 158, 11, 0.3);
