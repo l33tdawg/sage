@@ -339,7 +339,7 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
 
