@@ -231,12 +231,12 @@ func TestAuthMiddleware_EmptyBody(t *testing.T) {
 }
 
 func TestRateLimitMiddleware(t *testing.T) {
-	limiter := httprate.Limit(
+	limiter := httprate.LimitBy(
 		5,
 		time.Minute,
-		httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		func(r *http.Request) (string, error) {
 			return r.Header.Get("X-Agent-ID"), nil
-		}),
+		},
 		httprate.WithLimitHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", "60")
 			writeProblem(w, http.StatusTooManyRequests, "Rate limit exceeded", "Too many requests.")

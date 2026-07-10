@@ -12,17 +12,17 @@ import (
 // per minute. Over-limit requests receive a 429 response with RFC 7807 body
 // and a Retry-After header.
 func RateLimitMiddleware() func(http.Handler) http.Handler {
-	return httprate.Limit(
+	return httprate.LimitBy(
 		10000,
 		time.Minute,
-		httprate.WithKeyFuncs(func(r *http.Request) (string, error) {
+		func(r *http.Request) (string, error) {
 			agentID := r.Header.Get("X-Agent-ID")
 			if agentID == "" {
 				// Fall back to remote address for unauthenticated endpoints.
 				return r.RemoteAddr, nil
 			}
 			return agentID, nil
-		}),
+		},
 		httprate.WithLimitHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Retry-After", "60")
 			writeProblem(w, http.StatusTooManyRequests, "Rate limit exceeded",
