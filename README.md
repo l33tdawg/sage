@@ -51,7 +51,22 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.4.10
+## What's New in v11.4.11
+
+**ChatGPT setup is now a background-managed CEREBRUM flow.** v11.4.11 is an off-consensus UX and packaging patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
+
+- **No terminal needed for ChatGPT.** The ChatGPT setup wizard now downloads the pinned OpenAI `tunnel-client`, writes the local profile, and starts the daemon from inside CEREBRUM. The user only opens the OpenAI and ChatGPT browser tabs.
+- **The generated MCP command uses the running SAGE app.** CEREBRUM gets the real `sage-gui` executable path from the backend instead of assuming `sage-gui` is on PATH, so macOS app-bundle installs work.
+- **The tunnel client avoids SAGE's port.** The managed `tunnel-client` admin UI binds `127.0.0.1:8081`, leaving SAGE's dashboard on `127.0.0.1:8080`.
+- **No fake secret in copyable commands.** The runtime API key is accepted once to launch the child process and is not written to the profile or preferences. Advanced manual commands use an explicit placeholder, not a valid-looking `sk-...`.
+- **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.11.
+
+SDK 11.4.11.
+
+## Older releases
+
+<details>
+<summary>v11.4.10 - join ceremony fix + MCP registry publishing</summary>
 
 **Connecting two SAGEs works again.** v11.4.10 is an off-consensus bug-fix patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
 
@@ -62,8 +77,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.10.
 
 SDK 11.4.10.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.4.9 - ChatGPT via OpenAI Secure MCP Tunnel</summary>

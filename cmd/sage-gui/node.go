@@ -47,6 +47,7 @@ import (
 	"github.com/l33tdawg/sage/internal/snapshot"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
+	"github.com/l33tdawg/sage/internal/tunnelclientd"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
 	"github.com/l33tdawg/sage/internal/voter"
@@ -202,6 +203,9 @@ func runServe() (rerr error) {
 	// Manager for the local Ollama runtime used by smart memory setup. It
 	// follows the same adopt-or-spawn model as rerankd.
 	ollamaMgr := ollamad.New(SageHome())
+	// Manager for OpenAI's tunnel-client sidecar used by the ChatGPT setup
+	// flow. The runtime key remains process-env only; profiles contain no key.
+	tunnelClientMgr := tunnelclientd.New(SageHome())
 
 	// Persisted reranker intent (Settings > Engine toggle) overrides the env
 	// config so an operator's dashboard on/off choice survives restart without
@@ -618,6 +622,7 @@ func runServe() (rerr error) {
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
 	dashboard.Rerankd = rerankdMgr            // managed reranker sidecar (guided setup)
 	dashboard.Ollamad = ollamaMgr             // managed Ollama runtime for smart memory setup
+	dashboard.TunnelClient = tunnelClientMgr  // managed OpenAI tunnel-client for ChatGPT/Codex
 	dashboard.BadgerStore = badgerStore       // Wire on-chain RBAC for agent isolation
 	dashboard.PostV8ForkFn = app.IsPostV8Fork // v8.0: ancestor-walk grants on post-fork dashboards
 

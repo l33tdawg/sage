@@ -4,5 +4,5 @@ from sage_sdk.auth import AgentIdentity
 from sage_sdk.async_client import AsyncSageClient
 from sage_sdk.client import SageClient
 
-__version__ = "11.4.10"
+__version__ = "11.4.11"
 __all__ = ["SageClient", "AsyncSageClient", "AgentIdentity"]

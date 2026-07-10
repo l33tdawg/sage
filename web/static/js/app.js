@@ -6,6 +6,7 @@ embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pu
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
+chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
 fedConnections, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedSyncResend, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
@@ -20,7 +21,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.4.10';
+const SAGE_VERSION = 'v11.4.11';
 
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
@@ -7963,10 +7964,16 @@ function shellQuote(s) {
 
 function ChatGPTTunnelWizard({ onClose }) {
     const [tunnelId, setTunnelId] = useState('');
+    const [apiKey, setApiKey] = useState('');
     const [profile, setProfile] = useState('sage-chatgpt');
+    const [status, setStatus] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [busy, setBusy] = useState('');
+    const [error, setError] = useState('');
+    const [progress, setProgress] = useState('');
     const cleanTunnelId = tunnelId.trim();
     const cleanProfile = (profile.trim() || 'sage-chatgpt').replace(/[^A-Za-z0-9_.-]/g, '-');
-    const mcpCommand = 'sage-gui mcp';
+    const mcpCommand = status?.mcp_command || '"<SAGE executable path>" mcp';
     const profileArg = shellQuote(cleanProfile);
     const tunnelArg = shellQuote(cleanTunnelId || 'tunnel_...');
     const commandArg = shellQuote(mcpCommand);
@@ -7976,13 +7983,85 @@ function ChatGPTTunnelWizard({ onClose }) {
   --tunnel-id ${tunnelArg} \\
   --mcp-command ${commandArg}`;
     const doctorCommand = `tunnel-client doctor --profile ${profileArg} --explain`;
-    const runCommand = `tunnel-client run --profile ${profileArg}`;
-    const fullRunbook = `export CONTROL_PLANE_API_KEY="sk-..."
+    const runCommand = `tunnel-client run --profile ${profileArg} --health.listen-addr "127.0.0.1:8081"`;
+    const fullRunbook = `# Paste a real Runtime API key from OpenAI Platform first.
+export CONTROL_PLANE_API_KEY="<paste-runtime-api-key-here>"
 
 ${initCommand}
 
 ${doctorCommand}
 ${runCommand}`;
+    const refreshStatus = useCallback(async () => {
+        setLoading(true);
+        try {
+            const s = await chatGPTTunnelStatus();
+            setStatus(s);
+            setError('');
+        } catch (e) {
+            setError(e.message || 'status check failed');
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+    useEffect(() => { refreshStatus(); }, [refreshStatus]);
+
+    const streamSetup = async () => {
+        setBusy('setup');
+        setError('');
+        setProgress('Preparing tunnel...');
+        try {
+            const res = await chatGPTTunnelSetup({ tunnel_id: cleanTunnelId, api_key: apiKey.trim(), profile: cleanProfile });
+            if (!res.ok || !res.body) throw new Error(`setup failed (HTTP ${res.status})`);
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            for (;;) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                const lines = buf.split('\n');
+                buf = lines.pop() || '';
+                for (const line of lines) {
+                    const m = line.match(/^([^:]+):\s*(.*)$/);
+                    if (!m) continue;
+                    if (m[1] === 'progress') {
+                        const [d, t] = m[2].split(/\s+/).map(Number);
+                        if (t > 0) setProgress(`${Math.round((d / t) * 100)}% downloaded`);
+                    } else if (m[1] === 'status') {
+                        setProgress(m[2]);
+                    } else if (m[1] === 'url') {
+                        setProgress(`Tunnel running: ${m[2]}`);
+                    } else if (m[1] === 'error') {
+                        throw new Error(m[2]);
+                    }
+                }
+            }
+            setApiKey('');
+            setProgress('Tunnel running');
+            await refreshStatus();
+        } catch (e) {
+            setError(e.message || 'setup failed');
+        } finally {
+            setBusy('');
+        }
+    };
+
+    const stopTunnel = async () => {
+        setBusy('stop');
+        setError('');
+        try {
+            await chatGPTTunnelStop();
+            await refreshStatus();
+        } catch (e) {
+            setError(e.message || 'stop failed');
+        } finally {
+            setBusy('');
+        }
+    };
+
+    const installed = !!status?.binary_found;
+    const running = !!status?.running;
+    const canSetup = cleanTunnelId && apiKey.trim() && !busy && !running && (installed || status?.install_supported);
 
     return html`
         <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -8004,11 +8083,12 @@ ${runCommand}`;
 
                     <h3 style="margin:0 0 8px;">1. Create an OpenAI tunnel</h3>
                     <p style="color:var(--text-dim);margin-top:0;">
-                        In OpenAI Platform, create or open a Secure MCP Tunnel and copy its <code>tunnel_id</code>.
-                        Make sure the tunnel is associated with the ChatGPT workspace where you will create the developer-mode app.
+                        In OpenAI Platform, create or open a Secure MCP Tunnel, then create a Runtime API key with tunnel read/use permissions.
+                        SAGE uses the key only to launch the local tunnel-client process; it is not saved.
                     </p>
                     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
                         <a class="btn" href="https://platform.openai.com/settings/organization/tunnels" target="_blank" rel="noopener">Open tunnel settings →</a>
+                        <a class="btn" href="https://platform.openai.com/settings/organization/api-keys" target="_blank" rel="noopener">Open runtime keys →</a>
                         <a class="btn" href="https://developers.openai.com/api/docs/guides/secure-mcp-tunnels" target="_blank" rel="noopener">Open OpenAI guide →</a>
                     </div>
 
@@ -8022,26 +8102,54 @@ ${runCommand}`;
                         <input class="wizard-input" value=${profile} onInput=${e => setProfile(e.target.value)}
                             placeholder="sage-chatgpt" spellcheck="false" />
                     </div>
+                    <div class="wizard-field">
+                        <label>Runtime API key</label>
+                        <input class="wizard-input" type="password" value=${apiKey} onInput=${e => setApiKey(e.target.value)}
+                            placeholder="Paste the real runtime key; SAGE will not save it" spellcheck="false" autocomplete="off" />
+                    </div>
 
-                    <h3 style="margin:18px 0 8px;">2. Run the tunnel client beside SAGE</h3>
+                    <h3 style="margin:18px 0 8px;">2. Let SAGE run the tunnel client</h3>
                     <p style="color:var(--text-dim);margin-top:0;">
-                        Install <code>tunnel-client</code> from the OpenAI tunnel page, then run this on the same computer as SAGE.
-                        The runtime API key is read by <code>tunnel-client</code>; SAGE never stores it.
+                        SAGE installs the pinned OpenAI tunnel-client release, writes a local profile for this running SAGE app, and starts the daemon on <code>127.0.0.1:8081</code> so it does not collide with CEREBRUM.
                     </p>
-                    <${ChatGPTCopyField} label="Full command block" value=${fullRunbook} multiline=${true} />
-                    <${ChatGPTCopyField} label="MCP command used by the tunnel" value=${mcpCommand} />
-                    <${ChatGPTCopyField} label="Doctor command" value=${doctorCommand} />
-                    <${ChatGPTCopyField} label="Run command" value=${runCommand} />
+                    ${loading && html`<p style="color:var(--text-dim);">Checking tunnel-client...</p>`}
+                    ${error && html`<div class="wizard-error" style="margin-bottom:12px;">${error}</div>`}
+                    ${status && html`
+                        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0;">
+                            <div class="settings-row" style="margin:0;"><span class="label">tunnel-client</span><span class="value">${installed ? 'Installed' : 'Missing'}</span></div>
+                            <div class="settings-row" style="margin:0;"><span class="label">Daemon</span><span class="value" style="color:${running ? 'var(--accent)' : 'var(--text-muted)'}">${running ? 'Running' : 'Stopped'}</span></div>
+                            <div class="settings-row" style="margin:0;"><span class="label">Admin UI</span><span class="value">${status.ui_url || 'http://127.0.0.1:8081/ui'}</span></div>
+                            <div class="settings-row" style="margin:0;"><span class="label">Profile</span><span class="value">${status.profile_path || cleanProfile}</span></div>
+                        </div>
+                    `}
+                    ${progress && html`<p style="color:var(--text-dim);margin:0 0 10px;">${progress}</p>`}
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">
+                        <button class="btn" onClick=${refreshStatus} disabled=${!!busy}>Refresh</button>
+                        <button class="btn btn-primary" onClick=${streamSetup} disabled=${!canSetup}>
+                            ${busy === 'setup' ? 'Setting up...' : (running ? 'Tunnel running' : 'Set up and start tunnel')}
+                        </button>
+                        ${running && html`<button class="btn" onClick=${stopTunnel} disabled=${!!busy}>${busy === 'stop' ? 'Stopping...' : 'Stop'}</button>`}
+                        ${running && html`<a class="btn" href=${status.ui_url || 'http://127.0.0.1:8081/ui'} target="_blank" rel="noopener">Open tunnel status →</a>`}
+                    </div>
 
                     <h3 style="margin:18px 0 8px;">3. Select the tunnel in ChatGPT</h3>
                     <p style="color:var(--text-dim);margin-top:0;">
                         In ChatGPT, open Settings → Plugins, create a developer-mode app, choose <strong>Tunnel</strong>,
-                        and select this tunnel. Keep <code>${runCommand}</code> running while ChatGPT uses SAGE.
+                        and select this tunnel. Keep the local tunnel daemon running while ChatGPT uses SAGE.
                     </p>
                     <div style="display:flex;gap:8px;flex-wrap:wrap;">
                         <a class="btn btn-primary" href="https://chatgpt.com/plugins" target="_blank" rel="noopener">Open ChatGPT Plugins →</a>
                         <button class="btn" onClick=${onClose}>Done</button>
                     </div>
+                    <details style="margin-top:18px;">
+                        <summary style="cursor:pointer;color:var(--text-dim);">Advanced manual commands</summary>
+                        <div style="margin-top:10px;">
+                            <${ChatGPTCopyField} label="Full command block" value=${fullRunbook} multiline=${true} />
+                            <${ChatGPTCopyField} label="MCP command used by the tunnel" value=${mcpCommand} />
+                            <${ChatGPTCopyField} label="Doctor command" value=${doctorCommand} />
+                            <${ChatGPTCopyField} label="Run command" value=${runCommand} />
+                        </div>
+                    </details>
                 </div>
             </div>
         </div>
