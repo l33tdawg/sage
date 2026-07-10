@@ -129,12 +129,12 @@ SDK 11.4.0.
 </details>
 
 <details>
-<summary>v11.3.1 - x/crypto SSH-advisory bump + tx-encoder overflow guard</summary>
+<summary>v11.3.1 - dependency maintenance + tx-encoder overflow guard</summary>
 
-**A security-hygiene patch: `golang.org/x/crypto` is bumped past the recent SSH advisories, and a latent transaction-encoding overflow is closed.** v11.3.1 changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Both fixes sit off the consensus hot path.
+**A maintenance patch: `golang.org/x/crypto` is refreshed, and a latent transaction-encoding overflow is closed.** v11.3.1 changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork and `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**. Both fixes sit off the consensus hot path.
 
-- **`golang.org/x/crypto` 0.51.0 to 0.52.0.** Clears a batch of Dependabot advisories against `x/crypto`. Every one of them is in `x/crypto/ssh`, which SAGE does not import (it uses only `argon2` and `hkdf`), so there was no reachable code path - the bump is dependency hygiene that closes the alerts rather than a fix for any live exposure.
-- **The transaction encoder bounds the payload length.** `EncodeTx` now rejects a payload larger than `MaxInt32` up front, so the total-length arithmetic cannot overflow and the 4-byte length prefix cannot silently truncate a pathologically oversized transaction. This mirrors the guard `DecodeTx` already had and resolves a CodeQL allocation-size-overflow finding. No real transaction approaches this size, so behavior is unchanged for all valid traffic.
+- **`golang.org/x/crypto` 0.51.0 to 0.52.0.** Keeps the crypto dependency line current for the `argon2` and `hkdf` packages SAGE actually imports.
+- **The transaction encoder bounds the payload length.** `EncodeTx` now rejects a payload larger than `MaxInt32` up front, so the total-length arithmetic cannot overflow and the 4-byte length prefix cannot silently truncate a pathologically oversized transaction. This mirrors the guard `DecodeTx` already had. No real transaction approaches this size, so behavior is unchanged for all valid traffic.
 
 SDK 11.3.1.
 </details>
@@ -189,7 +189,7 @@ SDK 11.2.0.
 - **Embedding health is visible.** `GET /ready` now reflects the embedding provider: a down semantic embedder reports `degraded` (HTTP 200; `?strict=1` → 503) instead of a misleading `ready`, refreshed by a background watchdog. And `sage_recall` / `sage_turn` results carry `recall_mode` / `semantic_degraded` / `degraded_reason` so an agent knows when recall silently fell back to keyword-only.
 - **Mempool backpressure signals.** New `GET /v1/chain/backpressure` (+ an `X-Sage-Mempool-Pct` header on every submit) lets clients pace writes without polling raw CometBFT RPC, and a mempool-full submit returns `429 + Retry-After` (a distinct problem type) instead of an opaque 500.
 - **Guaranteed auto-commit is operable.** `--require-voter` / `voter.required` makes a deployment that needs automatic `proposed → committed` flow fail-fast rather than silently run voterless; `sage_voter_running` + `sage_proposed_oldest_age_seconds` metrics and a `/ready` voter block turn a stuck backlog into a first-class alarm; a new `concepts/voter-operations.md` runbook covers per-mode ownership, key safety, quorum math, and triage.
-- **Safer upgrades + a security fix.** The pre-upgrade backup is verified by content (integrity + memory row-count parity) rather than file size, and an un-checkpointable write-ahead log aborts the migration instead of being discarded. Archive extraction for the managed Ollama runtime now validates symlink/hardlink targets against the extract root (CodeQL `go/unsafe-unzip-symlink`).
+- **Safer upgrades + hardened archive extraction.** The pre-upgrade backup is verified by content (integrity + memory row-count parity) rather than file size, and an un-checkpointable write-ahead log aborts the migration instead of being discarded. Archive extraction for the managed Ollama runtime now validates symlink/hardlink targets against the extract root.
 
 SDK 11.1.0.
 </details>
@@ -201,14 +201,14 @@ SDK 11.1.0.
 
 - **Managed Ollama runtime for semantic memory.** The CEREBRUM smart-memory wizard can now install a pinned Ollama runtime, start/adopt the local sidecar, pull `nomic-embed-text`, verify the embedding dimension, and remember the managed runtime preference across restarts. This gives Ollama the same dashboard-first setup path as the managed reranker.
 - **Setup endpoints are wizard-gated.** The new install/start/pull routes run behind the dashboard setup security gate, and archive extraction refuses traversal, oversized payloads, incomplete downloads, and checksum mismatches before anything becomes active.
-- **Security and deployment wording is clearer.** The public Security FAQ now separates SAGE Personal from Enterprise threat models, calls out local BadgerDB/SQLite storage accurately, and tightens the GitHub Pages privacy copy so optional connector traffic is not confused with a SAGE-hosted relay.
+- **Trust and deployment wording is clearer.** The public Security FAQ now separates SAGE Personal from Enterprise threat models, calls out local BadgerDB/SQLite storage accurately, and tightens the GitHub Pages privacy copy so optional connector traffic is not confused with a SAGE-hosted relay.
 - **Docs stay current with v11 code truth.** The reference docs, benchmark READMEs, SDK README, roadmap, and environment-variable notes are updated for the v11.0.2 surface without changing consensus semantics.
 
 SDK 11.0.2.
 </details>
 
 <details>
-<summary>v11.0.1 — MRI-first CEREBRUM polish + security dependency update</summary>
+<summary>v11.0.1 — MRI-first CEREBRUM polish + dependency update</summary>
 
 **CEREBRUM is now fully MRI-first.** v11.0.1 is a launch-polish patch on top of v11.0.0: no consensus rule, AppHash, transaction, key-encoding, or migration change. Existing v11 chains update in place; `app-v15` remains the active v11 consensus fork.
 
@@ -216,7 +216,7 @@ SDK 11.0.2.
 - **Focused memories are clearer and easier to leave.** Clicking a memory brings it into focus with a visible white focus ring, and clicking open space exits the focused train-of-thought view back to all memories.
 - **Launch visuals now match the product.** The README leads with the real MRI brain screenshot, and the supporting screenshots are tracked with the docs so GitHub, package archives, and release pages show the correct launch surface.
 - **Federation wording is tightened.** v11.0 federation is LAN-first, or reachable over a VPN/tunnel/operator-provided route. First-class internet/NAT traversal remains scoped for v11.5.
-- **Security dependency update.** `golang.org/x/net` is bumped to `v0.55.0`, clearing Dependabot alert #6 (`GHSA-5cv4-jp36-h3mw` / `CVE-2026-25680`) in the Go module graph.
+- **Dependency update.** `golang.org/x/net` is bumped to `v0.55.0` in the Go module graph.
 - **Docs and SDK metadata are lockstep.** The Python SDK version, reference headers, roadmap status, and MCP/Docker registry metadata are bumped to 11.0.1.
 
 SDK 11.0.1.
