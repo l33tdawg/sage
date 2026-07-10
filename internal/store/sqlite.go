@@ -587,6 +587,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// drop a column added before it).
 	s.migrateEmbeddingProvider(ctx)
 
+	// Migration: add app-v17 two-phase-challenge columns (disputed_height/quorum).
+	// MUST also run AFTER migrateTaskSupport for the same reason.
+	s.migrateDisputed(ctx)
+
 	// Schema migrations — add columns to network_agents that didn't exist in earlier versions.
 	agentMigrations := []string{
 		"ALTER TABLE network_agents ADD COLUMN on_chain_height INTEGER DEFAULT 0",
@@ -678,6 +682,41 @@ func (s *SQLiteStore) migrateEmbeddingProvider(ctx context.Context) {
 	}
 	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_embedding_provider ON memories(embedding_provider)`)
+}
+
+// migrateDisputed adds the app-v17 two-phase-challenge columns to memories.
+// disputed_height is the challenge-EXECUTION height (C-D3): it doubles as the
+// discriminator that keeps ResolveChallengedMemories from sweeping LIVE v17
+// disputes to deprecated on reboot — legacy pre-fork challenged rows predate the
+// column and read the default 0, so the sweep (scoped to disputed_height=0) still
+// cleans them while never touching a v17 dispute (disputed_height > 0).
+// disputed_quorum records the deterministically-measured modify-verb-holder count
+// for operator display. SQLite ADD COLUMN gives existing rows the default 0, so no
+// backfill is needed. MUST run AFTER migrateTaskSupport (which recreates the table).
+func (s *SQLiteStore) migrateDisputed(ctx context.Context) {
+	row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='disputed_height'`)
+	var count int
+	if err := row.Scan(&count); err != nil || count > 0 {
+		return // already migrated or error
+	}
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN disputed_height INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN disputed_quorum INTEGER NOT NULL DEFAULT 0`)
+}
+
+// MarkDisputed reflects an app-v17 two-phase CHALLENGE (park) in the off-chain
+// mirror: status → 'challenged', plus the challenge-EXECUTION height and the
+// deterministically-measured modify-verb-holder quorum (C-D3, persisted and never
+// re-measured). disputed_height is what ResolveChallengedMemories keys off to
+// leave a live dispute alone. Never touches committed_at/deprecated_at (a
+// reinstate/confirm later moves the row through UpdateStatus's normal arms).
+func (s *SQLiteStore) MarkDisputed(ctx context.Context, memoryID string, disputedHeight int64, quorum int, _ time.Time) error {
+	_, err := s.writeExecContext(ctx,
+		`UPDATE memories SET status = 'challenged', disputed_height = ?, disputed_quorum = ? WHERE memory_id = ?`,
+		disputedHeight, quorum, memoryID)
+	if err != nil {
+		return fmt.Errorf("mark disputed: %w", err)
+	}
+	return nil
 }
 
 // migrateTaskAssignee adds the assignee column to memories so tasks can be
@@ -1257,7 +1296,11 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		query += " AND confidence_score >= ?"
 		args = append(args, opts.MinConfidence)
 	}
-	if opts.StatusFilter != "" {
+	if opts.StatusFilter == "committed" && opts.IncludeDisputed {
+		// app-v17: admit disputed-but-live rows alongside committed (flagged at
+		// serialize). Committed rows are unaffected.
+		query += " AND status IN ('committed', 'challenged')"
+	} else if opts.StatusFilter != "" {
 		query += " AND status = ?"
 		args = append(args, opts.StatusFilter)
 	}
@@ -1406,6 +1449,10 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 	}
 	if opts.StatusFilter == "active" {
 		sqlStr += " AND m.status != 'deprecated'" // audit-only deprecated memories never surface in search
+	} else if opts.StatusFilter == "committed" && opts.IncludeDisputed {
+		// app-v17: admit disputed-but-live rows alongside committed (flagged at
+		// serialize). Committed rows are unaffected.
+		sqlStr += " AND m.status IN ('committed', 'challenged')"
 	} else if opts.StatusFilter != "" {
 		sqlStr += " AND m.status = ?"
 		args = append(args, opts.StatusFilter)
@@ -3481,13 +3528,22 @@ func (s *SQLiteStore) DeprecateMemories(ctx context.Context, memoryIDs []string)
 	return int(n), nil
 }
 
-// ResolveChallengedMemories upgrades all "challenged" memories to "deprecated".
-// In v4.5.0+, challenges are auto-deprecated on consensus. This resolves any
-// stale challenged memories from earlier versions.
+// ResolveChallengedMemories sweeps LEGACY stale "challenged" rows to "deprecated"
+// at boot. Before v4.5.0 a challenge could leave a memory limbo-'challenged'; this
+// one-shot migration cleans those up.
+//
+// app-v17 (v11.5) reintroduced a LIVE, reinstatable 'challenged' state (the
+// quorum-scaled two-phase challenge). A post-v17 dispute is written to the mirror
+// with disputed_height = the challenge-execution height (> 0), so it MUST be
+// scoped OUT of this sweep — otherwise a reboot would silently deprecate an
+// in-flight dispute and diverge the mirror from badger. Legacy limbo rows predate
+// the disputed_height column and read the default 0, so `disputed_height = 0` is
+// the exact legacy-vs-v17 discriminator. COALESCE guards DBs where the column was
+// somehow left NULL.
 func (s *SQLiteStore) ResolveChallengedMemories(ctx context.Context) (int, error) {
 	result, err := s.writeExecContext(ctx,
 		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE status = 'challenged'`)
+		WHERE status = 'challenged' AND COALESCE(disputed_height, 0) = 0`)
 	if err != nil {
 		return 0, fmt.Errorf("resolve challenged: %w", err)
 	}

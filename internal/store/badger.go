@@ -1948,6 +1948,184 @@ func (s *BadgerStore) IsDomainOwnerOrAncestor(domain, agentID string) (bool, err
 	return false, nil
 }
 
+// ModifyVerbHolders returns the sorted, deduplicated set of agent IDs that hold
+// the "modify" verb on domain at blockTime — the deterministic quorum the
+// app-v17 two-phase challenge is scaled against (C3). Membership mirrors the
+// authz gate in processMemoryChallenge (IsDomainOwnerOrAncestor +
+// HasAccessOrAncestor at level 3), so whoever could pass that gate is counted:
+//   - the domain owner and every non-shared ancestor-domain owner (C-D2), plus
+//   - every holder of an UNEXPIRED level-3+ grant on the domain or a non-shared
+//     ancestor.
+//
+// Determinism: all inputs are committed Badger state; expiry uses the SAME
+// predicate as HasAccessOrAncestor (expiresAt==0 permanent, else now<expiresAt),
+// where now=blockTime.Unix(); the walk uses the filtered segments + shared-domain
+// barrier + 16-segment cap of HasAccessOrAncestor; the result is deduped and
+// sorted so the COUNT never depends on map-iteration order. Integer count only —
+// no floats enter consensus state.
+func (s *BadgerStore) ModifyVerbHolders(domain string, blockTime time.Time) ([]string, error) {
+	if domain == "" {
+		return nil, nil
+	}
+	segments := splitDomainSegments(domain)
+	if len(segments) == 0 || len(segments) > 16 {
+		return nil, nil
+	}
+	now := blockTime.Unix()
+	set := make(map[string]struct{})
+	err := s.db.View(func(txn *badger.Txn) error {
+		for i := len(segments); i >= 1; i-- {
+			candidate := strings.Join(segments[:i], ".")
+			if candidate == "" || IsSharedDomainName(candidate) {
+				// Cascade barrier — shared domains do not act as ancestors.
+				continue
+			}
+
+			// Domain owner (mirrors IsDomainOwnerOrAncestor).
+			if item, getErr := txn.Get(domainKey(candidate)); getErr == nil {
+				if vErr := item.Value(func(val []byte) error {
+					owner, _, decErr := decodeString(val, 0)
+					if decErr == nil && owner != "" {
+						set[owner] = struct{}{}
+					}
+					return nil
+				}); vErr != nil {
+					return vErr
+				}
+			} else if !errors.Is(getErr, badger.ErrKeyNotFound) {
+				return getErr
+			}
+
+			// Level-3+ grant holders on this candidate (mirrors HasAccessOrAncestor).
+			prefix := []byte("grant:" + candidate + ":")
+			opts := badger.DefaultIteratorOptions
+			opts.PrefetchValues = true
+			it := txn.NewIterator(opts)
+			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+				gi := it.Item()
+				agentID := string(gi.Key()[len(prefix):])
+				if vErr := gi.Value(func(val []byte) error {
+					if len(val) < 9 {
+						return nil
+					}
+					level := val[0]
+					expiresAt := int64(binary.BigEndian.Uint64(val[1:9])) // #nosec G115 -- expiry timestamp fits in int64
+					if level >= 3 && (expiresAt == 0 || now < expiresAt) {
+						set[agentID] = struct{}{}
+					}
+					return nil
+				}); vErr != nil {
+					it.Close()
+					return vErr
+				}
+			}
+			it.Close()
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(set))
+	for a := range set {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// --- app-v17 two-phase challenge record ---
+
+// ChallengeRecord is the on-chain record of an OPEN two-phase challenge
+// (app-v17). It is persisted under state:challenge:<memoryID> and therefore
+// folded into the AppHash (it is real consensus state, not bookkeeping — the
+// app-v13 narrow exclusion list is exact-key and never matches this prefix).
+//
+// C-D3: QuorumCount is the modify-verb-holder count measured deterministically
+// at the challenge-EXECUTION height and is NEVER re-measured at confirm/reinstate
+// height. PriorHash/PriorStatus carry what a reinstate needs to restore the
+// memory's real content hash rather than leave a hash-less husk.
+type ChallengeRecord struct {
+	ChallengerID    string
+	Domain          string
+	ExecutionHeight int64
+	QuorumCount     uint32
+	PriorHash       []byte
+	PriorStatus     string
+}
+
+func challengeStateKey(memoryID string) string { return "challenge:" + memoryID }
+
+// SetChallengeRecord persists an open challenge record (AppHash-folded).
+// Encoding: challengerID(len) + domain(len) + executionHeight(8) +
+// quorumCount(4) + priorHash(len) + priorStatus(len), all big-endian.
+func (s *BadgerStore) SetChallengeRecord(memoryID string, rec *ChallengeRecord) error {
+	size := 4 + len(rec.ChallengerID) + 4 + len(rec.Domain) + 8 + 4 + 4 + len(rec.PriorHash) + 4 + len(rec.PriorStatus)
+	val := make([]byte, size)
+	off := encodeString(val, 0, rec.ChallengerID)
+	off = encodeString(val, off, rec.Domain)
+	binary.BigEndian.PutUint64(val[off:off+8], uint64(rec.ExecutionHeight)) // #nosec G115 -- block height is non-negative
+	off += 8
+	binary.BigEndian.PutUint32(val[off:off+4], rec.QuorumCount)
+	off += 4
+	binary.BigEndian.PutUint32(val[off:off+4], uint32(len(rec.PriorHash))) // #nosec G115 -- hash length fits in uint32
+	off += 4
+	copy(val[off:off+len(rec.PriorHash)], rec.PriorHash)
+	off += len(rec.PriorHash)
+	encodeString(val, off, rec.PriorStatus)
+	return s.SetState(challengeStateKey(memoryID), val)
+}
+
+// GetChallengeRecord returns the open challenge record for memoryID, or
+// (nil, nil) if none is recorded.
+func (s *BadgerStore) GetChallengeRecord(memoryID string) (*ChallengeRecord, error) {
+	val, err := s.GetState(challengeStateKey(memoryID))
+	if err != nil {
+		return nil, err
+	}
+	if val == nil {
+		return nil, nil
+	}
+	rec := &ChallengeRecord{}
+	var off int
+	rec.ChallengerID, off, err = decodeString(val, 0)
+	if err != nil {
+		return nil, err
+	}
+	rec.Domain, off, err = decodeString(val, off)
+	if err != nil {
+		return nil, err
+	}
+	if off+12 > len(val) {
+		return nil, fmt.Errorf("invalid challenge record")
+	}
+	rec.ExecutionHeight = int64(binary.BigEndian.Uint64(val[off : off+8])) // #nosec G115 -- height fits in int64
+	off += 8
+	rec.QuorumCount = binary.BigEndian.Uint32(val[off : off+4])
+	off += 4
+	if off+4 > len(val) {
+		return nil, fmt.Errorf("invalid challenge record")
+	}
+	hashLen := int(binary.BigEndian.Uint32(val[off : off+4])) // #nosec G115 -- length from 4-byte prefix
+	off += 4
+	if off+hashLen > len(val) {
+		return nil, fmt.Errorf("invalid challenge record")
+	}
+	rec.PriorHash = make([]byte, hashLen)
+	copy(rec.PriorHash, val[off:off+hashLen])
+	off += hashLen
+	rec.PriorStatus, _, err = decodeString(val, off)
+	if err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// DeleteChallengeRecord removes an open challenge record (on resolution).
+func (s *BadgerStore) DeleteChallengeRecord(memoryID string) error {
+	return s.DeleteState(challengeStateKey(memoryID))
+}
+
 // SetAccessRequest stores an access request in BadgerDB.
 // Encoding: requesterID (length-prefixed) + targetDomain (length-prefixed) + status (length-prefixed) + createdHeight (8 bytes).
 func (s *BadgerStore) SetAccessRequest(requestID string, requesterID, targetDomain, status string, createdHeight int64) error {

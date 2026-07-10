@@ -73,8 +73,16 @@ type QueryOptions struct {
 	Provider      string  `json:"provider,omitempty"`
 	MinConfidence float64 `json:"min_confidence,omitempty"` // stored-column floor (SQL, undecayed) — legacy; recall paths use DecayFloor
 	StatusFilter  string  `json:"status_filter,omitempty"`
-	TopK          int     `json:"top_k"`
-	Cursor        string  `json:"cursor,omitempty"`
+	// IncludeDisputed, when true AND StatusFilter=="committed", widens the status
+	// predicate to `status IN ('committed','challenged')` so app-v17 two-phase-
+	// disputed-but-LIVE memories remain recallable (flagged disputed at the
+	// serialize layer). OPT-IN and read-only: only the REST recall handlers set it,
+	// so every other caller's "committed" filter still means strictly committed —
+	// committed rows are returned byte-for-byte as before. Off-chain only; never a
+	// consensus input.
+	IncludeDisputed bool   `json:"-"`
+	TopK            int    `json:"top_k"`
+	Cursor          string `json:"cursor,omitempty"`
 	// DecayFloor, when > 0, drops records whose task-aware DECAYED confidence
 	// (memory.ComputeConfidenceForRecord — time decay + corroboration boost, open
 	// tasks exempt) is below the floor. Unlike MinConfidence it is applied in Go

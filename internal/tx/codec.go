@@ -387,6 +387,11 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 			return nil, fmt.Errorf("CrossFedRevoke is nil for cross_fed revoke tx")
 		}
 		return encodeCrossFedRevoke(tx.CrossFedRevoke), nil
+	case TxTypeMemoryReinstate:
+		if tx.MemoryReinstate == nil {
+			return nil, fmt.Errorf("MemoryReinstate is nil for memory reinstate tx")
+		}
+		return encodeMemoryReinstate(tx.MemoryReinstate), nil
 	default:
 		return nil, ErrUnknownTxType
 	}
@@ -631,6 +636,13 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 			return err
 		}
 		tx.CrossFedRevoke = r
+		return nil
+	case TxTypeMemoryReinstate:
+		r, err := decodeMemoryReinstate(data)
+		if err != nil {
+			return err
+		}
+		tx.MemoryReinstate = r
 		return nil
 	default:
 		return ErrUnknownTxType
@@ -1095,6 +1107,41 @@ func decodeMemoryChallenge(data []byte) (*MemoryChallenge, error) {
 	c.Evidence = string(b)
 
 	return c, nil
+}
+
+// --- MemoryReinstate (v11.5 / app-v17) ---
+//
+// Wire format: MemoryID + Reason, both length-prefixed via appendBytes. Single
+// canonical form (no optional/variadic fields), so EncodeTx round-trips
+// byte-identically — required by the app-v15 canonical-encoding guard that is
+// always active once app-v17 (which subsumes app-v15) is live.
+
+func encodeMemoryReinstate(r *MemoryReinstate) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(r.MemoryID))
+	buf = appendBytes(buf, []byte(r.Reason))
+	return buf
+}
+
+func decodeMemoryReinstate(data []byte) (*MemoryReinstate, error) {
+	r := &MemoryReinstate{}
+	var err error
+	var b []byte
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	r.MemoryID = string(b)
+
+	b, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	r.Reason = string(b)
+
+	return r, nil
 }
 
 // --- MemoryCorroborate ---

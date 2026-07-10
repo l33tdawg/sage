@@ -42,6 +42,14 @@ type statusUpdate struct {
 	MemoryID string
 	Status   memory.MemoryStatus
 	At       time.Time
+	// app-v17 two-phase challenge (C3/C-D3): populated ONLY when Status is
+	// "challenged" (park). DisputedHeight is the challenge-EXECUTION height — the
+	// off-chain mirror records it so ResolveChallengedMemories can distinguish a
+	// live v17 dispute from a legacy pre-fork challenged row, and DisputedQuorum
+	// carries the deterministically-measured modify-verb-holder count for display.
+	// Both zero for every non-park status update.
+	DisputedHeight int64
+	DisputedQuorum uint32
 }
 
 // accessRevokeData carries the fields needed to revoke a grant in PostgreSQL.
@@ -920,8 +928,9 @@ func (app *SageApp) postAppV17Fork(height int64) bool {
 // exactly postAppV17Fork and historical blocks replay byte-identically (kept
 // as a named predicate for callsite clarity and future skip-ahead subsumption).
 //
-//nolint:unused // C1 mints the empty gate; the first callsites land with C2/C3
 // (TxTypeMemoryReinstate + quorum-scaled challenge) in this same sprint.
+//
+//nolint:unused // C1 mints the empty gate; the first callsites land with C2/C3
 func (app *SageApp) postAppV17Rules(height int64) bool {
 	return app.postAppV17Fork(height)
 }
@@ -2138,6 +2147,19 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
 	}
 
+	// v11.5 (app-v17): reject the new memory-reinstate tx pre-fork so it never
+	// reaches the mempool. Symmetric with the exec-side Code 10 in
+	// processMemoryReinstate. Same mixed-binary reasoning as the co-commit block:
+	// an old binary DECODE-fails type byte 35 (Code 1) while a v17 binary returns
+	// Code 10, so a v17 proposer seating one pre-activation would diverge
+	// LastResultsHash. CheckTx has no block height, so gate on cached state
+	// height (postAppV17Fork, not Rules). (TxTypeMemoryChallenge is a legacy type
+	// with no CheckTx gate — C3's count-scaled behavior is layered inside its
+	// handler behind postAppV17Rules, so nothing to add here for it.)
+	if parsedTx.Type == tx.TxTypeMemoryReinstate && !app.postAppV17Fork(app.state.Height) {
+		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
+	}
+
 	// v11 (app-v15): keep post-fork AccessQuery txs out of the mempool. INVERTED
 	// vs the block above — TxTypeAccessQuery is a KNOWN type today, so it is
 	// rejected once the fork IS active (whereas the co-commit types are rejected
@@ -2569,6 +2591,8 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 		return app.processCrossFedSet(parsedTx, height, blockTime)
 	case tx.TxTypeCrossFedRevoke:
 		return app.processCrossFedRevoke(parsedTx, height, blockTime)
+	case tx.TxTypeMemoryReinstate:
+		return app.processMemoryReinstate(parsedTx, height, blockTime)
 	default:
 		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
 	}
@@ -3194,6 +3218,32 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		return &abcitypes.ExecTxResult{Code: 98, Log: fmt.Sprintf("co-commit %s already committed on this chain", sharedID)}
 	}
 
+	// app-v17 (C5): squat-reclaim stale-vote hygiene. The cocommit:core guard above
+	// proved this SharedID was NOT previously co-committed, so a pre-existing
+	// memory:<sharedID> is a front-run squat that the reclaim below overwrites to
+	// committed. If that squat was submitted as a normal proposed memory it may have
+	// accrued vote:<sharedID>:* keys, which survive as orphaned consensus state
+	// forever (no consensus-path cleanup exists). Clear them here. This is
+	// defense-in-depth behind the app-v15 priorStatus==proposed terminal-write guard
+	// in checkAndApplyQuorum, which already stops a stale vote from re-flipping the
+	// reclaimed (now committed) memory. Deterministic: PrefixKeys returns the keys
+	// lexicographically sorted and deletion order is AppHash-neutral. Gated
+	// postAppV17Rules (strict >), so a reclaim on a pre-fork/never-activated chain
+	// leaves every vote key exactly as today ⇒ byte-identical replay.
+	if app.postAppV17Rules(height) {
+		if _, _, mhErr := app.badgerStore.GetMemoryHash(sharedID); mhErr == nil {
+			voteKeys, vkErr := app.badgerStore.PrefixKeys("vote:" + sharedID + ":")
+			if vkErr != nil {
+				return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit: stale-vote scan error: %v", vkErr)}
+			}
+			for _, vk := range voteKeys {
+				if delErr := app.badgerStore.DeleteState(vk); delErr != nil {
+					return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit: stale-vote clear error: %v", delErr)}
+				}
+			}
+		}
+	}
+
 	// Write the native local memory keyed by SharedID, COMMITTED immediately. A
 	// co-commit is already ratified by every coauthor's signature (verified above),
 	// and its inclusion in this block IS BFT consensus — the same "block inclusion
@@ -3792,8 +3842,10 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 	// the AppHash (same validate-before-write discipline as processMemorySubmit).
 	postV15 := app.postAppV15Rules(height)
 	recordAppV15Branch(postV15)
+	var domain string
 	if postV15 {
-		domain, dErr := app.badgerStore.GetMemoryDomain(challenge.MemoryID)
+		var dErr error
+		domain, dErr = app.badgerStore.GetMemoryDomain(challenge.MemoryID)
 		if dErr != nil {
 			return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: domain lookup failed: %v", dErr)}
 		}
@@ -3831,6 +3883,129 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 		}
 	}
 
+	// app-v17 (C3): quorum-scaled two-phase challenge. Where more than one agent
+	// can modify a memory's domain, a single challenger no longer deprecates
+	// unilaterally — the memory is parked CHALLENGED pending either a SECOND
+	// distinct modify-verb holder's CONFIRM (deprecate) or any holder's REINSTATE
+	// (recommit, TxTypeMemoryReinstate). When the modify-verb-holder count is <= 1
+	// (personal nodes) the outcome is byte-identical to the legacy one-strike
+	// deprecate below — zero observable change. Every input is committed Badger
+	// state read at blockTime; the whole block is skipped pre-fork (postAppV17Rules
+	// is false on every existing chain and on the activation block itself, strict
+	// >), so historical blocks replay byte-identically, and each reject returns
+	// BEFORE any write.
+	if app.postAppV17Rules(height) {
+		// priorHash/priorStatus are read once. A never-submitted or nil-hash memory
+		// reads ("", "") on error — treated as a fresh (non-challenged) target.
+		priorHash, priorStatus, _ := app.badgerStore.GetMemoryHash(challenge.MemoryID)
+
+		// CONFIRM phase: the memory is ALREADY parked CHALLENGED. The authz gate
+		// above proved this challenger holds the modify verb; a DISTINCT holder
+		// finalizes the deprecation, but the ORIGINAL challenger cannot confirm
+		// their own challenge (that would collapse two-phase back into one-strike).
+		// C-D3: the persisted quorum is NEVER re-measured here.
+		if priorStatus == string(memory.StatusChallenged) {
+			rec, rErr := app.badgerStore.GetChallengeRecord(challenge.MemoryID)
+			if rErr != nil {
+				return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: challenge record lookup failed: %v", rErr)}
+			}
+			if rec == nil {
+				return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: memory %s is challenged but has no open challenge record", challenge.MemoryID)}
+			}
+			if rec.ChallengerID == challengerID {
+				return &abcitypes.ExecTxResult{Code: 93, Log: fmt.Sprintf("challenge: agent %s already opened this challenge; a DISTINCT modify-verb holder must confirm", challengerID[:16])}
+			}
+			// Confirm → deprecated (terminal): nil the hash (matches the legacy
+			// deprecate shape) and clear the open-challenge record.
+			if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, nil, string(memory.StatusDeprecated)); err != nil {
+				return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
+			}
+			if err := app.badgerStore.DeleteChallengeRecord(challenge.MemoryID); err != nil {
+				return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
+			}
+			app.pendingWrites = append(app.pendingWrites, pendingWrite{
+				writeType: "challenge",
+				data: &store.ChallengeEntry{
+					MemoryID:     challenge.MemoryID,
+					ChallengerID: challengerID,
+					Reason:       challenge.Reason,
+					Evidence:     challenge.Evidence,
+					BlockHeight:  height,
+					CreatedAt:    blockTime,
+				},
+			})
+			app.pendingWrites = append(app.pendingWrites, pendingWrite{
+				writeType: "status_update",
+				data:      &statusUpdate{MemoryID: challenge.MemoryID, Status: memory.StatusDeprecated, At: blockTime},
+			})
+			metrics.ChallengesTotal.Inc()
+			return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("memory %s challenge confirmed → deprecated by %s", challenge.MemoryID, challengerID[:16])}
+		}
+
+		// FRESH challenge: count the distinct modify-verb holders on the domain at
+		// THIS execution height (C-D3: persisted in the challenge record, never
+		// re-measured at confirm/reinstate).
+		holders, hsErr := app.badgerStore.ModifyVerbHolders(domain, blockTime)
+		if hsErr != nil {
+			return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("challenge: modify-holder enumeration failed: %v", hsErr)}
+		}
+		if len(holders) >= 2 && priorStatus == string(memory.StatusCommitted) {
+			// >= 2 holders AND the target is a live COMMITTED memory: park
+			// CHALLENGED. The priorStatus==committed guard is load-bearing — it
+			// confines the two-phase machine to committed memories so it can never
+			// REVERSE a terminal state or SKIP validation. Without it a single
+			// modify-verb holder could park a `deprecated` memory (then reinstate
+			// it, resurrecting a two-holder deprecation) or a still-`proposed` one
+			// (bypassing the content-validation quorum and committing it straight
+			// through reinstate). A non-committed target (deprecated / proposed /
+			// validated) instead falls through to the legacy one-strike deprecate
+			// below: idempotent for an already-deprecated memory (SetMemoryHash(nil,
+			// deprecated) keeps it deprecated) and byte-identical to pre-fork
+			// otherwise. Keep the prior content hash on the memory record (do NOT
+			// nil it) so a later reinstate restores the real memory, not a hash-less
+			// husk; also persist it in the challenge record as the authoritative
+			// restoration source.
+			if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, priorHash, string(memory.StatusChallenged)); err != nil {
+				return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
+			}
+			if err := app.badgerStore.SetChallengeRecord(challenge.MemoryID, &store.ChallengeRecord{
+				ChallengerID:    challengerID,
+				Domain:          domain,
+				ExecutionHeight: height,
+				QuorumCount:     uint32(len(holders)), // #nosec G115 -- holder count fits in uint32
+				PriorHash:       priorHash,
+				PriorStatus:     priorStatus,
+			}); err != nil {
+				return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
+			}
+			app.pendingWrites = append(app.pendingWrites, pendingWrite{
+				writeType: "challenge",
+				data: &store.ChallengeEntry{
+					MemoryID:     challenge.MemoryID,
+					ChallengerID: challengerID,
+					Reason:       challenge.Reason,
+					Evidence:     challenge.Evidence,
+					BlockHeight:  height,
+					CreatedAt:    blockTime,
+				},
+			})
+			app.pendingWrites = append(app.pendingWrites, pendingWrite{
+				writeType: "status_update",
+				data: &statusUpdate{
+					MemoryID:       challenge.MemoryID,
+					Status:         memory.StatusChallenged,
+					At:             blockTime,
+					DisputedHeight: height,
+					DisputedQuorum: uint32(len(holders)), // #nosec G115 -- holder count fits in uint32
+				},
+			})
+			metrics.ChallengesTotal.Inc()
+			return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("memory %s challenged (quorum %d) by %s — awaiting confirm/reinstate", challenge.MemoryID, len(holders), challengerID[:16])}
+		}
+		// count <= 1, or a non-committed target (deprecated/proposed/validated):
+		// fall through to the legacy one-strike deprecate below.
+	}
+
 	// A challenge that passes BFT consensus (included in a block) is decisive —
 	// the memory is deprecated immediately. The block inclusion IS the consensus.
 	if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, nil, string(memory.StatusDeprecated)); err != nil {
@@ -3862,6 +4037,88 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 
 	metrics.ChallengesTotal.Inc()
 	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("memory %s deprecated by %s", challenge.MemoryID, challengerID[:16])}
+}
+
+// processMemoryReinstate handles TxTypeMemoryReinstate (v11.5 / app-v17): the
+// second phase of the quorum-scaled two-phase challenge. It moves a CHALLENGED
+// memory back to committed, restoring the real content hash captured in the
+// on-chain challenge record so the memory is not left a hash-less husk. Any
+// distinct modify-verb holder may reinstate; the ORIGINAL challenger may always
+// withdraw their own challenge this way (both simply pass the modify verb
+// ladder). Dual-gated with the CheckTx pre-fork reject: pre-fork it returns Code
+// 10 ("unknown tx type") and mutates nothing, so a chain that never activates
+// app-v17 replays byte-identically. Every reject returns BEFORE any write.
+func (app *SageApp) processMemoryReinstate(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
+	postFork := app.postAppV17Fork(height)
+	if !postFork {
+		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
+	}
+	rein := parsedTx.MemoryReinstate
+	if rein == nil {
+		return &abcitypes.ExecTxResult{Code: 15, Log: "missing reinstate payload"}
+	}
+
+	agentID, err := verifyAgentIdentity(parsedTx)
+	if err != nil {
+		return &abcitypes.ExecTxResult{Code: 15, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
+	}
+
+	// Authz mirrors the challenge verb ladder — reinstatement is a modify verb, so
+	// the caller must own the memory's domain/ancestor OR hold a level-3 grant.
+	domain, dErr := app.badgerStore.GetMemoryDomain(rein.MemoryID)
+	if dErr != nil {
+		return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("reinstate: domain lookup failed: %v", dErr)}
+	}
+	if domain == "" {
+		return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("reinstate: memory %s has no recorded domain; not authorized", rein.MemoryID)}
+	}
+	isAdmin, adErr := app.badgerStore.IsDomainOwnerOrAncestor(domain, agentID)
+	if adErr != nil {
+		return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("reinstate: domain-owner lookup failed: %v", adErr)}
+	}
+	hasModify, hErr := app.badgerStore.HasAccessOrAncestor(domain, agentID, 3, blockTime)
+	if hErr != nil {
+		return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("reinstate: access lookup failed: %v", hErr)}
+	}
+	if !isAdmin && !hasModify {
+		return &abcitypes.ExecTxResult{Code: 92, Log: fmt.Sprintf("reinstate: agent %s not authorized to reinstate memory %s (need domain ownership or a level-3 modify grant)", agentID[:16], rein.MemoryID)}
+	}
+
+	// The memory must currently be CHALLENGED. Reinstating anything else
+	// (never-challenged, already committed, already deprecated, or double-
+	// reinstate of an already-reinstated memory) is an invalid transition and is
+	// cleanly rejected without any state write.
+	_, status, mErr := app.badgerStore.GetMemoryHash(rein.MemoryID)
+	if mErr != nil {
+		return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("reinstate: memory %s not found", rein.MemoryID)}
+	}
+	if status != string(memory.StatusChallenged) {
+		return &abcitypes.ExecTxResult{Code: 94, Log: fmt.Sprintf("reinstate: memory %s is not challenged (status=%s)", rein.MemoryID, status)}
+	}
+	rec, rErr := app.badgerStore.GetChallengeRecord(rein.MemoryID)
+	if rErr != nil {
+		return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("reinstate: challenge record lookup failed: %v", rErr)}
+	}
+	if rec == nil {
+		return &abcitypes.ExecTxResult{Code: 91, Log: fmt.Sprintf("reinstate: memory %s is challenged but has no open challenge record", rein.MemoryID)}
+	}
+
+	// Restore: challenged → committed, recovering the real content hash from the
+	// challenge record (the authoritative snapshot taken at challenge-execution
+	// height), then clear the open-challenge record.
+	if err := app.badgerStore.SetMemoryHash(rein.MemoryID, rec.PriorHash, string(memory.StatusCommitted)); err != nil {
+		return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
+	}
+	if err := app.badgerStore.DeleteChallengeRecord(rein.MemoryID); err != nil {
+		return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
+	}
+
+	app.pendingWrites = append(app.pendingWrites, pendingWrite{
+		writeType: "status_update",
+		data:      &statusUpdate{MemoryID: rein.MemoryID, Status: memory.StatusCommitted, At: blockTime},
+	})
+
+	return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("memory %s reinstated → committed by %s", rein.MemoryID, agentID[:16])}
 }
 
 func (app *SageApp) processMemoryCorroborate(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) *abcitypes.ExecTxResult {
@@ -5668,7 +5925,24 @@ func (app *SageApp) flushPendingWrites(ctx context.Context, s store.OffchainStor
 			}
 		case "status_update":
 			if su, ok := pw.data.(*statusUpdate); ok {
-				if writeErr := s.UpdateStatus(ctx, su.MemoryID, su.Status, su.At); writeErr != nil {
+				var writeErr error
+				if su.Status == memory.StatusChallenged {
+					// app-v17 park: reflect the disputed status AND the C-D3
+					// challenge-execution height + measured quorum in the SQLite
+					// mirror, so ResolveChallengedMemories can leave the live dispute
+					// alone and the dashboard can show the quorum. disputed_height/
+					// disputed_quorum are SQLite-only columns; a non-SQLite mirror
+					// (Postgres) falls back to a plain status update so the row still
+					// reads 'challenged'.
+					if sq, isSQLite := s.(*store.SQLiteStore); isSQLite {
+						writeErr = sq.MarkDisputed(ctx, su.MemoryID, su.DisputedHeight, int(su.DisputedQuorum), su.At)
+					} else {
+						writeErr = s.UpdateStatus(ctx, su.MemoryID, su.Status, su.At)
+					}
+				} else {
+					writeErr = s.UpdateStatus(ctx, su.MemoryID, su.Status, su.At)
+				}
+				if writeErr != nil {
 					err = writeErr
 				} else {
 					app.logger.Info().

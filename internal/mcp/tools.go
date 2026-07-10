@@ -599,15 +599,22 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 
 	memories := make([]map[string]any, 0, len(queryResp.Results))
 	for _, r := range queryResp.Results {
+		content := r.Content
+		if r.Disputed {
+			content = disputedContentPrefix + content
+		}
 		entry := map[string]any{
 			"memory_id":           r.MemoryID,
-			"content":             r.Content,
+			"content":             content,
 			"domain":              r.DomainTag,
 			"confidence":          r.ConfidenceScore,
 			"corroboration_count": r.CorroborationCount,
 			"type":                r.MemoryType,
 			"status":              r.Status,
 			"created_at":          r.CreatedAt,
+		}
+		if r.Disputed {
+			entry["disputed"] = true
 		}
 		if r.SourceChainID != "" {
 			entry["source_chain_id"] = r.SourceChainID
@@ -627,6 +634,13 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 	return out, nil
 }
 
+// disputedContentPrefix marks an app-v17 two-phase-CHALLENGED ("disputed") memory
+// in recall output so the agent treats it with suspicion instead of as settled
+// fact. The node keeps disputed-but-live memories recallable (they are pending
+// confirm/reinstate) and flags them; we prepend this to the content and surface a
+// `disputed` boolean. Personal nodes never produce disputed memories.
+const disputedContentPrefix = "[DISPUTED] "
+
 // recallResp is the response shape returned by both /v1/memory/query (semantic
 // path) and /v1/memory/search (FTS5 path). Pulled out as a named type so the
 // semantic path can be invoked from both the primary branch and the
@@ -640,6 +654,7 @@ type recallResp struct {
 		CorroborationCount int     `json:"corroboration_count"`
 		MemoryType         string  `json:"memory_type"`
 		Status             string  `json:"status"`
+		Disputed           bool    `json:"disputed,omitempty"`
 		CreatedAt          string  `json:"created_at"`
 		SourceChainID      string  `json:"source_chain_id,omitempty"`
 	} `json:"results"`
@@ -937,6 +952,7 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 			DomainTag       string  `json:"domain_tag"`
 			ConfidenceScore float64 `json:"confidence_score"`
 			MemoryType      string  `json:"memory_type"`
+			Disputed        bool    `json:"disputed,omitempty"`
 			CreatedAt       string  `json:"created_at"`
 		} `json:"results"`
 		TotalCount int `json:"total_count"`
@@ -1001,14 +1017,20 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 	if _, hasErr := result["recall_error"]; !hasErr && len(recallResp.Results) > 0 {
 		memories := make([]map[string]any, 0, len(recallResp.Results))
 		for _, r := range recallResp.Results {
-			memories = append(memories, map[string]any{
+			content := r.Content
+			entry := map[string]any{
 				"memory_id":  r.MemoryID,
-				"content":    r.Content,
+				"content":    content,
 				"domain":     r.DomainTag,
 				"confidence": r.ConfidenceScore,
 				"type":       r.MemoryType,
 				"created_at": r.CreatedAt,
-			})
+			}
+			if r.Disputed {
+				entry["content"] = disputedContentPrefix + content
+				entry["disputed"] = true
+			}
+			memories = append(memories, entry)
 		}
 		result["recalled"] = memories
 		result["recalled_count"] = len(memories)
