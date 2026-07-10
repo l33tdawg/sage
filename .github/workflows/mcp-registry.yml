@@ -1,0 +1,30 @@
+name: MCP Registry Publish
+
+# On-demand publish of the checked-in server.json to registry.modelcontextprotocol.io.
+# The Release workflow publishes automatically on tags; this exists to fix drift
+# (e.g. re-publish the current version if a past release predates the publish step).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish server.json to MCP Registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Show server.json to be published
+        run: cat server.json
+
+      - name: Publish to MCP Registry
+        run: |
+          curl -sSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v1.7.9/mcp-publisher_linux_amd64.tar.gz"
+          echo "ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish

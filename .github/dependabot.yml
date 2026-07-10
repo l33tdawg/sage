@@ -4,23 +4,43 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      go-deps:
+        patterns:
+          - "*"
 
   - package-ecosystem: gomod
     directory: /natter
     schedule:
       interval: weekly
+    groups:
+      natter-go-deps:
+        patterns:
+          - "*"
 
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    groups:
+      npm-deps:
+        patterns:
+          - "*"
 
   - package-ecosystem: pip
     directory: /sdk/python
     schedule:
       interval: weekly
+    groups:
+      python-deps:
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      actions-deps:
+        patterns:
+          - "*"
