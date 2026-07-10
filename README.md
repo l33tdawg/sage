@@ -51,7 +51,22 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.4.9
+## What's New in v11.4.10
+
+**Connecting two SAGEs works again.** v11.4.10 is an off-consensus bug-fix patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
+
+- **The join ceremony completes.** A URL-building regression in v11.4.8/v11.4.9 made the guest's "did they approve yet?" check fail silently, freezing every new connection at "1 of 2 confirmed" on both screens. The guest now sees the host's approval and the ceremony finishes.
+- **The wizard tells you what's wrong.** If the guest can't check the host's side, the waiting screen now shows the actual reason instead of a generic network hint.
+- **Read-back copy is clearer.** The host's "read this code" instruction now uses the other network's name.
+- **The public MCP registry stays current.** Releases now publish SAGE's server manifest to the MCP registry automatically, and the public listing was refreshed to the current version.
+- **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.10.
+
+SDK 11.4.10.
+
+## Older releases
+
+<details>
+<summary>v11.4.9 - ChatGPT via OpenAI Secure MCP Tunnel</summary>
 
 **ChatGPT setup now follows OpenAI's official Secure MCP Tunnel path.** v11.4.9 is an off-consensus UX and packaging patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
 
@@ -61,8 +76,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.9.
 
 SDK 11.4.9.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.4.8 - join hardening + release maintenance</summary>
