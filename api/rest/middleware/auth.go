@@ -62,11 +62,12 @@ const (
 // AgentAuthProof holds the raw cryptographic material from the agent's request
 // authentication, to be embedded in transactions for on-chain verification.
 type AgentAuthProof struct {
-	PubKey    []byte // Ed25519 public key (32 bytes)
-	Signature []byte // Ed25519 signature (64 bytes)
-	Timestamp int64  // Unix seconds used in signing
-	BodyHash  []byte // SHA-256 of request body (32 bytes)
-	Nonce     []byte // Optional nonce used in signing (nil if legacy)
+	PubKey           []byte // Ed25519 public key (32 bytes)
+	Signature        []byte // Ed25519 signature (64 bytes)
+	Timestamp        int64  // Unix seconds used in signing
+	BodyHash         []byte // SHA-256 of canonical request (32 bytes)
+	Nonce            []byte // Optional nonce used in signing (nil if legacy)
+	CanonicalRequest []byte // METHOD + " " + path[+query] + "\n" + raw body
 }
 
 // skipAuthPaths lists paths that bypass authentication.
@@ -201,11 +202,12 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 
 		// Store agent ID and raw auth proof in context for downstream handlers.
 		proof := &AgentAuthProof{
-			PubKey:    []byte(pubKey),
-			Signature: sig,
-			Timestamp: tsUnix,
-			BodyHash:  bodyHash[:],
-			Nonce:     nonce,
+			PubKey:           []byte(pubKey),
+			Signature:        sig,
+			Timestamp:        tsUnix,
+			BodyHash:         bodyHash[:],
+			Nonce:            nonce,
+			CanonicalRequest: canonical,
 		}
 		ctx := context.WithValue(r.Context(), agentIDKey, agentID)
 		ctx = context.WithValue(ctx, agentAuthKey, proof)

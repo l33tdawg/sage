@@ -208,7 +208,7 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 		Timestamp:      time.Now(),
 		CoCommitSubmit: env,
 	}
-	embedAgentAuth(r.Context(), submitTx)
+	s.embedAgentAuth(r.Context(), submitTx)
 	if signErr := tx.SignTx(submitTx, s.signingKey); signErr != nil {
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return

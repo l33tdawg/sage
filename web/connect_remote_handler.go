@@ -183,12 +183,12 @@ func directIPv4Candidates() []lanCandidate {
 	if err != nil {
 		return nil
 	}
-	var out []lanCandidate
+	out := make([]lanCandidate, 0, len(ifaces))
 	type ranked struct {
 		c    lanCandidate
 		rank int
 	}
-	var ranks []ranked
+	ranks := make([]ranked, 0, len(ifaces))
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
 			continue

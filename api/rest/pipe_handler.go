@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -14,6 +15,17 @@ import (
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
+)
+
+const (
+	// pipeQuotaProblemType marks the 429 returned when a requester (or the node
+	// as a whole) has too many open pipes — kept distinct from the rate
+	// limiter's status-derived 429 so clients can tell a storage quota breach
+	// ("you have too many pipes in flight") from request-rate shaping.
+	pipeQuotaProblemType = "https://sage.dev/errors/pipe-quota"
+	// pipeTooLargeProblemType marks the 413 returned when a pipe payload,
+	// intent, or result exceeds its size cap.
+	pipeTooLargeProblemType = "https://sage.dev/errors/pipe-too-large"
 )
 
 // handlePipeSend creates a pipeline message addressed to another agent/provider.
@@ -35,6 +47,18 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ToAgent == "" && req.ToProvider == "" {
 		writeProblem(w, http.StatusBadRequest, "Missing target", "to_agent or to_provider is required")
+		return
+	}
+	// Size caps (E8c) — fast-fail before the store; the store re-checks so the
+	// MCP and dashboard paths are covered too.
+	if len(req.Payload) > store.MaxPipeContentBytes {
+		writeProblemTyped(w, http.StatusRequestEntityTooLarge, pipeTooLargeProblemType,
+			"Payload too large", fmt.Sprintf("payload exceeds the %d byte limit.", store.MaxPipeContentBytes))
+		return
+	}
+	if len(req.Intent) > store.MaxPipeIntentBytes {
+		writeProblemTyped(w, http.StatusRequestEntityTooLarge, pipeTooLargeProblemType,
+			"Intent too large", fmt.Sprintf("intent exceeds the %d byte limit.", store.MaxPipeIntentBytes))
 		return
 	}
 
@@ -113,7 +137,17 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := pipeStore.InsertPipeline(r.Context(), msg); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Pipeline insert failed", err.Error())
+		switch {
+		case errors.Is(err, store.ErrPipePayloadTooLarge), errors.Is(err, store.ErrPipeIntentTooLarge):
+			writeProblemTyped(w, http.StatusRequestEntityTooLarge, pipeTooLargeProblemType, "Pipeline content too large", err.Error())
+		case errors.Is(err, store.ErrPipeQuotaPerAgent), errors.Is(err, store.ErrPipeQuotaGlobal):
+			// Storage quota, not chain backpressure: tell the caller to drain
+			// their in-flight pipes before sending more.
+			w.Header().Set("Retry-After", "5")
+			writeProblemTyped(w, http.StatusTooManyRequests, pipeQuotaProblemType, "Too many open pipelines", err.Error())
+		default:
+			writeProblem(w, http.StatusInternalServerError, "Pipeline insert failed", err.Error())
+		}
 		return
 	}
 
@@ -226,6 +260,12 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Missing result", "result is required")
 		return
 	}
+	// Size cap (E8c) — fast-fail before the store re-checks.
+	if len(req.Result) > store.MaxPipeContentBytes {
+		writeProblemTyped(w, http.StatusRequestEntityTooLarge, pipeTooLargeProblemType,
+			"Result too large", fmt.Sprintf("result exceeds the %d byte limit.", store.MaxPipeContentBytes))
+		return
+	}
 
 	pipeStore, ok := s.store.(store.PipelineStore)
 	if !ok {
@@ -276,6 +316,10 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 
 	// Complete the pipeline
 	if err := pipeStore.CompletePipeline(r.Context(), pipeID, agentID, req.Result, journalID); err != nil {
+		if errors.Is(err, store.ErrPipeResultTooLarge) {
+			writeProblemTyped(w, http.StatusRequestEntityTooLarge, pipeTooLargeProblemType, "Result too large", err.Error())
+			return
+		}
 		writeProblem(w, http.StatusConflict, "Completion failed", err.Error())
 		return
 	}

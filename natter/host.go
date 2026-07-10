@@ -104,6 +104,9 @@ func buildHost(cfg *Config, priv crypto.PrivKey) (host.Host, error) {
 		// restarts the service (see README).
 		wsTransport = libp2p.Transport(ws.New, ws.WithTLSConfig(&tls.Config{
 			Certificates: []tls.Certificate{cert},
+			// Dialers are exclusively sage nodes (modern Go libp2p), so the
+			// floor matches internal/tlsca's TLS 1.3 convention.
+			MinVersion: tls.VersionTLS13,
 		}))
 	}
 

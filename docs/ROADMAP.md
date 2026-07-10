@@ -1,12 +1,12 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.4.9 is the current release.** This document looks forward from v11 to the v11.5 slate. Everything past v11 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.5.0 is the current release.** This document records the v11.5 slate as shipped and looks forward to the v11.6 and v11.7 work. Everything past v11.5 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
 ---
 
-## v11 — shipped (the sovereign-UX + federation release)
+## v11 - shipped (the sovereign-UX + federation release)
 
 v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you know the CLI" to "a person clicking buttons can stand up a private, semantic, federated memory node." What landed:
 
@@ -19,7 +19,7 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 
 ### Federation
 
-- **Whole-SAGE-to-whole-SAGE join ceremony.** Guided guest and host wizards, offline-bundled, and LAN-first in v11. Trust is anchored by a human scan-and-compare; the six-digit codes are TOTP (RFC-6238) proving co-possession under a 2-of-2 consent handshake. Scope grants (allowed domains + a 0-4 clearance ceiling) are enforced when serving recall, recorded as an on-chain treaty, and revocable (revoke erases no memories). v11 assumes same-LAN or operator-provided reachability; first-class internet/NAT traversal is planned for v11.5.
+- **Whole-SAGE-to-whole-SAGE join ceremony.** Guided guest and host wizards, offline-bundled, and LAN-first in v11. Trust is anchored by a human scan-and-compare; the six-digit codes are TOTP (RFC-6238) proving co-possession under a 2-of-2 consent handshake. Scope grants (allowed domains + a 0-4 clearance ceiling) are enforced when serving recall, recorded as an on-chain treaty, and revocable (revoke erases no memories). v11 assumes same-LAN or operator-provided reachability; first-class internet/NAT traversal is planned for v11.6.
 - **Off-consensus transport.** mTLS federation listener, read-only recall query proxy (foreign results are merge-in-response only, never persisted to your chain), and receipt exchange.
 - **Consensus-layer federation primitives.** On-chain `cross_fed` exchange terms (Mode-1, tx 33/34) and the co-commit primitive (tx 31/32) landed at the app layer.
 
@@ -40,17 +40,27 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 
 ---
 
-## v11.5 — planned
+## v11.5 - shipped (the hardening + consensus release)
 
-Forward-looking. Nothing here is committed to a date; these are the problems v11.5 is scoped to solve, in rough priority order. Treat every item as speculative until it ships.
+v11.5 is the anti-DoS and memory-integrity release. Two workstreams landed: pipe hardening that puts real bounds on the agent-to-agent message tables, and the app-v17 consensus slate that gives deprecation teeth again with a quorum-scaled two-phase challenge, a first-class reinstate verb, disputed-but-recallable memories, and action-bound delegated agent proofs. The consensus slate ships **dormant** and activates only through the governed upgrade ladder (a 2/3 quorum vote with a 200-block floor), so existing chains replay byte-identically until operators vote it in. What landed:
 
-### Shared-domain replication
+### Pipe anti-DoS hardening
 
-Today federation is read-only recall exchange: borrowed answers are shown in the moment, tagged with their source, and never written to your chain. v11.5 adds opt-in **domain sync** so a shared domain can be *replicated* to a peer rather than only queried. The design centers on a **durable outbox** (writes to a shared domain are queued locally and delivered reliably across restarts and network gaps) plus **anti-entropy backfill** (periodic reconciliation so a peer that was offline catches up on what it missed). Bounded by the same scope grants as recall exchange; no silent widening of what crosses the link.
+The agent-to-agent pipe tables now carry anti-DoS guards on every write path (REST, MCP over REST, and the dashboard operator send that hits the store directly). **Size caps** at the store chokepoint: 256 KiB payload/result, 8 KiB intent, with matching fast-fail **413** checks in the handlers (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:513-515`). **Quotas**: 256 open pipes per verified agent identity, 10000 node-wide, an index-backed COUNT before insert, rejected as **429 with `Retry-After`** (mirrors the mempool-full recipe) and keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`, `store.go:518-521`). **Retention backstop**: pending or claimed rows older than 48h are force-expired regardless of stamped TTL, wired into the existing 5-minute sweep plus a boot one-shot; terminal rows still purge 24h after creation, and the dashboard TTL input is clamped to 24h.
 
 ### Reinstate verb + quorum-scaled deprecation
 
 Bring back a first-class deprecation verb with teeth: deprecation gated by consensus, with the required **quorum scaled to network size** so a small-LAN node and a large federation apply proportionate bars instead of one hardcoded threshold. Complements the v11 change that made deprecation audit-only.
+
+**Shipped in v11.5.0 as the app-v17 slate (dormant) - this item is now complete.** At challenge execution the handler counts the distinct modify-verb holders on the memory's domain (owner + ancestor owners + unexpired level-3 grantees) from committed state. A count of one or fewer keeps the byte-identical legacy one-strike deprecate, so personal nodes see zero change. A count of two or more parks the memory as `challenged` with an AppHash-folded challenge record; a second, distinct holder confirms to deprecate, and the original challenger cannot self-confirm. The new **`TxTypeMemoryReinstate`** takes a challenged memory back to `committed`, restoring the original content hash captured in the challenge record; current modify holders may use it and the original challenger can always withdraw, even after grant expiry/revocation. REST, MCP (`sage_reinstate`), Chrome, and sync/async Python SDK surfaces submit the transaction. Off-chain, challenged memories stay recallable on SQLite and Postgres, marked `disputed`, with a query-time confidence haircut. The whole slate is gated behind the app-v17 fork and ships dormant, activating only via the governed upgrade vote.
+
+The release audit also closed the delegated-signing gap in the original candidate: an agent proof authenticated a key but was not cryptographically tied to the transaction payload a validator executed. Post-app-v17 delegated REST transactions now append the exact canonical signed request without changing any legacy encoding; consensus verifies its hash/signature, rebuilds the authorized payload for every REST transaction type that uses agent identity, checks freshness against committed block time, and atomically consumes a short-lived proof marker in AppHash state. Same-key node-originated transactions remain bound by the outer signature and monotonic nonce.
+
+### Shared-domain replication
+
+Federation started as read-only recall exchange: borrowed answers are shown in the moment, tagged with their source, and never written to your chain. Opt-in **domain sync** lets a shared domain be *replicated* to a peer rather than only queried, built from a **durable outbox** (writes to a shared domain are queued locally and delivered reliably across restarts and network gaps) plus an **anti-entropy digest** (periodic reconciliation so a peer that was offline catches up on what it missed) and a commit-tail watcher. Bounded by the same scope grants as recall exchange; no silent widening of what crosses the link.
+
+**Shipped as a preview in v11.4.5 - this item is now delivered.** The durable outbox, anti-entropy digest, and commit-tail watcher landed together in the v11.4.5 preview.
 
 ### RBAC clarity + cross-scope memory transfer
 
@@ -58,9 +68,23 @@ Make the access model legible (who can read, write, and modify what, and why) an
 
 **Shipped across v11.3.0 and v11.4.0 - this item is now complete.** The CEREBRUM per-agent Domain Access matrix issues real on-chain access grants and revokes on Save (previously it saved a cosmetic blob the consensus checks never read), so what the matrix shows is what the chain enforces (v11.3.0). Cross-scope transfer shipped as governed domain-level reassignment: ownership of a domain moves to another agent through a governance-gated flow, from the Agents page or directly from a search selection (v11.4.0). The transfer moves ownership and read/write access - never authorship, which stays immutably attributed to whoever wrote each memory. Deliberate design choice: transfer operates on domains (tags), not individual memories, composed entirely from existing on-chain transactions rather than new consensus machinery.
 
+---
+
+## v11.6 - in development
+
 ### libp2p NAT traversal + author-operated connectivity service
 
 Replace the current same-LAN / bring-your-own-tunnel reachability story with **libp2p-based NAT traversal**, backed by an **author-operated connectivity service** (a relay / rendezvous the project runs) so two sovereign nodes behind home routers can find and reach each other without port-forwarding or a third-party cloud. Sovereignty is preserved: the service brokers connectivity only, it never sees or stores memory.
+
+---
+
+## v11.7 - planned
+
+Forward-looking. Nothing here is committed to a date; treat it as speculative until it ships.
+
+### Cross-network agent messaging (federated inbox)
+
+Extend the agent-to-agent pipe (today a node-local inbox) across a federation link so an agent on one SAGE can hand work to an agent on a peer SAGE - a **federated inbox**. Rides on the v11.6 connectivity substrate and inherits the same scope grants that bound recall exchange; delivery stays off-consensus and message content is never written to either chain.
 
 ---
 

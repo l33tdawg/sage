@@ -152,7 +152,7 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 			Status:         "active",
 		},
 	}
-	embedAgentAuth(r.Context(), setTx)
+	s.embedAgentAuth(r.Context(), setTx)
 	if signErr := tx.SignTx(setTx, s.signingKey); signErr != nil {
 		rollbackCA()
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
@@ -208,7 +208,7 @@ func (s *Server) handleCrossFedRevoke(w http.ResponseWriter, r *http.Request) {
 			Reason:        req.Reason,
 		},
 	}
-	embedAgentAuth(r.Context(), revokeTx)
+	s.embedAgentAuth(r.Context(), revokeTx)
 	if err := tx.SignTx(revokeTx, s.signingKey); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
 		return

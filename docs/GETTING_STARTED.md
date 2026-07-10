@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v11.1.0
+# sage-gui v11.5.0
 ```
 
 ---
@@ -146,7 +146,7 @@ For Claude Code, Codex, Cursor, Windsurf, or Claude Desktop running on the same 
 
 ### 2. Remote MCP (ChatGPT or another computer)
 
-For ChatGPT, the dashboard uses **OpenAI Secure MCP Tunnel**. The wizard gives you the `tunnel-client` commands for SAGE's local stdio MCP server, so ChatGPT can reach SAGE without a domain, public SAGE URL, or inbound firewall rule. For other tools on a different machine, use the LAN/VPN flow or a reachable HTTPS endpoint you manage. Bearer-only clients that run on the same machine (Cursor, Cline, Claude Desktop) can also connect directly to `https://localhost:8443` without a tunnel.
+For ChatGPT, the dashboard uses **OpenAI Secure MCP Tunnel**. CEREBRUM downloads the pinned `tunnel-client` release if needed, writes the local profile for the running SAGE app, and starts the tunnel daemon in the background. You only open the OpenAI Platform and ChatGPT browser tabs, paste the real tunnel ID/runtime key, and click **Set up and start tunnel**. SAGE does not store the runtime key. For other tools on a different machine, use the LAN/VPN flow or a reachable HTTPS endpoint you manage. Bearer-only clients that run on the same machine (Cursor, Cline, Claude Desktop) can also connect directly to `https://localhost:8443` without a tunnel.
 
 ### 3. LAN pairing (another computer on your network joins your SAGE)
 
@@ -265,7 +265,7 @@ This is safe to run on existing installs — it won't overwrite your `.mcp.json`
 
 ## Connect to ChatGPT
 
-ChatGPT supports MCP through its desktop app. The configuration is similar — add the sage-gui MCP server in ChatGPT's settings.
+Open **Connect an AI tool > ChatGPT** in CEREBRUM. SAGE manages OpenAI's `tunnel-client` in the background - no visible terminal - then ChatGPT connects to that OpenAI Secure MCP Tunnel. The advanced command block is only there as a fallback for operators who want to run the daemon by hand.
 
 ---
 

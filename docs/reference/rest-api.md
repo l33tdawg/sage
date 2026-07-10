@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.3.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.5.0. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -27,6 +27,10 @@ Include `X-Nonce` on current clients. If `X-Nonce` is absent, the server accepts
 - Duplicate `(agentID, signature)` pairs within the 5-minute window are rejected (replay cache, `auth.go:27-53`).
 - Body is capped at 1 MB before reading for signature verification (`auth.go:143`).
 - `X-Agent-ID` is the hex-encoded Ed25519 **public key** (32 bytes = 64 hex chars); it IS the agent identity on-chain.
+
+**Post-app-v17 consensus binding.** The REST process is not the trust boundary. Once app-v17 is active, a transaction whose outer node key differs from `X-Agent-ID` carries the exact `canonical` bytes above in the optional `ParsedTx.AgentRequest` wire tail. `FinalizeBlock` re-hashes those bytes to `AgentBodyHash`, re-verifies the Ed25519 proof, checks the signed timestamp against deterministic block time (±5 minutes), and rebuilds the expected type-specific payload from the signed method, path, and JSON. A mismatch is rejected with code 109 before the action handler runs. A successful validation atomically claims an AppHash-folded proof fingerprint until its freshness window closes, so the same agent authorization cannot be wrapped in a second node transaction with a fresh outer nonce. Transactions where the same key signs both agent proof and outer transaction need no HTTP envelope: the outer signature already binds the full payload and app-v9's monotonic nonce prevents replay (`internal/abci/agent_proof.go`, `internal/store/badger.go`).
+
+The optional tail is emitted only after the app-v17 activation block commits. Before activation it is absent, preserving the exact bytes older validators re-encode and every historical block's replay behavior (`internal/tx/codec.go`, `api/rest/server.go`).
 
 **Errors** use RFC 7807 `application/problem+json` with `type`, `title`, `status`, `detail` fields.
 
@@ -146,6 +150,8 @@ Vector similarity search. Requires a precomputed embedding.
 ```
 
 `confidence_score` in the response is the **decayed** value (time decay + corroboration boost applied server-side), not the raw submitted value. `initial_confidence` is the **stored** (undecayed) value — the on-chain confidence set at submission (corroboration never rewrites it) — so a client can see the authoritative floor alongside the decayed score without re-deriving it. It is present for local memories and omitted for federated results (where only the serving peer's already-decayed value is available).
+
+`disputed` (`memory_handler.go`, `json:"disputed,omitempty"`) is present and `true` only for an app-v17 two-phase-**challenged** memory that is still live and recallable while under dispute (set on all three recall paths: query, search, and hybrid). Because it is `omitempty`, its absence means "not disputed," which is why the committed example above omits it. When it is set, `confidence_score` already carries an extra query-time **disputed haircut** (the shared `store.DisputedConfidenceHaircut`, currently a `0.8` multiplier) layered on top of decay and corroboration. The store applies the same multiplier while enforcing `min_confidence`, so a returned result still satisfies the advertised floor after serialization. The haircut is presentation-only: it leaves the on-chain `status` (`challenged`) and the stored confidence untouched, and personal nodes never emit `disputed` at all (a challenge there is a one-strike deprecate, not a two-phase park). A challenged memory's on-chain `status` is `challenged`, already listed among the queryable `status_filter` values above.
 
 `min_confidence` is enforced against the **decayed** `confidence_score`, not the stored column. The store applies it over the full candidate set *before* the top-K trim, so: a result returned by a `min_confidence=X` query always satisfies `confidence_score >= X` (including federated results, which are re-checked against the floor on the requesting side); a corroboration-boosted memory whose stored value is below `X` but whose decayed value clears it is still returned; and `top_k` is filled with qualifying records rather than truncated. This full-corpus guarantee holds unconditionally only for `POST /v1/memory/query` on SQLite, whose `QuerySimilar` scans every candidate; on `/v1/memory/search` (FTS), `/v1/memory/hybrid` (via its FTS leaf), and on Postgres deployments the floor is instead evaluated over the top `decayFilterScanCap` (1000) rank/distance-ordered candidates, so a record that would qualify but ranks beyond that pool may not surface. Open tasks are exempt from decay, so an open task is judged by its stored confidence. (Prior to v11.2.0 the floor compared the stored column, which both leaked aged memories below the floor and dropped boosted ones above it.)
 
@@ -339,6 +345,29 @@ Semantic alias for challenge (`vote_handler.go:255-325`). Submits a `TxTypeMemor
 **Response** (HTTP 200): `{"message": "Memory forgotten.", "tx_hash": "<hex>"}`
 
 **Error responses:** identical to `/challenge` (same deprecation gate) — `403` not authorized (or a pre-app-v16 legacy reject), `404` unknown memory id, and `409` legacy no-recorded-domain (repair via an `OpMemoryDomainRepair` governance proposal). See the challenge section above.
+
+---
+
+### `POST /v1/memory/{memory_id}/reinstate`
+
+Return an open app-v17 two-phase challenge to `committed`. The handler builds
+`TxTypeMemoryReinstate`, embeds the authenticated caller proof, and waits for
+`broadcast_tx_commit`; a successful response is durable, not only a mempool
+receipt.
+
+**Request body:** `{"reason": "optional audit note"}` (`reason` may be omitted).
+
+**Response** (HTTP 200):
+`{"message": "Memory reinstated.", "tx_hash": "<hex>", "status": "committed"}`
+
+The chain must have activated app-v17. Current domain owners/ancestor owners and
+level-3 modify grantees may reinstate. The original challenger may always
+withdraw their own challenge even if the grant that authorized the challenge
+later expired or was revoked.
+
+**Errors:** `400` when app-v17 is not active, `403` when a non-challenger lacks
+the modify verb, `404` for an unknown memory, and `409` when the memory is not
+currently challenged.
 
 ---
 
@@ -1048,7 +1077,10 @@ The `access_token` returned by `/oauth/token` is the same bearer accepted by `Au
 
 ## 10. Pipeline (Agent-to-Agent)
 
-Async work routing between agents. State is off-chain (not consensus-validated). Requires `PipelineStore` support (SQLite yes, Postgres yes).
+Async work routing between agents. State is off-chain (not consensus-validated).
+The production pipeline store is SQLite. `PostgresStore` currently exposes
+interface stubs that return "not implemented" and must not be described as pipe
+support.
 
 ### `POST /v1/pipe/send`
 
@@ -1067,6 +1099,12 @@ Send a pipeline message to another agent or provider.
 Target agent must be registered. `to_agent` takes precedence; `to_provider` resolves via provider field or name lookup.
 
 **Response** (HTTP 201): `{"pipe_id": "pipe-<uuid>", "status": "pending", "expires_at": "..."}`
+
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:513-515`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:4083` payload, `:4086` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:527-529`) to 413.
+
+**Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
+
+Stale pipes are reaped independently: pending or claimed rows older than 48h are force-expired regardless of their stamped TTL (`ExpireStalePipelines`, wired into the 5-minute sweep plus a boot one-shot), and terminal rows purge 24h after creation.
 
 ---
 
@@ -1097,6 +1135,8 @@ Submit result for a claimed message. Triggers auto-journal: inserts an `observat
 | Field | Type | Required |
 |---|---|---|
 | `result` | string | yes |
+
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:513`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:4190`, mapping `ErrPipeResultTooLarge`).
 
 **Response** (HTTP 200): `{"status": "completed", "journal_id": "<memory_id or empty>"}`
 

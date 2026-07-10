@@ -51,7 +51,52 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.4.9
+## What's New in v11.5.0
+
+**Quorum-governed memory lifecycle plus pipe anti-DoS hardening: a two-phase challenge whose bar scales to the network, a first-class reinstate verb, disputed-but-recallable memories, and size caps and quotas on the agent pipe.** v11.5.0 introduces a new consensus fork **`app-v17`** that ships **dormant** - it changes no live-chain behavior until a network activates it through the governed upgrade ladder (a 2/3 quorum vote, past a 200-block floor). Until then `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay of every existing chain stays **byte-identical**. The pipe hardening is off-consensus and active on upgrade.
+
+- **Deprecation gates on a quorum that scales to the network (opt-in fork).** When a memory is challenged, `app-v17` counts the distinct modify-verb holders on its domain from committed state - the owner, ancestor-domain owners, and unexpired level-3 grantees, enumerated in sorted order. A personal node with one holder keeps the byte-identical legacy one-strike deprecate; where two or more holders exist the memory is parked as **challenged**, and a second, distinct holder must confirm before it deprecates - the original challenger cannot self-confirm. So a small-LAN node and a large federation apply proportionate bars instead of one hardcoded threshold.
+- **Reinstate is a first-class verb again (opt-in fork).** A new `app-v17` transaction, `TxTypeMemoryReinstate`, takes a **challenged** memory back to **committed**, restoring its original content hash from the challenge record; a challenger who wants to withdraw rides the same tx even if their grant has since expired or been revoked. It is reachable through REST (`POST /v1/memory/{id}/reinstate`), MCP (`sage_reinstate`), the Chrome bridge, and both Python SDK clients.
+- **Delegated agent proofs are action-bound on-chain (opt-in fork).** When a REST node signs a transaction for a different agent, `app-v17` carries the exact canonical signed request in a backward-compatible optional envelope. Consensus re-hashes and re-verifies it, reconstructs the authorized type-specific payload, applies the ±5-minute window against deterministic block time, and consumes an AppHash-folded proof marker once. A captured proof cannot be transplanted onto another action or rewrapped under a fresh node nonce. Node-originated transactions signed end-to-end by the same key keep the existing outer-signature + nonce path.
+- **Challenged memories stay recallable, clearly marked.** A memory under a two-phase challenge is no longer hidden while the dispute resolves: recall (REST and MCP) still returns it with a new **`disputed`** flag set and a query-time confidence haircut already applied to `confidence_score`, so an agent sees the marker and the softened score instead of silently losing the memory.
+- **The agent pipe has anti-DoS guards on every write path.** Pipe payloads and results are capped at 256 KiB and intents at 8 KiB at the store chokepoint, with matching **413** fast-fails in the REST and dashboard handlers. Open pipes are quota'd - **256** per verified agent identity, **10000** node-wide - checked and inserted under one write lock so a parallel burst cannot race past the cap, then rejected as **429 with Retry-After** (the same backpressure recipe as a full mempool). The quota keys on the Ed25519-verified `from_agent`, not the spoofable rate-limit header.
+- **Stale pipes can't pile up.** A retention backstop force-expires pending or claimed pipe rows older than 48h regardless of their stamped TTL, wired into the existing 5-minute sweep plus a new boot one-shot; terminal rows still purge 24h after creation, and the dashboard's TTL input is now clamped to 24h.
+- **CEREBRUM explains itself.** Polished hover/focus tooltips are on by default, with detailed explanations for every sidebar destination and consistent upgrades for existing icon, status, filter, and settings hints. They stay keyboard-accessible, avoid viewport clipping, and can still be disabled under **Settings → Maintenance → Preferences**.
+
+SDK 11.5.0.
+
+## Older releases
+
+<details>
+<summary>v11.4.11 - managed ChatGPT tunnel setup</summary>
+
+**ChatGPT setup is now a background-managed CEREBRUM flow.** v11.4.11 is an off-consensus UX and packaging patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
+
+- **No terminal needed for ChatGPT.** The ChatGPT setup wizard now downloads the pinned OpenAI `tunnel-client`, writes the local profile, and starts the daemon from inside CEREBRUM. The user only opens the OpenAI and ChatGPT browser tabs.
+- **The generated MCP command uses the running SAGE app.** CEREBRUM gets the real `sage-gui` executable path from the backend instead of assuming `sage-gui` is on PATH, so macOS app-bundle installs work.
+- **The tunnel client avoids SAGE's port.** The managed `tunnel-client` admin UI binds `127.0.0.1:8081`, leaving SAGE's dashboard on `127.0.0.1:8080`.
+- **No fake secret in copyable commands.** The runtime API key is accepted once to launch the child process and is not written to the profile or preferences. Advanced manual commands use an explicit placeholder, not a valid-looking `sk-...`.
+- **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.11.
+
+SDK 11.4.11.
+</details>
+
+<details>
+<summary>v11.4.10 - join ceremony fix + MCP registry publishing</summary>
+
+**Connecting two SAGEs works again.** v11.4.10 is an off-consensus bug-fix patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
+
+- **The join ceremony completes.** A URL-building regression in v11.4.8/v11.4.9 made the guest's "did they approve yet?" check fail silently, freezing every new connection at "1 of 2 confirmed" on both screens. The guest now sees the host's approval and the ceremony finishes.
+- **The wizard tells you what's wrong.** If the guest can't check the host's side, the waiting screen now shows the actual reason instead of a generic network hint.
+- **Read-back copy is clearer.** The host's "read this code" instruction now uses the other network's name.
+- **The public MCP registry stays current.** Releases now publish SAGE's server manifest to the MCP registry automatically, and the public listing was refreshed to the current version.
+- **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.10.
+
+SDK 11.4.10.
+</details>
+
+<details>
+<summary>v11.4.9 - ChatGPT via OpenAI Secure MCP Tunnel</summary>
 
 **ChatGPT setup now follows OpenAI's official Secure MCP Tunnel path.** v11.4.9 is an off-consensus UX and packaging patch - it changes **no consensus rule, AppHash, transaction type, key-encoding, or fork**: `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay stays **byte-identical**.
 
@@ -61,8 +106,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Patch-release metadata is current.** The SDK, Docker/MCP registry metadata, dashboard fallback version, and release notes are bumped together for 11.4.9.
 
 SDK 11.4.9.
-
-## Older releases
+</details>
 
 <details>
 <summary>v11.4.8 - join hardening + release maintenance</summary>

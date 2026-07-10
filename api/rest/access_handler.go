@@ -77,7 +77,7 @@ func (s *Server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), accessTx)
+	s.embedAgentAuth(r.Context(), accessTx)
 
 	err = tx.SignTx(accessTx, s.signingKey)
 	if err != nil {
@@ -144,7 +144,7 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), grantTx)
+	s.embedAgentAuth(r.Context(), grantTx)
 
 	err = tx.SignTx(grantTx, s.signingKey)
 	if err != nil {
@@ -206,7 +206,7 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), revokeTx)
+	s.embedAgentAuth(r.Context(), revokeTx)
 
 	err = tx.SignTx(revokeTx, s.signingKey)
 	if err != nil {
@@ -304,7 +304,7 @@ func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), domainTx)
+	s.embedAgentAuth(r.Context(), domainTx)
 
 	err = tx.SignTx(domainTx, s.signingKey)
 	if err != nil {

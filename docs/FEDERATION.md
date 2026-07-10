@@ -1,6 +1,6 @@
 # Connect your SAGE to another network
 
-This guide shows you how to link your whole SAGE to someone else's whole SAGE, so the two brains can share memories across a local network or another reachable address you provide. In the app this lives under the **Federation** section (the federation icon in the sidebar). v11.0 is LAN-first; first-class internet/NAT traversal is planned for v11.5.
+This guide shows you how to link your whole SAGE to someone else's whole SAGE, so the two brains can share memories across a local network or another reachable address you provide. In the app this lives under the **Federation** section (the federation icon in the sidebar). v11.0 is LAN-first; first-class internet/NAT traversal is planned for v11.6.
 
 It is written for the person clicking the buttons. You do not need to understand consensus or certificates to follow it. There is a short honest section at the end that explains what actually keeps the link safe, and what it does not promise.
 
@@ -23,7 +23,7 @@ Every connection is one-directional in the sense that each side keeps its own tr
 ## Before you start
 
 - Both people need their SAGE running and reachable at an `https://host:port` address (the federation listener, usually port **8444** on your network). The wizard fills in a sensible default like `https://192.168.1.20:8444` - change it if that is not how the other person reaches you.
-- v11.0 does not broker public-internet reachability for you. Use the same LAN, a VPN, or a tunnel you operate. Built-in internet/NAT traversal is a v11.5 roadmap item.
+- v11.0 does not broker public-internet reachability for you. Use the same LAN, a VPN, or a tunnel you operate. Built-in internet/NAT traversal is a v11.6 roadmap item.
 - You will each need a camera, or a shared screen, or at least a phone call you placed to a number you trust. The connection is safest when you are in the same room or on a video call you started.
 - Decide roughly what you are willing to share (which topics, and how sensitive) before you begin. You can leave it blank and share nothing, and you can change it later.
 

@@ -100,7 +100,7 @@ func (s *Server) handleDomainReassign(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), reassignTx)
+	s.embedAgentAuth(r.Context(), reassignTx)
 
 	err = tx.SignTx(reassignTx, s.signingKey)
 	if err != nil {

@@ -166,6 +166,33 @@ test.describe('Settings Page', () => {
         expect(tipCount).toBeGreaterThanOrEqual(1);
     });
 
+    test('HelpTip supports keyboard focus and Escape without a duplicate tooltip', async ({ page }) => {
+        await page.goto(`${BASE}/ui/`);
+        const trigger = page.locator('.help-tip-trigger').first();
+        await expect(trigger).toBeVisible();
+
+        await trigger.focus();
+        await expect(page.locator('.help-tip-popup')).toBeVisible();
+        await expect(page.locator('.smart-tooltip')).toHaveCount(0);
+
+        await trigger.press('Escape');
+        await expect(page.locator('.help-tip-popup')).toHaveCount(0);
+    });
+
+    test('smart tooltip stays inside a narrow viewport at the right edge', async ({ page }) => {
+        await page.setViewportSize({ width: 390, height: 844 });
+        await page.goto(`${BASE}/ui/`);
+        const themeButton = page.getByRole('button', { name: 'Switch to light theme' });
+
+        await themeButton.focus();
+        const tooltip = page.locator('.smart-tooltip');
+        await expect(tooltip).toBeVisible();
+        const box = await tooltip.boundingBox();
+        expect(box).not.toBeNull();
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(390);
+    });
+
     test('shows Synaptic Ledger section on Security tab', async ({ page }) => {
         await page.goto(`${BASE}/ui/#/settings`);
         await page.waitForSelector('.settings-page');

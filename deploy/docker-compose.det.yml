@@ -16,18 +16,44 @@
 # Driven by deploy/scripts/run-determinism.sh / `make determinism`.
 
 services:
+  # All four abci replicas share ONE image (same for the cometbft four): the
+  # base compose gives each service its own identical `build:` block, so
+  # `up --build` cold-builds 8 independent images and their caches — enough to
+  # exhaust Docker Desktop's VM disk. run-determinism.sh prebuilds the two
+  # shared images once; `build` is reset here so `up --build` builds nothing.
   abci0:
+    image: sage-det-abci:local
+    build: !reset null
     ports: !override
       - "127.0.0.1:18090:8080"
   abci1:
+    image: sage-det-abci:local
+    build: !reset null
     ports: !override
       - "127.0.0.1:18091:8080"
   abci2:
+    image: sage-det-abci:local
+    build: !reset null
     ports: !override
       - "127.0.0.1:18092:8080"
   abci3:
+    image: sage-det-abci:local
+    build: !reset null
     ports: !override
       - "127.0.0.1:18093:8080"
+
+  cometbft0:
+    image: sage-det-node:local
+    build: !reset null
+  cometbft1:
+    image: sage-det-node:local
+    build: !reset null
+  cometbft2:
+    image: sage-det-node:local
+    build: !reset null
+  cometbft3:
+    image: sage-det-node:local
+    build: !reset null
 
   # The determinism run reaches postgres only over the internal docker network
   # (abci -> postgres:5432); it needs no host binding. Drop it so the run never

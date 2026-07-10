@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -37,12 +38,20 @@ func (h *DashboardHandler) handlePipelineSend(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "payload (the note) is required")
 		return
 	}
+	// Size cap (E8c) — fast-fail before the store; the store re-checks.
+	if len(req.Payload) > store.MaxPipeContentBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "payload exceeds the maximum size")
+		return
+	}
 	if req.Intent == "" {
 		req.Intent = "note"
 	}
 	ttl := req.TTLMin
 	if ttl <= 0 {
 		ttl = 1440 // 24h default
+	}
+	if ttl > 1440 {
+		ttl = 1440 // match the agent send path; bound pipe lifetime so a huge TTL can't outlive GC
 	}
 	pipeStore, ok := h.store.(store.PipelineStore)
 	if !ok {
@@ -62,7 +71,14 @@ func (h *DashboardHandler) handlePipelineSend(w http.ResponseWriter, r *http.Req
 		ExpiresAt:    now.Add(time.Duration(ttl) * time.Minute),
 	}
 	if err := pipeStore.InsertPipeline(r.Context(), msg); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case errors.Is(err, store.ErrPipePayloadTooLarge), errors.Is(err, store.ErrPipeIntentTooLarge):
+			writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+		case errors.Is(err, store.ErrPipeQuotaPerAgent), errors.Is(err, store.ErrPipeQuotaGlobal):
+			writeError(w, http.StatusTooManyRequests, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	writeJSONResp(w, http.StatusCreated, map[string]any{"pipe_id": msg.PipeID, "to_agent": req.ToAgent, "status": "pending"})

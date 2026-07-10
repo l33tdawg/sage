@@ -71,6 +71,13 @@ type Server struct {
 	// the fork gate (e.g. tests, older deployments).
 	postV8ForkFn func() bool
 
+	// postV17ForNextTxFn reports whether a transaction broadcast now will
+	// execute under app-v17 rules. Unlike the v8 read-side accessor, this flips
+	// immediately after the activation block commits so delegated REST
+	// transactions carry the proof envelope before their first eligible block.
+	// nil preserves the legacy wire encoding used by tests and pre-v17 nodes.
+	postV17ForNextTxFn func() bool
+
 	// federation is the v11 OFF-consensus transport (recall proxy, co-commit
 	// receipt exchange, cross-fed agreement setup). nil disables every
 	// federation surface — handlers 501 and the recall merge is skipped, so
@@ -195,6 +202,16 @@ func (s *Server) isPostV8Fork() bool {
 	return s.postV8ForkFn()
 }
 
+// SetPostV17ForNextTxAccessor wires the dynamic app-v17 transaction-envelope
+// gate. Callers should pass app.IsAppV17ActiveForNextTx.
+func (s *Server) SetPostV17ForNextTxAccessor(fn func() bool) {
+	s.postV17ForNextTxFn = fn
+}
+
+func (s *Server) isPostV17ForNextTx() bool {
+	return s.postV17ForNextTxFn != nil && s.postV17ForNextTxFn()
+}
+
 // loadValidatorSigningKey loads the CometBFT validator private key so that
 // vote transactions are signed by the same identity in the validator set.
 // This is critical for quorum: checkAndApplyQuorum matches votes by validator ID.
@@ -304,6 +321,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Post("/v1/memory/{memory_id}/vote", s.handleVoteMemory)
 		r.Post("/v1/memory/{memory_id}/challenge", s.handleChallengeMemory)
 		r.Post("/v1/memory/{memory_id}/forget", s.handleForgetMemory)
+		r.Post("/v1/memory/{memory_id}/reinstate", s.handleReinstateMemory)
 		r.Post("/v1/memory/{memory_id}/corroborate", s.handleCorroborateMemory)
 		r.Put("/v1/memory/{memory_id}/task-status", s.handleUpdateTaskStatus)
 		r.Post("/v1/memory/link", s.handleLinkMemories)
@@ -419,7 +437,7 @@ func (s *Server) setupRouter() chi.Router {
 // embedAgentAuth copies the authenticated agent's cryptographic proof from the
 // request context into the ParsedTx. This allows ABCI to independently verify
 // the agent's identity on-chain — no trust in REST payload fields needed.
-func embedAgentAuth(ctx context.Context, ptx *tx.ParsedTx) {
+func (s *Server) embedAgentAuth(ctx context.Context, ptx *tx.ParsedTx) {
 	proof := middleware.ContextAgentAuth(ctx)
 	if proof == nil {
 		return
@@ -429,6 +447,12 @@ func embedAgentAuth(ctx context.Context, ptx *tx.ParsedTx) {
 	ptx.AgentTimestamp = proof.Timestamp
 	ptx.AgentBodyHash = proof.BodyHash
 	ptx.AgentNonce = proof.Nonce
+	// Appending this field before activation would make a new binary produce
+	// bytes an old binary cannot reproduce when it verifies the outer node
+	// signature. Keep it absent until the activation block has committed.
+	if s.isPostV17ForNextTx() {
+		ptx.AgentRequest = append([]byte(nil), proof.CanonicalRequest...)
+	}
 }
 
 // Router returns the underlying chi router for testing.

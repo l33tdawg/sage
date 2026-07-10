@@ -695,6 +695,7 @@ func sagePermissionsConfig(settings map[string]any) map[string]any {
 		"mcp__sage__sage_recall",
 		"mcp__sage__sage_reflect",
 		"mcp__sage__sage_forget",
+		"mcp__sage__sage_reinstate",
 		"mcp__sage__sage_list",
 		"mcp__sage__sage_status",
 		"mcp__sage__sage_task",

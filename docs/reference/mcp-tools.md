@@ -1,8 +1,8 @@
-Reconciled against internal/mcp at SAGE v11.3.0.
+Reconciled against internal/mcp at SAGE v11.5.0.
 
 # SAGE MCP Tools Reference
 
-SAGE exposes 22 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
+SAGE exposes 23 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
 the local Ed25519 identity; SSE and Streamable-HTTP use the MCP bearer-token/OAuth
 flow. Only consensus-committed memories are returned to callers.
 
@@ -247,9 +247,11 @@ verified configurations).
 - `degraded_reason`: present only when degraded — a short explanation.
 
 **Search path:** Same hybrid/semantic/FTS5 fallback chain as `sage_turn` recall
-phase. Only `committed` memories are returned. The `recall_mode`/`semantic_degraded`
-fields surface silent keyword-only fallback so a caller isn't misled into trusting a
-degraded recall.
+phase. Committed memories are returned; an app-v17 two-phase-challenged memory
+also remains recallable with `disputed: true`, a `[DISPUTED]` content prefix,
+and the shared query-time confidence haircut. The
+`recall_mode`/`semantic_degraded` fields surface silent keyword-only fallback so
+a caller isn't misled into trusting a degraded recall.
 
 **REST:** `POST /v1/memory/hybrid`, `POST /v1/memory/query`, `POST /v1/memory/search`
 
@@ -283,6 +285,32 @@ moves to `challenged`, not immediately deleted. Consensus governs final removal.
 
 **When to call:** When a memory contains outdated or incorrect information —
 e.g. an IP address changed, a decision was reversed, or a fact was disproven.
+
+---
+
+### sage_reinstate
+
+**Purpose:** Withdraw or resolve an open app-v17 two-phase challenge and move
+the memory from `challenged` back to `committed`.
+
+**Parameters:**
+
+| Name        | Type   | Required | Description |
+|-------------|--------|----------|-------------|
+| `memory_id` | string | yes      | The challenged memory ID to reinstate. |
+| `reason`    | string | no       | Optional audit note explaining the reinstatement. |
+
+**Returns:**
+- `memory_id`, `status: "committed"`, `reason`, `tx_hash`.
+
+The chain must have activated app-v17. A current domain owner/ancestor-owner or
+level-3 modify grantee may reinstate; the original challenger may always
+withdraw their own challenge even if that grant later expired or was revoked.
+
+**REST:** `POST /v1/memory/{memory_id}/reinstate`
+
+**When to call:** When a challenge was mistaken, its evidence was resolved, or
+the original challenger wants to withdraw it.
 
 ---
 
@@ -551,6 +579,11 @@ it in their inbox on their next `sage_turn` or `sage_inbox` call.
 **Note:** SAGE journals the exchange when complete but does NOT store the full
 payload as a memory — only a summary.
 
+`payload` is capped at 256 KiB and `intent` at 8 KiB. Each verified sender may
+hold at most 256 pending/claimed pipes and the node at most 10000; a full quota
+returns HTTP 429 with `Retry-After`. Pending/claimed rows force-expire after 48h
+and terminal rows purge after 24h.
+
 **REST:** `POST /v1/pipe/send`
 
 **When to call:** Delegating subtasks to specialized agents (e.g. send a research
@@ -605,7 +638,7 @@ back to the requesting agent and auto-journals the exchange.
 - `status`, `journal_id`, `message`.
 
 **Note:** A journal entry is auto-created summarizing the exchange (just the
-summary, not the full payload).
+summary, not the full payload). `result` is capped at 256 KiB.
 
 **REST:** `PUT /v1/pipe/{pipe_id}/result`
 
@@ -712,9 +745,9 @@ None. All tools mentioned in CLAUDE.md, MEMORY.md, and the MCP server
 
 ### Tools in tools.go not in documented boot sequence
 
-`sage_corroborate` and `sage_link` are core memory graph tools, but not part of
-the boot sequence. They are used only when a caller needs to strengthen or
-connect existing memories.
+`sage_corroborate`, `sage_link`, and `sage_reinstate` are core memory operations,
+but not part of the boot sequence. They are used only when a caller needs to
+strengthen/connect memories or resolve an open challenge.
 
 `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status` — governance tools —
 are not part of the boot sequence. This is correct: they are admin/validator
@@ -736,12 +769,12 @@ registration name from `sage_register` is untouched.
 
 ## Summary
 
-**22 tools documented:**
+**23 tools documented:**
 
 | Category     | Tools |
 |--------------|-------|
 | Boot / lifecycle | `sage_inception`, `sage_red_pill`, `sage_turn`, `sage_reflect` |
-| Core memory  | `sage_remember`, `sage_recall`, `sage_forget`, `sage_corroborate`, `sage_link` |
+| Core memory  | `sage_remember`, `sage_recall`, `sage_forget`, `sage_reinstate`, `sage_corroborate`, `sage_link` |
 | Browse       | `sage_list`, `sage_timeline`, `sage_status` |
 | Tasks        | `sage_task`, `sage_backlog` |
 | Identity     | `sage_register`, `sage_rename` |
