@@ -22,6 +22,7 @@ import (
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
 )
 
@@ -883,6 +884,54 @@ func TestForgetMemory_NotFound(t *testing.T) {
 	srv, _, _ := newTestServer(t, "")
 
 	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/missing/forget", []byte(`{}`))
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestReinstateMemory_SuccessBuildsAppV17Tx(t *testing.T) {
+	var capturedTxHex string
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedTxHex = strings.TrimPrefix(r.URL.Query().Get("tx"), "0x")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"result": map[string]interface{}{"code": 0, "hash": "REINSTATEHASH", "log": ""},
+		})
+	}))
+	defer cometMock.Close()
+
+	srv, memStore, _ := newTestServer(t, cometMock.URL)
+	memStore.memories["target"] = &memory.MemoryRecord{
+		MemoryID: "target",
+		Status:   memory.StatusChallenged,
+	}
+
+	body := []byte(`{"reason":"challenge withdrawn"}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/target/reinstate", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+	var resp ReinstateResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, "REINSTATEHASH", resp.TxHash)
+	assert.Equal(t, "committed", resp.Status)
+
+	raw, err := hex.DecodeString(capturedTxHex)
+	require.NoError(t, err)
+	parsed, err := tx.DecodeTx(raw)
+	require.NoError(t, err)
+	require.Equal(t, tx.TxTypeMemoryReinstate, parsed.Type)
+	require.NotNil(t, parsed.MemoryReinstate)
+	assert.Equal(t, "target", parsed.MemoryReinstate.MemoryID)
+	assert.Equal(t, "challenge withdrawn", parsed.MemoryReinstate.Reason)
+}
+
+func TestReinstateMemory_NotFound(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/missing/reinstate", []byte(`{}`))
 	rr := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr, req)
 

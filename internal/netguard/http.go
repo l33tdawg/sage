@@ -59,16 +59,29 @@ func LocalLANHostPort(raw string) (string, error) {
 	return net.JoinHostPort(host, strconv.Itoa(p)), nil
 }
 
-// JoinPath appends an absolute endpoint path to a pre-validated base URL.
+// JoinPath appends an absolute endpoint path (with optional query string) to a
+// pre-validated base URL. The path may not carry a scheme, host, userinfo, or
+// fragment, so it can never redirect the request off the validated base.
 func JoinPath(base, path string) (string, error) {
 	u, err := url.Parse(base)
 	if err != nil {
 		return "", err
 	}
-	if !strings.HasPrefix(path, "/") || strings.Contains(path, "\x00") {
+	if !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.Contains(path, "\x00") {
 		return "", fmt.Errorf("endpoint path must be absolute")
 	}
-	ref := &url.URL{Path: path}
+	// Parse (rather than assign to url.URL.Path) so a query string survives as
+	// RawQuery instead of being percent-escaped into the path — assigning
+	// "/a?b=c" to .Path serialized as "/a%3Fb=c" and 404'd the join status
+	// poll. Parsing keeps ? and # semantics; the checks below re-establish the
+	// no-redirect guarantees.
+	ref, err := url.Parse(path)
+	if err != nil {
+		return "", fmt.Errorf("endpoint path invalid: %w", err)
+	}
+	if ref.Scheme != "" || ref.Host != "" || ref.User != nil || ref.Fragment != "" {
+		return "", fmt.Errorf("endpoint path must not carry scheme, host, userinfo, or fragment")
+	}
 	return u.ResolveReference(ref).String(), nil
 }
 

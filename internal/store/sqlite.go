@@ -587,6 +587,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// drop a column added before it).
 	s.migrateEmbeddingProvider(ctx)
 
+	// Migration: add app-v17 two-phase-challenge columns (disputed_height/quorum).
+	// MUST also run AFTER migrateTaskSupport for the same reason.
+	s.migrateDisputed(ctx)
+
 	// Schema migrations — add columns to network_agents that didn't exist in earlier versions.
 	agentMigrations := []string{
 		"ALTER TABLE network_agents ADD COLUMN on_chain_height INTEGER DEFAULT 0",
@@ -678,6 +682,52 @@ func (s *SQLiteStore) migrateEmbeddingProvider(ctx context.Context) {
 	}
 	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN embedding_provider TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_embedding_provider ON memories(embedding_provider)`)
+}
+
+// migrateDisputed adds the app-v17 two-phase-challenge columns to memories.
+// disputed_height is the challenge-EXECUTION height (C-D3): it doubles as the
+// discriminator that keeps ResolveChallengedMemories from sweeping LIVE v17
+// disputes to deprecated on reboot — legacy pre-fork challenged rows predate the
+// column and read the default 0, so the sweep (scoped to disputed_height=0) still
+// cleans them while never touching a v17 dispute (disputed_height > 0).
+// disputed_quorum records the deterministically-measured modify-verb-holder count
+// for operator display. SQLite ADD COLUMN gives existing rows the default 0, so no
+// backfill is needed. MUST run AFTER migrateTaskSupport (which recreates the table).
+func (s *SQLiteStore) migrateDisputed(ctx context.Context) {
+	// Check each column independently. SQLite applies ALTER TABLE statements one
+	// at a time, so a crash between the two can leave a valid disputed_height but
+	// no disputed_quorum. Treating the first column as an all-or-nothing migration
+	// marker would then make every future MarkDisputed fail permanently.
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"disputed_height", `ALTER TABLE memories ADD COLUMN disputed_height INTEGER NOT NULL DEFAULT 0`},
+		{"disputed_quorum", `ALTER TABLE memories ADD COLUMN disputed_quorum INTEGER NOT NULL DEFAULT 0`},
+	} {
+		row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name=?`, col.name)
+		var count int
+		if err := row.Scan(&count); err != nil || count > 0 {
+			continue
+		}
+		_, _ = s.writeExecContext(ctx, col.ddl)
+	}
+}
+
+// MarkDisputed reflects an app-v17 two-phase CHALLENGE (park) in the off-chain
+// mirror: status → 'challenged', plus the challenge-EXECUTION height and the
+// deterministically-measured modify-verb-holder quorum (C-D3, persisted and never
+// re-measured). disputed_height is what ResolveChallengedMemories keys off to
+// leave a live dispute alone. Never touches committed_at/deprecated_at (a
+// reinstate/confirm later moves the row through UpdateStatus's normal arms).
+func (s *SQLiteStore) MarkDisputed(ctx context.Context, memoryID string, disputedHeight int64, quorum int, _ time.Time) error {
+	_, err := s.writeExecContext(ctx,
+		`UPDATE memories SET status = 'challenged', disputed_height = ?, disputed_quorum = ? WHERE memory_id = ?`,
+		disputedHeight, quorum, memoryID)
+	if err != nil {
+		return fmt.Errorf("mark disputed: %w", err)
+	}
+	return nil
 }
 
 // migrateTaskAssignee adds the assignee column to memories so tasks can be
@@ -1211,11 +1261,11 @@ func (s *SQLiteStore) UpdateStatus(ctx context.Context, memoryID string, status 
 	switch status {
 	case memory.StatusCommitted:
 		_, err = s.writeExecContext(ctx,
-			`UPDATE memories SET status = ?, committed_at = ? WHERE memory_id = ?`,
+			`UPDATE memories SET status = ?, committed_at = ?, disputed_height = 0, disputed_quorum = 0 WHERE memory_id = ?`,
 			string(status), nowStr, memoryID)
 	case memory.StatusDeprecated:
 		_, err = s.writeExecContext(ctx,
-			`UPDATE memories SET status = ?, deprecated_at = ? WHERE memory_id = ?`,
+			`UPDATE memories SET status = ?, deprecated_at = ?, disputed_height = 0, disputed_quorum = 0 WHERE memory_id = ?`,
 			string(status), nowStr, memoryID)
 	default:
 		_, err = s.writeExecContext(ctx,
@@ -1257,7 +1307,11 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		query += " AND confidence_score >= ?"
 		args = append(args, opts.MinConfidence)
 	}
-	if opts.StatusFilter != "" {
+	if opts.StatusFilter == "committed" && opts.IncludeDisputed {
+		// app-v17: admit disputed-but-live rows alongside committed (flagged at
+		// serialize). Committed rows are unaffected.
+		query += " AND status IN ('committed', 'challenged')"
+	} else if opts.StatusFilter != "" {
 		query += " AND status = ?"
 		args = append(args, opts.StatusFilter)
 	}
@@ -1347,7 +1401,7 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		if cErr != nil {
 			return nil, fmt.Errorf("query similar decay floor: %w", cErr)
 		}
-		ordered = applyDecayFloor(ordered, opts.DecayFloor, opts.DecayNow, counts)
+		ordered = applyDecayFloor(ordered, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
 	}
 
 	// opts.TopK was capped to [1, 100] at function entry, but make an explicit
@@ -1406,6 +1460,10 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 	}
 	if opts.StatusFilter == "active" {
 		sqlStr += " AND m.status != 'deprecated'" // audit-only deprecated memories never surface in search
+	} else if opts.StatusFilter == "committed" && opts.IncludeDisputed {
+		// app-v17: admit disputed-but-live rows alongside committed (flagged at
+		// serialize). Committed rows are unaffected.
+		sqlStr += " AND m.status IN ('committed', 'challenged')"
 	} else if opts.StatusFilter != "" {
 		sqlStr += " AND m.status = ?"
 		args = append(args, opts.StatusFilter)
@@ -1493,7 +1551,7 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		if cErr != nil {
 			return nil, fmt.Errorf("search by text decay floor: %w", cErr)
 		}
-		results = applyDecayFloor(results, opts.DecayFloor, opts.DecayNow, counts)
+		results = applyDecayFloor(results, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
 		if len(results) > opts.TopK {
 			results = results[:opts.TopK]
 		}
@@ -3481,13 +3539,22 @@ func (s *SQLiteStore) DeprecateMemories(ctx context.Context, memoryIDs []string)
 	return int(n), nil
 }
 
-// ResolveChallengedMemories upgrades all "challenged" memories to "deprecated".
-// In v4.5.0+, challenges are auto-deprecated on consensus. This resolves any
-// stale challenged memories from earlier versions.
+// ResolveChallengedMemories sweeps LEGACY stale "challenged" rows to "deprecated"
+// at boot. Before v4.5.0 a challenge could leave a memory limbo-'challenged'; this
+// one-shot migration cleans those up.
+//
+// app-v17 (v11.5) reintroduced a LIVE, reinstatable 'challenged' state (the
+// quorum-scaled two-phase challenge). A post-v17 dispute is written to the mirror
+// with disputed_height = the challenge-execution height (> 0), so it MUST be
+// scoped OUT of this sweep — otherwise a reboot would silently deprecate an
+// in-flight dispute and diverge the mirror from badger. Legacy limbo rows predate
+// the disputed_height column and read the default 0, so `disputed_height = 0` is
+// the exact legacy-vs-v17 discriminator. COALESCE guards DBs where the column was
+// somehow left NULL.
 func (s *SQLiteStore) ResolveChallengedMemories(ctx context.Context) (int, error) {
 	result, err := s.writeExecContext(ctx,
 		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE status = 'challenged'`)
+		WHERE status = 'challenged' AND COALESCE(disputed_height, 0) = 0`)
 	if err != nil {
 		return 0, fmt.Errorf("resolve challenged: %w", err)
 	}
@@ -4023,7 +4090,50 @@ func (s *SQLiteStore) migratePipeline(ctx context.Context) {
 }
 
 func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) error {
-	_, err := s.writeExecContext(ctx,
+	// Size caps (E8c) — bound one pipe's payload/intent before it hits disk.
+	if len(msg.Payload) > MaxPipeContentBytes {
+		return ErrPipePayloadTooLarge
+	}
+	if len(msg.Intent) > MaxPipeIntentBytes {
+		return ErrPipeIntentTooLarge
+	}
+
+	// Serialize the quota reads and the insert as one critical section. The old
+	// shape counted outside writeMu and locked only for the final INSERT, so a
+	// parallel burst could have every request observe the same below-cap count
+	// and then enqueue far beyond both advertised quotas. A tx-scoped store is
+	// already running under its parent's write lock and must not lock again.
+	if s.db != nil {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+	}
+
+	// Quotas (E8c) — cap non-terminal pipes per requester and globally so a
+	// flood of never-claimed work items cannot exhaust disk. Both counts are
+	// index-backed (idx_pipe_from_agent, idx_pipe_expires) and, with the critical
+	// section above, the check + insert is atomic with respect to every writer in
+	// this process.
+	var perAgent int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pipeline_messages WHERE from_agent = ? AND status IN ('pending','claimed')`,
+		msg.FromAgent).Scan(&perAgent); err != nil {
+		return err
+	}
+	if perAgent >= MaxOpenPipesPerAgent {
+		return ErrPipeQuotaPerAgent
+	}
+	var global int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pipeline_messages WHERE status IN ('pending','claimed')`).Scan(&global); err != nil {
+		return err
+	}
+	if global >= MaxOpenPipesGlobal {
+		return ErrPipeQuotaGlobal
+	}
+
+	// Call the underlying connection directly: standalone stores already hold
+	// writeMu above, while tx-scoped stores are already inside the parent lock.
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO pipeline_messages (pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.PipeID, msg.FromAgent, msg.FromProvider, msg.ToAgent, msg.ToProvider,
@@ -4100,6 +4210,10 @@ func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string)
 }
 
 func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, result, journalID string) error {
+	// Size cap (E8c) — bound the single result written back to a pipe.
+	if len(result) > MaxPipeContentBytes {
+		return ErrPipeResultTooLarge
+	}
 	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'completed', result = ?, journal_id = ?, claimed_by = CASE WHEN claimed_by = '' THEN ? ELSE claimed_by END,
 		        completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -4209,6 +4323,24 @@ func (s *SQLiteStore) ExpirePipelines(ctx context.Context) (int, error) {
 		`UPDATE pipeline_messages SET status = 'expired'
 		 WHERE status IN ('pending', 'claimed')
 		   AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// ExpireStalePipelines flips pending/claimed rows whose created_at predates
+// olderThan to 'expired', independent of their expires_at. This is a hard
+// backstop on lifetime: a never-claimed (or abandoned-after-claim) pipe carrying
+// an oversized TTL still ages out, so the subsequent PurgePipelines sweep can
+// reclaim its row. The staleness window is set well beyond the max legitimate
+// TTL, so an actively-running pipe is never touched.
+func (s *SQLiteStore) ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error) {
+	res, err := s.writeExecContext(ctx,
+		`UPDATE pipeline_messages SET status = 'expired'
+		 WHERE status IN ('pending', 'claimed')
+		   AND created_at < ?`, formatTime(olderThan))
 	if err != nil {
 		return 0, err
 	}

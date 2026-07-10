@@ -99,6 +99,7 @@ type DashboardHandler struct {
 	ExecPath     string // path to sage-gui binary, used by /v1/mcp-config
 	RESTAddr     string // configured REST listen address (cfg.RESTAddr), surfaced read-only in Settings > Connection
 	MCPTLSAddr   string // configured MCP TLS (bearer) listen address, used by /v1/dashboard/connect/remote-url to report whether the node is reachable from another computer (loopback bind = local-only)
+	TunnelClient TunnelClientManager
 	Encrypted    atomic.Bool
 	VaultLocked  atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
 
@@ -519,16 +520,17 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			// Governance routes
 			h.RegisterGovernanceRoutes(r)
 
-			// ChatGPT setup wizard (v6.7.3) — orchestrates cloudflared install,
-			// login, tunnel create, DNS routing, autostart, and token mint so
-			// non-power-users can wire SAGE up to ChatGPT's MCP connector
-			// without touching a terminal. Local-first orchestration only —
-			// no SAGE-hosted relay, the user owns the tunnel end-to-end.
+			// ChatGPT setup wizard — orchestrates the OpenAI tunnel-client setup
+			// from CEREBRUM so non-power-users can wire SAGE up to ChatGPT's
+			// MCP connector without leaving the browser or opening a terminal.
+			// Local-first orchestration only: SAGE installs/starts the local
+			// client, while the user owns the OpenAI tunnel end-to-end.
 			// wizardSecurityGate adds a strict same-origin check on top of
 			// the parent authMiddleware so cross-origin browser tabs cannot
 			// drive subprocess execution.
 			r.Group(func(r chi.Router) {
 				r.Use(h.wizardSecurityGate)
+				h.RegisterChatGPTTunnelRoutes(r)
 				h.RegisterChatGPTWizardRoutes(r)
 			})
 

@@ -47,6 +47,7 @@ import (
 	"github.com/l33tdawg/sage/internal/snapshot"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
+	"github.com/l33tdawg/sage/internal/tunnelclientd"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
 	"github.com/l33tdawg/sage/internal/voter"
@@ -202,6 +203,9 @@ func runServe() (rerr error) {
 	// Manager for the local Ollama runtime used by smart memory setup. It
 	// follows the same adopt-or-spawn model as rerankd.
 	ollamaMgr := ollamad.New(SageHome())
+	// Manager for OpenAI's tunnel-client sidecar used by the ChatGPT setup
+	// flow. The runtime key remains process-env only; profiles contain no key.
+	tunnelClientMgr := tunnelclientd.New(SageHome())
 
 	// Persisted reranker intent (Settings > Engine toggle) overrides the env
 	// config so an operator's dashboard on/off choice survives restart without
@@ -603,6 +607,7 @@ func runServe() (rerr error) {
 	// flip to ancestor-walk access checks once the chain reports a post-fork
 	// height. Advisory only — the consensus path uses app.postV8Fork(height).
 	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
+	restServer.SetPostV17ForNextTxAccessor(app.IsAppV17ActiveForNextTx)
 
 	// v7.1: tell the REST layer which ed25519 public key identifies the local
 	// node operator. Requests signed with this key bypass the cross-agent
@@ -618,6 +623,7 @@ func runServe() (rerr error) {
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
 	dashboard.Rerankd = rerankdMgr            // managed reranker sidecar (guided setup)
 	dashboard.Ollamad = ollamaMgr             // managed Ollama runtime for smart memory setup
+	dashboard.TunnelClient = tunnelClientMgr  // managed OpenAI tunnel-client for ChatGPT/Codex
 	dashboard.BadgerStore = badgerStore       // Wire on-chain RBAC for agent isolation
 	dashboard.PostV8ForkFn = app.IsPostV8Fork // v8.0: ancestor-walk grants on post-fork dashboards
 
@@ -1121,9 +1127,27 @@ func runServe() (rerr error) {
 	// Auto-import pending chat history (from setup wizard)
 	go autoImport(cfg, embedProvider, logger)
 
+	// Pipeline retention windows (E8c). The sweep runs on the 5-minute ticker
+	// below; a one-shot boot sweep runs first so a node that was offline reclaims
+	// stale rows immediately instead of waiting a full interval.
+	const (
+		pipeSweepInterval   = 5 * time.Minute
+		pipeRetentionWindow = 24 * time.Hour // terminal rows deleted this long after creation
+		pipeStalenessWindow = 48 * time.Hour // non-terminal rows force-expired past this age
+	)
+	// Boot one-shot pipeline reconciliation — mirror the ResolveChallengedMemories
+	// boot sweep so nothing accumulates while the node was down.
+	{
+		_, _ = sqliteStore.ExpirePipelines(ctx)
+		_, _ = sqliteStore.ExpireStalePipelines(ctx, time.Now().Add(-pipeStalenessWindow))
+		if purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-pipeRetentionWindow)); purged > 0 {
+			logger.Debug().Int("purged", purged).Msg("pipeline boot sweep")
+		}
+	}
+
 	// Pipeline TTL cleanup — expire and purge stale pipeline messages every 5 minutes
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(pipeSweepInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -1131,9 +1155,10 @@ func runServe() (rerr error) {
 				return
 			case <-ticker.C:
 				expired, _ := sqliteStore.ExpirePipelines(ctx)
-				purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-24*time.Hour))
-				if expired > 0 || purged > 0 {
-					logger.Debug().Int("expired", expired).Int("purged", purged).Msg("pipeline cleanup")
+				stale, _ := sqliteStore.ExpireStalePipelines(ctx, time.Now().Add(-pipeStalenessWindow))
+				purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-pipeRetentionWindow))
+				if expired > 0 || stale > 0 || purged > 0 {
+					logger.Debug().Int("expired", expired).Int("stale", stale).Int("purged", purged).Msg("pipeline cleanup")
 				}
 				// Sweep stale OAuth auth-codes (5-min TTL, single-use) — the
 				// store retains rows past use for audit visibility, but the

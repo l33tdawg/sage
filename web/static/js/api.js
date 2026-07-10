@@ -660,6 +660,37 @@ export async function connectRemoteUrl() {
     return res.json();
 }
 
+// Managed OpenAI tunnel-client sidecar for ChatGPT Secure MCP Tunnel.
+export async function chatGPTTunnelStatus() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/chatgpt-tunnel/status`);
+    if (!res.ok) throw new Error(`ChatGPT tunnel status failed (HTTP ${res.status})`);
+    return res.json();
+}
+export function chatGPTTunnelInstall() {
+    return fetch(`${API_BASE}/v1/dashboard/chatgpt-tunnel/install`, { method: 'POST' });
+}
+export function chatGPTTunnelSetup({ tunnel_id, api_key, profile }) {
+    return fetch(`${API_BASE}/v1/dashboard/chatgpt-tunnel/setup`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tunnel_id, api_key, profile }),
+    });
+}
+export async function chatGPTTunnelStart({ tunnel_id, api_key, profile }) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/chatgpt-tunnel/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tunnel_id, api_key, profile }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
+export async function chatGPTTunnelStop() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/chatgpt-tunnel/stop`, { method: 'POST' });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
+
 // ─── Embeddings setup (turn on the bundled semantic embedder + re-embed) ───
 export async function embeddingsStatus() {
     const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/status`);

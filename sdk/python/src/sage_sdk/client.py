@@ -40,6 +40,7 @@ from sage_sdk.models import (
     PipeResultResponse,
     PipeSendResponse,
     PreValidateResponse,
+    ReinstateRequest,
     TaskListResponse,
     TimelineResponse,
     VoteRequest,
@@ -416,16 +417,37 @@ class SageClient:
         memory_id: str,
         reason: str | None = None,
     ) -> dict:
-        """Forget (deprecate) a memory by ID.
+        """Challenge a memory through the user-facing forget endpoint.
 
         Thin wrapper over POST /v1/memory/{id}/forget. The server substitutes
-        a default reason when none is supplied. Returns the tx hash; the
-        memory is deprecated once the challenge tx is committed.
+        a default reason when none is supplied. On app-v17, a memory with
+        multiple modify holders is first parked as challenged; a one-holder
+        memory is deprecated immediately.
         """
         req = ForgetRequest(reason=reason)
         resp = self._request(
             "POST",
             f"/v1/memory/{memory_id}/forget",
+            json=req.model_dump(exclude_none=True),
+        )
+        return resp.json()
+
+    def reinstate(
+        self,
+        memory_id: str,
+        reason: str | None = None,
+    ) -> dict:
+        """Reinstate a two-phase-challenged memory.
+
+        Submits the app-v17 ``MemoryReinstate`` transaction and waits for
+        consensus commit. The chain must have activated app-v17; the caller
+        must be a current modify-verb holder or the original challenger
+        withdrawing their own challenge.
+        """
+        req = ReinstateRequest(reason=reason)
+        resp = self._request(
+            "POST",
+            f"/v1/memory/{memory_id}/reinstate",
             json=req.model_dump(exclude_none=True),
         )
         return resp.json()

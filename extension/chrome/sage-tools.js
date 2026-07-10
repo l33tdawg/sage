@@ -57,6 +57,15 @@ const SAGE_TOOLS = {
     },
     required: ["memory_id"]
   },
+  sage_reinstate: {
+    name: "sage_reinstate",
+    description: "Withdraw or resolve an open two-phase challenge and return the memory to committed.",
+    params: {
+      memory_id: { type: "string", description: "Challenged memory ID to reinstate" },
+      reason: { type: "string", description: "Optional audit note" }
+    },
+    required: ["memory_id"]
+  },
   sage_reflect: {
     name: "sage_reflect",
     description: "End-of-task reflection. Store dos and don'ts.",
@@ -150,11 +159,13 @@ Available tools:
 
 5. [SAGE_CALL: sage_forget({"memory_id": "id", "reason": "why"})] — Deprecate an outdated memory.
 
-6. [SAGE_CALL: sage_reflect({"task_summary": "what was done", "dos": "what worked", "donts": "what failed"})] — Post-task reflection.
+6. [SAGE_CALL: sage_reinstate({"memory_id": "id", "reason": "why"})] — Withdraw or resolve an open challenge.
 
-7. [SAGE_CALL: sage_status()] — Check memory stats.
+7. [SAGE_CALL: sage_reflect({"task_summary": "what was done", "dos": "what worked", "donts": "what failed"})] — Post-task reflection.
 
-8. [SAGE_CALL: sage_list({"domain": "specific-domain"})] — Browse stored memories.
+8. [SAGE_CALL: sage_status()] — Check memory stats.
+
+9. [SAGE_CALL: sage_list({"domain": "specific-domain"})] — Browse stored memories.
 
 The SAGE Chrome extension will intercept these calls, execute them against your local SAGE node, and paste the results back. You can then use the returned memories in your response.
 

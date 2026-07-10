@@ -55,6 +55,20 @@ type ForgetResponse struct {
 	TxHash  string `json:"tx_hash"`
 }
 
+// ReinstateRequest is the JSON body for
+// POST /v1/memory/{memory_id}/reinstate. Reason is an optional audit note
+// carried in the app-v17 transaction.
+type ReinstateRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+// ReinstateResponse is the JSON body for a successful reinstatement.
+type ReinstateResponse struct {
+	Message string `json:"message"`
+	TxHash  string `json:"tx_hash"`
+	Status  string `json:"status"`
+}
+
 // CorroborateRequest is the JSON body for POST /v1/memory/{memory_id}/corroborate.
 type CorroborateRequest struct {
 	Evidence string `json:"evidence,omitempty"`
@@ -143,7 +157,7 @@ func (s *Server) handleVoteMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Embed agent's cryptographic proof for on-chain identity verification.
-	embedAgentAuth(r.Context(), voteTx)
+	s.embedAgentAuth(r.Context(), voteTx)
 
 	// Sign the transaction with the node's signing key.
 	if err = tx.SignTx(voteTx, s.signingKey); err != nil {
@@ -219,7 +233,7 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Embed agent's cryptographic proof for on-chain identity verification.
-	embedAgentAuth(r.Context(), challengeTx)
+	s.embedAgentAuth(r.Context(), challengeTx)
 
 	// Sign the transaction with the node's signing key.
 	if err = tx.SignTx(challengeTx, s.signingKey); err != nil {
@@ -297,7 +311,7 @@ func (s *Server) handleForgetMemory(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), challengeTx)
+	s.embedAgentAuth(r.Context(), challengeTx)
 
 	if err = tx.SignTx(challengeTx, s.signingKey); err != nil {
 		s.logger.Error().Err(err).Msg("failed to sign forget tx")
@@ -334,6 +348,77 @@ func (s *Server) handleForgetMemory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleReinstateMemory handles POST /v1/memory/{memory_id}/reinstate.
+// app-v17 is dual-gated in CheckTx and FinalizeBlock, so a node whose chain has
+// not activated the fork returns a sanitized 400 and cannot accidentally admit
+// type 35. broadcast_tx_commit waits through Commit, making a successful 200 a
+// durable challenged -> committed transition rather than a mempool receipt.
+func (s *Server) handleReinstateMemory(w http.ResponseWriter, r *http.Request) {
+	memoryID := chi.URLParam(r, "memory_id")
+	if memoryID == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing memory ID", "memory_id path parameter is required.")
+		return
+	}
+
+	var req ReinstateRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+
+	// Fast, user-friendly not-found check. The consensus handler remains the
+	// authority for status and authorization because the off-chain mirror can be
+	// briefly stale during recovery.
+	if _, err := s.store.GetMemory(r.Context(), memoryID); err != nil {
+		writeProblem(w, http.StatusNotFound, "Memory not found",
+			fmt.Sprintf("No memory found with ID %s.", memoryID))
+		return
+	}
+
+	reinstateTx := &tx.ParsedTx{
+		Type:      tx.TxTypeMemoryReinstate,
+		Nonce:     tx.MonotonicNonce(s.signingKey),
+		Timestamp: time.Now(),
+		MemoryReinstate: &tx.MemoryReinstate{
+			MemoryID: memoryID,
+			Reason:   req.Reason,
+		},
+	}
+	s.embedAgentAuth(r.Context(), reinstateTx)
+
+	if err := tx.SignTx(reinstateTx, s.signingKey); err != nil {
+		s.logger.Error().Err(err).Msg("failed to sign reinstate tx")
+		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
+		return
+	}
+	encoded, err := tx.EncodeTx(reinstateTx)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to encode reinstate tx")
+		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
+		return
+	}
+
+	txHash, err := s.broadcastTxCommit(encoded)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to broadcast reinstate tx")
+		status, publicMsg := broadcastErrorPublic(err)
+		writeProblem(w, status, "Broadcast error", publicMsg)
+		return
+	}
+
+	if s.OnEvent != nil {
+		s.OnEvent("reinstate", memoryID, "", req.Reason, map[string]any{
+			"tx_hash": txHash,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, ReinstateResponse{
+		Message: "Memory reinstated.",
+		TxHash:  txHash,
+		Status:  "committed",
+	})
+}
+
 // handleCorroborateMemory handles POST /v1/memory/{memory_id}/corroborate.
 func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request) {
 	memoryID := chi.URLParam(r, "memory_id")
@@ -367,7 +452,7 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Embed agent's cryptographic proof for on-chain identity verification.
-	embedAgentAuth(r.Context(), corrTx)
+	s.embedAgentAuth(r.Context(), corrTx)
 
 	// Sign the transaction with the node's signing key.
 	if err = tx.SignTx(corrTx, s.signingKey); err != nil {

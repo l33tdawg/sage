@@ -1,8 +1,8 @@
-Verified against SDK source at SAGE v11.3.0. Package: sage-agent-sdk.
+Verified against SDK source at SAGE v11.5.0. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.3.0
+**Package:** `sage-agent-sdk` **Version:** 11.5.0
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -369,7 +369,28 @@ forget(
 
 `POST /v1/memory/{memory_id}/forget`
 
-Marks the memory as deprecated once the forget tx is committed. Server substitutes a default reason when none is supplied. Returns `{"tx_hash": ...}` (source: `client.py:422`).
+Submits the challenge transaction and waits for commit. On a personal/one-holder
+domain it deprecates immediately; after app-v17 activation on a multi-holder
+domain it may instead park as `challenged` pending confirmation or reinstatement.
+The server substitutes a default reason when none is supplied.
+
+---
+
+#### `reinstate()`
+
+```python
+reinstate(
+    memory_id: str,
+    reason: str | None = None,
+) -> dict
+```
+
+`POST /v1/memory/{memory_id}/reinstate`
+
+Submits `TxTypeMemoryReinstate` and waits for consensus commit. Requires an
+app-v17-activated chain and an open two-phase challenge. Current modify-verb
+holders may reinstate; the original challenger may always withdraw their own
+challenge. Returns `{"message": ..., "tx_hash": ..., "status": "committed"}`.
 
 ---
 
@@ -1203,7 +1224,11 @@ except SageAPIError as e:
 
 ## Method Count Summary
 
-**`SageClient`**: 59 public methods  
-**`AsyncSageClient`**: 58 public methods (`reassign_domain` is sync-only; `close` is async-only)
+**`SageClient`**: 63 public methods
+**`AsyncSageClient`**: 63 public methods (`reassign_domain` is sync-only; `close` is async-only)
 
-Groups: Health (2), Memory (11), Embeddings (1), Tasks (2), Voting/Validation (5), Agents (7), Validator (2), Pipeline (6), Access Control (4), Domains (4 + 2 domain-reassign), Organizations (6), Departments (6), Federation (5), Governance (5) = 68 methods total across both clients (counting shared methods once).
+Groups: Health (2), Memory (8), Embeddings (1), Tasks (2), Voting/Validation
+(5), Agents (6), Validator (2), Pipeline (6), Access Control (4), Domains (3
+shared + sync-only `reassign_domain`), Organizations (7), Departments (6),
+Federation (5), Governance (5), and async lifecycle (1) = 64 distinct methods
+across both clients (counting the 62 shared methods once).

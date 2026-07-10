@@ -1857,6 +1857,79 @@ body {
     left: 12px;
     transform: none;
 }
+
+/* Polished delegated tooltips for icon controls, sidebar navigation, stats,
+   and any existing title annotation. Fixed positioning escapes clipped cards
+   and scroll containers; the JS layer chooses a viewport-safe side. */
+.smart-tooltip {
+    position: fixed;
+    z-index: 5000;
+    width: max-content;
+    max-width: min(300px, calc(100vw - 32px));
+    padding: 10px 12px;
+    border: 1px solid rgba(139, 92, 246, 0.42);
+    border-radius: 10px;
+    background: var(--bg-elevated);
+    background: color-mix(in srgb, var(--bg-elevated) 94%, transparent);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.42), 0 0 0 1px rgba(255, 255, 255, 0.025) inset;
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    pointer-events: none;
+    animation: smart-tooltip-in 0.14s ease-out;
+}
+.smart-tooltip-title {
+    margin-bottom: 3px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+.smart-tooltip-copy {
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+.smart-tooltip::after {
+    content: '';
+    position: absolute;
+    width: 9px;
+    height: 9px;
+    background: var(--bg-elevated);
+    border: solid rgba(139, 92, 246, 0.42);
+    transform: rotate(45deg);
+}
+.smart-tooltip-top::after {
+    left: 50%;
+    bottom: -5px;
+    margin-left: -5px;
+    border-width: 0 1px 1px 0;
+}
+.smart-tooltip-bottom::after {
+    left: 50%;
+    top: -5px;
+    margin-left: -5px;
+    border-width: 1px 0 0 1px;
+}
+.smart-tooltip-right::after {
+    left: -5px;
+    top: 50%;
+    margin-top: -5px;
+    border-width: 0 0 1px 1px;
+}
+.smart-tooltip-left::after {
+    right: -5px;
+    top: 50%;
+    margin-top: -5px;
+    border-width: 1px 1px 0 0;
+}
+@keyframes smart-tooltip-in {
+    from { opacity: 0; filter: blur(2px); }
+    to { opacity: 1; filter: blur(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+    .smart-tooltip { animation: none; }
+}
 .help-footer {
     display: flex;
     justify-content: space-between;

@@ -71,7 +71,7 @@ func (s *Server) handleDeptRegister(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), deptTx)
+	s.embedAgentAuth(r.Context(), deptTx)
 
 	err = tx.SignTx(deptTx, s.signingKey)
 	if err != nil {
@@ -191,7 +191,7 @@ func (s *Server) handleDeptAddMember(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), addTx)
+	s.embedAgentAuth(r.Context(), addTx)
 
 	err = tx.SignTx(addTx, s.signingKey)
 	if err != nil {
@@ -240,7 +240,7 @@ func (s *Server) handleDeptRemoveMember(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 
-	embedAgentAuth(r.Context(), removeTx)
+	s.embedAgentAuth(r.Context(), removeTx)
 
 	err := tx.SignTx(removeTx, s.signingKey)
 	if err != nil {
