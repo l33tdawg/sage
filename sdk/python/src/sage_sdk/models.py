@@ -81,6 +81,12 @@ class MemoryRecord(BaseModel):
     # provider yet never see which provider a returned record carried.
     # Additive Optional: older servers omit it, so it defaults to None.
     provider: str | None = None
+    # app-v17 two-phase-challenged marker: the memory is still live and
+    # recallable but under dispute; the server sets disputed=true and has
+    # already applied the confidence haircut to confidence_score. Emitted as
+    # `disputed` (json:"disputed,omitempty") on recall. Additive Optional:
+    # older servers omit it, so it defaults to None.
+    disputed: bool | None = None
 
 
 class MemorySubmitRequest(BaseModel):

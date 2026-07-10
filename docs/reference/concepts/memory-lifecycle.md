@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.2.1. -->
+<!-- Reconciled through SAGE v11.5.0. -->
 
 # Memory Lifecycle
 
-Verified against code at SAGE v11.2.1.
+Verified against code at SAGE v11.5.0.
 
 ## Overview
 
@@ -83,7 +83,7 @@ Each validator (in personal mode: the single node's own auto-voter; in multi-nod
 - Increments on-chain validator vote stats (used for PoE scoring at epoch boundaries).
 - Calls `checkAndApplyQuorum`.
 
-`checkAndApplyQuorum` (`app.go:1043-1119`):
+`checkAndApplyQuorum` (`app.go:3602-3818`):
 - Loads all validators, reads each vote from BadgerDB.
 - Current chains use PoE-weighted votes after the app-v3 fork, with equal-weight replay retained only for pre-fork blocks.
 - Calls `validator.CheckQuorum` (threshold: `>= 2/3` of total weight, `internal/validator/quorum.go:6`).
@@ -92,13 +92,22 @@ Each validator (in personal mode: the single node's own auto-voter; in multi-nod
 
 ### 6. Challenge → Deprecated (or Reinstated)
 
-A committed memory may be challenged via `TxTypeMemoryChallenge`. Current chains authorize challenges through the app-v15 domain-access rules: the challenger must be the domain owner or ancestor owner, or hold a level-3 modify grant. Once an authorized challenge is included in a block, deprecation is decisive.
+A committed memory may be challenged via `TxTypeMemoryChallenge`. Chains authorize challenges through the app-v15 domain-access rules: the challenger must be the domain owner or ancestor owner, or hold a level-3 modify grant. Before app-v17 activates (and, after it activates, on any domain with a single modify-verb holder), an authorized challenge is decisive on inclusion.
 
-There is no separate voting round for challenges. The challenged memory transitions from `committed` → `deprecated` in the same `processMemoryChallenge` call that includes the tx.
+In that one-strike path there is no separate voting round: the challenged memory transitions from `committed` → `deprecated` in the same `processMemoryChallenge` call that includes the tx. app-v17 (below) replaces this with a quorum-scaled two-phase path when the domain has two or more modify-verb holders.
 
-**app-v16 — domainless-forget remediation.** The deprecation gate keys off the on-chain `memdomain:<memoryID>` record. Legacy memories committed before app-v8.4 never received one, so the gate rejected even the owner's challenge/forget with a generic "no recorded domain" denial (Code 91). app-v16 hardens the gate to split that into two distinct denials — both still DENY (Code 91, no new authorization): a legacy record predating app-v8.4 ("repair via an `OpMemoryDomainRepair` governance proposal") versus a genuinely unknown memory ("no memory record and no recorded domain") (`app.go:3708-3726`). The domained-but-unauthorized case is unchanged (Code 92). To unblock a legacy record, an **`OpMemoryDomainRepair`** governance proposal (`governance.ProposalOp = 6`, app-v16-gated) backfills the missing domain: it is created through the normal admin-gated propose path with a JSON payload of `[{"memory_id":"…","domain":"…"}]`, requires the default **2/3 supermajority** (`ThresholdFor` is fork-unaware, so a new op must not retroactively change quorum — replay parity), and on execution writes `memdomain:` only for a memory that already exists on-chain, has no domain yet, and whose target domain is already registered — idempotent, never overwriting, skipping unknown, already-domained, or unregistered-target IDs (`applyMemoryDomainRepair`, `app.go:6742`). After repair, a normal challenge/forget by an authorized agent deprecates as usual. app-v16 also requires every submit to carry a non-empty `domain_tag`, so the domainless state cannot recur.
+**app-v16 - domainless-forget remediation.** The deprecation gate keys off the on-chain `memdomain:<memoryID>` record. Legacy memories committed before app-v8.4 never received one, so the gate rejected even the owner's challenge/forget with a generic "no recorded domain" denial (Code 91). app-v16 hardens the gate to split that into two distinct denials — both still DENY (Code 91, no new authorization): a legacy record predating app-v8.4 ("repair via an `OpMemoryDomainRepair` governance proposal") versus a genuinely unknown memory ("no memory record and no recorded domain") (`app.go:3862-3867`). The domained-but-unauthorized case is unchanged (Code 92). To unblock a legacy record, an **`OpMemoryDomainRepair`** governance proposal (`governance.ProposalOp = 6`, app-v16-gated) backfills the missing domain: it is created through the normal admin-gated propose path with a JSON payload of `[{"memory_id":"…","domain":"…"}]`, requires the default **2/3 supermajority** (`ThresholdFor` is fork-unaware, so a new op must not retroactively change quorum — replay parity), and on execution writes `memdomain:` only for a memory that already exists on-chain, has no domain yet, and whose target domain is already registered — idempotent, never overwriting, skipping unknown, already-domained, or unregistered-target IDs (`applyMemoryDomainRepair`, `app.go:7161`). After repair, a normal challenge/forget by an authorized agent deprecates as usual. app-v16 also requires every submit to carry a non-empty `domain_tag`, so the domainless state cannot recur.
 
-The `validTransitions` map (`lifecycle.go:9`) does list `challenged → committed` as a valid transition, indicating a path exists to reinstate a challenged memory, but no handler currently drives that transition via a tx type.
+**app-v17 - quorum-scaled two-phase challenge + reinstate.** Ships dormant behind the app-v17 fork and activates only via the governed upgrade ladder (`postAppV17Rules`, strict `>`); every pre-fork block and the activation block itself replay byte-identically. Once active, `processMemoryChallenge` (`app.go:3897-4007`) branches on the memory's domain:
+
+- **Count the modify-verb holders.** At challenge execution the handler enumerates the distinct modify-verb holders on the memory's domain from committed state (the owner, ancestor owners, and unexpired level-3 grantees), in sorted order (`ModifyVerbHolders`, `app.go:3948`).
+- **One or fewer holders → legacy one-strike.** The outcome is byte-identical to the pre-fork deprecate above, so personal nodes and single-owner domains see zero change.
+- **Two or more holders → park as `challenged`.** A live `committed` memory is parked `challenged` with an AppHash-folded challenge record carrying the challenger, execution height, the measured quorum, and the prior hash/status snapshot (`SetChallengeRecord`, `app.go:3968-3980`; `status_update` stamps `DisputedHeight`/`DisputedQuorum`, `app.go:3993-3999`). The measured count is persisted and **never re-measured** at resolution. A `priorStatus == committed` guard is load-bearing: it confines the two-phase machine to committed memories, so a `deprecated` memory can never be resurrected through the park path and a `proposed` one can never skip the content-validation quorum.
+- **Confirm → `deprecated`.** A *distinct* modify-verb holder re-issues the challenge to finalize the deprecation; the original challenger **cannot** self-confirm (Code 93, `app.go:3915-3917`), which would collapse two-phase back into one-strike.
+
+**`TxTypeMemoryReinstate` (`processMemoryReinstate`, `app.go:4042`)** drives the `challenged → committed` transition that the `validTransitions` map (`lifecycle.go:9`) has always allowed but that previously had no handler. It is a new dual-gated tx (CheckTx + handler, returning Code 10 "unknown tx type" pre-fork so a non-activated chain replays byte-identically) taking a `challenged` memory back to `committed` and restoring the original content hash captured in the challenge record (the commit and deprecate paths nil that hash, so a reinstate without the record would leave a hash-less husk). Any distinct modify-verb holder may reinstate, and the original challenger's withdraw rides the same tx. Rejections: Code 94 not-challenged/double-resolve, Code 92 unauthorized.
+
+**Disputed-but-recallable (off-chain surface).** While parked `challenged`, a memory stays recallable across REST and MCP recall, flagged `disputed` in the response with a query-time confidence haircut (a `0.5` multiplier, presentation-only, leaving the on-chain status and stored confidence untouched; see `rest-api.md` on `POST /v1/memory/query`). The SQLite mirror carries the challenge metadata, and a boot-time `ResolveChallengedMemories` sweep is scoped to legacy pre-v17 rows only.
 
 ### 7. Corroborate (does not change status)
 
@@ -183,10 +192,11 @@ Combined with decay: a memory with many corroborations decays more slowly in eff
 
 ## Deprecation
 
-A memory reaches `deprecated` via three paths:
+A memory reaches `deprecated` via these paths:
 
-1. **Quorum failure**: all validators voted, `acceptWeight / totalWeight < 2/3` → deprecated in `checkAndApplyQuorum` (`app.go:1095-1118`).
-2. **Challenge**: a `TxTypeMemoryChallenge` is included in a block → immediately deprecated (`app.go:1135`). No secondary vote.
-3. **Explicit transition**: `ValidTransition(proposed → deprecated)` and `ValidTransition(validated → deprecated)` are also allowed for administrative paths, though no current public tx type drives them directly.
+1. **Quorum failure**: all validators voted, `acceptWeight / totalWeight < 2/3` → deprecated in `checkAndApplyQuorum` (`app.go:3766`).
+2. **Challenge (one-strike)**: a `TxTypeMemoryChallenge` is included in a block → immediately deprecated (`app.go:4011`). No secondary vote. This is the behavior before app-v17 activates, and after activation on any domain with a single modify-verb holder.
+3. **Challenge confirmed (app-v17 two-phase)**: on a domain with two or more modify-verb holders the first authorized challenge parks the memory `challenged`; a second, *distinct* modify-verb holder's confirming challenge finalizes the deprecation (`app.go:3918-3943`). The original challenger cannot self-confirm.
+4. **Explicit transition**: `ValidTransition(proposed → deprecated)` and `ValidTransition(validated → deprecated)` are also allowed for administrative paths, though no current public tx type drives them directly.
 
 Deprecated memories remain in PostgreSQL for audit purposes and are queryable by ID but are excluded from default similarity search results (callers can override with `status_filter`).

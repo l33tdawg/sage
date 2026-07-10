@@ -147,6 +147,8 @@ Vector similarity search. Requires a precomputed embedding.
 
 `confidence_score` in the response is the **decayed** value (time decay + corroboration boost applied server-side), not the raw submitted value. `initial_confidence` is the **stored** (undecayed) value — the on-chain confidence set at submission (corroboration never rewrites it) — so a client can see the authoritative floor alongside the decayed score without re-deriving it. It is present for local memories and omitted for federated results (where only the serving peer's already-decayed value is available).
 
+`disputed` (`memory_handler.go:143`, `json:"disputed,omitempty"`) is present and `true` only for an app-v17 two-phase-**challenged** memory that is still live and recallable while under dispute (set on all three recall paths: `memory_handler.go:831` query, `:1179` search, `:1425` hybrid). Because it is `omitempty`, its absence means "not disputed," which is why the committed example above omits it. When it is set, `confidence_score` already carries an extra query-time **disputed haircut** (a `0.5` multiplier, `disputedConfidenceHaircut` at `memory_handler.go:612`, applied by `markDisputed` at `:617-621`) layered on top of decay and corroboration. The haircut is presentation-only: it leaves the on-chain `status` (`challenged`) and the stored confidence untouched, and personal nodes never emit `disputed` at all (a challenge there is a one-strike deprecate, not a two-phase park). A challenged memory's on-chain `status` is `challenged`, already listed among the queryable `status_filter` values above.
+
 `min_confidence` is enforced against the **decayed** `confidence_score`, not the stored column. The store applies it over the full candidate set *before* the top-K trim, so: a result returned by a `min_confidence=X` query always satisfies `confidence_score >= X` (including federated results, which are re-checked against the floor on the requesting side); a corroboration-boosted memory whose stored value is below `X` but whose decayed value clears it is still returned; and `top_k` is filled with qualifying records rather than truncated. This full-corpus guarantee holds unconditionally only for `POST /v1/memory/query` on SQLite, whose `QuerySimilar` scans every candidate; on `/v1/memory/search` (FTS), `/v1/memory/hybrid` (via its FTS leaf), and on Postgres deployments the floor is instead evaluated over the top `decayFilterScanCap` (1000) rank/distance-ordered candidates, so a record that would qualify but ranks beyond that pool may not surface. Open tasks are exempt from decay, so an open task is judged by its stored confidence. (Prior to v11.2.0 the floor compared the stored column, which both leaked aged memories below the floor and dropped boosted ones above it.)
 
 `filtered` is present when agent-isolation RBAC or per-record classification gates silently hid records. Check the `X-SAGE-Filter-Applied` response header for the same info. Values in `by`: `rbac_submitting_agents`, `classification`.
@@ -1068,6 +1070,12 @@ Target agent must be registered. `to_agent` takes precedence; `to_provider` reso
 
 **Response** (HTTP 201): `{"pipe_id": "pipe-<uuid>", "status": "pending", "expires_at": "..."}`
 
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:513-515`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:4083` payload, `:4086` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:527-529`) to 413.
+
+**Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`, `store.go:518-521`). An index-backed COUNT runs before insert (`sqlite.go:4089-4109`); over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`, `store.go:530-531`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
+
+Stale pipes are reaped independently: pending or claimed rows older than 48h are force-expired regardless of their stamped TTL (`ExpireStalePipelines`, wired into the 5-minute sweep plus a boot one-shot), and terminal rows purge 24h after creation.
+
 ---
 
 ### `GET /v1/pipe/inbox`
@@ -1097,6 +1105,8 @@ Submit result for a claimed message. Triggers auto-journal: inserts an `observat
 | Field | Type | Required |
 |---|---|---|
 | `result` | string | yes |
+
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:513`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:4190`, mapping `ErrPipeResultTooLarge`).
 
 **Response** (HTTP 200): `{"status": "completed", "journal_id": "<memory_id or empty>"}`
 
