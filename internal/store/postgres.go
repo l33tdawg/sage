@@ -408,7 +408,12 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		args = append(args, opts.MinConfidence)
 		argIdx++
 	}
-	if opts.StatusFilter != "" {
+	if opts.StatusFilter == "committed" && opts.IncludeDisputed {
+		// app-v17 parity with SQLite: a challenged memory is still live and
+		// recallable while its two-phase dispute is open. REST marks it disputed
+		// and applies the presentation haircut after this store admission step.
+		query += " AND status IN ('committed', 'challenged')"
+	} else if opts.StatusFilter != "" {
 		query += fmt.Sprintf(" AND status = $%d", argIdx)
 		args = append(args, opts.StatusFilter)
 		argIdx++
@@ -473,7 +478,7 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		if cErr != nil {
 			return nil, fmt.Errorf("query similar decay floor: %w", cErr)
 		}
-		results = applyDecayFloor(results, opts.DecayFloor, opts.DecayNow, counts)
+		results = applyDecayFloor(results, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
 		if len(results) > opts.TopK {
 			results = results[:opts.TopK]
 		}

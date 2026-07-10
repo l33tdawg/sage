@@ -474,7 +474,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Embed agent's cryptographic proof for on-chain identity verification.
-	embedAgentAuth(r.Context(), submitTx)
+	s.embedAgentAuth(r.Context(), submitTx)
 
 	// Sign the transaction with the node's signing key.
 	if err = tx.SignTx(submitTx, s.signingKey); err != nil {
@@ -604,12 +604,12 @@ func setDecayFloor(opts *store.QueryOptions, now time.Time) {
 // legitimate stored 0.0 still serializes; nil is reserved for federated results.
 func initialConfidencePtr(v float64) *float64 { return &v }
 
-// disputedConfidenceHaircut is the OFF-CHAIN, query-time multiplier applied to a
-// disputed (app-v17 two-phase-challenged) memory's decayed confidence when it is
-// surfaced in recall. It signals "believe this less while it is under dispute"
-// WITHOUT touching consensus/AppHash or the stored decay math. Committed rows are
-// never affected. Presentation only.
-const disputedConfidenceHaircut = 0.5
+// disputedConfidenceHaircut is shared with the store's decayed-floor admission
+// logic. Keeping one value ensures a min_confidence=X query never admits a
+// challenged row and then serializes confidence_score below X after the haircut.
+// Off-chain presentation only; consensus/AppHash and stored confidence are
+// untouched.
+const disputedConfidenceHaircut = store.DisputedConfidenceHaircut
 
 // markDisputed reports whether rec is a live-but-disputed (challenged) memory and,
 // if so, applies the confidence haircut to conf in place. Off-chain recall surface
@@ -1734,6 +1734,12 @@ func broadcastErrorPublic(err error) (int, string) {
 		return http.StatusNotFound, "unknown memory: no on-chain record for that memory id"
 	case strings.Contains(msg, "not authorized to deprecate"):
 		return http.StatusForbidden, "not authorized to deprecate this memory (need domain ownership or a level-3 modify grant)"
+	case strings.Contains(msg, "reinstate:") && strings.Contains(msg, "not authorized"):
+		return http.StatusForbidden, "not authorized to reinstate this memory (need domain ownership or a level-3 modify grant)"
+	case strings.Contains(msg, "reinstate: memory") && strings.Contains(msg, "not found"):
+		return http.StatusNotFound, "memory not found"
+	case strings.Contains(msg, "is not challenged"):
+		return http.StatusConflict, "memory is not currently challenged"
 	case strings.Contains(msg, "tx rejected in CheckTx"):
 		return http.StatusBadRequest, "request rejected"
 	case strings.Contains(msg, "tx rejected in FinalizeBlock"):

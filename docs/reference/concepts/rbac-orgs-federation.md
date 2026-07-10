@@ -1,14 +1,14 @@
-<!-- Reconciled through SAGE v11.3.0. -->
+<!-- Reconciled through SAGE v11.5.0. -->
 
 # RBAC, Organizations, and Federation
 
-Verified against code at SAGE v11.3.0.
+Verified against code at SAGE v11.5.0.
 
 ## Overview
 
 SAGE's access control is a layered system. From outermost to innermost, a query passes through:
 
-1. **Ed25519 authentication** — every request must carry a valid agent signature
+1. **Ed25519 authentication and action binding** — every request must carry a valid agent signature; after app-v17 activation, consensus binds a delegated proof to the exact signed REST action, deterministic freshness window, and a single-use AppHash marker
 2. **Agent-isolation RBAC** — `visible_agents` field restricts which agents' memories a given agent can see
 3. **Domain-level access check** — `checkDomainAccess`: per-agent, per-domain allowlist (DomainAccess JSON)
 4. **Multi-org domain gate** — `HasAccessMultiOrg`: org membership, same-org clearance, or federation agreement

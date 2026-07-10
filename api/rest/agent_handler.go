@@ -81,7 +81,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), registerTx)
+	s.embedAgentAuth(r.Context(), registerTx)
 
 	if err := tx.SignTx(registerTx, s.signingKey); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
@@ -150,7 +150,7 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), updateTx)
+	s.embedAgentAuth(r.Context(), updateTx)
 
 	if err := tx.SignTx(updateTx, s.signingKey); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
@@ -336,7 +336,7 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 		},
 	}
 
-	embedAgentAuth(r.Context(), permTx)
+	s.embedAgentAuth(r.Context(), permTx)
 
 	if err := tx.SignTx(permTx, s.signingKey); err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")

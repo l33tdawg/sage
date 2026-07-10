@@ -303,6 +303,41 @@ func TestAppV17_ReinstateWithdrawByChallenger(t *testing.T) {
 	assert.Equal(t, originalHash, hash, "hash restored on withdraw")
 }
 
+// TestAppV17_ReinstateWithdrawAfterGrantRevoked pins the "always withdraw"
+// promise: a grantee who opened the challenge may close it even if the grant
+// that originally authorized the challenge is revoked while the dispute is
+// open. The AppHash-folded ChallengerID, not current grant state, authorizes
+// this one narrow withdrawal path.
+func TestAppV17_ReinstateWithdrawAfterGrantRevoked(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV17AppliedHeight = 5
+
+	owner := newAgentKey(t)
+	challenger := newAgentKey(t)
+	require.NoError(t, app.badgerStore.RegisterDomain("hr", owner.id, "", 1))
+	require.NoError(t, app.badgerStore.SetAccessGrant("hr", challenger.id, 3, 0, owner.id))
+
+	const mem = "hr-revoked-challenger"
+	originalHash := []byte("committed-content-hash")
+	require.NoError(t, app.badgerStore.SetMemoryDomain(mem, "hr"))
+	require.NoError(t, app.badgerStore.SetMemoryHash(mem, originalHash, string(memory.StatusCommitted)))
+	require.Equal(t, uint32(0), app.processMemoryChallenge(
+		makeMemoryChallengeTx(t, challenger, mem, "open"), 20, time.Now()).Code)
+
+	require.NoError(t, app.badgerStore.DeleteAccessGrant("hr", challenger.id))
+	hasModify, err := app.badgerStore.HasAccessOrAncestor("hr", challenger.id, 3, time.Now())
+	require.NoError(t, err)
+	require.False(t, hasModify, "precondition: the challenger no longer holds modify")
+
+	res := app.processMemoryReinstate(makeMemoryReinstateTx(t, challenger, mem, "withdraw"), 23, time.Now())
+	require.Equal(t, uint32(0), res.Code, "original challenger may withdraw after grant revocation: %s", res.Log)
+
+	hash, status, err := app.badgerStore.GetMemoryHash(mem)
+	require.NoError(t, err)
+	assert.Equal(t, string(memory.StatusCommitted), status)
+	assert.Equal(t, originalHash, hash)
+}
+
 // TestAppV17_ReinstateRejections: non-challenged target, double-reinstate,
 // unauthorized caller, and the pre-fork handler gate.
 func TestAppV17_ReinstateRejections(t *testing.T) {

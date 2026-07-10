@@ -203,6 +203,37 @@ func TestAppV16_SubmitRequiresDomain(t *testing.T) {
 	assert.Equal(t, uint32(0), ok.Code, "post-fork: a domained submit is still accepted: %s", ok.Log)
 }
 
+// TestAppV16Plus_SubmitRecordsDomainWithoutV84 guards the independent
+// skip-ahead path: app-v16 requires a domain and app-v17 subsumes that rule, so
+// both must persist memdomain even when the app-v8.4 PoE gate remains dormant.
+// Otherwise a freshly submitted memory cannot be challenged or forgotten.
+func TestAppV16Plus_SubmitRecordsDomainWithoutV84(t *testing.T) {
+	tests := []struct {
+		name     string
+		activate func(*SageApp)
+	}{
+		{name: "app-v16", activate: func(app *SageApp) { app.appV16AppliedHeight = 5 }},
+		{name: "app-v17 skip-ahead", activate: func(app *SageApp) { app.appV17AppliedHeight = 5 }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := setupTestApp(t)
+			tt.activate(app)
+			require.False(t, app.postV8_4Fork(6), "the fix must not activate app-v8.4's PoE rules")
+
+			parsed := makeMemorySubmitTx(t, newAgentKey(t), "hr", "domain persistence")
+			parsed.MemorySubmit.MemoryID = "memdomain-" + tt.name
+			res := app.processMemorySubmit(parsed, 6, time.Unix(6, 0))
+			require.Equal(t, uint32(0), res.Code, "submit failed: %s", res.Log)
+
+			domain, err := app.badgerStore.GetMemoryDomain(parsed.MemorySubmit.MemoryID)
+			require.NoError(t, err)
+			assert.Equal(t, "hr", domain)
+		})
+	}
+}
+
 // TestAppV16_ProposeValidatesRepairPayload guards the processGovPropose op==6
 // payload validation. Without it, an admin could create a repair proposal with an
 // empty/malformed payload, 2/3 could approve, and applyMemoryDomainRepair would

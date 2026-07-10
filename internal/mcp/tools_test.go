@@ -92,6 +92,15 @@ func mockSageAPI(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("/v1/memory/{id}/reinstate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Memory reinstated.",
+			"tx_hash": "reinstate-tx-789",
+			"status":  "committed",
+		})
+	})
+
 	mux.HandleFunc("/v1/memory/", func(w http.ResponseWriter, r *http.Request) {
 		// Handles /v1/memory/{id}/challenge
 		w.Header().Set("Content-Type", "application/json")
@@ -245,6 +254,35 @@ func TestSageForget_MissingID(t *testing.T) {
 	s := NewServer("http://localhost:9999", priv)
 
 	_, err := s.toolForget(context.Background(), map[string]any{})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "memory_id is required")
+}
+
+func TestSageReinstate(t *testing.T) {
+	ts := mockSageAPI(t)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolReinstate(context.Background(), map[string]any{
+		"memory_id": "mem-123",
+		"reason":    "challenge withdrawn",
+	})
+	require.NoError(t, err)
+
+	m := result.(map[string]any)
+	assert.Equal(t, "mem-123", m["memory_id"])
+	assert.Equal(t, "committed", m["status"])
+	assert.Equal(t, "challenge withdrawn", m["reason"])
+	assert.Equal(t, "reinstate-tx-789", m["tx_hash"])
+}
+
+func TestSageReinstate_MissingID(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer("http://localhost:9999", priv)
+
+	_, err := s.toolReinstate(context.Background(), map[string]any{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "memory_id is required")
 }

@@ -93,6 +93,7 @@ When using `sage_remember`:
 | `sage_recall` | Retrieve memories by topic and/or domain. |
 | `sage_reflect` | After tasks, store dos and don'ts. Both make you better. |
 | `sage_forget` | Deprecate a memory by ID. |
+| `sage_reinstate` | Withdraw or resolve an app-v17 two-phase challenge. |
 | `sage_list` | List memories with filters (domain, type, status). |
 | `sage_timeline` | View memory activity over time. |
 | `sage_status` | Check brain health — memory counts, domains, last activity. |

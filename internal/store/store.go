@@ -118,16 +118,26 @@ func recordIDs(recs []*memory.MemoryRecord) []string {
 	return ids
 }
 
+// DisputedConfidenceHaircut is the off-chain multiplier applied to an app-v17
+// challenged memory during recall. Keeping it in the store package gives the
+// admission floor and REST serialization one shared value, so min_confidence can
+// never admit a record and then report it below the requested floor. At 0.8 a
+// high-confidence fact remains discoverable under the default 0.70 recall floor,
+// while the explicit disputed flag and score reduction still down-rank it.
+const DisputedConfidenceHaircut = 0.8
+
 // applyDecayFloor drops records whose task-aware decayed confidence
 // (memory.ComputeConfidenceForRecord — time decay + corroboration boost, with open
-// tasks exempt from decay) is below floor, preserving input order. counts must map
-// every record's ID to its corroboration count (batch-fetched by the caller so the
-// boost is included). A zero/negative floor or empty input returns recs unchanged;
-// now defaults to time.Now() when zero. The filter runs in place over recs' backing
+// tasks exempt from decay) is below floor, preserving input order. When
+// includeDisputed is true, challenged rows are compared using the same disputed
+// haircut REST applies to the serialized confidence_score. counts must map every
+// record's ID to its corroboration count (batch-fetched by the caller so the boost
+// is included). A zero/negative floor or empty input returns recs unchanged; now
+// defaults to time.Now() when zero. The filter runs in place over recs' backing
 // array, so callers must use the returned slice. Because it is reached only when a
 // caller sets a positive floor (REST/federation recall, never consensus tx paths),
 // the wall-clock default never executes during deterministic block execution.
-func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, counts map[string]int) []*memory.MemoryRecord {
+func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, counts map[string]int, includeDisputed bool) []*memory.MemoryRecord {
 	if floor <= 0 || len(recs) == 0 {
 		return recs
 	}
@@ -136,7 +146,11 @@ func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, 
 	}
 	out := recs[:0]
 	for _, r := range recs {
-		if memory.ComputeConfidenceForRecord(r, now, counts[r.MemoryID]) >= floor {
+		confidence := memory.ComputeConfidenceForRecord(r, now, counts[r.MemoryID])
+		if includeDisputed && r.Status == memory.StatusChallenged {
+			confidence *= DisputedConfidenceHaircut
+		}
+		if confidence >= floor {
 			out = append(out, r)
 		}
 	}

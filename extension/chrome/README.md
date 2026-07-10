@@ -83,6 +83,7 @@ background.js (Ed25519 signing + REST API calls)
 | `sage_recall` | Semantic memory search |
 | `sage_remember` | Store a new memory |
 | `sage_forget` | Deprecate a memory |
+| `sage_reinstate` | Withdraw or resolve an open challenge |
 | `sage_reflect` | Post-task dos and don'ts |
 | `sage_status` | Memory statistics |
 | `sage_list` | Browse memories with filters |

@@ -67,9 +67,156 @@ function HelpTip({ text, align }) {
     return html`<span class="help-tip"
         onMouseEnter=${() => setShow(true)} onMouseLeave=${() => setShow(false)}
         onFocus=${() => setShow(true)} onBlur=${() => setShow(false)}>
-        <span class="help-tip-trigger" tabIndex="0">?</span>
+        <span class="help-tip-trigger" tabIndex="0" role="button" aria-label="More information">?</span>
         ${show && html`<span class="help-tip-popup ${align ? 'align-' + align : ''}">${text}</span>`}
     </span>`;
+}
+
+// SmartTooltipLayer upgrades every existing `title` and every richer
+// `data-tooltip` annotation into one consistent, instant, keyboard-accessible
+// tooltip. Event delegation keeps the 11k-line dashboard maintainable: newly
+// rendered controls automatically inherit the treatment without one component
+// and one state hook per button. Native titles remain the no-JS / tooltips-off
+// fallback; while enabled we move them to data-sage-native-title before the
+// browser's delayed yellow tooltip can appear.
+function SmartTooltipLayer() {
+    const enabled = useTooltips();
+    const [tip, setTip] = useState(null);
+    const timerRef = useRef(null);
+    const activeRef = useRef(null);
+
+    useEffect(() => {
+        const selector = '[data-tooltip], [data-sage-native-title], [title], button[aria-label], [role="button"][aria-label], .detail-close, .toast-close';
+        const clearTimer = () => {
+            if (timerRef.current) clearTimeout(timerRef.current);
+            timerRef.current = null;
+        };
+        const hide = () => {
+            clearTimer();
+            activeRef.current = null;
+            setTip(null);
+        };
+        if (!enabled) {
+            document.querySelectorAll('[data-sage-native-title]').forEach((el) => {
+                if (!el.hasAttribute('title')) el.setAttribute('title', el.getAttribute('data-sage-native-title') || '');
+                el.removeAttribute('data-sage-native-title');
+            });
+            hide();
+            return undefined;
+        }
+
+        const tooltipTarget = (node) => {
+            const el = node && node.closest ? node.closest(selector) : null;
+            // HelpTip already renders its own contextual popup. Letting the
+            // delegated layer also consume its aria-label would show two
+            // overlapping tooltips for the same question-mark control.
+            return el && !el.classList.contains('help-tip-trigger') ? el : null;
+        };
+        const copyFor = (el) => {
+            const native = el.getAttribute('title');
+            if (native) {
+                el.setAttribute('data-sage-native-title', native);
+                el.removeAttribute('title');
+            }
+            let fallback = '';
+            if (el.classList.contains('detail-close')) fallback = 'Close this panel';
+            else if (el.classList.contains('toast-close')) fallback = 'Dismiss notification';
+            return {
+                title: el.getAttribute('data-tooltip-title') || '',
+                text: el.getAttribute('data-tooltip') || el.getAttribute('data-sage-native-title') || el.getAttribute('aria-label') || fallback,
+            };
+        };
+        const schedule = (el, immediate) => {
+            if (!el || el.hasAttribute('disabled')) return;
+            const copy = copyFor(el);
+            if (!copy.text && !copy.title) return;
+            clearTimer();
+            activeRef.current = el;
+            const rect = el.getBoundingClientRect();
+            let placement = el.getAttribute('data-tooltip-placement') || '';
+            if (!placement) {
+                if (rect.left < 88) placement = 'right';
+                else if (window.innerWidth - rect.right < 160) placement = 'left';
+                else if (rect.top > 110) placement = 'top';
+                else placement = 'bottom';
+            }
+            timerRef.current = setTimeout(() => {
+                if (activeRef.current !== el) return;
+                setTip({ ...copy, rect, placement });
+            }, immediate ? 40 : 220);
+        };
+        const onMouseOver = (e) => {
+            const el = tooltipTarget(e.target);
+            if (!el || el === activeRef.current) return;
+            schedule(el, false);
+        };
+        const onMouseOut = (e) => {
+            const active = activeRef.current;
+            if (!active) return;
+            if (e.relatedTarget && active.contains(e.relatedTarget)) return;
+            hide();
+        };
+        const onFocusIn = (e) => schedule(tooltipTarget(e.target), true);
+        const onFocusOut = (e) => {
+            const active = activeRef.current;
+            if (!active || (e.relatedTarget && active.contains(e.relatedTarget))) return;
+            hide();
+        };
+        const onKeyDown = (e) => { if (e.key === 'Escape') hide(); };
+
+        document.addEventListener('mouseover', onMouseOver);
+        document.addEventListener('mouseout', onMouseOut);
+        document.addEventListener('focusin', onFocusIn);
+        document.addEventListener('focusout', onFocusOut);
+        document.addEventListener('pointerdown', hide, true);
+        document.addEventListener('keydown', onKeyDown);
+        window.addEventListener('scroll', hide, true);
+        window.addEventListener('resize', hide);
+        return () => {
+            clearTimer();
+            document.removeEventListener('mouseover', onMouseOver);
+            document.removeEventListener('mouseout', onMouseOut);
+            document.removeEventListener('focusin', onFocusIn);
+            document.removeEventListener('focusout', onFocusOut);
+            document.removeEventListener('pointerdown', hide, true);
+            document.removeEventListener('keydown', onKeyDown);
+            window.removeEventListener('scroll', hide, true);
+            window.removeEventListener('resize', hide);
+        };
+    }, [enabled]);
+
+    if (!enabled || !tip) return null;
+    const gap = 12;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const cx = tip.rect.left + tip.rect.width / 2;
+    const cy = tip.rect.top + tip.rect.height / 2;
+    let placement = tip.placement;
+    if (placement === 'right' && tip.rect.right + 320 > vw) placement = 'left';
+    if (placement === 'left' && tip.rect.left < 320) placement = 'right';
+    if (placement === 'top' && tip.rect.top < 100) placement = 'bottom';
+    if (placement === 'bottom' && vh - tip.rect.bottom < 100) placement = 'top';
+    const halfTooltip = Math.min(150, Math.max(0, (vw - 32) / 2));
+    let left = vw > 32 ? Math.max(16 + halfTooltip, Math.min(vw - 16 - halfTooltip, cx)) : vw / 2;
+    let top = tip.rect.top - gap;
+    let transform = 'translate(-50%, -100%)';
+    if (placement === 'bottom') {
+        top = tip.rect.bottom + gap;
+        transform = 'translate(-50%, 0)';
+    } else if (placement === 'right') {
+        left = tip.rect.right + gap;
+        top = Math.max(16, Math.min(vh - 16, cy));
+        transform = 'translate(0, -50%)';
+    } else if (placement === 'left') {
+        left = tip.rect.left - gap;
+        top = Math.max(16, Math.min(vh - 16, cy));
+        transform = 'translate(-100%, -50%)';
+    }
+    return html`<div class="smart-tooltip smart-tooltip-${placement}" role="tooltip"
+        style=${`left:${left}px;top:${top}px;transform:${transform};`}>
+        ${tip.title && html`<div class="smart-tooltip-title">${tip.title}</div>`}
+        ${tip.text && html`<div class="smart-tooltip-copy">${tip.text}</div>`}
+    </div>`;
 }
 
 // statusDot — the small green/grey liveness dot used across status rows.
@@ -4891,12 +5038,12 @@ function SettingsPage({ onRunSetup }) {
     };
 
     const tabs = [
-        { id: 'overview', label: 'Overview', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M4 4h3v3H4zM9 4h3v3H9zM4 9h3v3H4zM9 9h3v3H9z" fill="currentColor" opacity="0.8"/><path d="M2 2h12v12H2z" stroke="currentColor" fill="none" stroke-width="1.5" rx="2"/></svg>` },
-        { id: 'connection', label: 'Connection', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M6 10l4-4M6.5 4.5l1-1a2.5 2.5 0 013.5 3.5l-1 1M9.5 11.5l-1 1a2.5 2.5 0 01-3.5-3.5l1-1" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
-        { id: 'recall', label: 'Recall', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>` },
-        { id: 'security', label: 'Security', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1L2 4v4c0 4 3 6 6 7 3-1 6-3 6-7V4L8 1z" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>` },
-        { id: 'maintenance', label: 'Maintenance', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2a3 3 0 00-3 3.9L3 11v2h2l5.1-5A3 3 0 1011 2z" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linejoin="round"/></svg>` },
-        { id: 'updates', label: 'Updates', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/><path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
+        { id: 'overview', label: 'Overview', help: 'Live chain health, memory totals, peers, agents, and runtime status.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M4 4h3v3H4zM9 4h3v3H9zM4 9h3v3H4zM9 9h3v3H9z" fill="currentColor" opacity="0.8"/><path d="M2 2h12v12H2z" stroke="currentColor" fill="none" stroke-width="1.5" rx="2"/></svg>` },
+        { id: 'connection', label: 'Connection', help: 'Addresses and MCP configuration used by AI clients to reach this node.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M6 10l4-4M6.5 4.5l1-1a2.5 2.5 0 013.5 3.5l-1 1M9.5 11.5l-1 1a2.5 2.5 0 01-3.5-3.5l1-1" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
+        { id: 'recall', label: 'Recall', help: 'Semantic embedding, reranking, recall depth, confidence floor, and agent boot instructions.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>` },
+        { id: 'security', label: 'Security', help: 'Encrypt the Synaptic Ledger and manage its passphrase and recovery key.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1L2 4v4c0 4 3 6 6 7 3-1 6-3 6-7V4L8 1z" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>` },
+        { id: 'maintenance', label: 'Maintenance', help: 'Preview cleanup, export backups, restart the node, rerun setup, and change preferences.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2a3 3 0 00-3 3.9L3 11v2h2l5.1-5A3 3 0 1011 2z" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linejoin="round"/></svg>` },
+        { id: 'updates', label: 'Updates', help: 'Check, install, and inspect SAGE software releases and build information.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/><path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
     ];
 
     return html`
@@ -4905,7 +5052,7 @@ function SettingsPage({ onRunSetup }) {
             <div class="settings-tabs">
                 ${tabs.map(t => html`
                     <button class="settings-tab ${settingsTab === t.id ? 'active' : ''}"
-                            onClick=${() => setSettingsTab(t.id)}>
+                            onClick=${() => setSettingsTab(t.id)} data-tooltip-title=${t.label} data-tooltip=${t.help}>
                         ${t.icon}
                         <span>${t.label}</span>
                         ${t.id === 'updates' && updateAvailable ? html`<span class="update-badge" title="Update available"></span>` : ''}
@@ -10159,7 +10306,9 @@ function App() {
     const openHelp = (section) => { setHelpSection(section || null); setShowHelp(true); };
     window.__sageOpenHelp = openHelp;
     const [tooltipsEnabled, setTooltipsEnabled] = useState(() => {
-        try { return localStorage.getItem('sage-tooltips') === '1'; } catch (e) { return false; }
+        // Tooltips are a discoverability aid, so new installs start with them
+        // on. An explicit saved "0" remains respected.
+        try { return localStorage.getItem('sage-tooltips') !== '0'; } catch (e) { return true; }
     });
     const sseRef = useRef(null);
     const [textSize, setTextSize] = useState(() => {
@@ -10362,37 +10511,47 @@ function App() {
     }
 
     return html`<${TooltipsContext.Provider} value=${tooltipsEnabled}>
+        <${SmartTooltipLayer} />
         <${ToastContainer} />
         <${ReembedBanner} />
         ${showOnboarding && html`<${OnboardingWizard} onClose=${() => setShowOnboarding(false)} onNavigate=${navigate} onOpenGuide=${openHelp} />`}
         <div class="sidebar">
-            <div class="sidebar-logo">S</div>
-            <button class="sidebar-btn ${page === 'overview' ? 'active' : ''}" onClick=${() => navigate('overview')} title="Overview - node control board" aria-label="Overview - node control board">
+            <div class="sidebar-logo" data-tooltip-title="SAGE" data-tooltip="Your sovereign, consensus-governed memory node." data-tooltip-placement="right">S</div>
+            <button class="sidebar-btn ${page === 'overview' ? 'active' : ''}" onClick=${() => navigate('overview')} title="Overview - node control board" aria-label="Overview - node control board"
+                data-tooltip-title="Overview" data-tooltip="See node health, consensus progress, local agents, federation links, and the memory engine at a glance." data-tooltip-placement="right">
                 ${icons.overview}
             </button>
-            <button class="sidebar-btn ${page === 'brain' ? 'active' : ''}" onClick=${() => navigate('brain')} title="Cerebrum - your brain home" aria-label="Cerebrum - your brain home">
+            <button class="sidebar-btn ${page === 'brain' ? 'active' : ''}" onClick=${() => navigate('brain')} title="Cerebrum - your brain home" aria-label="Cerebrum - your brain home"
+                data-tooltip-title="CEREBRUM" data-tooltip="Explore your memories as a living 3D brain. Select a memory to inspect its content and relationships." data-tooltip-placement="right">
                 ${icons.brain}
             </button>
-            <button class="sidebar-btn ${page === 'search' ? 'active' : ''}" onClick=${() => navigate('search')} title="Search - find memories" aria-label="Search - find memories">
+            <button class="sidebar-btn ${page === 'search' ? 'active' : ''}" onClick=${() => navigate('search')} title="Search - find memories" aria-label="Search - find memories"
+                data-tooltip-title="Search" data-tooltip="Find, filter, inspect, tag, transfer, or forget memories across the whole node." data-tooltip-placement="right">
                 ${icons.search}
             </button>
-            <button class="sidebar-btn ${page === 'tasks' ? 'active' : ''}" onClick=${() => navigate('tasks')} title="Tasks - task board + agent messages" aria-label="Tasks - task board + agent messages">
+            <button class="sidebar-btn ${page === 'tasks' ? 'active' : ''}" onClick=${() => navigate('tasks')} title="Tasks - task board + agent messages" aria-label="Tasks - task board + agent messages"
+                data-tooltip-title="Tasks & messages" data-tooltip="Track work through the task board and send or monitor local agent-to-agent pipeline messages." data-tooltip-placement="right">
                 ${icons.tasks}
             </button>
-            <button class="sidebar-btn ${page === 'import' ? 'active' : ''}" onClick=${() => navigate('import')} title="Import - ingest conversation exports" aria-label="Import - ingest conversation exports">
+            <button class="sidebar-btn ${page === 'import' ? 'active' : ''}" onClick=${() => navigate('import')} title="Import - ingest conversation exports" aria-label="Import - ingest conversation exports"
+                data-tooltip-title="Import" data-tooltip="Bring in ChatGPT, Claude, Gemini, JSONL backups, and other conversation exports as structured memories." data-tooltip-placement="right">
                 ${icons.import}
             </button>
-            <button class="sidebar-btn ${page === 'network' ? 'active' : ''}" onClick=${() => navigate('network')} title="Agents - your agents, RBAC and validator quorum" aria-label="Agents - your agents, RBAC and validator quorum">
+            <button class="sidebar-btn ${page === 'network' ? 'active' : ''}" onClick=${() => navigate('network')} title="Agents - your agents, RBAC and validator quorum" aria-label="Agents - your agents, RBAC and validator quorum"
+                data-tooltip-title="Agents" data-tooltip="Manage the AI identities on this node: roles, domain permissions, keys, activity, and validator participation." data-tooltip-placement="right">
                 ${icons.network}
             </button>
-            <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Federation - connect your whole node to another SAGE" aria-label="Federation - connect your whole node to another SAGE">
+            <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Federation - connect your whole node to another SAGE" aria-label="Federation - connect your whole node to another SAGE"
+                data-tooltip-title="Federation" data-tooltip="Connect this entire SAGE brain to another independent node with human-verified trust, scoped domains, and revocable access." data-tooltip-placement="right">
                 ${icons.federation}
             </button>
-            <button class="sidebar-btn ${page === 'settings' ? 'active' : ''}" onClick=${() => navigate('settings')} title="Settings - node configuration" aria-label="Settings - node configuration">
+            <button class="sidebar-btn ${page === 'settings' ? 'active' : ''}" onClick=${() => navigate('settings')} title="Settings - node configuration" aria-label="Settings - node configuration"
+                data-tooltip-title="Settings" data-tooltip="Configure connections, semantic recall, encryption, maintenance, backups, updates, and accessibility preferences." data-tooltip-placement="right">
                 ${icons.settings}
             </button>
             <div style="flex:1;"></div>
-            <button class="sidebar-btn" onClick=${() => openHelp(null)} title="Help - open the CEREBRUM guide" aria-label="Help - open the CEREBRUM guide">
+            <button class="sidebar-btn" onClick=${() => openHelp(null)} title="Help - open the CEREBRUM guide" aria-label="Help - open the CEREBRUM guide"
+                data-tooltip-title="Help" data-tooltip="Open the built-in guide for setup, memories, agents, security, federation, and troubleshooting." data-tooltip-placement="right">
                 ${icons.help}
             </button>
         </div>

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 8.1.1
+  version: 11.5.0
   description: >-
     (Sovereign) Agent Governed Experience — REST API for memory submission,
     validation, and query.
@@ -36,6 +36,9 @@ components:
         **X-Agent-ID** (hex-encoded public key), **X-Signature** (Ed25519
         signature of the canonical request payload), and **X-Timestamp** (unix
         epoch seconds). All three must be present on authenticated endpoints.
+        Current clients should also send **X-Nonce**. After app-v17 activation,
+        consensus binds delegated REST proofs to the exact canonical request,
+        enforces the timestamp against block time, and consumes each proof once.
 
   # -----------------------------------------------------------------------
   # Parameters
@@ -556,6 +559,29 @@ components:
           type: string
         tx_hash:
           type: string
+
+    ReinstateRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Optional audit note explaining why the challenge is being withdrawn or resolved.
+
+    ReinstateResponse:
+      type: object
+      required:
+        - message
+        - tx_hash
+        - status
+      properties:
+        message:
+          type: string
+        tx_hash:
+          type: string
+        status:
+          type: string
+          enum:
+            - committed
 
     VoteRequest:
       type: object
@@ -1877,6 +1903,40 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/memory/{memory_id}/reinstate:
+    post:
+      operationId: reinstateMemory
+      summary: Return an app-v17 two-phase-challenged memory to committed.
+      tags:
+        - Memory
+      parameters:
+        - $ref: "#/components/parameters/memoryId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReinstateRequest"
+      responses:
+        "200":
+          description: Memory reinstated after consensus commit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReinstateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
 

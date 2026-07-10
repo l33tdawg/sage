@@ -63,6 +63,31 @@ func TestMigrateDisputedOnExistingDB(t *testing.T) {
 	assert.Equal(t, int64(0), h)
 }
 
+// TestMigrateDisputedRepairsPartialMigration covers a crash between SQLite's
+// two ALTER TABLE statements. Seeing disputed_height must not cause the
+// migration to skip a still-missing disputed_quorum column.
+func TestMigrateDisputedRepairsPartialMigration(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	_, err := s.writeExecContext(ctx, `ALTER TABLE memories DROP COLUMN disputed_quorum`)
+	require.NoError(t, err)
+
+	var heightCount, quorumCount int
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='disputed_height'`).Scan(&heightCount))
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='disputed_quorum'`).Scan(&quorumCount))
+	require.Equal(t, 1, heightCount)
+	require.Equal(t, 0, quorumCount)
+
+	s.migrateDisputed(ctx)
+
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='disputed_quorum'`).Scan(&quorumCount))
+	assert.Equal(t, 1, quorumCount)
+}
+
 // TestMarkDisputedPersistsMetadata verifies the park mirror write records status
 // 'challenged' plus the challenge-execution height and measured quorum (C-D3),
 // without stamping committed_at/deprecated_at.
@@ -87,6 +112,27 @@ func TestMarkDisputedPersistsMetadata(t *testing.T) {
 		`SELECT committed_at, deprecated_at FROM memories WHERE memory_id = ?`, "m1").
 		Scan(&committedAt, &deprecatedAt))
 	assert.Nil(t, deprecatedAt)
+}
+
+// TestResolvedDisputeClearsMetadata prevents stale quorum/height values from
+// leaking into later UI/API work after either terminal resolution.
+func TestResolvedDisputeClearsMetadata(t *testing.T) {
+	for _, status := range []memory.MemoryStatus{memory.StatusCommitted, memory.StatusDeprecated} {
+		t.Run(string(status), func(t *testing.T) {
+			s := newTestStore(t)
+			ctx := context.Background()
+			rec := testMemory("m1", "agentA", "disputed content here", "general")
+			rec.Status = memory.StatusCommitted
+			require.NoError(t, s.InsertMemory(ctx, rec))
+			require.NoError(t, s.MarkDisputed(ctx, "m1", 4242, 3, time.Now().UTC()))
+
+			require.NoError(t, s.UpdateStatus(ctx, "m1", status, time.Now().UTC()))
+			gotStatus, height, quorum := challengedCols(t, s, "m1")
+			assert.Equal(t, string(status), gotStatus)
+			assert.Zero(t, height)
+			assert.Zero(t, quorum)
+		})
+	}
 }
 
 // TestResolveChallengedMemoriesScoping is the core boot-sweep safety test: the
@@ -167,4 +213,15 @@ func TestRecallAdmitsDisputedRows(t *testing.T) {
 	simDisp, err := s.QuerySimilar(ctx, emb, QueryOptions{StatusFilter: "committed", IncludeDisputed: true, TopK: 10})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"c1", "d1"}, recordIDs(simDisp))
+
+	// The decayed floor uses the same disputed haircut as REST serialization.
+	// Both rows start at 0.85, but d1's effective 0.68 falls below a 0.70 floor;
+	// returning it would violate min_confidence's "filter what you report"
+	// contract after the serializer applies the haircut.
+	floored, err := s.QuerySimilar(ctx, emb, QueryOptions{
+		StatusFilter: "committed", IncludeDisputed: true, DecayFloor: 0.70,
+		DecayNow: time.Now().UTC(), TopK: 10,
+	})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"c1"}, recordIDs(floored))
 }

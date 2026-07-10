@@ -65,6 +65,19 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolForget,
 		},
+		"sage_reinstate": {
+			Name:        "sage_reinstate",
+			Description: "Withdraw or resolve an open two-phase challenge and return the memory to committed. Requires app-v17 activation; the original challenger may always withdraw, while other callers need the domain modify verb.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"memory_id": map[string]any{"type": "string", "description": "The challenged memory ID to reinstate"},
+					"reason":    map[string]any{"type": "string", "description": "Optional audit note explaining the reinstatement"},
+				},
+				"required": []string{"memory_id"},
+			},
+			Handler: s.toolReinstate,
+		},
 		"sage_list": {
 			Name:        "sage_list",
 			Description: "Browse memories with filters. Use this to see what memories exist in a domain, with a specific status, or tagged with a label.",
@@ -777,6 +790,33 @@ func (s *Server) toolForget(ctx context.Context, params map[string]any) (any, er
 		"memory_id": memoryID,
 		"status":    "challenged",
 		"reason":    reason,
+	}, nil
+}
+
+func (s *Server) toolReinstate(ctx context.Context, params map[string]any) (any, error) {
+	memoryID, _ := params["memory_id"].(string)
+	if memoryID == "" {
+		return nil, fmt.Errorf("memory_id is required")
+	}
+	reason := stringParam(params, "reason", "")
+	body, _ := json.Marshal(map[string]string{"reason": reason})
+	path := fmt.Sprintf("/v1/memory/%s/reinstate", url.PathEscape(memoryID))
+	var resp struct {
+		TxHash string `json:"tx_hash"`
+		Status string `json:"status"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", path, body, &resp); err != nil {
+		return nil, fmt.Errorf("reinstate memory: %w", err)
+	}
+	status := resp.Status
+	if status == "" {
+		status = "committed"
+	}
+	return map[string]any{
+		"memory_id": memoryID,
+		"status":    status,
+		"reason":    reason,
+		"tx_hash":   resp.TxHash,
 	}, nil
 }
 

@@ -2,8 +2,12 @@ package store
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,6 +93,55 @@ func TestPipelineQuotaPerAgent(t *testing.T) {
 	require.NoError(t, s.ClaimPipeline(ctx, "pipe-alice-0", "agent-bob"))
 	require.NoError(t, s.CompletePipeline(ctx, "pipe-alice-0", "agent-bob", "done", "journal-z"))
 	require.NoError(t, insert("agent-alice", "pipe-alice-refill"))
+}
+
+// TestPipelineQuotaPerAgentConcurrent proves the quota check and INSERT are one
+// serialized operation. Without that critical section, a parallel burst can
+// have every request observe a below-cap count and all enqueue successfully.
+func TestPipelineQuotaPerAgentConcurrent(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "pipes.db"))
+	require.NoError(t, err)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	var succeeded, quotaRejected, unexpected atomic.Int64
+	var wg sync.WaitGroup
+	const burstExtra = 64
+	for i := 0; i < MaxOpenPipesPerAgent+burstExtra; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			err := s.InsertPipeline(ctx, &PipelineMessage{
+				PipeID:    "pipe-concurrent-" + strconv.Itoa(i),
+				FromAgent: "agent-alice",
+				ToAgent:   "agent-bob",
+				Intent:    "task",
+				Payload:   "work",
+				Status:    "pending",
+				CreatedAt: now,
+				ExpiresAt: now.Add(time.Hour),
+			})
+			switch {
+			case err == nil:
+				succeeded.Add(1)
+			case errors.Is(err, ErrPipeQuotaPerAgent):
+				quotaRejected.Add(1)
+			default:
+				unexpected.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(MaxOpenPipesPerAgent), succeeded.Load())
+	assert.Equal(t, int64(burstExtra), quotaRejected.Load())
+	assert.Zero(t, unexpected.Load())
+	var open int
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pipeline_messages WHERE from_agent = ? AND status IN ('pending','claimed')`,
+		"agent-alice").Scan(&open))
+	assert.Equal(t, MaxOpenPipesPerAgent, open)
 }
 
 // TestPipelineStaleExpiry verifies ExpireStalePipelines force-expires an old

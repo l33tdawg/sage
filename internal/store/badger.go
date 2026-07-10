@@ -21,6 +21,13 @@ import (
 // already has a non-empty owner. Use TransferDomain for authorized ownership changes.
 var ErrDomainAlreadyRegistered = errors.New("domain already registered")
 
+// ErrAgentProofReplayed is returned when a delegated app-v17 agent proof has
+// already been consumed. The marker is consensus state, not the REST process's
+// in-memory replay cache, so a Byzantine proposer cannot bypass it.
+var ErrAgentProofReplayed = errors.New("agent proof already consumed")
+
+var agentProofPrefix = []byte("agentproof:")
+
 // BadgerStore manages on-chain state in BadgerDB.
 type BadgerStore struct {
 	db *badger.DB
@@ -86,6 +93,92 @@ func nonceKey(agentID string) []byte {
 	return []byte("nonce:" + agentID)
 }
 
+func agentProofKey(fingerprint []byte, expiresAt int64) []byte {
+	key := make([]byte, 0, len(agentProofPrefix)+8+len(fingerprint))
+	key = append(key, agentProofPrefix...)
+	var expiry [8]byte
+	// Flip the sign bit so signed unix timestamps retain numeric order under
+	// Badger's unsigned lexicographic key ordering.
+	binary.BigEndian.PutUint64(expiry[:], uint64(expiresAt)^(uint64(1)<<63)) // #nosec G115 -- preserve signed bits
+	key = append(key, expiry[:]...)
+	return append(key, fingerprint...)
+}
+
+func agentProofKeyExpiry(key []byte) (int64, error) {
+	if len(key) != len(agentProofPrefix)+8+sha256.Size || !bytes.HasPrefix(key, agentProofPrefix) {
+		return 0, fmt.Errorf("invalid agent proof marker key")
+	}
+	sortable := binary.BigEndian.Uint64(key[len(agentProofPrefix) : len(agentProofPrefix)+8])
+	return int64(sortable ^ (uint64(1) << 63)), nil // #nosec G115 -- reverse the sign-bit transform
+}
+
+// HasAgentProof reports whether a delegated proof fingerprint is still live at
+// consensusTime. It is read-only and intended for advisory CheckTx rejection;
+// ClaimAgentProof is the authoritative atomic consensus operation.
+func (s *BadgerStore) HasAgentProof(fingerprint []byte, consensusTime time.Time, expiresAt int64) (bool, error) {
+	if len(fingerprint) != sha256.Size {
+		return false, fmt.Errorf("invalid agent proof fingerprint length: %d", len(fingerprint))
+	}
+	if expiresAt < consensusTime.Unix() {
+		return false, nil
+	}
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get(agentProofKey(fingerprint, expiresAt))
+		return err
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ClaimAgentProof atomically prunes expired delegated-proof markers, rejects a
+// live duplicate, and stores this proof through expiresAt. Both times must come
+// from the deterministic block/proof data supplied by consensus callers.
+func (s *BadgerStore) ClaimAgentProof(fingerprint []byte, consensusTime time.Time, expiresAt int64) error {
+	if len(fingerprint) != sha256.Size {
+		return fmt.Errorf("invalid agent proof fingerprint length: %d", len(fingerprint))
+	}
+	if expiresAt < consensusTime.Unix() {
+		return fmt.Errorf("agent proof already expired")
+	}
+
+	key := agentProofKey(fingerprint, expiresAt)
+	return s.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = agentProofPrefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			expiry, err := agentProofKeyExpiry(item.Key())
+			if err != nil {
+				return err
+			}
+			if expiry >= consensusTime.Unix() {
+				break // keys are expiry-sorted; every remaining marker is live
+			}
+			if err := txn.Delete(item.KeyCopy(nil)); err != nil {
+				return err
+			}
+		}
+
+		if _, err := txn.Get(key); err == nil {
+			return ErrAgentProofReplayed
+		} else if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+
+		return txn.Set(key, []byte{1})
+	})
+}
+
 // stateKey returns the BadgerDB key for app state.
 func stateKey(key string) []byte {
 	return []byte("state:" + key)
@@ -122,13 +215,18 @@ type MemoryHashEntry struct {
 // SetMemoryHash stores or updates a memory's on-chain hash and status.
 func (s *BadgerStore) SetMemoryHash(memoryID string, contentHash []byte, status string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
-		// Encode: contentHash length (4 bytes) + contentHash + status bytes
-		val := make([]byte, 4+len(contentHash)+len(status))
-		binary.BigEndian.PutUint32(val[:4], uint32(len(contentHash))) // #nosec G115 -- content hash length fits in uint32
-		copy(val[4:4+len(contentHash)], contentHash)
-		copy(val[4+len(contentHash):], status)
-		return txn.Set(memoryKey(memoryID), val)
+		return txn.Set(memoryKey(memoryID), encodeMemoryHashEntry(contentHash, status))
 	})
+}
+
+// encodeMemoryHashEntry encodes the value stored under memory:<id>.
+func encodeMemoryHashEntry(contentHash []byte, status string) []byte {
+	// Encode: contentHash length (4 bytes) + contentHash + status bytes.
+	val := make([]byte, 4+len(contentHash)+len(status))
+	binary.BigEndian.PutUint32(val[:4], uint32(len(contentHash))) // #nosec G115 -- content hash length fits in uint32
+	copy(val[4:4+len(contentHash)], contentHash)
+	copy(val[4+len(contentHash):], status)
+	return val
 }
 
 // GetMemoryHash retrieves a memory's on-chain hash and status.
@@ -654,8 +752,9 @@ func memoryDomainKey(memoryID string) []byte {
 	return []byte("memdomain:" + memoryID)
 }
 
-// SetMemoryDomain records a memory's domain tag on-chain. Caller gates on
-// postV8_4Fork so pre-fork blocks never write this key (byte-identical replay).
+// SetMemoryDomain records a memory's domain tag on-chain. The caller gates the
+// write on post-v8.4 or post-app-v16 rules so older blocks never gain this key
+// during replay.
 func (s *BadgerStore) SetMemoryDomain(memoryID, domain string) error {
 	return s.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(memoryDomainKey(memoryID), []byte(domain))
@@ -2060,6 +2159,11 @@ func challengeStateKey(memoryID string) string { return "challenge:" + memoryID 
 // Encoding: challengerID(len) + domain(len) + executionHeight(8) +
 // quorumCount(4) + priorHash(len) + priorStatus(len), all big-endian.
 func (s *BadgerStore) SetChallengeRecord(memoryID string, rec *ChallengeRecord) error {
+	val := encodeChallengeRecord(rec)
+	return s.SetState(challengeStateKey(memoryID), val)
+}
+
+func encodeChallengeRecord(rec *ChallengeRecord) []byte {
 	size := 4 + len(rec.ChallengerID) + 4 + len(rec.Domain) + 8 + 4 + 4 + len(rec.PriorHash) + 4 + len(rec.PriorStatus)
 	val := make([]byte, size)
 	off := encodeString(val, 0, rec.ChallengerID)
@@ -2073,7 +2177,39 @@ func (s *BadgerStore) SetChallengeRecord(memoryID string, rec *ChallengeRecord) 
 	copy(val[off:off+len(rec.PriorHash)], rec.PriorHash)
 	off += len(rec.PriorHash)
 	encodeString(val, off, rec.PriorStatus)
-	return s.SetState(challengeStateKey(memoryID), val)
+	return val
+}
+
+// OpenChallenge atomically changes memory:<id> to the challenged state and
+// writes its AppHash-folded open-challenge record. Keeping both keys in one
+// Badger transaction prevents a write failure from producing a challenged
+// memory with no restoration record.
+func (s *BadgerStore) OpenChallenge(memoryID string, contentHash []byte, status string, rec *ChallengeRecord) error {
+	if rec == nil {
+		return errors.New("challenge record is required")
+	}
+	memVal := encodeMemoryHashEntry(contentHash, status)
+	recVal := encodeChallengeRecord(rec)
+	return s.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(memoryKey(memoryID), memVal); err != nil {
+			return err
+		}
+		return txn.Set(stateKey(challengeStateKey(memoryID)), recVal)
+	})
+}
+
+// ResolveChallenge atomically updates memory:<id> to its resolved state and
+// removes the AppHash-folded open-challenge record. It is used for both confirm
+// (deprecated) and reinstate (committed), so neither can leave a stale record if
+// the write fails midway.
+func (s *BadgerStore) ResolveChallenge(memoryID string, contentHash []byte, status string) error {
+	memVal := encodeMemoryHashEntry(contentHash, status)
+	return s.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(memoryKey(memoryID), memVal); err != nil {
+			return err
+		}
+		return txn.Delete(stateKey(challengeStateKey(memoryID)))
+	})
 }
 
 // GetChallengeRecord returns the open challenge record for memoryID, or

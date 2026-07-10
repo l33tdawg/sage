@@ -198,6 +198,10 @@ class ForgetRequest(BaseModel):
     reason: str | None = None
 
 
+class ReinstateRequest(BaseModel):
+    reason: str | None = None
+
+
 # --- Agent Models ---
 
 class AgentProfile(BaseModel):

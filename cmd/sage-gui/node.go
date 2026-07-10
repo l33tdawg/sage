@@ -607,6 +607,7 @@ func runServe() (rerr error) {
 	// flip to ancestor-walk access checks once the chain reports a post-fork
 	// height. Advisory only — the consensus path uses app.postV8Fork(height).
 	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
+	restServer.SetPostV17ForNextTxAccessor(app.IsAppV17ActiveForNextTx)
 
 	// v7.1: tell the REST layer which ed25519 public key identifies the local
 	// node operator. Requests signed with this key bypass the cross-agent

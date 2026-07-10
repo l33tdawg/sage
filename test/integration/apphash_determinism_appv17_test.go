@@ -19,7 +19,7 @@ import (
 
 // TestAppHashDeterminism_AppV17Activation is the canonical cross-node gate for the
 // app-v17 fork (v11.5 memory-lifecycle sprint: TxTypeMemoryReinstate + quorum-scaled
-// two-phase challenge + stale-vote cleanup). It drives a real app-v17 activation
+// two-phase challenge + stale-vote cleanup + delegated-proof hardening). It drives a real app-v17 activation
 // across the 4-validator devnet and asserts the AppHash stays byte-identical across
 // the activation seam AND across the new post-fork memory-lifecycle txs — a per-node
 // divergence at either point is the exact production halt symptom (a validator would
@@ -41,6 +41,10 @@ import (
 //     state, so the app-v17 state-transition guard (processMemoryReinstate) rejects
 //     it at execution. broadcast_tx_commit lands it in a block and returns the exec
 //     code, so every validator must exec-reject it identically.
+//   - the real TWO-HOLDER happy path: after a level-3 grant creates a second
+//     modify holder, a fresh challenge parks as CHALLENGED and the original
+//     challenger reinstates it through REST. Both transitions must agree across
+//     all four validators.
 //
 // Requires the 4-validator devnet (deploy/docker-compose.yml + docker-compose.test.yml
 // + the det port-remap override); run via deploy/scripts/run-determinism.sh. Skips
@@ -107,7 +111,9 @@ func TestAppHashDeterminism_AppV17Activation(t *testing.T) {
 	// One-strike challenge (legacy path: sole modify-verb holder ⇒ deprecate; under
 	// C3 this is byte-identical to the pre-fork unilateral deprecate).
 	cRes, cStatus := challengeMemoryTo(t, owner, defaultAPIURL, memoryID, "app-v17 determinism: one-strike challenge")
-	t.Logf("challenge status=%d body=%v", cStatus, cRes)
+	if cStatus != http.StatusOK {
+		t.Fatalf("one-strike challenge: status=%d body=%v", cStatus, cRes)
+	}
 	chalH := readHeight(t, rpcs[0])
 	driveChainPast(t, rpcs[0], chalH+3, 5*time.Minute)
 
@@ -128,6 +134,50 @@ func TestAppHashDeterminism_AppV17Activation(t *testing.T) {
 	}
 	t.Logf("reinstate correctly rejected at execution (tx_result code=%d) — the app-v17 two-phase guard", txCode)
 
+	// Create a second modify holder on the same domain, then prove the actual
+	// two-phase happy path at cluster scope. The grantee need not act: its committed
+	// level-3 grant is enough to make ModifyVerbHolders return two, while the owner
+	// opens and then withdraws the challenge through the public REST endpoint.
+	secondHolder := newTestAgent(t)
+	gRes, gStatus := grantAccessTo(t, owner, defaultAPIURL, secondHolder.agentID, domain, 3)
+	if gStatus != http.StatusCreated {
+		t.Fatalf("grant second modify holder: status=%d body=%v", gStatus, gRes)
+	}
+
+	res2, status2 := submitMemoryTo(t, owner, defaultAPIURL, "app-v17 determinism: two-holder challenge then successful reinstate", domain, "fact", 0.9)
+	if status2 != http.StatusCreated {
+		t.Fatalf("submit two-holder memory: status=%d body=%v", status2, res2)
+	}
+	memoryID2, _ := res2["memory_id"].(string)
+	if memoryID2 == "" {
+		t.Fatalf("submit two-holder memory: no memory_id in response %v", res2)
+	}
+	submitH2 := readHeight(t, rpcs[0])
+	driveChainPast(t, rpcs[0], submitH2+3, 5*time.Minute)
+	committed, committedStatus := getMemory(t, owner, memoryID2)
+	if committedStatus != http.StatusOK || committed["status"] != "committed" {
+		t.Fatalf("two-holder memory did not commit before challenge: status=%d body=%v", committedStatus, committed)
+	}
+
+	cRes2, cStatus2 := challengeMemoryTo(t, owner, defaultAPIURL, memoryID2, "app-v17 determinism: park two-holder dispute")
+	if cStatus2 != http.StatusOK {
+		t.Fatalf("two-holder challenge: status=%d body=%v", cStatus2, cRes2)
+	}
+	parked, parkedStatus := getMemory(t, owner, memoryID2)
+	if parkedStatus != http.StatusOK || parked["status"] != "challenged" {
+		t.Fatalf("two-holder challenge did not park: status=%d body=%v", parkedStatus, parked)
+	}
+
+	rRes2, rStatus2 := reinstateMemoryTo(t, owner, defaultAPIURL, memoryID2, "app-v17 determinism: withdraw two-holder dispute")
+	if rStatus2 != http.StatusOK || rRes2["status"] != "committed" {
+		t.Fatalf("two-holder reinstate: status=%d body=%v", rStatus2, rRes2)
+	}
+	restored, restoredStatus := getMemory(t, owner, memoryID2)
+	if restoredStatus != http.StatusOK || restored["status"] != "committed" {
+		t.Fatalf("reinstated memory not committed: status=%d body=%v", restoredStatus, restored)
+	}
+	t.Logf("two-holder challenge + REST reinstate succeeded for %s", memoryID2)
+
 	// broadcast_tx_commit already waited for the reinstate to commit on node0; drive a
 	// couple more blocks so every node has the submit+challenge+reinstate range, then
 	// assert AppHash agreement at settled heights below the tip.
@@ -136,7 +186,7 @@ func TestAppHashDeterminism_AppV17Activation(t *testing.T) {
 	for _, h := range []int64{postH - 1, postH} {
 		assertAppHashAgreement(t, rpcs, h)
 	}
-	t.Logf("POST-ACTIVATION PASS: AppHash byte-identical across all %d nodes after submit + one-strike challenge + reinstate-reject at app-v17 (heights %d–%d)",
+	t.Logf("POST-ACTIVATION PASS: AppHash byte-identical across all %d nodes after one-strike reject plus two-holder challenge/reinstate at app-v17 (heights %d–%d)",
 		cometRPCCount, postH-1, postH)
 }
 

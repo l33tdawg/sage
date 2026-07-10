@@ -694,13 +694,24 @@ func (s *SQLiteStore) migrateEmbeddingProvider(ctx context.Context) {
 // for operator display. SQLite ADD COLUMN gives existing rows the default 0, so no
 // backfill is needed. MUST run AFTER migrateTaskSupport (which recreates the table).
 func (s *SQLiteStore) migrateDisputed(ctx context.Context) {
-	row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='disputed_height'`)
-	var count int
-	if err := row.Scan(&count); err != nil || count > 0 {
-		return // already migrated or error
+	// Check each column independently. SQLite applies ALTER TABLE statements one
+	// at a time, so a crash between the two can leave a valid disputed_height but
+	// no disputed_quorum. Treating the first column as an all-or-nothing migration
+	// marker would then make every future MarkDisputed fail permanently.
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"disputed_height", `ALTER TABLE memories ADD COLUMN disputed_height INTEGER NOT NULL DEFAULT 0`},
+		{"disputed_quorum", `ALTER TABLE memories ADD COLUMN disputed_quorum INTEGER NOT NULL DEFAULT 0`},
+	} {
+		row := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name=?`, col.name)
+		var count int
+		if err := row.Scan(&count); err != nil || count > 0 {
+			continue
+		}
+		_, _ = s.writeExecContext(ctx, col.ddl)
 	}
-	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN disputed_height INTEGER NOT NULL DEFAULT 0`)
-	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN disputed_quorum INTEGER NOT NULL DEFAULT 0`)
 }
 
 // MarkDisputed reflects an app-v17 two-phase CHALLENGE (park) in the off-chain
@@ -1250,11 +1261,11 @@ func (s *SQLiteStore) UpdateStatus(ctx context.Context, memoryID string, status 
 	switch status {
 	case memory.StatusCommitted:
 		_, err = s.writeExecContext(ctx,
-			`UPDATE memories SET status = ?, committed_at = ? WHERE memory_id = ?`,
+			`UPDATE memories SET status = ?, committed_at = ?, disputed_height = 0, disputed_quorum = 0 WHERE memory_id = ?`,
 			string(status), nowStr, memoryID)
 	case memory.StatusDeprecated:
 		_, err = s.writeExecContext(ctx,
-			`UPDATE memories SET status = ?, deprecated_at = ? WHERE memory_id = ?`,
+			`UPDATE memories SET status = ?, deprecated_at = ?, disputed_height = 0, disputed_quorum = 0 WHERE memory_id = ?`,
 			string(status), nowStr, memoryID)
 	default:
 		_, err = s.writeExecContext(ctx,
@@ -1390,7 +1401,7 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		if cErr != nil {
 			return nil, fmt.Errorf("query similar decay floor: %w", cErr)
 		}
-		ordered = applyDecayFloor(ordered, opts.DecayFloor, opts.DecayNow, counts)
+		ordered = applyDecayFloor(ordered, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
 	}
 
 	// opts.TopK was capped to [1, 100] at function entry, but make an explicit
@@ -1540,7 +1551,7 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		if cErr != nil {
 			return nil, fmt.Errorf("search by text decay floor: %w", cErr)
 		}
-		results = applyDecayFloor(results, opts.DecayFloor, opts.DecayNow, counts)
+		results = applyDecayFloor(results, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
 		if len(results) > opts.TopK {
 			results = results[:opts.TopK]
 		}
@@ -4086,11 +4097,22 @@ func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) 
 	if len(msg.Intent) > MaxPipeIntentBytes {
 		return ErrPipeIntentTooLarge
 	}
+
+	// Serialize the quota reads and the insert as one critical section. The old
+	// shape counted outside writeMu and locked only for the final INSERT, so a
+	// parallel burst could have every request observe the same below-cap count
+	// and then enqueue far beyond both advertised quotas. A tx-scoped store is
+	// already running under its parent's write lock and must not lock again.
+	if s.db != nil {
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+	}
+
 	// Quotas (E8c) — cap non-terminal pipes per requester and globally so a
 	// flood of never-claimed work items cannot exhaust disk. Both counts are
-	// index-backed (idx_pipe_from_agent, idx_pipe_expires). A small race under
-	// concurrent inserts can overshoot a cap by a few rows, which is harmless
-	// for an anti-DoS backstop.
+	// index-backed (idx_pipe_from_agent, idx_pipe_expires) and, with the critical
+	// section above, the check + insert is atomic with respect to every writer in
+	// this process.
 	var perAgent int
 	if err := s.conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM pipeline_messages WHERE from_agent = ? AND status IN ('pending','claimed')`,
@@ -4109,7 +4131,9 @@ func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) 
 		return ErrPipeQuotaGlobal
 	}
 
-	_, err := s.writeExecContext(ctx,
+	// Call the underlying connection directly: standalone stores already hold
+	// writeMu above, while tx-scoped stores are already inside the parent lock.
+	_, err := s.conn.ExecContext(ctx,
 		`INSERT INTO pipeline_messages (pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.PipeID, msg.FromAgent, msg.FromProvider, msg.ToAgent, msg.ToProvider,
