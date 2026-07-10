@@ -132,13 +132,19 @@ type MemoryResult struct {
 	// memory — the multiplier behind the corroboration boost in ConfidenceScore.
 	// Exposing it lets readers distinguish a low score caused by no corroboration
 	// (a fresh, untested belief) from one caused by time decay (a once-solid fact).
-	CorroborationCount int        `json:"corroboration_count"`
-	Classification     int        `json:"classification"`
-	Status             string     `json:"status"`
-	ParentHash         string     `json:"parent_hash,omitempty"`
-	TaskStatus         string     `json:"task_status,omitempty"`
-	CreatedAt          time.Time  `json:"created_at"`
-	CommittedAt        *time.Time `json:"committed_at,omitempty"`
+	CorroborationCount int    `json:"corroboration_count"`
+	Classification     int    `json:"classification"`
+	Status             string `json:"status"`
+	// Disputed is true for an app-v17 two-phase-CHALLENGED memory: still live and
+	// recallable, but under dispute pending confirm/reinstate. Off-chain surface
+	// signal only — the on-chain status is carried in Status ("challenged"). When
+	// set, ConfidenceScore already reflects the disputed haircut. Personal nodes
+	// never produce this (a challenge there is one-strike deprecate).
+	Disputed    bool       `json:"disputed,omitempty"`
+	ParentHash  string     `json:"parent_hash,omitempty"`
+	TaskStatus  string     `json:"task_status,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	CommittedAt *time.Time `json:"committed_at,omitempty"`
 	// SourceChainID is v11 federation provenance: empty for local memories,
 	// the origin chain id for results merged in from a cross_fed peer (whose
 	// SubmittingAgent is then chain-qualified as pubkey@chain_id). Remote
@@ -468,7 +474,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Embed agent's cryptographic proof for on-chain identity verification.
-	embedAgentAuth(r.Context(), submitTx)
+	s.embedAgentAuth(r.Context(), submitTx)
 
 	// Sign the transaction with the node's signing key.
 	if err = tx.SignTx(submitTx, s.signingKey); err != nil {
@@ -598,6 +604,24 @@ func setDecayFloor(opts *store.QueryOptions, now time.Time) {
 // legitimate stored 0.0 still serializes; nil is reserved for federated results.
 func initialConfidencePtr(v float64) *float64 { return &v }
 
+// disputedConfidenceHaircut is shared with the store's decayed-floor admission
+// logic. Keeping one value ensures a min_confidence=X query never admits a
+// challenged row and then serializes confidence_score below X after the haircut.
+// Off-chain presentation only; consensus/AppHash and stored confidence are
+// untouched.
+const disputedConfidenceHaircut = store.DisputedConfidenceHaircut
+
+// markDisputed reports whether rec is a live-but-disputed (challenged) memory and,
+// if so, applies the confidence haircut to conf in place. Off-chain recall surface
+// only — the on-chain status is unchanged and still carried in rec.Status.
+func markDisputed(rec *memory.MemoryRecord, conf *float64) bool {
+	if rec.Status != memory.StatusChallenged {
+		return false
+	}
+	*conf *= disputedConfidenceHaircut
+	return true
+}
+
 // corroborationCounts batch-fetches corroboration counts for a set of records,
 // keyed by memory ID — one query in place of the per-record GetCorroborations N+1
 // the recall loops used to run. These feed the SERIALIZED confidence_score. On a
@@ -706,6 +730,9 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		TopK:          req.TopK,
 		Cursor:        req.Cursor,
 		Tags:          req.Tags,
+		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
+		// at serialize). A no-op unless the caller's filter is "committed".
+		IncludeDisputed: true,
 	}
 	filterApplied := !seeAll
 	if filterApplied {
@@ -784,6 +811,10 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		// applied the decayed floor over the full candidate set, so no drop here.
 		corrCount := corrCounts[rec.MemoryID]
 		currentConf := memory.ComputeConfidenceForRecord(rec, now, corrCount)
+		// app-v17: flag disputed-but-live (challenged) memories and hair-cut their
+		// surfaced confidence. Off-chain only — the on-chain status stays in
+		// rec.Status and committed rows are untouched.
+		disputed := markDisputed(rec, &currentConf)
 
 		results = append(results, &MemoryResult{
 			MemoryID:           rec.MemoryID,
@@ -797,6 +828,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 			CorroborationCount: corrCount,
 			Classification:     int(memClass),
 			Status:             string(rec.Status),
+			Disputed:           disputed,
 			ParentHash:         rec.ParentHash,
 			CreatedAt:          rec.CreatedAt,
 			CommittedAt:        rec.CommittedAt,
@@ -1058,6 +1090,9 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		StatusFilter:  req.StatusFilter,
 		TopK:          req.TopK,
 		Tags:          req.Tags,
+		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
+		// at serialize). A no-op unless the caller's filter is "committed".
+		IncludeDisputed: true,
 	}
 	filterApplied := !seeAll
 	if filterApplied {
@@ -1124,6 +1159,10 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 
 		corrCount := corrCounts[rec.MemoryID]
 		currentConf := memory.ComputeConfidenceForRecord(rec, now, corrCount)
+		// app-v17: flag disputed-but-live (challenged) memories and hair-cut their
+		// surfaced confidence. Off-chain only — the on-chain status stays in
+		// rec.Status and committed rows are untouched.
+		disputed := markDisputed(rec, &currentConf)
 
 		results = append(results, &MemoryResult{
 			MemoryID:           rec.MemoryID,
@@ -1137,6 +1176,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 			CorroborationCount: corrCount,
 			Classification:     int(memClass),
 			Status:             string(rec.Status),
+			Disputed:           disputed,
 			ParentHash:         rec.ParentHash,
 			CreatedAt:          rec.CreatedAt,
 			CommittedAt:        rec.CommittedAt,
@@ -1297,6 +1337,9 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		StatusFilter:  req.StatusFilter,
 		TopK:          req.TopK,
 		Tags:          req.Tags,
+		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
+		// at serialize). A no-op unless the caller's filter is "committed".
+		IncludeDisputed: true,
 	}
 	filterApplied := !seeAll
 	if filterApplied {
@@ -1362,6 +1405,10 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 
 		corrCount := corrCounts[rec.MemoryID]
 		currentConf := memory.ComputeConfidenceForRecord(rec, now, corrCount)
+		// app-v17: flag disputed-but-live (challenged) memories and hair-cut their
+		// surfaced confidence. Off-chain only — the on-chain status stays in
+		// rec.Status and committed rows are untouched.
+		disputed := markDisputed(rec, &currentConf)
 
 		results = append(results, &MemoryResult{
 			MemoryID:           rec.MemoryID,
@@ -1375,6 +1422,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 			CorroborationCount: corrCount,
 			Classification:     int(memClass),
 			Status:             string(rec.Status),
+			Disputed:           disputed,
 			ParentHash:         rec.ParentHash,
 			CreatedAt:          rec.CreatedAt,
 			CommittedAt:        rec.CommittedAt,
@@ -1686,6 +1734,12 @@ func broadcastErrorPublic(err error) (int, string) {
 		return http.StatusNotFound, "unknown memory: no on-chain record for that memory id"
 	case strings.Contains(msg, "not authorized to deprecate"):
 		return http.StatusForbidden, "not authorized to deprecate this memory (need domain ownership or a level-3 modify grant)"
+	case strings.Contains(msg, "reinstate:") && strings.Contains(msg, "not authorized"):
+		return http.StatusForbidden, "not authorized to reinstate this memory (need domain ownership or a level-3 modify grant)"
+	case strings.Contains(msg, "reinstate: memory") && strings.Contains(msg, "not found"):
+		return http.StatusNotFound, "memory not found"
+	case strings.Contains(msg, "is not challenged"):
+		return http.StatusConflict, "memory is not currently challenged"
 	case strings.Contains(msg, "tx rejected in CheckTx"):
 		return http.StatusBadRequest, "request rejected"
 	case strings.Contains(msg, "tx rejected in FinalizeBlock"):

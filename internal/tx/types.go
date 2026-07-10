@@ -69,6 +69,16 @@ const (
 	// BEFORE app-v15 activates).
 	TxTypeCrossFedSet    TxType = 33
 	TxTypeCrossFedRevoke TxType = 34
+	// v11.5 (app-v17): MEMORY REINSTATE — the second phase of the quorum-scaled
+	// two-phase challenge. Moves a CHALLENGED memory back to committed (any
+	// distinct modify-verb holder may reinstate; the original challenger may
+	// always withdraw their own challenge). Single-signer agent-proof tx,
+	// dual-gated on postAppV17Fork (CheckTx reject + exec reject) so pre-activation
+	// chains treat it as unknown and replay byte-identically. A new TYPE byte is
+	// NOT backward-compatible — old binaries decode-fail — so the codec ships to
+	// the whole validator set BEFORE app-v17 activates (same mixed-binary note as
+	// co-commit tx-31/32).
+	TxTypeMemoryReinstate TxType = 35
 )
 
 // GovProposalOp identifies the governance operation being proposed.
@@ -145,6 +155,13 @@ type MemoryChallenge struct {
 	MemoryID string
 	Reason   string
 	Evidence string
+}
+
+// MemoryReinstate withdraws/resolves a two-phase challenge, moving a CHALLENGED
+// memory back to committed (app-v17). Reason is an optional audit note.
+type MemoryReinstate struct {
+	MemoryID string
+	Reason   string
 }
 
 // MemoryCorroborate corroborates an existing memory with supporting evidence.
@@ -550,18 +567,26 @@ type ParsedTx struct {
 	CoCommitAttest     *CoCommitAttest
 	CrossFedTerms      *CrossFedTerms
 	CrossFedRevoke     *CrossFedRevoke
+	MemoryReinstate    *MemoryReinstate
 	Signature          []byte // Node validator Ed25519 signature (64 bytes)
 	PublicKey          []byte // Node validator Ed25519 public key (32 bytes)
 	Nonce              uint64
 	Timestamp          time.Time
 
 	// Agent identity proof — allows ABCI to verify agent identity on-chain.
-	// The agent signed SHA256(requestBody) + bigEndian(AgentTimestamp) [+ nonce] with their key.
+	// The agent signed SHA256(METHOD + " " + path[+query] + "\n" + body) +
+	// bigEndian(AgentTimestamp) [+ nonce] with their key.
 	// ABCI re-verifies this signature to establish the authenticated agent identity
 	// independently of the REST layer.
 	AgentPubKey    []byte // Agent Ed25519 public key (32 bytes)
 	AgentSig       []byte // Agent Ed25519 signature (64 bytes)
 	AgentTimestamp int64  // Unix seconds timestamp used in signing
-	AgentBodyHash  []byte // SHA256 of original request body (32 bytes)
+	AgentBodyHash  []byte // SHA256 of the canonical signed request (32 bytes)
 	AgentNonce     []byte // Optional nonce used in signing (variable length, 0 if legacy)
+	// AgentRequest is the exact canonical HTTP request signed by a delegated
+	// agent: METHOD + " " + path[+query] + "\n" + raw body. It is appended to
+	// the wire envelope only when non-empty, so every pre-app-v17 transaction
+	// retains its byte-identical encoding. Post-app-v17 consensus uses it to
+	// bind a delegated identity proof to the exact action being executed.
+	AgentRequest []byte
 }

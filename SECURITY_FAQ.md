@@ -11,7 +11,7 @@ SAGE has two distinct deployment models with fundamentally different threat mode
 | **Who** | One user, one local operator | Multiple agents, teams, organizations |
 | **Trust model** | User IS the only validator | Byzantine fault tolerance across validators |
 | **Database** | Local BadgerDB/SQLite stores in `~/.sage/data/` | BadgerDB consensus state plus off-chain mirror |
-| **Release** | v11.1.0 current release | v11.0.2 quorum/federation surface |
+| **Release** | v11.5.0 personal-node surface | v11.5.0 quorum/federation surface |
 
 Many concerns raised about the enterprise codebase do not apply to SAGE Personal, and vice versa. Each item below is tagged with which deployment it affects.
 
@@ -23,7 +23,7 @@ Many concerns raised about the enterprise codebase do not apply to SAGE Personal
 
 **Applies to:** Enterprise
 
-Authenticated REST requests use Ed25519 signatures over the HTTP method, path including query string, body, timestamp, and optional `X-Nonce`; the server rejects signatures outside the five-minute timestamp window. See `api/rest/middleware/auth.go` and `docs/reference/rest-api.md`.
+Authenticated REST requests use Ed25519 signatures over the HTTP method, path including query string, body, timestamp, and optional `X-Nonce`; the server rejects signatures outside the five-minute timestamp window. After app-v17 activation, consensus independently binds delegated proofs to the exact signed action, checks freshness against deterministic block time, and consumes each authorization once in AppHash state; a validator cannot transplant a captured proof onto another payload. See `api/rest/middleware/auth.go`, `internal/abci/agent_proof.go`, and `docs/reference/rest-api.md`.
 
 ### 2. Replay Cache and Nonce Support
 
@@ -108,7 +108,7 @@ The `make byzantine` target and GitHub Actions CI job spin up a 4-validator Dock
 
 The following boundaries describe the current v11 codebase:
 
-**SAGE Personal (sage-gui v11.1.0):**
+**SAGE Personal (sage-gui v11.5.0):**
 - Designed for single-user, single-machine use. Not a networked service.
 - No authentication — anyone with access to your machine can access the API on localhost.
 - SQLite database supports optional AES-256-GCM encryption at rest (Synaptic Ledger). Enable from CEREBRUM Settings → Security.

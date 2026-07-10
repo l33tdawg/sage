@@ -364,8 +364,8 @@ func (m *Manager) ForeignCoauthorChains(sharedID string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	seen := make(map[string]bool)
-	var chains []string
+	seen := make(map[string]bool, len(coauthors))
+	chains := make([]string, 0, len(coauthors))
 	for _, c := range coauthors {
 		if c.ChainID == m.localChainID || seen[c.ChainID] {
 			continue

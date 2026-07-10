@@ -191,6 +191,43 @@ func challengeMemoryTo(t *testing.T, agent *testAgent, apiURL, memoryID, reason 
 	return result, resp.StatusCode
 }
 
+// reinstateMemoryTo reinstates a challenged memory through the public app-v17
+// REST surface and returns the consensus-committed response.
+func reinstateMemoryTo(t *testing.T, agent *testAgent, apiURL, memoryID, reason string) (map[string]interface{}, int) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{"reason": reason})
+	req := agent.signedRequest(t, "POST", fmt.Sprintf("%s/v1/memory/%s/reinstate", apiURL, memoryID), body)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("reinstate memory failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result, resp.StatusCode
+}
+
+// grantAccessTo grants a domain verb level through the public REST surface.
+func grantAccessTo(t *testing.T, granter *testAgent, apiURL, granteeID, domain string, level int) (map[string]interface{}, int) {
+	t.Helper()
+	body, _ := json.Marshal(map[string]interface{}{
+		"grantee_id": granteeID,
+		"domain":     domain,
+		"level":      level,
+	})
+	req := granter.signedRequest(t, "POST", apiURL+"/v1/access/grant", body)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("grant access failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result, resp.StatusCode
+}
+
 // corroborateMemory corroborates a memory via POST /v1/memory/{memory_id}/corroborate.
 func corroborateMemory(t *testing.T, agent *testAgent, memoryID string) (map[string]interface{}, int) {
 	t.Helper()

@@ -42,6 +42,21 @@ func TestBroadcastErrorPublic_DeprecationGate(t *testing.T) {
 			http.StatusForbidden,
 		},
 		{
+			"app-v17 unauthorized reinstate → 403",
+			"reinstate: agent 0123456789abcdef not authorized to reinstate memory abc (need domain ownership or a level-3 modify grant)",
+			http.StatusForbidden,
+		},
+		{
+			"app-v17 missing-domain reinstate → 403",
+			"reinstate: memory abc has no recorded domain; not authorized",
+			http.StatusForbidden,
+		},
+		{
+			"app-v17 wrong lifecycle state → 409",
+			"reinstate: memory abc is not challenged (status=committed)",
+			http.StatusConflict,
+		},
+		{
 			"other FinalizeBlock reject → generic 400",
 			"content schema rejected for (hr,x): bad shape",
 			http.StatusBadRequest,

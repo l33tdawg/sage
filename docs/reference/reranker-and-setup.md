@@ -1,10 +1,11 @@
-<!-- Verified against code at SAGE v11.2.1. Cite file:line when behavior is non-obvious. -->
+<!-- Verified against code at SAGE v11.4.11. Cite file:line when behavior is non-obvious. -->
 
 # SAGE Local Engines and First-Run Setup Reference (v11)
 
 **The v11 dashboard surface for standing up SAGE's optional local inference engines
-without a terminal, plus the onboarding and recall-tuning knobs, plus the embedder
-provenance column that ties each memory to the embedder that produced it.**
+and ChatGPT tunnel runtime without a terminal, plus the onboarding and recall-tuning
+knobs, plus the embedder provenance column that ties each memory to the embedder
+that produced it.**
 
 Everything here is **off-consensus**: the reranker only reorders recall candidates,
 onboarding is a per-node UI flag, recall tuning is a per-node preference, and the
@@ -13,10 +14,10 @@ touches chain state. Normal memory submission (which does reach consensus) is
 documented in [`rest-api.md`](rest-api.md) and [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md).
 
 All endpoints below live on the **dashboard listener** and use the dashboard's
-cookie/session auth (`authMiddleware`, `web/handler.go:635`), not the Ed25519
-signed-request scheme the `/v1/*` public API uses. The managed semantic-memory and
-managed-reranker **setup** endpoints additionally sit behind a strict same-origin
-gate (see below).
+cookie/session auth (`authMiddleware`), not the Ed25519 signed-request scheme the
+`/v1/*` public API uses. The managed semantic-memory, managed-reranker, and
+managed-ChatGPT-tunnel **setup** endpoints additionally sit behind a strict
+same-origin gate (see below).
 
 ---
 
@@ -225,7 +226,7 @@ Enables/disables and configures the reranker (`handleSaveReranker`,
 | `kind` | **v11 field.** Endpoint dialect: `"tei"` (default) or `"llamacpp"` (the managed sidecar). The Settings form omits it, which means TEI (`web/handler_reranker.go:24-29`). |
 
 **The `kind` field** selects which wire dialect the reranker HTTP client speaks (see
-section 6). Unknown / omitted values fall back to TEI. It is lower-cased and trimmed
+section 7). Unknown / omitted values fall back to TEI. It is lower-cased and trimmed
 before use (`web/handler_reranker.go:88`).
 
 **Verify-on-enable (v11):** when `enabled` is true, the handler probes the URL with a
@@ -374,7 +375,105 @@ Stops the sidecar and turns the reranker off (`handleRerankerSetupStop`,
 
 ---
 
-## 6. Internals: the managed reranker sidecar (`internal/rerankd`)
+## 6. Managed ChatGPT tunnel setup - `/v1/dashboard/chatgpt-tunnel/*` (v11.4.11)
+
+The ChatGPT MCP setup flow is now a CEREBRUM-managed tunnel-client runtime: the
+user stays in the dashboard, opens the OpenAI / ChatGPT browser tabs requested by
+the wizard, pastes the tunnel id plus runtime API key, then clicks one button. SAGE
+downloads the pinned OpenAI `tunnel-client` if needed, writes the profile, starts
+the client in the background, and surfaces the final connector URL. Routes are
+registered by `RegisterChatGPTTunnelRoutes` (`web/chatgpt_tunnel_handler.go:30-35`)
+inside the same `wizardSecurityGate` group as the ChatGPT wizard
+(`web/handler.go:531-535`).
+
+**Auth:** these routes carry dashboard auth plus the strict same-origin wizard gate.
+They download a binary and spawn a subprocess, so a cross-origin browser tab must
+not be able to drive them even if it can send cookies.
+
+### `GET /v1/dashboard/chatgpt-tunnel/status`
+
+Reports whether the local tunnel-client is supported, installed, running, and where
+its generated files live (`handleChatGPTTunnelStatus`,
+`web/chatgpt_tunnel_handler.go:38-59`).
+
+**Response** (HTTP 200):
+```json
+{
+  "available": true,
+  "binary_found": true,
+  "binary_path": "/Users/you/.sage/tunnel-client/tunnel-client",
+  "engine_installed": true,
+  "install_supported": true,
+  "engine_bytes": 7100022,
+  "installing": false,
+  "running": true,
+  "url": "http://127.0.0.1:8081",
+  "ui_url": "http://127.0.0.1:8081/ui",
+  "profile": "sage-chatgpt",
+  "profile_path": "/Users/you/.sage/tunnel-client-profiles/sage-chatgpt.yaml",
+  "health_port_free": false,
+  "mcp_command": "\"/Applications/SAGE.app/Contents/MacOS/sage-gui\" mcp"
+}
+```
+
+`running` is a live health probe, not a pid-only check. `ui_url` deliberately uses
+`127.0.0.1:8081`, so it does not collide with SAGE's dashboard on port 8080.
+
+### `POST /v1/dashboard/chatgpt-tunnel/setup`
+
+The one-click setup path (`handleChatGPTTunnelSetup`,
+`web/chatgpt_tunnel_handler.go:109-190`). It validates the tunnel id and runtime
+API key, installs the client when missing, writes the profile, starts the process,
+and streams progress back to the browser.
+
+**Request:**
+```json
+{"tunnel_id": "tun_...", "api_key": "<paste-runtime-api-key-here>", "profile": "sage-chatgpt"}
+```
+
+`profile` is optional and defaults to `sage-chatgpt`. The API key is required for
+process startup but is never written to preferences or the profile. The generated
+profile references `env:CONTROL_PLANE_API_KEY` instead
+(`internal/tunnelclientd/manager.go:417-433`), and `Start` injects that environment
+variable only into the child process (`internal/tunnelclientd/manager.go:301-309`).
+
+**Streaming protocol:** `Content-Type: text/plain`, one line per event, flushed as
+it happens (`web/chatgpt_tunnel_handler.go:193-215`).
+
+| Line | Meaning |
+|------|---------|
+| `status: <message>` | Human-readable setup phase. |
+| `progress: <done> <total>` | Download bytes so far and total, when available. |
+| `url: <https-url>` | Connector URL to paste into ChatGPT. |
+| `done: 0` | Success terminator. |
+| `error: <message>` followed by `done: 1` | Failure. |
+
+### Diagnostic endpoints
+
+`POST /v1/dashboard/chatgpt-tunnel/install`,
+`POST /v1/dashboard/chatgpt-tunnel/start`, and
+`POST /v1/dashboard/chatgpt-tunnel/stop` remain available for diagnostics and
+advanced recovery (`web/chatgpt_tunnel_handler.go:61-107`, `:217-275`). The wizard
+uses `/setup` for the normal path.
+
+### Runtime manager behavior (`internal/tunnelclientd`)
+
+SAGE does **not** require a globally installed `tunnel-client` and does not assume
+anything is on `$PATH`. `internal/tunnelclientd` downloads pinned OpenAI
+`tunnel-client` v0.0.10 release assets for supported OS/arch pairs, verifies each
+asset by sha256 before install, and stores the binary under
+`~/.sage/tunnel-client` (`internal/tunnelclientd/manager.go:25-48`,
+`:142-210`).
+
+`Start` launches `tunnel-client run --profile-file <profile>` with `exec.Command`
+and no terminal window. stdout/stderr go to `~/.sage/tunnel-client.log`, the health
+UI binds `127.0.0.1:8081`, and readiness is confirmed before the handler reports
+success (`internal/tunnelclientd/manager.go:264-348`). Stop targets only the managed
+process/pidfile path and cleans up process-group children on Unix.
+
+---
+
+## 7. Internals: the managed reranker sidecar (`internal/rerankd`)
 
 Package `rerankd` manages SAGE's optional reranker sidecar: a llama.cpp `llama-server`
 process serving `bge-reranker-v2-m3` on loopback (`internal/rerankd/rerankd.go:1-7`).
@@ -447,7 +546,7 @@ any TEI-compatible server) with no SAGE-specific adapter; llama.cpp is the diale
 
 ---
 
-## 7. Embedding provenance: `embedding_provider` stamped at insert (v11)
+## 8. Embedding provenance: `embedding_provider` stamped at insert (v11)
 
 Each memory record carries an `embedding_provider` string recording **which embedder**
 produced its vector - distinct from `provider`, which is the submitting agent's LLM

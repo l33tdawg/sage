@@ -88,7 +88,7 @@ func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), orgTx)
+	s.embedAgentAuth(r.Context(), orgTx)
 
 	err = tx.SignTx(orgTx, s.signingKey)
 	if err != nil {
@@ -300,7 +300,7 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), addTx)
+	s.embedAgentAuth(r.Context(), addTx)
 
 	err = tx.SignTx(addTx, s.signingKey)
 	if err != nil {
@@ -347,7 +347,7 @@ func (s *Server) handleOrgRemoveMember(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), removeTx)
+	s.embedAgentAuth(r.Context(), removeTx)
 
 	err := tx.SignTx(removeTx, s.signingKey)
 	if err != nil {
@@ -405,7 +405,7 @@ func (s *Server) handleOrgSetClearance(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	embedAgentAuth(r.Context(), clearanceTx)
+	s.embedAgentAuth(r.Context(), clearanceTx)
 
 	err = tx.SignTx(clearanceTx, s.signingKey)
 	if err != nil {
@@ -481,7 +481,7 @@ func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request)
 		},
 	}
 
-	embedAgentAuth(r.Context(), proposeTx)
+	s.embedAgentAuth(r.Context(), proposeTx)
 
 	err = tx.SignTx(proposeTx, s.signingKey)
 	if err != nil {
@@ -542,7 +542,7 @@ func (s *Server) handleFederationApprove(w http.ResponseWriter, r *http.Request)
 		},
 	}
 
-	embedAgentAuth(r.Context(), approveTx)
+	s.embedAgentAuth(r.Context(), approveTx)
 
 	err = tx.SignTx(approveTx, s.signingKey)
 	if err != nil {
@@ -608,7 +608,7 @@ func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 
-	embedAgentAuth(r.Context(), revokeTx)
+	s.embedAgentAuth(r.Context(), revokeTx)
 
 	err = tx.SignTx(revokeTx, s.signingKey)
 	if err != nil {

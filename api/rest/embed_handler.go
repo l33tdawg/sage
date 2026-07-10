@@ -126,7 +126,7 @@ func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {
 // embedderStampFor returns the embedding_provider stamp for a submission
 // carrying `emb`: the SEMANTIC embedder's Named id (e.g. "ollama") when one
 // is active, "" otherwise. Hash pseudo-vectors deliberately stay unstamped -
-// '' means "needs re-embed", so they get picked up when the operator turns
+// ” means "needs re-embed", so they get picked up when the operator turns
 // semantic search on. Callers on the submit path can't distinguish a vector
 // minted by this node's /v1/embed from one the SDK computed elsewhere, but
 // the dimension gate already forces schema compatibility, and mislabeling a

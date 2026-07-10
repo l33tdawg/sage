@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/memory"
@@ -72,8 +73,16 @@ type QueryOptions struct {
 	Provider      string  `json:"provider,omitempty"`
 	MinConfidence float64 `json:"min_confidence,omitempty"` // stored-column floor (SQL, undecayed) — legacy; recall paths use DecayFloor
 	StatusFilter  string  `json:"status_filter,omitempty"`
-	TopK          int     `json:"top_k"`
-	Cursor        string  `json:"cursor,omitempty"`
+	// IncludeDisputed, when true AND StatusFilter=="committed", widens the status
+	// predicate to `status IN ('committed','challenged')` so app-v17 two-phase-
+	// disputed-but-LIVE memories remain recallable (flagged disputed at the
+	// serialize layer). OPT-IN and read-only: only the REST recall handlers set it,
+	// so every other caller's "committed" filter still means strictly committed —
+	// committed rows are returned byte-for-byte as before. Off-chain only; never a
+	// consensus input.
+	IncludeDisputed bool   `json:"-"`
+	TopK            int    `json:"top_k"`
+	Cursor          string `json:"cursor,omitempty"`
 	// DecayFloor, when > 0, drops records whose task-aware DECAYED confidence
 	// (memory.ComputeConfidenceForRecord — time decay + corroboration boost, open
 	// tasks exempt) is below the floor. Unlike MinConfidence it is applied in Go
@@ -109,16 +118,26 @@ func recordIDs(recs []*memory.MemoryRecord) []string {
 	return ids
 }
 
+// DisputedConfidenceHaircut is the off-chain multiplier applied to an app-v17
+// challenged memory during recall. Keeping it in the store package gives the
+// admission floor and REST serialization one shared value, so min_confidence can
+// never admit a record and then report it below the requested floor. At 0.8 a
+// high-confidence fact remains discoverable under the default 0.70 recall floor,
+// while the explicit disputed flag and score reduction still down-rank it.
+const DisputedConfidenceHaircut = 0.8
+
 // applyDecayFloor drops records whose task-aware decayed confidence
 // (memory.ComputeConfidenceForRecord — time decay + corroboration boost, with open
-// tasks exempt from decay) is below floor, preserving input order. counts must map
-// every record's ID to its corroboration count (batch-fetched by the caller so the
-// boost is included). A zero/negative floor or empty input returns recs unchanged;
-// now defaults to time.Now() when zero. The filter runs in place over recs' backing
+// tasks exempt from decay) is below floor, preserving input order. When
+// includeDisputed is true, challenged rows are compared using the same disputed
+// haircut REST applies to the serialized confidence_score. counts must map every
+// record's ID to its corroboration count (batch-fetched by the caller so the boost
+// is included). A zero/negative floor or empty input returns recs unchanged; now
+// defaults to time.Now() when zero. The filter runs in place over recs' backing
 // array, so callers must use the returned slice. Because it is reached only when a
 // caller sets a positive floor (REST/federation recall, never consensus tx paths),
 // the wall-clock default never executes during deterministic block execution.
-func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, counts map[string]int) []*memory.MemoryRecord {
+func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, counts map[string]int, includeDisputed bool) []*memory.MemoryRecord {
 	if floor <= 0 || len(recs) == 0 {
 		return recs
 	}
@@ -127,7 +146,11 @@ func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, 
 	}
 	out := recs[:0]
 	for _, r := range recs {
-		if memory.ComputeConfidenceForRecord(r, now, counts[r.MemoryID]) >= floor {
+		confidence := memory.ComputeConfidenceForRecord(r, now, counts[r.MemoryID])
+		if includeDisputed && r.Status == memory.StatusChallenged {
+			confidence *= DisputedConfidenceHaircut
+		}
+		if confidence >= floor {
 			out = append(out, r)
 		}
 	}
@@ -489,6 +512,39 @@ type AgentStore interface {
 	ClearStaleRedeployLogs(ctx context.Context) (int, error)
 }
 
+// Pipeline hardening limits (E8c). These bound the pipe surface against a slow
+// disk-exhaustion DoS — a flood of large, never-claimed work items. They are
+// enforced at the store layer so every write path is covered by one chokepoint:
+// the agent REST handler, the MCP tools (which tunnel back through REST), and
+// the dashboard operator handler (which calls InsertPipeline directly). The
+// REST/dashboard handlers add matching request-body checks as fast-fail
+// defense in depth.
+const (
+	// MaxPipeContentBytes caps a single pipe payload and a single result.
+	// 256 KiB is far larger than any real agent work item yet leaves ample
+	// headroom under the 1 MiB request-body cap (decodeJSON / MaxBytesReader)
+	// even after JSON string escaping.
+	MaxPipeContentBytes = 256 << 10 // 256 KiB
+	// MaxPipeIntentBytes caps the short intent descriptor.
+	MaxPipeIntentBytes = 8 << 10 // 8 KiB
+	// MaxOpenPipesPerAgent caps the non-terminal (pending or claimed) pipes a
+	// single requester identity may hold open at once.
+	MaxOpenPipesPerAgent = 256
+	// MaxOpenPipesGlobal caps non-terminal pipes across all requesters, so
+	// many identities cannot collectively exhaust disk.
+	MaxOpenPipesGlobal = 10000
+)
+
+// Pipeline guard errors. Callers distinguish these with errors.Is and map them
+// to HTTP 413 (too large) and 429 (quota).
+var (
+	ErrPipePayloadTooLarge = errors.New("pipeline payload exceeds maximum size")
+	ErrPipeResultTooLarge  = errors.New("pipeline result exceeds maximum size")
+	ErrPipeIntentTooLarge  = errors.New("pipeline intent exceeds maximum size")
+	ErrPipeQuotaPerAgent   = errors.New("too many open pipelines for this requester")
+	ErrPipeQuotaGlobal     = errors.New("too many open pipelines on this node")
+)
+
 // PipelineMessage represents an ephemeral agent-to-agent work item.
 // These are NOT memories — they are transient messages that auto-expire.
 type PipelineMessage struct {
@@ -520,6 +576,10 @@ type PipelineStore interface {
 	ListPipelines(ctx context.Context, status string, limit int) ([]*PipelineMessage, error)
 	PipelineStats(ctx context.Context) (map[string]int, error)
 	ExpirePipelines(ctx context.Context) (int, error)
+	// ExpireStalePipelines flips pending/claimed rows created before olderThan
+	// to 'expired' regardless of their TTL, bounding the lifetime of a
+	// never-claimed pipe even if it carried an oversized expires_at.
+	ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error)
 	PurgePipelines(ctx context.Context, olderThan time.Time) (int, error)
 }
 

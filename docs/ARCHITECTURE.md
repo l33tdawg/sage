@@ -897,15 +897,22 @@ The (S)AGE REST API uses Ed25519 signature authentication and follows the OpenAP
 
 ### Authentication
 
-All authenticated endpoints require three headers:
+All authenticated endpoints require three headers; current clients should also
+send the optional nonce header:
 
 | Header | Value |
 |--------|-------|
 | `X-Agent-ID` | Hex-encoded Ed25519 public key |
-| `X-Signature` | Ed25519 signature of `SHA-256(request_body) + big-endian int64(timestamp)` |
+| `X-Signature` | Ed25519 signature of `SHA-256(method + " " + path[?query] + "\n" + body) + big-endian int64(timestamp) [+ nonce]` |
 | `X-Timestamp` | Unix epoch seconds |
+| `X-Nonce` | Optional hex bytes; current clients send 8 random bytes |
 
-The Python SDK handles signing automatically. For raw HTTP access, compute `SHA-256` of the JSON body, append the timestamp as a big-endian 8-byte integer, and sign the result with your Ed25519 private key.
+The Python SDK handles signing automatically. For raw HTTP access, construct the
+canonical method/path/body string exactly as shown above, hash it, append the
+timestamp and decoded nonce bytes, and sign with your Ed25519 private key. After
+app-v17 activation, consensus independently binds a delegated proof to that
+exact action, deterministic block-time freshness, and a single-use AppHash
+marker; see `docs/reference/rest-api.md` for the authoritative details.
 
 ### Endpoints
 

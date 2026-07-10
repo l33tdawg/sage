@@ -307,6 +307,7 @@ func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC, tlsCe
 	// flip to ancestor-walk access checks once the chain reports a post-fork
 	// height. Advisory only — the consensus path uses app.postV8Fork(height).
 	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
+	restServer.SetPostV17ForNextTxAccessor(app.IsAppV17ActiveForNextTx)
 
 	if tlsCert != "" && tlsKey != "" {
 		// TLS mode: load certs and start HTTPS.

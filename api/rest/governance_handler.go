@@ -126,7 +126,7 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Embed agent's cryptographic proof for on-chain identity verification.
-	embedAgentAuth(r.Context(), proposeTx)
+	s.embedAgentAuth(r.Context(), proposeTx)
 
 	// Sign the transaction with the node's signing key.
 	if err = tx.SignTx(proposeTx, s.signingKey); err != nil {
@@ -195,7 +195,7 @@ func (s *Server) handleGovVote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Embed agent's cryptographic proof for on-chain identity verification.
-	embedAgentAuth(r.Context(), voteTx)
+	s.embedAgentAuth(r.Context(), voteTx)
 
 	// Sign the transaction with the node's signing key.
 	if err = tx.SignTx(voteTx, s.signingKey); err != nil {
@@ -256,7 +256,7 @@ func (s *Server) handleGovCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Embed agent's cryptographic proof for on-chain identity verification.
-	embedAgentAuth(r.Context(), cancelTx)
+	s.embedAgentAuth(r.Context(), cancelTx)
 
 	// Sign the transaction with the node's signing key.
 	if err := tx.SignTx(cancelTx, s.signingKey); err != nil {

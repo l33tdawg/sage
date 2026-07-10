@@ -149,6 +149,9 @@ async function executeTool(toolName, params, baseUrl) {
     case "sage_forget":
       return executeForget(params, baseUrl);
 
+    case "sage_reinstate":
+      return executeReinstate(params, baseUrl);
+
     case "sage_reflect":
       return executeReflect(params, baseUrl);
 
@@ -288,6 +291,18 @@ async function executeForget(params, baseUrl) {
   const path = `/v1/memory/${encodeURIComponent(params.memory_id)}/challenge`;
   await signedFetch("POST", baseUrl, path, { reason: params.reason || "deprecated by user" });
   return { memory_id: params.memory_id, status: "challenged", reason: params.reason };
+}
+
+async function executeReinstate(params, baseUrl) {
+  if (!params.memory_id) throw new Error("memory_id is required");
+  const path = `/v1/memory/${encodeURIComponent(params.memory_id)}/reinstate`;
+  const resp = await signedFetch("POST", baseUrl, path, { reason: params.reason || "" });
+  return {
+    memory_id: params.memory_id,
+    status: resp.status || "committed",
+    reason: params.reason || "",
+    tx_hash: resp.tx_hash || ""
+  };
 }
 
 async function executeReflect(params, baseUrl) {

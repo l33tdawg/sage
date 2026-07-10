@@ -38,7 +38,7 @@ func TestAppV16_ForkGateDefaultsAndSubsumption(t *testing.T) {
 	assert.True(t, app.postAppV11Rules(6), "app-v16 subsumes app-v11 rules")
 	assert.True(t, app.postAppV15Rules(6), "app-v16 subsumes app-v15 rules")
 	assert.Equal(t, uint64(16), app.currentAppVersion(), "app-v16 active ⇒ version 16 (ranks above 15)")
-	assert.Equal(t, uint64(16), MaxSupportedAppVersion(), "binary advertises a v16 fork gate (no handshake-halt footgun)")
+	assert.GreaterOrEqual(t, MaxSupportedAppVersion(), uint64(16), "binary advertises at least a v16 fork gate (no handshake-halt footgun)")
 }
 
 // TestReplayAppV16_SkipAheadSubsumption: a hand-crafted skip to 16 (only

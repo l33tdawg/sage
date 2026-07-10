@@ -286,8 +286,9 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	// process where they would be exposed in /proc/<pid>/environ or a crash
 	// dump. llama-server needs no SAGE_* variable; every platform-critical var
 	// (PATH, HOME, TMPDIR, SystemRoot, ...) is preserved so it still spawns.
-	var childEnv []string
-	for _, kv := range os.Environ() {
+	env := os.Environ()
+	childEnv := make([]string, 0, len(env))
+	for _, kv := range env {
 		if strings.HasPrefix(kv, "SAGE_") {
 			continue
 		}

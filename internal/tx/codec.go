@@ -13,6 +13,12 @@ import (
 // Wire format: [1-byte type][payload][64-byte signature][32-byte pubkey][8-byte nonce][8-byte unix-nano timestamp]
 // The payload is type-specific, each field length-prefixed with a 4-byte big-endian uint32.
 
+// MaxAgentRequestSize mirrors the REST authentication body cap plus the small
+// method/path prefix. Keeping the consensus allocation bounded prevents a
+// malicious proposer from turning the optional app-v17 proof envelope into an
+// allocation DoS vector.
+const MaxAgentRequestSize = (1 << 20) + (8 << 10)
+
 var (
 	ErrInvalidTxData   = errors.New("invalid transaction data")
 	ErrUnknownTxType   = errors.New("unknown transaction type")
@@ -60,11 +66,20 @@ func EncodeTx(tx *ParsedTx) ([]byte, error) {
 	if agentNonce == nil {
 		agentNonce = []byte{}
 	}
+	agentRequest := tx.AgentRequest
+	if len(agentRequest) > MaxAgentRequestSize {
+		return nil, fmt.Errorf("%w: agent request too large (%d bytes)", ErrInvalidTxData, len(agentRequest))
+	}
 
 	// type(1) + payloadLen(4) + payload + nodeSig(64) + nodePub(32) + nonce(8) + timestamp(8)
 	// + agentPub(32) + agentSig(64) + agentTs(8) + agentBodyHash(32) + agentNonceLen(4) + agentNonce(var)
+	// + optional agentRequestLen(4) + agentRequest(var). The final field is
+	// omitted entirely when empty to preserve legacy bytes.
 	totalLen := 1 + 4 + len(payload) + ed25519.SignatureSize + ed25519.PublicKeySize + 8 + 8 +
 		ed25519.PublicKeySize + ed25519.SignatureSize + 8 + 32 + 4 + len(agentNonce)
+	if len(agentRequest) > 0 {
+		totalLen += 4 + len(agentRequest)
+	}
 	buf := make([]byte, 0, totalLen)
 	buf = append(buf, byte(tx.Type))
 	buf = appendUint32(buf, uint32(len(payload))) // #nosec G115 -- payload length fits in uint32
@@ -81,6 +96,10 @@ func EncodeTx(tx *ParsedTx) ([]byte, error) {
 	// Agent nonce (variable length, length-prefixed)
 	buf = appendUint32(buf, uint32(len(agentNonce))) // #nosec G115 -- nonce length fits in uint32
 	buf = append(buf, agentNonce...)
+	if len(agentRequest) > 0 {
+		buf = appendUint32(buf, uint32(len(agentRequest))) // #nosec G115 -- bounded above
+		buf = append(buf, agentRequest...)
+	}
 
 	return buf, nil
 }
@@ -155,6 +174,21 @@ func DecodeTx(data []byte) (*ParsedTx, error) {
 			if nonceLen > 0 && offset+int(nonceLen) <= len(data) { // #nosec G115 -- nonceLen validated
 				tx.AgentNonce = make([]byte, nonceLen)
 				copy(tx.AgentNonce, data[offset:offset+int(nonceLen)]) // #nosec G115 -- nonceLen validated
+				offset += int(nonceLen)                                // #nosec G115 -- nonceLen bounded by remaining data
+			}
+
+			// app-v17 delegated-request binding. Older encodings end exactly
+			// after AgentNonce, so no bytes are added or interpreted for them.
+			// Malformed optional tails remain decode-tolerant for historical
+			// replay; the existing post-app-v15 canonical-encoding gate rejects
+			// them before execution because EncodeTx cannot reproduce the tail.
+			if offset+4 <= len(data) {
+				requestLen := binary.BigEndian.Uint32(data[offset : offset+4])
+				offset += 4
+				if requestLen > 0 && requestLen <= MaxAgentRequestSize && offset+int(requestLen) <= len(data) { // #nosec G115 -- requestLen bounded
+					tx.AgentRequest = make([]byte, requestLen)
+					copy(tx.AgentRequest, data[offset:offset+int(requestLen)]) // #nosec G115 -- requestLen bounded
+				}
 			}
 		}
 	}
@@ -211,6 +245,14 @@ func signingPayload(tx *ParsedTx) ([]byte, error) {
 
 	hash := sha256.Sum256(encoded)
 	return hash[:], nil
+}
+
+// PayloadBytes returns the canonical type-specific payload encoding without
+// the outer transaction envelope. The app-v17 delegated-proof verifier uses
+// this to compare a transaction against the action deterministically rebuilt
+// from the agent's signed HTTP request.
+func PayloadBytes(tx *ParsedTx) ([]byte, error) {
+	return encodePayload(tx)
 }
 
 // --- payload encoding helpers ---
@@ -387,6 +429,11 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 			return nil, fmt.Errorf("CrossFedRevoke is nil for cross_fed revoke tx")
 		}
 		return encodeCrossFedRevoke(tx.CrossFedRevoke), nil
+	case TxTypeMemoryReinstate:
+		if tx.MemoryReinstate == nil {
+			return nil, fmt.Errorf("MemoryReinstate is nil for memory reinstate tx")
+		}
+		return encodeMemoryReinstate(tx.MemoryReinstate), nil
 	default:
 		return nil, ErrUnknownTxType
 	}
@@ -631,6 +678,13 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 			return err
 		}
 		tx.CrossFedRevoke = r
+		return nil
+	case TxTypeMemoryReinstate:
+		r, err := decodeMemoryReinstate(data)
+		if err != nil {
+			return err
+		}
+		tx.MemoryReinstate = r
 		return nil
 	default:
 		return ErrUnknownTxType
@@ -1095,6 +1149,41 @@ func decodeMemoryChallenge(data []byte) (*MemoryChallenge, error) {
 	c.Evidence = string(b)
 
 	return c, nil
+}
+
+// --- MemoryReinstate (v11.5 / app-v17) ---
+//
+// Wire format: MemoryID + Reason, both length-prefixed via appendBytes. Single
+// canonical form (no optional/variadic fields), so EncodeTx round-trips
+// byte-identically — required by the app-v15 canonical-encoding guard that is
+// always active once app-v17 (which subsumes app-v15) is live.
+
+func encodeMemoryReinstate(r *MemoryReinstate) []byte {
+	var buf []byte
+	buf = appendBytes(buf, []byte(r.MemoryID))
+	buf = appendBytes(buf, []byte(r.Reason))
+	return buf
+}
+
+func decodeMemoryReinstate(data []byte) (*MemoryReinstate, error) {
+	r := &MemoryReinstate{}
+	var err error
+	var b []byte
+	off := 0
+
+	b, off, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	r.MemoryID = string(b)
+
+	b, _, err = readBytes(data, off)
+	if err != nil {
+		return nil, err
+	}
+	r.Reason = string(b)
+
+	return r, nil
 }
 
 // --- MemoryCorroborate ---

@@ -28,6 +28,25 @@ def test_memory_record_tolerates_missing_provider(sample_memory):
     assert record.provider is None
 
 
+def test_memory_record_parses_disputed(sample_memory):
+    # An app-v17 two-phase-challenged memory stays live and recallable but the
+    # server flags it disputed=true (with the confidence haircut already
+    # applied). The model must read the marker back so a caller can see a
+    # returned record is under dispute.
+    from sage_sdk.models import MemoryRecord
+    record = MemoryRecord(**{**sample_memory, "disputed": True})
+    assert record.disputed is True
+
+
+def test_memory_record_tolerates_missing_disputed(sample_memory):
+    # An older server (or a record that is not challenged) omits the field; the
+    # additive Optional defaults to None so the model still validates
+    # (forward/back compat).
+    from sage_sdk.models import MemoryRecord
+    record = MemoryRecord(**sample_memory)
+    assert record.disputed is None
+
+
 def test_memory_record_parses_linked_memories(sample_memory):
     # The server emits `linked_memories` on the GET /v1/memory/{id} detail
     # response and link_memories() lets a caller write links. The model must

@@ -77,6 +77,49 @@ func TestPostgresUpdateStatus(t *testing.T) {
 	assert.NotNil(t, got.CommittedAt)
 }
 
+func TestPostgresQuerySimilarIncludesDisputed(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+	emb := []float32{0.1, 0.2, 0.3}
+
+	insert := func(status memory.MemoryStatus) string {
+		t.Helper()
+		id := uuid.NewString()
+		content := "disputed recall " + id
+		record := &memory.MemoryRecord{
+			MemoryID:        id,
+			SubmittingAgent: "agent-test",
+			Content:         content,
+			ContentHash:     memory.ComputeContentHash(content),
+			Embedding:       emb,
+			MemoryType:      memory.TypeFact,
+			DomainTag:       "crypto",
+			ConfidenceScore: 0.9,
+			Status:          status,
+			CreatedAt:       time.Now(),
+		}
+		require.NoError(t, store.InsertMemory(ctx, record))
+		return id
+	}
+
+	committedID := insert(memory.StatusCommitted)
+	disputedID := insert(memory.StatusChallenged)
+
+	base, err := store.QuerySimilar(ctx, emb, QueryOptions{
+		DomainTag: "crypto", StatusFilter: "committed", TopK: 100,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, recordIDs(base), committedID)
+	assert.NotContains(t, recordIDs(base), disputedID)
+
+	withDisputed, err := store.QuerySimilar(ctx, emb, QueryOptions{
+		DomainTag: "crypto", StatusFilter: "committed", IncludeDisputed: true, TopK: 100,
+	})
+	require.NoError(t, err)
+	assert.Contains(t, recordIDs(withDisputed), committedID)
+	assert.Contains(t, recordIDs(withDisputed), disputedID)
+}
+
 func TestVotes(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
