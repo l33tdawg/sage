@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/memory"
@@ -489,6 +490,39 @@ type AgentStore interface {
 	ClearStaleRedeployLogs(ctx context.Context) (int, error)
 }
 
+// Pipeline hardening limits (E8c). These bound the pipe surface against a slow
+// disk-exhaustion DoS — a flood of large, never-claimed work items. They are
+// enforced at the store layer so every write path is covered by one chokepoint:
+// the agent REST handler, the MCP tools (which tunnel back through REST), and
+// the dashboard operator handler (which calls InsertPipeline directly). The
+// REST/dashboard handlers add matching request-body checks as fast-fail
+// defense in depth.
+const (
+	// MaxPipeContentBytes caps a single pipe payload and a single result.
+	// 256 KiB is far larger than any real agent work item yet leaves ample
+	// headroom under the 1 MiB request-body cap (decodeJSON / MaxBytesReader)
+	// even after JSON string escaping.
+	MaxPipeContentBytes = 256 << 10 // 256 KiB
+	// MaxPipeIntentBytes caps the short intent descriptor.
+	MaxPipeIntentBytes = 8 << 10 // 8 KiB
+	// MaxOpenPipesPerAgent caps the non-terminal (pending or claimed) pipes a
+	// single requester identity may hold open at once.
+	MaxOpenPipesPerAgent = 256
+	// MaxOpenPipesGlobal caps non-terminal pipes across all requesters, so
+	// many identities cannot collectively exhaust disk.
+	MaxOpenPipesGlobal = 10000
+)
+
+// Pipeline guard errors. Callers distinguish these with errors.Is and map them
+// to HTTP 413 (too large) and 429 (quota).
+var (
+	ErrPipePayloadTooLarge = errors.New("pipeline payload exceeds maximum size")
+	ErrPipeResultTooLarge  = errors.New("pipeline result exceeds maximum size")
+	ErrPipeIntentTooLarge  = errors.New("pipeline intent exceeds maximum size")
+	ErrPipeQuotaPerAgent   = errors.New("too many open pipelines for this requester")
+	ErrPipeQuotaGlobal     = errors.New("too many open pipelines on this node")
+)
+
 // PipelineMessage represents an ephemeral agent-to-agent work item.
 // These are NOT memories — they are transient messages that auto-expire.
 type PipelineMessage struct {
@@ -520,6 +554,10 @@ type PipelineStore interface {
 	ListPipelines(ctx context.Context, status string, limit int) ([]*PipelineMessage, error)
 	PipelineStats(ctx context.Context) (map[string]int, error)
 	ExpirePipelines(ctx context.Context) (int, error)
+	// ExpireStalePipelines flips pending/claimed rows created before olderThan
+	// to 'expired' regardless of their TTL, bounding the lifetime of a
+	// never-claimed pipe even if it carried an oversized expires_at.
+	ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error)
 	PurgePipelines(ctx context.Context, olderThan time.Time) (int, error)
 }
 

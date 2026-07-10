@@ -4023,6 +4023,36 @@ func (s *SQLiteStore) migratePipeline(ctx context.Context) {
 }
 
 func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) error {
+	// Size caps (E8c) — bound one pipe's payload/intent before it hits disk.
+	if len(msg.Payload) > MaxPipeContentBytes {
+		return ErrPipePayloadTooLarge
+	}
+	if len(msg.Intent) > MaxPipeIntentBytes {
+		return ErrPipeIntentTooLarge
+	}
+	// Quotas (E8c) — cap non-terminal pipes per requester and globally so a
+	// flood of never-claimed work items cannot exhaust disk. Both counts are
+	// index-backed (idx_pipe_from_agent, idx_pipe_expires). A small race under
+	// concurrent inserts can overshoot a cap by a few rows, which is harmless
+	// for an anti-DoS backstop.
+	var perAgent int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pipeline_messages WHERE from_agent = ? AND status IN ('pending','claimed')`,
+		msg.FromAgent).Scan(&perAgent); err != nil {
+		return err
+	}
+	if perAgent >= MaxOpenPipesPerAgent {
+		return ErrPipeQuotaPerAgent
+	}
+	var global int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pipeline_messages WHERE status IN ('pending','claimed')`).Scan(&global); err != nil {
+		return err
+	}
+	if global >= MaxOpenPipesGlobal {
+		return ErrPipeQuotaGlobal
+	}
+
 	_, err := s.writeExecContext(ctx,
 		`INSERT INTO pipeline_messages (pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -4100,6 +4130,10 @@ func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string)
 }
 
 func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, result, journalID string) error {
+	// Size cap (E8c) — bound the single result written back to a pipe.
+	if len(result) > MaxPipeContentBytes {
+		return ErrPipeResultTooLarge
+	}
 	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'completed', result = ?, journal_id = ?, claimed_by = CASE WHEN claimed_by = '' THEN ? ELSE claimed_by END,
 		        completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
@@ -4209,6 +4243,24 @@ func (s *SQLiteStore) ExpirePipelines(ctx context.Context) (int, error) {
 		`UPDATE pipeline_messages SET status = 'expired'
 		 WHERE status IN ('pending', 'claimed')
 		   AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// ExpireStalePipelines flips pending/claimed rows whose created_at predates
+// olderThan to 'expired', independent of their expires_at. This is a hard
+// backstop on lifetime: a never-claimed (or abandoned-after-claim) pipe carrying
+// an oversized TTL still ages out, so the subsequent PurgePipelines sweep can
+// reclaim its row. The staleness window is set well beyond the max legitimate
+// TTL, so an actively-running pipe is never touched.
+func (s *SQLiteStore) ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error) {
+	res, err := s.writeExecContext(ctx,
+		`UPDATE pipeline_messages SET status = 'expired'
+		 WHERE status IN ('pending', 'claimed')
+		   AND created_at < ?`, formatTime(olderThan))
 	if err != nil {
 		return 0, err
 	}

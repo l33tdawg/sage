@@ -140,6 +140,7 @@ func pipeRouterAs(s *Server, callerID string) http.Handler {
 			next.ServeHTTP(w, req.WithContext(middleware.WithAgentID(req.Context(), callerID)))
 		})
 	})
+	r.Post("/v1/pipe/send", s.handlePipeSend)
 	r.Get("/v1/pipe/{pipe_id}", s.handlePipeStatus)
 	r.Put("/v1/pipe/{pipe_id}/claim", s.handlePipeClaim)
 	r.Put("/v1/pipe/{pipe_id}/result", s.handlePipeResult)

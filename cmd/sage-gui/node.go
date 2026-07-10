@@ -1126,9 +1126,27 @@ func runServe() (rerr error) {
 	// Auto-import pending chat history (from setup wizard)
 	go autoImport(cfg, embedProvider, logger)
 
+	// Pipeline retention windows (E8c). The sweep runs on the 5-minute ticker
+	// below; a one-shot boot sweep runs first so a node that was offline reclaims
+	// stale rows immediately instead of waiting a full interval.
+	const (
+		pipeSweepInterval   = 5 * time.Minute
+		pipeRetentionWindow = 24 * time.Hour // terminal rows deleted this long after creation
+		pipeStalenessWindow = 48 * time.Hour // non-terminal rows force-expired past this age
+	)
+	// Boot one-shot pipeline reconciliation — mirror the ResolveChallengedMemories
+	// boot sweep so nothing accumulates while the node was down.
+	{
+		_, _ = sqliteStore.ExpirePipelines(ctx)
+		_, _ = sqliteStore.ExpireStalePipelines(ctx, time.Now().Add(-pipeStalenessWindow))
+		if purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-pipeRetentionWindow)); purged > 0 {
+			logger.Debug().Int("purged", purged).Msg("pipeline boot sweep")
+		}
+	}
+
 	// Pipeline TTL cleanup — expire and purge stale pipeline messages every 5 minutes
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(pipeSweepInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -1136,9 +1154,10 @@ func runServe() (rerr error) {
 				return
 			case <-ticker.C:
 				expired, _ := sqliteStore.ExpirePipelines(ctx)
-				purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-24*time.Hour))
-				if expired > 0 || purged > 0 {
-					logger.Debug().Int("expired", expired).Int("purged", purged).Msg("pipeline cleanup")
+				stale, _ := sqliteStore.ExpireStalePipelines(ctx, time.Now().Add(-pipeStalenessWindow))
+				purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-pipeRetentionWindow))
+				if expired > 0 || stale > 0 || purged > 0 {
+					logger.Debug().Int("expired", expired).Int("stale", stale).Int("purged", purged).Msg("pipeline cleanup")
 				}
 				// Sweep stale OAuth auth-codes (5-min TTL, single-use) — the
 				// store retains rows past use for audit visibility, but the

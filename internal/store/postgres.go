@@ -1961,6 +1961,10 @@ func (s *PostgresStore) ExpirePipelines(_ context.Context) (int, error) {
 	return 0, fmt.Errorf("ExpirePipelines not implemented for PostgresStore")
 }
 
+func (s *PostgresStore) ExpireStalePipelines(_ context.Context, _ time.Time) (int, error) {
+	return 0, fmt.Errorf("ExpireStalePipelines not implemented for PostgresStore")
+}
+
 func (s *PostgresStore) PurgePipelines(_ context.Context, _ time.Time) (int, error) {
 	return 0, fmt.Errorf("PurgePipelines not implemented for PostgresStore")
 }
