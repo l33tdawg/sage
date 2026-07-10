@@ -37,7 +37,24 @@ trap cleanup EXIT
 echo "--- regenerating a fresh 4-node testnet genesis (app_version 0) ---"
 bash deploy/init-testnet.sh
 
-echo "--- building + starting the isolated cluster (cold build, be patient) ---"
+# Build the two shared images ONCE (docker-compose.det.yml resets the per-service
+# build blocks — 8 independent cold builds exhausted Docker's VM disk). Sequential
+# on purpose: one builder cache peak at a time. Skipped when the tag already
+# exists; set DET_REBUILD=1 after code changes so the run tests the CURRENT tree.
+for spec in "sage-det-abci:local deploy/Dockerfile.abci" \
+            "sage-det-node:local deploy/Dockerfile.node"; do
+  tag=${spec%% *}; dockerfile=${spec##* }
+  if [ "${DET_REBUILD:-0}" != "1" ] && docker image inspect "${tag}" >/dev/null 2>&1; then
+    created=$(docker image inspect --format '{{.Created}}' "${tag}")
+    echo "!!! ${tag} already exists (built ${created}) — REUSING a possibly stale"
+    echo "!!! binary. Set DET_REBUILD=1 to rebuild from the current tree."
+  else
+    echo "--- building ${tag} (${dockerfile}) ---"
+    docker build -f "${dockerfile}" -t "${tag}" .
+  fi
+done
+
+echo "--- starting the isolated cluster ---"
 # Only the services the determinism test needs: it submits NO memories, so the
 # ollama embedding stack (which pulls ~1.3GB of models) is skipped — abci depends
 # only on postgres, not ollama.
