@@ -159,6 +159,21 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 		t.Fatalf("CODE_H disagreement: host=%q guest=%q", view2.CodeH, greq.CodeH)
 	}
 
+	// The guest wizard learns of the approval by polling /fed/v1/join/status
+	// over the REAL router — this leg carries a query string and 404'd in
+	// v11.4.8/9 (netguard.JoinPath escaped the '?'), stalling every ceremony
+	// at "1 of 2 confirmed". Keep it exercised end-to-end.
+	polled, err := guest.mgr.GuestPollStatus(ctx, create.SessionID)
+	if err != nil {
+		t.Fatalf("GuestPollStatus: %v", err)
+	}
+	if !polled.HostApproved {
+		t.Fatal("GuestPollStatus: host approval not visible to the guest")
+	}
+	if polled.HostScope == nil || polled.HostScope.MaxClearance != int(hostGrant.MaxClearance) {
+		t.Fatalf("GuestPollStatus: host scope missing or wrong: %+v", polled.HostScope)
+	}
+
 	// Approval #2: guest confirms - broadcasts its tx-33, then the host confirms
 	// against the frozen E and broadcasts its tx-33.
 	if _, err := guest.mgr.GuestConfirm(ctx, create.SessionID, guestEndpoint, hostGrant); err != nil {

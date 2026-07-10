@@ -10721,7 +10721,7 @@ function GuestJoinWizard({ onExit }) {
             } catch (e) {
                 if (!live) return;
                 misses += 1;
-                if (misses >= 4) setPollNote("Still trying to reach the other computer. Make sure it's on and you're both on the same network.");
+                if (misses >= 4) setPollNote(`Can't check their side (${e && e.message ? e.message : 'no response'}). Make sure the other computer is on and you're both on the same network.`);
             }
         };
         const id = setInterval(tick, 2000); tick();
@@ -10945,7 +10945,7 @@ function HostJoinWizard({ onExit }) {
             <${FedGreenRail} />
             <h3>Read this code back to them</h3>
             ${view && view.code_h ? html`<${BigCode} code=${view.code_h} />` : html`<div class="fed-waiting"><span class="fed-spinner"></span> Preparing…</div>`}
-            <p class="fed-read-instr">Read ${view && view.guest_chain ? view.guest_chain : 'them'} this code so they can confirm it. Say it out loud - don't paste it.</p>
+            <p class="fed-read-instr">Read this code to ${(view && (view.guest_name || view.guest_chain)) || 'them'} so they can confirm it. Say it out loud - don't paste it.</p>
             <div class="fed-waiting"><span class="fed-spinner"></span> You approved. Waiting for them (2 of 2)…</div>
             <${TwoOfTwoMeter} n=${1} />
         </div>`}
