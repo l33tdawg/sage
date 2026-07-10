@@ -163,9 +163,9 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 	// over the REAL router — this leg carries a query string and 404'd in
 	// v11.4.8/9 (netguard.JoinPath escaped the '?'), stalling every ceremony
 	// at "1 of 2 confirmed". Keep it exercised end-to-end.
-	polled, err := guest.mgr.GuestPollStatus(ctx, create.SessionID)
-	if err != nil {
-		t.Fatalf("GuestPollStatus: %v", err)
+	polled, pollErr := guest.mgr.GuestPollStatus(ctx, create.SessionID)
+	if pollErr != nil {
+		t.Fatalf("GuestPollStatus: %v", pollErr)
 	}
 	if !polled.HostApproved {
 		t.Fatal("GuestPollStatus: host approval not visible to the guest")
