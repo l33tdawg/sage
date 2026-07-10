@@ -65,9 +65,10 @@ function HelpTip({ text, align }) {
     const [show, setShow] = useState(false);
     if (!enabled) return null;
     return html`<span class="help-tip"
-        onMouseEnter=${() => setShow(true)} onMouseLeave=${() => setShow(false)}
-        onFocus=${() => setShow(true)} onBlur=${() => setShow(false)}>
-        <span class="help-tip-trigger" tabIndex="0" role="button" aria-label="More information">?</span>
+        onMouseEnter=${() => setShow(true)} onMouseLeave=${() => setShow(false)}>
+        <span class="help-tip-trigger" tabIndex="0" role="button" aria-label="More information"
+            onFocus=${() => setShow(true)} onBlur=${() => setShow(false)}
+            onKeyDown=${(e) => { if (e.key === 'Escape') setShow(false); }}>?</span>
         ${show && html`<span class="help-tip-popup ${align ? 'align-' + align : ''}">${text}</span>`}
     </span>`;
 }
@@ -192,8 +193,11 @@ function SmartTooltipLayer() {
     const cx = tip.rect.left + tip.rect.width / 2;
     const cy = tip.rect.top + tip.rect.height / 2;
     let placement = tip.placement;
-    if (placement === 'right' && tip.rect.right + 320 > vw) placement = 'left';
-    if (placement === 'left' && tip.rect.left < 320) placement = 'right';
+    const horizontalNeed = Math.min(300, Math.max(0, vw - 32));
+    const leftRoom = tip.rect.left - gap - 16;
+    const rightRoom = vw - tip.rect.right - gap - 16;
+    if (placement === 'right' && rightRoom < horizontalNeed && leftRoom > rightRoom) placement = 'left';
+    if (placement === 'left' && leftRoom < horizontalNeed && rightRoom > leftRoom) placement = 'right';
     if (placement === 'top' && tip.rect.top < 100) placement = 'bottom';
     if (placement === 'bottom' && vh - tip.rect.bottom < 100) placement = 'top';
     const halfTooltip = Math.min(150, Math.max(0, (vw - 32) / 2));
