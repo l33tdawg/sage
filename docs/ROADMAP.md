@@ -98,13 +98,19 @@ Make the personal-node authority model match the product: the genesis admin can 
 
 Follow OpenAI's current product surfaces instead of treating every ChatGPT connection as the same runtime. The new ChatGPT desktop app combines Chat, ChatGPT Work, and Codex. Codex mode shares the user-level `~/.codex/config.toml` MCP configuration with Codex CLI and the IDE extension, so CEREBRUM provides a one-click app-wide local connection for that mode. ChatGPT Work on the web or in the desktop app uses the hosted plugin + Secure MCP Tunnel path because ChatGPT cannot invoke a local stdio MCP server directly. Regular Chat remains supported and starts with the **Quick chat** button. SAGE uses OpenAI's name **Work** rather than the unrelated **Cowork** label.
 
+---
+
+## v11.8 - planned (the collaboration release)
+
+Forward-looking. Nothing here is committed to a date; treat it as speculative until it ships.
+
 ### Sharing & Sync control plane
 
 Add a dedicated **Sharing & Sync** section, separate from Agents and identity management. It shows every synchronization group, member node, role and voting power where applicable, full-sync versus selective-sync status, shared domains, owner, backfill/catch-up position, health, and last successful synchronization.
 
 A domain's original/current owner may propose adding or removing that domain, create a new shared domain, backfill earlier memories, change eligible nodes, or stop future synchronization; group-level RBAC and validator governance authorize changes that affect other members. Removing a domain or node has explicit, auditable semantics for retained historical copies, tombstones, future updates, rejoin, and local deletion - it never silently erases another member's data.
 
-This release also adds multi-node group membership and explicit full-sync/selective-sync roles, but does not claim self-healing BFT until the v11.8 quorum gates below pass.
+This release also adds multi-node group membership and explicit full-sync/selective-sync roles, but does not claim self-healing BFT until the v11.9 quorum gates below pass.
 
 ### Cross-network agent messaging (federated inbox)
 
@@ -112,7 +118,7 @@ Extend the agent-to-agent pipe (today a node-local inbox) across a federation li
 
 ---
 
-## v11.8 - planned
+## v11.9 - planned
 
 ### Domain-scoped quorum + self-healing replication
 

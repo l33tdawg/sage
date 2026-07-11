@@ -1837,6 +1837,18 @@ body {
     border: 6px solid transparent;
     border-top-color: var(--border-light);
 }
+/* Flipped variant for triggers in the top chrome (top bar, health strip):
+   render the popup underneath so it is not clipped by the viewport top */
+.help-tip-popup.below {
+    bottom: auto;
+    top: calc(100% + 8px);
+}
+.help-tip-popup.below::after {
+    top: auto;
+    bottom: 100%;
+    border-top-color: transparent;
+    border-bottom-color: var(--border-light);
+}
 /* Right-aligned variant for elements near the right edge */
 .help-tip-popup.align-right {
     left: auto;

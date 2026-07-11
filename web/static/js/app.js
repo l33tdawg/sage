@@ -13,7 +13,7 @@ import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
 
 const { h, render, createContext } = preact;
-const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
+const { useState, useEffect, useRef, useLayoutEffect, useCallback, useContext } = preactHooks;
 const html = window.html;
 
 // Product version shown in the CEREBRUM header. Bump at release; the precise
@@ -209,13 +209,23 @@ function useTooltips() { return useContext(TooltipsContext); }
 function HelpTip({ text, align }) {
     const enabled = useTooltips();
     const [show, setShow] = useState(false);
+    const [below, setBelow] = useState(false);
+    const rootRef = useRef(null);
     if (!enabled) return null;
-    return html`<span class="help-tip"
-        onMouseEnter=${() => setShow(true)} onMouseLeave=${() => setShow(false)}>
+    const open = () => {
+        // The popup renders above the trigger by default; triggers living in
+        // the top chrome (top bar, health strip) have no room above, so flip
+        // the popup underneath before showing it.
+        const r = rootRef.current && rootRef.current.getBoundingClientRect();
+        setBelow(!!r && r.top < 200);
+        setShow(true);
+    };
+    return html`<span class="help-tip" ref=${rootRef}
+        onMouseEnter=${open} onMouseLeave=${() => setShow(false)}>
         <span class="help-tip-trigger" tabIndex="0" role="button" aria-label="More information"
-            onFocus=${() => setShow(true)} onBlur=${() => setShow(false)}
+            onFocus=${open} onBlur=${() => setShow(false)}
             onKeyDown=${(e) => { if (e.key === 'Escape') setShow(false); }}>?</span>
-        ${show && html`<span class="help-tip-popup ${align ? 'align-' + align : ''}">${text}</span>`}
+        ${show && html`<span class="help-tip-popup ${align ? 'align-' + align : ''} ${below ? 'below' : ''}">${text}</span>`}
     </span>`;
 }
 
@@ -231,6 +241,7 @@ function SmartTooltipLayer() {
     const [tip, setTip] = useState(null);
     const timerRef = useRef(null);
     const activeRef = useRef(null);
+    const tipRef = useRef(null);
 
     useEffect(() => {
         const selector = '[data-tooltip], [data-sage-native-title], [title], button[aria-label], [role="button"][aria-label], .detail-close, .toast-close';
@@ -332,6 +343,31 @@ function SmartTooltipLayer() {
         };
     }, [enabled]);
 
+    // Controls near the top of the page (the top bar, the health strip, the MRI
+    // toolbar) sit far enough down that the auto-placer picks "top", yet a tall
+    // tooltip rendered above them can spill over the fixed top bar or off the top
+    // of the viewport, where it is clipped and unreadable. The real tooltip height
+    // is only known once it is in the DOM, so measure it after layout and, if a
+    // top-placed tooltip has run past the top edge, flip it below the control
+    // instead. tip.flipped guards against re-running (and any placement loop).
+    useLayoutEffect(() => {
+        if (!tip || tip.flipped) return;
+        const node = tipRef.current;
+        if (!node || node.dataset.tipSide !== 'top') return;
+        const topSafe = 56; // clear the 52px fixed top bar
+        const box = node.getBoundingClientRect();
+        if (box.top < topSafe) {
+            // Flip below only when the underside can actually hold the tooltip
+            // (or at least beats the space above) - on a very short viewport an
+            // unconditional flip would just trade a top clip for a bottom clip.
+            const roomBelow = window.innerHeight - tip.rect.bottom - 12;
+            const roomAbove = tip.rect.top - topSafe;
+            if (roomBelow >= box.height || roomBelow > roomAbove) {
+                setTip((t) => (t && !t.flipped) ? { ...t, placement: 'bottom', flipped: true } : t);
+            }
+        }
+    }, [tip]);
+
     if (!enabled || !tip) return null;
     const gap = 12;
     const vw = window.innerWidth;
@@ -344,8 +380,10 @@ function SmartTooltipLayer() {
     const rightRoom = vw - tip.rect.right - gap - 16;
     if (placement === 'right' && rightRoom < horizontalNeed && leftRoom > rightRoom) placement = 'left';
     if (placement === 'left' && leftRoom < horizontalNeed && rightRoom > leftRoom) placement = 'right';
-    if (placement === 'top' && tip.rect.top < 100) placement = 'bottom';
-    if (placement === 'bottom' && vh - tip.rect.bottom < 100) placement = 'top';
+    if (!tip.flipped) {
+        if (placement === 'top' && tip.rect.top < 100) placement = 'bottom';
+        if (placement === 'bottom' && vh - tip.rect.bottom < 100) placement = 'top';
+    }
     const halfTooltip = Math.min(150, Math.max(0, (vw - 32) / 2));
     let left = vw > 32 ? Math.max(16 + halfTooltip, Math.min(vw - 16 - halfTooltip, cx)) : vw / 2;
     let top = tip.rect.top - gap;
@@ -362,7 +400,7 @@ function SmartTooltipLayer() {
         top = Math.max(16, Math.min(vh - 16, cy));
         transform = 'translate(-100%, -50%)';
     }
-    return html`<div class="smart-tooltip smart-tooltip-${placement}" role="tooltip"
+    return html`<div class="smart-tooltip smart-tooltip-${placement}" role="tooltip" ref=${tipRef} data-tip-side=${placement}
         style=${`left:${left}px;top:${top}px;transform:${transform};`}>
         ${tip.title && html`<div class="smart-tooltip-title">${tip.title}</div>`}
         ${tip.text && html`<div class="smart-tooltip-copy">${tip.text}</div>`}
@@ -6369,371 +6407,215 @@ function HelpOverlay({ onClose, initialSection }) {
     const sections = [
         {
             key: 'getting-started',
-            title: 'Getting Started',
+            title: 'Welcome to CEREBRUM',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`,
-            summary: 'First steps with CEREBRUM and your SAGE brain.',
+            summary: 'What CEREBRUM is and why it matters.',
             content: html`
-                <p>CEREBRUM is the visual dashboard for your SAGE institutional memory. Every conversation your AI agents have builds knowledge here — validated by BFT consensus, scored by confidence, and organized by domain.</p>
+                <p>CEREBRUM is where you watch and look after your AI's memory. Normally, when you close a chat with an AI, it forgets everything you talked about. SAGE is the memory that changes that: it quietly keeps what you and your AI work out together, so next time it already knows you, your projects, and what has and hasn't worked.</p>
                 <div class="guide-steps">
-                    <div class="guide-step"><span class="guide-step-num">1</span><div><strong>Connect your AI assistant</strong> — Add the MCP config from Settings to Claude Code, Cursor, or any MCP-compatible client. Your assistant will automatically call <code>sage_inception</code> on startup to load its memory.</div></div>
-                    <div class="guide-step"><span class="guide-step-num">2</span><div><strong>Start a conversation</strong> — As you work with your assistant, it stores observations, facts, and inferences. Each memory goes through consensus validation before being committed.</div></div>
-                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>Explore your brain</strong> — Open the Cerebrum view (brain icon) to see your memories inside the 3D MRI brain. Drag to orbit, click a memory to mark it with a white focus ring, and walk its related notes.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">1</span><div><strong>It gets to know you</strong> - Over time your AI remembers your projects, your preferences, and the decisions you have made together. The more you use it, the better it knows you.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">2</span><div><strong>It works with the tools you already use</strong> - Claude, ChatGPT, Cursor and others can all plug into the same memory, so they are on the same page instead of each starting from scratch.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>It stays yours</strong> - Everything lives on your own computer. Nothing is sent anywhere unless you choose to share it, and you are always the one who decides.</div></div>
                 </div>
+                <div class="guide-callout"><strong>New here?</strong> The three tabs worth reading first are this one, <strong>How your AI remembers</strong>, and <strong>Connect your AI tools</strong>. Dip into the rest whenever you need them.</div>
             `,
         },
         {
             key: 'cerebrum-view',
-            title: 'Cerebrum View',
+            title: 'How your AI remembers',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/></svg>`,
-            summary: 'The 3D MRI brain is the CEREBRUM view.',
+            summary: 'How your AI\'s memory works, in plain terms.',
             content: html`
-                <p>The Cerebrum view is your brain's neural map. The <strong>3D MRI brain</strong> renders memories as glowing points inside a translucent brain, with domains as lobes and consolidation shown by depth, size, and glow.</p>
+                <p>Here is what is going on behind the scenes, in plain terms. You never have to manage any of this - it just runs - but it helps to know why your memory stays useful instead of turning into a pile of clutter.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">MRI: navigate</div>
-                        <div class="guide-detail-desc">Drag to orbit, scroll to zoom. Click a memory point to mark it with a white focus ring, light up its related constellation, and open the related notes board. Click open space to reset back to all memories.</div>
+                        <div class="guide-detail-label">Kept tidy by topic</div>
+                        <div class="guide-detail-desc">Everything your AI learns is filed under a topic - a work project, a holiday, a recipe. Filing things this way keeps the memory sharp: when your AI needs something, it looks in the right drawer instead of rummaging through everything at once.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">MRI: scan & flow</div>
-                        <div class="guide-detail-desc">"Scan" toggles a slow auto-rotate; "flow" animates particles along memory links so you can watch knowledge pathways. Corroborated memories glow brighter and larger.</div>
+                        <div class="guide-detail-label">Checked before it is kept</div>
+                        <div class="guide-detail-desc">When your AI wants to remember something new, SAGE gives it a quick once-over first: is it real and worth keeping, or is it empty, a repeat, or just noise? Only the worthwhile things make it in, so junk does not build up.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Chain Activity</div>
-                        <div class="guide-detail-desc">The collapsible bar at the very bottom shows real-time chain events — memories stored, recalled, forgotten, and consensus votes. Drag the top edge to resize. Visible on all pages.</div>
+                        <div class="guide-detail-label">The useful stuff rises, the rest fades</div>
+                        <div class="guide-detail-desc">Memories you and your AI keep coming back to, and that keep proving true, become more trusted over time. Odd one-offs that never come up again slowly fade away on their own, so your memory does not fill with things that no longer matter.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">See it as a brain</div>
+                        <div class="guide-detail-desc">The main picture shows every memory as a glowing dot inside a 3D brain, grouped into areas by topic. Drag to spin it, scroll to zoom, and click any dot to light up what it is connected to and read the story around it. Click empty space to go back to the whole brain.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Watch it live</div>
+                        <div class="guide-detail-desc">The bar along the bottom shows things happening in real time as your AI stores or looks up memories. Drag it taller to watch, or tuck it away when you are done.</div>
                     </div>
                 </div>
+                <div class="guide-callout"><strong>For the curious:</strong> before a new memory is kept, a few independent checks have to agree it is worth keeping, a bit like a small panel of proofreaders. That agreement is what stops junk slipping in.</div>
             `,
         },
         {
-            key: 'domains',
-            title: 'Domains & Memory Types',
-            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
-            summary: 'How knowledge is categorized and what memory types mean.',
+            key: 'connect',
+            title: 'Connect your AI tools',
+            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
+            summary: 'Connect your AI tools to your memory.',
             content: html`
-                <p>Domains are knowledge categories that your AI agents create dynamically based on conversation context. Instead of dumping everything into one bucket, agents tag each memory with a specific domain for precise recall.</p>
+                <p>Connecting an AI tool to SAGE is the part people expect to be fiddly, and it isn't. SAGE writes all the setup for you. Open <strong>Connect an AI tool</strong> (you will see it during the first-time welcome, and any time afterwards in the Connect area). It asks one simple question first: is the tool on <strong>this</strong> computer, or <strong>another</strong> one?</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Dynamic domains</div>
-                        <div class="guide-detail-desc">Domains are created automatically. If you're debugging Go code, the agent creates "go-debugging". Discussing architecture? "sage-architecture". The more specific the domain, the better recall precision.</div>
+                        <div class="guide-detail-label">On this computer (one click)</div>
+                        <div class="guide-detail-desc">Pick your tool - Claude Code, Codex, Cursor, Windsurf, Claude Desktop, or ChatGPT's Codex mode. For a few of them you also point it at the folder you are working in. Click <strong>Connect</strong>, restart the tool, and it now remembers. That is the whole thing.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Facts <span style="color:var(--accent);">(0.95+)</span></div>
-                        <div class="guide-detail-desc">Verified truths — architecture decisions, confirmed behaviors, proven solutions. These are high-confidence memories that represent ground truth.</div>
+                        <div class="guide-detail-label">ChatGPT for Work</div>
+                        <div class="guide-detail-desc">ChatGPT for Work (on the web or in the app) connects a slightly different way. Use the <strong>Connect ChatGPT Work</strong> button and it walks you through it: open a couple of pages it points you to, paste in the two values it asks for, and click one button to switch on a secure link. After that, ChatGPT can use your memory too.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Observations <span style="color:var(--primary);">(0.80+)</span></div>
-                        <div class="guide-detail-desc">Things noticed during work — patterns, user preferences, what worked and what failed. These form the bulk of institutional knowledge.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Inferences <span style="color:var(--text-dim);">(0.60+)</span></div>
-                        <div class="guide-detail-desc">Conclusions drawn — hypotheses, connections between facts. Lower confidence than facts, but valuable for building understanding over time.</div>
+                        <div class="guide-detail-label">Another computer of yours</div>
+                        <div class="guide-detail-desc">Want a second computer to share this same memory - your laptop and your desktop, say? Choose the <strong>another computer</strong> path. This computer shows a code (a square you can scan, plus a short code). On the other computer, its SAGE reads that code, both screens then show the same six-digit number to prove they really found each other, and they are linked. No cables, no files to copy around.</div>
                     </div>
                 </div>
+                <div class="guide-callout"><strong>Not the same as sharing with a friend.</strong> Connecting your own tools and computers just points them all at one memory that is yours. Linking up with <em>someone else's</em> SAGE - a friend, family member, or colleague - is covered in <strong>Share with people you trust</strong>, and always needs a yes from both sides.</div>
             `,
         },
         {
-            key: 'search',
-            title: 'Search & Import',
-            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
-            summary: 'Full-text search across memories and importing from other AI platforms.',
+            key: 'sharing',
+            title: 'Share with people you trust',
+            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`,
+            summary: 'Share memory with people you trust.',
             content: html`
-                <p>The Search page provides full-text search across all your committed memories, with filtering by domain, status, and agent.</p>
+                <p>This is the part that makes SAGE more than a personal notebook. You can link your memory to someone else's - a partner, a family member, a colleague - so your two AIs can draw on each other's knowledge. You can be in the same room or on opposite sides of the world; it works the same either way. Look for the sharing area of the app (its icon is two linked dots, labelled Federation).</p>
+                <div class="guide-steps">
+                    <div class="guide-step"><span class="guide-step-num">1</span><div><strong>Both of you say yes</strong> - Nothing is shared until both sides agree. One of you picks <strong>Let someone join mine</strong> and shows a code; the other picks <strong>Join someone's network</strong> and scans it. If either of you does not confirm, nothing happens.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">2</span><div><strong>You pick exactly what to share</strong> - You choose which topics the other person may see - just recipes, or one shared project, or nothing at all - and how private is too private to hand over. They choose the same for their side, and neither of you can quietly widen what the other set.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>You confirm it is really them</strong> - Near the end you each read the other a short number, over a phone or video call. If the numbers match, you know you are connecting to the right person and not an impostor. If they do not match, you stop. Only ever connect when you can see or hear that it is genuinely them.</div></div>
+                </div>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Full-text search</div>
-                        <div class="guide-detail-desc">Type any keyword or phrase to match memory content and domain (case-insensitive exact match). Results are sorted newest first - there is no semantic ranking. Domain badges and confidence scores are shown inline.</div>
+                        <div class="guide-detail-label">What the other side can see</div>
+                        <div class="guide-detail-desc">When your AI looks something up, it can also peek at the topics you both agreed to share on their SAGE, and show you the answer marked as coming from them. It is shown to you in the moment, never quietly copied into your own memory.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Filters</div>
-                        <div class="guide-detail-desc">Filter by domain (dropdown), memory status (committed, pending, deprecated), and agent (which agent submitted the memory). Combine filters for precision.</div>
+                        <div class="guide-detail-label">You stay in control</div>
+                        <div class="guide-detail-desc">Turn a connection off whenever you like - it deletes nothing on either side, it just stops the two of you reaching each other. You can also narrow or change what you share at any time.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Import</div>
-                        <div class="guide-detail-desc">Go to Import (upload icon in sidebar) to bring in conversation exports from ChatGPT, Claude, or Gemini. The importer parses conversation JSON, extracts knowledge, and submits it through the BFT consensus pipeline.</div>
+                        <div class="guide-detail-label">Keeping topics up to date on both sides (optional)</div>
+                        <div class="guide-detail-desc">If you are the one hosting the connection, you can optionally choose a few specific topics to keep up to date on both sides, so new notes on either end show up for both of you. This is switched off unless you turn it on, and you are the one who picks which topics.</div>
+                    </div>
+                </div>
+                <div class="guide-callout"><strong>The one thing that keeps it safe</strong> is that human moment of checking the number with someone you can actually see or hear. The app will always nudge you towards doing it in person or on a call you placed yourself. If anything ever looks off, stop, and reach the person another way before you connect.</div>
+            `,
+        },
+        {
+            key: 'use-cases',
+            title: 'Ways people use it',
+            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+            summary: 'Everyday ways people use it.',
+            content: html`
+                <p>A few everyday examples to make it concrete.</p>
+                <div class="guide-detail-grid">
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">All your AI tools, one memory</div>
+                        <div class="guide-detail-desc">You might use one AI for writing, another for coding, and another inside your editor. Connect them all to your SAGE and they share a single memory. Tell one about your project and the others already know, so you never have to repeat yourself.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Delete</div>
-                        <div class="guide-detail-desc">Click any memory to open its detail, then click Delete. Deleted memories are marked as "deprecated" — hidden from recall but not permanently erased, preserving the audit trail.</div>
+                        <div class="guide-detail-label">A household or team on the same page</div>
+                        <div class="guide-detail-desc">Link everyone's SAGE together and each person's AI knows the shared things - the family plans, the quirks of the house, the team's decisions - without anyone having to explain them over and over.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Working together from different places</div>
+                        <div class="guide-detail-desc">Two people in different cities, each with their own memory, link up and share just the project topics. Now both of their AIs can pull up the same project knowledge - no emailing context back and forth to get each other's assistant up to speed.</div>
                     </div>
                 </div>
             `,
         },
         {
             key: 'network',
-            title: 'Agents',
+            title: 'Your devices & people',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/></svg>`,
-            summary: 'Manage agents on your SAGE chain — add peers, set roles, and control permissions.',
+            summary: 'See and manage everything connected to you.',
             content: html`
-                <p>The Agents page manages all agents participating in your SAGE consensus chain. Each agent is a separate identity — a different Claude Code project, machine, or assistant — that shares the same memory network.</p>
+                <p>This screen is your guest list. Every AI tool and computer working from this memory shows up here, and you decide what each one is allowed to do. Sharing with other people happens on the sharing screen - see "Share with people you trust".</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Agent list</div>
-                        <div class="guide-detail-desc">Each agent appears as a card showing its name, role badge, status indicator (green = active, yellow = pending, red = offline), memory count, and clearance level. Click any card to expand its detail view.</div>
+                        <div class="guide-detail-label">Everything in one place</div>
+                        <div class="guide-detail-desc">Each connected thing appears as a card with a name, a little status light (on, waiting, or offline), and how much it has added to your memory. Give them friendly names like "Work laptop" or "Mum's iPad" so you can tell them apart at a glance.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Adding an agent</div>
-                        <div class="guide-detail-desc">Click the "+" card to launch the Add Agent wizard. Configure the agent's identity (name, avatar, role), permissions (clearance, domain access), and connection method:
-                            <br/><br/>
-                            <strong>Local Project</strong> (recommended) — For Claude Code sessions on this machine. The wizard shows a one-line install command: <code>sage-gui mcp install --token XXXX</code>. Run it in your project folder. The agent's key and config are set up automatically, and it connects with the exact identity and RBAC you configured. The token is one-time use and expires in 24 hours.
-                            <br/><br/>
-                            <strong>Download Bundle</strong> — For remote machines. Downloads a ZIP with keys and config to copy manually.
-                            <br/><br/>
-                            <strong>LAN Pairing</strong> — For agents on your local network. Generates a pairing code (valid 15 minutes). Run <code>sage-gui pair CODE</code> on the new machine.
-                        </div>
+                        <div class="guide-detail-label">Decide what each one can do</div>
+                        <div class="guide-detail-desc">For anything or anyone connected, you choose what it can see and whether it can add new memories. A shared family laptop might read the household topics but not your private work; a guest device might only be allowed to look, never change anything.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Per-project identity</div>
-                        <div class="guide-detail-desc">Each Claude Code session in a different project folder automatically gets its own Ed25519 keypair — no shared keys between projects. Keys are stored at <code>~/.sage/agents/&lt;project-name&gt;-&lt;hash&gt;/agent.key</code>. This means your "sage" project, "levelupctf" project, and "cfp-directory" project each have distinct agents with separate memory attribution and permissions — all managed from this dashboard.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Claim token flow</div>
-                        <div class="guide-detail-desc">The recommended way to onboard an agent: create it in the dashboard first (name, role, RBAC permissions), then copy the install command shown in the wizard. Run <code>sage-gui mcp install --token XXXX</code> in your project folder. The CLI claims the pre-configured identity and writes <code>.mcp.json</code>. On next session start, the agent connects with the exact identity and permissions you set up — no manual key wrangling needed. The claim token is single-use and expires after 24 hours.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Unregistered agents</div>
-                        <div class="guide-detail-desc">Agents that submit memories via MCP but are not formally registered in the dashboard show up in the Brain view agent filter tabs with a dashed border and a "?" badge. Their memories are stored normally, but they lack a configured name, role, and permissions. You can link an unregistered agent to a dashboard identity at any time from the Agents page.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Admin role indicator</div>
-                        <div class="guide-detail-desc">Admin agents display a gold star (\u2605) next to their name in the agent filter tabs across the Brain and Search views. The admin is the primary identity that manages other agents' permissions, RBAC settings, and network configuration.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Overview tab</div>
-                        <div class="guide-detail-desc">Shows the agent's identity info: name, status, memory count, clearance level, first/last seen timestamps, agent ID (Ed25519 public key), validator key, and bio. Click Edit to modify name and bio.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Activity tab</div>
-                        <div class="guide-detail-desc">The Activity tab shows per-agent statistics — total memories contributed, domains active in, and a timeline of recent memory operations. Use this to monitor which agents are most active and what knowledge they're producing.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Key rotation</div>
-                        <div class="guide-detail-desc">If an agent's key is compromised or you want to rotate keys proactively, use the Rotate Key button in the agent's Overview tab. This generates a new Ed25519 identity, re-attributes all existing memories to the new key in a single transaction, and triggers a chain redeployment. The old key is permanently retired. You'll need to distribute a new bundle to the agent afterwards.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Removing an agent</div>
-                        <div class="guide-detail-desc">Click Remove in the action bar. On a single-node (personal) network this is instant. On a multi-node network the chain briefly reconfigures its validator set. Memories from the removed agent are preserved with their original attribution. You cannot remove the last admin.</div>
-                    </div>
-                </div>
-                <div class="guide-callout">
-                    <strong>Chain redeployment:</strong> Adding or removing agents requires updating the validator set. During redeployment, the chain pauses briefly, a backup is taken, the genesis is regenerated, and the chain restarts with the new validator set. Your memories in SQLite are never touched — only the consensus layer resets.
-                </div>
-            `,
-        },
-        {
-            key: 'access-control',
-            title: 'Access Control',
-            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
-            summary: 'Roles, domain-level permissions, and clearance levels for each agent.',
-            content: html`
-                <p>The Access Control tab (inside each agent's expanded view) lets you configure exactly what each agent can read, write, and access.</p>
-                <div class="guide-detail-grid">
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Roles</div>
-                        <div class="guide-detail-desc"><strong>Admin</strong> — Full access to all domains and network management. Can add/remove agents and modify settings. <strong>Member</strong> — Read and write within allowed domains only. Cannot manage other agents. <strong>Observer</strong> — Read-only access. Can view memories but cannot submit new ones.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Domain access matrix</div>
-                        <div class="guide-detail-desc">A per-domain permission grid with read and write toggles for each domain. Use "All Read" / "All Write" / "Revoke All" for bulk operations. Enabling write automatically enables read. Admins bypass this matrix entirely (shown as "full access").</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Clearance levels</div>
-                        <div class="guide-detail-desc">A 5-tier clearance system: Guest (0), Internal (1), Confidential (2), Secret (3), Top Secret (4). Clearance determines the sensitivity level of memories the agent can access. Higher clearance = access to more sensitive knowledge.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Enforcement</div>
-                        <div class="guide-detail-desc">Saving the domain access matrix issues real on-chain access grants (and revokes) for each domain, each signed by that domain's owner. Access is enforced by those grants: a write to a domain the agent holds no grant for is rejected server-side. Every request is signed with the agent's Ed25519 key, so the identity behind each grant is verifiable. Grants the domain owner's key isn't available to sign are surfaced on Save rather than applied silently.</div>
+                        <div class="guide-detail-label">Add another</div>
+                        <div class="guide-detail-desc">Use the add button to bring in a new tool or computer. It is the same easy show-a-code, check-the-number steps you will see everywhere else in SAGE. Inviting another person starts from the sharing screen instead.</div>
                     </div>
                 </div>
             `,
         },
         {
-            key: 'on-chain-identity',
-            title: 'On-Chain Agent Identity',
-            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>`,
-            summary: 'Agent registration, updates, and permissions validated by BFT consensus.',
+            key: 'search',
+            title: 'Find anything',
+            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`,
+            summary: 'Search your memory and import old chats.',
             content: html`
-                <p>Starting in v3.5, agent identity is a first-class on-chain concept. Every registration, metadata update, and permission change goes through CometBFT consensus — giving you auditability, tamper resistance, and federation readiness.</p>
+                <p>The Search page lets you look through everything your AI remembers, and bring in things you talked about long before you had SAGE.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">How agents join</div>
-                        <div class="guide-detail-desc">
-                            <strong>Option 1: Dashboard-first (recommended)</strong> — Create the agent in the Agents page with name, role, and RBAC. Copy the install command and run it in your project folder. The agent claims its pre-configured identity automatically.
-                            <br/><br/>
-                            <strong>Option 2: Auto-register</strong> — Just install MCP config (<code>sage-gui mcp install</code>) without a token. The agent self-registers on-chain during its first <code>sage_inception</code> call with a default identity. Configure permissions later from the dashboard.
-                        </div>
+                        <div class="guide-detail-label">Find a memory</div>
+                        <div class="guide-detail-desc">Type a word or a phrase and SAGE shows every memory that matches, newest first, with its topic and how trusted it is. Narrow it down by topic, or by which tool added it.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Auto-registration</div>
-                        <div class="guide-detail-desc">Agents connecting via MCP automatically register on-chain during their first <code>sage_inception</code> call. The registration is idempotent — connecting again returns the existing record. If a claim token was used, the agent already has its identity.</div>
+                        <div class="guide-detail-label">Bring in old chats</div>
+                        <div class="guide-detail-desc">Already had months of useful conversations elsewhere? Use <strong>Import</strong> to load a saved chat history from ChatGPT, Claude, or Gemini. SAGE pulls the worthwhile bits into your memory so your AI starts out already knowing them.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">On-chain badge</div>
-                        <div class="guide-detail-desc">Agents registered on-chain show a green "On-Chain" badge on their card, along with the block height where they were registered. Legacy agents (pre-v3.5) are auto-migrated on first boot.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Visible agents</div>
-                        <div class="guide-detail-desc">In the Access Control tab, you can restrict which agents' memories are visible to a given agent. By default, all agents can see everything (open model). Set a JSON array of agent IDs to restrict visibility.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Permission enforcement</div>
-                        <div class="guide-detail-desc">Memory operations check on-chain state (BadgerDB) first for clearance and domain access. If an agent isn't registered on-chain yet, the system falls back to the SQLite record. On-chain state is the source of truth.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Transaction types</div>
-                        <div class="guide-detail-desc">Three new on-chain transactions: <strong>AgentRegister</strong> (self-registration), <strong>AgentUpdate</strong> (self-update of name/bio), and <strong>AgentSetPermission</strong> (admin sets clearance, domains, visibility). All are cryptographically signed.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Claim token lifecycle</div>
-                        <div class="guide-detail-desc">When you create an agent via the dashboard, a one-time claim token is generated. Running <code>sage-gui mcp install --token XXXX</code> in a project folder does three things: generates an Ed25519 keypair at <code>~/.sage/agents/&lt;project-name&gt;-&lt;hash&gt;/agent.key</code>, claims the pre-configured on-chain identity (name, role, RBAC), and writes the <code>.mcp.json</code> config. The token is consumed on claim and cannot be reused. If expired, generate a new one from the agent's detail view in the dashboard.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Unregistered agents on-chain</div>
-                        <div class="guide-detail-desc">Agents that auto-register (no claim token) get an on-chain record but appear in the Brain view agent tabs with a dashed border and "?" badge, indicating they lack a dashboard-configured identity. Their memories are valid and consensus-verified, but they operate with default permissions until an admin links them to a named identity or configures their RBAC from the Agents page.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Admin role indicator</div>
-                        <div class="guide-detail-desc">Admin agents are visually distinguished with a gold star (\u2605) in the agent filter tabs throughout the dashboard. The admin role is the only one that can execute <strong>AgentSetPermission</strong> transactions and manage other agents' clearance, domain access, and visibility settings.</div>
-                    </div>
-                </div>
-            `,
-        },
-        {
-            key: 'encryption',
-            title: 'Synaptic Ledger (Encryption)',
-            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/></svg>`,
-            summary: 'Encrypt your memories at rest with a passphrase.',
-            content: html`
-                <p>The Synaptic Ledger (found in Settings) provides at-rest encryption for your entire memory store. When enabled, all memory content is encrypted using a key derived from your passphrase.</p>
-                <div class="guide-detail-grid">
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Enabling encryption</div>
-                        <div class="guide-detail-desc">Go to Settings and find the Synaptic Ledger section. Enter a passphrase and confirm it. All existing memories will be encrypted in place. Future memories are encrypted automatically on commit.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Unlocking</div>
-                        <div class="guide-detail-desc">When encryption is enabled, you'll see a lock screen when opening CEREBRUM. Enter your passphrase to unlock. The passphrase is held in memory for the session — it's never stored on disk.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Changing passphrase</div>
-                        <div class="guide-detail-desc">You can change your passphrase in Settings. The underlying data key stays the same — only the wrapper changes. If you lose your passphrase, use your recovery key on the lock screen to reset it.</div>
-                    </div>
-                </div>
-                <div class="guide-callout" style="border-color: var(--warning, #f59e0b);">
-                    <strong>Important:</strong> Save your recovery key somewhere safe. If you lose your passphrase, the recovery key is the only way to regain access. There is no backdoor beyond the recovery key.
-                </div>
-            `,
-        },
-        {
-            key: 'validators',
-            title: 'Quality & Validation',
-            icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
-            summary: '4 in-process validators enforce memory quality through BFT consensus.',
-            content: html`
-                <div class="guide-detail-grid">
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">How it works</div>
-                        <div class="guide-detail-desc">Every memory passes through 4 application validators before committing. Each validator independently votes accept, reject, or abstain. A BFT quorum of 3/4 (meeting the 2/3 threshold) is required for a memory to be committed. Each validator signs its vote as a real transaction broadcast through CometBFT consensus.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Sentinel</div>
-                        <div class="guide-detail-desc">Always accepts. Guarantees at least one positive vote for liveness -- ensures the system never deadlocks.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Dedup</div>
-                        <div class="guide-detail-desc">Checks the SHA-256 content hash against all committed memories. Rejects exact duplicates. Abstains if the database lookup fails (fail-open).</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Quality</div>
-                        <div class="guide-detail-desc">Rejects low-value content: memories shorter than 20 characters, greeting noise patterns ("user said hi", "session started", "brain online"), empty reflection headers, and bare markdown headers.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Consistency</div>
-                        <div class="guide-detail-desc">Enforces metadata rules: minimum confidence of 0.3 for all types, minimum 0.7 for facts, and requires a non-empty domain tag.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Pre-validate API</div>
-                        <div class="guide-detail-desc">POST /v1/memory/pre-validate lets you dry-run the validators without submitting on-chain. Returns per-validator decisions and quorum result. MCP tools use this automatically to reject low-quality memories before they hit the chain.</div>
+                        <div class="guide-detail-label">Remove something</div>
+                        <div class="guide-detail-desc">Click any memory to open it, then <strong>Delete</strong>. It disappears from what your AI uses, but a record is quietly kept, so nothing is ever truly lost by accident.</div>
                     </div>
                 </div>
             `,
         },
         {
             key: 'pipeline',
-            title: 'Messages',
+            title: 'Pass work between tools',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h4"/><path d="M16 12h4"/><rect x="8" y="8" width="8" height="8" rx="2"/><path d="M12 4v4"/><path d="M12 16v4"/><circle cx="2" cy="12" r="1" fill="currentColor"/><circle cx="22" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="2" r="1" fill="currentColor"/><circle cx="12" cy="22" r="1" fill="currentColor"/></svg>`,
-            summary: 'Route work between AI agents — SAGE as a message bus. Lives under Tasks > Messages.',
+            summary: 'Let your AI tools hand work to each other.',
             content: html`
-                <p>The Messages tab under Tasks (the agent pipeline) turns SAGE into an agent-to-agent message bus. Instead of copy-pasting between Claude, Perplexity, and ChatGPT, agents can send work to each other through SAGE. The pipeline is ephemeral — messages auto-expire, and only a journal summary persists as a memory.</p>
+                <p>This one is handy once you are using more than one AI tool at a time. Instead of you copy-pasting a job from one AI into another, they can hand work to each other through SAGE. You will find it under <strong>Tasks</strong>, on the <strong>Messages</strong> tab.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Sending work</div>
-                        <div class="guide-detail-desc">From any connected agent, call <code>sage_pipe(to="perplexity", intent="research", payload="...")</code>. The <strong>to</strong> field accepts a provider name (e.g. "perplexity", "chatgpt") or a specific agent_id hex string. The message is stored in SAGE and waits for the target agent to pick it up.</div>
+                        <div class="guide-detail-label">Hand off a job</div>
+                        <div class="guide-detail-desc">One AI can drop a task - say, "research this" - and another AI picks it up, does it, and sends the answer back, all without you shuttling text between windows.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Receiving work</div>
-                        <div class="guide-detail-desc">Agents discover pipeline items automatically on their next <code>sage_turn</code> call — no extra action needed. Items appear in the <code>pipe_inbox</code> field of the turn response. Agents can also explicitly call <code>sage_inbox</code> to check for work.</div>
+                        <div class="guide-detail-label">It cleans up after itself</div>
+                        <div class="guide-detail-desc">These handoffs are short-lived. Once a job is done the message clears itself out on its own, and only a one-line note about what happened stays behind in your memory.</div>
                     </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Returning results</div>
-                        <div class="guide-detail-desc">After processing a pipeline item, the receiving agent calls <code>sage_pipe_result(pipe_id="...", result="...")</code>. This marks the pipe as completed and auto-creates a journal memory summarizing the exchange. The sending agent sees the result on their next <code>sage_turn</code>.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Routing</div>
-                        <div class="guide-detail-desc"><strong>By provider:</strong> Address by name (e.g. "perplexity") — any agent with that provider can claim it. First-come-first-served for same-provider agents. <strong>By agent_id:</strong> Address with the 64-character hex ID — only that specific agent sees it.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Auto-claiming</div>
-                        <div class="guide-detail-desc">When an agent views items via <code>sage_inbox</code>, they are automatically claimed — preventing other agents of the same provider from double-processing. This is atomic at the database level.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">TTL & expiry</div>
-                        <div class="guide-detail-desc">Pipeline messages have a time-to-live (default: 60 minutes, max: 24 hours). Expired messages are automatically cleaned up. Completed messages are purged after 24 hours — only the journal summary persists as a committed memory.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Messages tab</div>
-                        <div class="guide-detail-desc">The Messages tab under Tasks shows all messages with status filters (pending, claimed, completed, expired, failed). Click any message to expand and see the full payload, result, and metadata. Auto-refreshes every 10 seconds.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Auto-journal</div>
-                        <div class="guide-detail-desc">When a pipe completes, SAGE automatically creates a one-line observation memory in the "agent-pipeline" domain summarizing who asked whom to do what, and a preview of the result. This gives you a persistent audit trail without storing the full payload.</div>
-                    </div>
-                </div>
-                <div class="guide-callout">
-                    <strong>Key difference from Tasks:</strong> Pipeline messages are ephemeral work routing between machines. Tasks are your persistent backlog tracked across sessions. Pipeline auto-expires; tasks persist until you mark them done.
                 </div>
             `,
         },
         {
             key: 'settings',
-            title: 'Settings & Maintenance',
+            title: 'Settings & housekeeping',
             icon: html`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
-            summary: 'Tabbed settings: Overview, Connection, Recall, Security, Maintenance, Updates.',
+            summary: 'Settings and housekeeping.',
             content: html`
-                <p>Settings is organized into tabs: <strong>Overview</strong> (chain health, system status, peers & agents), <strong>Connection</strong> (MCP config + connect flows), <strong>Recall</strong> (memory engine + recall tuning), <strong>Security</strong> (Synaptic Ledger encryption), <strong>Maintenance</strong> (cleanup, backup, restart, redo setup), and <strong>Updates</strong>.</p>
+                <p>A handful of switches that keep your memory fast, private, and tidy. You will rarely need to touch most of them.</p>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Memory engine (Recall tab)</div>
-                        <div class="guide-detail-desc">The two models that power recall: the semantic embedder (Ollama + nomic-embed-text, with a guided "Turn on smart memory" setup) and the optional reranker - one click and SAGE downloads the engine and model itself, then manages the process.</div>
+                        <div class="guide-detail-label">Smarter search</div>
+                        <div class="guide-detail-desc">Turn on "smart memory" and your AI can find things by meaning, not just by exact words - so "what did we decide about the budget" finds the right note even if you never used that exact phrase. It is one click, and everything stays on your own computer.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Recall tuning (Recall tab)</div>
-                        <div class="guide-detail-desc">Results per query (k, 3-20) controls how many memories each recall returns - higher pairs well with the reranker. Minimum confidence (50-100%) filters by earned, decaying consensus confidence.</div>
+                        <div class="guide-detail-label">Lock it with a password</div>
+                        <div class="guide-detail-desc">If you want, you can put a password on your memories so they are scrambled on disk and only unlock when you type it in. Keep the recovery key it gives you somewhere safe - it is the only way back in if you ever forget the password.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">MCP config (Connection tab)</div>
-                        <div class="guide-detail-desc">Your MCP configuration snippet plus the guided "Connect an AI tool" flows (same machine, remote, LAN). Copy the snippet into your AI client's MCP config to connect it to SAGE.</div>
+                        <div class="guide-detail-label">Tidy up automatically</div>
+                        <div class="guide-detail-desc">SAGE can quietly clear out old, rarely-used memories over time so things stay neat. You can always preview exactly what it would remove before it does a thing.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Auto-cleanup (Maintenance tab)</div>
-                        <div class="guide-detail-desc">Automatically remove stale observations and low-confidence memories over time. Configure the cleanup interval and minimum confidence threshold; always Preview before Clean.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Chain health & peers (Overview tab)</div>
-                        <div class="guide-detail-desc">Block height, sync status, voting power, and every peer node and agent identity connected to this node. An idle chain mints no empty blocks - "Idle" is not a stall.</div>
-                    </div>
-                    <div class="guide-detail-item">
-                        <div class="guide-detail-label">Updates & setup (Maintenance/Updates tabs)</div>
-                        <div class="guide-detail-desc">Check for updates and apply them in place, restart the node, export backups, and re-run the first-run setup wizard any time via "Run setup".</div>
+                        <div class="guide-detail-label">Keep it up to date</div>
+                        <div class="guide-detail-desc">Check for and install updates, restart, make a backup of everything, or run the friendly welcome setup again - all from here.</div>
                     </div>
                 </div>
             `,
