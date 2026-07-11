@@ -13,10 +13,10 @@
 </script>
 <title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11: local-first persistent memory for AI agents with the CEREBRUM MRI brain, semantic recall, managed reranking, and LAN-first federation.">
+<meta name="description" content="Install SAGE v11.6: local-first persistent memory for AI agents with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
 <meta name="theme-color" content="#0a0614">
 <meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
-<meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and LAN-first federation.">
+<meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/">
 <meta property="og:image" content="https://l33tdawg.github.io/sage/og-image.png">
@@ -24,7 +24,7 @@
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
-<meta name="twitter:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and LAN-first federation.">
+<meta name="twitter:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
 <meta name="twitter:image" content="https://l33tdawg.github.io/sage/og-image.png">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -1042,7 +1042,7 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker">SAGE v11 · MRI memory brain · LAN-first federation</div>
+          <div class="hero-kicker">SAGE v11.6 · MRI memory brain · LAN + internet federation</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
           <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, governed validation, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">...</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.6.0</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1112,16 +1112,17 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="fed-hero-grid">
         <div class="fed-panel reveal" onclick="openLightbox(1)">
-          <img src="screen-network.png" alt="Federation dashboard showing LAN-first SAGE-to-SAGE links">
+          <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
         </div>
         <div class="reveal">
-          <div class="section-tag">New in v11</div>
+          <div class="section-tag">New in v11.6</div>
           <h2>Federate two SAGE brains without handing memory to a cloud.</h2>
-          <p class="section-desc">v11 links two separate SAGE nodes when they can already reach each other: same LAN, VPN, or an operator-provided route. Built-in internet/NAT traversal is planned for v11.5.</p>
+          <p class="section-desc">v11.6 guides two SAGE nodes through a verified join on the same LAN or across the internet. Built-in libp2p traversal uses direct paths when possible and an untrusted encrypted relay fallback when NAT blocks them.</p>
           <ul class="fed-list">
-            <li>Human-verified join ceremony with QR enrollment and rotating six-digit compare codes.</li>
-            <li>Share only chosen domains at the clearance ceiling you set.</li>
-            <li>Recall queries across the link live; no silent copying, no remote deletion.</li>
+            <li>Human-verified join ceremony with QR enrollment and session-bound six-digit compare codes.</li>
+            <li>The host chooses synchronized domains; bilateral clearance ceilings are fixed during pairing, and sync is off by default.</li>
+            <li>Signed peers exchange roaming routes, so moving between LAN and internet does not require re-pairing.</li>
+            <li>Optional controlled sync keeps selected memories available during outages and catches peers up when they return.</li>
           </ul>
           <div class="hero-actions" style="margin-top:28px;">
             <button class="btn-secondary" onclick="switchTab('network')">See federation details</button>
@@ -1137,8 +1138,8 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="value-grid reveal">
         <div class="value-card">
-          <h3>100% Local</h3>
-          <p>No cloud. No telemetry. No API keys phoning home. Memories live in <code>~/.sage/</code> and nowhere else.</p>
+          <h3>Local by Default</h3>
+          <p>No required cloud account or telemetry. Memories stay under <code>~/.sage/</code> unless you explicitly enable federation, sync, or a connector.</p>
         </div>
         <div class="value-card">
           <h3>AES-256 Encrypted</h3>
@@ -1185,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.0.1</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11 makes SAGE usable from the dashboard. First-run onboarding connects your AI, semantic memory turns on through a guided local Ollama flow, the reranker installs and verifies itself, and two SAGE nodes can federate on a LAN, VPN, or operator-provided route with a human verification ceremony. Under the hood, app-v15 adds co-commit and cross-federation transaction types while preserving byte-identical replay before activation.</p>
+        <h3>What's new in <span id="whats-new-version">v11.6.0</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.6 brings guided internet federation, seamless LAN-to-internet roaming, and optional host-controlled memory synchronization to the dashboard. The feature is off-consensus, so it introduces no chain fork or AppHash change.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>CEREBRUM, rebuilt around you</h4><p>The 3D MRI brain is now the default view &mdash; your memories as glowing points inside a translucent brain, domains as lobes ordered by recent activity, corroborated knowledge pulled to the core. Around it: an Overview control board for the whole node, real full-text + semantic search with bulk curation, a live task board your agents and you share (with assignment and atomic claiming), and the agent-to-agent message bus as a Messages tab. A first-run onboarding wizard walks new nodes through everything &mdash; re-runnable any time from Settings.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>A reranker that installs itself</h4><p>One click in the dashboard and SAGE downloads a pinned llama.cpp build for your platform and the bge-reranker-v2-m3 model, verifies both by checksum, then starts and manages the sidecar &mdash; no terminal, no package manager, nothing leaves your machine. Recall results get re-scored by a cross-encoder for sharper relevance, and the recall depth setting now goes up to 20 with guidance that adapts to whether the reranker is on.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Federation with a human handshake</h4><p>Link your whole SAGE to another person&rsquo;s on the same LAN, or over reachability you provide. First-class internet/NAT traversal is planned for v11.5. The join ceremony verifies both sides with rotating six-digit codes (Google-Authenticator compatible), QR scans, and an unskippable mutual compare, so you know exactly who you federated with. Share only the domains you choose, at the clearance ceiling you choose; recall reaches across live, nothing is copied, and nothing is ever deleted. Revoke any time.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Semantic memory made effortless</h4><p>A guided flow turns on meaning-based recall (Ollama + nomic-embed-text), re-reads your existing memories in the background with live progress, and &mdash; if an old vault key left some memories unreadable &mdash; recovers them in place with your recovery key. Every new memory is stamped with the embedder that produced it, so the dashboard always tells you the truth about what is searchable by meaning.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Internet federation, built in</h4><p>Pair SAGE nodes through the guided human verification ceremony whether they are on the same LAN or across the internet. libp2p discovers a direct route when possible and falls back to an untrusted relay that carries encrypted peer traffic without reading your memories.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Roam without re-pairing</h4><p>Once two v11.6 nodes sign with each other, they exchange authenticated routes. A laptop can leave home, connect from another network, and return to the LAN while SAGE selects the reachable path automatically.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Host-controlled memory sync</h4><p>Synchronization is off by default. After pairing, the host can enable it for selected domains within the clearance ceilings fixed during the ceremony; permitted memories and tags remain available when a peer is offline, and that peer catches up after reconnecting.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Crash-safe replication boundaries</h4><p>Replicated memories retain durable origin records through retries and restarts. SAGE prevents automatic A-to-B-to-C forwarding, applies the host policy before data, and quarantines ambiguous deliveries so they do not appear native or get re-forwarded.</p></div></div>
         </div>
       </div>
 
@@ -1236,8 +1237,8 @@ footer a:hover { text-decoration: underline; }
           <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation, confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
           <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
           <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
-          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds the rebuilt CEREBRUM dashboard, first-run onboarding, guided semantic setup, a self-installing local reranker, v11 federation, and the app-v15 consensus fork.</p></div>
-          <div class="faq-item"><h3>What does federation mean in v11?</h3><p>v11 federation is LAN-first: it links two separate SAGE brains through a human-verified ceremony when the nodes can already reach each other, such as same LAN, VPN, or your own tunnel. Built-in internet/NAT traversal is planned for v11.5.</p></div>
+          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds the rebuilt CEREBRUM dashboard, first-run onboarding, guided semantic setup, a self-installing local reranker, the app-v15 consensus fork, and v11.6 LAN/internet federation with controlled memory sync.</p></div>
+          <div class="faq-item"><h3>What does federation mean in v11.6?</h3><p>v11.6 links two separate SAGE brains through a human-verified ceremony on a LAN or across the internet. Signed peers can roam between networks without re-pairing. The host may optionally synchronize selected domains; sync remains off by default, and the guest cannot widen the policy.</p></div>
         </div>
       </div>
     </div>
@@ -1465,7 +1466,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install sage-agent-sdk</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.6.0"</span></div>
         </div>
       </div>
 
@@ -1482,8 +1483,8 @@ footer a:hover { text-decoration: underline; }
       <div style="margin-top:60px;">
         <div class="reveal" style="text-align:center;">
           <div class="section-tag">Privacy &amp; Security</div>
-          <h2>Your data never<br>leaves your machine</h2>
-          <p class="section-desc" style="margin:0 auto;">Most &ldquo;memory plugins&rdquo; send your conversations to servers. SAGE runs locally, with memories stored in local BadgerDB/SQLite stores under your home directory.</p>
+          <h2>Your data stays<br>under your control</h2>
+          <p class="section-desc" style="margin:0 auto;">SAGE runs locally, with memories stored in BadgerDB/SQLite under your home directory. Only data you explicitly authorize for federation, synchronization, or a connector leaves the node; relays carry ciphertext while still observing connection metadata.</p>
         </div>
         <div class="privacy-grid reveal">
           <div class="privacy-visual">
@@ -1516,7 +1517,7 @@ footer a:hover { text-decoration: underline; }
             </div>
           </div>
           <div class="privacy-points">
-            <div class="privacy-point"><div><h3>100% Local</h3><p>No cloud accounts. No telemetry. Memories live in <code>~/.sage/</code> and nowhere else.</p></div></div>
+            <div class="privacy-point"><div><h3>Local by Default</h3><p>No required cloud account or telemetry. Memories stay in <code>~/.sage/</code> unless you explicitly choose to share them.</p></div></div>
             <div class="privacy-point"><div><h3>Fully Inspectable</h3><p>Local data stores under <code>~/.sage/</code>. Inspect them, query them, back them up, move them.</p></div></div>
             <div class="privacy-point"><div><h3>Tamper-Evident</h3><p>Every memory is digitally signed with your local key. Full audit trail.</p></div></div>
             <div class="privacy-point"><div><h3>AES-256 Encrypted at Rest</h3><p>Optional encryption for the memory vault. If your machine is stolen, the on-disk memories remain unreadable.</p></div></div>
@@ -1742,7 +1743,7 @@ function copyPrompt(box) {
 // ─── Screenshot Lightbox ───
 const lbImages = [
   { src: 'screen-brain.png', caption: 'CEREBRUM MRI brain — memory focus, related notes, and the train-of-thought view' },
-  { src: 'screen-network.png', caption: 'Federation — LAN-first SAGE-to-SAGE links with a consent-gated join ceremony' },
+  { src: 'screen-network.png', caption: 'Federation — LAN and internet SAGE-to-SAGE links with a consent-gated join ceremony' },
   { src: 'screen-config.png', caption: 'Recall Engine — Semantic setup, managed reranker, and recall tuning' },
   { src: 'screen-overview.png', caption: 'Overview — chain health, agents, federation, embeddings, and update status' },
 ];
