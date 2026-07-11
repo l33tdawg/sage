@@ -13,7 +13,7 @@
 </script>
 <title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11.6: local-first persistent memory for AI agents with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
+<meta name="description" content="Install SAGE v11.7: local-first persistent memory for AI agents with safer updates, resilient connections, governed administration, and the CEREBRUM MRI brain.">
 <meta name="theme-color" content="#0a0614">
 <meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
 <meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
@@ -1042,7 +1042,7 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker">SAGE v11.6 · MRI memory brain · LAN + internet federation</div>
+          <div class="hero-kicker">SAGE v11.7 · governed memory · resilient agent connections</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
           <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, governed validation, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.6.1</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.7.0</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1115,14 +1115,14 @@ footer a:hover { text-decoration: underline; }
           <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
         </div>
         <div class="reveal">
-          <div class="section-tag">New in v11.6</div>
-          <h2>Federate two SAGE brains without handing memory to a cloud.</h2>
-          <p class="section-desc">v11.6 guides two SAGE nodes through a verified join on the same LAN or across the internet. Built-in libp2p traversal uses direct paths when possible and an untrusted encrypted relay fallback when NAT blocks them.</p>
+          <div class="section-tag">Hardened in v11.7</div>
+          <h2>Keep agents connected, governed, and safely up to date.</h2>
+          <p class="section-desc">v11.7 hardens the full lifecycle around CEREBRUM: domain administration, AI-tool connections, restarts, and verified updates. New releases now surface automatically in a banner at the top of the dashboard.</p>
           <ul class="fed-list">
-            <li>Human-verified join ceremony with QR enrollment and session-bound six-digit compare codes.</li>
-            <li>The host chooses synchronized domains; bilateral clearance ceilings are fixed during pairing, and sync is off by default.</li>
-            <li>Signed peers exchange roaming routes, so moving between LAN and internet does not require re-pairing.</li>
-            <li>Optional controlled sync keeps selected memories available during outages and catches peers up when they return.</li>
+            <li>Genesis admins can grant or revoke local-agent access while preserving the original domain owner in the audit trail.</li>
+            <li>ChatGPT desktop Codex mode gets an app-wide local connection shared with Codex CLI and the IDE extension.</li>
+            <li>Restart coordination drains MCP sessions and dashboard streams before replacing the process.</li>
+            <li>Updates verify checksums, roll back automatically on failure, and prove the new version booted successfully.</li>
           </ul>
           <div class="hero-actions" style="margin-top:28px;">
             <button class="btn-secondary" onclick="switchTab('network')">See federation details</button>
@@ -1186,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.6.1</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.6 brings guided internet federation, seamless LAN-to-internet roaming, and optional host-controlled memory synchronization to the dashboard. The feature is off-consensus, so it introduces no chain fork or AppHash change.</p>
+        <h3>What's new in <span id="whats-new-version">v11.7.0</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.7 is an administration, connection, and lifecycle-hardening release. Existing chains replay byte-identically; its consensus support remains behind the dormant app-v18 activation gate.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Internet federation, built in</h4><p>Pair SAGE nodes through the guided human verification ceremony whether they are on the same LAN or across the internet. libp2p discovers a direct route when possible and falls back to an untrusted relay that carries encrypted peer traffic without reading your memories.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Roam without re-pairing</h4><p>Once two v11.6 nodes sign with each other, they exchange authenticated routes. A laptop can leave home, connect from another network, and return to the LAN while SAGE selects the reachable path automatically.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Host-controlled memory sync</h4><p>Synchronization is off by default. After pairing, the host can enable it for selected domains within the clearance ceilings fixed during the ceremony; permitted memories and tags remain available when a peer is offline, and that peer catches up after reconnecting.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Crash-safe replication boundaries</h4><p>Replicated memories retain durable origin records through retries and restarts. SAGE prevents automatic A-to-B-to-C forwarding, applies the host policy before data, and quarantines ambiguous deliveries so they do not appear native or get re-forwarded.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Updates find you</h4><p>CEREBRUM checks for new releases automatically and shows a dismissible banner across the top of the dashboard with release notes and a direct route to update or restart options.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Safer restarts and updates</h4><p>A single-instance lock prevents duplicate nodes. Coordinated restarts drain active sessions, while checksum verification, rollback, and proof-of-boot protect self-updates.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Reliable AI-tool connections</h4><p>v11.7 fixes intermittent MCP disconnects and misleading permission errors, adds one-click ChatGPT desktop Codex setup, and hardens the HTTP MCP transport.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Governed domain administration</h4><p>The genesis admin can grant a locally installed agent read or read-and-write access to another agent's domain, with owner-aware confirmation and ordinary on-chain grant and revoke records.</p></div></div>
         </div>
       </div>
 
@@ -1237,7 +1237,7 @@ footer a:hover { text-decoration: underline; }
           <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation, confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
           <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
           <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
-          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds the rebuilt CEREBRUM dashboard, first-run onboarding, guided semantic setup, a self-installing local reranker, the app-v15 consensus fork, and v11.6 LAN/internet federation with controlled memory sync.</p></div>
+          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds the rebuilt CEREBRUM dashboard, first-run onboarding, guided semantic setup, a self-installing local reranker, LAN/internet federation with controlled memory sync, and v11.7's safer administration, connections, restarts, and updates.</p></div>
           <div class="faq-item"><h3>What does federation mean in v11.6?</h3><p>v11.6 links two separate SAGE brains through a human-verified ceremony on a LAN or across the internet. Signed peers can roam between networks without re-pairing. The host may optionally synchronize selected domains; sync remains off by default, and the guest cannot widen the policy.</p></div>
         </div>
       </div>
@@ -1466,7 +1466,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.6.0"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.7.0"</span></div>
         </div>
       </div>
 
