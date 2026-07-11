@@ -159,3 +159,32 @@ func TestServeHTTP_Returns503WhenFull(t *testing.T) {
 		b.Unsubscribe(c)
 	}
 }
+
+func TestSSEBroadcaster_CloseAllDrainsClientsAndRejectsNew(t *testing.T) {
+	b := NewSSEBroadcaster()
+	ch1 := b.Subscribe()
+	ch2 := b.Subscribe()
+	require.NotNil(t, ch1)
+	require.NotNil(t, ch2)
+
+	b.CloseAll()
+
+	// Every connected client's channel is closed so its handler returns.
+	for _, ch := range []chan []byte{ch1, ch2} {
+		select {
+		case _, ok := <-ch:
+			assert.False(t, ok, "CloseAll must close client channels")
+		case <-time.After(time.Second):
+			t.Fatal("client channel not closed by CloseAll")
+		}
+	}
+
+	// New subscriptions are rejected during shutdown.
+	assert.Nil(t, b.Subscribe(), "Subscribe after CloseAll must be rejected")
+
+	// A handler's deferred Unsubscribe after CloseAll must not double-close.
+	assert.NotPanics(t, func() { b.Unsubscribe(ch1) })
+
+	// Broadcast after CloseAll must not send on closed channels.
+	assert.NotPanics(t, func() { b.Broadcast(SSEEvent{Type: EventUpdate, MemoryID: "x"}) })
+}

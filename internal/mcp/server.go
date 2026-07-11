@@ -568,10 +568,18 @@ func (s *Server) signedRequest(ctx context.Context, method, path string, body []
 	return s.httpClient.Do(req)
 }
 
+// retryableIdempotentPOSTPaths lists POST endpoints that are read-only or
+// otherwise idempotent, so a transient transport failure (e.g. a stale
+// keep-alive EOF) may be retried like a GET. Memory-submitting POSTs stay
+// single-shot: retrying those could double-commit.
+var retryableIdempotentPOSTPaths = map[string]bool{
+	"/v1/embed": true,
+}
+
 // doSignedJSON makes a signed request and decodes the JSON response.
 func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []byte, out any) error {
 	attempts := 1
-	if method == http.MethodGet {
+	if method == http.MethodGet || (method == http.MethodPost && retryableIdempotentPOSTPaths[path]) {
 		attempts = 4
 	}
 	var resp *http.Response
@@ -769,12 +777,25 @@ func mcpRequestTimeout() time.Duration {
 	return timeout
 }
 
+// mcpIdleConnTimeout must stay BELOW the node http.Server's IdleTimeout (60s).
+// If the client keeps an idle connection longer than the server does, it will
+// reuse a connection the server already closed and the request fails with a
+// stale keep-alive EOF (net/http never auto-retries non-idempotent POSTs).
+const mcpIdleConnTimeout = 30 * time.Second
+
+func mcpTransport(tlsCfg *tls.Config) *http.Transport {
+	return &http.Transport{
+		TLSClientConfig: tlsCfg,
+		IdleConnTimeout: mcpIdleConnTimeout,
+	}
+}
+
 // mcpHTTPClient returns an *http.Client configured for TLS if the baseURL uses https://.
 // For plain http:// URLs, returns a simple client with a timeout.
 // Checks SAGE_CA_CERT env var first, then ~/.sage/certs/, then falls back to system CAs.
 func mcpHTTPClient(baseURL string) *http.Client {
 	if !strings.HasPrefix(baseURL, "https://") {
-		return &http.Client{Timeout: mcpRequestTimeout()}
+		return &http.Client{Timeout: mcpRequestTimeout(), Transport: mcpTransport(nil)}
 	}
 
 	// Try SAGE_CA_CERT env var first (explicit CA path).
@@ -783,7 +804,7 @@ func mcpHTTPClient(baseURL string) *http.Client {
 		if err == nil {
 			return &http.Client{
 				Timeout:   mcpRequestTimeout(),
-				Transport: &http.Transport{TLSClientConfig: tlsCfg},
+				Transport: mcpTransport(tlsCfg),
 			}
 		}
 		fmt.Fprintf(os.Stderr, "SAGE MCP: SAGE_CA_CERT=%s failed to load: %v (falling back)\n", caPath, err)
@@ -802,7 +823,7 @@ func mcpHTTPClient(baseURL string) *http.Client {
 		if err == nil {
 			return &http.Client{
 				Timeout:   mcpRequestTimeout(),
-				Transport: &http.Transport{TLSClientConfig: tlsCfg},
+				Transport: mcpTransport(tlsCfg),
 			}
 		}
 	}
@@ -810,6 +831,6 @@ func mcpHTTPClient(baseURL string) *http.Client {
 	// Fall back to system CAs — works with properly-signed certs (e.g. Let's Encrypt).
 	return &http.Client{
 		Timeout:   mcpRequestTimeout(),
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13}},
+		Transport: mcpTransport(&tls.Config{MinVersion: tls.VersionTLS13}),
 	}
 }

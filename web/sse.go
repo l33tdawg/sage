@@ -40,6 +40,7 @@ type SSEEvent struct {
 type SSEBroadcaster struct {
 	mu      sync.RWMutex
 	clients map[chan []byte]struct{}
+	closed  bool
 }
 
 // NewSSEBroadcaster creates a new SSE broadcaster.
@@ -50,11 +51,12 @@ func NewSSEBroadcaster() *SSEBroadcaster {
 }
 
 // Subscribe registers a new SSE client and returns its channel.
-// Returns nil if the maximum number of concurrent connections has been reached.
+// Returns nil if the maximum number of concurrent connections has been
+// reached or the broadcaster has been closed for shutdown.
 func (b *SSEBroadcaster) Subscribe() chan []byte {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if len(b.clients) >= maxClients {
+	if b.closed || len(b.clients) >= maxClients {
 		return nil
 	}
 	ch := make(chan []byte, 64)
@@ -62,12 +64,29 @@ func (b *SSEBroadcaster) Subscribe() chan []byte {
 	return ch
 }
 
-// Unsubscribe removes a client channel.
+// Unsubscribe removes a client channel. Safe to call after CloseAll already
+// disconnected the client.
 func (b *SSEBroadcaster) Unsubscribe(ch chan []byte) {
 	b.mu.Lock()
-	delete(b.clients, ch)
-	b.mu.Unlock()
-	close(ch)
+	defer b.mu.Unlock()
+	if _, ok := b.clients[ch]; ok {
+		delete(b.clients, ch)
+		close(ch)
+	}
+}
+
+// CloseAll disconnects every connected client and rejects new subscriptions.
+// The dashboard holds its event stream open for the whole tab lifetime, so a
+// coordinated shutdown must drain these handlers explicitly — otherwise
+// http.Server.Shutdown blocks its full budget on a stream that never ends.
+func (b *SSEBroadcaster) CloseAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
+	for ch := range b.clients {
+		delete(b.clients, ch)
+		close(ch)
+	}
 }
 
 // Broadcast sends an event to all connected clients.

@@ -9671,7 +9671,16 @@ function NetworkJoinHostPanel() {
 
     const onSwitch = async () => {
         setSwitching(true); setErr(null);
-        try { await enableNetworkMode(); } catch (e) { setErr(e.message); setSwitching(false); }
+        try {
+            const r = await enableNetworkMode();
+            if (r && r.restart_required) {
+                // No in-process restart on this platform (Windows): the mode is
+                // saved but nothing will restart — surface the quit-and-reopen
+                // instruction instead of waiting forever.
+                setSwitching(false);
+                setErr(r.message || 'Saved. Fully quit SAGE and open it again to finish switching.');
+            }
+        } catch (e) { setErr(e.message); setSwitching(false); }
         // On success the node re-execs — this session drops; we show a restart notice.
     };
 
@@ -9791,7 +9800,16 @@ function NetworkJoinGuestPanel({ onClose }) {
 
     const onRestart = async () => {
         setRestarting(true); setErr(null);
-        try { await joinGuestRestart(); } catch (e) { setErr(e.message); setRestarting(false); }
+        try {
+            const r = await joinGuestRestart();
+            if (r && r.restart_required) {
+                // No in-process restart on this platform (Windows): the join is
+                // staged but nothing will restart — surface the quit-and-reopen
+                // instruction instead of hanging on "Restarting…".
+                setRestarting(false);
+                setErr(r.message || 'Saved. Fully quit SAGE and open it again to finish joining.');
+            }
+        } catch (e) { setErr(e.message); setRestarting(false); }
     };
 
     const st = status && status.state;

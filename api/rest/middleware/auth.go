@@ -29,11 +29,19 @@ var sigCache = &replayCache{
 	maxSize: 10000,
 }
 
-// check returns true if the signature has been seen before (replay).
-// If not seen, it records it and returns false.
-func (rc *replayCache) check(key string) bool {
+// check reports whether the signature has been seen before (replayed) and
+// whether the live replay window is saturated. A saturated window still fails
+// closed — the request is not recorded and must be rejected — but it is NOT a
+// replay: one busy signer filling the shared cache must surface as a
+// retryable condition, not as a false "Replay detected" for every other
+// agent's genuinely fresh signature.
+func (rc *replayCache) check(key string) (replayed, saturated bool) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
+
+	if _, exists := rc.seen[key]; exists {
+		return true, false // replay detected
+	}
 
 	// Evict expired entries if cache is getting large.
 	if len(rc.seen) >= rc.maxSize {
@@ -47,15 +55,12 @@ func (rc *replayCache) check(key string) bool {
 		// maxSize: otherwise a signer (or spoofed pre-auth rate-limit identities)
 		// can turn every request into an unbounded O(n) sweep and memory DoS.
 		if len(rc.seen) >= rc.maxSize {
-			return true
+			return false, true
 		}
 	}
 
-	if _, exists := rc.seen[key]; exists {
-		return true // replay detected
-	}
 	rc.seen[key] = time.Now()
-	return false
+	return false, false
 }
 
 type contextKey string
@@ -194,7 +199,14 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 
 		// Replay protection: reject duplicate (agentID, signature) pairs within the skew window.
 		cacheKey := agentID + ":" + sigHex
-		if sigCache.check(cacheKey) {
+		replayed, saturated := sigCache.check(cacheKey)
+		if saturated {
+			w.Header().Set("Retry-After", "5")
+			writeProblem(w, http.StatusServiceUnavailable, "Replay window saturated",
+				"The replay-protection window is temporarily full. Retry shortly.")
+			return
+		}
+		if replayed {
 			writeProblem(w, http.StatusUnauthorized, "Replay detected",
 				"This exact request signature has already been used.")
 			return

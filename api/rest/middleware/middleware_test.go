@@ -278,13 +278,26 @@ func TestRequestLogger(t *testing.T) {
 
 func TestReplayCacheFailsClosedAtBoundAndRecoversExpiredSpace(t *testing.T) {
 	rc := &replayCache{seen: make(map[string]time.Time), maxSize: 2}
-	assert.False(t, rc.check("sig-a"))
-	assert.False(t, rc.check("sig-b"))
-	assert.True(t, rc.check("sig-c"), "a fresh saturated window must fail closed")
+	replayed, saturated := rc.check("sig-a")
+	assert.False(t, replayed)
+	assert.False(t, saturated)
+	replayed, saturated = rc.check("sig-b")
+	assert.False(t, replayed)
+	assert.False(t, saturated)
+
+	replayed, saturated = rc.check("sig-c")
+	assert.False(t, replayed, "a fresh signature in a saturated window is not a replay")
+	assert.True(t, saturated, "a fresh saturated window must fail closed as saturation")
 	assert.Len(t, rc.seen, 2, "cache must never grow past maxSize")
 
+	replayed, saturated = rc.check("sig-a")
+	assert.True(t, replayed, "a recorded signature must still report replay under saturation")
+	assert.False(t, saturated)
+
 	rc.seen["sig-a"] = time.Now().Add(-maxTimestampSkew - time.Second)
-	assert.False(t, rc.check("sig-c"), "expired space should admit a new signature")
+	replayed, saturated = rc.check("sig-c")
+	assert.False(t, replayed, "expired space should admit a new signature")
+	assert.False(t, saturated)
 	assert.Len(t, rc.seen, 2)
 	assert.NotContains(t, rc.seen, "sig-a")
 }

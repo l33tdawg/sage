@@ -632,7 +632,11 @@ func (h *DashboardHandler) handleEmbeddingsEnable(w http.ResponseWriter, r *http
 		return
 	}
 	if err := h.RequestRestart(); err != nil {
-		writeJSONResp(w, http.StatusServiceUnavailable, map[string]any{
+		// The setting IS persisted; only the automatic restart failed (e.g. one
+		// is already in flight). A 503 here makes the frontend throw a bare
+		// "HTTP 503" and discard the guidance, so answer 200 like the sibling
+		// restart_required branches above.
+		writeJSONResp(w, http.StatusOK, map[string]any{
 			"ok": true, "restart_required": true,
 			"message": "Semantic memory is saved, but SAGE could not restart cleanly. Fully quit and reopen it.",
 		})

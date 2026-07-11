@@ -1479,7 +1479,13 @@ func runServe() (rerr error) {
 					}
 				}
 				if startupErr == nil {
-					startupErr = web.ConfirmPendingUpdate(execPath)
+					if confirmErr := web.ConfirmPendingUpdate(execPath); confirmErr != nil {
+						// The replacement already proved healthy; a failed marker
+						// cleanup (transient fsync/unlink error) must not roll a
+						// good update back. Leave the marker — the next boot
+						// re-proves and re-confirms it.
+						logger.Warn().Err(confirmErr).Msg("update confirmed but rollback-marker cleanup failed — will reconfirm on next boot")
+					}
 				}
 				if startupErr != nil {
 					logger.Error().Err(startupErr).Msg("updated process failed readiness proof — preparing rollback")
@@ -1513,6 +1519,11 @@ func runServe() (rerr error) {
 		// restart over an unsafe partial teardown.
 		_ = mcpHTTPTransport.Close(context.Background())
 	}
+	// Disconnect dashboard event streams before Shutdown. The dashboard keeps
+	// an EventSource open for the whole tab lifetime, so without an explicit
+	// drain httpServer.Shutdown blocks its entire budget on that stream and a
+	// coordinated restart aborts whenever a tab is open.
+	dashboard.SSE.CloseAll()
 	if fedMgr != nil {
 		fedMgr.StopSyncDrainer()
 	}
@@ -1541,11 +1552,13 @@ func runServe() (rerr error) {
 		go func(name string, server *http.Server) {
 			defer shutdownWG.Done()
 			if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				shutdownMu.Lock()
-				shutdownErrs = append(shutdownErrs, fmt.Errorf("%s listener: %w", name, err))
-				shutdownMu.Unlock()
-				// Shutdown timed out waiting for an active handler. Force-close its
-				// connection so no request can outlive the stores during restart.
+				// Shutdown timed out waiting for an active handler (e.g. a
+				// long-lived stream that ignored the drain). Force-close so no
+				// request outlives the stores. A drained-then-force-closed
+				// listener is still a clean stop; only a failed force close may
+				// veto the restart, else an open browser tab aborts the exec and
+				// strands the node (or rolls back a just-installed update).
+				logger.Warn().Err(err).Str("listener", name).Msg("graceful drain timed out — force closing")
 				if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
 					shutdownMu.Lock()
 					shutdownErrs = append(shutdownErrs, fmt.Errorf("%s force close: %w", name, closeErr))
