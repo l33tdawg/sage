@@ -53,7 +53,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ## What's New in v11.7.2
 
-**Background macOS updates are back, without compromising the signed app.** SAGE now downloads the architecture-specific DMG in the background, verifies its published SHA-256, mounts it read-only, enforces the expected bundle identifier and Developer ID team, and asks Gatekeeper to validate both the release app and its staged copy. Activation atomically exchanges the entire signed `SAGE.app` bundle while preserving the previous bundle for proof-of-boot rollback, so updates never patch a signed executable in place and never leave the application path missing. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+**Background macOS updates are back, without compromising the signed app.** SAGE now downloads the architecture-specific DMG in the background, verifies its published SHA-256, mounts it read-only, enforces the expected bundle identifier and Developer ID team, and asks Gatekeeper to validate both the release app and its staged copy. Activation atomically exchanges the entire signed `SAGE.app` bundle while preserving the previous bundle for proof-of-boot rollback, so updates never patch a signed executable in place and never leave the application path missing. CEREBRUM also restores Access Controls as a dedicated sidebar destination that opens agents directly on their permission editor, and the task board now uses one natural page scroller instead of trapping scrolling inside fixed-height columns. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
 
 SDK 11.7.2.
 

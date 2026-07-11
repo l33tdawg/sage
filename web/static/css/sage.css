@@ -3851,7 +3851,7 @@ input[type="range"]::-moz-range-thumb {
     min-height: 0;
     display: flex;
     flex-direction: column;
-    overflow: hidden;
+    overflow-y: auto;
 }
 .tasks-header {
     display: flex;
@@ -3877,8 +3877,10 @@ input[type="range"]::-moz-range-thumb {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     gap: 16px;
-    flex: 1;
-    min-height: 0;
+    align-items: start;
+    flex: none;
+    min-height: 200px;
+    padding-bottom: 24px;
 }
 @media (max-width: 1000px) {
     .kanban-board { grid-template-columns: repeat(2, 1fr); }
@@ -3898,6 +3900,7 @@ input[type="range"]::-moz-range-thumb {
     display: flex;
     flex-direction: column;
     min-height: 200px;
+    width: 100%;
     transition: border-color 0.15s, box-shadow 0.15s;
 }
 .kanban-column.drag-over {
@@ -3950,12 +3953,24 @@ input[type="range"]::-moz-range-thumb {
     opacity: 0.65;
 }
 .kanban-cards {
-    flex: 1;
-    overflow-y: auto;
+    flex: none;
+    overflow-y: visible;
     padding: 10px;
     display: flex;
     flex-direction: column;
     gap: 8px;
+}
+.tasks-board-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.network-page.access-mode .gov-section,
+.network-page.access-mode .ext-clients-section,
+.network-page.access-mode .agent-group-tip,
+.network-page.access-mode .agent-card-add {
+    display: none;
 }
 .kanban-card {
     background: var(--bg-elevated);

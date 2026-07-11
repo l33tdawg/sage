@@ -23,7 +23,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.7.1';
+const SAGE_VERSION = 'v11.7.2';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -579,6 +579,7 @@ const icons = {
     import: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
     help: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`,
     network: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/><line x1="5" y1="19" x2="19" y2="19" opacity="0.3"/></svg>`,
+    access: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.6-2.8 8.1-7 10-4.2-1.9-7-5.4-7-10V6l7-3z"/><path d="M9.5 12l1.7 1.7 3.6-3.9"/></svg>`,
     tasks: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
     pipeline: html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h4"/><path d="M16 12h4"/><rect x="8" y="8" width="8" height="8" rx="2"/><path d="M12 4v4"/><path d="M12 16v4"/><circle cx="2" cy="12" r="1" fill="currentColor"/><circle cx="22" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="2" r="1" fill="currentColor"/><circle cx="12" cy="22" r="1" fill="currentColor"/></svg>`,
     // Two interlinked rings — a handshake/connection between two networks.
@@ -2399,7 +2400,7 @@ function TasksPage({ sse }) {
 				actionLabel=${tasks.length === 0 ? 'Add a task' : 'Clear filters'}
 				onAction=${() => { if (tasks.length === 0) setShowAddForm(true); else { setDomainFilter(''); setAgentFilter(''); } }} />
 			` : html`
-			<div style="display:flex;flex:1;flex-direction:column;gap:12px;min-height:0;overflow:auto;">
+			<div class="tasks-board-content">
 			${unclassifiedTasks.length > 0 && html`
 				<div class="warning-banner" style="margin:0;flex:0 0 auto;" role="region" aria-labelledby="historical-task-status-heading">
 					<div id="historical-task-status-heading" style="font-weight:700;color:var(--text);margin-bottom:5px;">${unclassifiedTasks.length} historical task${unclassifiedTasks.length !== 1 ? 's need' : ' needs'} a status</div>
@@ -7044,12 +7045,12 @@ function removeFromAllGroups(model, agentId) {
 }
 
 // --- Network Page (Accordion) ---
-function NetworkPage({ sse }) {
+function NetworkPage({ sse, accessMode = false }) {
     const [agents, setAgents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showWizard, setShowWizard] = useState(false);
     const [expandedId, setExpandedId] = useState(null);
-    const [expandedTab, setExpandedTab] = useState('overview');
+    const [expandedTab, setExpandedTab] = useState(accessMode ? 'access' : 'overview');
     // Local, visual-only agent grouping (localStorage; never on-chain).
     const [groupModel, setGroupModel] = useState(loadAgentGroups);
     const [dragAgentId, setDragAgentId] = useState(null);   // agent_id being dragged
@@ -7257,7 +7258,7 @@ function NetworkPage({ sse }) {
             setExpandedId(null); setEditing(false);
         } else {
             setExpandedId(agent.agent_id);
-            setExpandedTab('overview');
+            setExpandedTab(accessMode ? 'access' : 'overview');
             setEditing(false);
             setEditName(agent.name);
             setEditBio(agent.boot_bio || '');
@@ -7275,7 +7276,7 @@ function NetworkPage({ sse }) {
             } catch (e) {}
             setEditDomainAccess(parsed);
         }
-    }, [expandedId]);
+    }, [expandedId, accessMode]);
 
     const handleAccessSave = useCallback(async (agentId, adminOverride = false) => {
         const arr = Object.entries(editDomainAccess)
@@ -7475,10 +7476,12 @@ function NetworkPage({ sse }) {
     const isRedeploying = redeployStatus?.active === true;
 
     return html`
-        <div class="network-page fade-in">
+        <div class="network-page fade-in ${accessMode ? 'access-mode' : ''}">
             ${isRedeploying && html`<div class="redeploy-banner"><span class="deploy-spinner"></span> Network reconfiguration in progress...${redeployStatus.operation ? ` (${redeployStatus.operation.replace(/_/g, ' ')})` : ''}</div>`}
             <div class="network-header">
-                <div><h2>Agents <${HelpTip} text="Manage the agents on your own SAGE node. Each agent is a separate participant in BFT consensus with its own permissions. Click any agent to expand its details and access. (To connect your whole node to ANOTHER SAGE, use Federation.)" /><${PageHelp} section="network" label="Agents guide" /></h2><div class="network-header-sub">${agents.length} agent${agents.length !== 1 ? 's' : ''} on this node</div></div>
+                ${accessMode
+                    ? html`<div><h2>Access Controls <${HelpTip} text="Review and change each local agent's domain permissions, clearance, and visibility. Access grants are enforced on-chain." /><${PageHelp} section="network" label="Access controls guide" /></h2><div class="network-header-sub">Select an agent to manage its access · ${agents.length} agent${agents.length !== 1 ? 's' : ''} on this node</div></div>`
+                    : html`<div><h2>Agents <${HelpTip} text="Manage the agents on your own SAGE node. Each agent is a separate participant in BFT consensus with its own permissions. Click any agent to expand its details and access. (To connect your whole node to ANOTHER SAGE, use Federation.)" /><${PageHelp} section="network" label="Agents guide" /></h2><div class="network-header-sub">${agents.length} agent${agents.length !== 1 ? 's' : ''} on this node</div></div>`}
             </div>
 
             <div class="gov-section">
@@ -10787,6 +10790,7 @@ function App() {
             else if (hash === '/settings') setPage('settings');
             else if (hash === '/import') setPage('import');
             else if (hash === '/network') setPage('network');
+            else if (hash === '/access') setPage('access');
             else if (hash === '/pipeline') setPage('tasks'); // legacy deep-link: the message bus lives in Tasks > Messages now
             else if (hash === '/federation') setPage('federation');
             else setPage('brain');
@@ -10867,6 +10871,10 @@ function App() {
                 data-tooltip-title="Agents" data-tooltip="Manage the AI identities on this node: roles, domain permissions, keys, activity, and validator participation." data-tooltip-placement="right">
                 ${icons.network}
             </button>
+            <button class="sidebar-btn ${page === 'access' ? 'active' : ''}" onClick=${() => navigate('access')} title="Access Controls - agent permissions" aria-label="Access Controls - agent permissions"
+                data-tooltip-title="Access Controls" data-tooltip="Review and change each local agent's domain permissions, clearance, and visibility." data-tooltip-placement="right">
+                ${icons.access}
+            </button>
             <button class="sidebar-btn ${page === 'federation' ? 'active' : ''}" onClick=${() => navigate('federation')} title="Federation - connect your whole node to another SAGE" aria-label="Federation - connect your whole node to another SAGE"
                 data-tooltip-title="Federation" data-tooltip="Connect this entire SAGE brain to another independent node with human-verified trust, scoped domains, and revocable access." data-tooltip-placement="right">
                 ${icons.federation}
@@ -10922,6 +10930,7 @@ function App() {
             ${page === 'tasks' && html`<${TasksPage} sse=${sseRef.current} />`}
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}
             ${page === 'network' && html`<${NetworkPage} sse=${sseRef.current} />`}
+            ${page === 'access' && html`<${NetworkPage} sse=${sseRef.current} accessMode=${true} />`}
             ${page === 'federation' && html`<${FederationPage} />`}
             ${page === 'settings' && html`<${SettingsPage} onRunSetup=${() => setShowOnboarding(true)} requestedTab=${settingsTabRequest} />`}
         </div>
@@ -12002,6 +12011,7 @@ const PAGE_LABELS = {
     tasks: 'Tasks',
     import: 'Import',
     network: 'Agents',
+    access: 'Access Controls',
     federation: 'Federation',
     settings: 'Settings',
 };
