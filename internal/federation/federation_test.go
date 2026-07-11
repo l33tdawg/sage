@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/memory"
+	sagep2p "github.com/l33tdawg/sage/internal/p2p"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -119,6 +122,69 @@ func startListener(t *testing.T, c *testChain) *httptest.Server {
 	ts.StartTLS()
 	t.Cleanup(ts.Close)
 	return ts
+}
+
+func TestPeerStatusOverP2PStreamKeepsFederationMTLS(t *testing.T) {
+	a := newTestChain(t, "chain-a")
+	b := newTestChain(t, "chain-b")
+	federate(t, a, b, "https://unused.invalid", []string{"*"}, 4, 0)
+	federate(t, b, a, "https://unused.invalid", []string{"*"}, 4, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	left, err := sagep2p.New(ctx, sagep2p.Config{
+		IdentityKeyPath: filepath.Join(t.TempDir(), "left-p2p.key"),
+		ListenAddrs:     []string{"/ip4/127.0.0.1/tcp/0"},
+		AcceptInbound:   true,
+	})
+	if err != nil {
+		t.Fatalf("left p2p: %v", err)
+	}
+	t.Cleanup(func() { _ = left.Close() })
+	right, err := sagep2p.New(ctx, sagep2p.Config{
+		IdentityKeyPath: filepath.Join(t.TempDir(), "right-p2p.key"),
+		ListenAddrs:     []string{"/ip4/127.0.0.1/tcp/0"},
+		AcceptInbound:   true,
+	})
+	if err != nil {
+		t.Fatalf("right p2p: %v", err)
+	}
+	t.Cleanup(func() { _ = right.Close() })
+
+	tlsCfg, err := b.mgr.ServerTLSConfig()
+	if err != nil {
+		t.Fatalf("server TLS config: %v", err)
+	}
+	server := &http.Server{Handler: b.mgr.Router(), TLSConfig: tlsCfg}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- server.ServeTLS(right.Listener(), "", "") }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		select {
+		case serveResult := <-serveErr:
+			if serveResult != nil && serveResult != http.ErrServerClosed && !errors.Is(serveResult, net.ErrClosed) {
+				t.Errorf("p2p HTTP server: %v", serveResult)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("p2p HTTP server did not stop")
+		}
+	})
+
+	target := right.Addrs()[0]
+	a.mgr.SetPeerDialFunc(func(dialCtx context.Context, remoteChainID string) (net.Conn, bool, error) {
+		if remoteChainID != b.chainID {
+			return nil, false, nil
+		}
+		conn, dialErr := left.DialContext(dialCtx, target)
+		return conn, true, dialErr
+	})
+	status, err := a.mgr.PeerStatus(context.Background(), b.chainID)
+	if err != nil {
+		t.Fatalf("PeerStatus over p2p: %v", err)
+	}
+	if status.ChainID != b.chainID {
+		t.Fatalf("PeerStatus chain = %q, want %q", status.ChainID, b.chainID)
+	}
 }
 
 // fakeComet emulates the local CometBFT /broadcast_tx_commit RPC, capturing

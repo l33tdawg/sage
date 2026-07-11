@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,12 @@ type Manager struct {
 	badger       *store.BadgerStore
 	memStore     store.MemoryStore
 	logger       zerolog.Logger
+
+	// peerDialFn is the optional v11.6 connectivity seam. It may handle a
+	// remote chain via a libp2p stream; handled=false preserves the original
+	// direct TCP/HTTPS dial path byte-for-byte. Set once during node boot.
+	peerDialMu sync.RWMutex
+	peerDialFn PeerDialFunc
 
 	// replayMu guards seenSigs — the federation listener's replay cache,
 	// SHARDED BY PEER CHAIN so one peer's flood can never evict or lock out
@@ -146,6 +153,24 @@ type Manager struct {
 	// is built. Cosmetic + unauthenticated; never a trust input.
 	nameMu      sync.RWMutex
 	networkName string
+}
+
+// PeerDialFunc returns a stream-backed connection for remoteChainID. handled
+// is false when no p2p route is configured and the caller should use direct
+// TCP. Federation TLS still authenticates the returned connection end-to-end.
+type PeerDialFunc func(ctx context.Context, remoteChainID string) (conn net.Conn, handled bool, err error)
+
+// SetPeerDialFunc installs the optional libp2p dial seam.
+func (m *Manager) SetPeerDialFunc(fn PeerDialFunc) {
+	m.peerDialMu.Lock()
+	m.peerDialFn = fn
+	m.peerDialMu.Unlock()
+}
+
+func (m *Manager) peerDialFunc() PeerDialFunc {
+	m.peerDialMu.RLock()
+	defer m.peerDialMu.RUnlock()
+	return m.peerDialFn
 }
 
 // NetworkName returns this node's current friendly label (may be empty).

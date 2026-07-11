@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -98,7 +99,24 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 	req.Header.Set(HeaderNonce, hex.EncodeToString(nonce))
 	req.Header.Set(HeaderSignature, hex.EncodeToString(sig))
 
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	transport := &http.Transport{TLSClientConfig: tlsCfg}
+	if peerDial := m.peerDialFunc(); peerDial != nil {
+		directDialer := &net.Dialer{}
+		transport.DialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+			conn, handled, dialErr := peerDial(dialCtx, agreement.RemoteChainID)
+			if handled {
+				if dialErr != nil {
+					return nil, fmt.Errorf("peer %s p2p dial: %w", agreement.RemoteChainID, dialErr)
+				}
+				if conn == nil {
+					return nil, fmt.Errorf("peer %s p2p dial returned no connection", agreement.RemoteChainID)
+				}
+				return conn, nil
+			}
+			return directDialer.DialContext(dialCtx, network, address)
+		}
+	}
+	client := &http.Client{Transport: transport}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {

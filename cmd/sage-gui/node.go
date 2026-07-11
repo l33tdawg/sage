@@ -43,6 +43,7 @@ import (
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/ollamad"
 	"github.com/l33tdawg/sage/internal/orchestrator"
+	sagep2p "github.com/l33tdawg/sage/internal/p2p"
 	"github.com/l33tdawg/sage/internal/rerankd"
 	"github.com/l33tdawg/sage/internal/snapshot"
 	"github.com/l33tdawg/sage/internal/store"
@@ -927,6 +928,55 @@ func runServe() (rerr error) {
 		app.SetSyncNotifier(fedMgr.SyncWatcher())
 	}
 
+	// Optional v11.6 connectivity substrate. It starts independently of the
+	// TCP federation listener because federation.enabled=false means
+	// outbound-only: established peers may still be dialed over libp2p, while
+	// AcceptInbound=false installs no federation stream handler. The SAGE trust
+	// boundary remains the mTLS+pin layer inside each stream.
+	var fedP2P *sagep2p.Transport
+	if cfg.Federation.P2PEnabled && fedMgr != nil {
+		p2pTransport, p2pErr := sagep2p.New(ctx, sagep2p.Config{
+			IdentityKeyPath: filepath.Join(SageHome(), "p2p.key"),
+			ListenAddrs:     cfg.Federation.P2PListenAddrs,
+			RelayAddrs:      cfg.Federation.P2PRelayAddrs,
+			AcceptInbound:   cfg.Federation.Enabled,
+			ForcePrivate:    cfg.Federation.P2PForcePrivate,
+			UserAgent:       "sage/" + version,
+		})
+		if p2pErr != nil {
+			logger.Warn().Err(p2pErr).Msg("federation p2p transport unavailable; direct HTTPS remains active")
+		} else {
+			fedP2P = p2pTransport
+			fedMgr.SetPeerDialFunc(func(dialCtx context.Context, remoteChainID string) (net.Conn, bool, error) {
+				targets := cfg.Federation.P2PPeers[remoteChainID]
+				if len(targets) == 0 {
+					return nil, false, nil
+				}
+				var dialErrors []error
+				for _, target := range targets {
+					if target == "" {
+						continue
+					}
+					conn, dialErr := p2pTransport.DialContext(dialCtx, target)
+					if dialErr == nil {
+						return conn, true, nil
+					}
+					dialErrors = append(dialErrors, dialErr)
+				}
+				if len(dialErrors) == 0 {
+					return nil, true, errors.New("no non-empty p2p target configured")
+				}
+				return nil, true, errors.Join(dialErrors...)
+			})
+			logger.Info().
+				Str("peer_id", fedP2P.Host().ID().String()).
+				Int("addresses", len(fedP2P.Addrs())).
+				Int("relays", len(cfg.Federation.P2PRelayAddrs)).
+				Bool("inbound", cfg.Federation.Enabled).
+				Msg("federation p2p transport started")
+		}
+	}
+
 	// TLS listener: encrypted REST on a separate port.
 	// Auto-generates self-signed certs on first run if none exist.
 	// Personal mode: TLS on localhost:8443. Quorum mode: TLS on 0.0.0.0:8443.
@@ -1002,6 +1052,7 @@ func runServe() (rerr error) {
 	// verification at handshake, chain-qualified signed requests per call. The
 	// local REST/TLS listeners above keep NoClientCert semantics untouched.
 	var fedServer *http.Server
+	var fedP2PServer *http.Server
 	if cfg.Federation.Enabled && fedMgr != nil {
 		if !tlsca.CertsExist(certsDir) {
 			logger.Warn().Msg("federation listener disabled: no TLS certificates")
@@ -1031,6 +1082,24 @@ func runServe() (rerr error) {
 					logger.Error().Err(fedServeErr).Msg("federation listener error")
 				}
 			}()
+			if fedP2P != nil {
+				fedP2PServer = &http.Server{
+					Handler:      fedMgr.Router(),
+					TLSConfig:    fedTLS.Clone(),
+					ReadTimeout:  15 * time.Second,
+					WriteTimeout: 15 * time.Second,
+					IdleTimeout:  60 * time.Second,
+				}
+				go func() {
+					logger.Info().
+						Str("peer_id", fedP2P.Host().ID().String()).
+						Str("protocol", string(sagep2p.FederationProtocol)).
+						Msg("federation mTLS listener starting over libp2p")
+					if serveErr := fedP2PServer.ServeTLS(fedP2P.Listener(), "", ""); serveErr != nil && serveErr != http.ErrServerClosed && !errors.Is(serveErr, net.ErrClosed) {
+						logger.Error().Err(serveErr).Msg("federation p2p listener error")
+					}
+				}()
+			}
 		}
 	} else if cfg.Federation.Enabled {
 		logger.Warn().Msg("federation.enabled set but transport unavailable (missing agent key or chain_id)")
@@ -1190,6 +1259,12 @@ func runServe() (rerr error) {
 	}
 	if fedServer != nil {
 		_ = fedServer.Shutdown(shutdownCtx)
+	}
+	if fedP2PServer != nil {
+		_ = fedP2PServer.Shutdown(shutdownCtx)
+	}
+	if fedP2P != nil {
+		_ = fedP2P.Close()
 	}
 	return httpServer.Shutdown(shutdownCtx)
 }
