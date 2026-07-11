@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.5.0. -->
+<!-- Reconciled through SAGE v11.6.0. -->
 
 # RBAC, Organizations, and Federation
 
-Verified against code at SAGE v11.5.0.
+Verified against code at SAGE v11.6.0.
 
 ## Overview
 

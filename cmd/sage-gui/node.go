@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -925,6 +926,7 @@ func runServe() (rerr error) {
 		// SetSyncNotifier MUST follow StartSyncDrainer (it nudges the channel the
 		// drainer creates).
 		fedMgr.StartSyncDrainer(ctx)
+		defer fedMgr.StopSyncDrainer()
 		app.SetSyncNotifier(fedMgr.SyncWatcher())
 	}
 
@@ -934,7 +936,8 @@ func runServe() (rerr error) {
 	// AcceptInbound=false installs no federation stream handler. The SAGE trust
 	// boundary remains the mTLS+pin layer inside each stream.
 	var fedP2P *sagep2p.Transport
-	if cfg.Federation.P2PEnabled && fedMgr != nil {
+	var fedP2PRoutesMu sync.RWMutex
+	if cfg.Federation.P2PEnabled && fedMgr != nil && (cfg.Federation.Enabled || len(cfg.Federation.P2PPeers) > 0) {
 		allowedPeerAddrs := make([]string, 0)
 		for _, targets := range cfg.Federation.P2PPeers {
 			allowedPeerAddrs = append(allowedPeerAddrs, targets...)
@@ -954,7 +957,9 @@ func runServe() (rerr error) {
 		} else {
 			fedP2P = p2pTransport
 			fedMgr.SetPeerDialFunc(func(dialCtx context.Context, remoteChainID string) (net.Conn, bool, error) {
-				targets := cfg.Federation.P2PPeers[remoteChainID]
+				fedP2PRoutesMu.RLock()
+				targets := append([]string(nil), cfg.Federation.P2PPeers[remoteChainID]...)
+				fedP2PRoutesMu.RUnlock()
 				if len(targets) == 0 {
 					return nil, false, nil
 				}
@@ -973,6 +978,68 @@ func runServe() (rerr error) {
 					return nil, true, errors.New("no non-empty p2p target configured")
 				}
 				return nil, true, errors.Join(dialErrors...)
+			})
+			fedMgr.SetJoinP2PHooks(federation.JoinP2PHooks{
+				LocalBundle: func() (federation.JoinP2PBundle, error) {
+					if !cfg.Federation.Enabled {
+						return federation.JoinP2PBundle{}, errors.New("enable federation before creating an internet connection")
+					}
+					all := p2pTransport.Addrs()
+					selected := make([]string, 0, 4)
+					circuit := ""
+					for _, addr := range all {
+						if strings.Contains(addr, "/p2p-circuit/") {
+							if circuit == "" {
+								circuit = addr
+							}
+							continue
+						}
+						if len(selected) < 3 {
+							selected = append(selected, addr)
+						}
+					}
+					if circuit == "" {
+						return federation.JoinP2PBundle{}, errors.New("relay reservation is not ready")
+					}
+					selected = append(selected, circuit)
+					return federation.JoinP2PBundle{PeerID: p2pTransport.Host().ID().String(), Protocol: string(sagep2p.FederationProtocol), Addrs: selected}, nil
+				},
+				DialTarget: p2pTransport.DialContext,
+				Begin:      p2pTransport.BeginJoin,
+				BindPeer:   p2pTransport.BindJoinPeer,
+				End:        p2pTransport.EndJoin,
+				Persist: func(remoteChainID string, targets []string) error {
+					fedP2PRoutesMu.Lock()
+					defer fedP2PRoutesMu.Unlock()
+					previous := append([]string(nil), cfg.Federation.P2PPeers[remoteChainID]...)
+					if err := persistFederationPeer(remoteChainID, targets); err != nil {
+						return err
+					}
+					p2pTransport.RemoveAllowedPeer(previous)
+					if err := p2pTransport.AddAllowedPeer(targets); err != nil {
+						_ = persistFederationPeer(remoteChainID, previous)
+						if len(previous) > 0 {
+							_ = p2pTransport.AddAllowedPeer(previous)
+						}
+						return err
+					}
+					if cfg.Federation.P2PPeers == nil {
+						cfg.Federation.P2PPeers = make(map[string][]string)
+					}
+					cfg.Federation.P2PPeers[remoteChainID] = append([]string(nil), targets...)
+					return nil
+				},
+				Remove: func(remoteChainID string) error {
+					fedP2PRoutesMu.Lock()
+					defer fedP2PRoutesMu.Unlock()
+					targets := append([]string(nil), cfg.Federation.P2PPeers[remoteChainID]...)
+					if err := persistFederationPeer(remoteChainID, nil); err != nil {
+						return err
+					}
+					p2pTransport.RemoveAllowedPeer(targets)
+					delete(cfg.Federation.P2PPeers, remoteChainID)
+					return nil
+				},
 			})
 			logger.Info().
 				Str("peer_id", fedP2P.Host().ID().String()).

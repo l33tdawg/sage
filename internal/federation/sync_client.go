@@ -87,3 +87,28 @@ func (m *Manager) SyncDigest(ctx context.Context, remoteChainID string, req *Syn
 	}
 	return &out, nil
 }
+
+func (m *Manager) SyncPolicyPush(ctx context.Context, remoteChainID string, req *SyncPolicyRequest) (*SyncPolicyResponse, error) {
+	agreement, err := m.ActiveAgreement(remoteChainID)
+	if err != nil {
+		return nil, err
+	}
+	body, status, err := m.doPeerRequest(ctx, agreement, http.MethodPut, "/fed/v1/sync/policy", req)
+	if err != nil {
+		return nil, err
+	}
+	if ok, unsupported := classifySyncStatus(status); !ok {
+		if unsupported {
+			return nil, ErrSyncUnsupported
+		}
+		return nil, fmt.Errorf("peer %s returned %d: %s", remoteChainID, status, truncate(body, 200))
+	}
+	var out SyncPolicyResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode sync policy response: %w", err)
+	}
+	if out.Revision != req.Revision {
+		return nil, fmt.Errorf("peer acknowledged wrong sync policy revision")
+	}
+	return &out, nil
+}

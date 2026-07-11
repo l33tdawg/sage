@@ -40,6 +40,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -102,6 +103,12 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Linearize inbound policy with host removal and revoke cleanup. Lock order
+	// is policy -> origin, matching PurgeSyncPeerState and preventing a request
+	// authenticated just before revoke from resuming with stale consent after
+	// the revoke API has returned.
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
 
 	// Receiver-side consent rows for this peer, loaded once per batch.
 	consented, err := ss.GetSyncDomains(r.Context(), peer.ChainID)
@@ -206,6 +213,29 @@ func validateSyncItem(peerChainID string, item *SyncItem) error {
 	if item.Classification < 0 || item.Classification > 4 {
 		return errors.New("classification out of range")
 	}
+	if len(item.Tags) > SyncMaxTags {
+		return fmt.Errorf("tags exceed %d entries", SyncMaxTags)
+	}
+	seenTags := make(map[string]struct{}, len(item.Tags))
+	canonicalTags := make([]string, 0, len(item.Tags))
+	totalTagBytes := 0
+	for _, raw := range item.Tags {
+		tag := strings.TrimSpace(raw)
+		if tag == "" || tag != raw || len(tag) > SyncMaxTagBytes {
+			return errors.New("tag is empty, padded, or too long")
+		}
+		totalTagBytes += len(tag)
+		if totalTagBytes > SyncMaxTags*SyncMaxTagBytes {
+			return errors.New("tag metadata is too large")
+		}
+		if _, exists := seenTags[tag]; exists {
+			continue
+		}
+		seenTags[tag] = struct{}{}
+		canonicalTags = append(canonicalTags, tag)
+	}
+	sort.Strings(canonicalTags)
+	item.Tags = canonicalTags
 	sum := sha256.Sum256([]byte(item.Content))
 	if hex.EncodeToString(sum[:]) != strings.ToLower(item.ContentHash) {
 		return errors.New("content_hash does not match content")
@@ -233,7 +263,7 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 	// provenance + loop-prevention + idempotency record must land even if the
 	// sender disconnected and cancelled r.Context(). A missing record would
 	// let the copy be re-forwarded (loop-prevention bypass).
-	recordAdmitted := func(localID string) {
+	recordAdmitted := func(localID string) error {
 		if err := ss.RecordSyncOrigin(context.Background(), store.SyncOrigin{
 			OriginChainID:   item.OriginChainID,
 			OriginMemoryID:  item.OriginMemoryID,
@@ -243,7 +273,9 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 			Outcome:         store.SyncOutcomeAdmitted,
 		}); err != nil {
 			m.logger.Error().Err(err).Str("origin", item.OriginMemoryID).Msg("sync: record origin failed")
+			return err
 		}
+		return nil
 	}
 
 	// Gate 3 — treaty scope.
@@ -262,13 +294,76 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 		out.Outcome = SyncOutcomeRejectedClearance
 		return out
 	}
+	localID := syncMemoryID(item.OriginChainID, item.OriginMemoryID)
+	expectedPending := store.SyncOriginPending{
+		OriginChainID: item.OriginChainID, OriginMemoryID: item.OriginMemoryID,
+		OriginCreatedAt: item.OriginCreatedAt, LocalMemoryID: localID, DomainTag: item.Domain,
+		ContentHash: strings.ToLower(item.ContentHash), Classification: item.Classification,
+		MemoryType: syncStoredMemoryType(item.MemoryType), SubmittingAgent: hex.EncodeToString(m.agentPub),
+	}
+	originUnlock := ss.LockSyncOriginWrite()
+	defer originUnlock()
 	// Gate 6 — idempotency: replay a recorded ADMISSION verbatim (only
 	// admissions are recorded, so a hit is always a prior success).
 	if prior, err := ss.GetSyncOrigin(ctx, item.OriginChainID, item.OriginMemoryID); err == nil {
+		if prior.LocalMemoryID != "" && len(item.Tags) > 0 {
+			if tagErr := ss.SetTags(context.Background(), prior.LocalMemoryID, item.Tags); tagErr != nil {
+				out.Outcome = SyncOutcomeRetry
+				return out
+			}
+		}
+		if pendingErr := ss.DeletePendingSyncOrigin(context.Background(), item.OriginChainID, item.OriginMemoryID); pendingErr != nil {
+			out.Outcome = SyncOutcomeRetry
+			return out
+		}
 		out.Outcome = SyncOutcomeDuplicate
 		out.LocalMemoryID = prior.LocalMemoryID
 		return out
 	} else if !errors.Is(err, sql.ErrNoRows) {
+		out.Outcome = SyncOutcomeRetry
+		return out
+	}
+	// A durable pending row means a prior process may have crashed anywhere
+	// between pre-broadcast quarantine and provenance promotion. If the exact
+	// immutable local copy exists, promote without rebroadcasting. If it does
+	// not, retain quarantine while safely re-offering the deterministic tx.
+	if pending, pendingErr := ss.GetPendingSyncOrigin(ctx, item.OriginChainID, item.OriginMemoryID); pendingErr == nil {
+		if *pending != expectedPending {
+			out.Outcome = SyncOutcomeRetry
+			return out
+		}
+		exists, matches, existsErr := ss.PendingSyncMemoryState(ctx, *pending)
+		if existsErr != nil {
+			out.Outcome = SyncOutcomeRetry
+			return out
+		}
+		if exists && !matches {
+			out.Outcome = SyncOutcomeRetry
+			return out
+		}
+		if matches {
+			if err := recordAdmitted(localID); err != nil {
+				out.Outcome = SyncOutcomeRetry
+				return out
+			}
+			if err := ss.DeletePendingSyncOrigin(context.Background(), item.OriginChainID, item.OriginMemoryID); err != nil {
+				out.Outcome = SyncOutcomeRetry
+				return out
+			}
+			if len(item.Tags) > 0 {
+				if err := ss.SetTags(context.Background(), localID, item.Tags); err != nil {
+					out.Outcome = SyncOutcomeRetry
+					return out
+				}
+			}
+			out.Outcome = SyncOutcomeDuplicate
+			out.LocalMemoryID = localID
+			return out
+		}
+		// No row yet does not prove an earlier ambiguous broadcast cannot still
+		// commit. Keep the durable quarantine and safely re-offer the same
+		// deterministic transaction below.
+	} else if !errors.Is(pendingErr, sql.ErrNoRows) {
 		out.Outcome = SyncOutcomeRetry
 		return out
 	}
@@ -294,7 +389,10 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 			// content collision), and tagging a native memory as a synced copy
 			// would suppress its onward replication forever. We still tell the
 			// sender where it landed on the wire (informational only).
-			recordAdmitted("")
+			if err := recordAdmitted(""); err != nil {
+				out.Outcome = SyncOutcomeRetry
+				return out
+			}
 			out.Outcome = SyncOutcomeDuplicate
 			out.LocalMemoryID = mt.MemoryID
 			return out
@@ -317,13 +415,36 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 	}
 
 	// Gate 9 — admit through consensus.
-	localID := syncMemoryID(item.OriginChainID, item.OriginMemoryID)
+	if err := ss.StageSyncOrigin(context.Background(), expectedPending); err != nil {
+		out.Outcome = SyncOutcomeRetry
+		return out
+	}
 	outcome, txHash := m.broadcastSyncSubmit(localID, item)
 	if outcome == SyncOutcomeAccepted || outcome == SyncOutcomeDuplicate {
-		recordAdmitted(localID)
+		if err := recordAdmitted(localID); err != nil {
+			out.Outcome = SyncOutcomeRetry
+			return out
+		}
+		if err := ss.DeletePendingSyncOrigin(context.Background(), item.OriginChainID, item.OriginMemoryID); err != nil {
+			out.Outcome = SyncOutcomeRetry
+			return out
+		}
+		if len(item.Tags) > 0 {
+			if err := ss.SetTags(context.Background(), localID, item.Tags); err != nil {
+				m.logger.Warn().Err(err).Str("local", localID).Msg("sync: tag persistence deferred")
+				out.Outcome = SyncOutcomeRetry
+				return out
+			}
+		}
 		out.LocalMemoryID = localID
 		m.logger.Info().Str("origin", item.OriginChainID+"/"+item.OriginMemoryID).
 			Str("local", localID).Str("tx", txHash).Str("outcome", outcome).Msg("sync: item admitted")
+	}
+	if outcome != SyncOutcomeAccepted && outcome != SyncOutcomeDuplicate && outcome != SyncOutcomeRetry {
+		if err := ss.DeletePendingSyncOrigin(context.Background(), item.OriginChainID, item.OriginMemoryID); err != nil {
+			out.Outcome = SyncOutcomeRetry
+			return out
+		}
 	}
 	out.Outcome = outcome
 	return out
@@ -425,6 +546,17 @@ func syncMemoryTypeToTx(s string) tx.MemoryType {
 		return tx.MemoryTypeInference
 	default:
 		return tx.MemoryTypeFact
+	}
+}
+
+func syncStoredMemoryType(s string) string {
+	switch syncMemoryTypeToTx(s) {
+	case tx.MemoryTypeObservation:
+		return "observation"
+	case tx.MemoryTypeInference:
+		return "inference"
+	default:
+		return "fact"
 	}
 }
 

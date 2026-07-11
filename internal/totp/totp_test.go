@@ -1,9 +1,13 @@
 package totp
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"testing"
+
+	libcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // TestRFC6238Vectors checks Code against the RFC-6238 Appendix-B SHA-1 vectors
@@ -29,6 +33,43 @@ func TestRFC6238Vectors(t *testing.T) {
 		if !Verify(seed, c.want, StepAt(c.unix)) {
 			t.Errorf("Verify failed for the RFC vector at unix=%d", c.unix)
 		}
+	}
+}
+
+func TestProvisioningP2PRoundTripAndPeerBinding(t *testing.T) {
+	priv, _, err := libcrypto.GenerateEd25519Key(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := peer.IDFromPrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed, _ := NewSecret()
+	pin := sha256.Sum256([]byte("host-ca-spki"))
+	sid := b32.EncodeToString([]byte{1, 2, 3, 4, 5, 6})
+	relayPriv, _, _ := libcrypto.GenerateEd25519Key(rand.Reader)
+	relayID, _ := peer.IDFromPrivateKey(relayPriv)
+	base := "/ip4/203.0.113.7/tcp/4001/p2p/" + relayID.String()
+	// Only the terminal destination identity is security-relevant to parsing;
+	// the relay portion remains a normal full multiaddr.
+	relay := base + "/p2p-circuit/p2p/" + id.String()
+	uri := ProvisioningURIWithP2P(seed, "acme-chain", "SAGE", pin[:], "https://host:8444", sid,
+		"host", "/sage/fed/1.0.0", id.String(), []string{relay})
+	e, err := ParseEnrollment(uri, false)
+	if err != nil {
+		t.Fatalf("ParseEnrollment p2p: %v", err)
+	}
+	if e.Transport != "p2p" || e.PeerID != id.String() || len(e.P2PAddrs) != 1 {
+		t.Fatalf("p2p fields mismatch: %+v", e)
+	}
+
+	otherPriv, _, _ := libcrypto.GenerateEd25519Key(rand.Reader)
+	otherID, _ := peer.IDFromPrivateKey(otherPriv)
+	bad := ProvisioningURIWithP2P(seed, "acme-chain", "SAGE", pin[:], "https://host:8444", sid,
+		"host", "/sage/fed/1.0.0", otherID.String(), []string{relay})
+	if _, err := ParseEnrollment(bad, false); err == nil {
+		t.Fatal("accepted route whose terminal peer differs from x_sage_peer")
 	}
 }
 

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.5.0
+  version: 11.6.0
   description: >-
     (Sovereign) Agent Governed Experience — REST API for memory submission,
     validation, and query.

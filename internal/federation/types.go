@@ -165,6 +165,10 @@ const (
 	// SyncMaxItemContent bounds one item's content bytes (sender enforces at
 	// enqueue; receiver rejects the batch as malformed on violation).
 	SyncMaxItemContent = 64 * 1024
+	// SyncMaxTags and SyncMaxTagBytes bound off-consensus tag metadata so a
+	// peer cannot turn a small memory batch into unbounded SQLite work.
+	SyncMaxTags     = 32
+	SyncMaxTagBytes = 128
 )
 
 // Wire outcomes for one pushed item. Terminal rejections are recorded in the

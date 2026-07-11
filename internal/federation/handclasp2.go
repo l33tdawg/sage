@@ -31,6 +31,7 @@ const (
 	tagScope      = "sage-fed-join-scope-v1"
 	tagSeedCommit = "sage-fed-seed-commit-v1"
 	tagEnroll     = "sage-fed-enroll-v1"
+	tagEnrollP2P  = "sage-fed-enroll-p2p-v1"
 	tagEnrollSig  = "sage-fed-enroll-sig-v1"
 	tagEnrollAck  = "sage-fed-enroll-ack-v1"
 	dirG2H        = "G2H"
@@ -186,6 +187,8 @@ type EnrollInputs struct {
 	GuestScope, HostScope       [32]byte
 	Seed                        []byte
 	GuestNonce, HostNonce       []byte // 16B each, per-session freshness
+	GuestPeerID, HostPeerID     string
+	GuestP2PAddrs, HostP2PAddrs []string
 }
 
 // Attestation computes the frozen enrollment attestation E (§2.4). Fields in
@@ -204,8 +207,18 @@ func (in EnrollInputs) Attestation() [32]byte {
 		aScope, bScope = in.HostScope, in.GuestScope
 	}
 	sc := SeedCommit(in.Seed)
+	aPeer, bPeer := in.GuestPeerID, in.HostPeerID
+	aRoutes, bRoutes := in.GuestP2PAddrs, in.HostP2PAddrs
+	if in.HostChain < in.GuestChain {
+		aPeer, bPeer = in.HostPeerID, in.GuestPeerID
+		aRoutes, bRoutes = in.HostP2PAddrs, in.GuestP2PAddrs
+	}
 	h := sha256.New()
-	h.Write([]byte(tagEnroll))
+	if aPeer == "" && bPeer == "" && len(aRoutes) == 0 && len(bRoutes) == 0 {
+		h.Write([]byte(tagEnroll))
+	} else {
+		h.Write([]byte(tagEnrollP2P))
+	}
 	h.Write([]byte{0x00})
 	h.Write([]byte(aChain))
 	h.Write([]byte{0x00})
@@ -222,6 +235,30 @@ func (in EnrollInputs) Attestation() [32]byte {
 	h.Write([]byte{0x00})
 	h.Write([]byte(bEp))
 	h.Write([]byte{0x00})
+	if aPeer != "" || bPeer != "" || len(aRoutes) > 0 || len(bRoutes) > 0 {
+		aDigest, bDigest := routeDigest(aRoutes), routeDigest(bRoutes)
+		h.Write([]byte(aPeer))
+		h.Write([]byte{0x00})
+		h.Write(aDigest[:])
+		h.Write([]byte(bPeer))
+		h.Write([]byte{0x00})
+		h.Write(bDigest[:])
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+func routeDigest(routes []string) [32]byte {
+	values := append([]string(nil), routes...)
+	sort.Strings(values)
+	h := sha256.New()
+	for _, value := range values {
+		var n [4]byte
+		binary.BigEndian.PutUint32(n[:], uint32(len(value))) // #nosec G115 -- QR routes are tightly bounded
+		h.Write(n[:])
+		h.Write([]byte(value))
+	}
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out

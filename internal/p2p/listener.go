@@ -3,6 +3,7 @@ package p2p
 import (
 	"net"
 	"sync"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -24,6 +25,8 @@ type Listener struct {
 	closed    bool
 	addr      net.Addr
 	allowed   map[peer.ID]struct{}
+	joinOpen  map[string]time.Time
+	joinPeers map[peer.ID]map[string]time.Time
 	enforce   bool
 	active    int
 	byPeer    map[peer.ID]int
@@ -51,6 +54,8 @@ func newListener(h host.Host, protocolID protocol.ID, queue int, allowed map[pee
 		done:      make(chan struct{}),
 		addr:      streamAddr{value: withPeer(h.Addrs()[0], h.ID().String())},
 		allowed:   allowed,
+		joinOpen:  make(map[string]time.Time),
+		joinPeers: make(map[peer.ID]map[string]time.Time),
 		enforce:   enforce,
 		byPeer:    make(map[peer.ID]int),
 		maxActive: maxActive,
@@ -68,7 +73,7 @@ func (l *Listener) handleStream(stream network.Stream) {
 		_ = stream.Reset()
 		return
 	}
-	if _, ok := l.allowed[remotePeer]; l.enforce && !ok {
+	if _, ok := l.allowed[remotePeer]; l.enforce && !ok && !l.joinAllowedLocked(remotePeer, time.Now()) {
 		l.stateMu.Unlock()
 		_ = stream.Reset()
 		return
@@ -153,3 +158,78 @@ func (l *Listener) Close() error {
 }
 
 func (l *Listener) Addr() net.Addr { return l.addr }
+
+func (l *Listener) joinAllowedLocked(id peer.ID, now time.Time) bool {
+	for sid, expiry := range l.joinOpen {
+		if now.After(expiry) {
+			delete(l.joinOpen, sid)
+			continue
+		}
+		return true
+	}
+	bySession := l.joinPeers[id]
+	for sid, expiry := range bySession {
+		if now.After(expiry) {
+			delete(bySession, sid)
+			continue
+		}
+		return true
+	}
+	if len(bySession) == 0 {
+		delete(l.joinPeers, id)
+	}
+	return false
+}
+
+func (l *Listener) beginJoin(session string, expiry time.Time) {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	if !l.closed && session != "" && expiry.After(time.Now()) {
+		l.joinOpen[session] = expiry
+	}
+}
+
+func (l *Listener) bindJoinPeer(session string, id peer.ID, expiry time.Time) {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	delete(l.joinOpen, session)
+	for existingID, sessions := range l.joinPeers {
+		delete(sessions, session)
+		if len(sessions) == 0 {
+			delete(l.joinPeers, existingID)
+		}
+	}
+	if l.closed || session == "" || id == "" || !expiry.After(time.Now()) {
+		return
+	}
+	if l.joinPeers[id] == nil {
+		l.joinPeers[id] = make(map[string]time.Time)
+	}
+	l.joinPeers[id][session] = expiry
+}
+
+func (l *Listener) endJoin(session string) {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	delete(l.joinOpen, session)
+	for id, sessions := range l.joinPeers {
+		delete(sessions, session)
+		if len(sessions) == 0 {
+			delete(l.joinPeers, id)
+		}
+	}
+}
+
+func (l *Listener) addAllowedPeer(id peer.ID) {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	if !l.closed && id != "" {
+		l.allowed[id] = struct{}{}
+	}
+}
+
+func (l *Listener) removeAllowedPeer(id peer.ID) {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	delete(l.allowed, id)
+}

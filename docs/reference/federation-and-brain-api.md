@@ -1,15 +1,15 @@
-<!-- Verified against code on the v11.6 development branch (2026-07-11). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.6.0 code (2026-07-11). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
-v11 adds two independent HTTP surfaces. The original v11.0 federation transport assumes the two nodes are reachable by address - normally the same LAN, a VPN, or a tunnel the operator controls. The opt-in v11.6 transport substrate can carry the same mTLS HTTP protocol over manually configured libp2p peer multiaddrs, including Circuit Relay v2 fallback; peer discovery and the QR-based internet JOIN/onboarding flow are not yet provided. The direct HTTPS listener remains available.
+v11 adds two independent HTTP surfaces. v11.6 can carry the same mTLS HTTP protocol over direct HTTPS or libp2p, including NAT traversal and Circuit Relay v2 fallback. The dashboard JOIN wizard offers Same LAN and Internet setup: Internet enrollment carries bounded libp2p routes in the QR, while two v11.6 nodes paired on a LAN exchange and persist roaming routes over their authenticated agreement after signing. Older peers remain compatible with the legacy LAN enrollment. The relay is outside the trust boundary and sees only encrypted traffic.
 
 1. **Cross-network federation** - a read-only recall exchange between two independent SAGE chains, plus a guided TOTP JOIN ceremony to establish the agreement. This spans three listeners: a dedicated peer-facing mTLS listener (`/fed/v1/*`), the node operator's REST control surface (`/v1/federation/*`), and a cookie-authed dashboard proxy (`/v1/dashboard/federation/*`).
 2. **The brain as a tool** - the memory "train of thought" endpoint (`GET /v1/dashboard/memory/{id}/related`) that powers the MRI click-to-explore board.
 
 ### The trust / consensus boundary (read this first)
 
-Everything documented here is **OFF-consensus**. Foreign query results are merged into REST responses only - never written to `InsertMemory`, BadgerDB, or anything AppHash-visible (`internal/federation/types.go:1-14`). The **only** federation writes that reach chain state are the two operators' own `TxTypeCrossFedSet` (tx-33) and `TxTypeCrossFedRevoke` (tx-34) broadcasts, each authorized on-chain by `crossFedAuthorized` and each fired only after a human confirmation. A peer receipt (Mode-2) reaches chain state exclusively as verbatim signed bytes inside a `TxTypeCoCommitAttest` broadcast, re-verified under consensus. Every trust check in this package fails **closed**: unreachable peer, revoked/expired/unknown agreement, missing remote CA, or SPKI pin mismatch each deny.
+Federation transport, routing, policy, and foreign recall results are **OFF-consensus**. Borrowed query results are merged into REST responses only and never persisted. Treaty lifecycle reaches chain state through the two operators' own `TxTypeCrossFedSet` (tx-33) and `TxTypeCrossFedRevoke` (tx-34) broadcasts. A peer receipt (Mode-2) reaches chain state as signed bytes inside `TxTypeCoCommitAttest`. Domain-sync copies enter independently as ordinary locally signed `TxTypeMemorySubmit` (tx-1) transactions and pass the receiver's consensus/RBAC gates. Every trust check fails **closed**: unreachable peer, revoked/expired/unknown agreement, missing remote CA, or SPKI pin mismatch each deny.
 
 **The JOIN ceremony's peer-auth anchor is HUMAN** - an in-person / on-camera QR scan (or a spoken-code fallback). The TOTP factor proves co-possession of a shared seed and 2-of-2 consent; it does **not** prove the secret reached the right peer. Do not read the ceremony as machine-authenticated key exchange.
 
@@ -23,7 +23,7 @@ A **separate port and router** from the local API. Started from `cmd/sage-gui/no
 
 | Group | Routes | Middleware | Why |
 |---|---|---|---|
-| Established peers | `status`, `query`, `receipt` | `peerAuth` (`server.go:74-208`) | Requires an ACTIVE cross_fed agreement |
+| Established peers | `status`, `query`, `receipt`, `p2p/routes`, `sync/*` | `peerAuth` (`server.go:74-208`) | Requires an ACTIVE cross_fed agreement |
 | Pre-agreement JOIN | `join/ca`, `join/request`, `join/status`, `join/confirm` | `joinAuth` (`join_routes.go:161-183`) | No agreement exists yet during a join |
 
 ### `peerAuth` - the established-peer authenticator (`server.go:74-208`)
@@ -110,6 +110,12 @@ Accepts a peer's Mode-2 `CommitReceipt` push and anchors it via `TxTypeCoCommitA
 | `GET /fed/v1/join/status?session_id=…` | `handleJoinStatus` (`join_routes.go:316-347`) | Guest polls state flags; once the host approves, also returns the host's granted scope. Only the bound client cert may read. |
 | `POST /fed/v1/join/confirm` | `handleJoinConfirm` (`join_routes.go:352-375`) | Guest -> host approval #2. Verifies the guest's signatures over the frozen attestation E, then the host broadcasts its tx-33, commits the staged CA + seed, marks ACTIVE. |
 
+Internet enrollment adds `x_sage_transport=p2p`, protocol, peer ID, and up to four complete peer multiaddrs to the otherwise compatible TOTP URI. Parsing is all-or-nothing: the peer ID must match every terminal `/p2p/<id>`, at least one route must contain `/p2p-circuit`, and malformed or partial P2P metadata is rejected. P2P route and peer identity digests are included in the frozen attestation E, so route substitution makes the signed confirmation fail. The spoken codes separately bind the seed, CA pins, session nonces, and step. Temporary pre-agreement stream admission is bounded by session and peer and becomes a durable allowlist entry only after the agreement commits.
+
+### `POST /fed/v1/p2p/routes` (established peers)
+
+Authenticated v11.6 peers use this endpoint after a LAN ceremony to exchange `JoinP2PBundle{peer_id, protocol, addrs}`. Both bundles receive the same strict validation as Internet enrollment and are persisted atomically with the runtime allowlist. Older peers return 404 and remain LAN-only; the agreement itself stays valid. Revocation removes the stored route and inbound admission.
+
 **`JoinRequestWire`** (guest -> host, `join_routes.go:85-94`): `session_id`, `guest_chain`, `guest_agent_id` (hex ed25519), `guest_nonce` (hex 16B), `guest_pin` (hex 32B SPKI = scanned anchor), `guest_ca_pem`, `guest_endpoint`, `scope` (`{max_clearance, allowed_domains, mode, direction}`). No secret seed is carried - the seed rode the QR; the nonce is freshness-only.
 
 **`JoinRequestResp`** (`join_routes.go:97-104`): `host_chain`, `host_agent_id`, `host_nonce` (hex 16B), `confirm_step`, `host_pin` (echo), `host_endpoint`.
@@ -169,7 +175,7 @@ The browser holds a dashboard session, not the operator's signing key, so it can
 | `GET /v1/dashboard/federation/connections` | `handleFedConnections` (`:95`) | List cross_fed agreements from chain state |
 | `POST /v1/dashboard/federation/connections/{chain_id}/revoke` | `handleFedRevoke` (`:123`) | Revoke (drives `RevokeAgreement` -> tx-34 + local seed/CA purge) |
 | `GET /v1/dashboard/federation/connections/{chain_id}/status` | `handleFedPeerStatus` (`:136`) | Peer reachability preflight |
-| `POST /v1/dashboard/federation/join/host/create` | `handleFedHostCreate` (`:153`) | Host H1 |
+| `POST /v1/dashboard/federation/join/host/create` | `handleFedHostCreate` (`:636`) | Host H1; body includes `transport` (`lan` or `internet`) |
 | `POST /v1/dashboard/federation/join/host/scan-return` | `handleFedHostScanReturn` (`:172`) | Host scans guest return QR |
 | `GET /v1/dashboard/federation/join/host/{session_id}` | `handleFedHostStatus` (`:191`) | Host wizard poll |
 | `POST /v1/dashboard/federation/join/host/{session_id}/approve` | `handleFedHostApprove` (`:203`) | Host approval #1 |
@@ -179,7 +185,7 @@ The browser holds a dashboard session, not the operator's signing key, so it can
 | `GET /v1/dashboard/federation/join/guest/{session_id}/status` | `handleFedGuestStatus` (`:294`) | Guest poll host approval |
 | `POST /v1/dashboard/federation/join/guest/confirm` | `handleFedGuestConfirm` (`:308`) | Guest approval #2 |
 
-(All handlers in `web/federation_join.go`.) The request/response bodies mirror the operator REST bodies of §2 (same field names). `GET …/connections` returns `{local_chain_id, connections: []FedConnection}` where `FedConnection` (`:86-93`) = `{remote_chain_id, endpoint, max_clearance, allowed_domains, status, expired}`. `POST …/revoke` returns `{remote_chain_id, status:"revoked", tx_hash}`.
+(All handlers in `web/federation_join.go`.) Except for the dashboard-only host `transport` choice, the join request/response bodies mirror the operator REST bodies of §2. `GET …/connections` returns `{local_chain_id, connections: []FedConnection}` where `FedConnection` = `{remote_chain_id, endpoint, max_clearance, allowed_domains, status, expired}`. `POST …/revoke` returns `{remote_chain_id, status:"revoked", tx_hash}`.
 
 **Trust boundary:** these routes proxy the same off-consensus Manager as §2. The only chain writes are the two operators' own tx-33/tx-34, fired inside the Manager after each human confirmation.
 
@@ -210,17 +216,23 @@ Powers the MRI click-to-explore "train of thought" board. Cookie-authed dashboar
 
 ---
 
-## v11.5 Domain sync (shared-domain replication)
+## v11.6 Domain sync (host-controlled shared-domain replication)
 
 Opt-in replication of committed memories in consented domain subtrees to a federation peer - store-and-forward on top of the same mTLS transport and treaty scope as recall exchange. Everything is off-consensus (no fork): copies enter the receiving chain only as ordinary locally-signed `TxTypeMemorySubmit` transactions that the receiver's own consensus gates re-validate.
 
 ### Consent model
 
-Consent is **local, per side, and can only narrow the treaty**. Each operator configures `sync_domains` for a peer (`PUT /v1/federation/cross/{chain_id}/sync`, operator-only); every entry must be concrete (no `*`) and subtree-covered by the on-chain agreement's `allowed_domains`. It is deliberately **not** a field on the on-chain `cross_fed` record. The receiver enforces its **own** rows on every incoming push, so asymmetric consent means less flows, never more. Subtree semantics throughout: consenting `hr` covers `hr.public`.
+The signing ceremony creates a frozen host/guest controller binding, but sync starts **off by default**. Only the original host may replace the synchronized domain set; the guest's policy endpoint accepts only monotonically increasing, epoch-bound policies signed and transported by that exact host agreement. Every domain must be concrete (no `*`), within both treaty scopes, and authorized locally: the host operator must be a chain admin or owner/ancestor-owner of every selected domain. An empty set is always allowed so the host can narrow or disable sharing. The guest UI and REST surface are read-only for policy changes. Subtree semantics remain: selecting `hr` covers `hr.public`.
+
+Host policy is a complete, sorted snapshot with revision and hash. The sender waits for the guest to acknowledge the newest revision before delivering memory data. Activation atomically clears any legacy bilateral consent/outbox rows, so an upgraded pre-v11.6 preview configuration cannot silently become active. Removing consent and revoking a peer share the SQLite policy lock with delivery; stale in-flight work cannot escape after the change completes.
+
+### `PUT /fed/v1/sync/policy` (peer-facing, behind peerAuth)
+
+Host -> guest policy propagation: `{version:1, epoch, revision, domains}` -> `{status, revision}`. The receiver verifies its frozen guest role, controller chain and agent, remote CA pin, treaty scope, monotonic revision, and snapshot hash before atomically replacing `sync_domains`. Replays are idempotent; conflicting content at the same revision fails closed.
 
 ### `POST /fed/v1/sync/push` (peer-facing, behind peerAuth)
 
-`{items: [{origin_chain_id, origin_memory_id, origin_created_at, domain, classification, memory_type, confidence_score, content, content_hash, tags}]}` - max 8 items, 64KB content each; `content_hash` must equal sha256(content). The origin chain **must** equal the authenticated peer (no third-chain forwarding). Handler: `internal/federation/sync_server.go` `handleSyncPush`.
+`{items: [{origin_chain_id, origin_memory_id, origin_created_at, domain, classification, memory_type, confidence_score, content, content_hash, tags}]}` - max 8 items, 64KB content each, and at most 32 canonical tags of 128 bytes each; `content_hash` must equal sha256(content). The origin chain **must** equal the authenticated peer (no third-chain forwarding). Handler: `internal/federation/sync_server.go` `handleSyncPush`.
 
 Admission gates, in order: treaty `allowed_domains` -> receiver's own `sync_domains` consent -> `classification <= max_clearance` -> idempotency replay from the `sync_origin` ledger -> cross-domain duplicate check (identical committed content in a **different** domain is terminally rejected and surfaced, never silently moved; same domain is an idempotent duplicate-success) -> vault-locked retry NACK -> admit via a locally-signed submit tx with the deterministic id `hex(sha256("sync1|" + origin_chain + "|" + origin_memory_id))`.
 
@@ -236,11 +248,11 @@ Anti-entropy: the sender asks what the receiver has **already decided** about it
 
 | Route | Purpose |
 |---|---|
-| `PUT .../sync` | Replace the consented sync-domain set (validated against the active agreement). |
+| `PUT .../sync` | Host only: replace the synchronized domain set and deliver the versioned policy; returns `state` as `delivered` or `pending`. Guest attempts are rejected. |
 | `GET .../sync` | Read it back. |
 | `GET .../sync/status` | Outbox counts per state, rejected rows with reasons, pending retry schedule, last anti-entropy run, the peer's advertised consent, peer-unsupported flag. |
 
-Revoking an agreement (either revoke path) purges the peer's sync consent and queued deliveries.
+Revoking an agreement (either revoke path) atomically purges the peer's sync domains, queued deliveries, controller binding, cached CA/seed, and persisted P2P route. Durable pending-origin quarantine markers are retained until an exact committed mirror can be promoted, because deleting an ambiguous in-flight marker could later make a committed foreign copy look native.
 
 ### Delivery semantics - the honest version
 
@@ -248,7 +260,8 @@ Revoking an agreement (either revoke path) purges the peer's sync consent and qu
 - **"Delivered" means handed to the peer's pipeline.** The copy lands `proposed` (co-commit-style direct commit does not apply) and the receiver's own voter governs it. Peer lifecycle stays sovereign: decay, corroboration, and deprecation never propagate in either direction.
 - **The copy's on-chain author is the receiving node's operator agent** - everything entering chain state is a locally-signed tx. Origin truth (`origin_chain_id`, `origin_memory_id`, `origin_created_at`) lives in the receiver's off-consensus `sync_origin` ledger.
 - **A synced copy is never re-forwarded** (no A->B->C fan-out): the sender excludes copies at scan time and the receiver rejects any push whose origin is not the authenticated peer.
-- Copies arrive **without embeddings** (semantic recall needs a receiver-side re-embed; keyword/FTS recall works immediately). Tag replication is a non-goal in v11.5.
+- Before broadcasting a received copy, the receiver writes a durable pending-origin quarantine keyed to its deterministic local memory ID and immutable content/domain/classification/type/operator tuple. Commit watchers and restart scans treat pending and admitted origins alike for loop prevention. After a crash, retry promotes an exact already-committed copy without rebroadcasting. A definitive rejection removes the marker; an ambiguous timeout retains it, including across revocation, because the transaction may still commit later.
+- Copies arrive **without embeddings** (semantic recall needs a receiver-side re-embed; keyword/FTS recall works immediately). User tags are replicated with the memory in v11.6.
 - SQLite-only: Postgres-backed nodes disable sync loudly (501 on the routes, drainer no-op, no `sync` capability).
 - **First sync into a domain that does not yet exist on the receiver auto-registers that domain** with the receiving node's operator agent as owner (a level-2 self-grant), exactly as an ordinary local submit into a new domain does. This is a consensus-visible RBAC effect triggered by a peer's push - benign (the receiver's own operator owns it, never the peer) but worth knowing: an operator wanting tighter control should pre-create the domains they consent to sync.
 - **Rejections are re-evaluable, not permanent.** Only admissions are recorded on the receiver; a `rejected_not_consented` / `rejected_domain_scope` / `rejected_clearance` outcome is receiver-config-dependent and stays retryable on the sender (long backoff, attempt-capped), so widening consent or clearance later lets a backlog self-heal. A `rejected_cross_domain_dup` is content-derived and terminal on the sender. The cross-domain-dup check only inspects domains within the treaty scope, so it never reveals whether the receiver holds content in a domain the peer cannot see.

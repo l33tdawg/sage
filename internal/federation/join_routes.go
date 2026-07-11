@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,6 +24,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 
 	"github.com/l33tdawg/sage/internal/netguard"
 	"github.com/l33tdawg/sage/internal/store"
@@ -268,6 +271,13 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid guest endpoint")
 		return
 	}
+	if js.ExpectedGuestPeer != "" {
+		remotePeer, peerErr := joinRemotePeerID(r.RemoteAddr)
+		if peerErr != nil || remotePeer != js.ExpectedGuestPeer {
+			httpError(w, http.StatusForbidden, "join stream does not match scanned guest peer")
+			return
+		}
+	}
 	// Stage the guest CA to a pending sidecar (committed only after the host's
 	// tx-33 lands). requireChainCN inside StageRemoteCA binds the CA CN to the
 	// claimed guest chain. The SPKI==scanned-pin assertion is the anchor and is
@@ -309,6 +319,7 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 		GuestPin:        guestPin,
 		GuestEndpoint:   req.GuestEndpoint,
 		GuestScope:      req.Scope.digest(),
+		GuestScopeWire:  req.Scope,
 		CertSPKI:        joinCertSPKI(r.Context()),
 		CommitGuestCA:   commitCA,
 		RollbackGuestCA: rollbackCA,
@@ -403,6 +414,36 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	if err != nil {
 		return "", "", err
 	}
+	epoch := syncPolicyEpoch(ctx.ApprovedE)
+	if ss := m.syncStore(); ss != nil {
+		if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
+			RemoteChainID: ctx.GuestChain, Role: "host", ControllerChainID: m.localChainID,
+			ControllerAgentID: hex.EncodeToString(m.agentPub), PolicyEpoch: epoch,
+			RemoteCAPin: hex.EncodeToString(ctx.GuestPin),
+		}); prepareErr != nil {
+			ctx.RollbackGuestCA()
+			return "", "", fmt.Errorf("prepare host sync policy: %w", prepareErr)
+		}
+	}
+	hooks := m.joinP2PHooks()
+	routePrepared := false
+	if len(ctx.GuestP2PAddrs) > 0 {
+		if hooks.Persist == nil {
+			ctx.RollbackGuestCA()
+			if ss := m.syncStore(); ss != nil {
+				_ = ss.DeleteSyncControl(context.Background(), ctx.GuestChain)
+			}
+			return "", "", fmt.Errorf("internet peer route persistence is unavailable")
+		}
+		if persistErr := hooks.Persist(ctx.GuestChain, ctx.GuestP2PAddrs); persistErr != nil {
+			ctx.RollbackGuestCA()
+			if ss := m.syncStore(); ss != nil {
+				_ = ss.DeleteSyncControl(context.Background(), ctx.GuestChain)
+			}
+			return "", "", fmt.Errorf("persist guest internet route: %w", persistErr)
+		}
+		routePrepared = true
+	}
 	// Broadcast the host's own tx-33 CrossFedSet(remote=guest) with the operator
 	// key. crossFedAuthorized re-checks authority on-chain.
 	txHash, err := m.broadcastCrossFedSet(&tx.CrossFedTerms{
@@ -415,7 +456,13 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 		Status:         "active",
 	})
 	if err != nil {
+		if routePrepared && hooks.Remove != nil {
+			_ = hooks.Remove(ctx.GuestChain)
+		}
 		ctx.RollbackGuestCA() // broadcast rejected: discard the staged CA (no leak)
+		if ss := m.syncStore(); ss != nil {
+			_ = ss.DeleteSyncControl(context.Background(), ctx.GuestChain)
+		}
 		return "", "", fmt.Errorf("host agreement broadcast failed: %w", err)
 	}
 	// On-chain authz succeeded: commit the staged guest CA, then the seed. The
@@ -436,7 +483,15 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 		m.logger.Error().Err(sErr).Str("guest", ctx.GuestChain).Msg("host seed commit failed post-broadcast; revoking agreement")
 		return m.undoPartialHostConfirm(sessionID, ctx, "host seed commit failed", sErr)
 	}
+	if ss := m.syncStore(); ss != nil {
+		if aErr := ss.ActivateSyncControl(context.Background(), ctx.GuestChain, epoch); aErr != nil {
+			return m.undoPartialHostConfirm(sessionID, ctx, "sync control activation failed", aErr)
+		}
+	}
 	m.joins.MarkActive(sessionID)
+	if hooks.End != nil {
+		hooks.End(sessionID)
+	}
 	m.rememberPeerName(ctx.GuestChain, ctx.GuestName)
 	m.logger.Info().Str("guest", ctx.GuestChain).Str("tx", txHash).Msg("federation join activated (host side)")
 	return txHash, m.localChainID, nil
@@ -482,11 +537,19 @@ type HostCreateResult struct {
 	HostPinHex string `json:"host_pin"`
 	Endpoint   string `json:"endpoint"`
 	ExpiresAt  int64  `json:"expires_at"`
+	Transport  string `json:"transport,omitempty"`
 }
 
 // HostCreate opens a join session, generates the shared seed, and returns the
 // enrollment QR string (rendered client-side).
 func (m *Manager) HostCreate(hostEndpoint string) (*HostCreateResult, error) {
+	return m.HostCreateMode(hostEndpoint, false)
+}
+
+// HostCreateMode requires a ready relay bundle for explicit internet setup.
+// Normal LAN setup keeps its legacy QR byte shape; two v11.6 peers exchange
+// roaming routes over authenticated mTLS only after the agreement is active.
+func (m *Manager) HostCreateMode(hostEndpoint string, requireP2P bool) (*HostCreateResult, error) {
 	if err := validateJoinEndpoint(hostEndpoint); err != nil {
 		return nil, fmt.Errorf("invalid host endpoint: %w", err)
 	}
@@ -504,12 +567,32 @@ func (m *Manager) HostCreate(hostEndpoint string) (*HostCreateResult, error) {
 		return nil, err
 	}
 	uri := totp.ProvisioningURI(seed, m.localChainID, "SAGE", ownPin, hostEndpoint, sidForQR(js.ID), "host")
+	transport := ""
+	hooks := m.joinP2PHooks()
+	if requireP2P && hooks.LocalBundle != nil {
+		if bundle, bundleErr := hooks.LocalBundle(); bundleErr == nil && bundle.PeerID != "" && len(bundle.Addrs) > 0 {
+			if setErr := m.joins.SetHostP2P(js.ID, bundle.PeerID, bundle.Addrs); setErr != nil {
+				return nil, setErr
+			}
+			uri = totp.ProvisioningURIWithP2P(seed, m.localChainID, "SAGE", ownPin, hostEndpoint,
+				sidForQR(js.ID), "host", bundle.Protocol, bundle.PeerID, bundle.Addrs)
+			transport = "p2p"
+			if hooks.Begin != nil {
+				hooks.Begin(js.ID, js.ExpiresAt)
+			}
+		}
+	}
+	if requireP2P && transport != "p2p" {
+		m.joins.Abort(js.ID)
+		return nil, fmt.Errorf("internet connection is not ready: enable P2P and wait for a relay reservation")
+	}
 	return &HostCreateResult{
 		SessionID:  js.ID,
 		OTPAuthURI: uri,
 		HostPinHex: hex.EncodeToString(ownPin),
 		Endpoint:   hostEndpoint,
 		ExpiresAt:  js.ExpiresAt.Unix(),
+		Transport:  transport,
 	}, nil
 }
 
@@ -527,7 +610,21 @@ func (m *Manager) HostScanReturn(sessionID, returnURI string) error {
 	if sidForQR(sessionID) != strings.ToUpper(joinB32.EncodeToString(enr.SessionB)) {
 		return fmt.Errorf("scanned code belongs to a different session")
 	}
-	return m.joins.SetExpectedGuest(sessionID, enr.Pin, enr.Endpoint, time.Now())
+	now := time.Now()
+	if enr.Transport == "p2p" {
+		hooks := m.joinP2PHooks()
+		if hooks.BindPeer == nil {
+			return fmt.Errorf("internet join transport is unavailable")
+		}
+		js, ok := m.joins.Get(sessionID, now)
+		if !ok {
+			return fmt.Errorf("join session not found or expired")
+		}
+		if err := hooks.BindPeer(sessionID, enr.P2PAddrs, js.ExpiresAt); err != nil {
+			return fmt.Errorf("bind guest p2p identity: %w", err)
+		}
+	}
+	return m.joins.SetExpectedGuestWithP2P(sessionID, enr.Pin, enr.Endpoint, enr.PeerID, enr.P2PAddrs, now)
 }
 
 // HostSessionView is the host wizard's poll payload.
@@ -564,6 +661,9 @@ func (m *Manager) HostSessionStatus(sessionID string) (*HostSessionView, error) 
 	if js.GuestChain != "" {
 		codeG, codeH := js.confirmCodes()
 		view.CodeG = codeG
+		scope := js.GuestScopeWire
+		scope.AllowedDomains = append([]string(nil), js.GuestScopeWire.AllowedDomains...)
+		view.GuestScope = &scope
 		if js.Approved {
 			view.CodeH = codeH
 		}
@@ -612,29 +712,51 @@ func (m *Manager) HostApprove(sessionID, typedCode string, grant ScopeWire) erro
 }
 
 // HostAbort burns a session (H4 "No" / operator ignore).
-func (m *Manager) HostAbort(sessionID string) { m.joins.Abort(sessionID) }
+func (m *Manager) HostAbort(sessionID string) {
+	m.joins.Abort(sessionID)
+	if end := m.joinP2PHooks().End; end != nil {
+		end(sessionID)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Guest-side ceremony drivers + draft store
 // ---------------------------------------------------------------------------
 
 type guestDraft struct {
-	sessionID    string
-	hostChain    string
-	hostName     string // host's friendly label (cosmetic, from the CA fetch)
-	hostEndpoint string
-	hostPin      []byte
-	hostCAPEM    []byte
-	hostAgentPub []byte
-	seed         []byte
-	guestNonce   []byte
-	hostNonce    []byte
-	confirmStep  int64
-	scope        ScopeWire
-	expiresAt    time.Time
+	sessionID     string
+	hostChain     string
+	hostName      string // host's friendly label (cosmetic, from the CA fetch)
+	hostEndpoint  string
+	hostPin       []byte
+	hostCAPEM     []byte
+	hostAgentPub  []byte
+	seed          []byte
+	guestNonce    []byte
+	hostNonce     []byte
+	confirmStep   int64
+	scope         ScopeWire
+	expiresAt     time.Time
+	hostPeerID    string
+	hostP2PAddrs  []string
+	guestPeerID   string
+	guestP2PAddrs []string
+	state         guestDraftState
+	generation    uint64
+	txHash        string
 }
 
-func (m *Manager) putGuestDraft(d *guestDraft) {
+type guestDraftState string
+
+const (
+	guestDraftScanned     guestDraftState = "scanned"
+	guestDraftRequesting  guestDraftState = "requesting"
+	guestDraftRequested   guestDraftState = "requested"
+	guestDraftConfirming  guestDraftState = "confirming"
+	guestDraftLocalActive guestDraftState = "local_active"
+)
+
+func (m *Manager) putGuestDraft(d *guestDraft) error {
 	m.guestMu.Lock()
 	defer m.guestMu.Unlock()
 	// prune expired
@@ -645,7 +767,16 @@ func (m *Manager) putGuestDraft(d *guestDraft) {
 			delete(m.guestDrafts, k)
 		}
 	}
-	m.guestDrafts[d.sessionID] = d
+	if current, ok := m.guestDrafts[d.sessionID]; ok {
+		if current.state != guestDraftScanned {
+			return fmt.Errorf("a connection ceremony for this code is already in progress")
+		}
+		zeroize(current.seed)
+	}
+	m.guestGeneration++
+	d.generation = m.guestGeneration
+	m.guestDrafts[d.sessionID] = cloneGuestDraft(d)
+	return nil
 }
 
 func (m *Manager) getGuestDraft(sessionID string) (*guestDraft, bool) {
@@ -662,7 +793,71 @@ func (m *Manager) getGuestDraft(sessionID string) (*guestDraft, bool) {
 		delete(m.guestDrafts, sessionID)
 		return nil, false
 	}
-	return d, true
+	return cloneGuestDraft(d), true
+}
+
+// claimGuestDraft serializes guest-side ceremony mutations across double
+// clicks and concurrent API clients. The host already has exclusive BOUND /
+// CONFIRMING transitions; this is the equivalent ownership claim locally.
+func (m *Manager) claimGuestDraft(sessionID string, allowed []guestDraftState, next guestDraftState) (*guestDraft, guestDraftState, bool) {
+	m.guestMu.Lock()
+	defer m.guestMu.Unlock()
+	d, ok := m.guestDrafts[sessionID]
+	if !ok || time.Now().After(d.expiresAt) {
+		if ok {
+			zeroize(d.seed)
+			delete(m.guestDrafts, sessionID)
+		}
+		return nil, "", false
+	}
+	for _, state := range allowed {
+		if d.state == state {
+			previous := d.state
+			d.state = next
+			return cloneGuestDraft(d), previous, true
+		}
+	}
+	return nil, d.state, false
+}
+
+func (m *Manager) transitionGuestDraft(sessionID string, generation uint64, from, to guestDraftState) bool {
+	m.guestMu.Lock()
+	defer m.guestMu.Unlock()
+	d, ok := m.guestDrafts[sessionID]
+	if !ok || d.generation != generation || d.state != from {
+		return false
+	}
+	d.state = to
+	return true
+}
+
+func (m *Manager) finishGuestRequest(d *guestDraft) bool {
+	m.guestMu.Lock()
+	defer m.guestMu.Unlock()
+	current, ok := m.guestDrafts[d.sessionID]
+	if !ok || current.generation != d.generation || current.state != guestDraftRequesting {
+		return false
+	}
+	d.state = guestDraftRequested
+	m.guestDrafts[d.sessionID] = cloneGuestDraft(d)
+	return true
+}
+
+func cloneGuestDraft(d *guestDraft) *guestDraft {
+	if d == nil {
+		return nil
+	}
+	cp := *d
+	cp.hostPin = append([]byte(nil), d.hostPin...)
+	cp.hostCAPEM = append([]byte(nil), d.hostCAPEM...)
+	cp.hostAgentPub = append([]byte(nil), d.hostAgentPub...)
+	cp.seed = append([]byte(nil), d.seed...)
+	cp.guestNonce = append([]byte(nil), d.guestNonce...)
+	cp.hostNonce = append([]byte(nil), d.hostNonce...)
+	cp.hostP2PAddrs = append([]string(nil), d.hostP2PAddrs...)
+	cp.guestP2PAddrs = append([]string(nil), d.guestP2PAddrs...)
+	cp.scope.AllowedDomains = append([]string(nil), d.scope.AllowedDomains...)
+	return &cp
 }
 
 // pruneGuestDrafts zeroizes + drops every expired guest draft (periodic reaper).
@@ -697,10 +892,10 @@ func (m *Manager) StartMaintenance(ctx context.Context) {
 	}()
 }
 
-func (m *Manager) dropGuestDraft(sessionID string) {
+func (m *Manager) dropGuestDraft(sessionID string, generation uint64) {
 	m.guestMu.Lock()
 	defer m.guestMu.Unlock()
-	if d, ok := m.guestDrafts[sessionID]; ok {
+	if d, ok := m.guestDrafts[sessionID]; ok && d.generation == generation {
 		zeroize(d.seed)
 		delete(m.guestDrafts, sessionID)
 	}
@@ -739,7 +934,7 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 	sessionID := strings.ToUpper(joinB32.EncodeToString(enr.SessionB))
 	// Fetch the host CA over the join listener (payload is pin-authenticated).
 	// hostName is the host's cosmetic label from the same response.
-	caPEM, hostName, err := m.fetchHostCA(ctx, enr.Endpoint, sessionID)
+	caPEM, hostName, err := m.fetchHostCA(ctx, enr.Endpoint, sessionID, enr.P2PAddrs)
 	if err != nil {
 		return nil, fmt.Errorf("could not fetch host CA: %w", err)
 	}
@@ -757,7 +952,7 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 	if err != nil {
 		return nil, err
 	}
-	m.putGuestDraft(&guestDraft{
+	draft := &guestDraft{
 		sessionID:    sessionID,
 		hostChain:    enr.ChainID,
 		hostName:     hostName,
@@ -766,8 +961,28 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 		hostCAPEM:    caPEM,
 		seed:         append([]byte(nil), enr.Seed...),
 		expiresAt:    time.Now().Add(guestDraftTTL),
-	})
+		hostPeerID:   enr.PeerID,
+		hostP2PAddrs: append([]string(nil), enr.P2PAddrs...),
+		state:        guestDraftScanned,
+	}
 	returnURI := totp.ProvisioningURI(nil, m.localChainID, "SAGE", ownPin, guestEndpoint, sidForQR(sessionID), "guest")
+	if enr.Transport == "p2p" {
+		hooks := m.joinP2PHooks()
+		if hooks.LocalBundle == nil || hooks.DialTarget == nil {
+			return nil, fmt.Errorf("internet join transport is unavailable")
+		}
+		bundle, bundleErr := hooks.LocalBundle()
+		if bundleErr != nil || bundle.PeerID == "" || len(bundle.Addrs) == 0 {
+			return nil, fmt.Errorf("internet join relay is not ready: %w", bundleErr)
+		}
+		draft.guestPeerID = bundle.PeerID
+		draft.guestP2PAddrs = append([]string(nil), bundle.Addrs...)
+		returnURI = totp.ProvisioningURIWithP2P(nil, m.localChainID, "SAGE", ownPin, guestEndpoint,
+			sidForQR(sessionID), "guest", bundle.Protocol, bundle.PeerID, bundle.Addrs)
+	}
+	if err := m.putGuestDraft(draft); err != nil {
+		return nil, err
+	}
 	return &GuestScanResult{
 		SessionID:    sessionID,
 		HostChain:    enr.ChainID,
@@ -788,10 +1003,16 @@ type GuestRequestResult struct {
 // GuestRequest fires POST /fed/v1/join/request against the host, records the
 // exchanged nonces, and computes CODE_G/CODE_H. scope is the guest's scope_G.
 func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint string, scope ScopeWire) (*GuestRequestResult, error) {
-	d, ok := m.getGuestDraft(sessionID)
+	d, _, ok := m.claimGuestDraft(sessionID, []guestDraftState{guestDraftScanned}, guestDraftRequesting)
 	if !ok {
-		return nil, fmt.Errorf("no scanned connection for this session (re-scan)")
+		return nil, fmt.Errorf("connection request is already in progress or completed")
 	}
+	finished := false
+	defer func() {
+		if !finished {
+			m.transitionGuestDraft(sessionID, d.generation, guestDraftRequesting, guestDraftScanned)
+		}
+	}()
 	if err := validateJoinEndpoint(guestEndpoint); err != nil {
 		return nil, fmt.Errorf("invalid guest endpoint: %w", err)
 	}
@@ -839,7 +1060,10 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 	d.confirmStep = resp.ConfirmStep
 	d.hostAgentPub = hostAgentPub
 	d.scope = scope
-	m.putGuestDraft(d)
+	if !m.finishGuestRequest(d) {
+		return nil, fmt.Errorf("connection request state changed; re-scan")
+	}
+	finished = true
 
 	codeG, codeH := m.guestConfirmCodes(d, ownPin)
 	return &GuestRequestResult{CodeG: codeG, CodeH: codeH, ConfirmStep: resp.ConfirmStep}, nil
@@ -865,10 +1089,24 @@ func (m *Manager) GuestPollStatus(ctx context.Context, sessionID string) (*JoinS
 // first (guest-first activation, RT-7), then POSTs /fed/v1/join/confirm so the
 // host activates its side. hostScope is what the guest polled from /join/status.
 func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint string, hostScope ScopeWire) (string, error) {
-	d, ok := m.getGuestDraft(sessionID)
+	m.guestConfirmMu.Lock()
+	defer m.guestConfirmMu.Unlock()
+	d, previousState, ok := m.claimGuestDraft(sessionID,
+		[]guestDraftState{guestDraftRequested, guestDraftLocalActive}, guestDraftConfirming)
 	if !ok {
-		return "", fmt.Errorf("no scanned connection for this session (re-scan)")
+		return "", fmt.Errorf("connection confirmation is already in progress or unavailable")
 	}
+	localActive := previousState == guestDraftLocalActive
+	confirmed := false
+	defer func() {
+		if !confirmed {
+			to := guestDraftRequested
+			if localActive {
+				to = guestDraftLocalActive
+			}
+			m.transitionGuestDraft(sessionID, d.generation, guestDraftConfirming, to)
+		}
+	}()
 	if d.hostNonce == nil || d.guestNonce == nil {
 		return "", fmt.Errorf("request step not completed")
 	}
@@ -891,27 +1129,84 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 		Seed:          d.seed,
 		GuestNonce:    d.guestNonce,
 		HostNonce:     d.hostNonce,
+		GuestPeerID:   d.guestPeerID,
+		GuestP2PAddrs: d.guestP2PAddrs,
+		HostPeerID:    d.hostPeerID,
+		HostP2PAddrs:  d.hostP2PAddrs,
 	}.Attestation()
 	guestSig := SignEnroll(m.agentKey, e, false)
 	guestAckSig := SignEnroll(m.agentKey, e, true)
+	epoch := syncPolicyEpoch(e)
+	hooks := m.joinP2PHooks()
+	txHash := d.txHash
+	if !localActive {
+		if ss := m.syncStore(); ss != nil {
+			if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
+				RemoteChainID: d.hostChain, Role: "guest", ControllerChainID: d.hostChain,
+				ControllerAgentID: hex.EncodeToString(d.hostAgentPub), PolicyEpoch: epoch,
+				RemoteCAPin: hex.EncodeToString(d.hostPin),
+			}); prepareErr != nil {
+				return "", fmt.Errorf("prepare guest sync policy: %w", prepareErr)
+			}
+		}
 
-	// Guest-first: broadcast our own tx-33 (remote=host) + commit host CA + seed.
-	txHash, err := m.broadcastCrossFedSet(&tx.CrossFedTerms{
-		RemoteChainID:  d.hostChain,
-		Endpoint:       d.hostEndpoint,
-		PeerPubKey:     d.hostPin,
-		MaxClearance:   tx.ClearanceLevel(clampClearance(d.scope.MaxClearance)),
-		AllowedDomains: d.scope.AllowedDomains,
-		Status:         "active",
-	})
-	if err != nil {
-		return "", fmt.Errorf("your agreement broadcast failed: %w", err)
-	}
-	if _, cErr := m.StoreRemoteCA(d.hostChain, d.hostCAPEM); cErr != nil {
-		m.logger.Error().Err(cErr).Str("host", d.hostChain).Msg("host CA commit failed post-broadcast")
-	}
-	if sErr := m.commitPairSeed(d.hostChain, d.hostPin, d.seed); sErr != nil {
-		m.logger.Error().Err(sErr).Str("host", d.hostChain).Msg("guest seed commit failed post-broadcast")
+		routePrepared := false
+		if len(d.hostP2PAddrs) > 0 {
+			if hooks.Persist == nil {
+				if ss := m.syncStore(); ss != nil {
+					_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
+				}
+				return "", fmt.Errorf("internet peer route persistence is unavailable")
+			}
+			if persistErr := hooks.Persist(d.hostChain, d.hostP2PAddrs); persistErr != nil {
+				if ss := m.syncStore(); ss != nil {
+					_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
+				}
+				return "", fmt.Errorf("persist host internet route: %w", persistErr)
+			}
+			routePrepared = true
+		}
+		// Guest-first: broadcast our own tx-33 (remote=host) + commit host CA + seed.
+		txHash, err = m.broadcastCrossFedSet(&tx.CrossFedTerms{
+			RemoteChainID:  d.hostChain,
+			Endpoint:       d.hostEndpoint,
+			PeerPubKey:     d.hostPin,
+			MaxClearance:   tx.ClearanceLevel(clampClearance(d.scope.MaxClearance)),
+			AllowedDomains: d.scope.AllowedDomains,
+			Status:         "active",
+		})
+		if err != nil {
+			if routePrepared && hooks.Remove != nil {
+				_ = hooks.Remove(d.hostChain)
+			}
+			if ss := m.syncStore(); ss != nil {
+				_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
+			}
+			return "", fmt.Errorf("your agreement broadcast failed: %w", err)
+		}
+		d.txHash = txHash
+		m.guestMu.Lock()
+		if current := m.guestDrafts[sessionID]; current != nil && current.generation == d.generation && current.state == guestDraftConfirming {
+			current.txHash = txHash
+		}
+		m.guestMu.Unlock()
+		if _, cErr := m.StoreRemoteCA(d.hostChain, d.hostCAPEM); cErr != nil {
+			m.logger.Error().Err(cErr).Str("host", d.hostChain).Msg("host CA commit failed post-broadcast")
+			_, _ = m.RevokeAgreement(d.hostChain)
+			return "", fmt.Errorf("host CA persistence failed; agreement rolled back: %w", cErr)
+		}
+		if sErr := m.commitPairSeed(d.hostChain, d.hostPin, d.seed); sErr != nil {
+			m.logger.Error().Err(sErr).Str("host", d.hostChain).Msg("guest seed commit failed post-broadcast")
+			_, _ = m.RevokeAgreement(d.hostChain)
+			return "", fmt.Errorf("federation seed persistence failed; agreement rolled back: %w", sErr)
+		}
+		if ss := m.syncStore(); ss != nil {
+			if activateErr := ss.ActivateSyncControl(context.Background(), d.hostChain, epoch); activateErr != nil {
+				_, _ = m.RevokeAgreement(d.hostChain)
+				return "", fmt.Errorf("sync controller activation failed; agreement rolled back: %w", activateErr)
+			}
+		}
+		localActive = true
 	}
 
 	// Tell the host to activate its side.
@@ -927,8 +1222,24 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 		m.logger.Warn().Err(err).Str("host", d.hostChain).Msg("guest active but host confirm failed (one-sided window)")
 		return txHash, fmt.Errorf("your side is connected but the host has not confirmed yet: %w", err)
 	}
+	confirmed = true
 	m.rememberPeerName(d.hostChain, d.hostName)
-	m.dropGuestDraft(sessionID)
+	// A strictly legacy LAN QR stays compatible with older peers. Once both new
+	// nodes are active, opportunistically exchange relay routes over the now-
+	// authenticated direct mTLS agreement so the relationship can later roam.
+	if len(d.hostP2PAddrs) == 0 && hooks.LocalBundle != nil {
+		if bundle, bundleErr := hooks.LocalBundle(); bundleErr == nil {
+			routeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			if routeErr := m.ExchangeP2PRoutes(routeCtx, d.hostChain, bundle); routeErr != nil {
+				m.logger.Debug().Err(routeErr).Str("host", d.hostChain).Msg("LAN join completed without roaming route upgrade")
+			}
+			cancel()
+		}
+	}
+	if hooks.End != nil {
+		hooks.End(sessionID)
+	}
+	m.dropGuestDraft(sessionID, d.generation)
 	m.logger.Info().Str("host", d.hostChain).Str("tx", txHash).Msg("federation join activated (guest side)")
 	return txHash, nil
 }
@@ -1016,6 +1327,14 @@ func (m *Manager) RevokeAgreement(remoteChainID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	m.PurgeLocalFederationState(remoteChainID)
+	return hash, nil
+}
+
+// PurgeLocalFederationState removes every node-local capability associated
+// with a revoked agreement. REST's independently-broadcast revoke calls this
+// same helper so no control surface leaves routes or sync authority behind.
+func (m *Manager) PurgeLocalFederationState(remoteChainID string) {
 	// Off-consensus purge (zeroize seed cache + delete seed files + drop cached CA).
 	m.purgeSeed(remoteChainID)
 	m.invalidateCACache(remoteChainID)
@@ -1025,14 +1344,15 @@ func (m *Manager) RevokeAgreement(remoteChainID string) (string, error) {
 	// scan finds no consent rows and goes quiet.
 	if ss, ok := m.memStore.(*store.SQLiteStore); ok && ss != nil {
 		ctx := context.Background()
-		if err := ss.DeleteSyncDomains(ctx, remoteChainID); err != nil {
-			m.logger.Warn().Err(err).Str("remote", remoteChainID).Msg("revoke: sync domains purge failed")
-		}
-		if err := ss.PurgeSyncOutbox(ctx, remoteChainID); err != nil {
-			m.logger.Warn().Err(err).Str("remote", remoteChainID).Msg("revoke: sync outbox purge failed")
+		if err := ss.PurgeSyncPeerState(ctx, remoteChainID); err != nil {
+			m.logger.Warn().Err(err).Str("remote", remoteChainID).Msg("revoke: sync state purge failed")
 		}
 	}
-	return hash, nil
+	if remove := m.joinP2PHooks().Remove; remove != nil {
+		if err := remove(remoteChainID); err != nil {
+			m.logger.Warn().Err(err).Str("remote", remoteChainID).Msg("revoke: p2p route purge failed")
+		}
+	}
 }
 
 // commitPairSeed stages + commits the EXACT ceremony seed for (localChain,
@@ -1062,7 +1382,7 @@ func (m *Manager) commitPairSeed(remoteChain string, remotePin, seed []byte) err
 // fetchHostCA returns the host's CA PEM (pin-validated by the caller) plus the
 // host's friendly label (cosmetic, sanitized, may be empty). The label rides the
 // same response but carries no authority — only the CAPEM feeds the pin check.
-func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID string) (caPEM []byte, hostName string, err error) {
+func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID string, p2pTargets []string) (caPEM []byte, hostName string, err error) {
 	tlsCfg, err := m.joinBootstrapTLS()
 	if err != nil {
 		return nil, "", err
@@ -1082,7 +1402,15 @@ func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID strin
 	if err != nil {
 		return nil, "", err
 	}
-	client := &http.Client{Transport: joinHTTPTransport(tlsCfg)}
+	transport := joinHTTPTransport(tlsCfg)
+	if len(p2pTargets) > 0 {
+		dial := m.joinP2PHooks().DialTarget
+		if dial == nil {
+			return nil, "", fmt.Errorf("internet join transport is unavailable")
+		}
+		transport = joinP2PHTTPTransport(tlsCfg, dial, p2pTargets)
+	}
+	client := &http.Client{Transport: transport, CheckRedirect: refuseJoinRedirect}
 	defer client.CloseIdleConnections()
 	// netguard.LocalLANHTTPBase canonicalizes hostEndpoint, and joinHTTPTransport
 	// rejects non-local/LAN destinations again at dial time.
@@ -1140,7 +1468,15 @@ func (m *Manager) guestCall(ctx context.Context, d *guestDraft, method, path str
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Transport: joinHTTPTransport(tlsCfg)}
+	transport := joinHTTPTransport(tlsCfg)
+	if len(d.hostP2PAddrs) > 0 {
+		dial := m.joinP2PHooks().DialTarget
+		if dial == nil {
+			return fmt.Errorf("internet join transport is unavailable")
+		}
+		transport = joinP2PHTTPTransport(tlsCfg, dial, d.hostP2PAddrs)
+	}
+	client := &http.Client{Transport: transport, CheckRedirect: refuseJoinRedirect}
 	defer client.CloseIdleConnections()
 	// d.hostEndpoint was captured only after netguard.LocalLANHTTPBase validation,
 	// and joinHTTPTransport enforces the same local/LAN constraint at dial time.
@@ -1216,6 +1552,38 @@ func joinHTTPTransport(tlsCfg *tls.Config) *http.Transport {
 			return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
 		},
 	}
+}
+
+func joinP2PHTTPTransport(tlsCfg *tls.Config, dial func(context.Context, string) (net.Conn, error), targets []string) *http.Transport {
+	exact := append([]string(nil), targets...)
+	return &http.Transport{
+		TLSClientConfig: tlsCfg,
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var errs []error
+			for _, target := range exact {
+				conn, err := dial(ctx, target)
+				if err == nil {
+					return conn, nil
+				}
+				errs = append(errs, err)
+			}
+			return nil, fmt.Errorf("join p2p targets unreachable: %w", errors.Join(errs...))
+		},
+	}
+}
+
+func refuseJoinRedirect(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+
+func joinRemotePeerID(remoteAddr string) (string, error) {
+	addr, err := ma.NewMultiaddr(remoteAddr)
+	if err != nil {
+		return "", err
+	}
+	info, err := peer.AddrInfoFromP2pAddr(addr)
+	if err != nil {
+		return "", err
+	}
+	return info.ID.String(), nil
 }
 
 func (m *Manager) loadNodeKeyPair() (tls.Certificate, error) {

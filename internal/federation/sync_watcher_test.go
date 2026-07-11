@@ -3,6 +3,7 @@ package federation
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,9 +17,9 @@ func TestSyncWatcherEnqueuesAndNudges(t *testing.T) {
 	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
 	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
 
-	seedCommitted(t, ms, "m-in", "hr.public", "watched fact")   // consented subtree
-	seedCommitted(t, ms, "m-out", "eng", "unconsented fact")    // outside consent
-	seedCommitted(t, ms, "m-copy", "hr", "copy fact")           // synced copy: never re-forward
+	seedCommitted(t, ms, "m-in", "hr.public", "watched fact") // consented subtree
+	seedCommitted(t, ms, "m-out", "eng", "unconsented fact")  // outside consent
+	seedCommitted(t, ms, "m-copy", "hr", "copy fact")         // synced copy: never re-forward
 	require.NoError(t, ms.RecordSyncOrigin(ctx, store.SyncOrigin{
 		OriginChainID: "chain-x", OriginMemoryID: "orig-1", LocalMemoryID: "m-copy",
 		DomainTag: "hr", Outcome: store.SyncOutcomeAdmitted,
@@ -49,6 +50,39 @@ func TestSyncWatcherEnqueuesAndNudges(t *testing.T) {
 	m.SyncWatcher()([]string{"m-in"})
 	counts, _ = ms.CountSyncOutboxByState(ctx, "chain-b")
 	assert.Equal(t, 1, counts[store.SyncStatePending])
+}
+
+func TestSyncWatcherWaitsForAdmissionProvenance(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	seedCommitted(t, ms, "m-copy-race", "hr", "incoming copy")
+
+	unlock := ms.LockSyncOriginWrite()
+	done := make(chan struct{})
+	go func() {
+		m.onCommitted([]string{"m-copy-race"})
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("watcher crossed the provenance admission lease")
+	case <-time.After(25 * time.Millisecond):
+	}
+	require.NoError(t, ms.RecordSyncOrigin(ctx, store.SyncOrigin{
+		OriginChainID: "chain-peer", OriginMemoryID: "origin", LocalMemoryID: "m-copy-race",
+		DomainTag: "hr", Outcome: store.SyncOutcomeAdmitted,
+	}))
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not resume after provenance commit")
+	}
+	counts, err := ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.NoError(t, err)
+	assert.Empty(t, counts, "an admitted copy must never be re-forwarded")
 }
 
 func TestSyncWatcherNilSafety(t *testing.T) {

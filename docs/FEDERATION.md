@@ -1,6 +1,6 @@
 # Connect your SAGE to another network
 
-This guide shows you how to link your whole SAGE to someone else's whole SAGE, so the two brains can share memories across a local network or another reachable address you provide. In the app this lives under the **Federation** section (the federation icon in the sidebar). The guided flow remains LAN/reachable-address first. v11.6 adds an opt-in libp2p transport substrate for manually configured established peers, including relay fallback; QR-based internet onboarding is still being built.
+This guide shows you how to link your whole SAGE to someone else's whole SAGE, so the two brains can share memories on the same LAN or across the internet. In the app this lives under the **Federation** section (the federation icon in the sidebar). v11.6 carries the same pinned mTLS protocol over libp2p, with direct-path discovery, NAT traversal, and Circuit Relay v2 fallback. The relay only carries encrypted bytes; it never receives the federation keys or plaintext memories.
 
 It is written for the person clicking the buttons. You do not need to understand consensus or certificates to follow it. There is a short honest section at the end that explains what actually keeps the link safe, and what it does not promise.
 
@@ -22,8 +22,8 @@ Every connection is one-directional in the sense that each side keeps its own tr
 
 ## Before you start
 
-- Both people need their SAGE running and reachable at an `https://host:port` address (the federation listener, usually port **8444** on your network). The wizard fills in a sensible default like `https://192.168.1.20:8444` - change it if that is not how the other person reaches you.
-- The current wizard does not broker public-internet reachability for you. Use the same LAN, a VPN, or a tunnel you operate. Operators can configure the opt-in v11.6 libp2p substrate for established peers, but the wizard does not yet create or persist those internet peer routes.
+- Both people need federation switched on. For **Same LAN**, the wizard uses the federation listener (usually port **8444**) for the ceremony, then securely exchanges roaming routes after signing when both nodes support v11.6. For **Internet**, the host's enrollment code carries its signed-session libp2p routes and the ceremony uses those routes from the start.
+- Internet connectivity depends on at least one configured relay being reachable. SAGE ships with the project relay route and operators may add or replace relay multiaddrs. A relay outage can delay a relay-only connection, but does not weaken authentication or expose memory content.
 - You will each need a camera, or a shared screen, or at least a phone call you placed to a number you trust. The connection is safest when you are in the same room or on a video call you started.
 - Decide roughly what you are willing to share (which topics, and how sensitive) before you begin. You can leave it blank and share nothing, and you can change it later.
 
@@ -34,9 +34,9 @@ Open **Federation** in the sidebar. You will see two big choices:
 
 One of you picks each. Below are both walkthroughs, step by step, exactly matching the screens.
 
-### Advanced: manually configured libp2p transport
+### Advanced: connectivity configuration
 
-Until the internet JOIN wizard lands, operators can opt established peers into the v11.6 transport in `~/.sage/config.yaml` and restart SAGE:
+The guided wizard persists peer routes automatically. Operators who run their own relay or need fixed peer routes can override them in `~/.sage/config.yaml` and restart SAGE:
 
 ```yaml
 federation:
@@ -55,7 +55,7 @@ federation:
   p2p_force_private: true
 ```
 
-Every relay and peer value must be a complete multiaddr ending in `/p2p/<peer-id>`; `p2p_peers` is keyed by the remote SAGE chain ID from the established agreement. Configured peer IDs are an inbound connectivity allowlist only - the existing federation mTLS certificate, pinned CA, agreement, and signed requests still authenticate the remote chain. `p2p_force_private` asks for an immediate relay reservation and is useful behind known NAT; leave it false when automatic reachability is preferred. If P2P connectivity fails before TLS begins, SAGE falls back to that agreement's direct HTTPS endpoint. A TLS or identity failure never downgrades. The current wizard does not write these keys, so additions and removals require editing the file and restarting SAGE.
+Every relay and peer value must be a complete multiaddr ending in `/p2p/<peer-id>`; `p2p_peers` is keyed by the remote SAGE chain ID from the established agreement. Configured peer IDs are only an inbound connectivity allowlist - the existing federation mTLS certificate, pinned CA, agreement, and signed requests still authenticate the remote chain. `p2p_force_private` asks for an immediate relay reservation and is useful behind known NAT; leave it false when automatic reachability is preferred. If P2P connectivity fails before TLS begins, SAGE falls back to that agreement's direct HTTPS endpoint. A TLS or identity failure never downgrades.
 
 ---
 
@@ -150,6 +150,14 @@ Now your SAGE shows a code for you to read **back** to the guest, out loud. Say 
 ### 7. Connected
 
 When the guest confirms, you see "Connected", the two-of-two meter full, and the reminder that nothing was deleted. The connection is now in your list, and you can turn it off any time.
+
+The host then gets a separate **Memory sync** choice. It is off by default:
+
+- **Not now** keeps the connection as live, read-only recall exchange.
+- **Choose shared topics** lets the host select concrete domains permitted by both sides' treaty scopes, or enter a new domain tag for future memories. The host must be the local admin or owner of each chosen domain.
+- The selected set is the complete bidirectional replication allowlist. Memories with any other domain stay local, including memories already held by the guest.
+
+The guest sees the result but cannot widen it. The host can later add, remove, or disable synchronized domains from the connection's sync controls; a dedicated multi-node Sharing & Sync workspace is planned for v11.7.
 
 ---
 

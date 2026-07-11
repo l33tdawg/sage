@@ -58,9 +58,9 @@ func TestListSyncCandidatesSubtreeAndExclusions(t *testing.T) {
 
 	seedCommitted(t, ms, "m-hr", "hr", "hr fact")
 	seedCommitted(t, ms, "m-hr-pub", "hr.public", "hr public fact")
-	seedCommitted(t, ms, "m-eng", "eng", "eng fact")          // outside consent
-	seedCommitted(t, ms, "m-queued", "hr", "queued fact")     // already queued
-	seedCommitted(t, ms, "m-copy", "hr", "synced copy fact")  // a copy: never re-forward
+	seedCommitted(t, ms, "m-eng", "eng", "eng fact")         // outside consent
+	seedCommitted(t, ms, "m-queued", "hr", "queued fact")    // already queued
+	seedCommitted(t, ms, "m-copy", "hr", "synced copy fact") // a copy: never re-forward
 	_, err := ms.EnqueueSyncOutbox(ctx, "chain-b", "m-queued")
 	require.NoError(t, err)
 	require.NoError(t, ms.RecordSyncOrigin(ctx, store.SyncOrigin{
@@ -114,6 +114,129 @@ func TestSyncDrainEndToEnd(t *testing.T) {
 	pushed = nil
 	m.syncTick(ctx, ms)
 	assert.Empty(t, pushed)
+}
+
+func TestSyncDrainReplicatesMemoryTags(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	seedCommitted(t, ms, "m-tags", "hr", "tagged shared fact")
+	require.NoError(t, ms.SetTags(ctx, "m-tags", []string{"eurorack", "oscillator"}))
+	require.NoError(t, func() error { _, err := ms.EnqueueSyncOutbox(ctx, "chain-b", "m-tags"); return err }())
+
+	var got []string
+	m.syncPushFn = func(_ context.Context, _ string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		require.Len(t, req.Items, 1)
+		got = append([]string(nil), req.Items[0].Tags...)
+		return &SyncPushResponse{Results: []SyncItemResult{{OriginMemoryID: "m-tags", Outcome: SyncOutcomeAccepted}}}, nil
+	}
+	m.syncDrain(ctx, ms, mustDrainAgreement(t, m, "chain-b"), []string{"hr"})
+	assert.Equal(t, []string{"eurorack", "oscillator"}, got)
+}
+
+func TestSyncDrainerStopWaitsAndRecoversClaim(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	seedCommitted(t, ms, "m-stop", "hr", "shutdown-safe fact")
+	entered := make(chan struct{})
+	m.syncPushFn = func(ctx context.Context, _ string, _ *SyncPushRequest) (*SyncPushResponse, error) {
+		close(entered)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	parent, cancel := context.WithCancel(context.Background())
+	m.StartSyncDrainer(parent)
+	m.StartSyncDrainer(parent) // idempotent: must not launch a second worker pair
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("drainer never entered push")
+	}
+	cancel()
+	done := make(chan struct{})
+	go func() { m.StopSyncDrainer(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("StopSyncDrainer did not join canceled workers")
+	}
+	counts, err := ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.NoError(t, err)
+	assert.Zero(t, counts[store.SyncStateDelivering])
+	assert.Equal(t, 1, counts[store.SyncStatePending])
+}
+
+func TestSyncPolicyRemovalWaitsForInflightPush(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	seedCommitted(t, ms, "m-policy-race", "hr", "policy race fact")
+	m.syncScan(ctx, ms, mustDrainAgreement(t, m, "chain-b"), []string{"hr"})
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var pushes int
+	m.syncPushFn = func(_ context.Context, _ string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		pushes++
+		close(entered)
+		<-release
+		return &SyncPushResponse{Results: []SyncItemResult{{OriginMemoryID: req.Items[0].OriginMemoryID, Outcome: SyncOutcomeAccepted}}}, nil
+	}
+	drainDone := make(chan struct{})
+	go func() { m.syncDrain(ctx, ms, mustDrainAgreement(t, m, "chain-b"), []string{"hr"}); close(drainDone) }()
+	<-entered
+	removed := make(chan struct{})
+	go func() { _ = ms.SetSyncDomains(ctx, "chain-b", nil); close(removed) }()
+	select {
+	case <-removed:
+		t.Fatal("policy removal returned while an old-policy push was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	<-drainDone
+	<-removed
+	m.syncDrain(ctx, ms, mustDrainAgreement(t, m, "chain-b"), []string{"hr"})
+	assert.Equal(t, 1, pushes, "no push may begin under old consent after removal returns")
+}
+
+func TestSyncDataWaitsForHostPolicyAcknowledgement(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
+	require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{RemoteChainID: "chain-b", Role: "host",
+		ControllerChainID: m.localChainID, ControllerAgentID: "operator", PolicyEpoch: "epoch", RemoteCAPin: "pin"}))
+	require.NoError(t, ms.ActivateSyncControl(ctx, "chain-b", "epoch"))
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	// Simulate a widened host snapshot that has not reached the guest yet.
+	_, err := ms.ApplySyncPolicy(ctx, "chain-b", "epoch", 1, "hash", []string{"hr"})
+	require.NoError(t, err)
+	seedCommitted(t, ms, "m-policy-first", "hr", "policy must arrive first")
+	m.syncScan(ctx, ms, mustDrainAgreement(t, m, "chain-b"), []string{"hr"})
+	pushes := 0
+	m.syncPushFn = func(_ context.Context, _ string, _ *SyncPushRequest) (*SyncPushResponse, error) {
+		pushes++
+		return nil, fmt.Errorf("must not be called")
+	}
+	m.syncDrain(ctx, ms, mustDrainAgreement(t, m, "chain-b"), []string{"hr"})
+	assert.Zero(t, pushes)
+	require.NoError(t, ms.MarkSyncPolicyDelivered(ctx, "chain-b", "epoch", 1))
+	require.NoError(t, ms.MarkSyncOutboxRetry(ctx, "chain-b", "m-policy-first", 0, time.Now().Add(-time.Second), "due"))
+	m.syncPushFn = func(_ context.Context, _ string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		pushes++
+		return &SyncPushResponse{Results: []SyncItemResult{{OriginMemoryID: req.Items[0].OriginMemoryID, Outcome: SyncOutcomeAccepted}}}, nil
+	}
+	m.syncDrain(ctx, ms, mustDrainAgreement(t, m, "chain-b"), []string{"hr"})
+	assert.Equal(t, 1, pushes)
+}
+
+func mustDrainAgreement(t *testing.T, m *Manager, chain string) *store.CrossFedRecord {
+	t.Helper()
+	a, err := m.ActiveAgreement(chain)
+	require.NoError(t, err)
+	return a
 }
 
 func TestSyncDrainOutcomeMapping(t *testing.T) {

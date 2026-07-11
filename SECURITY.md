@@ -27,7 +27,7 @@ Reporters will be credited in the changelog unless anonymity is requested.
 
 ## Scope
 
-- **SAGE Personal (sage-gui):** Single-user, localhost-only. Primary attack surface is the local REST API on port 8080.
+- **SAGE Personal (sage-gui):** Single-user. Its management dashboard/API is intended for localhost on port 8080. Federation is separately opt-in and network-facing: a dedicated pinned-mTLS listener plus optional v11.6 libp2p NAT traversal/relay transport. Active agreements, certificate pins, and signed requests remain the federation authorization boundary.
 - **SAGE Enterprise:** Multi-node BFT consensus. Broader attack surface including inter-validator communication, RBAC, and federation.
 
 For a detailed security analysis, threat model, and known limitations, see [SECURITY_FAQ.md](SECURITY_FAQ.md).

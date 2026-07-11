@@ -23,6 +23,9 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/libp2p/go-libp2p/core/peer"
+	ma "github.com/multiformats/go-multiaddr"
 )
 
 const (
@@ -90,18 +93,29 @@ func Verify(seed []byte, code string, step int64) bool {
 
 // Enrollment is a parsed, validated SAGE enrollment QR (see ParseEnrollment).
 type Enrollment struct {
-	ChainID  string // otpauth label chain id
-	Seed     []byte // RFC-6238 seed (nil for a pin-only reciprocal card)
-	Pin      []byte // 32-byte x_sage_pin (peer CA SPKI fingerprint) — REQUIRED
-	Endpoint string // x_sage_ep, https://host:port
-	SessionB []byte // x_sage_sid decoded bytes (>= 40 bits)
-	Role     string // x_sage_role: "host" | "guest"
+	ChainID   string   // otpauth label chain id
+	Seed      []byte   // RFC-6238 seed (nil for a pin-only reciprocal card)
+	Pin       []byte   // 32-byte x_sage_pin (peer CA SPKI fingerprint) — REQUIRED
+	Endpoint  string   // x_sage_ep, https://host:port
+	SessionB  []byte   // x_sage_sid decoded bytes (>= 40 bits)
+	Role      string   // x_sage_role: "host" | "guest"
+	Transport string   // empty (LAN) or "p2p"
+	Protocol  string   // libp2p application protocol for p2p enrollments
+	PeerID    string   // terminal libp2p peer ID committed by the QR
+	P2PAddrs  []string // exact QR-authorized targets; never browser supplied
 }
 
 // ProvisioningURI builds the otpauth:// enrollment URI. seed may be nil for a
 // pin-only reciprocal card (the guest's return scan, §2.2.5): then secret/
 // algorithm/digits/period are omitted and only the x_sage_* commitment rides.
 func ProvisioningURI(seed []byte, chainID, issuer string, pin []byte, endpoint, sessionID string, role string) string {
+	return ProvisioningURIWithP2P(seed, chainID, issuer, pin, endpoint, sessionID, role, "", "", nil)
+}
+
+// ProvisioningURIWithP2P extends the byte-compatible LAN enrollment with a
+// versioned, exact libp2p route bundle. Empty peerID/addrs emits the original
+// LAN form. Callers must only pass addresses obtained from the live transport.
+func ProvisioningURIWithP2P(seed []byte, chainID, issuer string, pin []byte, endpoint, sessionID, role, protocol, peerID string, addrs []string) string {
 	q := url.Values{}
 	if len(seed) > 0 {
 		q.Set("secret", b32.EncodeToString(seed))
@@ -114,6 +128,14 @@ func ProvisioningURI(seed []byte, chainID, issuer string, pin []byte, endpoint, 
 	q.Set("x_sage_ep", endpoint)
 	q.Set("x_sage_sid", sessionID)
 	q.Set("x_sage_role", role)
+	if peerID != "" || len(addrs) > 0 {
+		q.Set("x_sage_transport", "p2p")
+		q.Set("x_sage_proto", protocol)
+		q.Set("x_sage_peer", peerID)
+		for _, addr := range addrs {
+			q.Add("x_sage_addr", addr)
+		}
+	}
 	label := url.PathEscape(issuer + ":" + chainID)
 	return "otpauth://totp/" + label + "?" + q.Encode()
 }
@@ -172,6 +194,53 @@ func ParseEnrollment(uri string, allowPinOnly bool) (*Enrollment, error) {
 		return nil, fmt.Errorf("this isn't a SAGE connection code (bad role)")
 	}
 	e.Role = role
+
+	// Optional v11.6 internet-join bundle. It is all-or-nothing and exact:
+	// every target must terminate in the declared peer ID, preventing a QR from
+	// smuggling an unrelated public destination into the join dialer.
+	transport := q.Get("x_sage_transport")
+	if transport != "" {
+		if transport != "p2p" || q.Get("x_sage_proto") != "/sage/fed/1.0.0" {
+			return nil, fmt.Errorf("this isn't a SAGE connection code (bad transport)")
+		}
+		peerID := q.Get("x_sage_peer")
+		declared, decodeErr := peer.Decode(peerID)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("this isn't a SAGE connection code (bad peer id)")
+		}
+		addrs := q["x_sage_addr"]
+		if len(addrs) == 0 || len(addrs) > 4 {
+			return nil, fmt.Errorf("this isn't a SAGE connection code (bad route count)")
+		}
+		hasCircuit := false
+		total := 0
+		for _, raw := range addrs {
+			total += len(raw)
+			if len(raw) == 0 || len(raw) > 512 || total > 1536 {
+				return nil, fmt.Errorf("this isn't a SAGE connection code (route too large)")
+			}
+			addr, addrErr := ma.NewMultiaddr(raw)
+			if addrErr != nil {
+				return nil, fmt.Errorf("this isn't a SAGE connection code (bad route)")
+			}
+			info, infoErr := peer.AddrInfoFromP2pAddr(addr)
+			if infoErr != nil || info.ID != declared {
+				return nil, fmt.Errorf("this isn't a SAGE connection code (route peer mismatch)")
+			}
+			if strings.Contains(raw, "/p2p-circuit/") {
+				hasCircuit = true
+			}
+		}
+		if !hasCircuit {
+			return nil, fmt.Errorf("this isn't a SAGE connection code (no relay route)")
+		}
+		e.Transport = transport
+		e.Protocol = q.Get("x_sage_proto")
+		e.PeerID = peerID
+		e.P2PAddrs = append([]string(nil), addrs...)
+	} else if q.Get("x_sage_proto") != "" || q.Get("x_sage_peer") != "" || len(q["x_sage_addr"]) != 0 {
+		return nil, fmt.Errorf("this isn't a SAGE connection code (incomplete transport)")
+	}
 
 	// x_sage_ep — REQUIRED, https host[:port] only.
 	ep := q.Get("x_sage_ep")

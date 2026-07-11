@@ -36,10 +36,12 @@ type SQLiteStore struct {
 	conn            sqlQuerier // either *sql.DB or *sql.Tx
 	db              *sql.DB    // nil for tx-scoped stores
 	dbPath          string
-	vault           *vault.Vault // nil = no encryption
-	vaultExpected   bool         // true = encryption should be active; reject writes if vault nil
-	decryptWarnOnce sync.Once    // gates the one-time decryption failure warning
-	writeMu         sync.Mutex   // serializes ALL writes to prevent SQLITE_BUSY
+	vault           *vault.Vault  // nil = no encryption
+	vaultExpected   bool          // true = encryption should be active; reject writes if vault nil
+	decryptWarnOnce sync.Once     // gates the one-time decryption failure warning
+	writeMu         sync.Mutex    // serializes ALL writes to prevent SQLITE_BUSY
+	syncPolicyGate  *sync.RWMutex // shared with tx clones; linearizes consent vs egress
+	syncOriginGate  *sync.RWMutex // shared with tx clones; linearizes copy provenance vs re-forward scans
 
 	// Optional cross-encoder reranker; nil = skip the rerank pass and return
 	// the RRF-sorted candidates directly. Wired at server startup via
@@ -257,7 +259,7 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 		}
 	}
 
-	s := &SQLiteStore{conn: db, db: db, dbPath: dbPath}
+	s := &SQLiteStore{conn: db, db: db, dbPath: dbPath, syncPolicyGate: &sync.RWMutex{}, syncOriginGate: &sync.RWMutex{}}
 	if err := s.initSchema(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -3436,7 +3438,7 @@ func (s *SQLiteStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	txStore := &SQLiteStore{conn: tx, dbPath: s.dbPath}
+	txStore := &SQLiteStore{conn: tx, dbPath: s.dbPath, syncPolicyGate: s.syncPolicyGate, syncOriginGate: s.syncOriginGate}
 	if err := fn(txStore); err != nil {
 		return err
 	}

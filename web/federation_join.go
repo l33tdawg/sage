@@ -81,7 +81,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	r.Get("/v1/dashboard/federation/lan-endpoint", h.handleFedLanEndpoint)
 	r.Get("/v1/dashboard/federation/readiness", h.handleFedReadiness)
 
-	// v11.5 domain-sync consent + status (operator-only surface, but the
+	// v11.6 host-controlled domain sync + status (operator-only surface, but the
 	// dashboard IS the operator here — cookie-authed local control plane).
 	r.Get("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncGet)
 	r.Put("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncSet)
@@ -294,7 +294,7 @@ func (h *DashboardHandler) handleSetFederationSetting(w http.ResponseWriter, r *
 	}()
 }
 
-// --- v11.5 domain-sync consent + status -------------------------------------
+// --- v11.6 host-controlled domain sync + status -----------------------------
 
 // syncStore returns the SQLite store the sync tables live on, or nil on any
 // other backend (sync is SQLite-only).
@@ -343,7 +343,23 @@ func (h *DashboardHandler) handleFedSyncGet(w http.ResponseWriter, r *http.Reque
 	if domains == nil {
 		domains = []string{}
 	}
-	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": domains})
+	role := "legacy"
+	revision := int64(0)
+	delivered := int64(0)
+	control, controlErr := ss.GetSyncControl(r.Context(), chain)
+	if controlErr != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Failed to read sync policy ownership.")
+		return
+	}
+	if control != nil {
+		role, revision, delivered = control.Role, control.Revision, control.DeliveredRevision
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": domains,
+		"sync_role": role, "revision": revision, "delivered_revision": delivered})
+}
+
+type hostSyncPolicyDriver interface {
+	SetHostSyncPolicy(context.Context, string, []string) (*federation.HostSyncPolicyResult, error)
 }
 
 func (h *DashboardHandler) handleFedSyncSet(w http.ResponseWriter, r *http.Request) {
@@ -385,6 +401,30 @@ func (h *DashboardHandler) handleFedSyncSet(w http.ResponseWriter, r *http.Reque
 			fedWriteErr(w, http.StatusBadRequest, "Domain "+strconv.Quote(d)+" is not covered by the agreement's shared domains.")
 			return
 		}
+	}
+	control, controlErr := ss.GetSyncControl(r.Context(), chain)
+	if controlErr != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Could not verify host/guest sync policy ownership.")
+		return
+	}
+	if control != nil {
+		if control.Role == "guest" {
+			fedWriteErr(w, http.StatusConflict, "Memory sync for this connection is managed by the host node.")
+			return
+		}
+		driver, ok := h.Federation.(hostSyncPolicyDriver)
+		if !ok {
+			fedWriteErr(w, http.StatusNotImplemented, "Host-managed sync policy is unavailable.")
+			return
+		}
+		result, err := driver.SetHostSyncPolicy(r.Context(), chain, body.Domains)
+		if err != nil {
+			fedWriteErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": result.Domains,
+			"sync_role": "host", "revision": result.Revision, "state": result.State})
+		return
 	}
 	if err := ss.SetSyncDomains(r.Context(), chain, body.Domains); err != nil {
 		fedWriteErr(w, http.StatusInternalServerError, "Failed to save sync domains.")
@@ -608,13 +648,26 @@ func (h *DashboardHandler) handleFedHostCreate(w http.ResponseWriter, r *http.Re
 		return
 	}
 	var body struct {
-		Endpoint string `json:"endpoint"`
+		Endpoint  string `json:"endpoint"`
+		Transport string `json:"transport"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
 		fedWriteErr(w, http.StatusBadRequest, "Invalid request.")
 		return
 	}
-	res, err := h.Federation.HostCreate(body.Endpoint)
+	var res *federation.HostCreateResult
+	var err error
+	if body.Transport == "internet" {
+		if driver, ok := h.Federation.(interface {
+			HostCreateMode(string, bool) (*federation.HostCreateResult, error)
+		}); ok {
+			res, err = driver.HostCreateMode(body.Endpoint, true)
+		} else {
+			err = fmt.Errorf("internet join is unavailable")
+		}
+	} else {
+		res, err = h.Federation.HostCreate(body.Endpoint)
+	}
 	if err != nil {
 		fedWriteErr(w, http.StatusBadRequest, err.Error())
 		return

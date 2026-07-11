@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 type scriptedComet struct {
 	calls     atomic.Int32
 	responses []string
+	after     func()
 }
 
 func (f *scriptedComet) handler() http.HandlerFunc {
@@ -35,6 +37,9 @@ func (f *scriptedComet) handler() http.HandlerFunc {
 		n := int(f.calls.Add(1)) - 1
 		if n >= len(f.responses) {
 			n = len(f.responses) - 1
+		}
+		if f.after != nil {
+			f.after()
 		}
 		_, _ = w.Write([]byte(f.responses[n]))
 	}
@@ -125,8 +130,14 @@ func TestSyncPushGateOrder(t *testing.T) {
 	outsideTreaty := syncItem("m-scope", "finance", "finance fact")
 	notConsented := syncItem("m-consent", "eng", "eng fact") // in treaty, not in sync_domains
 	tooHigh := syncItem("m-clear", "hr", "secret fact")
-	tooHigh.Classification = 4 // above MaxClearance 2
+	tooHigh.Classification = 4                               // above MaxClearance 2
 	happy := syncItem("m-ok", "hr.public", "shared hr fact") // consented via subtree
+	happy.Tags = []string{"eurorack", "oscillator"}
+	comet.after = func() {
+		localID := syncMemoryID("chain-b", "m-ok")
+		sum := sha256.Sum256([]byte(happy.Content))
+		_ = seedCommittedMemory(ctx, ms, localID, happy.Domain, happy.Content, sum[:])
+	}
 
 	_, resp := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{outsideTreaty, notConsented, tooHigh, happy}})
 	require.NotNil(t, resp)
@@ -136,6 +147,9 @@ func TestSyncPushGateOrder(t *testing.T) {
 	assert.Equal(t, SyncOutcomeRejectedClearance, resp.Results[2].Outcome)
 	assert.Equal(t, SyncOutcomeAccepted, resp.Results[3].Outcome)
 	assert.Equal(t, syncMemoryID("chain-b", "m-ok"), resp.Results[3].LocalMemoryID)
+	tags, err := ms.GetTags(ctx, syncMemoryID("chain-b", "m-ok"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"eurorack", "oscillator"}, tags)
 
 	// Every terminal decision is in the ledger; redelivery replays it without
 	// re-running gates or re-broadcasting.
@@ -146,6 +160,133 @@ func TestSyncPushGateOrder(t *testing.T) {
 	assert.Equal(t, SyncOutcomeDuplicate, resp.Results[1].Outcome)
 	assert.Equal(t, syncMemoryID("chain-b", "m-ok"), resp.Results[1].LocalMemoryID)
 	assert.Equal(t, broadcastsBefore, comet.calls.Load(), "replay must not broadcast")
+}
+
+func TestSyncItemTagValidationAndPersistence(t *testing.T) {
+	item := syncItem("m-tags", "hr", "tagged fact")
+	item.Tags = []string{"zeta", "alpha", "alpha"}
+	require.NoError(t, validateSyncItem("chain-b", &item))
+	assert.Equal(t, []string{"alpha", "zeta"}, item.Tags)
+
+	bad := item
+	bad.Tags = []string{" padded "}
+	assert.Error(t, validateSyncItem("chain-b", &bad))
+	bad = item
+	bad.Tags = make([]string, SyncMaxTags+1)
+	for i := range bad.Tags {
+		bad.Tags[i] = fmt.Sprintf("tag-%d", i)
+	}
+	assert.Error(t, validateSyncItem("chain-b", &bad))
+
+	_, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	localID := syncMemoryID("chain-b", "m-tags")
+	seedCommitted(t, ms, localID, "hr", "tagged fact")
+	require.NoError(t, ms.SetTags(context.Background(), localID, item.Tags))
+	got, err := ms.GetTags(context.Background(), localID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alpha", "zeta"}, got)
+}
+
+func TestSyncTagFailureKeepsProvenanceAndNeverRebroadcasts(t *testing.T) {
+	ctx := context.Background()
+	comet := &scriptedComet{responses: []string{cometOK}}
+	m, ms := newSyncTestManager(t, comet)
+	peer := testPeer(2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	item := syncItem("m-tag-retry", "hr", "tag projection retry")
+	item.Tags = []string{"important"}
+
+	// The scripted Comet deliberately does not project the committed memory
+	// into SQLite, so memory_tags' FK makes SetTags fail after admission.
+	_, first := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{item}})
+	require.NotNil(t, first)
+	assert.Equal(t, SyncOutcomeRetry, first.Results[0].Outcome)
+	origin, err := ms.GetSyncOrigin(ctx, "chain-b", "m-tag-retry")
+	require.NoError(t, err, "provenance must precede fallible tag projection")
+	assert.Equal(t, syncMemoryID("chain-b", "m-tag-retry"), origin.LocalMemoryID)
+
+	_, second := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{item}})
+	require.NotNil(t, second)
+	assert.Equal(t, SyncOutcomeRetry, second.Results[0].Outcome)
+	assert.Equal(t, int32(1), comet.calls.Load(), "tag repair replay must never rebroadcast the admitted copy")
+}
+
+func TestPendingSyncOriginRecoversCommittedCopyWithoutRebroadcast(t *testing.T) {
+	ctx := context.Background()
+	comet := &scriptedComet{responses: []string{cometOK}}
+	m, ms := newSyncTestManager(t, comet)
+	peer := testPeer(2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	item := syncItem("m-crash", "hr", "committed before provenance crash")
+	item.Tags = []string{"recovered"}
+	localID := syncMemoryID("chain-b", "m-crash")
+	require.NoError(t, ms.StageSyncOrigin(ctx, store.SyncOriginPending{
+		OriginChainID: "chain-b", OriginMemoryID: "m-crash", LocalMemoryID: localID, DomainTag: "hr",
+		ContentHash: item.ContentHash, Classification: item.Classification, MemoryType: "fact",
+		SubmittingAgent: hex.EncodeToString(m.agentPub),
+	}))
+	require.NoError(t, seedSyncedMirror(ctx, ms, m, localID, item))
+
+	_, resp := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{item}})
+	require.NotNil(t, resp)
+	assert.Equal(t, SyncOutcomeDuplicate, resp.Results[0].Outcome)
+	assert.Equal(t, int32(0), comet.calls.Load(), "crash recovery must not rebroadcast committed state")
+	origin, err := ms.GetSyncOrigin(ctx, "chain-b", "m-crash")
+	require.NoError(t, err)
+	assert.Equal(t, localID, origin.LocalMemoryID)
+	_, err = ms.GetPendingSyncOrigin(ctx, "chain-b", "m-crash")
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+	tags, err := ms.GetTags(ctx, localID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"recovered"}, tags)
+}
+
+func TestAmbiguousBroadcastKeepsQuarantineAndPromotesOnRetry(t *testing.T) {
+	ctx := context.Background()
+	comet := &scriptedComet{responses: []string{cometReject(11, "temporary admission result unavailable")}}
+	m, ms := newSyncTestManager(t, comet)
+	peer := testPeer(2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	item := syncItem("m-ambiguous", "hr", "commit response was lost")
+	localID := syncMemoryID("chain-b", item.OriginMemoryID)
+	comet.after = func() { _ = seedSyncedMirror(ctx, ms, m, localID, item) }
+
+	_, first := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{item}})
+	require.NotNil(t, first)
+	assert.Equal(t, SyncOutcomeRetry, first.Results[0].Outcome)
+	isCopy, err := ms.IsSyncedCopy(ctx, localID)
+	require.NoError(t, err)
+	assert.True(t, isCopy, "ambiguous commit must remain durably quarantined")
+
+	_, second := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{item}})
+	require.NotNil(t, second)
+	assert.Equal(t, SyncOutcomeDuplicate, second.Results[0].Outcome)
+	assert.Equal(t, int32(1), comet.calls.Load(), "retry must promote the mirror without another broadcast")
+}
+
+func TestPendingRecoveryRefusesMismatchedLocalIdentity(t *testing.T) {
+	ctx := context.Background()
+	comet := &scriptedComet{responses: []string{cometOK}}
+	m, ms := newSyncTestManager(t, comet)
+	peer := testPeer(2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+	item := syncItem("m-collision", "hr", "expected foreign content")
+	localID := syncMemoryID("chain-b", item.OriginMemoryID)
+	pending := store.SyncOriginPending{OriginChainID: "chain-b", OriginMemoryID: item.OriginMemoryID,
+		LocalMemoryID: localID, DomainTag: item.Domain, ContentHash: item.ContentHash,
+		Classification: item.Classification, MemoryType: "fact", SubmittingAgent: hex.EncodeToString(m.agentPub)}
+	require.NoError(t, ms.StageSyncOrigin(ctx, pending))
+	wrongHash := sha256.Sum256([]byte("unrelated native content"))
+	require.NoError(t, seedCommittedMemory(ctx, ms, localID, item.Domain, "unrelated native content", wrongHash[:]))
+
+	_, resp := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{item}})
+	require.NotNil(t, resp)
+	assert.Equal(t, SyncOutcomeRetry, resp.Results[0].Outcome)
+	assert.Equal(t, int32(0), comet.calls.Load(), "identity collision must fail closed before broadcast")
+	_, err := ms.GetSyncOrigin(ctx, "chain-b", item.OriginMemoryID)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+	_, err = ms.GetPendingSyncOrigin(ctx, "chain-b", item.OriginMemoryID)
+	require.NoError(t, err, "mismatched row must remain quarantined")
 }
 
 func TestSyncPushStructuralViolations(t *testing.T) {
@@ -259,4 +400,19 @@ func seedCommittedMemory(ctx context.Context, ms *store.SQLiteStore, id, domain,
 		Status:          memory.StatusCommitted,
 		CreatedAt:       time.Now(),
 	})
+}
+
+func seedSyncedMirror(ctx context.Context, ms *store.SQLiteStore, m *Manager, id string, item SyncItem) error {
+	hash, err := hex.DecodeString(item.ContentHash)
+	if err != nil {
+		return err
+	}
+	if err := ms.InsertMemory(ctx, &memory.MemoryRecord{
+		MemoryID: id, SubmittingAgent: hex.EncodeToString(m.agentPub), Content: item.Content, ContentHash: hash,
+		MemoryType: memory.MemoryType(syncStoredMemoryType(item.MemoryType)), DomainTag: item.Domain,
+		ConfidenceScore: item.ConfidenceScore, Status: memory.StatusCommitted, CreatedAt: time.Now(),
+	}); err != nil {
+		return err
+	}
+	return ms.UpdateMemoryClassification(ctx, id, store.ClearanceLevel(item.Classification))
 }

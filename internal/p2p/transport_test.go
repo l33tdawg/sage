@@ -284,6 +284,67 @@ func TestInboundPeerAllowlist(t *testing.T) {
 	}
 }
 
+func TestJoinAdmissionNarrowsAndPromotesDynamically(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guest, err := New(ctx, testConfig(t, filepath.Join(t.TempDir(), "guest.key")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer guest.Close()
+	other, err := New(ctx, testConfig(t, filepath.Join(t.TempDir(), "other.key")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	serverCfg := testConfig(t, filepath.Join(t.TempDir(), "server.key"))
+	serverCfg.EnforcePeerAllowlist = true
+	server, err := New(ctx, serverCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	allowed := func(id peer.ID) bool {
+		server.listener.stateMu.Lock()
+		defer server.listener.stateMu.Unlock()
+		return server.listener.joinAllowedLocked(id, time.Now())
+	}
+	if allowed(guest.Host().ID()) {
+		t.Fatal("unknown peer admitted without a live join")
+	}
+	server.BeginJoin("sid", time.Now().Add(time.Minute))
+	if !allowed(guest.Host().ID()) || !allowed(other.Host().ID()) {
+		t.Fatal("bootstrap window did not admit unknown peers")
+	}
+	if err := server.BindJoinPeer("sid", guest.Addrs(), time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if !allowed(guest.Host().ID()) {
+		t.Fatal("scanned guest was not admitted after narrowing")
+	}
+	if allowed(other.Host().ID()) {
+		t.Fatal("unscanned peer remained admitted after narrowing")
+	}
+	if err := server.AddAllowedPeer(guest.Addrs()); err != nil {
+		t.Fatal(err)
+	}
+	server.EndJoin("sid")
+	server.listener.stateMu.RLock()
+	_, durable := server.listener.allowed[guest.Host().ID()]
+	server.listener.stateMu.RUnlock()
+	if !durable {
+		t.Fatal("promoted peer was removed with temporary join admission")
+	}
+	server.RemoveAllowedPeer(guest.Addrs())
+	server.listener.stateMu.RLock()
+	_, durable = server.listener.allowed[guest.Host().ID()]
+	server.listener.stateMu.RUnlock()
+	if durable {
+		t.Fatal("revoked peer remained in dynamic allowlist")
+	}
+}
+
 func TestActiveStreamLimitHeldUntilClose(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

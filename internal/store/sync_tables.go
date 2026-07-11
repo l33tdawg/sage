@@ -49,6 +49,16 @@ const (
 	SyncStateFailed     = "failed"     // terminal local failure (e.g. memory content no longer available)
 )
 
+func (s *SQLiteStore) LockSyncOriginRead() func() {
+	s.syncOriginGate.RLock()
+	return s.syncOriginGate.RUnlock
+}
+
+func (s *SQLiteStore) LockSyncOriginWrite() func() {
+	s.syncOriginGate.Lock()
+	return s.syncOriginGate.Unlock
+}
+
 // Sync origin outcomes recorded at admission time on the receiving side.
 const (
 	SyncOutcomeAdmitted             = "admitted"
@@ -79,6 +89,34 @@ type SyncOrigin struct {
 	DomainTag       string
 	Outcome         string
 	CreatedAt       time.Time
+}
+
+// SyncOriginPending is a durable pre-broadcast quarantine. Its local ID is
+// excluded from all re-forward scans before the receiver submits the copy to
+// consensus, closing the commit-to-provenance crash window.
+type SyncOriginPending struct {
+	OriginChainID   string
+	OriginMemoryID  string
+	OriginCreatedAt string
+	LocalMemoryID   string
+	DomainTag       string
+	ContentHash     string
+	Classification  int
+	MemoryType      string
+	SubmittingAgent string
+}
+
+type SyncControl struct {
+	RemoteChainID     string
+	Role              string
+	ControllerChainID string
+	ControllerAgentID string
+	PolicyEpoch       string
+	RemoteCAPin       string
+	BindingState      string
+	Revision          int64
+	PolicyHash        string
+	DeliveredRevision int64
 }
 
 // CommittedHashMatch is one committed memory row matching a content hash,
@@ -138,6 +176,36 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		`CREATE INDEX IF NOT EXISTS idx_sync_origin_domain ON sync_origin(origin_chain_id, domain_tag)`)
 	_, _ = s.writeExecContext(ctx,
 		`CREATE INDEX IF NOT EXISTS idx_sync_origin_local ON sync_origin(local_memory_id) WHERE local_memory_id != ''`)
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS sync_origin_pending (
+		origin_chain_id   TEXT NOT NULL,
+		origin_memory_id  TEXT NOT NULL,
+		origin_created_at TEXT NOT NULL DEFAULT '',
+		local_memory_id   TEXT NOT NULL,
+		domain_tag        TEXT NOT NULL DEFAULT '',
+		content_hash      TEXT NOT NULL,
+		classification    INTEGER NOT NULL,
+		memory_type       TEXT NOT NULL,
+		submitting_agent  TEXT NOT NULL,
+		created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		PRIMARY KEY (origin_chain_id, origin_memory_id)
+	)`)
+	_, _ = s.writeExecContext(ctx,
+		`CREATE INDEX IF NOT EXISTS idx_sync_origin_pending_local ON sync_origin_pending(local_memory_id)`)
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS sync_control (
+		remote_chain_id      TEXT PRIMARY KEY,
+		role                 TEXT NOT NULL CHECK (role IN ('host','guest')),
+		controller_chain_id  TEXT NOT NULL,
+		controller_agent_id  TEXT NOT NULL,
+		policy_epoch         TEXT NOT NULL,
+		remote_ca_pin        TEXT NOT NULL,
+		binding_state        TEXT NOT NULL CHECK (binding_state IN ('pending','active')),
+		revision             INTEGER NOT NULL DEFAULT 0,
+		policy_hash          TEXT NOT NULL DEFAULT '',
+		delivered_revision   INTEGER NOT NULL DEFAULT 0,
+		updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	)`)
 	// fed_peer_names: the friendly label a peer network chose for itself, learned
 	// at join time. Purely a local display convenience (the connections list shows
 	// it in place of the raw chain id); never authoritative, never on-chain.
@@ -147,6 +215,193 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		name            TEXT NOT NULL,
 		updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	)`)
+}
+
+func (s *SQLiteStore) PrepareSyncControl(ctx context.Context, c SyncControl) error {
+	if c.RemoteChainID == "" || (c.Role != "host" && c.Role != "guest") || c.ControllerChainID == "" ||
+		c.ControllerAgentID == "" || c.PolicyEpoch == "" || c.RemoteCAPin == "" {
+		return fmt.Errorf("incomplete sync control binding")
+	}
+	_, err := s.writeExecContext(ctx, `
+		INSERT INTO sync_control (remote_chain_id, role, controller_chain_id, controller_agent_id,
+			policy_epoch, remote_ca_pin, binding_state)
+		VALUES (?, ?, ?, ?, ?, ?, 'pending')
+		ON CONFLICT(remote_chain_id) DO UPDATE SET
+			role=excluded.role, controller_chain_id=excluded.controller_chain_id,
+			controller_agent_id=excluded.controller_agent_id, policy_epoch=excluded.policy_epoch,
+			remote_ca_pin=excluded.remote_ca_pin, revision=0, policy_hash='', delivered_revision=0,
+			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE sync_control.binding_state='pending'`,
+		c.RemoteChainID, c.Role, c.ControllerChainID, c.ControllerAgentID, c.PolicyEpoch, c.RemoteCAPin)
+	if err != nil {
+		return err
+	}
+	existing, err := s.GetSyncControl(ctx, c.RemoteChainID)
+	if err != nil {
+		return err
+	}
+	if existing == nil || existing.Role != c.Role || existing.ControllerChainID != c.ControllerChainID ||
+		existing.ControllerAgentID != c.ControllerAgentID || existing.PolicyEpoch != c.PolicyEpoch ||
+		existing.RemoteCAPin != c.RemoteCAPin {
+		return fmt.Errorf("different sync controller binding already exists; revoke before re-enrolling")
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ActivateSyncControl(ctx context.Context, remoteChainID, epoch string) error {
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
+	return s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		var state string
+		if err := tx.conn.QueryRowContext(ctx, `SELECT binding_state FROM sync_control WHERE remote_chain_id=? AND policy_epoch=?`,
+			remoteChainID, epoch).Scan(&state); err != nil {
+			return fmt.Errorf("sync control binding not found: %w", err)
+		}
+		if state == "active" {
+			return nil
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return err
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_outbox WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return err
+		}
+		_, err := tx.writeExecContext(ctx, `UPDATE sync_control SET binding_state='active', revision=0,
+			policy_hash='', delivered_revision=0, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			WHERE remote_chain_id=? AND policy_epoch=?`, remoteChainID, epoch)
+		return err
+	})
+}
+
+func (s *SQLiteStore) DeleteSyncControl(ctx context.Context, remoteChainID string) error {
+	_, err := s.writeExecContext(ctx, `DELETE FROM sync_control WHERE remote_chain_id=?`, remoteChainID)
+	return err
+}
+
+func (s *SQLiteStore) PurgeSyncPeerState(ctx context.Context, remoteChainID string) error {
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
+	originUnlock := s.LockSyncOriginWrite()
+	defer originUnlock()
+	return s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("purge sync domains: %w", err)
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_outbox WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("purge sync outbox: %w", err)
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_control WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("purge sync control: %w", err)
+		}
+		// A revoke removes transport/policy state, not the fact that an already
+		// committed local memory originated elsewhere. Promote crash-window
+		// quarantines whose deterministic copy exists before clearing pending.
+		if _, err := tx.writeExecContext(ctx, `INSERT OR IGNORE INTO sync_origin
+			(origin_chain_id, origin_memory_id, origin_created_at, local_memory_id, domain_tag, outcome)
+			SELECT p.origin_chain_id, p.origin_memory_id, p.origin_created_at, p.local_memory_id, p.domain_tag, 'admitted'
+			FROM sync_origin_pending p WHERE p.origin_chain_id=?
+			AND EXISTS (SELECT 1 FROM memories m WHERE m.memory_id=p.local_memory_id
+				AND m.domain_tag=p.domain_tag AND lower(hex(m.content_hash))=lower(p.content_hash)
+				AND m.classification=p.classification AND m.memory_type=p.memory_type
+				AND m.submitting_agent=p.submitting_agent)`, remoteChainID); err != nil {
+			return fmt.Errorf("promote pending sync origins: %w", err)
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_origin_pending
+			WHERE origin_chain_id=? AND EXISTS (
+				SELECT 1 FROM sync_origin so WHERE so.origin_chain_id=sync_origin_pending.origin_chain_id
+					AND so.origin_memory_id=sync_origin_pending.origin_memory_id
+					AND so.local_memory_id=sync_origin_pending.local_memory_id AND so.local_memory_id!='')`, remoteChainID); err != nil {
+			return fmt.Errorf("purge pending sync origins: %w", err)
+		}
+		return nil
+	})
+}
+
+func (s *SQLiteStore) GetSyncControl(ctx context.Context, remoteChainID string) (*SyncControl, error) {
+	c := &SyncControl{}
+	err := s.conn.QueryRowContext(ctx, `SELECT remote_chain_id, role, controller_chain_id,
+		controller_agent_id, policy_epoch, remote_ca_pin, binding_state, revision,
+		policy_hash, delivered_revision FROM sync_control WHERE remote_chain_id=?`, remoteChainID).
+		Scan(&c.RemoteChainID, &c.Role, &c.ControllerChainID, &c.ControllerAgentID, &c.PolicyEpoch,
+			&c.RemoteCAPin, &c.BindingState, &c.Revision, &c.PolicyHash, &c.DeliveredRevision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return c, err
+}
+
+func (s *SQLiteStore) ListPendingSyncControls(ctx context.Context) ([]SyncControl, error) {
+	rows, err := s.conn.QueryContext(ctx, `SELECT remote_chain_id, role, controller_chain_id,
+		controller_agent_id, policy_epoch, remote_ca_pin, binding_state, revision,
+		policy_hash, delivered_revision FROM sync_control
+		WHERE role='host' AND binding_state='active' AND revision > delivered_revision ORDER BY remote_chain_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SyncControl
+	for rows.Next() {
+		var c SyncControl
+		if err := rows.Scan(&c.RemoteChainID, &c.Role, &c.ControllerChainID, &c.ControllerAgentID,
+			&c.PolicyEpoch, &c.RemoteCAPin, &c.BindingState, &c.Revision, &c.PolicyHash, &c.DeliveredRevision); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *SQLiteStore) MarkSyncPolicyDelivered(ctx context.Context, remoteChainID, epoch string, revision int64) error {
+	_, err := s.writeExecContext(ctx, `UPDATE sync_control SET delivered_revision = CASE
+		WHEN delivered_revision < ? THEN ? ELSE delivered_revision END,
+		updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE remote_chain_id=? AND policy_epoch=?`, revision, revision, remoteChainID, epoch)
+	return err
+}
+
+// ApplySyncPolicy atomically advances the controller snapshot and replaces the
+// effective domains. The caller has already authenticated treaty/controller.
+func (s *SQLiteStore) ApplySyncPolicy(ctx context.Context, remoteChainID, epoch string, revision int64, policyHash string, domains []string) (string, error) {
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
+	result := "applied"
+	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		var current int64
+		var currentHash, state string
+		if err := tx.conn.QueryRowContext(ctx, `SELECT revision, policy_hash, binding_state FROM sync_control
+			WHERE remote_chain_id=? AND policy_epoch=?`, remoteChainID, epoch).Scan(&current, &currentHash, &state); err != nil {
+			return err
+		}
+		if state != "active" {
+			return fmt.Errorf("sync control is not active")
+		}
+		if revision < current {
+			return fmt.Errorf("stale sync policy revision")
+		}
+		if revision == current {
+			if policyHash != currentHash {
+				return fmt.Errorf("sync policy revision conflict")
+			}
+			result = "duplicate"
+			return nil
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return err
+		}
+		for _, domain := range domains {
+			if _, err := tx.writeExecContext(ctx, `INSERT INTO sync_domains (remote_chain_id, domain_tag) VALUES (?, ?)`, remoteChainID, domain); err != nil {
+				return err
+			}
+		}
+		_, err := tx.writeExecContext(ctx, `UPDATE sync_control SET revision=?, policy_hash=?,
+			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE remote_chain_id=? AND policy_epoch=?`,
+			revision, policyHash, remoteChainID, epoch)
+		return err
+	})
+	return result, err
 }
 
 // ---- fed_peer_names (local display labels for federated peers) ----
@@ -197,6 +452,8 @@ func (s *SQLiteStore) SetSyncDomains(ctx context.Context, remoteChainID string, 
 	if remoteChainID == "" {
 		return fmt.Errorf("remote_chain_id is required")
 	}
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
 	return s.RunInTx(ctx, func(txStore OffchainStore) error {
 		tx, ok := txStore.(*SQLiteStore)
 		if !ok {
@@ -265,12 +522,33 @@ func (s *SQLiteStore) ListSyncDomainChains(ctx context.Context) ([]string, error
 // DeleteSyncDomains removes all sync consent for a peer chain (agreement
 // revocation path — called next to the TOTP-seed and CA purges).
 func (s *SQLiteStore) DeleteSyncDomains(ctx context.Context, remoteChainID string) error {
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
 	_, err := s.writeExecContext(ctx,
 		`DELETE FROM sync_domains WHERE remote_chain_id = ?`, remoteChainID)
 	if err != nil {
 		return fmt.Errorf("delete sync domains: %w", err)
 	}
 	return nil
+}
+
+// LockSyncPolicyRead leases the effective sync policy across the final gate
+// recheck and network push. A completed policy removal therefore guarantees no
+// later egress begins under its old snapshot. No SQLite transaction is held.
+func (s *SQLiteStore) LockSyncPolicyRead() func() {
+	if s.syncPolicyGate == nil {
+		return func() {}
+	}
+	s.syncPolicyGate.RLock()
+	return s.syncPolicyGate.RUnlock
+}
+
+func (s *SQLiteStore) LockSyncPolicyWrite() func() {
+	if s.syncPolicyGate == nil {
+		return func() {}
+	}
+	s.syncPolicyGate.Lock()
+	return s.syncPolicyGate.Unlock
 }
 
 // ---- sync_outbox ----
@@ -506,6 +784,70 @@ func (s *SQLiteStore) PurgeSyncOutbox(ctx context.Context, remoteChainID string)
 
 // ---- sync_origin ----
 
+func (s *SQLiteStore) StageSyncOrigin(ctx context.Context, o SyncOriginPending) error {
+	if o.OriginChainID == "" || o.OriginMemoryID == "" || o.LocalMemoryID == "" ||
+		o.ContentHash == "" || o.MemoryType == "" || o.SubmittingAgent == "" {
+		return fmt.Errorf("pending origin identity fields are required")
+	}
+	_, err := s.writeExecContext(ctx, `
+		INSERT INTO sync_origin_pending
+			(origin_chain_id, origin_memory_id, origin_created_at, local_memory_id, domain_tag,
+			 content_hash, classification, memory_type, submitting_agent)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(origin_chain_id, origin_memory_id) DO UPDATE SET
+			origin_created_at=excluded.origin_created_at,
+			local_memory_id=excluded.local_memory_id,
+			domain_tag=excluded.domain_tag,
+			content_hash=excluded.content_hash,
+			classification=excluded.classification,
+			memory_type=excluded.memory_type,
+			submitting_agent=excluded.submitting_agent`,
+		o.OriginChainID, o.OriginMemoryID, o.OriginCreatedAt, o.LocalMemoryID, o.DomainTag,
+		o.ContentHash, o.Classification, o.MemoryType, o.SubmittingAgent)
+	if err != nil {
+		return fmt.Errorf("stage sync origin: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) GetPendingSyncOrigin(ctx context.Context, originChainID, originMemoryID string) (*SyncOriginPending, error) {
+	p := &SyncOriginPending{}
+	err := s.conn.QueryRowContext(ctx, `SELECT origin_chain_id, origin_memory_id, origin_created_at,
+		local_memory_id, domain_tag, content_hash, classification, memory_type, submitting_agent
+		FROM sync_origin_pending WHERE origin_chain_id=? AND origin_memory_id=?`, originChainID, originMemoryID).
+		Scan(&p.OriginChainID, &p.OriginMemoryID, &p.OriginCreatedAt, &p.LocalMemoryID, &p.DomainTag,
+			&p.ContentHash, &p.Classification, &p.MemoryType, &p.SubmittingAgent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get pending sync origin: %w", err)
+	}
+	return p, nil
+}
+
+func (s *SQLiteStore) DeletePendingSyncOrigin(ctx context.Context, originChainID, originMemoryID string) error {
+	_, err := s.writeExecContext(ctx, `DELETE FROM sync_origin_pending WHERE origin_chain_id=? AND origin_memory_id=?`,
+		originChainID, originMemoryID)
+	if err != nil {
+		return fmt.Errorf("delete pending sync origin: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) PendingSyncMemoryState(ctx context.Context, p SyncOriginPending) (exists, matches bool, err error) {
+	var existsInt, matchesInt int
+	if err := s.conn.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM memories WHERE memory_id=?),
+		EXISTS(SELECT 1 FROM memories WHERE memory_id=? AND domain_tag=?
+			AND lower(hex(content_hash))=lower(?) AND classification=?
+			AND memory_type=? AND submitting_agent=?)`, p.LocalMemoryID, p.LocalMemoryID, p.DomainTag, p.ContentHash,
+		p.Classification, p.MemoryType, p.SubmittingAgent).Scan(&existsInt, &matchesInt); err != nil {
+		return false, false, fmt.Errorf("check pending sync memory: %w", err)
+	}
+	return existsInt == 1, matchesInt == 1, nil
+}
+
 // RecordSyncOrigin persists an admission decision. INSERT OR IGNORE: the
 // FIRST recorded decision wins and redelivery replays it via GetSyncOrigin —
 // gates must never re-run for an origin pair that already has an outcome.
@@ -552,8 +894,9 @@ func (s *SQLiteStore) IsSyncedCopy(ctx context.Context, localMemoryID string) (b
 		return false, nil
 	}
 	var n int
-	err := s.conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM sync_origin WHERE local_memory_id = ?`, localMemoryID).Scan(&n)
+	err := s.conn.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM sync_origin WHERE local_memory_id = ?) +
+		(SELECT COUNT(*) FROM sync_origin_pending WHERE local_memory_id = ?)`, localMemoryID, localMemoryID).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("check synced copy: %w", err)
 	}
@@ -651,6 +994,8 @@ type SyncCandidate struct {
 // (legacy rows have committed_at NULL and unindexed), so the same call is
 // both the steady-state scan and restart recovery.
 func (s *SQLiteStore) ListSyncCandidates(ctx context.Context, remoteChainID string, domains []string, limit int) ([]SyncCandidate, error) {
+	unlockOrigin := s.LockSyncOriginRead()
+	defer unlockOrigin()
 	if len(domains) == 0 {
 		return nil, nil
 	}
@@ -680,6 +1025,8 @@ func (s *SQLiteStore) ListSyncCandidates(ctx context.Context, remoteChainID stri
 		                    WHERE o.remote_chain_id = ? AND o.memory_id = m.memory_id)
 		   AND NOT EXISTS (SELECT 1 FROM sync_origin so
 		                    WHERE so.local_memory_id = m.memory_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_origin_pending sop
+		                    WHERE sop.local_memory_id = m.memory_id)
 		 ORDER BY m.created_at ASC
 		 LIMIT ?`, args...)
 	if err != nil {

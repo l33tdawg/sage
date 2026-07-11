@@ -69,6 +69,9 @@ type Manager struct {
 	peerDialMu sync.RWMutex
 	peerDialFn PeerDialFunc
 
+	joinP2PMu sync.RWMutex
+	joinP2P   JoinP2PHooks
+
 	// replayMu guards seenSigs — the federation listener's replay cache,
 	// SHARDED BY PEER CHAIN so one peer's flood can never evict or lock out
 	// another peer (a shared global cap would let any single authenticated peer
@@ -94,7 +97,8 @@ type Manager struct {
 	// syncPushFn is the outbox drainer's delivery seam: nil in production
 	// (the drainer calls m.SyncPush, the real mTLS client), non-nil only in
 	// tests so drain logic is testable without a TLS peer.
-	syncPushFn func(ctx context.Context, remoteChainID string, req *SyncPushRequest) (*SyncPushResponse, error)
+	syncPushFn       func(ctx context.Context, remoteChainID string, req *SyncPushRequest) (*SyncPushResponse, error)
+	syncPolicyPushFn func(ctx context.Context, remoteChainID string, req *SyncPolicyRequest) (*SyncPolicyResponse, error)
 
 	// syncNudge wakes the outbox drainer ahead of its ticker when the commit
 	// watcher enqueues new work. Buffered-1 (a pending nudge covers all
@@ -102,7 +106,11 @@ type Manager struct {
 	// goroutine launches; nil when the drainer is disabled — nudgeSync is
 	// nil-safe. Wiring order matters: StartSyncDrainer runs before
 	// SetSyncNotifier in runServe, so the watcher never sees a half-built channel.
-	syncNudge chan struct{}
+	syncNudge     chan struct{}
+	syncStartOnce sync.Once
+	syncStopOnce  sync.Once
+	syncCancel    context.CancelFunc
+	syncWG        sync.WaitGroup
 
 	// syncDigestFn is the anti-entropy seam (same pattern as syncPushFn):
 	// nil in production (m.SyncDigest), non-nil only in tests.
@@ -138,9 +146,11 @@ type Manager struct {
 	// scanned seed + host material + exchanged nonces) between the QR scan and
 	// the guest's tx-33, keyed by the host's session id. Both are node-local and
 	// off-consensus. Initialized in NewManager.
-	joins       *JoinStore
-	guestMu     sync.Mutex
-	guestDrafts map[string]*guestDraft
+	joins           *JoinStore
+	guestMu         sync.Mutex
+	guestDrafts     map[string]*guestDraft
+	guestGeneration uint64
+	guestConfirmMu  sync.Mutex // activation artifacts are keyed by remote chain; serialize confirm/rollback ownership
 
 	// broadcastFn submits an encoded tx to the local chain and returns
 	// (txHash, height). Defaults to broadcastTxCommit; overridable in tests so
@@ -159,6 +169,39 @@ type Manager struct {
 // is false when no p2p route is configured and the caller should use direct
 // TCP. Federation TLS still authenticates the returned connection end-to-end.
 type PeerDialFunc func(ctx context.Context, remoteChainID string) (conn net.Conn, handled bool, err error)
+
+// JoinP2PBundle is sourced from the live node transport, never from a browser.
+// Addrs contain both direct and relay-circuit targets so one enrollment can
+// roam LAN -> internet -> LAN without changing federation trust.
+type JoinP2PBundle struct {
+	PeerID   string   `json:"peer_id"`
+	Protocol string   `json:"protocol"`
+	Addrs    []string `json:"addrs"`
+}
+
+// JoinP2PHooks keep federation independent of libp2p while giving the JOIN
+// ceremony narrowly-scoped bootstrap, admission and crash-safe route seams.
+type JoinP2PHooks struct {
+	LocalBundle func() (JoinP2PBundle, error)
+	DialTarget  func(context.Context, string) (net.Conn, error)
+	Begin       func(sessionID string, expiresAt time.Time)
+	BindPeer    func(sessionID string, targets []string, expiresAt time.Time) error
+	End         func(sessionID string)
+	Persist     func(remoteChainID string, targets []string) error
+	Remove      func(remoteChainID string) error
+}
+
+func (m *Manager) SetJoinP2PHooks(h JoinP2PHooks) {
+	m.joinP2PMu.Lock()
+	m.joinP2P = h
+	m.joinP2PMu.Unlock()
+}
+
+func (m *Manager) joinP2PHooks() JoinP2PHooks {
+	m.joinP2PMu.RLock()
+	defer m.joinP2PMu.RUnlock()
+	return m.joinP2P
+}
 
 // SetPeerDialFunc installs the optional libp2p dial seam.
 func (m *Manager) SetPeerDialFunc(fn PeerDialFunc) {

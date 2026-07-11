@@ -147,6 +147,33 @@ func TestSyncDomainsWildcardAgreementAllowsConcrete(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, putSync(t, h, "chain-w", `{"domains":["*"]}`).Code)
 }
 
+func TestSyncDomainsGuestCannotReplaceHostPolicy(t *testing.T) {
+	s, ms, bs := newSyncServer(t)
+	h := syncRouterAs(s, syncOperatorID)
+	seedAgreement(t, bs, "chain-host", []string{"shared"}, "active")
+	require.NoError(t, ms.PrepareSyncControl(context.Background(), store.SyncControl{
+		RemoteChainID: "chain-host", Role: "guest", ControllerChainID: "chain-host",
+		ControllerAgentID: "host-agent", PolicyEpoch: "epoch", RemoteCAPin: "pin",
+	}))
+	require.NoError(t, ms.ActivateSyncControl(context.Background(), "chain-host", "epoch"))
+
+	rr := putSync(t, h, "chain-host", `{"domains":["shared"]}`)
+	assert.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	domains, err := ms.GetSyncDomains(context.Background(), "chain-host")
+	require.NoError(t, err)
+	assert.Empty(t, domains)
+}
+
+func TestSyncDomainsMutationFailsClosedWhenControllerReadFails(t *testing.T) {
+	s, ms, bs := newSyncServer(t)
+	h := syncRouterAs(s, syncOperatorID)
+	seedAgreement(t, bs, "chain-b", []string{"shared"}, "active")
+	require.NoError(t, ms.Close())
+
+	rr := putSync(t, h, "chain-b", `{"domains":["shared"]}`)
+	assert.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+}
+
 func TestSyncPurgeOnRestRevoke(t *testing.T) {
 	ctx := context.Background()
 	s, ms, bs := newSyncServer(t)

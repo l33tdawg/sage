@@ -21,7 +21,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.5.0';
+const SAGE_VERSION = 'v11.6.0';
 
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
@@ -11062,7 +11062,7 @@ function GuestJoinWizard({ onExit }) {
             <div class="fed-done-check">✓</div>
             <h2>You're connected to ${scan && scan.host_chain}</h2>
             <${TwoOfTwoMeter} n=${2} />
-            <p class="muted">Nothing was deleted. This added a connection you can turn off any time.</p>
+            <p class="muted">Nothing was deleted. Memory copying is off until the host chooses shared topics; you can always disconnect to opt out.</p>
             <button class="btn btn-primary" onClick=${onExit}>Done</button>
         </div>`}
 
@@ -11077,18 +11077,21 @@ function GuestJoinWizard({ onExit }) {
 
 // HostJoinWizard - "Let someone join". Maps to host H1-H7.
 function HostJoinWizard({ onExit }) {
-    const [step, setStep] = useState('create');
+    const [step, setStep] = useState('route');
+    const [routeMode, setRouteMode] = useState('');
     const [endpoint, setEndpoint, lanCandidates] = useLanEndpoint();
     const [session, setSession] = useState(null);   // {session_id, otpauth_uri, host_pin}
     const [view, setView] = useState(null);          // host status view
     const [grant, setGrant] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
+    const [syncSel, setSyncSel] = useState(new Set());
+    const [syncAdd, setSyncAdd] = useState('');
     const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
 
-    const doCreate = async () => {
+    const doCreate = async (mode = routeMode || 'lan') => {
         setBusy(true); setErr('');
-        try { const r = await fedHostCreate(endpoint); setSession(r); setStep('showqr'); }
+        try { const r = await fedHostCreate(endpoint, mode); setSession(r); setRouteMode(mode); setStep('showqr'); }
         catch (e) { fail(e); }
         setBusy(false);
     };
@@ -11146,7 +11149,7 @@ function HostJoinWizard({ onExit }) {
                 if (!live) return;
                 setView(v);
                 if (step === 'waiting' && v.guest_chain) setStep('review');
-                if (step === 'readback' && v.active) setStep('connected');
+                if (step === 'readback' && v.active) setStep('syncsetup');
             } catch (e) {}
         };
         const id = setInterval(tick, 2000); tick();
@@ -11155,10 +11158,20 @@ function HostJoinWizard({ onExit }) {
 
     return html`<div class="fed-wizard">
         <div class="fed-wizard-head">
-            <button class="btn fed-back" onClick=${step === 'create' ? onExit : abort}>← ${step === 'create' ? 'Back' : 'Cancel'}</button>
+            <button class="btn fed-back" onClick=${step === 'route' ? onExit : abort}>← ${step === 'route' ? 'Back' : 'Cancel'}</button>
             <span class="fed-wizard-title">Let someone join</span>
         </div>
         ${err && html`<div class="fed-err">${err}</div>`}
+
+        ${step === 'route' && html`<div class="fed-step">
+            <h2>How are the two computers connected?</h2>
+            <${FedGreenRail} />
+            <div class="fed-gate-choices">
+                <button class="btn btn-primary" onClick=${() => { setRouteMode('lan'); setStep('create'); }}>Same Wi‑Fi or local network</button>
+                <button class="btn" disabled=${busy} onClick=${() => { setRouteMode('internet'); doCreate('internet'); }}>${busy ? 'Checking relay…' : 'Across the internet'}</button>
+            </div>
+            <p class="muted">Either way, SAGE saves secure roaming routes when available, so a laptop can move from home Wi‑Fi to another network and reconnect without pairing again.</p>
+        </div>`}
 
         ${step === 'create' && html`<div class="fed-step">
             <h2>Let someone join your network</h2>
@@ -11169,7 +11182,7 @@ function HostJoinWizard({ onExit }) {
                 ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This address only works on this computer, so anyone who scans your code would reach their own machine instead. Pick this computer's address on your network below (e.g. <code>https://192.168.1.10:8444</code>).</div>`}
             </div>
             <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
-            <button class="btn btn-primary" disabled=${busy} onClick=${doCreate}>${busy ? 'Working…' : 'Show my connection code'}</button>
+            <button class="btn btn-primary" disabled=${busy} onClick=${() => doCreate('lan')}>${busy ? 'Working…' : 'Show my connection code'}</button>
         </div>`}
 
         ${step === 'showqr' && session && html`<div class="fed-step">
@@ -11221,12 +11234,34 @@ function HostJoinWizard({ onExit }) {
             <${TwoOfTwoMeter} n=${1} />
         </div>`}
 
-        ${step === 'connected' && html`<div class="fed-step fed-done">
+        ${step === 'syncsetup' && html`<div class="fed-step fed-done">
             <div class="fed-done-check">✓</div>
             <h2>Connected to ${view && view.guest_chain}</h2>
             <${TwoOfTwoMeter} n=${2} />
-            <p class="muted">Nothing was deleted. You can turn this connection off any time.</p>
-            <button class="btn btn-primary" onClick=${onExit}>Done</button>
+            <h3>Synchronize memories too?</h3>
+            <p class="muted">Off by default. As the host, you choose which shared topics are copied onto both nodes. The guest cannot widen this list.</p>
+            ${(() => {
+                const hostAllowed = grant.allowed_domains || [];
+                const guestAllowed = (view && view.guest_scope && view.guest_scope.allowed_domains) || [];
+                const known = Array.from(new Set([...hostAllowed, ...guestAllowed]))
+                    .filter(d => d && d !== '*' && jsDomainAllowed(hostAllowed, d) && jsDomainAllowed(guestAllowed, d)).sort();
+                const add = () => {
+                    const d = syncAdd.trim(); if (!d || d === '*') return;
+                    if (!jsDomainAllowed(hostAllowed, d) || !jsDomainAllowed(guestAllowed, d)) { setErr(`"${d}" is not shared in both directions.`); return; }
+                    const n = new Set(syncSel); n.add(d); setSyncSel(n); setSyncAdd(''); setErr('');
+                };
+                const save = async () => {
+                    setBusy(true); setErr('');
+                    try { const r = await fedSyncSet(view.guest_chain, [...syncSel]); showToast(r.state === 'delivered' ? 'Memory sync enabled on both nodes' : 'Sync policy saved — waiting for the other node', r.state === 'delivered' ? 'success' : 'info'); onExit(); }
+                    catch (e) { fail(e); }
+                    setBusy(false);
+                };
+                return html`<div class="fed-sync-domains">
+                    ${known.map(d => html`<label class="fed-sync-row" key=${d}><input type="checkbox" checked=${syncSel.has(d)} onChange=${() => { const n = new Set(syncSel); n.has(d) ? n.delete(d) : n.add(d); setSyncSel(n); }} /><span class="fed-sync-dom">${d}</span></label>`)}
+                    <div class="fed-sync-add"><input class="fed-share-input" placeholder="Add a shared topic" value=${syncAdd} onInput=${e => setSyncAdd(e.target.value)} /><button class="btn" onClick=${add}>Add</button></div>
+                    <div class="fed-step-actions"><button class="btn" onClick=${onExit}>Not now</button><button class="btn" onClick=${() => setSyncSel(new Set(known))}>Select all eligible</button><button class="btn btn-primary" disabled=${busy || syncSel.size === 0} onClick=${save}>${busy ? 'Saving…' : 'Sync selected topics'}</button></div>
+                </div>`;
+            })()}
         </div>`}
 
         ${step === 'aborted' && html`<div class="fed-step">
@@ -11258,10 +11293,9 @@ function prettySyncReason(code) {
     return map[code] || code || 'unknown';
 }
 
-// FedSyncPanel - per-connection domain-sync control. Domain sync COPIES a shared
-// topic's memories to the peer (vs. recall, which only borrows answers live). It
-// is off until BOTH sides switch a topic on. This panel is where an operator
-// turns it on and sees what's flowing.
+// FedSyncPanel - per-connection domain-sync control. New v11.6 connections are
+// host-controlled and default off; guests get a read-only view. Legacy links
+// retain bilateral consent until they re-pair.
 function FedSyncPanel({ conn }) {
     const chain = conn.remote_chain_id;
     const allowed = (conn.allowed_domains || []).filter(d => d && d !== '*');
@@ -11272,12 +11306,13 @@ function FedSyncPanel({ conn }) {
     const [addVal, setAddVal] = useState('');
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
+    const [syncRole, setSyncRole] = useState('legacy');
 
     const load = async () => {
         try {
             const g = await fedSyncGet(chain);
             const ds = g.sync_domains || [];
-            setSaved(ds); setSel(new Set(ds)); setErr('');
+            setSaved(ds); setSel(new Set(ds)); setSyncRole(g.sync_role || 'legacy'); setErr('');
         } catch (e) { setErr(String(e.message || e)); setSaved([]); setSel(new Set()); }
         try { setStatus(await fedSyncStatus(chain)); } catch (e) {}
     };
@@ -11321,37 +11356,39 @@ function FedSyncPanel({ conn }) {
     const peerConsent = status && status.peer_consented_domains;
     const peerUnsupported = status && status.peer_unsupported;
     // Both-sides-consent gap: topics we share that the peer hasn't turned on.
-    const oneSided = peerConsent ? [...sel].filter(d => !jsDomainAllowed(peerConsent, d)) : [];
+    const oneSided = syncRole === 'legacy' && peerConsent ? [...sel].filter(d => !jsDomainAllowed(peerConsent, d)) : [];
 
     return html`<div class="fed-sync-detail">
         <div class="fed-sync-explain">
             <strong>Copying memories (sync) is off until you turn it on.</strong>
             Connecting lets you borrow answers live. To actually <em>copy</em> a topic's memories to ${chain},
-            switch it on below — and they must switch the same topic on their side. Nothing crosses until both do.
+            ${syncRole === 'guest' ? ' the host chooses the shared topics for this connection.' : syncRole === 'host' ? ' choose it below; SAGE securely applies the same policy to the guest.' : ' switch it on below — legacy connections still require the other side to enable the same topic.'}
         </div>
+
+        ${syncRole === 'guest' && html`<div class="fed-sync-note">Managed by the host. You can view the synchronized topics here, but only the host can add or remove them. Disconnecting always stops sharing.</div>`}
 
         ${rows.length === 0 && !wildcard && html`<div class="muted">This connection shares no topics, so there's nothing to sync.</div>`}
         ${(rows.length > 0 || wildcard) && html`<div class="fed-sync-domains">
             ${rows.map(d => html`<label class="fed-sync-row" key=${d}>
-                <input type="checkbox" checked=${sel.has(d)} onChange=${() => toggle(d)} />
+                <input type="checkbox" disabled=${syncRole === 'guest'} checked=${sel.has(d)} onChange=${() => toggle(d)} />
                 <span class="fed-sync-dom">${d}</span>
                 ${!allowed.includes(d) && html`<span class="fed-sync-tag muted">added</span>`}
                 ${oneSided.includes(d) && sel.has(d) && html`<span class="fed-sync-tag warn" title="They haven't turned this on yet">one-sided</span>`}
             </label>`)}
         </div>`}
 
-        <div class="fed-sync-add">
+        ${syncRole !== 'guest' && html`<div class="fed-sync-add">
             <input class="fed-share-input" placeholder=${wildcard ? 'Add a topic to sync (e.g. hr.public)' : 'Add a specific sub-topic'}
                 value=${addVal} onInput=${e => setAddVal(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') addDomain(); }} />
             <button class="btn" onClick=${addDomain}>Add</button>
-        </div>
+        </div>`}
 
         ${err && html`<div class="fed-warn">${err}</div>`}
         ${oneSided.length > 0 && html`<div class="fed-sync-note">You're sharing <strong>${oneSided.join(', ')}</strong>, but ${chain} hasn't turned ${oneSided.length > 1 ? 'those' : 'that'} on their side yet — nothing will arrive there until they do.</div>`}
         ${peerUnsupported && html`<div class="fed-sync-note">${chain} is on an older SAGE that doesn't support sync yet — anything you enable is queued and will deliver once they upgrade.</div>`}
 
         <div class="fed-sync-actions">
-            <button class="btn btn-primary" disabled=${!dirty || busy} onClick=${save}>${busy ? 'Saving…' : 'Save sync topics'}</button>
+            ${syncRole !== 'guest' && html`<button class="btn btn-primary" disabled=${!dirty || busy} onClick=${save}>${busy ? 'Saving…' : 'Save sync topics'}</button>`}
             ${status && html`<div class="fed-sync-status">
                 ${counts.delivered ? html`<span class="fed-sync-chip ok">${counts.delivered} copied</span>` : ''}
                 ${counts.pending ? html`<span class="fed-sync-chip pending">${counts.pending} pending</span>` : ''}
@@ -11574,7 +11611,7 @@ function FederationPage() {
     return html`<div class="page fed-page">
         <div class="fed-landing">
             <h1>Federation</h1>
-            <p class="fed-landing-sub muted">Link your <strong>whole SAGE</strong> to <strong>someone else's SAGE</strong> so the two can share the topics you choose. It works when both computers can reach each other — the same Wi‑Fi or office network today; connecting across the internet is coming soon. This is different from adding an AI tool to your own SAGE (do that under <strong>Agents</strong>) — here you're linking two separate brains.</p>
+            <p class="fed-landing-sub muted">Link your <strong>whole SAGE</strong> to <strong>someone else's SAGE</strong> so the two can share the topics you choose — on the same LAN or across the internet. A paired laptop can roam between networks and reconnect without pairing again. This is different from adding an AI tool to your own SAGE (do that under <strong>Agents</strong>) — here you're linking two separate brains.</p>
             <${FedGreenRail} />
             <${FederationMasterSwitch} onChange=${setFedOn} />
             ${fedOn && html`<${NetworkNameEditor} />`}
@@ -11596,7 +11633,7 @@ function FederationPage() {
 
             ${(fedOn || (conns && conns.length > 0)) && html`<div class="fed-conns">
                 <h3>Your connections <${HelpTip} text="Each row is a treaty with another SAGE. The dot is green when the connection is active and unexpired. The domains listed are the only knowledge shared across the link - everything else stays private." /></h3>
-                ${conns && conns.length > 0 && html`<div class="fed-conns-explain muted">Connecting lets each side <strong>borrow answers</strong> live within the shared topics. To also <strong>copy</strong> a topic's memories across, open a connection and turn on sync — it stays off until both sides do.</div>`}
+                ${conns && conns.length > 0 && html`<div class="fed-conns-explain muted">Connecting lets each side <strong>borrow answers</strong> live within the shared topics. To also <strong>copy</strong> memories, open a connection and choose sync topics. New connections are host-managed and default to off.</div>`}
                 ${conns === null && html`<div class="muted">Loading…</div>`}
                 ${conns && conns.length === 0 && html`
                     <${EmptyState} icon="federation"

@@ -11,8 +11,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
@@ -51,6 +54,11 @@ func newCeremonyNode(t *testing.T, chainID string) *ceremonyNode {
 		t.Fatalf("open badger: %v", err)
 	}
 	t.Cleanup(func() { _ = badger.CloseBadger() })
+	sqlite, err := store.NewSQLiteStore(context.Background(), filepath.Join(dir, "sage.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlite.Close() })
 
 	node := &ceremonyNode{certsDir: dir}
 	node.mgr = NewManager(Config{
@@ -58,6 +66,7 @@ func newCeremonyNode(t *testing.T, chainID string) *ceremonyNode {
 		CertsDir:     dir,
 		AgentKey:     priv,
 		Badger:       badger,
+		MemStore:     sqlite,
 		Logger:       zerolog.Nop(),
 	})
 	node.mgr.broadcastFn = func(_ []byte) (string, int64, error) {
@@ -146,11 +155,14 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 	if view.CodeH != "" {
 		t.Fatalf("CODE_H leaked before approval")
 	}
+	if view.GuestScope == nil || len(view.GuestScope.AllowedDomains) != 1 || view.GuestScope.AllowedDomains[0] != "*" {
+		t.Fatalf("host status omitted the guest's selectable scope: %+v", view.GuestScope)
+	}
 
 	// Approval #1: host types the code it heard, sets its grant, freezes E.
 	hostGrant := ScopeWire{MaxClearance: 2, AllowedDomains: []string{"*"}, Mode: "exchange", Direction: "both"}
-	if err := host.mgr.HostApprove(create.SessionID, greq.CodeG, hostGrant); err != nil {
-		t.Fatalf("HostApprove: %v", err)
+	if approveErr := host.mgr.HostApprove(create.SessionID, greq.CodeG, hostGrant); approveErr != nil {
+		t.Fatalf("HostApprove: %v", approveErr)
 	}
 
 	// After approval the host reveals CODE_H; the guest already computed it.
@@ -176,8 +188,8 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 
 	// Approval #2: guest confirms - broadcasts its tx-33, then the host confirms
 	// against the frozen E and broadcasts its tx-33.
-	if _, err := guest.mgr.GuestConfirm(ctx, create.SessionID, guestEndpoint, hostGrant); err != nil {
-		t.Fatalf("GuestConfirm: %v", err)
+	if _, confirmErr := guest.mgr.GuestConfirm(ctx, create.SessionID, guestEndpoint, hostGrant); confirmErr != nil {
+		t.Fatalf("GuestConfirm: %v", confirmErr)
 	}
 
 	// Host session is ACTIVE.
@@ -205,6 +217,65 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 	if !host.mgr.seedEstablished("guest-bbbbbb") {
 		t.Fatal("host seed_established not set")
 	}
+	hostControl, err := host.mgr.syncStore().GetSyncControl(ctx, "guest-bbbbbb")
+	if err != nil || hostControl == nil || hostControl.Role != "host" || hostControl.BindingState != "active" || hostControl.Revision != 0 {
+		t.Fatalf("host sync control not default-off/active: %+v err=%v", hostControl, err)
+	}
+	guestControl, err := guest.mgr.syncStore().GetSyncControl(ctx, "host-aaaaaa")
+	if err != nil || guestControl == nil || guestControl.Role != "guest" || guestControl.BindingState != "active" || guestControl.PolicyEpoch != hostControl.PolicyEpoch {
+		t.Fatalf("guest sync control mismatch: %+v err=%v", guestControl, err)
+	}
+}
+
+func TestLANHostCreateRemainsLegacyWithP2PHooks(t *testing.T) {
+	host := newCeremonyNode(t, "host-legacy1")
+	host.mgr.SetJoinP2PHooks(JoinP2PHooks{LocalBundle: func() (JoinP2PBundle, error) {
+		return JoinP2PBundle{PeerID: "new-only", Protocol: "/sage/fed/1.0.0", Addrs: []string{"new-only"}}, nil
+	}})
+	create, err := host.mgr.HostCreate("https://127.0.0.1:8444")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if create.Transport != "" || strings.Contains(create.OTPAuthURI, "x_sage_transport") {
+		t.Fatalf("normal LAN QR is not backward-compatible: transport=%q uri=%s", create.Transport, create.OTPAuthURI)
+	}
+}
+
+func TestGuestDraftClaimsRejectConcurrentRequestAndConfirm(t *testing.T) {
+	m := &Manager{guestDrafts: map[string]*guestDraft{
+		"session": {sessionID: "session", seed: []byte("secret"), expiresAt: time.Now().Add(time.Minute), state: guestDraftScanned},
+	}}
+	request, _, ok := m.claimGuestDraft("session", []guestDraftState{guestDraftScanned}, guestDraftRequesting)
+	require.True(t, ok)
+	_, state, ok := m.claimGuestDraft("session", []guestDraftState{guestDraftScanned}, guestDraftRequesting)
+	assert.False(t, ok)
+	assert.Equal(t, guestDraftRequesting, state)
+	require.True(t, m.finishGuestRequest(request))
+
+	_, _, ok = m.claimGuestDraft("session", []guestDraftState{guestDraftRequested}, guestDraftConfirming)
+	require.True(t, ok)
+	_, state, ok = m.claimGuestDraft("session", []guestDraftState{guestDraftRequested}, guestDraftConfirming)
+	assert.False(t, ok)
+	assert.Equal(t, guestDraftConfirming, state)
+	require.True(t, m.transitionGuestDraft("session", 0, guestDraftConfirming, guestDraftLocalActive))
+	_, previous, ok := m.claimGuestDraft("session", []guestDraftState{guestDraftLocalActive}, guestDraftConfirming)
+	require.True(t, ok, "one-sided activation must allow host-confirm retry without rebroadcast")
+	assert.Equal(t, guestDraftLocalActive, previous)
+
+	// ABA ownership: an old claim can never mutate or delete a newer draft
+	// that happens to reuse the same session id and state.
+	m2 := &Manager{guestDrafts: map[string]*guestDraft{
+		"session": {sessionID: "session", generation: 1, seed: []byte("old"), expiresAt: time.Now().Add(time.Minute), state: guestDraftConfirming},
+	}}
+	m2.guestMu.Lock()
+	m2.guestDrafts["session"] = &guestDraft{sessionID: "session", generation: 2, seed: []byte("new"), expiresAt: time.Now().Add(time.Minute), state: guestDraftScanned}
+	m2.guestMu.Unlock()
+	assert.False(t, m2.transitionGuestDraft("session", 1, guestDraftConfirming, guestDraftLocalActive))
+	m2.dropGuestDraft("session", 1)
+	newer, ok := m2.getGuestDraft("session")
+	require.True(t, ok)
+	assert.Equal(t, uint64(2), newer.generation)
+	assert.Equal(t, guestDraftScanned, newer.state)
 }
 
 // TestJoinApproveWrongCodeRejected: a host that types a code that does not match

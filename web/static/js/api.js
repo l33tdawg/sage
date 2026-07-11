@@ -830,7 +830,7 @@ export function fedReadiness() { return fedFetch('/v1/dashboard/federation/readi
 // Federation on/off (Settings).
 export function fedSettingGet() { return fedFetch('/v1/dashboard/settings/federation'); }
 export function fedSettingSet(enabled) { return fedPost('/v1/dashboard/settings/federation', { enabled }); }
-// v11.5 domain-sync consent + status (per connection).
+// v11.6 host-controlled domain sync + status (per connection).
 export function fedSyncGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`); }
 export function fedSyncSet(chainId, domains) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`, { domains }); }
 export function fedSyncStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync/status`); }
@@ -841,7 +841,7 @@ export function fedSetNetworkName(name) { return fedPut('/v1/dashboard/federatio
 export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/status`); }
 
 // Host wizard.
-export function fedHostCreate(endpoint) { return fedPost('/v1/dashboard/federation/join/host/create', { endpoint }); }
+export function fedHostCreate(endpoint, transport = 'lan') { return fedPost('/v1/dashboard/federation/join/host/create', { endpoint, transport }); }
 export function fedHostScanReturn(sessionId, returnUri) { return fedPost('/v1/dashboard/federation/join/host/scan-return', { session_id: sessionId, return_uri: returnUri }); }
 export function fedHostStatus(sessionId) { return fedFetch(`/v1/dashboard/federation/join/host/${encodeURIComponent(sessionId)}`); }
 export function fedHostApprove(sessionId, grant) { return fedPost(`/v1/dashboard/federation/join/host/${encodeURIComponent(sessionId)}/approve`, grant); }

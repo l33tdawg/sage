@@ -107,6 +107,36 @@ func TestAttestationNonceBound(t *testing.T) {
 	}
 }
 
+func TestAttestationBindsP2PRoutesWithoutChangingLANVector(t *testing.T) {
+	base := EnrollInputs{
+		GuestChain: "g", HostChain: "h", GuestPin: randN(32), HostPin: randN(32),
+		GuestEndpoint: "https://g:8444", HostEndpoint: "https://h:8444",
+		Seed: randN(20), GuestNonce: randN(16), HostNonce: randN(16),
+	}
+	lan := base.Attestation()
+	if base.Attestation() != lan {
+		t.Fatal("LAN attestation is not stable")
+	}
+	base.GuestPeerID = "peer-g"
+	base.HostPeerID = "peer-h"
+	base.GuestP2PAddrs = []string{"/ip4/1.2.3.4/tcp/1/p2p/peer-g"}
+	base.HostP2PAddrs = []string{"/ip4/5.6.7.8/tcp/2/p2p/peer-h"}
+	p2p := base.Attestation()
+	if p2p == lan {
+		t.Fatal("p2p enrollment reused the LAN transcript")
+	}
+	mutated := base
+	mutated.HostP2PAddrs = []string{"/ip4/5.6.7.9/tcp/2/p2p/peer-h"}
+	if mutated.Attestation() == p2p {
+		t.Fatal("route mutation did not change enrollment attestation")
+	}
+	mutated = base
+	mutated.GuestPeerID = "peer-attacker"
+	if mutated.Attestation() == p2p {
+		t.Fatal("peer-id mutation did not change enrollment attestation")
+	}
+}
+
 // TestEnrollSigTagSeparation: an identity sig does not verify as an ack sig.
 func TestEnrollSigTagSeparation(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)

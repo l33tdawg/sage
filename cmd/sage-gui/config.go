@@ -6,9 +6,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
+	sagep2p "github.com/l33tdawg/sage/internal/p2p"
 	"gopkg.in/yaml.v3"
 )
+
+var configPersistMu sync.Mutex
 
 // expandTilde replaces a leading "~" or "~/" with the actual home directory.
 // This is needed because shells expand ~ but Go's os.MkdirAll does not.
@@ -177,7 +181,21 @@ func defaultVoterConfig() VoterConfig {
 // and an explicit enabled:false are equivalent (both = off), so this can no
 // longer cause a surprise disable.
 func defaultFederationConfig() FederationConfig {
-	return FederationConfig{Enabled: false}
+	return FederationConfig{
+		Enabled:         false,
+		P2PEnabled:      true,
+		P2PRelayAddrs:   append([]string(nil), defaultNatterRelayAddrs...),
+		P2PForcePrivate: true,
+	}
+}
+
+// Verified against the live Natter startup banner on 2026-07-11. Use the
+// origin IP multiaddrs: natter.sage.delivery is Cloudflare-fronted and those
+// anycast DNS addresses do not forward raw libp2p QUIC/TCP. Operators can
+// replace or extend this list for fully sovereign/self-hosted connectivity.
+var defaultNatterRelayAddrs = []string{
+	"/ip4/65.108.81.134/udp/4001/quic-v1/p2p/12D3KooWM3wX9unPJDdp2KPU9CCpKxJ7GxxdyAu3M4XjZRzRvavV",
+	"/ip4/65.108.81.134/tcp/4001/p2p/12D3KooWM3wX9unPJDdp2KPU9CCpKxJ7GxxdyAu3M4XjZRzRvavV",
 }
 
 // DefaultConfig returns the default configuration.
@@ -351,6 +369,8 @@ func expandHome(path string) string {
 // reconcile-on-boot fires for every existing node's first v11 boot, so it must
 // not rewrite paths. Re-reads the raw file and rewrites only the delta.
 func persistChainID(chainID string) error {
+	configPersistMu.Lock()
+	defer configPersistMu.Unlock()
 	home := SageHome()
 	if err := os.MkdirAll(home, 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
@@ -364,7 +384,7 @@ func persistChainID(chainID string) error {
 			// is fine — there is no operator-authored tilde/relative form to lose.
 			cfg := DefaultConfig(home)
 			cfg.ChainID = chainID
-			return SaveConfig(cfg)
+			return saveConfigUnlocked(cfg)
 		}
 		return fmt.Errorf("read config: %w", err)
 	}
@@ -387,7 +407,7 @@ func persistChainID(chainID string) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(configPath, out, 0600)
+	return atomicWriteConfig(configPath, out)
 }
 
 // persistFederationEnabled flips ONLY federation.enabled in config.yaml via the
@@ -396,6 +416,8 @@ func persistChainID(chainID string) error {
 // bake runtime-expanded absolute paths into the file — the exact drift the raw
 // round-trip exists to avoid).
 func persistFederationEnabled(enabled bool) error {
+	configPersistMu.Lock()
+	defer configPersistMu.Unlock()
 	home := SageHome()
 	if err := os.MkdirAll(home, 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
@@ -407,7 +429,7 @@ func persistFederationEnabled(enabled bool) error {
 		if os.IsNotExist(err) {
 			cfg := DefaultConfig(home)
 			cfg.Federation.Enabled = enabled
-			return SaveConfig(cfg)
+			return saveConfigUnlocked(cfg)
 		}
 		return fmt.Errorf("read config: %w", err)
 	}
@@ -423,7 +445,7 @@ func persistFederationEnabled(enabled bool) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(configPath, out, 0600)
+	return atomicWriteConfig(configPath, out)
 }
 
 // maxNetworkNameLen bounds the friendly network label. Long enough for
@@ -473,6 +495,8 @@ func sanitizeNetworkName(name string) string {
 // bake runtime-expanded absolute paths into the file). The name is sanitized by
 // the caller.
 func persistNetworkName(name string) error {
+	configPersistMu.Lock()
+	defer configPersistMu.Unlock()
 	home := SageHome()
 	if err := os.MkdirAll(home, 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
@@ -484,7 +508,7 @@ func persistNetworkName(name string) error {
 		if os.IsNotExist(err) {
 			cfg := DefaultConfig(home)
 			cfg.NetworkName = name
-			return SaveConfig(cfg)
+			return saveConfigUnlocked(cfg)
 		}
 		return fmt.Errorf("read config: %w", err)
 	}
@@ -500,11 +524,103 @@ func persistNetworkName(name string) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	return os.WriteFile(configPath, out, 0600)
+	return atomicWriteConfig(configPath, out)
+}
+
+// persistFederationPeer atomically promotes a QR-authenticated connectivity
+// route. All targets must name one peer ID. Nil removes the route on revoke or
+// a failed staged activation. Raw config round-tripping preserves user paths.
+func persistFederationPeer(chainID string, targets []string) error {
+	if chainID == "" {
+		return fmt.Errorf("remote chain id is required")
+	}
+	var peerID string
+	for _, target := range targets {
+		id, err := sagep2p.PeerIDFromTarget(target)
+		if err != nil {
+			return err
+		}
+		if peerID != "" && peerID != id.String() {
+			return fmt.Errorf("peer routes name different peer ids")
+		}
+		peerID = id.String()
+	}
+	configPersistMu.Lock()
+	defer configPersistMu.Unlock()
+	home := SageHome()
+	if err := os.MkdirAll(home, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	path := filepath.Join(home, "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
+	if len(data) > 0 {
+		if unmarshalErr := yaml.Unmarshal(data, &raw); unmarshalErr != nil {
+			return fmt.Errorf("parse config: %w", unmarshalErr)
+		}
+	}
+	if raw.Federation.P2PPeers == nil {
+		raw.Federation.P2PPeers = make(map[string][]string)
+	}
+	if len(targets) == 0 {
+		delete(raw.Federation.P2PPeers, chainID)
+	} else {
+		raw.Federation.P2PPeers[chainID] = append([]string(nil), targets...)
+	}
+	out, err := yaml.Marshal(&raw)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return atomicWriteConfig(path, out)
+}
+
+func atomicWriteConfig(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".config-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	ok := false
+	defer func() {
+		_ = f.Close()
+		if !ok {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err := f.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	ok = true
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 // SaveConfig writes the configuration to ~/.sage/config.yaml.
 func SaveConfig(cfg *Config) error {
+	configPersistMu.Lock()
+	defer configPersistMu.Unlock()
+	return saveConfigUnlocked(cfg)
+}
+
+func saveConfigUnlocked(cfg *Config) error {
 	home := SageHome()
 	if err := os.MkdirAll(home, 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
@@ -515,5 +631,5 @@ func SaveConfig(cfg *Config) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	return os.WriteFile(filepath.Join(home, "config.yaml"), data, 0600)
+	return atomicWriteConfig(filepath.Join(home, "config.yaml"), data)
 }

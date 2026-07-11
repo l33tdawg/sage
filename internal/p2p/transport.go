@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -116,6 +117,92 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 func (t *Transport) Host() host.Host { return t.host }
 
 func (t *Transport) Listener() net.Listener { return t.listener }
+
+// PeerIDFromTarget validates a full peer multiaddr and returns its terminal
+// connectivity identity. Federation trust remains the inner mTLS CA pin.
+func PeerIDFromTarget(target string) (peer.ID, error) {
+	addr, err := ma.NewMultiaddr(target)
+	if err != nil {
+		return "", fmt.Errorf("parse p2p target: %w", err)
+	}
+	info, err := peer.AddrInfoFromP2pAddr(addr)
+	if err != nil {
+		return "", fmt.Errorf("p2p target must end in /p2p/<peer-id>: %w", err)
+	}
+	return info.ID, nil
+}
+
+// BeginJoin temporarily admits bootstrap streams while a real, bounded host
+// JOIN session exists. Only JOIN routes are usable before peerAuth establishes
+// an agreement; stream and TLS caps still apply.
+func (t *Transport) BeginJoin(session string, expiry time.Time) {
+	if t.listener != nil {
+		t.listener.beginJoin(session, expiry)
+	}
+}
+
+// BindJoinPeer narrows bootstrap admission to the peer authenticated by the
+// reciprocal QR. All targets must name that same peer.
+func (t *Transport) BindJoinPeer(session string, targets []string, expiry time.Time) error {
+	if t.listener == nil {
+		return errors.New("p2p listener is not running")
+	}
+	var id peer.ID
+	for _, target := range targets {
+		got, err := PeerIDFromTarget(target)
+		if err != nil {
+			return err
+		}
+		if id != "" && id != got {
+			return errors.New("p2p join targets name different peers")
+		}
+		id = got
+	}
+	if id == "" {
+		return errors.New("p2p join has no peer target")
+	}
+	t.listener.bindJoinPeer(session, id, expiry)
+	return nil
+}
+
+func (t *Transport) EndJoin(session string) {
+	if t.listener != nil {
+		t.listener.endJoin(session)
+	}
+}
+
+func (t *Transport) AddAllowedPeer(targets []string) error {
+	if t.listener == nil {
+		return errors.New("p2p listener is not running")
+	}
+	var id peer.ID
+	for _, target := range targets {
+		got, err := PeerIDFromTarget(target)
+		if err != nil {
+			return err
+		}
+		if id != "" && id != got {
+			return errors.New("p2p targets name different peers")
+		}
+		id = got
+	}
+	if id == "" {
+		return errors.New("p2p route has no peer target")
+	}
+	t.listener.addAllowedPeer(id)
+	return nil
+}
+
+func (t *Transport) RemoveAllowedPeer(targets []string) {
+	if t.listener == nil {
+		return
+	}
+	for _, target := range targets {
+		if id, err := PeerIDFromTarget(target); err == nil {
+			t.listener.removeAllowedPeer(id)
+		}
+	}
+}
 
 // DialContext opens a federation stream to a full peer multiaddr. Direct
 // addresses, relay circuit addresses, IPv4, IPv6, QUIC, TCP, and WSS remain

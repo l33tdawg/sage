@@ -8,6 +8,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/memory"
 )
 
 func newSyncTestStore(t *testing.T) *SQLiteStore {
@@ -79,6 +81,162 @@ func TestSyncDomainsRoundTrip(t *testing.T) {
 	got, _ = s.GetSyncDomains(ctx, "chain-b")
 	if len(got) != 0 {
 		t.Fatalf("expected purge, got %v", got)
+	}
+}
+
+func TestSyncControlPolicyRevisionAndAtomicDomains(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	binding := SyncControl{RemoteChainID: "chain-b", Role: "guest", ControllerChainID: "chain-b",
+		ControllerAgentID: "agent-host", PolicyEpoch: "epoch-1", RemoteCAPin: "pin-1"}
+	if err := s.PrepareSyncControl(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSyncDomains(ctx, "chain-b", []string{"legacy"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnqueueSyncOutbox(ctx, "chain-b", "legacy-memory"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ActivateSyncControl(ctx, "chain-b", "epoch-1"); err != nil {
+		t.Fatal(err)
+	}
+	if domains, _ := s.GetSyncDomains(ctx, "chain-b"); len(domains) != 0 {
+		t.Fatalf("controller activation did not reset legacy consent: %v", domains)
+	}
+	if counts, _ := s.CountSyncOutboxByState(ctx, "chain-b"); len(counts) != 0 {
+		t.Fatalf("controller activation did not clear legacy outbox: %v", counts)
+	}
+	status, err := s.ApplySyncPolicy(ctx, "chain-b", "epoch-1", 1, "hash-1", []string{"hr", "eng"})
+	if err != nil || status != "applied" {
+		t.Fatalf("apply: status=%s err=%v", status, err)
+	}
+	domains, _ := s.GetSyncDomains(ctx, "chain-b")
+	if len(domains) != 2 || domains[0] != "eng" || domains[1] != "hr" {
+		t.Fatalf("policy domains = %v", domains)
+	}
+	status, err = s.ApplySyncPolicy(ctx, "chain-b", "epoch-1", 1, "hash-1", []string{"eng", "hr"})
+	if err != nil || status != "duplicate" {
+		t.Fatalf("idempotent replay: status=%s err=%v", status, err)
+	}
+	if _, err := s.ApplySyncPolicy(ctx, "chain-b", "epoch-1", 1, "evil", []string{"ops"}); err == nil {
+		t.Fatal("accepted equal-revision equivocation")
+	}
+	domains, _ = s.GetSyncDomains(ctx, "chain-b")
+	if len(domains) != 2 {
+		t.Fatalf("failed policy changed domains: %v", domains)
+	}
+	if _, err := s.ApplySyncPolicy(ctx, "chain-b", "epoch-1", 3, "hash-3", nil); err != nil {
+		t.Fatalf("full snapshot revision jump/disable: %v", err)
+	}
+	domains, _ = s.GetSyncDomains(ctx, "chain-b")
+	if len(domains) != 0 {
+		t.Fatalf("disable left domains: %v", domains)
+	}
+}
+
+func TestPendingSyncOriginQuarantineSurvivesPeerPurgeWithoutMirror(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	content := "late ambiguous commit"
+	hash := sha256.Sum256([]byte(content))
+	pending := SyncOriginPending{OriginChainID: "chain-b", OriginMemoryID: "origin-1",
+		OriginCreatedAt: "2026-07-11T00:00:00Z", LocalMemoryID: "local-1", DomainTag: "shared",
+		ContentHash: hex.EncodeToString(hash[:]), Classification: 1, MemoryType: "fact", SubmittingAgent: "operator"}
+	if err := s.StageSyncOrigin(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetPendingSyncOrigin(ctx, "chain-b", "origin-1")
+	if err != nil || got.LocalMemoryID != "local-1" {
+		t.Fatalf("pending origin = %+v err=%v", got, err)
+	}
+	isCopy, err := s.IsSyncedCopy(ctx, "local-1")
+	if err != nil || !isCopy {
+		t.Fatalf("pending copy not quarantined: copy=%v err=%v", isCopy, err)
+	}
+	if purgeErr := s.PurgeSyncPeerState(ctx, "chain-b"); purgeErr != nil {
+		t.Fatal(purgeErr)
+	}
+	if _, pendingErr := s.GetPendingSyncOrigin(ctx, "chain-b", "origin-1"); pendingErr != nil {
+		t.Fatalf("ambiguous no-mirror quarantine was removed by peer purge: %v", pendingErr)
+	}
+	// The previously ambiguous tx may commit after revoke returned. Its exact
+	// mirror must still be recognized as foreign and excluded from every other
+	// peer's candidate scan.
+	rec := &memory.MemoryRecord{MemoryID: pending.LocalMemoryID, SubmittingAgent: pending.SubmittingAgent,
+		Content: content, ContentHash: hash[:], MemoryType: memory.TypeFact, DomainTag: pending.DomainTag,
+		ConfidenceScore: 0.8, Status: memory.StatusCommitted, CreatedAt: time.Now()}
+	if insertErr := s.InsertMemory(ctx, rec); insertErr != nil {
+		t.Fatal(insertErr)
+	}
+	if classificationErr := s.UpdateMemoryClassification(ctx, rec.MemoryID, ClearanceLevel(1)); classificationErr != nil {
+		t.Fatal(classificationErr)
+	}
+	isCopy, err = s.IsSyncedCopy(ctx, rec.MemoryID)
+	if err != nil || !isCopy {
+		t.Fatalf("late mirror lost quarantine: copy=%v err=%v", isCopy, err)
+	}
+	if domainsErr := s.SetSyncDomains(ctx, "chain-c", []string{"shared"}); domainsErr != nil {
+		t.Fatal(domainsErr)
+	}
+	candidates, err := s.ListSyncCandidates(ctx, "chain-c", []string{"shared"}, 10)
+	if err != nil || len(candidates) != 0 {
+		t.Fatalf("late foreign mirror became a forwarding candidate: %+v err=%v", candidates, err)
+	}
+}
+
+func TestPeerPurgePromotesCommittedPendingOrigin(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	content := "committed foreign copy"
+	hash := sha256.Sum256([]byte(content))
+	rec := &memory.MemoryRecord{MemoryID: "local-copy", SubmittingAgent: "operator", Content: content,
+		ContentHash: hash[:], MemoryType: memory.TypeFact, DomainTag: "shared",
+		ConfidenceScore: 0.8, Status: memory.StatusCommitted, CreatedAt: time.Now()}
+	if err := s.InsertMemory(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMemoryClassification(ctx, rec.MemoryID, ClearanceLevel(1)); err != nil {
+		t.Fatal(err)
+	}
+	pending := SyncOriginPending{OriginChainID: "chain-b", OriginMemoryID: "origin-committed",
+		LocalMemoryID: rec.MemoryID, DomainTag: rec.DomainTag, ContentHash: hex.EncodeToString(hash[:]),
+		Classification: 1, MemoryType: string(memory.TypeFact), SubmittingAgent: rec.SubmittingAgent}
+	if err := s.StageSyncOrigin(ctx, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PurgeSyncPeerState(ctx, "chain-b"); err != nil {
+		t.Fatal(err)
+	}
+	origin, err := s.GetSyncOrigin(ctx, "chain-b", "origin-committed")
+	if err != nil || origin.LocalMemoryID != rec.MemoryID {
+		t.Fatalf("committed pending origin not promoted: %+v err=%v", origin, err)
+	}
+	isCopy, err := s.IsSyncedCopy(ctx, rec.MemoryID)
+	if err != nil || !isCopy {
+		t.Fatalf("promoted copy lost quarantine: copy=%v err=%v", isCopy, err)
+	}
+}
+
+func TestInboundPolicyLeaseLinearizesPeerPurge(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	readUnlock := s.LockSyncPolicyRead()
+	done := make(chan error, 1)
+	go func() { done <- s.PurgeSyncPeerState(ctx, "chain-b") }()
+	select {
+	case err := <-done:
+		t.Fatalf("peer purge crossed an active inbound policy lease: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	readUnlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("peer purge did not resume after inbound policy lease released")
 	}
 }
 

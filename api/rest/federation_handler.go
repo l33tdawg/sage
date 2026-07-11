@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"encoding/hex"
 	"net/http"
 	"net/url"
@@ -228,12 +229,11 @@ func (s *Server) handleCrossFedRevoke(w http.ResponseWriter, r *http.Request) {
 	// Off-consensus sync purge: consent + queued deliveries die with the
 	// agreement (tx-34 touches only chain state; node-local sync tables are
 	// this handler's job, mirroring Manager.RevokeAgreement's seed/CA purge).
-	if ss := s.syncStore(); ss != nil {
-		if purgeErr := ss.DeleteSyncDomains(r.Context(), remoteChainID); purgeErr != nil {
-			s.logger.Warn().Err(purgeErr).Str("remote", remoteChainID).Msg("revoke: sync domains purge failed")
-		}
-		if purgeErr := ss.PurgeSyncOutbox(r.Context(), remoteChainID); purgeErr != nil {
-			s.logger.Warn().Err(purgeErr).Str("remote", remoteChainID).Msg("revoke: sync outbox purge failed")
+	if cleaner, ok := s.federation.(interface{ PurgeLocalFederationState(string) }); ok {
+		cleaner.PurgeLocalFederationState(remoteChainID)
+	} else if ss := s.syncStore(); ss != nil {
+		if purgeErr := ss.PurgeSyncPeerState(r.Context(), remoteChainID); purgeErr != nil {
+			s.logger.Warn().Err(purgeErr).Str("remote", remoteChainID).Msg("revoke: sync state purge failed")
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{
@@ -325,15 +325,12 @@ func (s *Server) handleCrossFedPeerStatus(w http.ResponseWriter, r *http.Request
 	})
 }
 
-// ---- v11.5 domain-sync consent (sync_domains) -------------------------------
+// ---- v11.6 host-controlled domain sync --------------------------------------
 //
-// Sync consent is LOCAL, off-consensus state: which domains this operator has
-// agreed to replicate with a given peer. It is deliberately NOT a field on the
-// on-chain cross_fed record (extending tx-33's positional codec would be a
-// fork) — each side configures its own set, and the receiving side enforces
-// its OWN rows on every incoming push, so asymmetric consent narrows, never
-// widens, what crosses the link. Operator-only in both directions: this is
-// node configuration with data-residency consequences, not agent surface.
+// The frozen JOIN roles determine the controller: only the host may replace
+// the complete domain snapshot and the guest applies its versioned policy.
+// Legacy pre-v11.6 agreements retain bilateral consent behavior until they
+// re-pair. Policy remains off-consensus because extending tx-33 would fork.
 
 // SyncDomainsRequest is the JSON body for PUT /v1/federation/cross/{chain_id}/sync.
 type SyncDomainsRequest struct {
@@ -410,6 +407,31 @@ func (s *Server) handleSyncDomainsSet(w http.ResponseWriter, r *http.Request) {
 				"Sync domain "+strconv.Quote(d)+" is not covered by the agreement's allowed domains.")
 			return
 		}
+	}
+	control, controlErr := ss.GetSyncControl(r.Context(), remoteChainID)
+	if controlErr != nil {
+		writeProblem(w, http.StatusInternalServerError, "Sync policy read failed", "Could not verify host/guest policy ownership.")
+		return
+	}
+	if control != nil {
+		if control.Role == "guest" {
+			writeProblem(w, http.StatusConflict, "Host-managed sync", "This connection's sync policy is managed by the host node.")
+			return
+		}
+		if driver, ok := s.federation.(interface {
+			SetHostSyncPolicy(context.Context, string, []string) (*federation.HostSyncPolicyResult, error)
+		}); ok {
+			result, policyErr := driver.SetHostSyncPolicy(r.Context(), remoteChainID, req.Domains)
+			if policyErr != nil {
+				writeProblem(w, http.StatusForbidden, "Sync policy denied", policyErr.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"remote_chain_id": remoteChainID,
+				"sync_domains": result.Domains, "sync_role": "host", "revision": result.Revision, "state": result.State})
+			return
+		}
+		writeProblem(w, http.StatusNotImplemented, "Sync policy unavailable", "Host-managed sync is not wired on this node.")
+		return
 	}
 	if err = ss.SetSyncDomains(r.Context(), remoteChainID, req.Domains); err != nil {
 		s.logger.Error().Err(err).Str("remote", remoteChainID).Msg("set sync domains failed")
@@ -531,8 +553,22 @@ func (s *Server) handleSyncDomainsGet(w http.ResponseWriter, r *http.Request) {
 	if domains == nil {
 		domains = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"remote_chain_id": remoteChainID,
-		"sync_domains":    domains,
-	})
+	resp := map[string]any{
+		"remote_chain_id":    remoteChainID,
+		"sync_domains":       domains,
+		"sync_role":          "legacy",
+		"revision":           int64(0),
+		"delivered_revision": int64(0),
+	}
+	control, controlErr := ss.GetSyncControl(r.Context(), remoteChainID)
+	if controlErr != nil {
+		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read sync policy ownership.")
+		return
+	}
+	if control != nil {
+		resp["sync_role"] = control.Role
+		resp["revision"] = control.Revision
+		resp["delivered_revision"] = control.DeliveredRevision
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

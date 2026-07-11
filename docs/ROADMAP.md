@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.5.0 is the current release.** This document records the v11.5 slate as shipped and looks forward to the v11.6 and v11.7 work. Everything past v11.5 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.6.0 is the current release.** This document records the v11.6 slate as shipped and looks forward to v11.7, v11.8, and the v12 completion milestone. Everything past v11.6 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -19,7 +19,7 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 
 ### Federation
 
-- **Whole-SAGE-to-whole-SAGE join ceremony.** Guided guest and host wizards, offline-bundled, and LAN-first in v11. Trust is anchored by a human scan-and-compare; the six-digit codes are TOTP (RFC-6238) proving co-possession under a 2-of-2 consent handshake. Scope grants (allowed domains + a 0-4 clearance ceiling) are enforced when serving recall, recorded as an on-chain treaty, and revocable (revoke erases no memories). v11 assumes same-LAN or operator-provided reachability; first-class internet/NAT traversal is planned for v11.6.
+- **Whole-SAGE-to-whole-SAGE join ceremony.** Guided guest and host wizards, offline-bundled, and human-verified. Scope grants (allowed domains + a 0-4 clearance ceiling) are enforced when serving recall, recorded as an on-chain treaty, and revocable. v11.6 adds first-class internet/NAT traversal and authenticated post-pair route exchange so a LAN relationship can roam.
 - **Off-consensus transport.** mTLS federation listener, read-only recall query proxy (foreign results are merge-in-response only, never persisted to your chain), and receipt exchange.
 - **Consensus-layer federation primitives.** On-chain `cross_fed` exchange terms (Mode-1, tx 33/34) and the co-commit primitive (tx 31/32) landed at the app layer.
 
@@ -70,17 +70,17 @@ Make the access model legible (who can read, write, and modify what, and why) an
 
 ---
 
-## v11.6 - in development
+## v11.6 - shipped (internet federation + controlled sync)
 
 ### libp2p NAT traversal + author-operated connectivity service
 
-Replace the current same-LAN / bring-your-own-tunnel reachability story with **libp2p-based NAT traversal**, backed by an **author-operated connectivity service** (a relay / rendezvous the project runs) so two sovereign nodes behind home routers can find and reach each other without port-forwarding or a third-party cloud. Sovereignty is preserved: the service brokers connectivity only, it never sees or stores memory.
+SAGE now uses **libp2p-based NAT traversal** with an **author-operated connectivity relay**, so two sovereign nodes behind home routers can reach each other without port-forwarding. The service brokers encrypted connectivity only; it never sees or stores memory. Operators may supply their own relay routes.
 
 ### Domain-scoped memory sync foundation
 
-Let an operator opt specific domains into synchronization across their own machines or an established federation peer, on LAN or over the internet. A node might sync `eurorack` or `dmt-laser-experiments` while its `personal`, `family`, and every other unselected domain remain local and are never transmitted.
+An operator can opt specific domains into synchronization across an established federation peer, on LAN or over the internet. A node might sync `eurorack` or `dmt-laser-experiments` while its `personal`, `family`, and every other unselected domain remain local and are never transmitted.
 
-v11.6 productizes the v11.5 preview engine (durable outbox, authenticated push, anti-entropy backfill, and reconnect catch-up) instead of creating a second replication path. The choice appears after the two-node federation signing ceremony completes and is controlled by the host. It is **off by default**. The host may enable all shareable domains, select any number of existing domains, and/or create new shared domains. That selected set becomes the negotiated bidirectional synchronization allowlist: guest memories whose domain tags are not selected never sync to the host, and host memories outside the set never sync to the guest. The release gate adds durable host-policy propagation, P2P-path end-to-end tests, tag/index parity, clear health/progress visibility, and explicit domain-isolation tests. Federation connectivity and memory synchronization remain visibly separate choices.
+v11.6 productizes the v11.5 preview engine (durable outbox, authenticated push, anti-entropy backfill, and reconnect catch-up) instead of creating a second replication path. The choice appears after the two-node signing ceremony and is controlled by the host, **off by default**. Its concrete domain set is the bidirectional synchronization allowlist. Durable versioned policy propagation precedes data; tags replicate; crash-safe provenance prevents re-forwarding; P2P and domain-isolation tests cover the release path. Federation connectivity and memory synchronization remain separate choices.
 
 v11.6 does **not** label a two-node synchronized pair Byzantine fault tolerant. If one side is unavailable, writes may be queued or remain local according to an explicit degraded-mode policy; the release must not imply that one surviving member constitutes quorum.
 

@@ -65,13 +65,16 @@ func (m *Manager) onCommitted(ids []string) {
 
 	enqueued := false
 	for _, id := range ids {
+		originUnlock := ss.LockSyncOriginRead()
 		// Loop prevention: a copy admitted FROM a peer commits locally and
 		// re-fires this hook — never re-forward it (to anyone).
 		if isCopy, cErr := ss.IsSyncedCopy(ctx, id); cErr != nil || isCopy {
+			originUnlock()
 			continue
 		}
 		domain, cls, ok := m.syncMetaFor(ctx, ss, id)
 		if !ok {
+			originUnlock()
 			continue
 		}
 		for _, sc := range scopes {
@@ -87,6 +90,7 @@ func (m *Manager) onCommitted(ids []string) {
 			}
 			enqueued = true
 		}
+		originUnlock()
 	}
 	if enqueued {
 		m.nudgeSync()

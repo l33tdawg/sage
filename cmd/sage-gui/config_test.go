@@ -1,13 +1,40 @@
 package main
 
 import (
+	"crypto/rand"
 	"os"
 	"path/filepath"
 	"testing"
 
+	libcrypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPersistFederationPeerPreservesRawPathsAndRemoves(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	raw := "data_dir: ~/sage-data\nagent_key_file: ./operator.key\nfederation:\n  enabled: true\n  p2p_enabled: true\n"
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "config.yaml"), []byte(raw), 0o600))
+	priv, _, err := libcrypto.GenerateEd25519Key(rand.Reader)
+	require.NoError(t, err)
+	id, err := peer.IDFromPrivateKey(priv)
+	require.NoError(t, err)
+	target := "/ip4/203.0.113.9/tcp/4001/p2p/" + id.String()
+	require.NoError(t, persistFederationPeer("remote-chain", []string{target}))
+	written, err := os.ReadFile(filepath.Join(tmp, "config.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(written), "data_dir: ~/sage-data")
+	assert.Contains(t, string(written), "agent_key_file: ./operator.key")
+	loaded, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, []string{target}, loaded.Federation.P2PPeers["remote-chain"])
+	require.NoError(t, persistFederationPeer("remote-chain", nil))
+	loaded, err = LoadConfig()
+	require.NoError(t, err)
+	assert.NotContains(t, loaded.Federation.P2PPeers, "remote-chain")
+}
 
 func TestDefaultConfig(t *testing.T) {
 	home := "/tmp/test-sage"
@@ -62,7 +89,11 @@ func TestSaveAndLoadConfig(t *testing.T) {
 // start the inbound listener until the operator turns it on in the panel.
 func TestFederationDisabledByDefault(t *testing.T) {
 	tmp := t.TempDir()
-	assert.False(t, DefaultConfig(tmp).Federation.Enabled, "federation must default OFF (opt-in)")
+	fed := DefaultConfig(tmp).Federation
+	assert.False(t, fed.Enabled, "federation must default OFF (opt-in)")
+	assert.True(t, fed.P2PEnabled, "connectivity substrate should be ready when the operator enables federation")
+	assert.Len(t, fed.P2PRelayAddrs, 2)
+	assert.True(t, fed.P2PForcePrivate)
 }
 
 // TestFederationEnabledPersists: with the default now false, an explicit

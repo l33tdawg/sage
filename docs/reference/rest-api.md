@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.5.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.6.0. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -873,17 +873,17 @@ List active federations for an org.
 
 ---
 
-### v11.5 domain-sync consent + status (`/v1/federation/cross/{chain_id}/sync*`)
+### v11.6 host-controlled domain sync + status (`/v1/federation/cross/{chain_id}/sync*`)
 
-Node-operator-only, off-consensus. Full wire protocol (the `/fed/v1/sync/*` push + anti-entropy digest, the consent model, delivery semantics) is documented in [`federation-and-brain-api.md`](federation-and-brain-api.md#v115-domain-sync-shared-domain-replication); this is the operator control surface.
+Node-operator-only and off-consensus. Full wire protocol, controller binding, replication, and delivery semantics are documented in [`federation-and-brain-api.md`](federation-and-brain-api.md#v116-domain-sync-host-controlled-shared-domain-replication); this is the signed operator control surface. A v11.6 JOIN starts sync empty and freezes host/guest roles. The host owns the complete versioned policy; the guest may view it or disconnect but cannot widen it. Legacy agreements retain their bilateral consent behavior until they re-pair.
 
 | Route | Purpose |
 |---|---|
-| `PUT /v1/federation/cross/{chain_id}/sync` | Replace the consented sync-domain set: `{"domains": ["hr","eng.public"]}`. Each entry must be concrete (no `*`) and subtree-covered by the agreement's `allowed_domains`; consent can only narrow the treaty, never widen it. Requires an active, unexpired agreement (`404`/`409` otherwise). |
-| `GET /v1/federation/cross/{chain_id}/sync` | Read back the consented set. |
+| `PUT /v1/federation/cross/{chain_id}/sync` | Host only: replace the complete set with `{"domains": ["hr","eng.public"]}`. Each entry must be concrete, covered by the treaty, and owned by/admin-authorized for the local operator. Returns `sync_domains`, `sync_role:"host"`, `revision`, and `state` (`delivered` or `pending`). A guest receives `409`; an empty list disables sync. |
+| `GET /v1/federation/cross/{chain_id}/sync` | Read back `sync_domains`, `sync_role` (`host`, `guest`, or `legacy`), `revision`, and `delivered_revision`. |
 | `GET /v1/federation/cross/{chain_id}/sync/status` | `outbox_counts` per state (`pending`/`delivering`/`delivered`/`rejected`/`failed`), `rejected` rows with reasons (the B-D1 cross-domain-dup surface), `pending` rows with `attempts`/`next_attempt_at` (vault-deferred rows show `reason: "sender vault locked"` and do not accrue attempts), plus anti-entropy bookkeeping: `last_reconcile`, the peer's advertised `peer_consented_domains`, and `peer_unsupported`. |
 
-Revoking an agreement purges its sync consent and queued deliveries. Domain sync is SQLite-only; on a Postgres-backed node these routes return `501` and the drainer is a no-op.
+Revoking an agreement atomically purges its sync policy, controller binding, and queued deliveries, then removes cached federation credentials and P2P routes. Domain sync is SQLite-only; on a Postgres-backed node these routes return `501` and the drainer is a no-op.
 
 ---
 

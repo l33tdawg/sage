@@ -45,13 +45,29 @@ Full deployment guide (multi-agent networks, RBAC, federation, monitoring): **[A
 | Control Board | Federation | Recall Engine |
 |:---:|:---:|:---:|
 | ![CEREBRUM overview dashboard](docs/screen-overview.png) | ![Federation join dashboard](docs/screen-network.png) | ![Recall engine settings](docs/screen-config.png) |
-| Chain health, quorum, agents, federation, and embeddings | LAN-first, human-verified joins between separate SAGE brains, scoped and revocable | Smart-memory setup, managed reranker install, and recall-depth tuning |
+| Chain health, quorum, agents, federation, and embeddings | Human-verified LAN or internet joins between separate SAGE brains, scoped and revocable | Smart-memory setup, managed reranker install, and recall-depth tuning |
 
 The dashboard also includes agent management, domain permissions, key rotation, import/export, software updates, and encryption controls.
 
 ---
 
-## What's New in v11.5.0
+## What's New in v11.6.0
+
+**SAGE federation can now travel with you, and selected memories can become a shared, durable two-node brain without turning the relay into a trusted server.** v11.6.0 is an off-consensus connectivity, replication-control, and UX release: it changes no consensus rule, AppHash, transaction type, key encoding, or fork. `app-v17` remains shipped-dormant until governed activation, and existing chains replay byte-identically.
+
+- **Pair across the internet without port-forwarding.** The guided host flow now offers Same LAN or Internet. Internet JOIN carries a bounded libp2p route bundle through the human-verified ceremony and uses NAT traversal with Circuit Relay v2 fallback. Federation mTLS, the pinned CA, active treaty, and signed requests remain the trust boundary; the relay sees encrypted bytes and connection metadata, never plaintext memories or federation keys.
+- **LAN relationships roam without re-pairing.** A legacy-shaped LAN QR stays compatible with older guests. Once two v11.6 nodes finish signing, they exchange relay/direct routes over the authenticated agreement, persist them atomically, and can move LAN → internet → LAN without changing federation identity.
+- **Memory sync is host-controlled and off by default.** After signing, the host can leave copying off or choose concrete domains permitted by both treaty scopes and local domain ownership. The selected set is the complete bidirectional replication allowlist; the guest can view it or disconnect, but cannot widen it. Existing pre-v11.6 links retain their legacy bilateral behavior until they re-pair.
+- **Offline catch-up keeps domain boundaries intact.** The existing durable outbox and anti-entropy engine now propagate versioned host policy before data, preserve user tags, retry across restarts and outages, and catch a returning peer up. Memories outside selected domains never enter the sync outbox.
+- **Crash-safe no-forward provenance.** A received copy is durably quarantined before its local consensus submission. Ambiguous timeouts, restarts, and revocation cannot make a foreign copy look native or leak into A→B→C forwarding; exact mirrors promote without rebroadcast, while identity mismatches fail closed.
+- **Federation remains opt-in.** A fresh or upgraded node does not contact the project relay while federation is disabled and no persisted peer routes exist. The shipped relay is a connectivity dependency for relay-only paths, not a validator or memory store; operators can configure their own relay multiaddrs.
+
+SDK 11.6.0.
+
+## Older releases
+
+<details>
+<summary>v11.5.0 - quorum-governed memory lifecycle + pipe hardening</summary>
 
 **Quorum-governed memory lifecycle plus pipe anti-DoS hardening: a two-phase challenge whose bar scales to the network, a first-class reinstate verb, disputed-but-recallable memories, and size caps and quotas on the agent pipe.** v11.5.0 introduces a new consensus fork **`app-v17`** that ships **dormant** - it changes no live-chain behavior until a network activates it through the governed upgrade ladder (a 2/3 quorum vote, past a 200-block floor). Until then `app-v15` stays the active v11 consensus fork, `app-v16` stays shipped-dormant, and historical replay of every existing chain stays **byte-identical**. The pipe hardening is off-consensus and active on upgrade.
 
@@ -65,7 +81,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 SDK 11.5.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.4.11 - managed ChatGPT tunnel setup</summary>

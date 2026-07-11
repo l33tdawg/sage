@@ -74,11 +74,19 @@ const (
 // StartSyncDrainer launches the outbox goroutine. No-op (with one log line)
 // on non-SQLite backends — sync is SQLite-only and must disable loudly.
 func (m *Manager) StartSyncDrainer(ctx context.Context) {
+	m.syncStartOnce.Do(func() {
+		m.startSyncDrainer(ctx)
+	})
+}
+
+func (m *Manager) startSyncDrainer(parent context.Context) {
 	ss := m.syncStore()
 	if ss == nil {
 		m.logger.Info().Msg("domain sync disabled: store backend is not SQLite")
 		return
 	}
+	ctx, cancel := context.WithCancel(parent)
+	m.syncCancel = cancel
 	// The nudge channel must exist before the commit watcher can be wired
 	// (runServe calls StartSyncDrainer, THEN SetSyncNotifier).
 	m.syncNudge = make(chan struct{}, 1)
@@ -93,7 +101,9 @@ func (m *Manager) StartSyncDrainer(ctx context.Context) {
 		m.logger.Info().Int("rows", n).Msg("sync: recovered stranded delivering rows on startup")
 	}
 
+	m.syncWG.Add(2)
 	go func() {
+		defer m.syncWG.Done()
 		// Immediate first pass: restart recovery should not wait a tick.
 		m.syncTick(ctx, ss)
 		t := time.NewTicker(syncDrainInterval)
@@ -112,6 +122,7 @@ func (m *Manager) StartSyncDrainer(ctx context.Context) {
 	// Anti-entropy reconciler: its own goroutine so a slow paging pass never
 	// starves the delivery loop.
 	go func() {
+		defer m.syncWG.Done()
 		m.syncReconcileAll(ctx, ss)
 		t := time.NewTicker(syncReconcileInterval)
 		defer t.Stop()
@@ -126,8 +137,39 @@ func (m *Manager) StartSyncDrainer(ctx context.Context) {
 	}()
 }
 
+// StopSyncDrainer cancels and joins both sync workers before the SQLite store
+// is closed. It is idempotent and deliberately leaves syncNudge open because
+// commit watchers may still hold a nonblocking notifier reference.
+func (m *Manager) StopSyncDrainer() {
+	m.syncStopOnce.Do(func() {
+		if m.syncCancel != nil {
+			m.syncCancel()
+		}
+		m.syncWG.Wait()
+		if ss := m.syncStore(); ss != nil {
+			if _, err := ss.ResetDeliveringToPending(context.Background()); err != nil {
+				m.logger.Warn().Err(err).Msg("sync: shutdown delivery reset failed")
+			}
+		}
+	})
+}
+
 // syncTick runs one scan+drain pass over every peer with sync consent.
 func (m *Manager) syncTick(ctx context.Context, ss *store.SQLiteStore) {
+	if pending, err := ss.ListPendingSyncControls(ctx); err == nil {
+		for _, control := range pending {
+			if ctx.Err() != nil {
+				return
+			}
+			pctx, cancel := context.WithTimeout(ctx, syncPushTimeout)
+			if deliveryErr := m.deliverSyncPolicy(pctx, ss, control.RemoteChainID); deliveryErr != nil {
+				m.logger.Debug().Err(deliveryErr).Str("peer", control.RemoteChainID).Msg("sync policy delivery pending")
+			}
+			cancel()
+		}
+	} else {
+		m.logger.Warn().Err(err).Msg("sync: list pending policies failed")
+	}
 	chains, err := ss.ListSyncDomainChains(ctx)
 	if err != nil {
 		m.logger.Warn().Err(err).Msg("sync: list consent chains failed")
@@ -275,6 +317,11 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			_ = ss.MarkSyncOutboxRejected(writeCtx, chain, row.MemoryID, "classification above agreement ceiling")
 			continue
 		}
+		tags, err := ss.GetTags(ctx, row.MemoryID)
+		if err != nil {
+			retry(row, true, false, syncBackoff(row.Attempts+1), "tag read failed")
+			continue
+		}
 		items = append(items, SyncItem{
 			OriginChainID:   m.localChainID,
 			OriginMemoryID:  row.MemoryID,
@@ -285,11 +332,55 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			ConfidenceScore: rec.ConfidenceScore,
 			Content:         rec.Content,
 			ContentHash:     contentHashHex(rec.Content),
-			Tags:            nil, // tag replication is a documented v11.5 non-goal
+			Tags:            tags,
 		})
 		itemRows = append(itemRows, row)
 	}
 	if len(items) == 0 {
+		return
+	}
+
+	// Linearize the last policy check with consent changes. Set/DeleteSyncDomains
+	// take the write side of this lease, so once their API returns no push can
+	// begin from the old snapshot. Never hold a SQLite transaction here.
+	policyUnlock := ss.LockSyncPolicyRead()
+	policyLocked := true
+	defer func() {
+		if policyLocked {
+			policyUnlock()
+		}
+	}()
+	currentAgreement, gateErr := m.ActiveAgreement(chain)
+	currentConsent, consentErr := ss.GetSyncDomains(ctx, chain)
+	control, controlErr := ss.GetSyncControl(ctx, chain)
+	policyPending := control != nil && control.Role == "host" && control.Revision > control.DeliveredRevision
+	if gateErr != nil || consentErr != nil || controlErr != nil || len(currentConsent) == 0 || policyPending {
+		policyUnlock()
+		policyLocked = false
+		for _, row := range itemRows {
+			reason := "sync policy changed before delivery"
+			if policyPending {
+				reason = "sync policy awaiting peer acknowledgement"
+			}
+			retry(row, false, false, syncBackoffBase, reason)
+		}
+		return
+	}
+	filteredItems := items[:0]
+	filteredRows := itemRows[:0]
+	for i, item := range items {
+		if !DomainAllowed(currentAgreement.AllowedDomains, item.Domain) || !DomainAllowed(currentConsent, item.Domain) ||
+			item.Classification > int(currentAgreement.MaxClearance) {
+			_ = ss.MarkSyncOutboxRejected(writeCtx, chain, itemRows[i].MemoryID, "domain out of scope at final policy gate")
+			continue
+		}
+		filteredItems = append(filteredItems, item)
+		filteredRows = append(filteredRows, itemRows[i])
+	}
+	items, itemRows = filteredItems, filteredRows
+	if len(items) == 0 {
+		policyUnlock()
+		policyLocked = false
 		return
 	}
 
@@ -303,6 +394,8 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		push = m.SyncPush
 	}
 	resp, err := push(pctx, chain, &SyncPushRequest{Items: items})
+	policyUnlock()
+	policyLocked = false
 	if err != nil {
 		reason := err.Error()
 		for _, row := range itemRows {

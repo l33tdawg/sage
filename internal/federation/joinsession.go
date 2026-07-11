@@ -29,25 +29,30 @@ type JoinSession struct {
 	HostEndpoint string
 	Seed         []byte
 	HostNonce    []byte
+	HostPeerID   string
+	HostP2PAddrs []string
 
 	// ExpectedGuestPin is the guest CA SPKI the host scanned off the guest's
 	// return QR over the authenticated visual channel (§2.2.5). It is the
 	// ANCHOR: at the first /join/request the host asserts SPKIFingerprint(the
 	// presented guest CA) == ExpectedGuestPin, so a body-supplied pin can never
 	// substitute the scanned one. Set by ScanReturn BEFORE the guest requests.
-	ExpectedGuestPin []byte
-	ExpectedGuestEnd string // guest endpoint scanned off the return QR
+	ExpectedGuestPin  []byte
+	ExpectedGuestEnd  string // guest endpoint scanned off the return QR
+	ExpectedGuestPeer string
+	ExpectedGuestP2P  []string
 
 	// Guest-side material (bound at the first Request - one-guest-identity).
-	GuestChain    string
-	GuestName     string // friendly label the guest chose (cosmetic, unauthenticated)
-	GuestAgentPub []byte // guest node-operator ed25519 pub (verifies guest_sig/ack over E)
-	GuestPin      []byte
-	GuestEndpoint string
-	GuestNonce    []byte
-	GuestScope    [32]byte
-	HostScope     [32]byte
-	BoundCertSPKI []byte // RT-2/RT-5: the TLS client-cert SPKI bound to this session
+	GuestChain     string
+	GuestName      string // friendly label the guest chose (cosmetic, unauthenticated)
+	GuestAgentPub  []byte // guest node-operator ed25519 pub (verifies guest_sig/ack over E)
+	GuestPin       []byte
+	GuestEndpoint  string
+	GuestNonce     []byte
+	GuestScope     [32]byte
+	GuestScopeWire ScopeWire
+	HostScope      [32]byte
+	BoundCertSPKI  []byte // RT-2/RT-5: the TLS client-cert SPKI bound to this session
 
 	// Host grant terms for cross_fed:<guest> (what the guest may read from the
 	// host). Set by Approve from the operator's H3/H5 choices; folded into
@@ -69,12 +74,12 @@ type JoinSession struct {
 	// concurrent/late re-request that mutates the live fields can never make the
 	// host broadcast against, or verify signatures under, an identity no human
 	// compared.
-	Approved            bool
-	ApprovedE           [32]byte
-	ApprovedGuestPin    []byte
-	ApprovedGuestNonce  []byte
-	ApprovedGuestEnd    string
-	ApprovedGuestAgent  []byte
+	Approved           bool
+	ApprovedE          [32]byte
+	ApprovedGuestPin   []byte
+	ApprovedGuestNonce []byte
+	ApprovedGuestEnd   string
+	ApprovedGuestAgent []byte
 
 	failCount int
 }
@@ -155,6 +160,18 @@ func (s *JoinStore) Create(localChain string, hostPin []byte, hostEndpoint strin
 	return js, nil
 }
 
+func (s *JoinStore) SetHostP2P(id, peerID string, addrs []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	js, ok := s.sessions[id]
+	if !ok || js.State != JoinCreated {
+		return fmt.Errorf("join session is not available for p2p setup")
+	}
+	js.HostPeerID = peerID
+	js.HostP2PAddrs = append([]string(nil), addrs...)
+	return nil
+}
+
 // SessionID returns the base32 id for the QR (x_sage_sid).
 func (js *JoinSession) SessionID() string { return js.ID }
 
@@ -167,6 +184,9 @@ func (js *JoinSession) SessionID() string { return js.ID }
 func (js *JoinSession) snapshot() *JoinSession {
 	cp := *js
 	cp.Seed = append([]byte(nil), js.Seed...)
+	cp.HostP2PAddrs = append([]string(nil), js.HostP2PAddrs...)
+	cp.ExpectedGuestP2P = append([]string(nil), js.ExpectedGuestP2P...)
+	cp.GuestScopeWire.AllowedDomains = append([]string(nil), js.GuestScopeWire.AllowedDomains...)
 	// The unexported commit/rollback closures are node-local ceremony plumbing;
 	// never expose them on a read snapshot handed to lock-free callers.
 	cp.commitGuestCA = nil
@@ -214,6 +234,10 @@ func (js *JoinSession) attestation(hostScope [32]byte) [32]byte {
 		Seed:          js.Seed,
 		GuestNonce:    js.GuestNonce,
 		HostNonce:     js.HostNonce,
+		GuestPeerID:   js.ExpectedGuestPeer,
+		GuestP2PAddrs: js.ExpectedGuestP2P,
+		HostPeerID:    js.HostPeerID,
+		HostP2PAddrs:  js.HostP2PAddrs,
 	}.Attestation()
 }
 
@@ -233,30 +257,40 @@ func (s *JoinStore) AllowConnRead(connKey string, now time.Time) bool {
 // anchor the first /join/request asserts the presented guest CA against. Setting
 // it does not advance state; it only arms the session to accept a request.
 func (s *JoinStore) SetExpectedGuest(id string, pin []byte, endpoint string, now time.Time) error {
+	return s.SetExpectedGuestWithP2P(id, pin, endpoint, "", nil, now)
+}
+
+func (s *JoinStore) SetExpectedGuestWithP2P(id string, pin []byte, endpoint, peerID string, addrs []string, now time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	js, ok := s.sessions[id]
 	if !ok || (now.After(js.ExpiresAt) && js.State != JoinActive) {
 		return fmt.Errorf("join session not found or expired")
 	}
+	if js.State != JoinCreated {
+		return fmt.Errorf("guest return card is already bound for this session")
+	}
 	if len(pin) != 32 {
 		return fmt.Errorf("scanned guest pin must be 32 bytes")
 	}
 	js.ExpectedGuestPin = append([]byte(nil), pin...)
 	js.ExpectedGuestEnd = endpoint
+	js.ExpectedGuestPeer = peerID
+	js.ExpectedGuestP2P = append([]string(nil), addrs...)
 	return nil
 }
 
 // GuestRequestInput carries everything the first /join/request binds.
 type GuestRequestInput struct {
-	GuestChain    string
-	GuestName     string // friendly label (cosmetic, unauthenticated — NOT folded into E)
-	GuestAgentPub []byte
-	GuestNonce    []byte
-	GuestPin      []byte
-	GuestEndpoint string
-	GuestScope    [32]byte
-	CertSPKI      []byte // presented TLS client-cert leaf SPKI (RT-2/RT-5)
+	GuestChain     string
+	GuestName      string // friendly label (cosmetic, unauthenticated — NOT folded into E)
+	GuestAgentPub  []byte
+	GuestNonce     []byte
+	GuestPin       []byte
+	GuestEndpoint  string
+	GuestScope     [32]byte
+	GuestScopeWire ScopeWire
+	CertSPKI       []byte // presented TLS client-cert leaf SPKI (RT-2/RT-5)
 	// CommitGuestCA/RollbackGuestCA persist/discard the staged guest CA (held
 	// until the host's tx-33 lands). Attached only on the first bind.
 	CommitGuestCA   func() error
@@ -327,6 +361,8 @@ func (s *JoinStore) Request(id string, now time.Time, in GuestRequestInput) (*Jo
 	js.GuestPin = append([]byte(nil), in.GuestPin...)
 	js.GuestEndpoint = in.GuestEndpoint
 	js.GuestScope = in.GuestScope
+	js.GuestScopeWire = in.GuestScopeWire
+	js.GuestScopeWire.AllowedDomains = append([]string(nil), in.GuestScopeWire.AllowedDomains...)
 	js.BoundCertSPKI = append([]byte(nil), in.CertSPKI...)
 	if firstBind {
 		js.commitGuestCA = in.CommitGuestCA
@@ -457,6 +493,10 @@ func (s *JoinStore) CheckConfirm(id string, certSPKI, guestSig, guestAckSig []by
 		GuestName:     js.GuestName,
 		GuestPin:      append([]byte(nil), js.ApprovedGuestPin...),
 		GuestEndpoint: js.ApprovedGuestEnd,
+		GuestPeerID:   js.ExpectedGuestPeer,
+		GuestP2PAddrs: append([]string(nil), js.ExpectedGuestP2P...),
+		GuestAgentID:  append([]byte(nil), js.ApprovedGuestAgent...),
+		ApprovedE:     js.ApprovedE,
 		Seed:          append([]byte(nil), js.Seed...),
 		HostGrant: HostGrant{
 			Clearance: js.HostGrantClearance,
@@ -485,6 +525,10 @@ type ConfirmContext struct {
 	GuestName       string // friendly label the guest chose (cosmetic; for local display)
 	GuestPin        []byte
 	GuestEndpoint   string
+	GuestPeerID     string
+	GuestP2PAddrs   []string
+	GuestAgentID    []byte
+	ApprovedE       [32]byte
 	Seed            []byte // the ceremony's own seed (NOT re-resolved by chain id)
 	HostGrant       HostGrant
 	commitGuestCA   func() error
