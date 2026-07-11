@@ -3607,7 +3607,7 @@ function SoftwareUpdate() {
     };
 
     const stepLabel = (step) => {
-        const labels = { queued: 'Prepare', download: 'Download', verify: 'Verify checksum', extract: 'Extract binary', install: 'Install' };
+        const labels = { queued: 'Prepare', download: 'Download', verify: 'Verify checksum', extract: 'Verify update', install: 'Install' };
         return labels[step] || step;
     };
 

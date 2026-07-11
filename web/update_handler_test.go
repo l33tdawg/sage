@@ -92,10 +92,10 @@ func TestHandleApplyUpdateRequiresTrustedChecksum(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.handleApplyUpdate(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	if runtime.GOOS == "linux" {
-		assert.Contains(t, w.Body.String(), "checksum")
-	} else {
+	if runtime.GOOS == "windows" {
 		assert.Contains(t, w.Body.String(), "signed release installer")
+	} else {
+		assert.Contains(t, w.Body.String(), "checksum")
 	}
 }
 
@@ -198,9 +198,10 @@ func TestParseSemver(t *testing.T) {
 }
 
 func TestFindAssetName(t *testing.T) {
-	name := findAssetName("3.7.0")
-	assert.Contains(t, name, "sage-gui_3.7.0_")
-	assert.True(t, len(name) > 20)
+	assert.Equal(t, "SAGE-v3.7.0-macOS-arm64.dmg", findUpdateAssetName("3.7.0", "darwin", "arm64"))
+	assert.Equal(t, "SAGE-v3.7.0-macOS-x86_64.dmg", findUpdateAssetName("3.7.0", "darwin", "amd64"))
+	assert.Equal(t, "sage-gui_3.7.0_linux_amd64.tar.gz", findUpdateAssetName("3.7.0", "linux", "amd64"))
+	assert.Equal(t, "sage-gui_3.7.0_windows_arm64.zip", findUpdateAssetName("3.7.0", "windows", "arm64"))
 }
 
 func TestRedirectRestriction(t *testing.T) {

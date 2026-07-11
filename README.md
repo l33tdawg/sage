@@ -51,13 +51,22 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.7.1
+## What's New in v11.7.2
+
+**Background macOS updates are back, without compromising the signed app.** SAGE now downloads the architecture-specific DMG in the background, verifies its published SHA-256, mounts it read-only, enforces the expected bundle identifier and Developer ID team, and asks Gatekeeper to validate both the release app and its staged copy. Activation atomically exchanges the entire signed `SAGE.app` bundle while preserving the previous bundle for proof-of-boot rollback, so updates never patch a signed executable in place and never leave the application path missing. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+
+SDK 11.7.2.
+
+## Older releases
+
+<details>
+<summary>v11.7.1 - smart-memory reliability and task-board maintenance</summary>
 
 **Smart-memory reliability and task-board maintenance release.** Managed Smart Memory now stays managed: SAGE supervises the local Ollama runtime, adopts it across upgrades, and automatically restarts it after a crash instead of leaving semantic recall offline until manual repair. CEREBRUM tasks, imports, and pipeline journals now preserve embedding provenance, so newly indexed memories no longer drift back into the “needs fixing” queue after a successful repair. The task board also correctly fills the remaining application height, keeping the bottom of every column reachable. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
 
 SDK 11.7.1.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.7.0 - administration, connection, and lifecycle</summary>

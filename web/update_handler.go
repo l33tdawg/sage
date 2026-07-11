@@ -92,10 +92,11 @@ func (h *DashboardHandler) handleCheckUpdate(w http.ResponseWriter, r *http.Requ
 	updateAvailable := current != "dev" && semverGreater(latest, currentClean)
 
 	// Find the right asset for this platform
-	assetName := findAssetName(latest)
+	assetName := findUpdateAssetName(latest, runtime.GOOS, runtime.GOARCH)
 	var downloadURL string
 	var assetSize int64
 	var checksumsURL string
+	var assetChecksumURL string
 	for _, a := range release.Assets {
 		if a.Name == assetName {
 			downloadURL = a.BrowserDownloadURL
@@ -104,11 +105,18 @@ func (h *DashboardHandler) handleCheckUpdate(w http.ResponseWriter, r *http.Requ
 		if a.Name == "checksums.txt" {
 			checksumsURL = a.BrowserDownloadURL
 		}
+		if a.Name == assetName+".sha256" {
+			assetChecksumURL = a.BrowserDownloadURL
+		}
 	}
 
-	// Fetch checksum for the asset from checksums.txt if available
+	// GoReleaser archives are listed in checksums.txt. Desktop installers are
+	// built afterward and publish a sibling .sha256 asset instead; prefer that
+	// when present so the signed macOS DMG can use the same verified updater.
 	var expectedChecksum string
-	if checksumsURL != "" && assetName != "" {
+	if assetChecksumURL != "" && assetName != "" {
+		expectedChecksum = fetchChecksumForAsset(r.Context(), client, assetChecksumURL, assetName)
+	} else if checksumsURL != "" && assetName != "" {
 		expectedChecksum = fetchChecksumForAsset(r.Context(), client, checksumsURL, assetName)
 	}
 
@@ -123,12 +131,12 @@ func (h *DashboardHandler) handleCheckUpdate(w http.ResponseWriter, r *http.Requ
 		"download_size":            assetSize,
 		"checksum":                 expectedChecksum,
 		"platform":                 runtime.GOOS + "/" + runtime.GOARCH,
-		"in_app_update_supported":  runtime.GOOS == "linux",
+		"in_app_update_supported":  runtime.GOOS == "linux" || runtime.GOOS == "darwin",
 		"in_app_restart_supported": runtime.GOOS != "windows",
 		"update_instructions": func() string {
 			switch runtime.GOOS {
 			case "darwin":
-				return "Download the signed DMG, fully quit SAGE, drag-replace the app, then open it again."
+				return "SAGE can download, verify, and install the signed app update in the background."
 			case "windows":
 				return "Download the signed installer, fully quit SAGE, install it, then open SAGE again."
 			default:
@@ -206,7 +214,7 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusForbidden, "updates can only be installed from an authenticated CEREBRUM session")
 		return
 	}
-	if runtime.GOOS != "linux" {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		writeError(w, http.StatusBadRequest, "This platform uses the signed release installer. Fully quit SAGE, install the release, then reopen it.")
 		return
 	}
@@ -362,7 +370,11 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	}
 
 	// Save to temp file while computing checksum
-	archiveTmp, err := os.CreateTemp("", "sage-archive-*")
+	tempPattern := "sage-archive-*"
+	if runtime.GOOS == "darwin" {
+		tempPattern = "sage-archive-*.dmg"
+	}
+	archiveTmp, err := os.CreateTemp("", tempPattern)
 	if err != nil {
 		h.sendUpdateProgress("download", "error", "Failed to create temp file")
 		return
@@ -389,6 +401,31 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	}
 	h.sendUpdateProgress("verify", "done", "Checksum verified")
 
+	// Protect the irreplaceable vault key before either the app-bundle or
+	// standalone-binary installer touches the current installation.
+	if h.VaultKeyPath != "" {
+		if vkData, vkErr := os.ReadFile(h.VaultKeyPath); vkErr == nil {
+			backupDir := filepath.Join(filepath.Dir(h.VaultKeyPath), "backups")
+			_ = os.MkdirAll(backupDir, 0700)
+			vaultBackup := filepath.Join(backupDir, "vault-pre-update.key")
+			_ = os.WriteFile(vaultBackup, vkData, 0600) //nolint:gosec // trusted local vault backup
+		}
+	}
+
+	if runtime.GOOS == "darwin" {
+		_ = archiveTmp.Close()
+		h.sendUpdateProgress("extract", "active", "Opening signed SAGE app update...")
+		stagedVersion, installErr := installDarwinAppUpdate(ctx, archiveTmp.Name(), execPath)
+		if installErr != nil {
+			h.sendUpdateProgress("install", "error", installErrorMessage("Failed to install signed app update", installErr, downloadURL))
+			return
+		}
+		h.sendUpdateProgress("extract", "done", "Signed app verified")
+		h.sendUpdateProgress("install", "done", "SAGE "+stagedVersion+" installed — restart SAGE to apply")
+		h.sendUpdateProgress("complete", "done", "ready_to_restart")
+		return
+	}
+
 	// Step 3: Extract
 	h.sendUpdateProgress("extract", "active", "Extracting sage-gui binary...")
 	if _, seekErr := archiveTmp.Seek(0, io.SeekStart); seekErr != nil {
@@ -410,18 +447,6 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	if stagedVersion == "" || stagedVersion == "dev" {
 		h.sendUpdateProgress("extract", "error", "The verified archive did not contain a runnable release build. Use the signed release installer instead.")
 		return
-	}
-
-	// Step 3.5: Protect vault key — back it up before touching any files.
-	// The vault key is irreplaceable: if lost, all encrypted memories are
-	// permanently unrecoverable.
-	if h.VaultKeyPath != "" {
-		if vkData, vkErr := os.ReadFile(h.VaultKeyPath); vkErr == nil {
-			backupDir := filepath.Join(filepath.Dir(h.VaultKeyPath), "backups")
-			_ = os.MkdirAll(backupDir, 0700)
-			vaultBackup := filepath.Join(backupDir, "vault-pre-update.key")
-			_ = os.WriteFile(vaultBackup, vkData, 0600) //nolint:gosec // trusted local vault backup
-		}
 	}
 
 	// Step 4: Install
@@ -482,7 +507,7 @@ func installPendingBinary(execPath, extractedPath, version string) error {
 	}
 
 	backupPath := execPath + ".old"
-	markerPath := execPath + pendingUpdateSuffix
+	markerPath := platformPendingUpdateMarker(execPath)
 	_ = os.Remove(backupPath)
 	if err = copyFileDurable(execPath, backupPath, mode); err != nil {
 		return fmt.Errorf("preserve rollback binary: %w", err)
@@ -558,11 +583,17 @@ func syncDirectory(dir string) error {
 
 // PendingUpdateVersion reports the release awaiting boot confirmation.
 func PendingUpdateVersion(execPath string) string {
-	data, err := os.ReadFile(execPath + pendingUpdateSuffix) //nolint:gosec // trusted executable sibling
-	if err != nil {
-		return ""
+	paths := []string{platformPendingUpdateMarker(execPath), execPath + pendingUpdateSuffix}
+	for i, path := range paths {
+		if i > 0 && path == paths[0] {
+			continue
+		}
+		data, err := os.ReadFile(path) //nolint:gosec // trusted executable/app sibling
+		if err == nil {
+			return strings.TrimSpace(string(data))
+		}
 	}
-	return strings.TrimSpace(string(data))
+	return ""
 }
 
 // ConfirmPendingUpdate removes rollback state only after the replacement node
@@ -571,14 +602,19 @@ func ConfirmPendingUpdate(execPath string) error {
 	if PendingUpdateVersion(execPath) == "" {
 		return nil
 	}
+	if handled, err := confirmPendingAppBundle(execPath); handled {
+		return err
+	}
 	// Make the installed executable + rollback copy durable before committing.
 	// Keep .old as a one-generation recovery artifact; the next update replaces
 	// it only after confirming no update is currently pending.
 	if err := syncDirectory(filepath.Dir(execPath)); err != nil {
 		return err
 	}
-	if err := os.Remove(execPath + pendingUpdateSuffix); err != nil && !os.IsNotExist(err) {
-		return err
+	for _, path := range []string{platformPendingUpdateMarker(execPath), execPath + pendingUpdateSuffix} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	// A post-unlink fsync failure is not a boot failure: the replacement already
 	// proved healthy, and a crash may at worst leave the marker to reconfirm.
@@ -592,6 +628,9 @@ func RollbackPendingUpdate(execPath string) (bool, error) {
 	if PendingUpdateVersion(execPath) == "" {
 		return false, nil
 	}
+	if handled, rolledBack, err := rollbackPendingAppBundle(execPath); handled {
+		return rolledBack, err
+	}
 	backupPath := execPath + ".old"
 	if _, err := os.Stat(backupPath); err != nil {
 		return false, fmt.Errorf("pending update has no rollback binary: %w", err)
@@ -599,6 +638,7 @@ func RollbackPendingUpdate(execPath string) (bool, error) {
 	if err := os.Rename(backupPath, execPath); err != nil {
 		return false, err
 	}
+	_ = os.Remove(platformPendingUpdateMarker(execPath))
 	_ = os.Remove(execPath + pendingUpdateSuffix)
 	if err := syncDirectory(filepath.Dir(execPath)); err != nil {
 		// The atomic rename already restored the old executable. Tell the caller
@@ -674,10 +714,15 @@ func releasePageURL(downloadURL string) string {
 	return fmt.Sprintf("https://github.com/%s/%s/releases/latest", githubOwner, githubRepo)
 }
 
-// findAssetName returns the expected GoReleaser archive name for the current platform.
-func findAssetName(version string) string {
-	goos := runtime.GOOS
-	goarch := runtime.GOARCH
+// findUpdateAssetName returns the release asset for a target platform.
+func findUpdateAssetName(version, goos, goarch string) string {
+	if goos == "darwin" {
+		archLabel := goarch
+		if goarch == "amd64" {
+			archLabel = "x86_64"
+		}
+		return fmt.Sprintf("SAGE-v%s-macOS-%s.dmg", version, archLabel)
+	}
 	ext := "tar.gz"
 	if goos == "windows" {
 		ext = "zip"
