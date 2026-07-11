@@ -3847,9 +3847,11 @@ input[type="range"]::-moz-range-thumb {
 /* ─── Kanban / Tasks Page ─── */
 .tasks-page {
     padding: 24px;
-    height: calc(100vh - 100px);
+    flex: 1;
+    min-height: 0;
     display: flex;
     flex-direction: column;
+    overflow: hidden;
 }
 .tasks-header {
     display: flex;

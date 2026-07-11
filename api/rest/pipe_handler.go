@@ -465,6 +465,15 @@ func (s *Server) autoJournalPipeline(ctx context.Context, summary string) string
 		Status:          memory.StatusProposed,
 		CreatedAt:       time.Now().UTC(),
 	}
+	// Pipeline journals are inserted directly into the off-chain store rather
+	// than through handleSubmitMemory. Generate and stamp their vector here so
+	// semantic nodes do not accumulate false "needs fixing" counts over time.
+	if s.embedder != nil {
+		if emb, err := s.embedder.Embed(ctx, summary); err == nil {
+			record.Embedding = emb
+			record.EmbeddingProvider = s.embedderStampFor(emb)
+		}
+	}
 
 	if err := offchain.InsertMemory(ctx, record); err != nil {
 		s.logger.Warn().Err(err).Msg("pipeline auto-journal: failed to insert memory")

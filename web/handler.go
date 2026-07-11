@@ -2243,17 +2243,18 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 	contentHash := sha256.Sum256([]byte(taskContent))
 
 	rec := &memory.MemoryRecord{
-		MemoryID:        memoryID,
-		SubmittingAgent: agentIDForKey(h.SigningKey),
-		Content:         taskContent,
-		ContentHash:     contentHash[:],
-		MemoryType:      memory.TypeTask,
-		DomainTag:       body.Domain,
-		ConfidenceScore: 0.90,
-		TaskStatus:      memory.TaskStatusPlanned,
-		Status:          memory.StatusProposed,
-		CreatedAt:       time.Now(),
-		Embedding:       embedding,
+		MemoryID:          memoryID,
+		SubmittingAgent:   agentIDForKey(h.SigningKey),
+		Content:           taskContent,
+		ContentHash:       contentHash[:],
+		MemoryType:        memory.TypeTask,
+		DomainTag:         body.Domain,
+		ConfidenceScore:   0.90,
+		TaskStatus:        memory.TaskStatusPlanned,
+		Status:            memory.StatusProposed,
+		CreatedAt:         time.Now(),
+		Embedding:         embedding,
+		EmbeddingProvider: embeddingProviderStamp(h.embedder, embedding),
 	}
 
 	// Broadcast on-chain through CometBFT consensus
@@ -2280,6 +2281,13 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 		if _, _, _, err := h.signAndBroadcastCommit(submitTx, h.SigningKey); err != nil {
 			writeError(w, http.StatusBadGateway, "the network did not confirm this task; nothing was added: "+err.Error())
 			return
+		}
+		// The dashboard broadcasts directly instead of going through api/rest's
+		// supplementary-data cache. Consensus has inserted the task by the time
+		// broadcast_tx_commit returns; enrich that row with the local semantic
+		// vector and its provenance so Settings does not flag it for repair.
+		if rec.EmbeddingProvider != "" {
+			_ = h.store.UpdateMemoryEmbedding(r.Context(), rec.MemoryID, rec.Embedding, rec.EmbeddingProvider)
 		}
 	} else {
 		if rec.SubmittingAgent == "" {

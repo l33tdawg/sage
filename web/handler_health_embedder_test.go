@@ -49,6 +49,22 @@ func (hashOnlyEmbedder) Dimension() int { return 768 }
 func (hashOnlyEmbedder) Ready() bool    { return true }
 func (hashOnlyEmbedder) Semantic() bool { return false }
 
+func TestEmbeddingProviderStamp(t *testing.T) {
+	t.Run("semantic named provider", func(t *testing.T) {
+		e := &fakeEmbedder{name: "ollama", dimension: 3, ready: true, semantic: true}
+		assert.Equal(t, "ollama", embeddingProviderStamp(e, []float32{1, 2, 3}))
+	})
+
+	t.Run("hash vectors remain repairable", func(t *testing.T) {
+		assert.Empty(t, embeddingProviderStamp(hashOnlyEmbedder{}, []float32{1, 2, 3}))
+	})
+
+	t.Run("missing vector has no provenance", func(t *testing.T) {
+		e := &fakeEmbedder{name: "ollama", dimension: 3, ready: true, semantic: true}
+		assert.Empty(t, embeddingProviderStamp(e, nil))
+	})
+}
+
 // doHealth dispatches GET /v1/dashboard/health against a router built from h
 // and returns the decoded JSON body. It's a thin helper so the table tests
 // below stay legible.

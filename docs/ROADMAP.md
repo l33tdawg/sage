@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.7.0 is the current release.** This document records the v11.7 slate as shipped and looks forward to v11.8, v11.9, and the v12 completion milestone. Everything past v11.7 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.7.1 is the current release.** This document records the v11.7 slate as shipped and looks forward to v11.8, v11.9, and the v12 completion milestone. Everything past v11.7 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 

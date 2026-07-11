@@ -148,6 +148,24 @@ func currentEmbedProvider(e Embedder) string {
 	return "hash"
 }
 
+// embeddingProviderStamp records provenance for vectors created by dashboard
+// ingestion paths (tasks and imports). Those paths bypass api/rest's
+// SupplementaryData cache, so without this stamp every newly-created semantic
+// vector is incorrectly counted as "needs re-embedding" in Settings.
+func embeddingProviderStamp(e Embedder, emb []float32) string {
+	if len(emb) == 0 || e == nil {
+		return ""
+	}
+	if ep, ok := e.(embedderProvider); !ok || !ep.Semantic() {
+		return ""
+	}
+	if named, ok := e.(embedding.Named); ok {
+		return named.Name()
+	}
+	// Pre-Named semantic providers in SAGE were Ollama clients.
+	return embedProviderOllama
+}
+
 // handleEmbeddingsCheckOllama reports whether Ollama is reachable and whether the
 // bundled model is pulled.
 func (h *DashboardHandler) handleEmbeddingsCheckOllama(w http.ResponseWriter, r *http.Request) {

@@ -157,7 +157,9 @@ archives before the runtime becomes active.
 
 Spawns or adopts `ollama serve` and waits until `GET /api/tags` answers. On success
 it persists `ollama_managed=1` and `ollama_url`, so node boot re-starts/adopts the
-managed runtime (`cmd/sage-gui/node.go`).
+managed runtime. The node then probes it every 30 seconds and automatically
+restarts it after a crash, so the persisted managed choice cannot silently decay
+into an offline Smart Memory state (`cmd/sage-gui/node.go`).
 
 **Response** (HTTP 200): `{"ok": true, "url": "http://127.0.0.1:11434"}`.
 
@@ -567,6 +569,12 @@ would forever count it as "needs re-embed" even though its vector is already sem
   (`api/rest/embed_handler.go:126-142`).
 - **Where it is applied:** on the submit and co-commit paths
   (`api/rest/memory_handler.go:481`, `api/rest/cocommit_handler.go:201`).
+- **Direct-ingest paths:** CEREBRUM task creation and imports stamp vectors with
+  the same semantic-provider rule, while pipeline auto-journals generate and
+  stamp their vector before the off-chain insert. These paths do not traverse
+  the REST supplementary-data cache, so omitting this step would make the
+  Settings repair count grow again after a successful repair
+  (`web/handler.go`, `web/import.go`, `api/rest/pipe_handler.go`).
 - **Where it is persisted:** `SQLiteStore.InsertMemory` writes the
   `embedding_provider` column (`internal/store/sqlite.go:843-884`). The upsert uses
   `COALESCE(NULLIF(excluded.embedding_provider, ''), memories.embedding_provider)`

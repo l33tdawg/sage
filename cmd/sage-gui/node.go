@@ -311,14 +311,7 @@ func runServe() (rerr error) {
 		}
 		if prefs["ollama_managed"] == "1" {
 			startWorker(func() {
-				startCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-				defer cancel()
-				ollamaURL, startErr := ollamaMgr.Start(startCtx)
-				if startErr != nil {
-					logger.Warn().Err(startErr).Msg("managed Ollama runtime did not start; semantic recall may be unavailable until setup runs")
-					return
-				}
-				logger.Info().Str("url", ollamaURL).Msg("managed Ollama runtime ready")
+				superviseManagedOllama(ctx, ollamaMgr, 30*time.Second, logger)
 			})
 		}
 	}
@@ -2001,6 +1994,44 @@ func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *me
 		}
 	}()
 	return done
+}
+
+type managedOllamaRuntime interface {
+	Start(context.Context) (string, error)
+	Probe(context.Context) bool
+}
+
+// superviseManagedOllama keeps the operator's persisted "managed" choice true
+// in practice, not just in preferences. Previously boot made one Start attempt
+// and the health watchdog only reported later crashes; semantic memory then
+// remained offline until the user repaired it or restarted SAGE manually.
+func superviseManagedOllama(ctx context.Context, runtime managedOllamaRuntime, retryInterval time.Duration, logger zerolog.Logger) {
+	start := func() {
+		startCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		ollamaURL, err := runtime.Start(startCtx)
+		if err != nil {
+			if ctx.Err() == nil {
+				logger.Warn().Err(err).Msg("managed Ollama runtime unavailable; SAGE will retry automatically")
+			}
+			return
+		}
+		logger.Info().Str("url", ollamaURL).Msg("managed Ollama runtime ready")
+	}
+
+	start() // Start adopts an already-running sidecar, including across upgrades.
+	ticker := time.NewTicker(retryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !runtime.Probe(ctx) {
+				start()
+			}
+		}
+	}
 }
 
 // truncateString caps s at max runes, appending an ellipsis when it overflows.

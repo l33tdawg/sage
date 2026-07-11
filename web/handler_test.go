@@ -395,6 +395,7 @@ func TestCreateTaskConsensusFailureDoesNotInsertPhantom(t *testing.T) {
 
 func TestCreateTaskStandaloneStoresProposedAuthoredTask(t *testing.T) {
 	h, s := newTestHandler(t)
+	h.SetEmbedder(&fakeEmbedder{name: "ollama", dimension: 3, ready: true, semantic: true})
 	r := testRouter(h)
 	body := []byte(`{"content":"standalone work","domain":"work"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/tasks", bytes.NewReader(body))
@@ -410,6 +411,10 @@ func TestCreateTaskStandaloneStoresProposedAuthoredTask(t *testing.T) {
 	require.Equal(t, memory.StatusProposed, got.Status)
 	require.Equal(t, "cerebrum", got.SubmittingAgent)
 	require.Equal(t, memory.TaskStatusPlanned, got.TaskStatus)
+	counts, err := s.CountMemoriesByProvider(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, counts["ollama"])
+	require.Zero(t, counts[""], "a newly embedded dashboard task must not re-enter the repair queue")
 }
 
 func TestTaskAssignmentRejectsInactiveOrUnknownAgent(t *testing.T) {

@@ -238,6 +238,7 @@ func (h *DashboardHandler) processImportRecords(w http.ResponseWriter, r *http.R
 		if h.embedder != nil {
 			if emb, embErr := h.embedder.Embed(r.Context(), rec.Content); embErr == nil {
 				rec.Embedding = emb
+				rec.EmbeddingProvider = embeddingProviderStamp(h.embedder, emb)
 				eh := sha256.New()
 				for _, v := range emb {
 					fmt.Fprintf(eh, "%f", v)
