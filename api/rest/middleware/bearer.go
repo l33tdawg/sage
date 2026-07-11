@@ -39,6 +39,10 @@ type MCPTokenInfo struct {
 // store's method without forcing the interface above on it.
 type MCPTokenLookupFn func(ctx context.Context, tokenSHA256 string) (agentID string, err error)
 
+type mcpTokenFingerprintKeyType struct{}
+
+var mcpTokenFingerprintKey mcpTokenFingerprintKeyType
+
 // MCPBearerAuthMiddleware returns a middleware that validates the
 // Authorization header against a bearer-token store. On success, the
 // resolved agent ID is placed in the request context under the same key
@@ -124,6 +128,11 @@ func MCPBearerAuthMiddleware(lookup MCPTokenLookupFn) func(http.Handler) http.Ha
 			}
 
 			ctx := context.WithValue(r.Context(), agentIDKey, agentID)
+			// Bind transport sessions to the credential, not only the effective
+			// operator principal. Multiple operator tokens intentionally resolve to
+			// the same agent ID, but must not be able to post into one another's SSE
+			// stream if a session UUID leaks.
+			ctx = context.WithValue(ctx, mcpTokenFingerprintKey, digestHex)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -134,3 +143,11 @@ func MCPBearerAuthMiddleware(lookup MCPTokenLookupFn) func(http.Handler) http.Ha
 // package returns its own ErrTokenRevoked; callers wiring the middleware
 // should translate or shadow that to this sentinel.
 var ErrMCPTokenRevoked = errors.New("mcp token revoked")
+
+// ContextMCPTokenFingerprint returns the SHA-256 digest of the bearer that
+// authenticated an MCP request. It is safe for binding/isolation and never
+// exposes the plaintext credential.
+func ContextMCPTokenFingerprint(ctx context.Context) string {
+	v, _ := ctx.Value(mcpTokenFingerprintKey).(string)
+	return v
+}

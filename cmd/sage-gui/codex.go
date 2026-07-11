@@ -3,11 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/l33tdawg/sage/web"
+	"github.com/pelletier/go-toml/v2"
 )
 
 // runCodexInstall is the Codex-side mirror of runMCPInstall. It wires SAGE
@@ -133,19 +136,28 @@ func installCodexConfig(projectDir, sageHome, execPath string) ([]web.ConnectFil
 // reads this to learn about the sage MCP server. The format follows
 // Codex's documented schema (mcp_servers.<name> table with command, args,
 // and env subtable).
-const codexConfigTemplate = `[mcp_servers.sage]
-command = "__SAGE_GUI_BIN__"
+func codexSageConfigBlock(configPath, binPath, sageHome, provider string) string {
+	return fmt.Sprintf(`[mcp_servers.sage]
+command = %s
 args = ["mcp"]
 
 [mcp_servers.sage.env]
-SAGE_HOME = "__SAGE_HOME__"
-SAGE_PROVIDER = "codex"
-`
+SAGE_HOME = %s
+SAGE_PROVIDER = %s
+SAGE_API_URL = %s
+SAGE_IDENTITY_PATH = %s
+SAGE_PROJECT = %s
+`, tomlString(binPath), tomlString(sageHome), tomlString(provider), tomlString(mcpConfigAPIURL), tomlString(mcpIdentityPath(configPath, sageHome, provider)), tomlString(mcpProjectName(configPath, sageHome, provider)))
+}
+
+func tomlString(value string) string {
+	encoded, _ := json.Marshal(value) // JSON strings are valid TOML basic strings.
+	return string(encoded)
+}
 
 func writeCodexConfig(path, binPath, sageHome string) error {
-	content := strings.ReplaceAll(codexConfigTemplate, "__SAGE_GUI_BIN__", binPath)
-	content = strings.ReplaceAll(content, "__SAGE_HOME__", sageHome)
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil { //nolint:gosec // path is composed from project working dir
+	content := codexSageConfigBlock(path, binPath, sageHome, "codex")
+	if err := safeWriteFile(path, []byte(content), 0600); err != nil {
 		return fmt.Errorf("write codex config: %w", err)
 	}
 	return nil
@@ -158,10 +170,13 @@ func writeCodexConfig(path, binPath, sageHome string) error {
 // block, leaving every other section byte-for-byte intact. Returns "created"
 // when the file did not exist, "merged" otherwise.
 func mergeCodexConfig(path, binPath, sageHome string) (string, error) {
-	sageBlock := strings.ReplaceAll(codexConfigTemplate, "__SAGE_GUI_BIN__", binPath)
-	sageBlock = strings.ReplaceAll(sageBlock, "__SAGE_HOME__", sageHome)
+	return mergeCodexConfigForProvider(path, binPath, sageHome, "codex")
+}
 
-	existing, err := os.ReadFile(path) //nolint:gosec // path composed from project dir, not remote input
+func mergeCodexConfigForProvider(path, binPath, sageHome, provider string) (string, error) {
+	sageBlock := codexSageConfigBlock(path, binPath, sageHome, provider)
+
+	existing, err := readBoundedConfig(path, 1<<20)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if writeErr := safeWriteFile(path, []byte(sageBlock), 0600); writeErr != nil {
@@ -171,35 +186,187 @@ func mergeCodexConfig(path, binPath, sageHome string) (string, error) {
 		}
 		return "", fmt.Errorf("read codex config: %w", err)
 	}
+	var parsed any
+	if parseErr := toml.Unmarshal(existing, &parsed); parseErr != nil {
+		return "", fmt.Errorf("existing Codex config is invalid TOML; fix it before connecting SAGE: %w", parseErr)
+	}
 
-	// Keep every line except the ones inside a sage section. A TOML section
-	// header line starts with "["; it may carry a trailing inline comment
-	// ("[mcp_servers.other] # my server" is valid TOML), so match the header up
-	// to its first "]" rather than requiring the whole trimmed line to end in
-	// "]" (which would miss commented headers and silently drop that section).
-	var kept []string
+	// Remove only semantic [mcp_servers.sage] tables (including quoted keys and
+	// descendants) while preserving every unrelated byte. Header recognition is
+	// disabled inside TOML multiline strings so bracket-looking content is safe.
+	var kept strings.Builder
 	inSage := false
-	for _, line := range strings.Split(string(existing), "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "[") {
-			if end := strings.Index(trimmed, "]"); end >= 0 {
-				header := trimmed[:end+1] // e.g. "[mcp_servers.sage]" without any inline comment
-				inSage = header == "[mcp_servers.sage]" || strings.HasPrefix(header, "[mcp_servers.sage.")
+	multiline := byte(0)
+	for _, line := range strings.SplitAfter(string(existing), "\n") {
+		if multiline == 0 {
+			if header, ok := tomlTableHeader(line); ok {
+				inSage = len(header) >= 2 && header[0] == "mcp_servers" && header[1] == "sage"
 			}
 		}
 		if !inSage {
-			kept = append(kept, line)
+			kept.WriteString(line)
 		}
+		updateTOMLMultilineState(line, &multiline)
 	}
-	body := strings.TrimRight(strings.Join(kept, "\n"), "\n")
+	body := strings.TrimRight(kept.String(), "\n")
 	out := sageBlock
 	if body != "" {
 		out = body + "\n\n" + sageBlock
+	}
+	parsed = nil
+	if parseErr := toml.Unmarshal([]byte(out), &parsed); parseErr != nil {
+		return "", fmt.Errorf("refusing to write invalid merged Codex config: %w", parseErr)
 	}
 	if writeErr := safeWriteFile(path, []byte(out), 0600); writeErr != nil {
 		return "", fmt.Errorf("write codex config: %w", writeErr)
 	}
 	return "merged", nil
+}
+
+func readBoundedConfig(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path) //nolint:gosec // caller supplies an operator-scoped config path
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("config exceeds %d bytes", limit)
+	}
+	return data, nil
+}
+
+// tomlTableHeader returns a decoded TOML table path. The input has already
+// been validated by go-toml; this lexer exists only to preserve unrelated bytes.
+func tomlTableHeader(line string) ([]string, bool) {
+	trimmed := strings.TrimSpace(stripTOMLComment(line))
+	arrayTable := strings.HasPrefix(trimmed, "[[")
+	if arrayTable {
+		if !strings.HasSuffix(trimmed, "]]") {
+			return nil, false
+		}
+		trimmed = strings.TrimSpace(trimmed[2 : len(trimmed)-2])
+	} else {
+		if !strings.HasPrefix(trimmed, "[") || !strings.HasSuffix(trimmed, "]") {
+			return nil, false
+		}
+		trimmed = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+	}
+	var parts []string
+	for len(trimmed) > 0 {
+		trimmed = strings.TrimLeft(trimmed, " \t")
+		if trimmed == "" {
+			break
+		}
+		var part string
+		if trimmed[0] == '"' {
+			end := 1
+			escaped := false
+			for end < len(trimmed) {
+				if trimmed[end] == '"' && !escaped {
+					break
+				}
+				if trimmed[end] == '\\' && !escaped {
+					escaped = true
+				} else {
+					escaped = false
+				}
+				end++
+			}
+			if end >= len(trimmed) {
+				return nil, false
+			}
+			decoded, err := strconv.Unquote(trimmed[:end+1])
+			if err != nil {
+				return nil, false
+			}
+			part, trimmed = decoded, trimmed[end+1:]
+		} else if trimmed[0] == '\'' {
+			end := strings.IndexByte(trimmed[1:], '\'')
+			if end < 0 {
+				return nil, false
+			}
+			end++
+			part, trimmed = trimmed[1:end], trimmed[end+1:]
+		} else {
+			end := strings.IndexByte(trimmed, '.')
+			if end < 0 {
+				part, trimmed = strings.TrimSpace(trimmed), ""
+			} else {
+				part, trimmed = strings.TrimSpace(trimmed[:end]), trimmed[end:]
+			}
+		}
+		if part == "" {
+			return nil, false
+		}
+		parts = append(parts, part)
+		trimmed = strings.TrimLeft(trimmed, " \t")
+		if trimmed == "" {
+			break
+		}
+		if trimmed[0] != '.' {
+			return nil, false
+		}
+		trimmed = trimmed[1:]
+	}
+	return parts, len(parts) > 0
+}
+
+func stripTOMLComment(line string) string {
+	quote := byte(0)
+	escaped := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if quote == 0 && c == '#' {
+			return line[:i]
+		}
+		if quote == 0 && (c == '"' || c == '\'') {
+			quote = c
+			continue
+		}
+		if quote == '"' && c == '\\' && !escaped {
+			escaped = true
+			continue
+		}
+		if quote != 0 && c == quote && !escaped {
+			quote = 0
+		}
+		escaped = false
+	}
+	return line
+}
+
+func updateTOMLMultilineState(line string, state *byte) {
+	for i := 0; i+2 < len(line); i++ {
+		if *state == '"' && strings.HasPrefix(line[i:], `"""`) {
+			*state = 0
+			i += 2
+			continue
+		}
+		if *state == '\'' && strings.HasPrefix(line[i:], `'''`) {
+			*state = 0
+			i += 2
+			continue
+		}
+		if *state != 0 {
+			continue
+		}
+		if line[i] == '#' {
+			return
+		}
+		if strings.HasPrefix(line[i:], `"""`) {
+			*state = '"'
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(line[i:], `'''`) {
+			*state = '\''
+			i += 2
+		}
+	}
 }
 
 // sageAgentsMDBlock is the SAGE section injected into AGENTS.md. It mirrors

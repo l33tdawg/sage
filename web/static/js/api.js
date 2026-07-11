@@ -484,11 +484,16 @@ export async function checkForUpdate() {
     return res.json();
 }
 
-export async function applyUpdate(downloadUrl) {
+export async function fetchUpdateStatus() {
+	const res = await fetch(`${API_BASE}/v1/dashboard/settings/update/status`, { cache: 'no-store' });
+	return res.json();
+}
+
+export async function applyUpdate(downloadUrl, checksum) {
     const res = await fetch(`${API_BASE}/v1/dashboard/settings/update/apply`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ download_url: downloadUrl }),
+        body: JSON.stringify({ download_url: downloadUrl, checksum }),
     });
     return res.json();
 }

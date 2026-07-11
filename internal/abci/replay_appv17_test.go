@@ -39,7 +39,7 @@ func TestAppV17_ForkGateDefaultsAndSubsumption(t *testing.T) {
 	assert.True(t, app.postAppV15Rules(6), "app-v17 subsumes app-v15 rules")
 	assert.True(t, app.postAppV16Rules(6), "app-v17 subsumes app-v16 rules")
 	assert.Equal(t, uint64(17), app.currentAppVersion(), "app-v17 active ⇒ version 17 (ranks above 16)")
-	assert.Equal(t, uint64(17), MaxSupportedAppVersion(), "binary advertises the v17 fork gate (no handshake-halt footgun)")
+	assert.GreaterOrEqual(t, MaxSupportedAppVersion(), uint64(17), "binary advertises at least the v17 fork gate (no handshake-halt footgun)")
 }
 
 // TestAppV17_CanonicalNameAndVersionLockstep couples the activation-name constant

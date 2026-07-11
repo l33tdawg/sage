@@ -96,6 +96,19 @@ type upgradeWatchdogConfig struct {
 	// PumpInterval overrides the pending-plan pump cadence. Zero means the
 	// 5s default; only tests set it.
 	PumpInterval time.Duration
+
+	// StartWorker lets the long-running serve lifecycle track and join every
+	// watchdog goroutine before stores close. Nil keeps the historical detached
+	// goroutine behavior for short-lived tests and CLI callers.
+	StartWorker func(func())
+}
+
+func startUpgradeWorker(cfg upgradeWatchdogConfig, fn func()) {
+	if cfg.StartWorker != nil {
+		cfg.StartWorker(fn)
+		return
+	}
+	go fn()
 }
 
 // startUpgradeWatchdog launches the watchdog goroutine. Returns
@@ -121,7 +134,7 @@ func startUpgradeWatchdog(ctx context.Context, cfg upgradeWatchdogConfig) bool {
 	// the binary's compiled ceiling instead of stopping at the legacy PoE
 	// target. Replaces (supersedes) the legacy loop on personal nodes.
 	if cfg.PersonalMode && cfg.AutoAdvance {
-		go runAutoAdvance(ctx, cfg, interval)
+		startUpgradeWorker(cfg, func() { runAutoAdvance(ctx, cfg, interval) })
 		cfg.Logger.Info().
 			Uint64("max_app_version", sageabci.MaxSupportedAppVersion()).
 			Str("binary_version", cfg.BinaryVersion).
@@ -139,7 +152,7 @@ func startUpgradeWatchdog(ctx context.Context, cfg upgradeWatchdogConfig) bool {
 		return false
 	}
 
-	go runUpgradeWatchdog(ctx, cfg, interval)
+	startUpgradeWorker(cfg, func() { runUpgradeWatchdog(ctx, cfg, interval) })
 	cfg.Logger.Info().
 		Uint64("target_app_version", upgradeTargetAppVersion).
 		Str("binary_version", cfg.BinaryVersion).
@@ -632,8 +645,7 @@ func buildUpgradeProposeTx(cfg upgradeWatchdogConfig, target uint64) (*tx.Parsed
 // expanded form, matching readNodeOperatorKey. Returns nil if the
 // file isn't present or is malformed — the watchdog treats nil as
 // "no operator key, skip".
-func loadOperatorAgentKey(logger zerolog.Logger) ed25519.PrivateKey {
-	path := filepath.Join(SageHome(), "agent.key")
+func loadOperatorAgentKeyAt(path string, logger zerolog.Logger) ed25519.PrivateKey {
 	data, err := os.ReadFile(path) //nolint:gosec // path under operator's home
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -650,6 +662,10 @@ func loadOperatorAgentKey(logger zerolog.Logger) ed25519.PrivateKey {
 		logger.Warn().Int("size", len(data)).Msg("upgrade watchdog: agent.key has unexpected length")
 		return nil
 	}
+}
+
+func loadOperatorAgentKey(logger zerolog.Logger) ed25519.PrivateKey {
+	return loadOperatorAgentKeyAt(filepath.Join(SageHome(), "agent.key"), logger)
 }
 
 // computeSelfBinarySHA256 hashes the running binary's bytes so the

@@ -182,6 +182,121 @@ loop:
 	assert.True(t, gotResponse)
 }
 
+func TestSSEClearsParentServerWriteDeadline(t *testing.T) {
+	transport := newTestTransport(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/mcp/sse", transport.HandleSSE)
+	mux.HandleFunc("/v1/mcp/messages", transport.HandleSSEMessages)
+	server := httptest.NewUnstartedServer(mux)
+	server.Config.WriteTimeout = 100 * time.Millisecond
+	server.Start()
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/mcp/sse", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	scanner := bufio.NewScanner(resp.Body)
+	endpoint := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: /v1/mcp/messages") {
+			endpoint = strings.TrimPrefix(line, "data: ")
+		}
+		if endpoint != "" && line == "" {
+			break
+		}
+	}
+	require.NotEmpty(t, endpoint)
+
+	// Stay idle for several parent WriteTimeout windows, then prove the same
+	// stream still accepts a paired request and returns its response.
+	time.Sleep(350 * time.Millisecond)
+	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+endpoint,
+		bytes.NewBufferString(`{"jsonrpc":"2.0","id":7,"method":"tools/list"}`))
+	require.NoError(t, err)
+	postReq.Header.Set("Content-Type", "application/json")
+	postResp, err := http.DefaultClient.Do(postReq)
+	require.NoError(t, err)
+	_ = postResp.Body.Close()
+	require.Equal(t, http.StatusAccepted, postResp.StatusCode)
+
+	found := false
+	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), `"id":7`) {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "SSE stream must survive the parent server write timeout")
+}
+
+func TestHTTPTransportCloseDrainsAndRejectsNewSSESessions(t *testing.T) {
+	transport := newTestTransport(t)
+	sess := transport.sessions.register("before-restart", "", "")
+	require.NotNil(t, sess)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, transport.Close(ctx))
+
+	select {
+	case <-sess.done:
+		// The coordinated restart can now complete without waiting for the
+		// long-lived SSE handler's request context to time out.
+	case <-time.After(time.Second):
+		t.Fatal("Close did not drain the active SSE session")
+	}
+	require.Nil(t, transport.sessions.lookup("before-restart"))
+	require.Nil(t, transport.sessions.register("during-restart", "", ""),
+		"a draining transport must not admit a new stream after Close")
+}
+
+func TestHTTPTransportCloseRejectsEveryHTTPTransport(t *testing.T) {
+	transport := newTestTransport(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, transport.Close(ctx))
+
+	for name, handler := range map[string]http.HandlerFunc{
+		"sse":        transport.HandleSSE,
+		"messages":   transport.HandleSSEMessages,
+		"streamable": transport.HandleStreamable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/mcp/"+name, nil)
+			handler.ServeHTTP(w, req)
+			require.Equal(t, http.StatusServiceUnavailable, w.Code)
+			require.Equal(t, "2", w.Header().Get("Retry-After"))
+		})
+	}
+}
+
+func TestHTTPTransportCloseCancelsAndJoinsInflightDispatch(t *testing.T) {
+	transport := newTestTransport(t)
+	ctx, done, admitted := transport.admit(context.Background())
+	require.True(t, admitted)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		<-ctx.Done()
+		done()
+	}()
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, transport.Close(closeCtx))
+	select {
+	case <-workerDone:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight handler was not canceled and joined")
+	}
+}
+
 func TestSSE_MessagesRejectsBadSession(t *testing.T) {
 	transport := newTestTransport(t)
 	mux := http.NewServeMux()
@@ -263,6 +378,25 @@ func TestCORS_RejectsCrossOriginBrowser(t *testing.T) {
 	// regardless of bearer; ChatGPT's MCP connector uses server-to-server
 	// requests with no Origin header, so this does not break the connector.
 	assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+}
+
+func TestCORSRejectsLoopbackPrefixAttackerOrigins(t *testing.T) {
+	for _, origin := range []string{
+		"http://localhost.evil.example",
+		"https://127.0.0.1.evil.example",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			transport := newTestTransport(t)
+			handler := transport.CORSMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodGet, "/v1/mcp/streamable", nil)
+			req.Header.Set("Origin", origin)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			require.Equal(t, http.StatusForbidden, w.Code)
+		})
+	}
 }
 
 func TestCORS_AllowsLocalhostOrigin(t *testing.T) {

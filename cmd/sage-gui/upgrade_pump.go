@@ -47,7 +47,7 @@ func startPendingPlanPump(ctx context.Context, cfg upgradeWatchdogConfig) bool {
 	if every <= 0 {
 		every = defaultPumpInterval
 	}
-	go runPendingPlanPump(ctx, cfg, every)
+	startUpgradeWorker(cfg, func() { runPendingPlanPump(ctx, cfg, every) })
 	cfg.Logger.Info().Dur("interval", every).
 		Msg("v10.5.2 pending-plan pump armed — a quiescent chain with a pending upgrade plan will be heartbeaten to its activation height")
 	return true

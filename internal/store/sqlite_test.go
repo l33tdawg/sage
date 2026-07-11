@@ -1510,7 +1510,7 @@ func TestListMemoriesActiveHidesDeprecated(t *testing.T) {
 }
 
 // TestInsertMemory_StampsEmbeddingProvider guards the v11 fix where every new
-// memory landed with embedding_provider='' and the dashboard forever counted
+// memory landed with embedding_provider=” and the dashboard forever counted
 // it as "needs re-embed" even though the vector was semantic. The stamp must
 // survive the insert AND the upsert path must never clobber an existing stamp
 // with an empty one.

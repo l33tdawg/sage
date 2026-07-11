@@ -201,7 +201,8 @@ func handleMCPConfig(w http.ResponseWriter, r *http.Request) {
 				"command": execPath,
 				"args":    []string{"mcp"},
 				"env": map[string]string{
-					"SAGE_HOME": SageHome(),
+					"SAGE_HOME":    SageHome(),
+					"SAGE_API_URL": mcpConfigAPIURL,
 				},
 			},
 		},
@@ -236,7 +237,8 @@ func handleInstallMCP(w http.ResponseWriter, r *http.Request) {
 		"command": execPath,
 		"args":    []string{"mcp"},
 		"env": map[string]string{
-			"SAGE_HOME": SageHome(),
+			"SAGE_HOME":    SageHome(),
+			"SAGE_API_URL": mcpConfigAPIURL,
 		},
 	}
 
@@ -741,7 +743,7 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
 
   <div class="tabs">
     <div class="tab active" onclick="switchPlatform('claude')">Claude Desktop</div>
-    <div class="tab" onclick="switchPlatform('chatgpt')">ChatGPT</div>
+	<div class="tab" onclick="switchPlatform('chatgpt')">ChatGPT / Codex</div>
     <div class="tab" onclick="switchPlatform('claude-code')">Claude Code</div>
   </div>
 
@@ -769,11 +771,10 @@ label { display: block; margin-top: 1rem; color: #9ca3af; font-size: 0.9rem; }
 
   <div id="platform-chatgpt" style="display:none">
     <ol class="instructions">
-      <li>Open the <strong>ChatGPT desktop app</strong> (not the website)</li>
-      <li>Go to <strong>Settings</strong> &rarr; <strong>Beta features</strong></li>
-      <li>Enable <strong>MCP Servers</strong> if not already on</li>
-      <li>Add a new MCP server with the configuration below</li>
-      <li><strong>Restart ChatGPT</strong></li>
+	  <li>Finish setup, then open CEREBRUM <strong>Settings &rarr; Connection &rarr; Connect an AI tool</strong></li>
+	  <li>For <strong>Codex mode</strong> in the new ChatGPT desktop app, choose <strong>On this computer &rarr; ChatGPT desktop — Codex</strong>; SAGE writes the shared Codex MCP config</li>
+	  <li>For <strong>ChatGPT Work</strong> on the web or in the desktop app, choose <strong>ChatGPT Work</strong>; SAGE guides you through the OpenAI plugin + Secure MCP Tunnel</li>
+	  <li>Regular Chat remains supported from the <strong>Quick chat</strong> button, but it does not use the local Codex MCP configuration</li>
     </ol>
   </div>
 

@@ -13,7 +13,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -157,7 +156,12 @@ func (h *DashboardHandler) handleGuestJoinStart(w http.ResponseWriter, r *http.R
 	h.GuestJoin.active = sess
 	h.GuestJoin.mu.Unlock()
 
-	go h.pollForBundle(ctx, sess, base, tok.SessionID, secret)
+	h.runBackground(func(nodeCtx context.Context) {
+		pollCtx, pollCancel := context.WithCancel(nodeCtx)
+		stopSessionCancel := context.AfterFunc(ctx, pollCancel)
+		defer func() { stopSessionCancel(); pollCancel() }()
+		h.pollForBundle(pollCtx, sess, base, tok.SessionID, secret)
+	})
 
 	writeJSONResp(w, http.StatusOK, map[string]any{"sas": localSAS})
 }
@@ -289,21 +293,18 @@ func (h *DashboardHandler) handleGuestJoinRestart(w http.ResponseWriter, r *http
 		writeError(w, http.StatusConflict, "no staged join to apply")
 		return
 	}
-	execPath, err := os.Executable()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot determine binary path")
+	if !restartInProcessSupported() || h.RequestRestart == nil {
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"ok": false, "restart_required": true,
+			"message": "The network is ready to join. Fully quit SAGE and open it again to finish.",
+		})
 		return
 	}
-	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "Joining and restarting..."})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	if err := h.RequestRestart(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "could not begin a clean restart: "+err.Error())
+		return
 	}
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		if err := restartSelf(execPath); err != nil { // no-op + logged on Windows
-			log.Printf("network join apply: restart failed: %v", err)
-		}
-	}()
+	writeJSONResp(w, http.StatusAccepted, map[string]any{"ok": true, "status": "draining", "message": "Joining and restarting cleanly…"})
 }
 
 // guestPost POSTs JSON to the host pairing listener and decodes the response.

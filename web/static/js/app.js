@@ -1,7 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
-rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl,
+rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
@@ -10,6 +10,7 @@ chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
 fedConnections, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedSyncResend, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
+import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useCallback, useContext } = preactHooks;
@@ -2050,6 +2051,7 @@ function TasksPage({ sse }) {
     const reloadTimer = useRef(null);
     const movedThisSession = useRef(new Set()); // keeps just-completed old cards visible (see isRecentDone)
     const agentName = (id) => { const a = agentList.find(x => x.agent_id === id); return a ? a.name : (id ? id.slice(0, 8) : ''); };
+	const taskSummary = (task) => task.content.replace(/^\[TASK\]\s*/i, '').trim().slice(0, 80) || 'Untitled task';
 
     // Board / Messages tabs. The agent message bus (formerly its own Pipeline
     // page) lives here as a second tab; #/pipeline deep-links keep working and
@@ -2127,7 +2129,10 @@ function TasksPage({ sse }) {
             setTasks(items);
             const ds = [...new Set(items.map(t => t.domain_tag).filter(Boolean))].sort();
             setDomains(ds);
-        } catch (e) { setTasks([]); setError(e && e.message ? e.message : 'Failed to load tasks'); }
+        } catch (e) {
+			console.error('Task board load failed:', e);
+			setError('SAGE could not load your task list. Your tasks are still safe; try again.');
+		}
         setLoading(false);
     }
 
@@ -2270,6 +2275,8 @@ function TasksPage({ sse }) {
         .filter(t => !domainFilter || t.domain_tag === domainFilter)
         .filter(t => !agentFilter || (agentFilter === '__human__' ? !t.provider : t.provider === agentFilter))
         .filter(isRecentDone);
+	const validTaskStatuses = new Set(TASK_COLUMNS.map(c => c.key));
+	const unclassifiedTasks = filtered.filter(t => !validTaskStatuses.has(t.task_status));
     const hiddenDoneCount = tasks.filter(t => (t.task_status === 'done' || t.task_status === 'dropped') && !isRecentDone(t)).length;
 
     return html`
@@ -2287,30 +2294,32 @@ function TasksPage({ sse }) {
             <div class="tasks-header">
                 <div>
                     <h2 class="tasks-title">Task Board <${HelpTip} text="Each card is a governed memory tagged [TASK], flowing through consensus like any other memory. Drag a card between columns, or use the play / check / drop buttons to move it through Planned, In Progress, Done, and Dropped." /><${PageHelp} section="getting-started" label="How SAGE memories work" /></h2>
-                    <div class="network-header-sub">Plan work as memories - drag cards across the board or use the card buttons to change status.</div>
+                    <div class="network-header-sub">This computer's work queue. Task content is a governed memory; board status, assignment, and inbox notices stay local to this node.</div>
                 </div>
                 <div class="tasks-filters">
-                    <select class="filter-select" value=${domainFilter} onChange=${e => setDomainFilter(e.target.value)}>
+                    <select class="filter-select" aria-label="Filter tasks by domain" value=${domainFilter} onChange=${e => setDomainFilter(e.target.value)}>
                         <option value="">All domains</option>
                         ${domains.map(d => html`<option value=${d}>${d}</option>`)}
                     </select>
                     ${taskAuthors.length > 0 && html`
-                        <select class="filter-select" value=${agentFilter} onChange=${e => setAgentFilter(e.target.value)} title="Filter by who created the task">
+                        <select class="filter-select" aria-label="Filter tasks by author" value=${agentFilter} onChange=${e => setAgentFilter(e.target.value)} title="Filter by who created the task">
                             <option value="">All authors</option>
                             <option value="__human__">You (dashboard)</option>
                             ${taskAuthors.map(p => html`<option value=${p}>${p}</option>`)}
                         </select>
                     `}
                     <button class="btn" onClick=${() => setShowAddForm(!showAddForm)} title="Add task" style="font-weight:bold;">+ Add</button>
-                    <button class="btn" onClick=${loadTasks} title="Refresh">↻</button>
+                    <button class="btn" onClick=${loadTasks} title="Refresh" aria-label="Refresh task board">↻</button>
                 </div>
             </div>
             ${showAddForm && html`
                 <form class="task-add-form" onSubmit=${handleAddTask}>
                     <input class="task-add-input" type="text" placeholder="What needs to be done?"
+						aria-label="Task description"
                         value=${newContent} onInput=${e => setNewContent(e.target.value)}
                         autoFocus disabled=${adding} />
                     <input class="task-add-domain" type="text" placeholder="domain (optional)"
+						aria-label="Task domain (optional)"
                         value=${newDomain} onInput=${e => setNewDomain(e.target.value)}
                         disabled=${adding} list="domain-suggestions" />
                     <datalist id="domain-suggestions">
@@ -2335,21 +2344,44 @@ function TasksPage({ sse }) {
                 </div>
             `}
             ${error && html`
-                <div style="background:var(--danger-tint);border:1px solid rgba(239,68,68,0.4);color:var(--danger);padding:12px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
-                    <span style="flex:1;">Couldn't load tasks: ${error}</span>
+                <div role="alert" aria-live="assertive" style="background:var(--danger-tint);border:1px solid rgba(239,68,68,0.4);color:var(--danger);padding:12px 16px;border-radius:8px;margin-bottom:12px;display:flex;align-items:center;gap:12px;font-size:13px;">
+                    <span style="flex:1;">${error}</span>
                     <button class="btn" onClick=${loadTasks}>Retry</button>
                 </div>
             `}
-            ${filtered.length === 0 && !loading && !error ? html`
+            ${loading ? html`
+				<div class="kanban-empty" role="status" style="padding:32px;">Loading your tasks…</div>
+			` : error ? null : filtered.length === 0 ? html`
                 <${EmptyState} icon="tasks"
                     headline=${tasks.length === 0 ? 'No tasks yet' : 'No tasks in this view'}
                     hint=${tasks.length === 0
-                        ? 'Tasks are governed memories tagged [TASK]. Add one, then drag it across Planned, In progress, and Done as work moves.'
-                        : 'No tasks match the current domain filter. Clear the filter or add a task to this domain.'}
-                    actionLabel="Add a task"
-                    onAction=${() => setShowAddForm(true)} />
-            ` : html`
-            <div class="kanban-board">
+						? 'Only work explicitly saved as a task appears here; ordinary agent chats and completed conversations are not converted automatically. Add one here, or ask an agent to add it to your task list (using sage_task), then track it through Planned, In progress, and Done.'
+						: 'No tasks match the current filters. Clear the domain or author filter to see the full board.'}
+				actionLabel=${tasks.length === 0 ? 'Add a task' : 'Clear filters'}
+				onAction=${() => { if (tasks.length === 0) setShowAddForm(true); else { setDomainFilter(''); setAgentFilter(''); } }} />
+			` : html`
+			<div style="display:flex;flex:1;flex-direction:column;gap:12px;min-height:0;overflow:auto;">
+			${unclassifiedTasks.length > 0 && html`
+				<div class="warning-banner" style="margin:0;flex:0 0 auto;" role="region" aria-labelledby="historical-task-status-heading">
+					<div id="historical-task-status-heading" style="font-weight:700;color:var(--text);margin-bottom:5px;">${unclassifiedTasks.length} historical task${unclassifiedTasks.length !== 1 ? 's need' : ' needs'} a status</div>
+					<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">These are real task memories from an older SAGE version, but their last board position was not saved. SAGE will not guess whether the work is still planned or already finished. Choose the correct status for each task.</div>
+					<div role="list" style="max-height:240px;overflow:auto;padding-right:4px;">
+					${unclassifiedTasks.map(task => html`
+						<div role="listitem" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 0;border-top:1px solid rgba(255,255,255,.08);">
+							<div style="flex:1;min-width:220px;">
+								<div style="font-size:13px;color:var(--text);">${taskSummary(task)}</div>
+								<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${task.domain_tag || 'general'} · ${task.provider ? `created by ${task.provider}` : 'created from CEREBRUM'}</div>
+							</div>
+							<button class="btn btn-sm" aria-label=${`Set ${taskSummary(task)} to Planned`} onClick=${() => moveTask(task.memory_id, 'planned')}>Planned</button>
+							<button class="btn btn-sm" aria-label=${`Set ${taskSummary(task)} to In progress`} onClick=${() => moveTask(task.memory_id, 'in_progress')}>In progress</button>
+							<button class="btn btn-sm" aria-label=${`Set ${taskSummary(task)} to Done`} onClick=${() => moveTask(task.memory_id, 'done')}>Done</button>
+							<button class="btn btn-sm" aria-label=${`Set ${taskSummary(task)} to Dropped`} onClick=${() => moveTask(task.memory_id, 'dropped')}>Dropped</button>
+						</div>
+					`)}
+					</div>
+				</div>
+			`}
+			<div class="kanban-board">
                 ${TASK_COLUMNS.map(col => {
                     const colTasks = filtered.filter(t => t.task_status === col.key);
                     return html`
@@ -2397,6 +2429,7 @@ function TasksPage({ sse }) {
                                                 <span style="font-size:10px;color:var(--text-muted);">${task.assignee ? '👤' : 'Assign:'}</span>
                                                 <select style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:4px;"
                                                     value=${task.assignee || ''}
+											aria-label=${`Assign ${taskSummary(task)} to an agent`}
                                                     onClick=${e => e.stopPropagation()}
                                                     onChange=${e => { e.stopPropagation(); doAssign(task.memory_id, e.target.value); }}
                                                     title=${task.assignee ? 'Assigned to ' + agentName(task.assignee) : 'Assign this task to an agent'}>
@@ -2405,29 +2438,29 @@ function TasksPage({ sse }) {
                                                 </select>
                                             </div>
                                         `}
-                                        ${col.key !== 'done' && col.key !== 'dropped' ? html`
-                                            <div class="kanban-card-actions">
-                                                ${col.key === 'planned' && html`
-                                                    <button class="kanban-action" title="Start" onClick=${() => moveTask(task.memory_id, 'in_progress')}>▶</button>
-                                                `}
-                                                ${col.key === 'in_progress' && html`
-                                                    <button class="kanban-action" title="Done" onClick=${() => moveTask(task.memory_id, 'done')}>✓</button>
-                                                `}
-                                                <button class="kanban-action kanban-action-drop" title="Drop" onClick=${() => moveTask(task.memory_id, 'dropped')}>✕</button>
-                                            </div>
-                                        ` : null}
+						<div class="kanban-card-actions">
+							<span style="font-size:10px;color:var(--text-muted);">Status:</span>
+							<select class="kanban-status-select"
+								value=${task.task_status}
+								aria-label=${`Change status for ${taskSummary(task)}`}
+								onClick=${e => e.stopPropagation()}
+								onChange=${e => { e.stopPropagation(); moveTask(task.memory_id, e.target.value); }}>
+								${TASK_COLUMNS.map(status => html`<option value=${status.key}>${status.label}</option>`)}
+							</select>
+						</div>
                                     </div>
                                         `;
                                     })()}
                                 `)}
                                 ${colTasks.length === 0 && html`
-                                    <div class="kanban-empty">${loading ? 'Loading...' : 'No tasks'}</div>
+                                    <div class="kanban-empty">No tasks</div>
                                 `}
                             </div>
                         </div>
                     `;
                 })}
-            </div>`}
+			</div>
+			</div>`}
             `}
         </div>
     `;
@@ -3347,6 +3380,34 @@ function SynapticLedger() {
 // Software Update Component
 // ============================================================================
 
+async function restartAndWaitForNewBoot(expectedVersion = '') {
+    const restart = await restartServer();
+    if (!restart?.ok) {
+        return { ok: false, manual: !!restart?.restart_required, message: restart?.message || restart?.error || 'SAGE could not begin a clean restart.' };
+    }
+    // The process that accepted POST /restart is the process we must observe
+    // leaving. A health preflight can race with some other restart (A health,
+    // B accepts POST); using A would incorrectly accept still-running B.
+    const previousBootID = restartBaselineBootID(restart);
+    if (!previousBootID) {
+        return { ok: false, message: 'SAGE could not verify which process is restarting. Fully quit SAGE, open it again, then check the running version.' };
+    }
+    for (let attempt = 0; attempt < 120; attempt++) {
+		await new Promise(resolve => setTimeout(resolve, 500));
+		try {
+			const response = await fetch('/v1/dashboard/health', { cache: 'no-store' });
+                if (!response.ok) continue;
+                const health = await response.json();
+                if (requestedRestartIsReady(previousBootID, health, expectedVersion)) {
+                    return { ok: true, health };
+                }
+		} catch (_) {
+			// Expected while the old listener is down and the new process is starting.
+		}
+	}
+	return { ok: false, message: 'SAGE did not return as a new, ready process. Fully quit it, open it again, then use Check for updates.' };
+}
+
 function SoftwareUpdate() {
     const [updateInfo, setUpdateInfo] = useState(null);
     const [checking, setChecking] = useState(false);
@@ -3373,6 +3434,37 @@ function SoftwareUpdate() {
     };
 
     useEffect(() => { doCheck(); }, []);
+
+	// SSE makes progress feel live; this durable status poll owns correctness
+	// across navigation, sleep, or a dropped event stream.
+	useEffect(() => {
+		let active = true;
+		const poll = async () => {
+			try {
+				const status = await fetchUpdateStatus();
+				if (!active) return;
+				const state = status.state || {};
+				if (status.in_progress) setUpdating(true);
+				if (state.step === 'complete' && state.status === 'done') {
+					setInstalled(true); setUpdating(false); setCurrentStep(null);
+				} else if (state.status === 'error') {
+					setError(state.message || 'Update failed'); setUpdating(false);
+				} else if (status.in_progress && state.step && state.step !== 'idle') {
+					setCurrentStep(state);
+					setSteps(prev => {
+						const existing = prev.findIndex(s => s.step === state.step);
+						if (existing < 0) return [...prev, state];
+						const next = [...prev];
+						next[existing] = state;
+						return next;
+					});
+				}
+			} catch (_) {}
+		};
+		poll();
+		const id = setInterval(poll, 1500);
+		return () => { active = false; clearInterval(id); };
+	}, []);
 
     // Listen for SSE update events when an update is in progress
     useEffect(() => {
@@ -3416,16 +3508,24 @@ function SoftwareUpdate() {
     }, [updating]);
 
     const doUpdate = async () => {
+		if (updateInfo?.in_app_update_supported === false) {
+			setError(updateInfo?.update_instructions || 'Use the signed release installer, then reopen SAGE.');
+			return;
+		}
         if (!updateInfo?.download_url) {
             setError('No download URL available for your platform');
             return;
         }
+		if (!updateInfo?.checksum) {
+			setError('This release does not include a verified checksum. Use the release page installer instead.');
+			return;
+		}
         setUpdating(true);
         setError(null);
         setSteps([]);
         setCurrentStep(null);
         try {
-            const res = await applyUpdate(updateInfo.download_url);
+            const res = await applyUpdate(updateInfo.download_url, updateInfo.checksum);
             if (!res.ok) {
                 setError(res.error || 'Update failed to start');
                 setUpdating(false);
@@ -3439,15 +3539,19 @@ function SoftwareUpdate() {
 
     const doRestart = async () => {
         setRestarting(true);
-        try { await restartServer(); } catch (e) { /* expected */ }
-        // Server will restart — poll until back
-        setTimeout(() => {
-            const poll = setInterval(() => {
-                fetch('/health').then(r => {
-                    if (r.ok) { clearInterval(poll); window.location.reload(); }
-                }).catch(() => {});
-            }, 1000);
-        }, 2000);
+		setError(null);
+		try {
+			const result = await restartAndWaitForNewBoot(updateInfo?.disk_version || updateInfo?.latest_version || '');
+			if (result.ok) {
+				try { sessionStorage.setItem('sage-update-restarted', result.health?.version || 'updated'); } catch (_) {}
+				window.location.reload();
+				return;
+			}
+			setError(result.message);
+		} catch (e) {
+			setError('SAGE could not restart: ' + (e.message || 'unknown error'));
+		}
+		setRestarting(false);
     };
 
     const formatSize = (bytes) => {
@@ -3464,7 +3568,7 @@ function SoftwareUpdate() {
     };
 
     const stepLabel = (step) => {
-        const labels = { download: 'Download', verify: 'Verify checksum', extract: 'Extract binary', install: 'Install' };
+        const labels = { queued: 'Prepare', download: 'Download', verify: 'Verify checksum', extract: 'Extract binary', install: 'Install' };
         return labels[step] || step;
     };
 
@@ -3522,6 +3626,14 @@ function SoftwareUpdate() {
                 </div>
             `}
 
+			${updateInfo?.in_app_update_supported === false && (updateInfo?.update_available || (updateInfo?.restart_required && updateInfo?.in_app_restart_supported === false)) && html`
+				<div class="warning-banner" style="margin:12px 0;">
+					${updateInfo?.restart_required
+						? 'The update is installed. Fully quit SAGE—not just this browser tab—then open SAGE again to run the new version.'
+						: (updateInfo?.update_instructions || 'Download the signed release, fully quit SAGE, install it, then open SAGE again.')}
+				</div>
+			`}
+
             ${(updating || installed) && steps.length > 0 && html`
                 <div class="update-steps">
                     ${steps.map(s => html`
@@ -3541,11 +3653,17 @@ function SoftwareUpdate() {
                     </button>
                 `}
 
-                ${updateInfo?.update_available && !updateInfo?.restart_required && !installed && !updating && html`
+                ${updateInfo?.update_available && !updateInfo?.restart_required && !installed && !updating && updateInfo?.in_app_update_supported !== false && html`
                     <button class="btn btn-primary" onClick=${doUpdate}>
                         Update Now
                     </button>
                 `}
+
+				${updateInfo?.in_app_update_supported === false && updateInfo?.release_url && updateInfo?.update_available && !updateInfo?.restart_required && html`
+					<a class="btn btn-primary" href="${updateInfo.release_url}" target="_blank" rel="noopener">
+						Download Signed Release
+					</a>
+				`}
 
                 ${updating && html`
                     <button class="btn btn-primary" disabled>
@@ -3553,7 +3671,7 @@ function SoftwareUpdate() {
                     </button>
                 `}
 
-                ${(installed || updateInfo?.restart_required) && !restarting && !updating && html`
+                ${(installed || updateInfo?.restart_required) && updateInfo?.in_app_restart_supported !== false && !restarting && !updating && html`
                     <button class="btn btn-primary update-restart-btn" onClick=${doRestart}>
                         Restart to Apply
                     </button>
@@ -4810,6 +4928,7 @@ function RerankerControl() {
 function RestartNodeButton() {
     const [arming, setArming] = useState(false);
     const [busy, setBusy] = useState(false);
+	const [restartError, setRestartError] = useState('');
     const armRef = useRef(null);
     useEffect(() => () => { if (armRef.current) clearTimeout(armRef.current); }, []);
     const doRestart = async () => {
@@ -4819,8 +4938,18 @@ function RestartNodeButton() {
             return;
         }
         if (armRef.current) clearTimeout(armRef.current);
-        setArming(false); setBusy(true);
-        try { await restartServer(); } catch (e) {}
+		setArming(false); setBusy(true); setRestartError('');
+		try {
+			const result = await restartAndWaitForNewBoot();
+			if (result.ok) {
+				window.location.reload();
+				return;
+			}
+			setRestartError(result.message);
+		} catch (e) {
+			setRestartError('SAGE could not restart. Fully quit it and open it again.');
+		}
+		setBusy(false);
     };
     return html`
         <div class="settings-row">
@@ -4832,6 +4961,7 @@ function RestartNodeButton() {
             </span>
         </div>
         ${arming ? html`<div style="font-size:11px;color:var(--warning);margin-top:4px;">Restarting re-locks the vault - you will need to unlock again. The node is briefly offline.</div>` : ''}
+		${restartError ? html`<div style="font-size:11px;color:var(--danger);margin-top:4px;">${restartError}</div>` : ''}
     `;
 }
 
@@ -5108,7 +5238,7 @@ function SettingsPage({ onRunSetup }) {
     // Background update check on page load + every 12 hours
     useEffect(() => {
         const doCheck = () => checkForUpdate().then(data => {
-            if (data && data.update_available) setUpdateAvailable(true);
+			setUpdateAvailable(!!(data && (data.update_available || data.restart_required)));
         }).catch(() => {});
         doCheck();
         const iv = setInterval(doCheck, 12 * 60 * 60 * 1000);
@@ -7075,6 +7205,7 @@ function NetworkPage({ sse }) {
     const [editDomainAccess, setEditDomainAccess] = useState({});
     const [accessDirty, setAccessDirty] = useState(false);
     const [accessSaved, setAccessSaved] = useState(false);
+    const [accessFailures, setAccessFailures] = useState([]);
     const [editVisibleAgents, setEditVisibleAgents] = useState('');
     // Edit mode state
     const [editing, setEditing] = useState(false);
@@ -7247,6 +7378,7 @@ function NetworkPage({ sse }) {
             setEditClearance(agent.clearance);
             setAccessDirty(false);
             setAccessSaved(false);
+            setAccessFailures([]);
             setEditVisibleAgents(agent.visible_agents || '');
             // Parse domain_access
             let parsed = {};
@@ -7258,12 +7390,25 @@ function NetworkPage({ sse }) {
         }
     }, [expandedId]);
 
-    const handleAccessSave = useCallback(async (agentId) => {
+    const handleAccessSave = useCallback(async (agentId, adminOverride = false) => {
         const arr = Object.entries(editDomainAccess)
             .filter(([_, v]) => v.read || v.write)
             .map(([domain, p]) => ({ domain, read: p.read, write: p.write }));
         try {
-            const res = await updateAgent(agentId, { clearance: editClearance, domain_access: JSON.stringify(arr), visible_agents: editVisibleAgents });
+            const overrideConfirmations = adminOverride
+                ? accessFailures.filter(f => f.override_ready).map(f => ({
+                    domain: f.domain,
+                    owner_id: f.owner_id,
+                    owned_domain: f.owned_domain || f.domain,
+                    level: f.level || 0,
+                }))
+                : [];
+            const res = await updateAgent(agentId, {
+                clearance: editClearance,
+                domain_access: JSON.stringify(arr),
+                visible_agents: editVisibleAgents,
+                admin_override: overrideConfirmations,
+            });
             if (res.error) { showToast(res.error, 'error'); return; }
             // Surface the real per-domain on-chain grant/revoke results. Grants are
             // issued (and revokes applied) on Save, signed by each domain's owner key;
@@ -7272,16 +7417,36 @@ function NetworkPage({ sse }) {
             // an "auto-heal" promise.
             const grantResults = Array.isArray(res.grant_results) ? res.grant_results : [];
             const failed = grantResults.filter(g => g && g.ok === false);
+            setAccessFailures(failed);
             if (failed.length > 0) {
-                const detail = failed.map(g => {
-                    const verb = g.action === 'revoke' ? 'revoke' : 'grant';
-                    return `${g.domain} (${verb} failed${g.error ? ': ' + g.error : ''})`;
-                }).join(', ');
-                showToast(`Access saved, but ${failed.length} on-chain ${failed.length === 1 ? 'change' : 'changes'} did not apply: ${detail}. This node must hold the domain owner's signing key to grant or revoke access on it.`, 'warning', 10000);
+                // Keep consensus diagnostics available to developers without
+                // dumping transaction internals into an operator-facing toast.
+                console.warn('Domain access update details:', failed);
+                const names = failed.slice(0, 3).map(g => g.domain).join(', ');
+                const more = failed.length > 3 ? ` and ${failed.length - 3} more` : '';
+                const codes = new Set(failed.map(g => g.code));
+                if (failed.some(f => f.override_ready)) {
+                    showToast(`Access needs your confirmation for ${names}${more}. Review the owner details below, then choose “Admin override & assign”.`, 'warning', 9000);
+                } else if (failed.some(f => f.override_available && !f.override_ready)) {
+                    showToast(`Admin override for ${names}${more} requires app-v18 activation. The selected access is saved; review Network health before trying the override again.`, 'warning', 9000);
+                } else if ([...codes].every(c => c === 'owner_key_unavailable')) {
+                    showToast(`Access could not be changed for ${names}${more} because those domains are managed by another node. Ask the domain owner to approve access or transfer ownership here.`, 'warning', 9000);
+                } else if ([...codes].every(c => c === 'owner_access')) {
+                    showToast(`The selected agent owns ${names}${more}, so its access cannot be removed. Transfer domain ownership first.`, 'warning', 8000);
+                } else if (codes.has('admin_key_unavailable')) {
+                    showToast(`CEREBRUM could not authorize access for ${names}${more}. Restart this node and try again; if it continues, restore the genesis admin key.`, 'error', 9000);
+                } else if (codes.has('override_not_active')) {
+                    showToast('Administrator override requires app-v18 activation. Check Network health before trying again.', 'warning', 9000);
+                } else {
+                    showToast(`Some access changes could not be completed for ${names}${more}. Try again; if it continues, check Network health.`, 'warning', 8000);
+                }
             } else if (res.on_chain_warning) {
-                showToast('Access saved, but an on-chain sync issue was reported: ' + res.on_chain_warning, 'warning', 8000);
+                console.warn('On-chain permission sync detail:', res.on_chain_warning);
+                showToast('Access was saved locally, but the network has not confirmed it yet. Try again in a moment.', 'warning', 7000);
             } else if (grantResults.length > 0) {
-                showToast(`Access saved. On-chain access updated for ${grantResults.length} ${grantResults.length === 1 ? 'domain' : 'domains'}.`, 'success');
+                showToast(adminOverride
+                    ? `Admin override applied. Access changed for ${grantResults.length} ${grantResults.length === 1 ? 'domain' : 'domains'}; ownership was not changed.`
+                    : `Access saved. On-chain access updated for ${grantResults.length} ${grantResults.length === 1 ? 'domain' : 'domains'}.`, 'success');
             } else {
                 showToast('Access saved.', 'success');
             }
@@ -7290,7 +7455,24 @@ function NetworkPage({ sse }) {
             setAccessSaved(true);
             setTimeout(() => setAccessSaved(false), 2000);
         } catch (e) { showToast('Failed to save access: ' + e.message, 'error'); }
-    }, [editRole, editClearance, editDomainAccess, editVisibleAgents, loadAgents]);
+    }, [editRole, editClearance, editDomainAccess, editVisibleAgents, accessFailures, loadAgents]);
+
+    const handleAdminAccessOverride = useCallback(async (agent) => {
+        const eligible = accessFailures.filter(f => f.override_ready);
+        if (eligible.length === 0) return;
+        const ownership = eligible.map(f => {
+            const owner = agents.find(a => a.agent_id === f.owner_id);
+            const ownerLabel = owner?.name || 'Unknown agent';
+            const levelLabel = f.level === 2 ? 'Read + write' : f.level === 1 ? 'Read' : 'Remove access';
+            const ancestor = f.owned_domain && f.owned_domain !== f.domain ? ` (owned through ${f.owned_domain})` : '';
+            return `${f.domain} — ${levelLabel}\nOriginal owner: ${ownerLabel} (${f.owner_id})${ancestor}`;
+        }).join('\n');
+        const confirmed = await showConfirmation(
+            `Give ${agent.name} the selected access as genesis admin?\n\n${ownership}\n\nThis changes access only. Original ownership and memory authorship stay unchanged.`,
+            { title: 'Admin access override', confirmLabel: 'Override & assign' }
+        );
+        if (confirmed) await handleAccessSave(agent.agent_id, true);
+    }, [accessFailures, agents, handleAccessSave]);
 
     const handleOverviewSave = useCallback(async (agentId) => {
         try {
@@ -7556,7 +7738,7 @@ function NetworkPage({ sse }) {
                         <div class="ext-client-icon">🔌</div>
                         <div class="ext-client-info">
                             <div class="ext-client-title">Connect an AI tool</div>
-                            <div class="ext-client-desc">Claude Code, Codex, Cursor, Windsurf, or Claude Desktop - on this computer or another. We write the config for you.</div>
+							<div class="ext-client-desc">ChatGPT desktop (Codex mode), Claude Code, Codex CLI, Cursor, Windsurf, or Claude Desktop - on this computer or another. We write the config for you.</div>
                         </div>
                         <div class="ext-client-cta">Get started →</div>
                     </div>
@@ -7566,7 +7748,7 @@ function NetworkPage({ sse }) {
 
             <div class="ext-clients-section">
                 <div class="ext-clients-header">
-                    <h3>Connect external clients <${HelpTip} text="Wire SAGE up to ChatGPT, Cursor, Cline, or Claude Desktop. ChatGPT uses OpenAI Secure MCP Tunnel; local tools use generated MCP config." /></h3>
+					<h3>Connect ChatGPT Work <${HelpTip} text="Use this plugin/tunnel path for ChatGPT Work on the web or in the desktop app. Codex mode in the desktop app has a simpler local setup under Connect an AI tool." /></h3>
                 </div>
                 <div class="ext-clients-grid">
                     <div class="ext-client-card" role="button" tabIndex="0"
@@ -7574,8 +7756,8 @@ function NetworkPage({ sse }) {
                         onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setShowChatGPTWizard(true); } }}>
                         <div class="ext-client-icon">🤖</div>
                         <div class="ext-client-info">
-                            <div class="ext-client-title">Connect to ChatGPT</div>
-                            <div class="ext-client-desc">Uses OpenAI Secure MCP Tunnel. No domain, no public URL, no inbound firewall rule.</div>
+							<div class="ext-client-title">Connect ChatGPT Work</div>
+							<div class="ext-client-desc">Uses an OpenAI plugin and Secure MCP Tunnel on the web or in the desktop app. Codex mode can connect locally.</div>
                         </div>
                         <div class="ext-client-cta">Setup wizard →</div>
                     </div>
@@ -7712,13 +7894,50 @@ function NetworkPage({ sse }) {
                                                 Role is set at registration and cannot be changed here.
                                             </div>
 
-                                            <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read from and write to. Enabling write automatically enables read. On Save, SAGE issues on-chain access grants (write = read+write, read-only = read) or revokes for each domain, signed by that domain's owner - enforcement is by those grants. Any grant the owner's key isn't available to sign is reported instead of applied silently." /></div>
+                                            <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read from and write to. The domain owner normally authorizes the change. For an agent installed on this computer, the genesis admin can explicitly override access without changing the original owner or memory authorship." /></div>
                                             <${DomainAccessMatrix}
                                                 domains=${allDomains}
                                                 domainAccess=${editDomainAccess}
                                                 onChange=${(v) => { setEditDomainAccess(v); setAccessDirty(true); }}
                                                 disabled=${editRole === 'admin'}
                                             />
+                                            ${accessFailures.length > 0 && html`
+                                                <div style="margin-top:12px;padding:12px 14px;border:1px solid rgba(245,158,11,.35);border-radius:10px;background:rgba(245,158,11,.08);" onClick=${e => e.stopPropagation()}>
+                                                    <div style="font-weight:700;color:var(--text);margin-bottom:7px;">Some access changes need attention</div>
+                                                    ${accessFailures.map(f => {
+                                                        const owner = agents.find(a => a.agent_id === f.owner_id);
+                                                        const ownerName = owner?.name || 'Unknown agent';
+                                                        const levelLabel = f.level === 2 ? 'Read + write' : f.level === 1 ? 'Read' : 'Remove access';
+                                                        const reason = f.code === 'owner_key_unavailable' ? 'The owner key is not available here.'
+                                                            : f.code === 'owner_access' ? 'This agent owns the domain; transfer ownership before removing its access.'
+                                                            : f.code === 'override_not_active' ? 'Administrator override requires app-v18 activation.'
+                                                            : f.code === 'owner_changed' ? 'Ownership changed after confirmation; review the current owner and try again.'
+                                                            : f.code === 'admin_key_unavailable' ? 'The genesis admin key is unavailable on this node.'
+                                                            : 'The network did not confirm this change. Try again or check Network health.';
+                                                        return html`<div style="font-size:12px;color:var(--text-muted);margin:8px 0;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.06);">
+                                                            <div><strong style="color:var(--text);">${f.domain}</strong> · ${levelLabel}</div>
+                                                            ${f.owner_id && html`<div style="margin-top:3px;">
+                                                                Original owner: ${ownerName} · <code title=${f.owner_id}>${f.owner_id.slice(0, 16)}…</code>
+                                                                <button class="btn btn-sm" style="margin-left:6px;padding:2px 6px;" title="Copy full owner ID" onClick=${() => navigator.clipboard.writeText(f.owner_id)}>Copy ID</button>
+                                                                ${f.owner_local ? ' · this computer' : ' · another node'}
+                                                                ${f.owned_domain && f.owned_domain !== f.domain ? ` · inherited from ${f.owned_domain}` : ''}
+                                                            </div>`}
+                                                            <div style="margin-top:3px;">${reason}</div>
+                                                        </div>`;
+                                                    })}
+                                                    ${accessFailures.some(f => f.override_ready) && html`
+                                                        <button class="btn btn-primary" style="margin-top:10px;" onClick=${() => handleAdminAccessOverride(agent)}>
+                                                            Admin override & assign
+                                                        </button>
+                                                    `}
+                                                    ${accessFailures.some(f => f.override_available && !f.override_ready) && html`
+                                                        <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">Admin override requires app-v18 activation. Check Network health for the current upgrade status.</div>
+                                                    `}
+                                                    ${!accessFailures.some(f => f.override_available) && accessFailures.some(f => f.code === 'owner_key_unavailable') && html`
+                                                        <div style="font-size:12px;color:var(--text-muted);margin-top:8px;">Admin override is available only when this agent's key is installed on this computer.</div>
+                                                    `}
+                                                </div>
+                                            `}
 
                                             <div class="access-section-title">Clearance Level <${HelpTip} text="5 tiers from Guest (0) to Top Secret (4). Determines the sensitivity of memories this agent can access." /></div>
                                             <div class="clearance-row" onClick=${e => e.stopPropagation()}>
@@ -8376,7 +8595,7 @@ ${runCommand}`;
         <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
             <div class="wizard-modal" style="max-width:720px;max-height:85vh;display:flex;flex-direction:column;">
                 <div class="wizard-header">
-                    <h2>Connect ChatGPT</h2>
+					<h2>Connect ChatGPT Work</h2>
                     <button class="detail-close" onClick=${onClose}>×</button>
                 </div>
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
@@ -8385,7 +8604,7 @@ ${runCommand}`;
                         <div>
                             <strong>Use OpenAI Secure MCP Tunnel.</strong>
                             <div style="color:var(--text-dim);font-size:13px;margin-top:3px;">
-                                ChatGPT connects through OpenAI's tunnel client to SAGE's local stdio MCP server. No domain, no inbound firewall, no public SAGE URL.
+								ChatGPT Work connects through an OpenAI plugin and tunnel client to SAGE's local stdio MCP server. No domain, no inbound firewall, no public SAGE URL. For Codex mode in the desktop app, close this wizard and use <strong>Connect an AI tool → On this computer → ChatGPT desktop — Codex</strong> instead.
                             </div>
                         </div>
                     </div>
@@ -8441,9 +8660,9 @@ ${runCommand}`;
                         ${running && html`<a class="btn" href=${status.ui_url || 'http://127.0.0.1:8081/ui'} target="_blank" rel="noopener">Open tunnel status →</a>`}
                     </div>
 
-                    <h3 style="margin:18px 0 8px;">3. Select the tunnel in ChatGPT</h3>
+					<h3 style="margin:18px 0 8px;">3. Select the tunnel in ChatGPT Work</h3>
                     <p style="color:var(--text-dim);margin-top:0;">
-                        In ChatGPT, open Settings → Plugins, create a developer-mode app, choose <strong>Tunnel</strong>,
+						In ChatGPT, open Work → Plugins, create a developer-mode app, choose <strong>Tunnel</strong>,
                         and select this tunnel. Keep the local tunnel daemon running while ChatGPT uses SAGE.
                     </p>
                     <div style="display:flex;gap:8px;flex-wrap:wrap;">
@@ -8512,7 +8731,6 @@ function RemoteAccessWizard({ agents, onClose, target }) {
     const [creatingTunnel, setCreatingTunnel] = useState(false);
 
     // Step 6: token mint
-    const [agentChoice, setAgentChoice] = useState('');
     const [tokenName, setTokenName] = useState(forChatGPT ? 'chatgpt' : 'remote');
     const [mintedToken, setMintedToken] = useState(null);
     const [minting, setMinting] = useState(false);
@@ -8622,14 +8840,13 @@ function RemoteAccessWizard({ agents, onClose, target }) {
         setMinting(true);
         setError(null);
         try {
-            const r = await wizardMintToken(agentChoice, tokenName);
+            const r = await wizardMintToken('', tokenName);
             if (r.error) { setError(r.error); }
             else { setMintedToken(r); setStep(7); }
         } catch (e) { setError('mint token failed: ' + e.message); }
         setMinting(false);
     };
 
-    const eligibleAgents = (agents || []).filter(a => a.status !== 'removed');
 
     return html`
         <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -8792,22 +9009,12 @@ function RemoteAccessWizard({ agents, onClose, target }) {
                     ${step === 6 && html`
                         <div style="line-height:1.55;">
                             <h3 style="margin-top:0;">Mint a bearer token</h3>
-                            <p>The bearer is the credential the ${forChatGPT ? 'ChatGPT connector' : 'remote tool'} will use to talk to SAGE. Tokens are scoped to a specific agent identity — pick (or create) the agent it should run as.</p>
-                            <div class="wizard-field">
-                                <label>Agent</label>
-                                <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
-                                    <option value="">Pick an agent...</option>
-                                    ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
-                                </select>
-                                <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
-                                    No dedicated agent yet? Cancel and create one in the Network tab first, then come back. (Best practice: dedicate one agent per remote tool for clear audit trails.)
-                                </div>
-                            </div>
+                            <p>The bearer is an administrator credential for this SAGE node. Remote HTTP MCP currently runs as the local node operator, and CEREBRUM records that identity honestly in the audit trail.</p>
                             <div class="wizard-field">
                                 <label>Token name</label>
                                 <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder=${forChatGPT ? 'chatgpt' : 'remote'} />
                             </div>
-                            <button class="btn btn-primary" onClick=${startMintToken} disabled=${minting || !agentChoice}>
+                            <button class="btn btn-primary" onClick=${startMintToken} disabled=${minting}>
                                 ${minting ? 'Minting…' : 'Mint bearer'}
                             </button>
                         </div>
@@ -8894,18 +9101,16 @@ function ChatGPTCopyField({ label, value, sensitive, multiline }) {
 // directly to localhost over the bearer auth scheme. The most local-first
 // option: zero external surface area.
 function CursorSetupPanel({ agents, onClose }) {
-    const [agentChoice, setAgentChoice] = useState('');
     const [tokenName, setTokenName] = useState('cursor');
     const [mintedToken, setMintedToken] = useState(null);
     const [minting, setMinting] = useState(false);
     const [error, setError] = useState(null);
-    const eligibleAgents = (agents || []).filter(a => a.status !== 'removed');
 
     const onMint = async () => {
         setMinting(true);
         setError(null);
         try {
-            const r = await wizardMintToken(agentChoice, tokenName);
+            const r = await wizardMintToken('', tokenName);
             if (r.error) setError(r.error);
             else setMintedToken(r);
         } catch (e) { setError('mint failed: ' + e.message); }
@@ -8932,18 +9137,12 @@ function CursorSetupPanel({ agents, onClose }) {
 
                     ${!mintedToken && html`
                         <h3 style="margin-top:18px;">1. Mint a bearer</h3>
-                        <div class="wizard-field">
-                            <label>Agent</label>
-                            <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
-                                <option value="">Pick an agent...</option>
-                                ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
-                            </select>
-                        </div>
+                        <p style="font-size:12px;color:var(--text-muted);">This bearer runs as the local node operator. Treat it like an administrator password and revoke it when the connection is no longer needed.</p>
                         <div class="wizard-field">
                             <label>Token name</label>
                             <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="cursor" />
                         </div>
-                        <button class="btn btn-primary" onClick=${onMint} disabled=${minting || !agentChoice}>
+                        <button class="btn btn-primary" onClick=${onMint} disabled=${minting}>
                             ${minting ? 'Minting…' : 'Mint bearer'}
                         </button>
                     `}
@@ -8982,8 +9181,9 @@ function CursorSetupPanel({ agents, onClose }) {
 // need an absolute project path); folder=false tools have one app-wide config
 // and ignore any path.
 const SAME_MACHINE_PROVIDERS = [
+	{ key: 'chatgpt-desktop', name: 'ChatGPT desktop — Codex', icon: '\u{1F4AC}', folder: false, detail: 'App-wide local MCP for Codex mode' },
     { key: 'claude-code', name: 'Claude Code', icon: '\u{1F916}', folder: true },
-    { key: 'codex', name: 'Codex', icon: '⌨️', folder: true },
+	{ key: 'codex', name: 'Codex project', icon: '⌨️', folder: true, detail: 'Project MCP + lifecycle hooks' },
     { key: 'cursor', name: 'Cursor', icon: '\u{1F4BB}', folder: true },
     { key: 'windsurf', name: 'Windsurf', icon: '\u{1F30A}', folder: false },
     { key: 'claude-desktop', name: 'Claude Desktop', icon: '\u{1F5A5}️', folder: false },
@@ -9047,7 +9247,7 @@ const REMOTE_PROVIDERS = [
     { key: 'cursor', name: 'Cursor / Cline', icon: '\u{1F4BB}', kind: 'url' },
     { key: 'windsurf', name: 'Windsurf', icon: '\u{1F30A}', kind: 'mcp-remote' },
     { key: 'claude-desktop', name: 'Claude Desktop', icon: '\u{1F5A5}️', kind: 'mcp-remote' },
-    { key: 'chatgpt', name: 'ChatGPT', icon: '\u{1F4AC}', kind: 'openai-tunnel' },
+	{ key: 'chatgpt', name: 'ChatGPT Work', icon: '\u{1F4AC}', kind: 'openai-tunnel' },
 ];
 
 // RemoteConnectPanel — Flow 2 body. A tool on another computer can only reach
@@ -9063,13 +9263,11 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
     const [tool, setTool] = useState('');
     const [base, setBase] = useState('');           // 'tunnel' | 'lan'
     const [lanIdx, setLanIdx] = useState(0);        // which lan_candidates entry the operator picked
-    const [agentChoice, setAgentChoice] = useState('');
     const [tokenName, setTokenName] = useState('remote');
     const [minting, setMinting] = useState(false);
     const [minted, setMinted] = useState(null);
     const [mintErr, setMintErr] = useState(null);
 
-    const eligibleAgents = (agents || []).filter(a => a.status !== 'removed');
     const selected = REMOTE_PROVIDERS.find(p => p.key === tool) || null;
 
     useEffect(() => {
@@ -9093,7 +9291,7 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
         setMinting(true);
         setMintErr(null);
         try {
-            const r = await wizardMintToken(agentChoice, tokenName || 'remote');
+            const r = await wizardMintToken('', tokenName || 'remote');
             if (r.error) setMintErr(r.error);
             else setMinted(r);
         } catch (e) { setMintErr('mint failed: ' + (e.message || e)); }
@@ -9242,31 +9440,20 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                     : html`
                         ${!minted && html`
                             <h4 style="margin:14px 0 8px;">Mint a bearer for the other computer</h4>
-                            ${eligibleAgents.length === 0
-                                ? html`<div class="import-error" style="margin-bottom:8px;">No agents yet — create one in the Network tab first, then come back to mint a bearer for it.</div>`
-                                : html`
-                                    <div class="wizard-field">
-                                        <label>Agent</label>
-                                        <select class="wizard-select" value=${agentChoice} onInput=${e => setAgentChoice(e.target.value)}>
-                                            <option value="">Pick an agent…</option>
-                                            ${eligibleAgents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.role}) — ${a.agent_id.slice(0,12)}…</option>`)}
-                                        </select>
-                                        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">No agent yet? Create one in the Network tab first. (Best practice: one dedicated agent per remote tool for clear audit trails.)</div>
-                                    </div>
+                            <p style="font-size:12px;color:var(--text-muted);">Remote HTTP MCP bearers run as the local node operator. Treat this as an administrator credential.</p>
                                     <div class="wizard-field">
                                         <label>Token name</label>
                                         <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="remote" />
                                     </div>
-                                    <button class="btn btn-primary" onClick=${onMint} disabled=${minting || !agentChoice}>
+                                    <button class="btn btn-primary" onClick=${onMint} disabled=${minting}>
                                         ${minting ? 'Minting…' : 'Mint bearer'}
                                     </button>
-                                `}
                         `}
 
                         ${minted && html`
                             <h4 style="margin:14px 0 8px;color:var(--accent-green);">✓ Token minted</h4>
                             <div class="warning-banner" style="margin-bottom:14px;">
-                                Save the bearer NOW — it's shown ONCE. It carries the agent's identity; treat it like a password.
+                                Save the bearer NOW — it's shown ONCE. It carries node-operator access; treat it like an administrator password.
                             </div>
                             <${ChatGPTCopyField} label="MCP Server URL" value=${baseUrl} />
                             <${ChatGPTCopyField} label="Bearer token (save now!)" value=${minted.token} sensitive=${true} />
@@ -9335,14 +9522,14 @@ function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
                                 onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); resetFlow1(); setView('flow1'); } }}>
                                 <div class="connect-card-icon">\u{1F5A5}️</div>
                                 <h4>On this computer</h4>
-                                <p>Claude Code, Codex, Cursor, Windsurf, or Claude Desktop running right here. SAGE writes its config.</p>
+								<p>ChatGPT desktop (Codex mode), Claude Code, Codex CLI, Cursor, Windsurf, or Claude Desktop. SAGE writes its config.</p>
                             </div>
                             <div class="connect-card" style="text-align:left;" role="button" tabIndex="0"
                                 onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}
                                 onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onOpenChatGPT && onOpenChatGPT('chatgpt'); } }}>
                                 <div class="connect-card-icon">\u{1F4AC}</div>
-                                <h4>ChatGPT</h4>
-                                <p>Use OpenAI Secure MCP Tunnel. No domain, no public SAGE URL, no inbound firewall rule.</p>
+								<h4>ChatGPT Work</h4>
+								<p>Use the OpenAI plugin + Secure MCP Tunnel path for Work on the web or in the desktop app.</p>
                             </div>
                             <div class="connect-card" style="text-align:left;" role="button" tabIndex="0"
                                 onClick=${() => setView('flow2')}
@@ -9381,7 +9568,7 @@ function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
                                     onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickProvider(p.key); } }}>
                                     <div class="connect-card-icon">${p.icon}</div>
                                     <h4>${p.name}</h4>
-                                    <p>${p.folder ? 'Per-project config' : 'App-wide config'}</p>
+									<p>${p.detail || (p.folder ? 'Per-project config' : 'App-wide config')}</p>
                                 </div>
                             `)}
                         </div>
@@ -9398,10 +9585,12 @@ function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
                             </div>
                         `}
 
-                        ${selected && html`
-                            <div style="font-size:11px;color:var(--text-muted);margin:10px 0 4px;">
-                                SAGE writes the config and the agent registers itself on first connect. You can manage its identity and permissions afterward here on the Agents page.
-                            </div>
+						${selected && html`
+							<div style="font-size:11px;color:var(--text-muted);margin:10px 0 4px;">
+								${selected.key === 'chatgpt-desktop'
+									? 'SAGE updates ~/.codex/config.toml for Codex mode in the ChatGPT desktop app; Codex CLI and the IDE extension share it. Restart ChatGPT, select Codex, and start a new task. Regular Chat remains supported through the Quick chat button; ChatGPT Work uses the plugin/tunnel setup.'
+									: 'SAGE writes the config and the agent registers itself on first connect. You can manage its identity and permissions afterward here on the Agents page.'}
+							</div>
                         `}
 
                         ${selected && html`
@@ -10458,6 +10647,20 @@ function App() {
     // over the hardcoded product constant, trimmed to base semver, so it never
     // goes stale the way the pinned SAGE_VERSION did.
     const [sageVersion, setSageVersion] = useState(SAGE_VERSION);
+    useEffect(() => {
+        let restartedVersion = '';
+        try {
+            restartedVersion = sessionStorage.getItem('sage-update-restarted') || '';
+            if (restartedVersion) sessionStorage.removeItem('sage-update-restarted');
+        } catch (_) {}
+        if (!restartedVersion) return;
+        const id = setTimeout(() => showToast(
+            `SAGE ${restartedVersion === 'updated' ? '' : restartedVersion + ' '}restarted cleanly. Restart any open ChatGPT, Codex, Claude, Cursor, or other AI app so it reconnects to the updated MCP.`,
+            'success',
+            12000,
+        ), 100);
+        return () => clearTimeout(id);
+    }, []);
     useEffect(() => {
         fetchHealth().then(h => {
             const m = (h && h.version || '').match(/\d+\.\d+\.\d+/);

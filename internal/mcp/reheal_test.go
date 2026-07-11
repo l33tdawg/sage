@@ -29,9 +29,9 @@ func TestIsStaleSessionErr(t *testing.T) {
 		{"nil", nil, false},
 		{"broadcast access denied", errString("Broadcast error: access denied"), true},
 		{"identity verification", errString("agent identity verification failed"), true},
-		{"connection refused", errString("API error (HTTP 502): dial tcp: connection refused"), true},
-		{"connection reset", errString("Post: read: connection reset by peer"), true},
-		{"unexpected eof", errString("read response: unexpected EOF"), true},
+		{"connection refused", errString("API error (HTTP 502): dial tcp: connection refused"), false},
+		{"connection reset", errString("Post: read: connection reset by peer"), false},
+		{"unexpected eof", errString("read response: unexpected EOF"), false},
 		// The REST layer stamps the title "Broadcast error" on EVERY consensus
 		// rejection, so a permanent application reject (e.g. a content-schema
 		// reject) reaches the client as "Broadcast error: request rejected". That
@@ -49,6 +49,44 @@ func TestIsStaleSessionErr(t *testing.T) {
 			assert.Equal(t, c.want, isStaleSessionErr(c.err))
 		})
 	}
+}
+
+func TestSubmitMemoryResilient_DoesNotRepeatAmbiguousRetry(t *testing.T) {
+	withFastBackoffs(t)
+
+	var submits, registers atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, _ *http.Request) {
+		registers.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "registered"})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, _ *http.Request) {
+		switch submits.Add(1) {
+		case 1:
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]any{"title": "Broadcast error", "detail": "access denied"})
+		case 2:
+			// Model a commit followed by a lost HTTP response. The client sees EOF,
+			// so delivery is ambiguous and a third POST would duplicate the memory.
+			hj, ok := w.(http.Hijacker)
+			require.True(t, ok)
+			conn, _, err := hj.Hijack()
+			require.NoError(t, err)
+			_ = conn.Close()
+		default:
+			t.Errorf("ambiguous submit was repeated")
+		}
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	err := s.submitMemoryResilient(context.Background(), []byte(`{"content":"x"}`), &map[string]any{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may have reached SAGE")
+	assert.EqualValues(t, 2, submits.Load())
+	assert.EqualValues(t, 1, registers.Load())
 }
 
 // errString is a tiny error wrapper so the table above reads cleanly.

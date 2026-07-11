@@ -311,10 +311,11 @@ func TestWizard_CreateTunnel_DoesNotClobberExistingConfig(t *testing.T) {
 
 func TestWizard_MintToken_Success(t *testing.T) {
 	h, _ := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
 	r := testRouter(h)
 
 	body, _ := json.Marshal(map[string]string{
-		"agent_id":   strings.Repeat("a", 64),
+		"agent_id":   "",
 		"token_name": "chatgpt-test",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/mint-token", bytes.NewReader(body))
@@ -332,10 +333,11 @@ func TestWizard_MintToken_Success(t *testing.T) {
 
 func TestWizard_MintToken_RejectsBadAgentID(t *testing.T) {
 	h, _ := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
 	r := testRouter(h)
 
 	body, _ := json.Marshal(map[string]string{
-		"agent_id":   "too-short",
+		"agent_id":   strings.Repeat("b", 64),
 		"token_name": "chatgpt-test",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/mint-token", bytes.NewReader(body))
@@ -361,6 +363,7 @@ func TestWizard_HappyPath_E2E(t *testing.T) {
 	t.Setenv("PATH", filepath.Dir(cfPath)+":"+os.Getenv("PATH"))
 
 	h, _ := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("c", 64)
 	r := testRouter(h)
 
 	// 1. check-cloudflared → installed
@@ -404,7 +407,7 @@ func TestWizard_HappyPath_E2E(t *testing.T) {
 
 	// 6. mint-token
 	body, _ = json.Marshal(map[string]string{
-		"agent_id":   strings.Repeat("c", 64),
+		"agent_id":   "",
 		"token_name": "chatgpt",
 	})
 	w = httptest.NewRecorder()

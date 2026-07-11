@@ -876,8 +876,10 @@ func (m *Manager) pruneGuestDrafts(now time.Time) {
 // expired/terminal host sessions (rolling back staged CAs, zeroizing seeds),
 // drains the rate-limiter map, and prunes expired guest drafts. Wire it once
 // from the node when the federation listener starts; tests may skip it.
-func (m *Manager) StartMaintenance(ctx context.Context) {
+func (m *Manager) StartMaintenance(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
 		for {
@@ -890,6 +892,7 @@ func (m *Manager) StartMaintenance(ctx context.Context) {
 			}
 		}
 	}()
+	return done
 }
 
 func (m *Manager) dropGuestDraft(sessionID string, generation uint64) {

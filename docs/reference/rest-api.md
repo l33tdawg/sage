@@ -1021,14 +1021,14 @@ When vault (at-rest encryption) is active, `semantic` is forced `true` even if n
 
 ### `POST /v1/mcp/tokens`
 
-Issue a bearer token for MCP clients that cannot sign Ed25519 requests (ChatGPT, Cursor, etc.). Ed25519 auth required (admin use). Token plaintext shown **once only** — not stored, only SHA-256 digest persisted.
+Issue a bearer token for MCP clients that cannot sign Ed25519 requests (ChatGPT, Cursor, etc.). Ed25519 auth required (admin use). Token plaintext is shown **once only** — not stored, only its SHA-256 digest is persisted. HTTP MCP calls execute as the local node operator because that is the signing key held by the transport; tokens cannot impersonate another agent identity.
 
 **Request body:**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `name` | string | no | Human label, e.g. `chatgpt-laptop` |
-| `agent_id` | string | yes | 64-char hex Ed25519 pubkey to mint for |
+| `agent_id` | string | yes | The local node operator's 64-char hex Ed25519 pubkey |
 
 **Response** (HTTP 201):
 
@@ -1126,6 +1126,8 @@ caller actually won; a losing reader never receives the same work item.
 
 ### Task assignment and agent notices
 
+`GET /v1/dashboard/tasks?all=true&limit=N` is the local-human CEREBRUM Kanban feed; signed agents receive `403` and use the scoped backlog instead. It returns explicit `memory_type=task` records across `planned`, `in_progress`, `done`, and `dropped` on both SQLite and PostgreSQL; ordinary agent conversations/observations are not inferred as tasks. Historical task rows whose older writer did not persist `task_status` are returned with an empty status so CEREBRUM can ask the operator to classify each one—SAGE does not guess that unknown work is Planned or Done. New PostgreSQL inserts persist `TaskStatus`, matching SQLite.
+
 `PUT /v1/dashboard/tasks/{id}/assign` accepts `{"assignee":"<agent-id>"}`
 (empty unassigns). This is a local CEREBRUM operator action; callers presenting
 an agent identity cannot assign or reassign work. On an unencrypted personal
@@ -1145,6 +1147,8 @@ For signed agents, `in_progress` is one atomic claim-and-start operation and
 atomic owner/status transition. Agents cannot re-plan or reopen work; those
 transitions stay on the local operator board. Current task read permission is
 checked before every agent status change.
+
+Task content/creation follows the memory consensus path. Board workflow metadata—assignee, assignment generation, status transitions, and agent inbox notifications—is deliberately local-node operational state. It is not federated or consensus-replicated: agents claim work from the node they are connected to, while other nodes may independently organize the same shared task memory. CEREBRUM labels the board as “This computer's work queue” so this boundary is explicit.
 
 `GET /v1/dashboard/task-notifications?limit=5` is signed with `X-Agent-ID` and
 peeks current notices, applies current active-agent and task RBAC checks, then

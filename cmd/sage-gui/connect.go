@@ -11,6 +11,8 @@ import (
 	"github.com/l33tdawg/sage/web"
 )
 
+var mcpConfigAPIURL = "http://localhost:8080"
+
 // connectProvider is the same-machine one-click connect dispatcher wired into
 // the dashboard via DashboardHandler.ConnectFunc (see node.go). It resolves the
 // running sage-gui binary + SAGE_HOME, maps the provider id to the matching
@@ -39,6 +41,8 @@ func connectProvider(provider, path, token string) ([]web.ConnectFile, error) {
 		return installClaudeCodeConfig(path, sageHome, execPath, token)
 	case "codex":
 		return installCodexConfig(path, sageHome, execPath)
+	case "chatgpt-desktop":
+		return writeChatGPTDesktopConfig(sageHome, execPath)
 	case "cursor":
 		return writeCursorConfig(path, sageHome, execPath)
 	case "windsurf":
@@ -48,6 +52,32 @@ func connectProvider(provider, path, token string) ([]web.ConnectFile, error) {
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", provider)
 	}
+}
+
+// writeChatGPTDesktopConfig registers SAGE for Codex mode in the new ChatGPT
+// desktop app. Codex CLI and the IDE extension share the same user-level Codex
+// host config. ChatGPT Work/Chat do not consume local stdio MCP config and use
+// the hosted plugin + Secure MCP Tunnel path instead.
+func writeChatGPTDesktopConfig(sageHome, execPath string) ([]web.ConnectFile, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("get home dir: %w", err)
+	}
+	path := filepath.Join(home, ".codex", "config.toml")
+	configDir := filepath.Dir(path)
+	if info, statErr := os.Lstat(configDir); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("refusing to use symlinked ChatGPT config directory: %s", configDir)
+	} else if statErr != nil && !os.IsNotExist(statErr) {
+		return nil, fmt.Errorf("inspect ChatGPT config dir: %w", statErr)
+	}
+	if mkErr := os.MkdirAll(configDir, 0755); mkErr != nil { //nolint:gosec // fixed directory under user home
+		return nil, fmt.Errorf("create ChatGPT config dir: %w", mkErr)
+	}
+	action, err := mergeCodexConfigForProvider(path, execPath, sageHome, "codex")
+	if err != nil {
+		return nil, err
+	}
+	return []web.ConnectFile{{Path: path, Action: action}}, nil
 }
 
 // writeCursorConfig registers the sage stdio server in <projectDir>/.cursor/mcp.json
@@ -138,8 +168,11 @@ func mergeMCPServerConfig(path, execPath, sageHome, provider string) (string, er
 		"command": execPath,
 		"args":    []string{"mcp"},
 		"env": map[string]string{
-			"SAGE_HOME":     sageHome,
-			"SAGE_PROVIDER": provider,
+			"SAGE_HOME":          sageHome,
+			"SAGE_PROVIDER":      provider,
+			"SAGE_API_URL":       mcpConfigAPIURL,
+			"SAGE_IDENTITY_PATH": mcpIdentityPath(path, sageHome, provider),
+			"SAGE_PROJECT":       mcpProjectName(path, sageHome, provider),
 		},
 	}
 	config["mcpServers"] = servers
@@ -157,17 +190,142 @@ func mergeMCPServerConfig(path, execPath, sageHome, provider string) (string, er
 	return action, nil
 }
 
-// safeWriteFile writes data to path with perm, but refuses to write THROUGH a
-// symlink at the final path component. The target sits under an operator-
-// supplied directory, so a pre-planted symlink at a fixed config path could
-// otherwise redirect the write onto an arbitrary file it points at. Best-
-// effort: it does not chase intermediate directory symlinks (same-machine,
-// authenticated threat model keeps that residual low).
+// mcpIdentityPath makes identity independent of whichever working directory a
+// desktop client happens to use when it launches stdio MCP.
+func mcpIdentityPath(configPath, sageHome, provider string) string {
+	projectDir := mcpProjectDir(configPath, sageHome, provider)
+	if projectDir != "" {
+		return filepath.Join(projectAgentDir(sageHome, projectDir), "agent.key")
+	}
+	return filepath.Join(sageHome, "agents", "global-"+sanitizeDirName(provider), "agent.key")
+}
+
+func mcpProjectDir(configPath, sageHome, provider string) string {
+	projectDir := ""
+	switch provider {
+	case "claude-code":
+		projectDir = filepath.Dir(configPath)
+	case "cursor":
+		projectDir = filepath.Dir(filepath.Dir(configPath))
+	case "codex":
+		projectDir = filepath.Dir(filepath.Dir(configPath))
+	}
+	userHome, _ := os.UserHomeDir()
+	if projectDir != "" && filepath.Clean(projectDir) != filepath.Clean(userHome) {
+		return projectDir
+	}
+	return ""
+}
+
+func mcpProjectName(configPath, sageHome, provider string) string {
+	if projectDir := mcpProjectDir(configPath, sageHome, provider); projectDir != "" {
+		return filepath.Base(projectDir)
+	}
+	return ""
+}
+
+// selfHealKnownMCPConfigs repairs app-scoped configs on every node boot. This
+// migrates existing users away from stale app-bundle binaries and adds the
+// canonical API/identity env without touching unrelated MCP servers.
+func selfHealKnownMCPConfigs(sageHome, execPath string) []error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return []error{err}
+	}
+	type target struct {
+		path     string
+		provider string
+		toml     bool
+	}
+	targets := []target{
+		{path: filepath.Join(home, ".codex", "config.toml"), provider: "codex", toml: true},
+		{path: filepath.Join(home, ".cursor", "mcp.json"), provider: "cursor"},
+		{path: filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"), provider: "windsurf"},
+	}
+	if claudePath, pathErr := claudeDesktopConfigPath(); pathErr == nil {
+		targets = append(targets, target{path: claudePath, provider: "claude-desktop"})
+	}
+	var errs []error
+	for _, item := range targets {
+		data, readErr := readBoundedConfig(item.path, 1<<20)
+		if readErr != nil {
+			if !os.IsNotExist(readErr) {
+				errs = append(errs, fmt.Errorf("inspect %s: %w", item.path, readErr))
+			}
+			continue
+		}
+		if item.toml {
+			if !strings.Contains(string(data), "mcp_servers.sage") && !strings.Contains(string(data), `mcp_servers."sage"`) {
+				continue
+			}
+		} else {
+			var existing map[string]any
+			if jsonErr := json.Unmarshal(data, &existing); jsonErr != nil {
+				errs = append(errs, fmt.Errorf("inspect %s: %w", item.path, jsonErr))
+				continue
+			}
+			servers, _ := existing["mcpServers"].(map[string]any)
+			if _, exists := servers["sage"]; !exists {
+				continue
+			}
+		}
+		if item.toml {
+			_, err = mergeCodexConfigForProvider(item.path, execPath, sageHome, item.provider)
+		} else {
+			_, err = mergeMCPServerConfig(item.path, execPath, sageHome, item.provider)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("refresh %s: %w", item.path, err))
+		}
+	}
+	return errs
+}
+
+// safeWriteFile atomically replaces path from a same-directory 0600 temp file.
+// Rename replaces (rather than follows) a final-component link, but we reject
+// final symlinks explicitly so a surprising link never disappears silently.
+// Writing a new inode also prevents an existing hardlink from being mutated.
 func safeWriteFile(path string, data []byte, perm os.FileMode) error {
 	if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing to write through a symlink: %s", path)
+	} else if lerr != nil && !os.IsNotExist(lerr) {
+		return fmt.Errorf("inspect target %s: %w", path, lerr)
 	}
-	return os.WriteFile(path, data, perm) //nolint:gosec // caller-composed local path; symlink refused above
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".sage-config-*") //nolint:gosec // same-directory atomic replacement
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err = tmp.Chmod(perm); err == nil {
+		_, err = tmp.Write(data)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	// Re-check after writing the temp file. A racing final-component symlink is
+	// still never followed by Rename, but reject it for predictable semantics.
+	if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to replace a symlink: %s", path)
+	} else if lerr != nil && !os.IsNotExist(lerr) {
+		return fmt.Errorf("reinspect target %s: %w", path, lerr)
+	}
+	if err = os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	if dirHandle, openErr := os.Open(dir); openErr == nil {
+		_ = dirHandle.Sync()
+		_ = dirHandle.Close()
+	}
+	return nil
 }
 
 // fileAction reports "merged" when path already exists (an existing config is

@@ -233,13 +233,36 @@ func (s *PostgresStore) ensureGovSchema(ctx context.Context) error {
 // quorum nodes (distinct from the agent/gov keys).
 const memoriesSchemaLockKey int64 = 0x5341_4745_4D45_4D53 // "SAGEMEMS"
 
-// ensureMemoriesSchema backfills the memories.task_status column on a legacy
-// Postgres deployment whose init.sql predates the task-memory feature. v11.2 recall
-// (GetMemory / QuerySimilar) SELECTs COALESCE(task_status, ”), which on a schema
-// missing the column is a plan-time undefined_column (42703) error — a total read
-// outage — not a NULL that COALESCE can mask. Idempotent (ADD COLUMN IF NOT EXISTS)
-// and serialized via a transaction-scoped advisory lock, mirroring
-// ensureAgentSchema/ensureGovSchema. Must stay in sync with deploy/init.sql.
+var postgresTaskAssignmentSchema = []string{
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS assignee TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_picked_up_at TIMESTAMPTZ`,
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_picked_up_by TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_assignment_version BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_requires_handoff BOOLEAN NOT NULL DEFAULT FALSE`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_assignee ON memories (assignee) WHERE assignee != ''`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_task_picked_up_by ON memories (task_picked_up_by) WHERE task_picked_up_by != ''`,
+	`CREATE TABLE IF NOT EXISTS agent_notifications (
+		notification_id TEXT PRIMARY KEY,
+		agent_id TEXT NOT NULL,
+		kind TEXT NOT NULL CHECK (kind IN ('task_assignment')),
+		task_id UUID NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE,
+		assignment_version BIGINT NOT NULL,
+		domain TEXT NOT NULL DEFAULT '',
+		title TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL DEFAULT 'unread' CHECK (state IN ('unread','read','superseded')),
+		created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		read_at TIMESTAMPTZ,
+		UNIQUE(kind, task_id, assignment_version, agent_id)
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_notifications_inbox ON agent_notifications(agent_id, state, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_agent_notifications_task ON agent_notifications(task_id, assignment_version, state)`,
+}
+
+// ensureMemoriesSchema backfills memory columns on legacy Postgres deployments
+// whose one-shot init.sql predates task status, assignment, or RBAC classification. Missing
+// columns fail at query planning (42703), so COALESCE/fail-closed authorization
+// cannot compensate. The migration is idempotent and serialized under the same
+// transaction-scoped advisory lock. Keep it in sync with deploy/init.sql.
 func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 	return s.RunInTx(ctx, func(tx OffchainStore) error {
 		ps := tx.(*PostgresStore)
@@ -254,9 +277,55 @@ func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 			`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_status TEXT DEFAULT '' CHECK (task_status IN ('', 'planned', 'in_progress', 'done', 'dropped'))`); err != nil {
 			return fmt.Errorf("migrate memories.task_status: %w", err)
 		}
+		// deploy/init.sql adds this after CREATE TABLE, so it must also be replayed
+		// here for existing volumes. Default Internal (1), matching SQLite and the
+		// canonical Postgres schema; authorization still fails closed on read errors.
+		if _, err := ps.db.Exec(ctx,
+			`ALTER TABLE memories ADD COLUMN IF NOT EXISTS classification SMALLINT NOT NULL DEFAULT 1`); err != nil {
+			return fmt.Errorf("migrate memories.classification: %w", err)
+		}
+		for _, stmt := range postgresTaskAssignmentSchema {
+			if _, err := ps.db.Exec(ctx, stmt); err != nil {
+				return fmt.Errorf("migrate task assignment schema: %w", err)
+			}
+		}
+		// Repair pre-notification assignments without disturbing authenticated
+		// pickup evidence. ON CONFLICT keeps restart/parallel boot idempotent.
+		if _, err := ps.db.Exec(ctx, `UPDATE memories SET task_assignment_version = 1
+			WHERE memory_type = 'task' AND COALESCE(assignee, '') != '' AND task_assignment_version = 0`); err != nil {
+			return fmt.Errorf("backfill assignment generations: %w", err)
+		}
+		if _, err := ps.db.Exec(ctx, `UPDATE memories SET task_requires_handoff = TRUE
+			WHERE memory_type = 'task' AND task_status IN ('done','dropped')`); err != nil {
+			return fmt.Errorf("backfill terminal task handoff gates: %w", err)
+		}
+		if _, err := ps.db.Exec(ctx, `INSERT INTO agent_notifications
+			(notification_id, agent_id, kind, task_id, assignment_version, domain, title, state)
+			SELECT 'task-assignment:' || m.memory_id || ':' || m.task_assignment_version,
+			       m.assignee, 'task_assignment', m.memory_id, m.task_assignment_version,
+			       m.domain_tag, 'A task was assigned to you', 'unread'
+			FROM memories m JOIN agents a ON a.agent_id = m.assignee
+			WHERE m.memory_type = 'task' AND m.status != 'deprecated'
+			  AND m.task_status IN ('planned','in_progress')
+			  AND a.status = 'active' AND a.removed_at IS NULL
+			ON CONFLICT DO NOTHING`); err != nil {
+			return fmt.Errorf("backfill assignment notifications: %w", err)
+		}
 		return nil
 	})
 }
+
+const postgresInsertMemorySQL = `INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
+	memory_type, domain_tag, provider, confidence_score, status, parent_hash, task_status, created_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	ON CONFLICT (memory_id) DO UPDATE SET
+		submitting_agent = EXCLUDED.submitting_agent,
+		status = EXCLUDED.status,
+		created_at = EXCLUDED.created_at,
+		embedding = COALESCE(EXCLUDED.embedding, memories.embedding),
+		embedding_hash = COALESCE(EXCLUDED.embedding_hash, memories.embedding_hash),
+		provider = COALESCE(NULLIF(EXCLUDED.provider, ''), memories.provider),
+		parent_hash = COALESCE(NULLIF(EXCLUDED.parent_hash, ''), memories.parent_hash)`
 
 func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryRecord) error {
 	var emb *pgvector.Vector
@@ -265,22 +334,11 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 		emb = &v
 	}
 
-	_, err := s.db.Exec(ctx,
-		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		ON CONFLICT (memory_id) DO UPDATE SET
-			submitting_agent = EXCLUDED.submitting_agent,
-			status = EXCLUDED.status,
-			created_at = EXCLUDED.created_at,
-			embedding = COALESCE(EXCLUDED.embedding, memories.embedding),
-			embedding_hash = COALESCE(EXCLUDED.embedding_hash, memories.embedding_hash),
-			provider = COALESCE(NULLIF(EXCLUDED.provider, ''), memories.provider),
-			parent_hash = COALESCE(NULLIF(EXCLUDED.parent_hash, ''), memories.parent_hash)`,
+	_, err := s.db.Exec(ctx, postgresInsertMemorySQL,
 		record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
 		emb, record.EmbeddingHash,
 		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,
-		string(record.Status), record.ParentHash, record.CreatedAt,
+		string(record.Status), record.ParentHash, string(record.TaskStatus), record.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
@@ -1177,6 +1235,19 @@ func (s *PostgresStore) UpdateMemoryClassification(ctx context.Context, memoryID
 	return nil
 }
 
+// GetMemoryClassificationLocal reads the off-chain mirror used by task and
+// memory authorization checks. It intentionally does not fall back to a
+// default: a missing row or unavailable mirror must fail closed.
+func (s *PostgresStore) GetMemoryClassificationLocal(ctx context.Context, memoryID string) (int, error) {
+	var classification int
+	if err := s.db.QueryRow(ctx,
+		`SELECT classification FROM memories WHERE memory_id = $1`, memoryID,
+	).Scan(&classification); err != nil {
+		return 0, fmt.Errorf("get memory classification: %w", err)
+	}
+	return classification, nil
+}
+
 // ListMemories returns memories matching the given filters with pagination.
 func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*memory.MemoryRecord, int, error) {
 	if opts.Limit <= 0 {
@@ -1391,33 +1462,305 @@ func (s *PostgresStore) UpdateDomainTag(ctx context.Context, memoryID string, do
 	return nil
 }
 
-// UpdateTaskStatus updates the task_status of a task memory.
-func (s *PostgresStore) SetTaskAssignee(_ context.Context, _, _ string) error {
-	return fmt.Errorf("SetTaskAssignee not implemented for PostgresStore (SQLite-only feature)")
-}
-
-func (s *PostgresStore) ClaimTask(ctx context.Context, memoryID, _ string) (bool, error) {
-	result, err := s.db.Exec(ctx,
-		`UPDATE memories SET task_status = 'in_progress'
-		 WHERE memory_id = $1 AND memory_type = 'task' AND task_status IN ('planned','in_progress')`, memoryID)
+// SetTaskAssignee updates only the basic assignment fields. Dashboard callers
+// use AssignTaskAndNotify so the transition and its durable notice are atomic.
+func (s *PostgresStore) SetTaskAssignee(ctx context.Context, memoryID, assignee string) error {
+	result, err := s.db.Exec(ctx, `UPDATE memories
+		SET assignee = $2, task_picked_up_by = '', task_picked_up_at = NULL
+		WHERE memory_id = $1 AND memory_type = 'task'`, memoryID, assignee)
 	if err != nil {
-		return false, fmt.Errorf("claim and start task: %w", err)
-	}
-	return result.RowsAffected() > 0, nil
-}
-
-func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
-	result, err := s.db.Exec(ctx,
-		`UPDATE memories SET task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'`,
-		memoryID, string(taskStatus))
-	if err != nil {
-		return fmt.Errorf("update task status: %w", err)
+		return fmt.Errorf("set task assignee: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		return fmt.Errorf("task not found: %s", memoryID)
 	}
 	return nil
 }
+
+func (s *PostgresStore) ClaimTask(ctx context.Context, memoryID, agentID string) (bool, error) {
+	result, err := s.db.Exec(ctx, `UPDATE memories m
+		SET assignee = $2, task_status = 'in_progress',
+		    task_picked_up_by = CASE
+		      WHEN COALESCE(m.assignee, '') = '' THEN $2
+		      WHEN COALESCE(m.task_picked_up_by, '') = '' THEN $2
+		      ELSE m.task_picked_up_by END,
+		    task_picked_up_at = CASE
+		      WHEN COALESCE(m.assignee, '') = '' OR m.task_picked_up_at IS NULL THEN NOW()
+		      ELSE m.task_picked_up_at END
+		FROM agents a
+		WHERE m.memory_id = $1 AND m.memory_type = 'task'
+		  AND m.task_status IN ('planned','in_progress')
+		  AND m.task_requires_handoff = FALSE
+		  AND COALESCE(m.assignee, '') IN ('', $2)
+		  AND a.agent_id = $2 AND a.status = 'active' AND a.removed_at IS NULL`, memoryID, agentID)
+	if err != nil {
+		return false, fmt.Errorf("claim task: %w", err)
+	}
+	return result.RowsAffected() > 0, nil
+}
+
+func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
+	terminal := taskStatus == memory.TaskStatusDone || taskStatus == memory.TaskStatusDropped
+	if terminal && s.pool != nil {
+		return s.RunInTx(ctx, func(tx OffchainStore) error {
+			return tx.(*PostgresStore).UpdateTaskStatus(ctx, memoryID, taskStatus)
+		})
+	}
+	query := `UPDATE memories SET
+		task_requires_handoff = CASE WHEN task_status IN ('done','dropped') THEN TRUE ELSE task_requires_handoff END,
+		task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'`
+	if terminal {
+		query = `UPDATE memories SET task_status = $2,
+			task_assignment_version = task_assignment_version + CASE WHEN COALESCE(assignee, '') != '' THEN 1 ELSE 0 END,
+			assignee = '', task_requires_handoff = TRUE
+			WHERE memory_id = $1 AND memory_type = 'task'`
+	}
+	result, err := s.db.Exec(ctx, query, memoryID, string(taskStatus))
+	if err != nil {
+		return fmt.Errorf("update task status: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("task not found: %s", memoryID)
+	}
+	if terminal {
+		if _, err := s.db.Exec(ctx, `UPDATE agent_notifications SET state = 'superseded'
+			WHERE task_id = $1 AND state = 'unread'`, memoryID); err != nil {
+			return fmt.Errorf("supersede terminal task notifications: %w", err)
+		}
+	}
+	return nil
+}
+
+// AssignTaskAndNotify atomically updates assignment state and creates the
+// generation-bound one-way inbox notice. Row locking makes A→B→A transitions
+// monotonic under concurrent dashboard requests.
+func (s *PostgresStore) AssignTaskAndNotify(ctx context.Context, memoryID, assignee string) (*TaskAssignmentResult, error) {
+	if s.pool != nil {
+		var out *TaskAssignmentResult
+		err := s.RunInTx(ctx, func(tx OffchainStore) error {
+			var innerErr error
+			out, innerErr = tx.(*PostgresStore).AssignTaskAndNotify(ctx, memoryID, assignee)
+			return innerErr
+		})
+		return out, err
+	}
+	if assignee != "" {
+		var active int
+		if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM agents
+			WHERE agent_id = $1 AND status = 'active' AND removed_at IS NULL`, assignee).Scan(&active); err != nil {
+			return nil, fmt.Errorf("validate task assignee: %w", err)
+		}
+		if active != 1 {
+			return nil, fmt.Errorf("choose an active registered agent")
+		}
+	}
+	var current, domain, taskStatus, memoryStatus string
+	var version int64
+	err := s.db.QueryRow(ctx, `SELECT COALESCE(assignee, ''), task_assignment_version,
+		domain_tag, COALESCE(task_status, ''), status
+		FROM memories WHERE memory_id = $1 AND memory_type = 'task' FOR UPDATE`, memoryID).
+		Scan(&current, &version, &domain, &taskStatus, &memoryStatus)
+	if err == pgx.ErrNoRows {
+		return nil, fmt.Errorf("task not found: %s", memoryID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read task assignment: %w", err)
+	}
+	if memoryStatus == string(memory.StatusDeprecated) || taskStatus == string(memory.TaskStatusDone) || taskStatus == string(memory.TaskStatusDropped) {
+		return nil, fmt.Errorf("task is no longer open: %s", memoryID)
+	}
+
+	changed := current != assignee
+	if changed {
+		version++
+		newStatus := taskStatus
+		if assignee != "" {
+			newStatus = string(memory.TaskStatusInProgress)
+		}
+		if _, err := s.db.Exec(ctx, `UPDATE memories SET assignee = $2,
+			task_assignment_version = $3, task_status = $4,
+			task_picked_up_by = '', task_picked_up_at = NULL,
+			task_requires_handoff = CASE WHEN $2 != '' THEN FALSE ELSE task_requires_handoff END
+			WHERE memory_id = $1 AND memory_type = 'task'`, memoryID, assignee, version, newStatus); err != nil {
+			return nil, fmt.Errorf("update task assignment: %w", err)
+		}
+		taskStatus = newStatus
+		if _, err := s.db.Exec(ctx, `UPDATE agent_notifications SET state = 'superseded'
+			WHERE task_id = $1 AND state = 'unread'`, memoryID); err != nil {
+			return nil, fmt.Errorf("supersede task notifications: %w", err)
+		}
+	} else if assignee != "" && version == 0 {
+		version = 1
+		if _, err := s.db.Exec(ctx, `UPDATE memories SET task_assignment_version = $2 WHERE memory_id = $1`, memoryID, version); err != nil {
+			return nil, fmt.Errorf("backfill task assignment generation: %w", err)
+		}
+	}
+
+	notificationCreated := false
+	if assignee != "" {
+		notificationID := fmt.Sprintf("task-assignment:%s:%d", memoryID, version)
+		result, err := s.db.Exec(ctx, `INSERT INTO agent_notifications
+			(notification_id, agent_id, kind, task_id, assignment_version, domain, title, state)
+			VALUES ($1, $2, 'task_assignment', $3, $4, $5, 'A task was assigned to you', 'unread')
+			ON CONFLICT DO NOTHING`, notificationID, assignee, memoryID, version, domain)
+		if err != nil {
+			return nil, fmt.Errorf("create task notification: %w", err)
+		}
+		notificationCreated = result.RowsAffected() == 1
+	}
+	return &TaskAssignmentResult{
+		Changed: changed, Assignee: assignee, AssignmentVersion: version,
+		TaskStatus: taskStatus, NotificationCreated: notificationCreated,
+	}, nil
+}
+
+func (s *PostgresStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agentID string, status memory.TaskStatus) (bool, error) {
+	if status != memory.TaskStatusDone && status != memory.TaskStatusDropped {
+		return false, fmt.Errorf("agent terminal status must be done or dropped")
+	}
+	if s.pool != nil {
+		var completed bool
+		err := s.RunInTx(ctx, func(tx OffchainStore) error {
+			var innerErr error
+			completed, innerErr = tx.(*PostgresStore).CompleteTaskAsAgent(ctx, memoryID, agentID, status)
+			return innerErr
+		})
+		return completed, err
+	}
+	result, err := s.db.Exec(ctx, `UPDATE memories m SET task_status = $3,
+		task_assignment_version = task_assignment_version + 1,
+		assignee = '', task_requires_handoff = TRUE
+		FROM agents a
+		WHERE m.memory_id = $1 AND m.memory_type = 'task'
+		  AND m.task_status IN ('planned','in_progress') AND m.assignee = $2
+		  AND a.agent_id = $2 AND a.status = 'active' AND a.removed_at IS NULL`,
+		memoryID, agentID, string(status))
+	if err != nil {
+		return false, fmt.Errorf("complete task as agent: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return false, nil
+	}
+	if _, err := s.db.Exec(ctx, `UPDATE agent_notifications SET state = 'superseded'
+		WHERE task_id = $1 AND state = 'unread'`, memoryID); err != nil {
+		return false, fmt.Errorf("supersede completed task notifications: %w", err)
+	}
+	return true, nil
+}
+
+func (s *PostgresStore) PeekAgentNotifications(ctx context.Context, agentID string, limit int) ([]*AgentNotification, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 5
+	}
+	rows, err := s.db.Query(ctx, `SELECT n.notification_id, n.agent_id, n.kind, n.task_id,
+		n.assignment_version, n.domain, n.title, n.state, n.created_at
+		FROM agent_notifications n JOIN memories m ON m.memory_id = n.task_id
+		WHERE n.agent_id = $1 AND n.state = 'unread'
+		  AND m.memory_type = 'task' AND m.status != 'deprecated'
+		  AND m.task_status IN ('planned','in_progress')
+		  AND m.assignee = n.agent_id AND m.task_assignment_version = n.assignment_version
+		ORDER BY n.created_at ASC LIMIT $2`, agentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get agent notifications: %w", err)
+	}
+	defer rows.Close()
+	items := make([]*AgentNotification, 0)
+	for rows.Next() {
+		var n AgentNotification
+		if err := rows.Scan(&n.NotificationID, &n.AgentID, &n.Kind, &n.TaskID,
+			&n.AssignmentVersion, &n.Domain, &n.Title, &n.State, &n.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan agent notification: %w", err)
+		}
+		items = append(items, &n)
+	}
+	return items, rows.Err()
+}
+
+func (s *PostgresStore) AcknowledgeAgentNotifications(ctx context.Context, agentID string, notificationIDs []string) ([]string, error) {
+	if len(notificationIDs) == 0 {
+		return []string{}, nil
+	}
+	if s.pool != nil {
+		var acknowledged []string
+		err := s.RunInTx(ctx, func(tx OffchainStore) error {
+			var innerErr error
+			acknowledged, innerErr = tx.(*PostgresStore).AcknowledgeAgentNotifications(ctx, agentID, notificationIDs)
+			return innerErr
+		})
+		return acknowledged, err
+	}
+	acknowledged := make([]string, 0, len(notificationIDs))
+	for _, notificationID := range notificationIDs {
+		// Lock the task before touching its notice, matching assignment/completion's
+		// memory→notification lock order. This makes the assignment generation at
+		// acknowledgement a write-boundary fact, not a stale MVCC snapshot.
+		var currentID string
+		err := s.db.QueryRow(ctx, `SELECT n.notification_id
+			FROM agent_notifications n
+			JOIN memories m ON m.memory_id = n.task_id
+			JOIN agents a ON a.agent_id = n.agent_id
+			WHERE n.notification_id = $1 AND n.agent_id = $2 AND n.state = 'unread'
+			  AND m.memory_type = 'task' AND m.status != 'deprecated'
+			  AND m.task_status IN ('planned','in_progress')
+			  AND m.assignee = n.agent_id AND m.task_assignment_version = n.assignment_version
+			  AND a.status = 'active' AND a.removed_at IS NULL
+			FOR UPDATE OF m`, notificationID, agentID).Scan(&currentID)
+		if err == pgx.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("revalidate agent notification: %w", err)
+		}
+		result, err := s.db.Exec(ctx, `UPDATE agent_notifications SET state = 'read', read_at = NOW()
+			WHERE notification_id = $1 AND agent_id = $2 AND state = 'unread'`, currentID, agentID)
+		if err != nil {
+			return nil, fmt.Errorf("acknowledge agent notification: %w", err)
+		}
+		if result.RowsAffected() == 1 {
+			acknowledged = append(acknowledged, notificationID)
+		}
+	}
+	return acknowledged, nil
+}
+
+func (s *PostgresStore) SupersedeAgentNotifications(ctx context.Context, agentID string, notificationIDs []string) error {
+	for _, notificationID := range notificationIDs {
+		if _, err := s.db.Exec(ctx, `UPDATE agent_notifications SET state = 'superseded'
+			WHERE notification_id = $1 AND agent_id = $2 AND state = 'unread'`, notificationID, agentID); err != nil {
+			return fmt.Errorf("supersede agent notification: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *PostgresStore) TakeAgentNotifications(ctx context.Context, agentID string, limit int) ([]*AgentNotification, error) {
+	items, err := s.PeekAgentNotifications(ctx, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.NotificationID)
+	}
+	acknowledged, err := s.AcknowledgeAgentNotifications(ctx, agentID, ids)
+	if err != nil {
+		return nil, err
+	}
+	winners := make(map[string]bool, len(acknowledged))
+	for _, id := range acknowledged {
+		winners[id] = true
+	}
+	returned := items[:0]
+	for _, item := range items {
+		if winners[item.NotificationID] {
+			item.State = "read"
+			returned = append(returned, item)
+		}
+	}
+	return returned, nil
+}
+
+var _ TaskAssignmentStore = (*PostgresStore)(nil)
 
 // LinkMemories creates a link between two memories.
 func (s *PostgresStore) LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error {
@@ -1507,6 +1850,7 @@ func (s *PostgresStore) GetLinksAmong(ctx context.Context, memoryIDs []string) (
 func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provider string, assignee string) ([]*memory.MemoryRecord, error) {
 	query := `SELECT memory_id, submitting_agent, content, content_hash,
 		memory_type, domain_tag, COALESCE(provider, ''), confidence_score, status, parent_hash, COALESCE(task_status, ''),
+		COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at,
 		created_at, committed_at, deprecated_at
 		FROM memories
 		WHERE memory_type = 'task'
@@ -1520,13 +1864,23 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 		args = append(args, domain)
 		argN++
 	}
-	if provider != "" {
+	if assignee != "" {
+		if provider != "" {
+			query += fmt.Sprintf(" AND (assignee = $%d OR (COALESCE(assignee, '') = '' AND (provider = $%d OR provider = '')))", argN, argN+1)
+			args = append(args, assignee, provider)
+			argN += 2
+		} else {
+			query += fmt.Sprintf(" AND (COALESCE(assignee, '') = '' OR assignee = $%d)", argN)
+			args = append(args, assignee)
+			argN++
+		}
+	} else if provider != "" {
 		query += fmt.Sprintf(" AND (provider = $%d OR provider = '')", argN)
 		args = append(args, provider)
-		argN++ //nolint:ineffassign
+		argN++
 	}
-	_ = assignee // task assignment/claim is a SQLite-only feature; Postgres has no assignee column
-	query += " ORDER BY created_at DESC"
+	_ = argN
+	query += " ORDER BY created_at DESC LIMIT 500"
 
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
@@ -1539,14 +1893,17 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 		var r memory.MemoryRecord
 		var mt, st, ts string
 		var parentHash *string
+		var pickedUpAt *time.Time
 		if err := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 			&mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash, &ts,
+			&r.Assignee, &r.TaskPickedUpBy, &pickedUpAt,
 			&r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
 		r.MemoryType = memory.MemoryType(mt)
 		r.Status = memory.MemoryStatus(st)
 		r.TaskStatus = memory.TaskStatus(ts)
+		r.TaskPickedUpAt = pickedUpAt
 		if parentHash != nil {
 			r.ParentHash = *parentHash
 		}
@@ -1556,8 +1913,61 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 }
 
 // GetAllTasks returns all task memories across all statuses for the Kanban board.
-func (s *PostgresStore) GetAllTasks(_ context.Context, _ string, _ int) ([]*memory.MemoryRecord, error) {
-	return nil, nil
+func (s *PostgresStore) GetAllTasks(ctx context.Context, domain string, limit int) ([]*memory.MemoryRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	} else if limit > 500 {
+		limit = 500
+	}
+	query := `SELECT memory_id, submitting_agent, content, content_hash,
+		memory_type, domain_tag, COALESCE(provider, ''), confidence_score, status, parent_hash, COALESCE(task_status, ''),
+		COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at,
+		created_at, committed_at, deprecated_at
+		FROM memories
+		WHERE memory_type = 'task' AND status != 'deprecated'`
+	args := []any{}
+	argN := 1
+	if domain != "" {
+		query += fmt.Sprintf(" AND domain_tag = $%d", argN)
+		args = append(args, domain)
+		argN++
+	}
+	query += ` ORDER BY CASE task_status
+		WHEN 'in_progress' THEN 1
+		WHEN 'planned' THEN 2
+		WHEN 'done' THEN 3
+		WHEN 'dropped' THEN 4
+		ELSE 0 END, created_at DESC`
+	query += fmt.Sprintf(" LIMIT $%d", argN)
+	args = append(args, limit)
+
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get all tasks: %w", err)
+	}
+	defer rows.Close()
+	records := make([]*memory.MemoryRecord, 0)
+	for rows.Next() {
+		var r memory.MemoryRecord
+		var mt, st, ts string
+		var parentHash *string
+		var pickedUpAt *time.Time
+		if err := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
+			&mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash, &ts,
+			&r.Assignee, &r.TaskPickedUpBy, &pickedUpAt,
+			&r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt); err != nil {
+			return nil, fmt.Errorf("scan task: %w", err)
+		}
+		r.MemoryType = memory.MemoryType(mt)
+		r.Status = memory.MemoryStatus(st)
+		r.TaskStatus = memory.TaskStatus(ts)
+		r.TaskPickedUpAt = pickedUpAt
+		if parentHash != nil {
+			r.ParentHash = *parentHash
+		}
+		records = append(records, &r)
+	}
+	return records, rows.Err()
 }
 
 // ---- Tag operations (stubs — Postgres uses enterprise deployment, tags are SQLite/personal) ----

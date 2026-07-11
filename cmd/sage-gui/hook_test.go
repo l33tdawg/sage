@@ -11,11 +11,15 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/l33tdawg/sage/internal/auth"
 )
 
 // withTestSageEnv plants a temporary $HOME, $SAGE_HOME, $SAGE_AGENT_KEY, and
@@ -165,12 +169,23 @@ func TestHookSignedRequest_HeadersAreVerifiable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		agentID := r.Header.Get("X-Agent-ID")
 		sigHex := r.Header.Get("X-Signature")
+		nonceHex := r.Header.Get("X-Nonce")
 		require.NotEmpty(t, agentID)
 		require.NotEmpty(t, sigHex)
+		require.NotEmpty(t, nonceHex)
 
 		pub, err := hex.DecodeString(agentID)
 		require.NoError(t, err)
 		require.Len(t, pub, ed25519.PublicKeySize)
+		nonce, err := hex.DecodeString(nonceHex)
+		require.NoError(t, err)
+		require.Len(t, nonce, 8)
+		sig, err := hex.DecodeString(sigHex)
+		require.NoError(t, err)
+		ts, err := strconv.ParseInt(r.Header.Get("X-Timestamp"), 10, 64)
+		require.NoError(t, err)
+		require.WithinDuration(t, time.Now(), time.Unix(ts, 0), 5*time.Second)
+		require.True(t, auth.VerifyRequestWithNonce(ed25519.PublicKey(pub), r.Method, r.URL.RequestURI(), nil, ts, nonce, sig))
 
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	}))

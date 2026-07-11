@@ -1,8 +1,12 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+
+	"github.com/l33tdawg/sage/web"
 )
 
 // Set via ldflags at build time.
@@ -21,7 +25,43 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "serve":
-		err = runServe()
+		var lock *instanceLock
+		lock, err = acquireInstanceLock(SageHome())
+		if err == nil {
+			defer func() { _ = lock.Close() }()
+			err = runServe()
+		}
+		if errors.Is(err, errCoordinatedRestart) {
+			execPath, pathErr := os.Executable()
+			if pathErr != nil {
+				err = fmt.Errorf("restart: determine executable: %w", pathErr)
+			} else if prepErr := lock.PrepareExec(); prepErr != nil {
+				err = fmt.Errorf("restart: preserve single-instance ownership: %w", prepErr)
+			} else {
+				err = web.RestartProcess(execPath)
+			}
+		}
+		if err != nil && lock != nil {
+			if execPath, pathErr := os.Executable(); pathErr == nil {
+				if resolved, resolveErr := filepath.EvalSymlinks(execPath); resolveErr == nil {
+					execPath = resolved
+				}
+				rolledBack, rollbackErr := web.RollbackPendingUpdate(execPath)
+				if rolledBack {
+					fmt.Fprintln(os.Stderr, "SAGE update did not boot cleanly — restored the previous version and restarting it.")
+					if rollbackErr != nil {
+						fmt.Fprintln(os.Stderr, "SAGE rollback durability warning:", rollbackErr)
+					}
+					if prepErr := lock.PrepareExec(); prepErr != nil {
+						err = fmt.Errorf("restart restored version: preserve single-instance ownership: %w", prepErr)
+					} else {
+						err = web.RestartProcess(execPath)
+					}
+				} else if rollbackErr != nil {
+					err = fmt.Errorf("%w; automatic update rollback failed: %v", err, rollbackErr)
+				}
+			}
+		}
 	case "mcp":
 		if len(os.Args) > 2 && os.Args[2] == "install" {
 			err = runMCPInstall()

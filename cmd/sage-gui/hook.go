@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
-	"encoding/binary"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/tlsca"
 )
 
@@ -170,13 +170,11 @@ func hookSignedRequest(method, path string, body []byte) ([]byte, error) {
 	baseURL := hookBaseURL()
 
 	ts := time.Now().Unix()
-	canonical := []byte(method + " " + path + "\n")
-	canonical = append(canonical, body...)
-	hash := sha256.Sum256(canonical)
-	msg := make([]byte, 32+8)
-	copy(msg[:32], hash[:])
-	binary.BigEndian.PutUint64(msg[32:], uint64(ts)) //nolint:gosec // trusted local timestamp
-	sig := ed25519.Sign(priv, msg)
+	nonce := make([]byte, 8)
+	if _, nonceErr := rand.Read(nonce); nonceErr != nil {
+		return nil, fmt.Errorf("generate request nonce: %w", nonceErr)
+	}
+	sig := auth.SignRequestWithNonce(priv, method, path, body, ts, nonce)
 
 	ctx, cancel := context.WithTimeout(context.Background(), hookHTTPTimeout)
 	defer cancel()
@@ -188,6 +186,7 @@ func hookSignedRequest(method, path string, body []byte) ([]byte, error) {
 	req.Header.Set("X-Agent-ID", hex.EncodeToString(pub))
 	req.Header.Set("X-Signature", hex.EncodeToString(sig))
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
+	req.Header.Set("X-Nonce", hex.EncodeToString(nonce))
 
 	client := tlsAwareClient(baseURL)
 	client.Timeout = hookHTTPTimeout

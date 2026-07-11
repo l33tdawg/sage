@@ -18,7 +18,7 @@ import (
 // falling back to system CAs if the certs directory doesn't exist or isn't populated.
 func tlsAwareClient(baseURL string) *http.Client {
 	if !strings.HasPrefix(baseURL, "https://") {
-		return http.DefaultClient
+		return &http.Client{Timeout: 30 * time.Second}
 	}
 
 	// Try SAGE_CA_CERT env var first (explicit CA path).

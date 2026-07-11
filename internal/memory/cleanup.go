@@ -160,8 +160,10 @@ func RunCleanup(ctx context.Context, store CleanupStore, cfg CleanupConfig, dryR
 }
 
 // StartCleanupLoop starts a background goroutine that runs cleanup periodically.
-func StartCleanupLoop(ctx context.Context, store CleanupStore) {
+func StartCleanupLoop(ctx context.Context, store CleanupStore) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		// Initial delay — let the system boot up
 		select {
 		case <-time.After(30 * time.Second):
@@ -210,6 +212,7 @@ func StartCleanupLoop(ctx context.Context, store CleanupStore) {
 			}
 		}
 	}()
+	return done
 }
 
 func mustJSON(v any) string {

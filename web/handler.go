@@ -89,19 +89,37 @@ type DashboardHandler struct {
 	embedder  Embedder
 	SSE       *SSEBroadcaster
 	Version   string
+	BootID    string // unique per serve process; restart verification must observe a change
+	// NodeOperatorAgentID is the identity actually held by HTTP MCP's signing
+	// key. OAuth/wizard bearer metadata must use this exact ID.
+	NodeOperatorAgentID string
+
+	// RequestRestart asks the main serve lifecycle to drain listeners, stop
+	// consensus and close stores before the process image is replaced. nil means
+	// this embedding cannot restart safely in-process.
+	RequestRestart func() error
+	// RunBackground binds operator-triggered jobs to the node lifecycle. The
+	// production node cancels and joins these before closing stores; nil keeps
+	// the lightweight test/embed behavior.
+	RunBackground func(func(context.Context))
 
 	// graphCache memoises the expensive /memory/graph response with a
 	// stale-while-revalidate policy: the first load computes synchronously, every
 	// repeat load is served instantly from cache while a background refresh keeps
 	// it warm. Keyed by query params + RBAC scope so it never leaks across agents.
-	graphCacheMu sync.Mutex
-	graphCache   map[string]*graphCacheEntry
-	ExecPath     string // path to sage-gui binary, used by /v1/mcp-config
-	RESTAddr     string // configured REST listen address (cfg.RESTAddr), surfaced read-only in Settings > Connection
-	MCPTLSAddr   string // configured MCP TLS (bearer) listen address, used by /v1/dashboard/connect/remote-url to report whether the node is reachable from another computer (loopback bind = local-only)
-	TunnelClient TunnelClientManager
-	Encrypted    atomic.Bool
-	VaultLocked  atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
+	graphCacheMu     sync.Mutex
+	graphCache       map[string]*graphCacheEntry
+	ExecPath         string // path to sage-gui binary, used by /v1/mcp-config
+	RESTAddr         string // configured REST listen address (cfg.RESTAddr), surfaced read-only in Settings > Connection
+	MCPTLSAddr       string // configured MCP TLS (bearer) listen address, used by /v1/dashboard/connect/remote-url to report whether the node is reachable from another computer (loopback bind = local-only)
+	TunnelClient     TunnelClientManager
+	Encrypted        atomic.Bool
+	VaultLocked      atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
+	UpdateInProgress atomic.Bool
+	updateStateMu    sync.RWMutex
+	updateState      map[string]string
+	agentReplayMu    sync.Mutex
+	agentReplaySeen  map[string]time.Time
 
 	// Auth — only active when Encrypted is true.
 	VaultKeyPath  string
@@ -206,6 +224,9 @@ type DashboardHandler struct {
 	// accurate than QuorumEnabled, since a network-mode host with only
 	// non-validator peers is still a single-validator chain.
 	ValidatorCountFn func() int
+	// AppV18ActiveFn reports whether the next committed tx executes under the
+	// app-v18 global-admin domain-access override rules.
+	AppV18ActiveFn func() bool
 	// SetNetworkMode persists the network-mode flag to config.yaml (the node
 	// then re-binds P2P to the LAN on the next restart). Wired in cmd/sage-gui.
 	SetNetworkMode func(enabled bool) error
@@ -304,12 +325,15 @@ func (h *DashboardHandler) resolveAgentRBAC(r *http.Request) ([]string, bool) {
 // NewDashboardHandler creates a new dashboard handler.
 func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardHandler {
 	h := &DashboardHandler{
-		store:       memStore,
-		SSE:         NewSSEBroadcaster(),
-		Version:     version,
-		Pairing:     NewPairingStore(),
-		NetworkJoin: NewNetworkJoinStore(),
-		GuestJoin:   NewGuestJoinStore(),
+		store:           memStore,
+		SSE:             NewSSEBroadcaster(),
+		Version:         version,
+		BootID:          uuid.NewString(),
+		Pairing:         NewPairingStore(),
+		NetworkJoin:     NewNetworkJoinStore(),
+		GuestJoin:       NewGuestJoinStore(),
+		updateState:     map[string]string{"step": "idle", "status": "idle", "message": ""},
+		agentReplaySeen: make(map[string]time.Time),
 	}
 	// If the store implements PreferencesStore, wire it up.
 	if ps, ok := memStore.(PreferencesStore); ok {
@@ -321,6 +345,14 @@ func NewDashboardHandler(memStore store.MemoryStore, version string) *DashboardH
 // SetEmbedder configures the embedding provider for import operations.
 func (h *DashboardHandler) SetEmbedder(e Embedder) {
 	h.embedder = e
+}
+
+func (h *DashboardHandler) runBackground(fn func(context.Context)) {
+	if h.RunBackground != nil {
+		h.RunBackground(fn)
+		return
+	}
+	go fn(context.Background()) //nolint:gosec // embedded/test handler has no lifecycle owner
 }
 
 // handlePreValidate runs the per-node validation checks (dedup, quality,
@@ -374,6 +406,27 @@ type verifiedDashboardAgentKey struct{}
 func verifiedDashboardAgentID(ctx context.Context) string {
 	agentID, _ := ctx.Value(verifiedDashboardAgentKey{}).(string)
 	return agentID
+}
+
+// isCEREBRUMOperatorRequest distinguishes the local dashboard operator from a
+// signed agent or an unauthenticated LAN process. Browser headers provide CSRF
+// protection, not identity: non-loopback browsers must also carry a real
+// encrypted-dashboard session. On encryption-off nodes operator mutations and
+// full-board reads are therefore loopback-only.
+func (h *DashboardHandler) isCEREBRUMOperatorRequest(r *http.Request) bool {
+	if verifiedDashboardAgentID(r.Context()) != "" ||
+		(r.Header.Get("Sec-Fetch-Site") == "" && strings.TrimSpace(r.Header.Get("Origin")) == "") ||
+		!isLocalRequest(r) {
+		return false
+	}
+	if isLoopbackRemote(r.RemoteAddr) {
+		return true
+	}
+	if !h.Encrypted.Load() {
+		return false
+	}
+	cookie, err := r.Cookie(sessionCookieName)
+	return err == nil && h.validSession(cookie.Value)
 }
 
 // securityHeaders adds standard security headers to all responses.
@@ -504,6 +557,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 			// Software Update
 			r.Get("/v1/dashboard/settings/update/check", h.handleCheckUpdate)
+			r.Get("/v1/dashboard/settings/update/status", h.handleGetUpdateStatus)
 			r.Post("/v1/dashboard/settings/update/apply", h.handleApplyUpdate)
 			r.Post("/v1/dashboard/settings/update/restart", h.handleRestart)
 
@@ -842,7 +896,47 @@ func (h *DashboardHandler) validAgentSignature(r *http.Request) bool {
 	if r.URL.RawQuery != "" {
 		reqPath = r.URL.Path + "?" + r.URL.RawQuery
 	}
-	return auth.VerifyRequest(pubKey, r.Method, reqPath, body, tsUnix, sig)
+	valid := false
+	if nonceHex := strings.TrimSpace(r.Header.Get("X-Nonce")); nonceHex != "" {
+		nonce, decodeErr := hex.DecodeString(nonceHex)
+		if decodeErr != nil || len(nonce) == 0 {
+			return false
+		}
+		valid = auth.VerifyRequestWithNonce(pubKey, r.Method, reqPath, body, tsUnix, nonce, sig)
+	} else {
+		valid = auth.VerifyRequest(pubKey, r.Method, reqPath, body, tsUnix, sig)
+	}
+	if !valid {
+		return false
+	}
+	return !h.agentSignatureReplayed(agentID + ":" + sigHex)
+}
+
+// agentSignatureReplayed provides dashboard routes the same bounded replay
+// protection as the REST auth middleware. Cryptographic verification alone
+// proves who signed a request, not that a captured mutation was not resent.
+func (h *DashboardHandler) agentSignatureReplayed(key string) bool {
+	h.agentReplayMu.Lock()
+	defer h.agentReplayMu.Unlock()
+	if h.agentReplaySeen == nil {
+		h.agentReplaySeen = make(map[string]time.Time)
+	}
+	now := time.Now()
+	if len(h.agentReplaySeen) >= 10000 {
+		for seenKey, seenAt := range h.agentReplaySeen {
+			if now.Sub(seenAt) > 5*time.Minute {
+				delete(h.agentReplaySeen, seenKey)
+			}
+		}
+	}
+	if _, exists := h.agentReplaySeen[key]; exists {
+		return true
+	}
+	if len(h.agentReplaySeen) >= 10000 {
+		return true // fail closed instead of allowing the bounded cache to grow
+	}
+	h.agentReplaySeen[key] = now
+	return false
 }
 
 // handleLogin verifies the vault passphrase and sets a session cookie.
@@ -1337,7 +1431,9 @@ func (h *DashboardHandler) serveGraphFromCache(key, statusParam, drillDomain str
 	}
 	if now.Sub(ent.at) >= graphCacheFresh && !ent.refreshing {
 		ent.refreshing = true
-		go h.refreshGraphCache(key, statusParam, drillDomain, limit, seeAll, allowedAgents)
+		h.runBackground(func(ctx context.Context) {
+			h.refreshGraphCache(ctx, key, statusParam, drillDomain, limit, seeAll, allowedAgents)
+		})
 	}
 	return ent.body
 }
@@ -1355,8 +1451,8 @@ func (h *DashboardHandler) putGraphCache(key string, body []byte) {
 
 // refreshGraphCache recomputes a cache entry off the request path (the
 // "revalidate" half of stale-while-revalidate).
-func (h *DashboardHandler) refreshGraphCache(key, statusParam, drillDomain string, limit int, seeAll bool, allowedAgents []string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+func (h *DashboardHandler) refreshGraphCache(parent context.Context, key, statusParam, drillDomain string, limit int, seeAll bool, allowedAgents []string) {
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	body, err := h.computeGraphJSON(ctx, statusParam, drillDomain, limit, seeAll, allowedAgents)
 	h.graphCacheMu.Lock()
@@ -1573,6 +1669,10 @@ func (h *DashboardHandler) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteMemory deprecates a memory.
 func (h *DashboardHandler) handleDeleteMemory(w http.ResponseWriter, r *http.Request) {
+	if !h.isCEREBRUMOperatorRequest(r) {
+		writeError(w, http.StatusForbidden, "memories can only be removed from an authenticated CEREBRUM session")
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "missing memory id")
@@ -1753,9 +1853,19 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 	var err error
 
 	if r.URL.Query().Get("all") == "true" {
+		// The cross-status feed is the local CEREBRUM board, not an agent API.
+		// Agents use the scoped backlog below, where authorization happens before
+		// work is returned or claimed. Keeping signed callers out also prevents a
+		// global board limit from starving their permitted tasks behind denied rows.
+		if !h.isCEREBRUMOperatorRequest(r) {
+			writeError(w, http.StatusForbidden, "the full task board is available only in local CEREBRUM; agents should use their task backlog")
+			return
+		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		if limit <= 0 {
 			limit = 100
+		} else if limit > 500 {
+			limit = 500
 		}
 		tasks, err = h.store.GetAllTasks(r.Context(), domain, limit)
 	} else {
@@ -1763,6 +1873,10 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		// X-Agent-ID (set by the MCP server on every request) drives ownership: an
 		// agent's backlog excludes tasks claimed by another agent.
 		agentID := verifiedDashboardAgentID(r.Context())
+		if agentID == "" && !h.isCEREBRUMOperatorRequest(r) {
+			writeError(w, http.StatusForbidden, "the task backlog is available only to signed agents or an authenticated CEREBRUM session")
+			return
+		}
 		tasks, err = h.store.GetOpenTasks(r.Context(), domain, provider, agentID)
 		if err == nil && agentID != "" {
 			filtered := tasks[:0]
@@ -1779,7 +1893,6 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
 	type taskResult struct {
 		MemoryID        string  `json:"memory_id"`
 		Content         string  `json:"content"`
@@ -1893,6 +2006,10 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 		writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "task_status": body.TaskStatus})
 		return
 	}
+	if !h.isCEREBRUMOperatorRequest(r) {
+		writeError(w, http.StatusForbidden, "task status can only be changed by the assigned agent or from an authenticated CEREBRUM session")
+		return
+	}
 	if err := h.store.UpdateTaskStatus(r.Context(), id, ts); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
@@ -1914,9 +2031,7 @@ func (h *DashboardHandler) handleAssignTask(w http.ResponseWriter, r *http.Reque
 	// personal node, every local process is already inside the documented trusted
 	// operator boundary; Origin/Sec-Fetch only defend against cross-site browser
 	// requests and are not claimed as authentication against local software.
-	if verifiedDashboardAgentID(r.Context()) != "" ||
-		(r.Header.Get("Sec-Fetch-Site") == "" && strings.TrimSpace(r.Header.Get("Origin")) == "") ||
-		!isLocalRequest(r) {
+	if !h.isCEREBRUMOperatorRequest(r) {
 		writeError(w, http.StatusForbidden, "task assignments can only be changed from the local CEREBRUM task board")
 		return
 	}
@@ -2087,6 +2202,10 @@ func (h *DashboardHandler) handleTaskNotifications(w http.ResponseWriter, r *htt
 
 // handleCreateTaskDashboard creates a new task from the CEREBRUM dashboard.
 func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *http.Request) {
+	if !h.isCEREBRUMOperatorRequest(r) {
+		writeError(w, http.StatusForbidden, "tasks can only be added from an authenticated CEREBRUM session; agents should use sage_task")
+		return
+	}
 	var body struct {
 		Content string `json:"content"`
 		Domain  string `json:"domain"`
@@ -2125,21 +2244,26 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 
 	rec := &memory.MemoryRecord{
 		MemoryID:        memoryID,
+		SubmittingAgent: agentIDForKey(h.SigningKey),
 		Content:         taskContent,
 		ContentHash:     contentHash[:],
 		MemoryType:      memory.TypeTask,
 		DomainTag:       body.Domain,
 		ConfidenceScore: 0.90,
 		TaskStatus:      memory.TaskStatusPlanned,
+		Status:          memory.StatusProposed,
 		CreatedAt:       time.Now(),
 		Embedding:       embedding,
 	}
 
 	// Broadcast on-chain through CometBFT consensus
-	if h.CometBFTRPC != "" && h.SigningKey != nil {
+	if h.CometBFTRPC != "" {
+		if len(h.SigningKey) != ed25519.PrivateKeySize {
+			writeError(w, http.StatusServiceUnavailable, "this node cannot sign a task submission; restart it and try again")
+			return
+		}
 		submitTx := &tx.ParsedTx{
 			Type:      tx.TxTypeMemorySubmit,
-			Nonce:     tx.MonotonicNonce(h.SigningKey),
 			Timestamp: time.Now(),
 			MemorySubmit: &tx.MemorySubmit{
 				MemoryID:        memoryID,
@@ -2153,17 +2277,18 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 				Classification:  tx.ClearanceLevel(1), // INTERNAL
 			},
 		}
-		embedDashboardAgentProof(submitTx, h.SigningKey)
-		if signErr := tx.SignTx(submitTx, h.SigningKey); signErr == nil {
-			if encoded, encErr := tx.EncodeTx(submitTx); encErr == nil {
-				_ = broadcastTxSync(h.CometBFTRPC, encoded)
-			}
+		if _, _, _, err := h.signAndBroadcastCommit(submitTx, h.SigningKey); err != nil {
+			writeError(w, http.StatusBadGateway, "the network did not confirm this task; nothing was added: "+err.Error())
+			return
 		}
-	}
-
-	if err := h.store.InsertMemory(r.Context(), rec); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	} else {
+		if rec.SubmittingAgent == "" {
+			rec.SubmittingAgent = "cerebrum"
+		}
+		if err := h.store.InsertMemory(r.Context(), rec); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 
 	if h.SSE != nil {
@@ -2223,6 +2348,7 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 	health := map[string]any{
 		"sage":         "running",
 		"version":      h.Version,
+		"boot_id":      h.BootID,
 		"encrypted":    h.Encrypted.Load(),
 		"vault_locked": h.VaultLocked.Load(),
 		"uptime":       time.Since(startTime).String(),

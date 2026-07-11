@@ -22,6 +22,11 @@ CREATE TABLE memories (
     status           TEXT             NOT NULL DEFAULT 'proposed',
     parent_hash      TEXT,
     task_status      TEXT             DEFAULT '' CHECK (task_status IN ('', 'planned', 'in_progress', 'done', 'dropped')),
+    assignee         TEXT             NOT NULL DEFAULT '',
+    task_picked_up_at TIMESTAMPTZ,
+    task_picked_up_by TEXT            NOT NULL DEFAULT '',
+    task_assignment_version BIGINT    NOT NULL DEFAULT 0,
+    task_requires_handoff BOOLEAN     NOT NULL DEFAULT FALSE,
     created_at       TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
     committed_at     TIMESTAMPTZ,
     deprecated_at    TIMESTAMPTZ
@@ -169,6 +174,24 @@ CREATE TABLE agents (
 );
 CREATE INDEX IF NOT EXISTS idx_agents_name ON agents (name) WHERE status != 'removed';
 CREATE INDEX IF NOT EXISTS idx_agents_org ON agents (org_id) WHERE org_id != '';
+
+-- Durable one-way task assignment notices. These are separate from pipeline
+-- messages: reading a notice does not claim work or require a result.
+CREATE TABLE IF NOT EXISTS agent_notifications (
+    notification_id    TEXT        PRIMARY KEY,
+    agent_id           TEXT        NOT NULL,
+    kind               TEXT        NOT NULL CHECK (kind IN ('task_assignment')),
+    task_id            UUID        NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE,
+    assignment_version BIGINT      NOT NULL,
+    domain             TEXT        NOT NULL DEFAULT '',
+    title              TEXT        NOT NULL DEFAULT '',
+    state              TEXT        NOT NULL DEFAULT 'unread' CHECK (state IN ('unread','read','superseded')),
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    read_at            TIMESTAMPTZ,
+    UNIQUE(kind, task_id, assignment_version, agent_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_notifications_inbox ON agent_notifications(agent_id, state, created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_notifications_task ON agent_notifications(task_id, assignment_version, state);
 
 -- ============================================================
 -- 9. domain_registry (federation ACL)
@@ -349,6 +372,8 @@ ALTER TABLE federations ADD COLUMN IF NOT EXISTS allowed_depts TEXT[];
 -- ============================================================
 CREATE INDEX idx_memories_domain ON memories (domain_tag);
 CREATE INDEX idx_memories_status ON memories (status);
+CREATE INDEX IF NOT EXISTS idx_memories_assignee ON memories (assignee) WHERE assignee != '';
+CREATE INDEX IF NOT EXISTS idx_memories_task_picked_up_by ON memories (task_picked_up_by) WHERE task_picked_up_by != '';
 
 -- HNSW index for vector similarity search
 CREATE INDEX idx_memories_embedding_hnsw ON memories

@@ -122,6 +122,9 @@ func (h *DashboardHandler) signAndBroadcastCommit(ptx *tx.ParsedTx, key ed25519.
 // agentIDForKey returns the on-chain agent id (hex(pubkey)) for an Ed25519 key,
 // matching auth.PublicKeyToAgentID. Empty for a nil/invalid key.
 func agentIDForKey(key ed25519.PrivateKey) string {
+	if len(key) != ed25519.PrivateKeySize {
+		return ""
+	}
 	pub, ok := key.Public().(ed25519.PublicKey)
 	if !ok {
 		return ""

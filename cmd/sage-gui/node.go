@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"crypto/tls"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -74,6 +76,8 @@ func resolveRetainBlocks(configured int64, quorumEnabled bool) int64 {
 	}
 }
 
+var errCoordinatedRestart = errors.New("coordinated restart requested")
+
 func runServe() (rerr error) {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -104,6 +108,21 @@ func runServe() (rerr error) {
 			return fmt.Errorf("create dir %s: %w", dir, mkErr)
 		}
 	}
+	pidPath := filepath.Join(SageHome(), "sage.pid")
+	pidValue := strconv.Itoa(os.Getpid())
+	preservePIDForExec := false
+	if pidErr := os.WriteFile(pidPath, []byte(pidValue), 0600); pidErr != nil {
+		return fmt.Errorf("write daemon pid: %w", pidErr)
+	}
+	defer func() {
+		// A newer owner may have replaced the file during an unusual handoff;
+		// remove it only when it still names this process.
+		if !preservePIDForExec {
+			if data, readErr := os.ReadFile(pidPath); readErr == nil && strings.TrimSpace(string(data)) == pidValue {
+				_ = os.Remove(pidPath)
+			}
+		}
+	}()
 
 	// Pending LAN join (Flow 3, guest side): the "Join a network" dashboard flow
 	// decrypts the host bundle, stages it, and restarts. Apply it HERE — before
@@ -149,7 +168,7 @@ func runServe() (rerr error) {
 	// Initialize CometBFT config (seeds a brand-new chain's genesis with the operator
 	// admin) and, if a prior admin-less genesis survived a reset, re-inject the seed.
 	// One helper so the heal step can't be dropped from serve unnoticed (issue #52).
-	if initErr := ensureGenesisSeed(cometHome, logger); initErr != nil {
+	if initErr := ensureGenesisSeedWithKey(cometHome, cfg.AgentKey, logger); initErr != nil {
 		return initErr
 	}
 
@@ -178,11 +197,57 @@ func runServe() (rerr error) {
 	// cleanly instead of leaking until process exit.
 	ctx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
+	var backgroundWG sync.WaitGroup
+	var workerAdmissionMu sync.Mutex
+	workersClosing := false
+	startWorker := func(fn func()) {
+		workerAdmissionMu.Lock()
+		if workersClosing {
+			workerAdmissionMu.Unlock()
+			return
+		}
+		backgroundWG.Add(1)
+		workerAdmissionMu.Unlock()
+		go func() {
+			defer backgroundWG.Done()
+			fn()
+		}()
+	}
+	var listenerWG sync.WaitGroup
+	startListener := func(fn func()) {
+		listenerWG.Add(1)
+		go func() {
+			defer listenerWG.Done()
+			fn()
+		}()
+	}
+	var stopWorkersOnce sync.Once
+	stopWorkers := func() {
+		stopWorkersOnce.Do(func() {
+			// Close admission under the same lock used by Add. This makes the
+			// transition to Wait race-free even if a force-closed HTTP handler is
+			// still unwinding and tries to queue one last dashboard job.
+			workerAdmissionMu.Lock()
+			workersClosing = true
+			cancelRun()
+			workerAdmissionMu.Unlock()
+			backgroundWG.Wait()
+		})
+	}
+	trackDone := func(done <-chan struct{}) {
+		if done == nil {
+			return
+		}
+		startWorker(func() { <-done })
+	}
 	sqliteStore, err := store.NewSQLiteStore(ctx, sqlitePath)
 	if err != nil {
 		return fmt.Errorf("open SQLite: %w", err)
 	}
-	defer func() { _ = sqliteStore.Close() }()
+	defer func() {
+		stopWorkers()
+		_ = sqliteStore.Close()
+	}()
 
 	// Optional cross-encoder reranker on the hybrid recall path. Off by
 	// default; operator turns it on with SAGE_RERANK_ENABLED=1 and
@@ -233,8 +298,8 @@ func runServe() (rerr error) {
 		// background - recalls degrade gracefully (RRF ordering) until the
 		// sidecar answers, so boot is never blocked on it.
 		if prefs["reranker_managed"] == "1" {
-			go func() {
-				startCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			startWorker(func() {
+				startCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 				defer cancel()
 				rerankURL, startErr := rerankdMgr.Start(startCtx)
 				if startErr != nil {
@@ -242,11 +307,11 @@ func runServe() (rerr error) {
 					return
 				}
 				logger.Info().Str("url", rerankURL).Msg("managed reranker sidecar ready")
-			}()
+			})
 		}
 		if prefs["ollama_managed"] == "1" {
-			go func() {
-				startCtx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			startWorker(func() {
+				startCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 				defer cancel()
 				ollamaURL, startErr := ollamaMgr.Start(startCtx)
 				if startErr != nil {
@@ -254,7 +319,7 @@ func runServe() (rerr error) {
 					return
 				}
 				logger.Info().Str("url", ollamaURL).Msg("managed Ollama runtime ready")
-			}()
+			})
 		}
 	}
 
@@ -316,7 +381,10 @@ func runServe() (rerr error) {
 	if err != nil {
 		return fmt.Errorf("open BadgerDB: %w", err)
 	}
-	defer badgerStore.CloseBadger() //nolint:errcheck
+	defer func() {
+		stopWorkers()
+		_ = badgerStore.CloseBadger()
+	}()
 
 	// Seed the replay-nonce allocator from the chain's committed nonces. The
 	// app-v9 consensus gate rejects any tx whose nonce <= the signer's highest
@@ -340,7 +408,10 @@ func runServe() (rerr error) {
 		return fmt.Errorf("create SAGE app: %w", err)
 	}
 	app.Version = version
-	defer func() { _ = app.Close() }()
+	defer func() {
+		stopWorkers()
+		_ = app.Close()
+	}()
 
 	// Block-retention window (issue #40): bound blockstore growth by telling
 	// CometBFT it may prune blocks older than the window. Local node policy —
@@ -406,7 +477,11 @@ func runServe() (rerr error) {
 	// newest snapshots (plus per-version anchors). This is what clears the
 	// unbounded accumulation that existed before v9.2.2 wired retention; the
 	// scheduler keeps it bounded thereafter by pruning after each Take.
-	go func() {
+	// Snapshot pruning is crash-safe/idempotent and touches no live store. Do
+	// not put it in the shutdown join set: a huge stale directory must never
+	// hold an otherwise-clean restart indefinitely, and an interrupted sweep is
+	// simply resumed on the next boot.
+	go func() { //nolint:gosec
 		if swept, sErr := snapshot.SweepStaging(cfg.DataDir); sErr != nil {
 			logger.Warn().Err(sErr).Msg("snapshot staging sweep hit an error")
 		} else if swept > 0 {
@@ -427,14 +502,14 @@ func runServe() (rerr error) {
 	// the index is current; a genuinely-needed build proceeds in the background
 	// (off the consensus path — it only touches the off-chain SQLite mirror) while
 	// the node boots and produces blocks. No-op when the vault is active.
-	go func() {
+	startWorker(func() {
 		start := time.Now()
 		if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
 			logger.Warn().Err(ftsErr).Msg("FTS5 backfill failed — text search may be incomplete")
 			return
 		}
 		logger.Info().Dur("elapsed", time.Since(start)).Msg("FTS5 backfill complete (or already current)")
-	}()
+	})
 
 	// Create embedding provider
 	embedProvider := createEmbeddingProvider(cfg, logger)
@@ -447,7 +522,7 @@ func runServe() (rerr error) {
 	// Embedder health watchdog: keeps /ready's semantic-recall signal current so a
 	// down embedding provider surfaces as "degraded" instead of a silently
 	// keyword-only recall. Non-blocking (probes in its own goroutine).
-	startEmbedderWatchdog(ctx, embedProvider, health, logger)
+	trackDone(startEmbedderWatchdog(ctx, embedProvider, health, logger))
 
 	// Start CometBFT in-process
 	cometCfg := config.DefaultConfig()
@@ -538,6 +613,7 @@ func runServe() (rerr error) {
 		return fmt.Errorf("start CometBFT: %w", err)
 	}
 	defer func() {
+		stopWorkers()
 		if stopErr := nodeCtrl.StopChain(); stopErr != nil {
 			logger.Error().Err(stopErr).Msg("error stopping CometBFT")
 		}
@@ -581,7 +657,7 @@ func runServe() (rerr error) {
 	// state for releases that don't change consensus rules).
 	startUpgradeWatchdog(ctx, upgradeWatchdogConfig{
 		BinaryVersion: version,
-		AgentKey:      loadOperatorAgentKey(logger),
+		AgentKey:      loadOperatorAgentKeyAt(cfg.AgentKey, logger),
 		CometRPC:      cometRPC,
 		Logger:        logger,
 		// v10.5.1 auto-advance: personal nodes walk the fork ladder to the
@@ -594,6 +670,7 @@ func runServe() (rerr error) {
 		// always-on pump and the auto-advance pre-check. GetUpgradePlan's
 		// ErrNoUpgradePlan is flattened to nil by readPendingPlan.
 		PendingPlan: badgerStore.GetUpgradePlan,
+		StartWorker: startWorker,
 	})
 
 	// Create REST server
@@ -616,13 +693,30 @@ func runServe() (rerr error) {
 	// visibility filter so the v7.0 SessionStart-hook prefetch returns
 	// useful context on nodes where the LLM agent is registered separately.
 	// Skip if agent.key is unreadable; the bypass simply stays off.
-	if opKey, opErr := readNodeOperatorKey(); opErr == nil && opKey != "" {
-		restServer.SetNodeOperatorID(opKey)
-		logger.Info().Str("operator_id", opKey[:16]+"...").Msg("node operator key registered for hook read-scope bypass")
+	operatorAgentID, operatorIDErr := readNodeOperatorKey(cfg.AgentKey)
+	if operatorIDErr == nil && operatorAgentID != "" {
+		restServer.SetNodeOperatorID(operatorAgentID)
+		logger.Info().Str("operator_id", operatorAgentID[:16]+"...").Msg("node operator key registered for hook read-scope bypass")
+	} else if operatorIDErr != nil {
+		logger.Warn().Err(operatorIDErr).Msg("node operator key unavailable")
 	}
 
-	// Create dashboard handler
+	// Create dashboard handler. Restart requests are routed back to this main
+	// lifecycle so every listener/store/consensus component drains before exec.
+	restartRequested := make(chan struct{}, 1)
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
+	dashboard.NodeOperatorAgentID = operatorAgentID
+	dashboard.RunBackground = func(fn func(context.Context)) {
+		startWorker(func() { fn(ctx) })
+	}
+	dashboard.RequestRestart = func() error {
+		select {
+		case restartRequested <- struct{}{}:
+			return nil
+		default:
+			return fmt.Errorf("restart already in progress")
+		}
+	}
 	dashboard.Rerankd = rerankdMgr            // managed reranker sidecar (guided setup)
 	dashboard.Ollamad = ollamaMgr             // managed Ollama runtime for smart memory setup
 	dashboard.TunnelClient = tunnelClientMgr  // managed OpenAI tunnel-client for ChatGPT/Codex
@@ -655,6 +749,15 @@ func runServe() (rerr error) {
 	// Agent create/update will be broadcast on-chain in addition to direct SQLite writes.
 	dashboard.CometBFTRPC = cometRPC
 	dashboard.RESTAddr = cfg.RESTAddr // surfaced read-only in Settings > Connection
+	mcpConfigAPIURL = restBaseURL(cfg.RESTAddr)
+	if currentExec, execErr := os.Executable(); execErr == nil {
+		if resolvedExec, resolveErr := filepath.EvalSymlinks(currentExec); resolveErr == nil {
+			currentExec = resolvedExec
+		}
+		for _, healErr := range selfHealKnownMCPConfigs(SageHome(), currentExec) {
+			logger.Warn().Err(healErr).Msg("could not refresh an existing global MCP config")
+		}
+	}
 	// Same-machine one-click connect: the dashboard endpoint delegates provider
 	// config writing to the package-main writers via this dispatcher.
 	dashboard.ConnectFunc = connectProvider
@@ -670,6 +773,7 @@ func runServe() (rerr error) {
 	}
 	dashboard.QuorumEnabled = cfg.Quorum.Enabled
 	dashboard.ValidatorCountFn = app.ValidatorCount // authoritative single-validator check for agent ops
+	dashboard.AppV18ActiveFn = app.IsAppV18ActiveForNextTx
 	// Embeddings setup: flip the config to the bundled Ollama + nomic-embed-text
 	// provider (the node re-reads it on restart). The embedder is locked to this.
 	dashboard.SetEmbeddingOllama = func() error {
@@ -720,29 +824,34 @@ func runServe() (rerr error) {
 	// AccessGrant/AccessRevoke are signed as the resolved domain owner. Neither
 	// touches consensus; memory submits still sign with the validator key so
 	// authorship (submitting_agent) stays immutable.
-	if adminKey := adminSigningKey(); adminKey != nil {
+	if adminKey := adminSigningKeyAt(cfg.AgentKey); adminKey != nil {
 		dashboard.AdminSigningKey = adminKey
 	}
-	dashboard.ResolveAgentKeyFn = localAgentKeyResolver()
+	dashboard.ResolveAgentKeyFn = localAgentKeyResolverWithOperator(cfg.AgentKey)
 
 	// Create redeployment orchestrator and wire it to the dashboard
 	redeployer := orchestrator.NewRedeployer(sqliteStore, nodeCtrl, logger)
 	dashboard.Redeployer = redeployer
 
 	// Bridge redeployer status updates to SSE so the dashboard gets live updates
-	go func() {
-		for status := range redeployer.StatusChan() {
-			dashboard.SSE.Broadcast(web.SSEEvent{
-				Type: "redeploy",
-				Data: map[string]any{
-					"active":    status.Active,
-					"operation": status.Operation,
-					"agent_id":  status.AgentID,
-					"phases":    status.Phases,
-				},
-			})
+	startWorker(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case status := <-redeployer.StatusChan():
+				dashboard.SSE.Broadcast(web.SSEEvent{
+					Type: "redeploy",
+					Data: map[string]any{
+						"active":    status.Active,
+						"operation": status.Operation,
+						"agent_id":  status.AgentID,
+						"phases":    status.Phases,
+					},
+				})
+			}
 		}
-	}()
+	})
 
 	// Wire pre-validate function into both dashboard and REST API. This is the
 	// advisory pre-vote display; it delegates to voter.DecideVerbose so it shows the
@@ -801,7 +910,7 @@ func runServe() (rerr error) {
 	//
 	// Auth: bearer token in Authorization header, validated against the
 	// mcp_tokens table. Tokens are SHA-256-hashed before storage.
-	mountMCPHTTPTransport(r, sqliteStore, cfg, logger)
+	mcpHTTPTransport := mountMCPHTTPTransport(r, sqliteStore, cfg, logger)
 
 	// OAuth 2.0 + PKCE wrapper around bearer auth (v6.7.2). ChatGPT's MCP
 	// connector requires Auth URL + Token URL form fields; static-bearer
@@ -822,25 +931,12 @@ func runServe() (rerr error) {
 	// NodeOperatorAgentID is the identity that OAuth-issued bearers will run
 	// as. The HTTP MCP transport signs every outgoing REST call with the
 	// node's signing key, so this label always matches reality.
-	if keyData, kerr := os.ReadFile(cfg.AgentKey); kerr == nil {
-		var k ed25519.PrivateKey
-		switch len(keyData) {
-		case ed25519.SeedSize:
-			k = ed25519.NewKeyFromSeed(keyData)
-		case ed25519.PrivateKeySize:
-			k = ed25519.PrivateKey(keyData)
-		}
-		if k != nil {
-			if pub, ok := k.Public().(ed25519.PublicKey); ok {
-				oauthHandler.NodeOperatorAgentID = hex.EncodeToString(pub)
-			}
-		}
-	}
+	oauthHandler.NodeOperatorAgentID = operatorAgentID
 	rest.MountOAuthRoutes(r, oauthHandler)
 	logger.Info().Msg("OAuth 2.0 + PKCE wrapper enabled (/.well-known/oauth-authorization-server, /oauth/authorize, /oauth/token)")
 
 	// Start background memory cleanup loop
-	memory.StartCleanupLoop(ctx, sqliteStore)
+	trackDone(memory.StartCleanupLoop(ctx, sqliteStore))
 
 	// Embedding endpoint override — use configured provider, not just Ollama
 	r.Post("/v1/embed/personal", handleEmbedPersonal(embedProvider))
@@ -857,6 +953,23 @@ func runServe() (rerr error) {
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
+	}
+	var startupErr error
+	appendStartupErr := func(name string, err error) {
+		if err != nil {
+			startupErr = errors.Join(startupErr, fmt.Errorf("%s listener bind: %w", name, err))
+		}
+	}
+	restListener, restListenErr := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.RESTAddr)
+	appendStartupErr("REST", restListenErr)
+	serveErrors := make(chan error, 4)
+	reportServeError := func(name string, err error) {
+		wrapped := fmt.Errorf("%s listener failed: %w", name, err)
+		logger.Error().Err(wrapped).Msg("listener stopped unexpectedly")
+		select {
+		case serveErrors <- wrapped:
+		default:
+		}
 	}
 
 	// Build display URL: extract just the port for localhost display
@@ -1055,6 +1168,7 @@ func runServe() (rerr error) {
 	// Personal mode: TLS on localhost:8443. Quorum mode: TLS on 0.0.0.0:8443.
 	// Plain HTTP stays on localhost for dashboard backward compatibility.
 	var tlsServer *http.Server
+	var tlsListener net.Listener
 	// Self-heal a stale TLS CA CommonName before the auto-gen below (see
 	// reconcileCACommonName): on a re-minted personal node whose cert rotation didn't
 	// fully complete, this removes the mismatched certs so they regenerate with a CN
@@ -1111,12 +1225,19 @@ func runServe() (rerr error) {
 				WriteTimeout: 15 * time.Second,
 				IdleTimeout:  60 * time.Second,
 			}
-			go func() {
-				logger.Info().Str("addr", tlsAddr).Msg("TLS REST API server starting")
-				if tlsServeErr := tlsServer.ListenAndServeTLS("", ""); tlsServeErr != nil && tlsServeErr != http.ErrServerClosed {
-					logger.Error().Err(tlsServeErr).Msg("TLS server error")
-				}
-			}()
+			plainTLSListener, listenErr := (&net.ListenConfig{}).Listen(ctx, "tcp", tlsAddr)
+			appendStartupErr("MCP TLS", listenErr)
+			if listenErr == nil {
+				tlsListener = tls.NewListener(plainTLSListener, tlsCfg)
+			}
+			if tlsListener != nil {
+				startListener(func() {
+					logger.Info().Str("addr", tlsAddr).Msg("TLS REST API server starting")
+					if tlsServeErr := tlsServer.Serve(tlsListener); tlsServeErr != nil && tlsServeErr != http.ErrServerClosed {
+						reportServeError("MCP TLS", tlsServeErr)
+					}
+				})
+			}
 		}
 	}
 
@@ -1144,17 +1265,25 @@ func runServe() (rerr error) {
 				WriteTimeout: 15 * time.Second,
 				IdleTimeout:  60 * time.Second,
 			}
+			plainFedListener, listenErr := (&net.ListenConfig{}).Listen(ctx, "tcp", fedAddr)
+			appendStartupErr("federation TLS", listenErr)
+			var fedListener net.Listener
+			if listenErr == nil {
+				fedListener = tls.NewListener(plainFedListener, fedTLS)
+			}
 			// Periodic reaper for expired join sessions / guest drafts / rate-limit
 			// map (seed hygiene + staged-CA rollback + unbounded-growth guard).
-			fedMgr.StartMaintenance(ctx)
+			trackDone(fedMgr.StartMaintenance(ctx))
 			// (Domain-sync drainer + commit-tail watcher are wired above in the
 			// fedMgr block — outbound-only, not gated on the inbound listener.)
-			go func() {
-				logger.Info().Str("addr", fedAddr).Str("chain_id", cfg.ChainID).Msg("federation mTLS listener starting")
-				if fedServeErr := fedServer.ListenAndServeTLS("", ""); fedServeErr != nil && fedServeErr != http.ErrServerClosed {
-					logger.Error().Err(fedServeErr).Msg("federation listener error")
-				}
-			}()
+			if fedListener != nil {
+				startListener(func() {
+					logger.Info().Str("addr", fedAddr).Str("chain_id", cfg.ChainID).Msg("federation mTLS listener starting")
+					if fedServeErr := fedServer.Serve(fedListener); fedServeErr != nil && fedServeErr != http.ErrServerClosed {
+						reportServeError("federation TLS", fedServeErr)
+					}
+				})
+			}
 			if fedP2P != nil {
 				fedP2PServer = &http.Server{
 					Handler:      fedMgr.Router(),
@@ -1163,44 +1292,46 @@ func runServe() (rerr error) {
 					WriteTimeout: 15 * time.Second,
 					IdleTimeout:  60 * time.Second,
 				}
-				go func() {
+				startListener(func() {
 					logger.Info().
 						Str("peer_id", fedP2P.Host().ID().String()).
 						Str("protocol", string(sagep2p.FederationProtocol)).
 						Msg("federation mTLS listener starting over libp2p")
 					if serveErr := fedP2PServer.ServeTLS(fedP2P.Listener(), "", ""); serveErr != nil && serveErr != http.ErrServerClosed && !errors.Is(serveErr, net.ErrClosed) {
-						logger.Error().Err(serveErr).Msg("federation p2p listener error")
+						reportServeError("federation P2P", serveErr)
 					}
-				}()
+				})
 			}
 		}
 	} else if cfg.Federation.Enabled {
 		logger.Warn().Msg("federation.enabled set but transport unavailable (missing agent key or chain_id)")
 	}
 
-	go func() {
-		logger.Info().
-			Str("addr", cfg.RESTAddr).
-			Str("dashboard", fmt.Sprintf("http://%s/ui/", displayAddr)).
-			Msg("SAGE Personal ready")
+	if restListener != nil {
+		startListener(func() {
+			logger.Info().
+				Str("addr", cfg.RESTAddr).
+				Str("dashboard", fmt.Sprintf("http://%s/ui/", displayAddr)).
+				Msg("SAGE Personal ready")
 
-		fmt.Fprintf(os.Stderr, "\n  SAGE Personal is running!\n")
-		fmt.Fprintf(os.Stderr, "  CEREBRUM:  http://%s/ui/\n", displayAddr)
-		fmt.Fprintf(os.Stderr, "  REST API:  http://%s/v1/\n", displayAddr)
-		if tlsServer != nil {
-			fmt.Fprintf(os.Stderr, "  TLS API:   https://%s/v1/\n", tlsServer.Addr)
-		}
-		fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr, "\n  SAGE Personal is running!\n")
+			fmt.Fprintf(os.Stderr, "  CEREBRUM:  http://%s/ui/\n", displayAddr)
+			fmt.Fprintf(os.Stderr, "  REST API:  http://%s/v1/\n", displayAddr)
+			if tlsServer != nil {
+				fmt.Fprintf(os.Stderr, "  TLS API:   https://%s/v1/\n", tlsServer.Addr)
+			}
+			fmt.Fprintf(os.Stderr, "\n")
 
-		// Auto-open dashboard in browser (unless suppressed by tray app)
-		if os.Getenv("SAGE_NO_BROWSER") == "" {
-			go openBrowser(fmt.Sprintf("http://%s/ui/", displayAddr))
-		}
+			// Auto-open dashboard in browser (unless suppressed by tray app)
+			if os.Getenv("SAGE_NO_BROWSER") == "" {
+				go openBrowser(fmt.Sprintf("http://%s/ui/", displayAddr))
+			}
 
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Error().Err(err).Msg("HTTP server error")
-		}
-	}()
+			if err := httpServer.Serve(restListener); err != nil && err != http.ErrServerClosed {
+				reportServeError("REST", err)
+			}
+		})
+	}
 
 	// Start the per-node memory auto-voter: one node, one vote, signed with the
 	// node's OWN consensus validator key (priv_validator_key.json). No validator-set
@@ -1253,12 +1384,17 @@ func runServe() (rerr error) {
 		}
 		// Health wired in so /ready's "voter" block tracks liveness + the
 		// proposed backlog (nil-safe: amid starts the voter without one).
-		go voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval, Health: health}, logger)
+		startWorker(func() {
+			voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval, Health: health}, logger)
+		})
 	case cfg.Voter.Required:
 		// Normally unreachable — the pre-serve gate before StartChain already refused
 		// to boot — but a key that rots between the gate and here must still honor the
 		// runs-or-exits contract.
-		return fmt.Errorf("voter.required=true but no usable consensus key — memory auto-voter cannot start")
+		// Listeners and workers are already live here. Record the late failure
+		// and fall through to the one coordinated cleanup path below; returning
+		// directly would close stores underneath those goroutines.
+		startupErr = fmt.Errorf("voter.required=true but no usable consensus key — memory auto-voter cannot start")
 	default:
 		logger.Warn().Msg("no consensus key — memory auto-voter disabled")
 	}
@@ -1266,80 +1402,212 @@ func runServe() (rerr error) {
 		logger.Info().Msg("quorum mode — P2P consensus active, blocks validated by both nodes")
 	}
 
-	// Auto-import pending chat history (from setup wizard)
-	go autoImport(cfg, embedProvider, logger)
+	if startupErr == nil {
+		// Auto-import pending chat history (from setup wizard)
+		startWorker(func() { autoImport(ctx, cfg, embedProvider, logger) })
 
-	// Pipeline retention windows (E8c). The sweep runs on the 5-minute ticker
-	// below; a one-shot boot sweep runs first so a node that was offline reclaims
-	// stale rows immediately instead of waiting a full interval.
-	const (
-		pipeSweepInterval   = 5 * time.Minute
-		pipeRetentionWindow = 24 * time.Hour // terminal rows deleted this long after creation
-		pipeStalenessWindow = 48 * time.Hour // non-terminal rows force-expired past this age
-	)
-	// Boot one-shot pipeline reconciliation — mirror the ResolveChallengedMemories
-	// boot sweep so nothing accumulates while the node was down.
-	{
-		_, _ = sqliteStore.ExpirePipelines(ctx)
-		_, _ = sqliteStore.ExpireStalePipelines(ctx, time.Now().Add(-pipeStalenessWindow))
-		if purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-pipeRetentionWindow)); purged > 0 {
-			logger.Debug().Int("purged", purged).Msg("pipeline boot sweep")
+		// Pipeline retention windows (E8c). The sweep runs on the 5-minute ticker
+		// below; a one-shot boot sweep runs first so a node that was offline reclaims
+		// stale rows immediately instead of waiting a full interval.
+		const (
+			pipeSweepInterval   = 5 * time.Minute
+			pipeRetentionWindow = 24 * time.Hour // terminal rows deleted this long after creation
+			pipeStalenessWindow = 48 * time.Hour // non-terminal rows force-expired past this age
+		)
+		// Boot one-shot pipeline reconciliation — mirror the ResolveChallengedMemories
+		// boot sweep so nothing accumulates while the node was down.
+		{
+			_, _ = sqliteStore.ExpirePipelines(ctx)
+			_, _ = sqliteStore.ExpireStalePipelines(ctx, time.Now().Add(-pipeStalenessWindow))
+			if purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-pipeRetentionWindow)); purged > 0 {
+				logger.Debug().Int("purged", purged).Msg("pipeline boot sweep")
+			}
 		}
+
+		// Pipeline TTL cleanup — expire and purge stale pipeline messages every 5 minutes
+		startWorker(func() {
+			ticker := time.NewTicker(pipeSweepInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					expired, _ := sqliteStore.ExpirePipelines(ctx)
+					stale, _ := sqliteStore.ExpireStalePipelines(ctx, time.Now().Add(-pipeStalenessWindow))
+					purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-pipeRetentionWindow))
+					if expired > 0 || stale > 0 || purged > 0 {
+						logger.Debug().Int("expired", expired).Int("stale", stale).Int("purged", purged).Msg("pipeline cleanup")
+					}
+					// Sweep stale OAuth auth-codes (5-min TTL, single-use) — the
+					// store retains rows past use for audit visibility, but the
+					// bearer plaintext is wiped at redemption time. Anything older
+					// than 1h is genuinely abandoned and can drop. Older DCR
+					// registrations also age out (90d window) so a forgotten
+					// connector setup doesn't accumulate state forever.
+					if removed, _ := sqliteStore.PurgeExpiredAuthCodes(ctx); removed > 0 {
+						logger.Debug().Int64("removed", removed).Msg("oauth auth-codes purged")
+					}
+					if removed, _ := sqliteStore.PurgeOldOAuthClients(ctx, 90*24*time.Hour); removed > 0 {
+						logger.Debug().Int64("removed", removed).Msg("oauth clients purged")
+					}
+				}
+			}
+		})
 	}
 
-	// Pipeline TTL cleanup — expire and purge stale pipeline messages every 5 minutes
-	go func() {
-		ticker := time.NewTicker(pipeSweepInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				expired, _ := sqliteStore.ExpirePipelines(ctx)
-				stale, _ := sqliteStore.ExpireStalePipelines(ctx, time.Now().Add(-pipeStalenessWindow))
-				purged, _ := sqliteStore.PurgePipelines(ctx, time.Now().Add(-pipeRetentionWindow))
-				if expired > 0 || stale > 0 || purged > 0 {
-					logger.Debug().Int("expired", expired).Int("stale", stale).Int("purged", purged).Msg("pipeline cleanup")
+	// A replacement binary keeps its rollback copy until this exact process has
+	// answered health with its own boot ID and expected version. Failure enters
+	// the same full cleanup path below; main then atomically restores .old.
+	if startupErr == nil {
+		if execPath, pathErr := os.Executable(); pathErr == nil {
+			if resolved, resolveErr := filepath.EvalSymlinks(execPath); resolveErr == nil {
+				execPath = resolved
+			}
+			if web.PendingUpdateVersion(execPath) == "" {
+				execPath = ""
+			}
+			if execPath != "" {
+				readyCtx, cancelReady := context.WithTimeout(ctx, 15*time.Second)
+				startupErr = confirmPendingUpdateAfterReady(readyCtx, restBaseURL(cfg.RESTAddr), dashboard.BootID, execPath)
+				cancelReady()
+				if startupErr == nil {
+					select {
+					case listenerErr := <-serveErrors:
+						startupErr = listenerErr
+					default:
+					}
 				}
-				// Sweep stale OAuth auth-codes (5-min TTL, single-use) — the
-				// store retains rows past use for audit visibility, but the
-				// bearer plaintext is wiped at redemption time. Anything older
-				// than 1h is genuinely abandoned and can drop. Older DCR
-				// registrations also age out (90d window) so a forgotten
-				// connector setup doesn't accumulate state forever.
-				if removed, _ := sqliteStore.PurgeExpiredAuthCodes(ctx); removed > 0 {
-					logger.Debug().Int64("removed", removed).Msg("oauth auth-codes purged")
+				if startupErr == nil {
+					startupErr = web.ConfirmPendingUpdate(execPath)
 				}
-				if removed, _ := sqliteStore.PurgeOldOAuthClients(ctx, 90*24*time.Hour); removed > 0 {
-					logger.Debug().Int64("removed", removed).Msg("oauth clients purged")
+				if startupErr != nil {
+					logger.Error().Err(startupErr).Msg("updated process failed readiness proof — preparing rollback")
 				}
 			}
 		}
-	}()
+	}
 
 	// Wait for shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-quit
-	logger.Info().Str("signal", sig.String()).Msg("shutting down")
-	cancelRun() // stop the voter + background loops promptly, before draining HTTP
+	restarting := false
+	if startupErr == nil {
+		select {
+		case sig := <-quit:
+			logger.Info().Str("signal", sig.String()).Msg("shutting down")
+		case <-restartRequested:
+			restarting = true
+			logger.Info().Msg("coordinated restart requested — draining node")
+		case serveErr := <-serveErrors:
+			startupErr = serveErr
+		}
+	}
+	signal.Stop(quit)
+	// Stop MCP admission and cancel/join active tool calls first. A slow quorum
+	// call must not outlive the stores it is using or consume the entire listener
+	// shutdown budget.
+	if mcpHTTPTransport != nil {
+		// Never close stores under a live MCP tool call. Close has already canceled
+		// every admitted handler; joining without a short timeout favors a clean
+		// restart over an unsafe partial teardown.
+		_ = mcpHTTPTransport.Close(context.Background())
+	}
+	if fedMgr != nil {
+		fedMgr.StopSyncDrainer()
+	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if tlsServer != nil {
-		_ = tlsServer.Shutdown(shutdownCtx)
+	// All listeners get the same full wall-clock budget by draining in parallel;
+	// every result is checked before a restart is allowed to exec.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	servers := []struct {
+		name   string
+		server *http.Server
+	}{
+		{name: "REST", server: httpServer},
+		{name: "MCP TLS", server: tlsServer},
+		{name: "federation TLS", server: fedServer},
+		{name: "federation P2P", server: fedP2PServer},
 	}
-	if fedServer != nil {
-		_ = fedServer.Shutdown(shutdownCtx)
+	var shutdownWG sync.WaitGroup
+	var shutdownMu sync.Mutex
+	var shutdownErrs []error
+	for _, item := range servers {
+		if item.server == nil {
+			continue
+		}
+		shutdownWG.Add(1)
+		go func(name string, server *http.Server) {
+			defer shutdownWG.Done()
+			if err := server.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				shutdownMu.Lock()
+				shutdownErrs = append(shutdownErrs, fmt.Errorf("%s listener: %w", name, err))
+				shutdownMu.Unlock()
+				// Shutdown timed out waiting for an active handler. Force-close its
+				// connection so no request can outlive the stores during restart.
+				if closeErr := server.Close(); closeErr != nil && !errors.Is(closeErr, http.ErrServerClosed) {
+					shutdownMu.Lock()
+					shutdownErrs = append(shutdownErrs, fmt.Errorf("%s force close: %w", name, closeErr))
+					shutdownMu.Unlock()
+				}
+			}
+		}(item.name, item.server)
 	}
-	if fedP2PServer != nil {
-		_ = fedP2PServer.Shutdown(shutdownCtx)
-	}
+	shutdownWG.Wait()
 	if fedP2P != nil {
-		_ = fedP2P.Close()
+		if err := fedP2P.Close(); err != nil {
+			shutdownErrs = append(shutdownErrs, fmt.Errorf("federation P2P transport: %w", err))
+		}
 	}
-	return httpServer.Shutdown(shutdownCtx)
+	listenerWG.Wait()
+	// With every HTTP admission point closed and active handler gone, no new
+	// dashboard job can Add to the worker group while it is being joined.
+	stopWorkers()
+	if err := errors.Join(shutdownErrs...); err != nil {
+		return fmt.Errorf("clean shutdown failed: %w", err)
+	}
+	if startupErr != nil {
+		return startupErr
+	}
+	if restarting {
+		preservePIDForExec = true
+		return errCoordinatedRestart
+	}
+	return nil
+}
+
+func confirmPendingUpdateAfterReady(ctx context.Context, baseURL, bootID, execPath string) error {
+	expectedVersion := web.PendingUpdateVersion(execPath)
+	if expectedVersion == "" {
+		return nil
+	}
+	client := &http.Client{Timeout: time.Second}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/v1/dashboard/health", nil)
+		if err == nil {
+			if resp, doErr := client.Do(req); doErr == nil {
+				var health struct {
+					SAGE    string `json:"sage"`
+					Version string `json:"version"`
+					BootID  string `json:"boot_id"`
+				}
+				decodeErr := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health)
+				_ = resp.Body.Close()
+				if resp.StatusCode == http.StatusOK && decodeErr == nil && health.SAGE == "running" &&
+					health.BootID == bootID && strings.TrimPrefix(health.Version, "v") == strings.TrimPrefix(expectedVersion, "v") {
+					return nil
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("updated node did not prove boot %s at version %s: %w", bootID, expectedVersion, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // joinPeers joins a list of peers into a comma-separated string.
@@ -1354,12 +1622,15 @@ func joinPeers(peers []string) string {
 	return result
 }
 
-// restBaseURL builds an HTTP base URL from a REST address.
-// If addr starts with ":" (just a port), it prepends "localhost".
-// Otherwise it uses the address as-is (e.g. "127.0.0.1:18080").
+// restBaseURL builds a dialable HTTP base URL from a REST listen address.
+// Wildcard hosts are valid bind targets but invalid client destinations, so
+// local hooks and MCP configs must use loopback for those cases.
 func restBaseURL(addr string) string {
-	if strings.HasPrefix(addr, ":") {
-		return "http://localhost" + addr
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		if host == "" || host == "0.0.0.0" || host == "::" {
+			host = "localhost"
+		}
+		return "http://" + net.JoinHostPort(host, port)
 	}
 	return "http://" + addr
 }
@@ -1396,7 +1667,11 @@ func cmtP2PAddr(def string) string {
 // genesisInitialAdminAppState returns the genesis app_state JSON that seeds the node
 // operator's agent key as the chain-admin, or nil if the operator key is unavailable.
 func genesisInitialAdminAppState() json.RawMessage {
-	admin := ensureOperatorAdminID()
+	return genesisInitialAdminAppStateForKey(filepath.Join(SageHome(), "agent.key"))
+}
+
+func genesisInitialAdminAppStateForKey(keyPath string) json.RawMessage {
+	admin := ensureOperatorAdminIDForKey(keyPath)
 	if admin == "" {
 		return nil
 	}
@@ -1409,7 +1684,11 @@ func genesisInitialAdminAppState() json.RawMessage {
 // canonical loadOrGenerateKey) if it does not yet exist — `serve` does not
 // otherwise create it. Empty string on any failure.
 func ensureOperatorAdminID() string {
-	priv, err := loadOrGenerateKey(filepath.Join(SageHome(), "agent.key"))
+	return ensureOperatorAdminIDForKey(filepath.Join(SageHome(), "agent.key"))
+}
+
+func ensureOperatorAdminIDForKey(keyPath string) string {
+	priv, err := loadOrGenerateKey(filepath.Clean(expandTilde(keyPath)))
 	if err != nil {
 		return ""
 	}
@@ -1430,12 +1709,16 @@ func ensureOperatorAdminID() string {
 // by TestIssue52_HealThenInitChain_EndToEnd, so the heal step cannot be silently
 // dropped from the serve path without a test going red.
 func ensureGenesisSeed(cometHome string, logger zerolog.Logger) error {
-	if err := initCometBFTConfig(cometHome); err != nil {
+	return ensureGenesisSeedWithKey(cometHome, filepath.Join(SageHome(), "agent.key"), logger)
+}
+
+func ensureGenesisSeedWithKey(cometHome, keyPath string, logger zerolog.Logger) error {
+	if err := initCometBFTConfigWithKey(cometHome, keyPath); err != nil {
 		return fmt.Errorf("init CometBFT: %w", err)
 	}
 	// Strictly gated on height-0 (block store wiped) so a live chain's genesis hash is
 	// never disturbed. Runs AFTER migrateOnUpgrade's reset.
-	healGenesisAdminIfReset(cometHome, logger)
+	healGenesisAdminIfResetWithKey(cometHome, keyPath, logger)
 	return nil
 }
 
@@ -1450,6 +1733,10 @@ func ensureGenesisSeed(cometHome string, logger zerolog.Logger) error {
 // rewriting genesis.json on a live chain would change the genesis hash and break
 // CometBFT's handshake. Single-validator genesis only.
 func healGenesisAdminIfReset(home string, logger zerolog.Logger) {
+	healGenesisAdminIfResetWithKey(home, filepath.Join(SageHome(), "agent.key"), logger)
+}
+
+func healGenesisAdminIfResetWithKey(home, keyPath string, logger zerolog.Logger) {
 	configDir := filepath.Join(home, "config")
 	dataDir := filepath.Join(home, "data")
 	genesisPath := filepath.Join(configDir, "genesis.json")
@@ -1481,7 +1768,7 @@ func healGenesisAdminIfReset(home string, logger zerolog.Logger) {
 	if genesisAppStateHasInitialAdmin(genDoc.AppState) {
 		return // already seeded
 	}
-	admin := ensureOperatorAdminID()
+	admin := ensureOperatorAdminIDForKey(keyPath)
 	if admin == "" {
 		return
 	}
@@ -1530,6 +1817,10 @@ func genesisAppStateHasInitialAdmin(appState json.RawMessage) bool {
 
 // initCometBFTConfig generates CometBFT config files for a single-validator node.
 func initCometBFTConfig(home string) error {
+	return initCometBFTConfigWithKey(home, filepath.Join(SageHome(), "agent.key"))
+}
+
+func initCometBFTConfigWithKey(home, keyPath string) error {
 	configDir := filepath.Join(home, "config")
 	dataDir := filepath.Join(home, "data")
 
@@ -1585,7 +1876,7 @@ func initCometBFTConfig(home string) error {
 	// This is a single-validator genesis (quorum join overwrites it with a shared
 	// genesis that carries no app_state, so quorum is unaffected). InitChain only
 	// honours the seed for single-validator chains.
-	if admin := genesisInitialAdminAppState(); admin != nil {
+	if admin := genesisInitialAdminAppStateForKey(keyPath); admin != nil {
 		genDoc.AppState = admin
 	}
 	if err := genDoc.ValidateAndComplete(); err != nil {
@@ -1637,9 +1928,11 @@ size = 5000
 // /api/tags, an OpenAI-compatible Ping is a real embed request, so the 30s cadence
 // keeps it cheap — and falls back to the sticky Ready() flag otherwise. Non-blocking:
 // the initial probe runs inside the goroutine so boot never waits on the embedder.
-func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger) {
+func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger) <-chan struct{} {
+	done := make(chan struct{})
 	if p == nil || health == nil {
-		return
+		close(done)
+		return done
 	}
 	probe := func() metrics.EmbedderStatus {
 		s := metrics.EmbedderStatus{Semantic: p.Semantic()}
@@ -1666,6 +1959,7 @@ func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *me
 		return s
 	}
 	go func() {
+		defer close(done)
 		// Log only on transition (and once at startup) so a persistently-down provider
 		// doesn't spam the log every 30s.
 		var prevOK, probed bool
@@ -1693,6 +1987,7 @@ func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *me
 			}
 		}
 	}()
+	return done
 }
 
 // truncateString caps s at max runes, appending an ellipsis when it overflows.
@@ -1786,7 +2081,7 @@ func deriveArchetypeIDs(selfKey ed25519.PrivateKey) []string {
 }
 
 // autoImport checks for pending-import.json from the setup wizard and seeds memories.
-func autoImport(cfg *Config, embedProvider embedding.Provider, logger zerolog.Logger) {
+func autoImport(ctx context.Context, cfg *Config, embedProvider embedding.Provider, logger zerolog.Logger) {
 	home := SageHome()
 	importPath := filepath.Join(home, "pending-import.json")
 
@@ -1806,8 +2101,12 @@ func autoImport(cfg *Config, embedProvider embedding.Provider, logger zerolog.Lo
 		return
 	}
 
-	// Wait for the REST API to be ready
-	time.Sleep(5 * time.Second)
+	// Wait for the REST API to be ready, but never hold a coordinated restart.
+	select {
+	case <-time.After(5 * time.Second):
+	case <-ctx.Done():
+		return
+	}
 
 	logger.Info().Int("count", len(memories)).Msg("auto-importing chat history from setup wizard")
 
@@ -1825,6 +2124,9 @@ func autoImport(cfg *Config, embedProvider embedding.Provider, logger zerolog.Lo
 
 	success := 0
 	for _, mem := range memories {
+		if ctx.Err() != nil {
+			return
+		}
 		if mem.Domain == "" {
 			mem.Domain = "imported"
 		}
@@ -2020,15 +2322,13 @@ func seedNetworkAgents(ctx context.Context, s *store.SQLiteStore, cometHome stri
 // mountMCPHTTPTransport wires the HTTP/HTTPS MCP transport endpoints onto
 // the given chi router. Requires SQLite for the bearer-token store.
 //
-// The MCP server is created with a per-request agent identity resolved from
-// the bearer token — each token belongs to exactly one agent, so we mint a
-// fresh ed25519 signing pair for the transport and let the underlying tool
-// handlers run as that token's agent. (Long-term, an enhancement would let
-// each token also carry its own agent.key — for now they share a transport
-// key and the agent_id is propagated via context.)
+// The MCP server signs underlying REST calls with the local node operator key.
+// Bearers therefore resolve to that same identity; token rows created before
+// v11.7 may contain a different label, but must not impersonate an identity
+// whose private key the transport does not hold.
 //
 // CORS is liberal — MCP clients are first-class.
-func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Config, logger zerolog.Logger) {
+func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Config, logger zerolog.Logger) *mcp.HTTPTransport {
 	// Use the node's own agent identity as the underlying signing key for
 	// transport-originated REST calls. The actual *acting* agent is supplied
 	// by the bearer-token middleware via request context — downstream tool
@@ -2036,7 +2336,7 @@ func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Co
 	keyData, readErr := os.ReadFile(cfg.AgentKey) //nolint:gosec // path from trusted config
 	if readErr != nil {
 		logger.Warn().Err(readErr).Msg("HTTP MCP: cannot load agent key — transport disabled")
-		return
+		return nil
 	}
 	var transportKey ed25519.PrivateKey
 	switch len(keyData) {
@@ -2046,8 +2346,9 @@ func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Co
 		transportKey = ed25519.PrivateKey(keyData)
 	default:
 		logger.Warn().Int("len", len(keyData)).Msg("HTTP MCP: invalid agent key size — transport disabled")
-		return
+		return nil
 	}
+	transportAgentID := hex.EncodeToString(transportKey.Public().(ed25519.PublicKey))
 
 	// Build the MCP Server reusing the existing stdio Server logic.
 	// The base URL points at the local REST API so tool handlers funnel
@@ -2076,7 +2377,7 @@ func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Co
 		if tok == nil {
 			return "", sql.ErrNoRows
 		}
-		return tok.AgentID, nil
+		return transportAgentID, nil
 	}
 
 	// IMPORTANT: register the transport endpoints as FLAT paths, not via
@@ -2096,15 +2397,16 @@ func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Co
 	mcpTransportRouter.Post("/v1/mcp/streamable", transport.HandleStreamable)
 
 	logger.Info().Msg("HTTP MCP transport enabled (/v1/mcp/sse, /v1/mcp/streamable)")
+	return transport
 }
 
 // readNodeOperatorKey returns the hex-encoded ed25519 public key derived from
-// ~/.sage/agent.key, accepting either the 32-byte seed or the 64-byte expanded
+// the configured agent_key_file, accepting either the 32-byte seed or the 64-byte expanded
 // private-key form (matches mountMCPHTTPTransport's existing parse). Empty
 // string + nil error means the file isn't present — the caller treats that as
 // "no operator key, hook bypass stays off."
-func readNodeOperatorKey() (string, error) {
-	path := filepath.Join(SageHome(), "agent.key")
+func readNodeOperatorKey(path string) (string, error) {
+	path = filepath.Clean(expandTilde(path))
 	data, err := os.ReadFile(path) //nolint:gosec // path under operator's own home dir
 	if err != nil {
 		if os.IsNotExist(err) {

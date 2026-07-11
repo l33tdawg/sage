@@ -1838,9 +1838,13 @@ func (s *Server) storeMemory(ctx context.Context, content, domain, memType strin
 // getRecallDefaults returns the user's configured recall settings, cached for 60s.
 func (s *Server) getRecallDefaults(ctx context.Context) (topK int, minConf float64) {
 	// Return cached if fresh
+	s.stateMu.Lock()
 	if time.Since(s.recallCacheAge) < 60*time.Second && s.recallTopK > 0 {
-		return s.recallTopK, s.recallMinConf
+		topK, minConf = s.recallTopK, s.recallMinConf
+		s.stateMu.Unlock()
+		return topK, minConf
 	}
+	s.stateMu.Unlock()
 
 	// Fetch from dashboard API
 	var resp struct {
@@ -1848,10 +1852,13 @@ func (s *Server) getRecallDefaults(ctx context.Context) (topK int, minConf float
 		MinConfidence int `json:"min_confidence"`
 	}
 	if err := s.doSignedJSON(ctx, "GET", "/v1/dashboard/settings/recall", nil, &resp); err == nil && resp.TopK > 0 {
+		s.stateMu.Lock()
 		s.recallTopK = resp.TopK
 		s.recallMinConf = float64(resp.MinConfidence) / 100.0
 		s.recallCacheAge = time.Now()
-		return s.recallTopK, s.recallMinConf
+		topK, minConf = s.recallTopK, s.recallMinConf
+		s.stateMu.Unlock()
+		return topK, minConf
 	}
 
 	// Defaults if not configured
@@ -1920,17 +1927,24 @@ func (s *Server) isSemanticMode(ctx context.Context) bool {
 // getMemoryMode returns the current memory mode preference ("full" or "bookend").
 // Cached for 60 seconds to avoid hitting the API every call.
 func (s *Server) getMemoryMode(ctx context.Context) string {
+	s.stateMu.Lock()
 	if time.Since(s.memoryModeCacheAge) < 60*time.Second && s.memoryMode != "" {
-		return s.memoryMode
+		mode := s.memoryMode
+		s.stateMu.Unlock()
+		return mode
 	}
+	s.stateMu.Unlock()
 
 	var resp struct {
 		Mode string `json:"mode"`
 	}
 	if err := s.doSignedJSON(ctx, "GET", "/v1/dashboard/settings/memory-mode", nil, &resp); err == nil && resp.Mode != "" {
+		s.stateMu.Lock()
 		s.memoryMode = resp.Mode
 		s.memoryModeCacheAge = time.Now()
-		return s.memoryMode
+		mode := s.memoryMode
+		s.stateMu.Unlock()
+		return mode
 	}
 
 	return "full"

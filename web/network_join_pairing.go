@@ -20,10 +20,8 @@ package web
 
 import (
 	"encoding/json"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -163,26 +161,19 @@ func (h *DashboardHandler) handleEnableNetworkMode(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusInternalServerError, "enable network mode: "+err.Error())
 		return
 	}
-	execPath, err := os.Executable()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot determine binary path")
+	if !restartInProcessSupported() || h.RequestRestart == nil {
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"ok": true, "restart_required": true,
+			"message": "Network mode is saved. Fully quit SAGE and open it again to apply it.",
+		})
 		return
 	}
-	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "Switching to network mode and restarting..."})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	if err := h.RequestRestart(); err != nil {
+		_ = h.SetNetworkMode(false)
+		writeError(w, http.StatusServiceUnavailable, "could not begin a clean restart; network mode was not changed: "+err.Error())
+		return
 	}
-	// Re-exec after the response reaches the client (same pattern as
-	// handleRestart). syscall.Exec only returns on FAILURE; if it fails, the
-	// process keeps running in the old (personal) mode while config now says
-	// quorum — revert so config never diverges from the live process.
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		if err := restartSelf(execPath); err != nil {
-			log.Printf("network mode switch: restart failed, reverting to personal mode: %v", err)
-			_ = h.SetNetworkMode(false)
-		}
-	}()
+	writeJSONResp(w, http.StatusAccepted, map[string]any{"ok": true, "status": "draining", "message": "Switching to network mode and restarting cleanly…"})
 }
 
 // handleJoinHostStart begins a pairing: build the bundle, mint a session, start

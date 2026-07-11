@@ -1,6 +1,8 @@
 package mcp
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -11,12 +13,46 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestReadMCPFrameOversizeDoesNotPoisonFollowingRequest(t *testing.T) {
+	oversized := bytes.Repeat([]byte{'x'}, maxMCPFrameBytes+1)
+	input := append(append(oversized, '\n'), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`+"\n")...)
+	reader := bufio.NewReaderSize(bytes.NewReader(input), 64<<10)
+	_, err := readMCPFrame(reader, maxMCPFrameBytes)
+	require.ErrorIs(t, err, errMCPFrameTooLarge)
+	frame, err := readMCPFrame(reader, maxMCPFrameBytes)
+	require.NoError(t, err)
+	require.Contains(t, string(frame), `"method":"initialize"`)
+}
+
 func testServer(t *testing.T) (*Server, ed25519.PrivateKey) {
 	t.Helper()
 	_, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 	s := NewServer("http://localhost:9999", priv)
 	return s, priv
+}
+
+func TestConversationStateIsIsolatedAndReleased(t *testing.T) {
+	s, _ := testServer(t)
+	ctxA := WithConversationID(context.Background(), "sse:A")
+	ctxB := WithConversationID(context.Background(), "sse:B")
+	stateA := s.conversation(ctxA)
+	stateB := s.conversation(ctxB)
+	require.NotSame(t, stateA, stateB)
+
+	s.conversationMu.Lock()
+	stateA.callsSinceTurn = 7
+	stateA.inceptionChecked = true
+	s.conversationMu.Unlock()
+	assert.Equal(t, 0, stateB.callsSinceTurn)
+	assert.False(t, stateB.inceptionChecked)
+	assert.True(t, shouldBlockForTurn("external_tool", stateA))
+	assert.False(t, shouldBlockForTurn("external_tool", stateB))
+
+	s.ForgetConversation("sse:A")
+	replacementA := s.conversation(ctxA)
+	require.NotSame(t, stateA, replacementA)
+	assert.Equal(t, 0, replacementA.callsSinceTurn)
 }
 
 func TestHandleInitialize(t *testing.T) {

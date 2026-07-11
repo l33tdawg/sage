@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // This file wires the two signing identities the v11.3 RBAC reassign +
@@ -44,27 +45,29 @@ func parseKeyFile(path string) (ed25519.PrivateKey, bool) {
 	}
 }
 
-// adminSigningKey loads the operator/admin key (~/.sage/agent.key). This key is
-// the on-chain genesis admin; the dashboard uses it to sign the admin-gated
-// governance + domain-reassign txs. Returns nil if the key is absent.
-func adminSigningKey() ed25519.PrivateKey {
-	k, ok := parseKeyFile(filepath.Join(SageHome(), "agent.key"))
+// adminSigningKeyAt loads the operator/admin key (normally ~/.sage/agent.key,
+// but the configured cfg.AgentKey path wins). This key is the on-chain genesis
+// admin; the dashboard uses it to sign the admin-gated governance +
+// domain-reassign txs. Returns nil if the key is absent.
+func adminSigningKeyAt(path string) ed25519.PrivateKey {
+	k, ok := parseKeyFile(path)
 	if !ok {
 		return nil
 	}
 	return k
 }
 
-// localAgentKeyResolver builds a resolver mapping agentID (hex(pubkey)) -> the
-// local private key that produces it, scanning ~/.sage/agent.key and
-// ~/.sage/agents/<project>/agent.key. Keys are loaded once and cached. The
-// resolver only ever returns keys already held locally and never derives or
+// localAgentKeyResolverWithOperator builds a resolver mapping agentID
+// (hex(pubkey)) -> the local private key that produces it, scanning the
+// operator key path plus ~/.sage/agent.key and ~/.sage/agents/<project>/agent.key.
+// The resolver only ever returns keys already held locally and never derives or
 // exposes key material; it reports (nil, false) for any agent whose key is not
 // on this node (e.g. a remote federated agent).
-func localAgentKeyResolver() func(agentID string) (ed25519.PrivateKey, bool) {
+func localAgentKeyResolverWithOperator(operatorKeyPath string) func(agentID string) (ed25519.PrivateKey, bool) {
 	var (
-		once sync.Once
-		byID map[string]ed25519.PrivateKey
+		mu       sync.Mutex
+		byID     map[string]ed25519.PrivateKey
+		lastScan time.Time
 	)
 	load := func() {
 		byID = make(map[string]ed25519.PrivateKey)
@@ -80,7 +83,12 @@ func localAgentKeyResolver() func(agentID string) (ed25519.PrivateKey, bool) {
 			byID[hex.EncodeToString(pub)] = k
 		}
 		home := SageHome()
-		add(filepath.Join(home, "agent.key"))
+		add(operatorKeyPath)
+		// Also recognize the conventional path when a custom configured key is
+		// used; it may belong to another explicitly local agent/legacy install.
+		if operatorKeyPath != filepath.Join(home, "agent.key") {
+			add(filepath.Join(home, "agent.key"))
+		}
 		agentsDir := filepath.Join(home, "agents")
 		if entries, err := os.ReadDir(agentsDir); err == nil {
 			for _, e := range entries {
@@ -90,10 +98,22 @@ func localAgentKeyResolver() func(agentID string) (ed25519.PrivateKey, bool) {
 				add(filepath.Join(agentsDir, e.Name(), "agent.key"))
 			}
 		}
+		lastScan = time.Now()
 	}
 	return func(agentID string) (ed25519.PrivateKey, bool) {
-		once.Do(load)
+		mu.Lock()
+		defer mu.Unlock()
+		if byID == nil {
+			load()
+		}
 		k, ok := byID[agentID]
+		// Agent bundles can be created after dashboard startup. Refresh on a
+		// miss (rate-limited globally) so a newly local agent becomes eligible
+		// for an explicit admin override without restarting CEREBRUM.
+		if !ok && time.Since(lastScan) >= time.Second {
+			load()
+			k, ok = byID[agentID]
+		}
 		return k, ok
 	}
 }

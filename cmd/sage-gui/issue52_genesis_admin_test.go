@@ -47,7 +47,7 @@ func TestIssue52_EnsureOperatorAdminID(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, raw, ed25519.PublicKeySize)
 
-			rk, err := readNodeOperatorKey()
+			rk, err := readNodeOperatorKey(filepath.Join(home, "agent.key"))
 			require.NoError(t, err)
 			require.Equal(t, rk, got, "must match readNodeOperatorKey")
 		})

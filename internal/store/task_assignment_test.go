@@ -2,12 +2,46 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetAllTasksClampsBoardLimit(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "historical-priority", "codex")
+	_, err := s.writeExecContext(ctx, `UPDATE memories SET task_status = '' WHERE memory_id = 'historical-priority'`)
+	require.NoError(t, err)
+	for i := 0; i < 510; i++ {
+		insertOpenTask(t, s, fmt.Sprintf("limit-task-%03d", i), "codex")
+	}
+	tasks, err := s.GetAllTasks(ctx, "", 10_000)
+	require.NoError(t, err)
+	require.Len(t, tasks, 500)
+	require.Equal(t, "historical-priority", tasks[0].MemoryID, "unknown statuses must not be hidden behind the board limit")
+	tasks, err = s.GetAllTasks(ctx, "", -1)
+	require.NoError(t, err)
+	require.Len(t, tasks, 100)
+	open, err := s.GetOpenTasks(ctx, "", "", "")
+	require.NoError(t, err)
+	require.Len(t, open, 500, "agent backlog reads must remain bounded")
+}
+
+func TestGetAllTasksIncludesHistoricalEmptyStatusForRecovery(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	insertOpenTask(t, s, "historical-empty-status", "codex")
+	_, err := s.writeExecContext(ctx, `UPDATE memories SET task_status = '' WHERE memory_id = 'historical-empty-status'`)
+	require.NoError(t, err)
+	tasks, err := s.GetAllTasks(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Empty(t, tasks[0].TaskStatus, "unknown history must remain explicit until the user classifies it")
+}
 
 func insertOpenTask(t *testing.T, s *SQLiteStore, id, provider string) {
 	t.Helper()

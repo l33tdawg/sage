@@ -275,3 +275,16 @@ func TestRequestLogger(t *testing.T) {
 	assert.NotEmpty(t, rr.Header().Get("X-Request-ID"), "should set X-Request-ID header")
 	assert.Len(t, rr.Header().Get("X-Request-ID"), 32, "request ID should be 16 bytes hex = 32 chars")
 }
+
+func TestReplayCacheFailsClosedAtBoundAndRecoversExpiredSpace(t *testing.T) {
+	rc := &replayCache{seen: make(map[string]time.Time), maxSize: 2}
+	assert.False(t, rc.check("sig-a"))
+	assert.False(t, rc.check("sig-b"))
+	assert.True(t, rc.check("sig-c"), "a fresh saturated window must fail closed")
+	assert.Len(t, rc.seen, 2, "cache must never grow past maxSize")
+
+	rc.seen["sig-a"] = time.Now().Add(-maxTimestampSkew - time.Second)
+	assert.False(t, rc.check("sig-c"), "expired space should admit a new signature")
+	assert.Len(t, rc.seen, 2)
+	assert.NotContains(t, rc.seen, "sig-a")
+}

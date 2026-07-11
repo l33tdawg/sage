@@ -62,7 +62,7 @@ func tokenRouterAs(s *Server, callerID string) http.Handler {
 func TestMCPTokenIssue_Success(t *testing.T) {
 	_, h := newTokenServer(t)
 
-	pubkey := strings.Repeat("a", 64) // 64 hex chars = valid pubkey shape
+	pubkey := tokenOperatorID
 	body := []byte(`{"agent_id":"` + pubkey + `","name":"chatgpt"}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
@@ -111,7 +111,7 @@ func TestMCPTokenList_EmptyThenPopulated(t *testing.T) {
 	assert.Empty(t, listResp.Tokens)
 
 	// Issue one, then list again.
-	pubkey := strings.Repeat("b", 64)
+	pubkey := tokenOperatorID
 	body := []byte(`{"agent_id":"` + pubkey + `","name":"cursor"}`)
 	issueReq := httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body))
 	issueRR := httptest.NewRecorder()
@@ -133,7 +133,7 @@ func TestMCPTokenList_EmptyThenPopulated(t *testing.T) {
 func TestMCPTokenRevoke(t *testing.T) {
 	_, h := newTokenServer(t)
 
-	pubkey := strings.Repeat("c", 64)
+	pubkey := tokenOperatorID
 	body := []byte(`{"agent_id":"` + pubkey + `"}`)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body)))
@@ -168,9 +168,9 @@ func TestMCPTokenRevoke_NotFound(t *testing.T) {
 
 // --- AuthZ gate (v10.1.1) ---------------------------------------------------
 
-// TestMCPToken_SelfMintAllowed: a non-operator agent may mint a token for its
-// OWN agent_id.
-func TestMCPToken_SelfMintAllowed(t *testing.T) {
+// A bearer cannot honestly execute as an arbitrary agent because HTTP MCP
+// holds only the node operator's signing key.
+func TestMCPToken_NonOperatorSelfMintDenied(t *testing.T) {
 	s, _ := newTokenServer(t)
 	self := strings.Repeat("d", 64)
 	h := tokenRouterAs(s, self)
@@ -178,7 +178,8 @@ func TestMCPToken_SelfMintAllowed(t *testing.T) {
 	body := []byte(`{"agent_id":"` + self + `","name":"mine"}`)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body)))
-	assert.Equal(t, http.StatusCreated, rr.Code, "self-mint must be allowed; body=%s", rr.Body.String())
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "non-operator identity must not be mislabeled; body=%s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "node operator")
 }
 
 // TestMCPToken_MintForOtherDenied: a non-operator agent may NOT mint a token
@@ -192,7 +193,7 @@ func TestMCPToken_MintForOtherDenied(t *testing.T) {
 	body := []byte(`{"agent_id":"` + other + `","name":"impersonation"}`)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body)))
-	assert.Equal(t, http.StatusForbidden, rr.Code, "minting for another agent_id must be denied")
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "minting for another agent_id must be denied")
 }
 
 // TestMCPToken_ListScopedToCaller: a non-operator agent sees only its own
@@ -200,39 +201,34 @@ func TestMCPToken_MintForOtherDenied(t *testing.T) {
 func TestMCPToken_ListScopedToCaller(t *testing.T) {
 	s, opH := newTokenServer(t)
 	agentA := strings.Repeat("a", 64)
-	agentB := strings.Repeat("b", 64)
 
-	// Operator mints one token for each agent.
-	for _, id := range []string{agentA, agentB} {
-		rr := httptest.NewRecorder()
-		opH.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens",
-			bytes.NewReader([]byte(`{"agent_id":"`+id+`","name":"t"}`))))
-		require.Equal(t, http.StatusCreated, rr.Code)
-	}
-
-	// agentA lists — must see only its own token.
+	// Operator mints an operator-scoped token.
 	rr := httptest.NewRecorder()
+	opH.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens",
+		bytes.NewReader([]byte(`{"agent_id":"`+tokenOperatorID+`","name":"t"}`))))
+	require.Equal(t, http.StatusCreated, rr.Code)
+
+	// agentA lists — it must not see the operator token.
+	rr = httptest.NewRecorder()
 	tokenRouterAs(s, agentA).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/mcp/tokens", nil))
 	require.Equal(t, http.StatusOK, rr.Code)
 	var resp struct {
 		Tokens []MCPTokenSummary `json:"tokens"`
 	}
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
-	require.Len(t, resp.Tokens, 1, "non-operator must see only its own tokens")
-	assert.Equal(t, agentA, resp.Tokens[0].AgentID)
+	require.Empty(t, resp.Tokens, "non-operator must not see operator-scoped tokens")
 }
 
 // TestMCPToken_RevokeOtherDenied: a non-operator agent cannot revoke a token it
 // does not own.
 func TestMCPToken_RevokeOtherDenied(t *testing.T) {
 	s, opH := newTokenServer(t)
-	agentA := strings.Repeat("a", 64)
 	agentB := strings.Repeat("b", 64)
 
-	// Operator mints a token for agentA.
+	// Operator mints a token for the only identity HTTP MCP can execute as.
 	issueRR := httptest.NewRecorder()
 	opH.ServeHTTP(issueRR, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens",
-		bytes.NewReader([]byte(`{"agent_id":"`+agentA+`","name":"t"}`))))
+		bytes.NewReader([]byte(`{"agent_id":"`+tokenOperatorID+`","name":"t"}`))))
 	require.Equal(t, http.StatusCreated, issueRR.Code)
 	var issued MCPTokenIssueResponse
 	require.NoError(t, json.NewDecoder(issueRR.Body).Decode(&issued))

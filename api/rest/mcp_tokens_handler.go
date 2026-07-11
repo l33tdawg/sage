@@ -6,7 +6,7 @@ package rest
 // the bearer-token auth that gates the actual MCP transport). The flow is:
 //
 //   1. Operator (a Claude Code agent or human via dashboard) calls
-//      POST /v1/mcp/tokens with name + agent_id. Server returns a one-shot
+//      POST /v1/mcp/tokens with name + the local node-operator agent_id. Server returns a one-shot
 //      token string + token ID. Show ONCE — never readable again.
 //   2. External MCP client (ChatGPT, Cursor, etc.) sends that token in
 //      Authorization: Bearer <token> on every /v1/mcp/sse or
@@ -99,6 +99,19 @@ func (s *Server) handleMCPTokenIssue(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "agent_id must be hex-encoded")
 		return
 	}
+	// HTTP MCP currently signs every underlying REST call with the node's
+	// private operator key. Storing an arbitrary selected agent here only
+	// changed the bearer label; it did not grant that private identity and made
+	// audit/RBAC output dishonest. Until tokens carry their own signing key,
+	// bind them explicitly to the identity they truly execute as.
+	if s.nodeOperatorID == "" {
+		writeJSONError(w, http.StatusServiceUnavailable, "node operator identity unavailable — MCP tokens cannot be issued")
+		return
+	}
+	if req.AgentID != s.nodeOperatorID {
+		writeJSONError(w, http.StatusBadRequest, "HTTP MCP tokens run as the local node operator; agent_id must match the node operator identity")
+		return
+	}
 
 	// AuthZ: a bearer token grants the holder the target agent's identity on the
 	// MCP transport, so a caller may only mint a token for ITS OWN agent_id —
@@ -162,13 +175,17 @@ func (s *Server) handleMCPTokenList(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]MCPTokenSummary, 0, len(rows))
 	for _, t := range rows {
-		if !privileged && t.AgentID != callerID {
+		effectiveAgentID := s.nodeOperatorID
+		if effectiveAgentID == "" {
+			effectiveAgentID = t.AgentID
+		}
+		if !privileged && effectiveAgentID != callerID {
 			continue
 		}
 		out = append(out, MCPTokenSummary{
 			ID:         t.ID,
 			Name:       t.Name,
-			AgentID:    t.AgentID,
+			AgentID:    effectiveAgentID,
 			CreatedAt:  t.CreatedAt,
 			LastUsedAt: t.LastUsedAt,
 			RevokedAt:  t.RevokedAt,
@@ -203,7 +220,11 @@ func (s *Server) handleMCPTokenRevoke(w http.ResponseWriter, r *http.Request) {
 		}
 		owned := false
 		for _, t := range rows {
-			if t.ID == id && t.AgentID == callerID {
+			effectiveAgentID := s.nodeOperatorID
+			if effectiveAgentID == "" {
+				effectiveAgentID = t.AgentID
+			}
+			if t.ID == id && effectiveAgentID == callerID {
 				owned = true
 				break
 			}

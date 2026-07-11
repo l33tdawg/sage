@@ -1349,6 +1349,10 @@ func encodeAccessGrant(a *AccessGrant) []byte {
 	buf = append(buf, a.Level)
 	buf = appendInt64(buf, a.ExpiresAt)
 	buf = appendBytes(buf, []byte(a.RequestID))
+	if a.ExpectedOwnerID != "" || a.ExpectedOwnedDomain != "" {
+		buf = appendBytes(buf, []byte(a.ExpectedOwnerID))
+		buf = appendBytes(buf, []byte(a.ExpectedOwnedDomain))
+	}
 	return buf
 }
 
@@ -1387,11 +1391,23 @@ func decodeAccessGrant(data []byte) (*AccessGrant, error) {
 		return nil, err
 	}
 
-	b, _, err = readBytes(data, off)
+	b, off, err = readBytes(data, off)
 	if err != nil {
 		return nil, err
 	}
 	a.RequestID = string(b)
+	if off < len(data) {
+		b, off, err = readBytes(data, off)
+		if err != nil {
+			return nil, err
+		}
+		a.ExpectedOwnerID = string(b)
+		b, _, err = readBytes(data, off)
+		if err != nil {
+			return nil, err
+		}
+		a.ExpectedOwnedDomain = string(b)
+	}
 
 	return a, nil
 }
@@ -1404,6 +1420,10 @@ func encodeAccessRevoke(a *AccessRevoke) []byte {
 	buf = appendBytes(buf, []byte(a.GranteeID))
 	buf = appendBytes(buf, []byte(a.Domain))
 	buf = appendBytes(buf, []byte(a.Reason))
+	if a.ExpectedOwnerID != "" || a.ExpectedOwnedDomain != "" {
+		buf = appendBytes(buf, []byte(a.ExpectedOwnerID))
+		buf = appendBytes(buf, []byte(a.ExpectedOwnedDomain))
+	}
 	return buf
 }
 
@@ -1431,11 +1451,23 @@ func decodeAccessRevoke(data []byte) (*AccessRevoke, error) {
 	}
 	a.Domain = string(b)
 
-	b, _, err = readBytes(data, off)
+	b, off, err = readBytes(data, off)
 	if err != nil {
 		return nil, err
 	}
 	a.Reason = string(b)
+	if off < len(data) {
+		b, off, err = readBytes(data, off)
+		if err != nil {
+			return nil, err
+		}
+		a.ExpectedOwnerID = string(b)
+		b, _, err = readBytes(data, off)
+		if err != nil {
+			return nil, err
+		}
+		a.ExpectedOwnedDomain = string(b)
+	}
 
 	return a, nil
 }

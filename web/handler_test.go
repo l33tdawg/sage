@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	ed25519pkg "crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 func newTestHandler(t *testing.T) (*DashboardHandler, *store.SQLiteStore) {
@@ -81,15 +84,45 @@ func signAgentGET(t *testing.T, req *http.Request, priv ed25519pkg.PrivateKey) s
 	return signAgentRequest(t, req, priv, nil)
 }
 
+func markLocalCEREBRUM(req *http.Request) {
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Host = "localhost:8080"
+	req.RemoteAddr = "127.0.0.1:54321"
+}
+
 func signAgentRequest(t *testing.T, req *http.Request, priv ed25519pkg.PrivateKey, body []byte) string {
 	t.Helper()
 	pub := priv.Public().(ed25519pkg.PublicKey)
 	agentID := hex.EncodeToString(pub)
 	ts := time.Now().Unix()
+	nonce := make([]byte, 8)
+	_, randErr := rand.Read(nonce)
+	require.NoError(t, randErr)
 	req.Header.Set("X-Agent-ID", agentID)
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
-	req.Header.Set("X-Signature", hex.EncodeToString(auth.SignRequest(priv, req.Method, req.URL.RequestURI(), body, ts)))
+	req.Header.Set("X-Nonce", hex.EncodeToString(nonce))
+	req.Header.Set("X-Signature", hex.EncodeToString(auth.SignRequestWithNonce(priv, req.Method, req.URL.RequestURI(), body, ts, nonce)))
 	return agentID
+}
+
+func TestDashboardAgentSignatureRejectsReplay(t *testing.T) {
+	h, _ := newTestHandler(t)
+	router := testRouter(h)
+	_, priv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+
+	first := httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
+	signAgentGET(t, first, priv)
+	second := httptest.NewRequest(http.MethodGet, first.URL.RequestURI(), nil)
+	second.Header = first.Header.Clone()
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, first)
+	require.NotEqual(t, http.StatusUnauthorized, w.Code, "first valid signature must pass authentication: %s", w.Body.String())
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, second)
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
 }
 
 type transientClassificationStore struct {
@@ -159,8 +192,7 @@ func TestTaskAssignmentCrossProviderAppearsInBacklogAndInbox(t *testing.T) {
 	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
 	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/assigned-task/assign", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "http://localhost:8080")
-	req.Host = "localhost:8080"
+	markLocalCEREBRUM(req)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -173,8 +205,7 @@ func TestTaskAssignmentCrossProviderAppearsInBacklogAndInbox(t *testing.T) {
 	body = bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
 	req = httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/assigned-task/assign", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "http://localhost:8080")
-	req.Host = "localhost:8080"
+	markLocalCEREBRUM(req)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -223,6 +254,164 @@ func TestTaskAssignmentCrossProviderAppearsInBacklogAndInbox(t *testing.T) {
 	}
 }
 
+func TestTaskBoardAllTrueRejectsSignedAgentCaller(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestTask(t, s, "public-board-task", "public-work", "codex")
+	_, priv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/tasks?all=true&limit=10000", nil)
+	signAgentGET(t, req, priv)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "task backlog")
+}
+
+func TestTaskBoardAllTrueRequiresLocalHumanCEREBRUM(t *testing.T) {
+	h, s := newTestHandler(t)
+	boardHandler := http.HandlerFunc(h.handleGetTasks)
+	insertTestTask(t, s, "board-task", "work", "codex")
+
+	tests := []struct {
+		name       string
+		origin     string
+		secFetch   string
+		host       string
+		wantStatus int
+	}{
+		{name: "same-origin browser", origin: "http://localhost:8080", secFetch: "same-origin", host: "localhost:8080", wantStatus: http.StatusOK},
+		{name: "origin-less caller", host: "localhost:8080", wantStatus: http.StatusForbidden},
+		{name: "cross-origin browser", origin: "https://evil.example", secFetch: "cross-site", host: "localhost:8080", wantStatus: http.StatusForbidden},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/tasks?all=true", nil)
+			req.Host = tc.host
+			if tc.name == "same-origin browser" {
+				req.RemoteAddr = "127.0.0.1:54321"
+			}
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			if tc.secFetch != "" {
+				req.Header.Set("Sec-Fetch-Site", tc.secFetch)
+			}
+			w := httptest.NewRecorder()
+			boardHandler.ServeHTTP(w, req)
+			assert.Equal(t, tc.wantStatus, w.Code, w.Body.String())
+		})
+	}
+}
+
+func TestTaskOperatorSurfacesRejectAgentsAndUnauthenticatedLANCallers(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestTask(t, s, "guarded-task", "work", "codex")
+	_, priv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+
+	createBody := []byte(`{"content":"agent bypass","domain":"work"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/tasks", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	signAgentRequest(t, req, priv, createBody)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+
+	req = httptest.NewRequest(http.MethodDelete, "/v1/dashboard/memory/guarded-task", nil)
+	signAgentRequest(t, req, priv, nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	got, err := s.GetMemory(context.Background(), "guarded-task")
+	require.NoError(t, err)
+	require.NotEqual(t, memory.StatusDeprecated, got.Status)
+
+	statusBody := []byte(`{"task_status":"done"}`)
+	for _, req = range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/v1/dashboard/tasks", nil),
+		httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/guarded-task/status", bytes.NewReader(statusBody)),
+	} {
+		if req.Method == http.MethodPut {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	}
+
+	// Browser headers are not LAN authentication when encryption is disabled.
+	req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/tasks?all=true", nil)
+	req.Header.Set("Origin", "http://192.168.1.10:8080")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Host = "192.168.1.10:8080"
+	req.RemoteAddr = "192.168.1.20:54321"
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+}
+
+func TestTaskBoardAllowsAuthenticatedEncryptedLANSession(t *testing.T) {
+	h, s := newTestHandler(t)
+	insertTestTask(t, s, "lan-task", "work", "codex")
+	h.Encrypted.Store(true)
+	h.sessions.Store("valid-lan-session", time.Now().Add(time.Hour))
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/tasks?all=true", nil)
+	req.Header.Set("Origin", "http://192.168.1.10:8080")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Host = "192.168.1.10:8080"
+	req.RemoteAddr = "192.168.1.20:54321"
+	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "valid-lan-session"})
+	w := httptest.NewRecorder()
+	h.handleGetTasks(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+}
+
+func TestCreateTaskConsensusFailureDoesNotInsertPhantom(t *testing.T) {
+	h, s := newTestHandler(t)
+	_, key, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	h.SigningKey = key
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/broadcast_tx_commit", r.URL.Path)
+		_, _ = w.Write([]byte(`{"result":{"check_tx":{"code":0,"log":""},"tx_result":{"code":7,"log":"rejected"},"hash":"abc","height":"1"}}`))
+	}))
+	t.Cleanup(rpc.Close)
+	h.CometBFTRPC = rpc.URL
+	r := testRouter(h)
+	body := []byte(`{"content":"must commit","domain":"work"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+	stats, err := s.GetStats(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, stats.TotalMemories, "rejected consensus task must not appear in the local board")
+}
+
+func TestCreateTaskStandaloneStoresProposedAuthoredTask(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	body := []byte(`{"content":"standalone work","domain":"work"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/tasks", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	var response map[string]string
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	got, err := s.GetMemory(context.Background(), response["memory_id"])
+	require.NoError(t, err)
+	require.Equal(t, memory.StatusProposed, got.Status)
+	require.Equal(t, "cerebrum", got.SubmittingAgent)
+	require.Equal(t, memory.TaskStatusPlanned, got.TaskStatus)
+}
+
 func TestTaskAssignmentRejectsInactiveOrUnknownAgent(t *testing.T) {
 	h, s := newTestHandler(t)
 	r := testRouter(h)
@@ -235,8 +424,7 @@ func TestTaskAssignmentRejectsInactiveOrUnknownAgent(t *testing.T) {
 		body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, assignee))
 		req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/guarded-task/assign", body)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Origin", "http://localhost:8080")
-		req.Host = "localhost:8080"
+		markLocalCEREBRUM(req)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
@@ -280,8 +468,7 @@ func TestTaskNotificationRechecksRBACAfterAssignment(t *testing.T) {
 	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
 	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/reclassified-task/assign", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "http://localhost:8080")
-	req.Host = "localhost:8080"
+	markLocalCEREBRUM(req)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -313,8 +500,7 @@ func TestTaskNotificationRejectsAgentDeactivatedAfterAssignment(t *testing.T) {
 	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
 	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/deactivated-task/assign", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "http://localhost:8080")
-	req.Host = "localhost:8080"
+	markLocalCEREBRUM(req)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -343,8 +529,7 @@ func TestTaskNotificationTransientAuthorizationFailureDoesNotConsumeNotice(t *te
 	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
 	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/retry-auth-task/assign", body)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "http://localhost:8080")
-	req.Host = "localhost:8080"
+	markLocalCEREBRUM(req)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -383,8 +568,7 @@ func TestAgentTaskStatusRequiresActiveCurrentOwnerAndCannotReopen(t *testing.T) 
 	assignBody := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentA))
 	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/owned-task/assign", assignBody)
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "http://localhost:8080")
-	req.Host = "localhost:8080"
+	markLocalCEREBRUM(req)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
@@ -427,6 +611,7 @@ func TestHandleDeleteMemory(t *testing.T) {
 	insertTestMemory(t, s, "m1", "general")
 
 	req := httptest.NewRequest("DELETE", "/v1/dashboard/memory/m1", nil)
+	markLocalCEREBRUM(req)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -982,6 +1167,98 @@ func TestHandleUpdateAgent_NoCometBFT_NoWarning(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "Renamed Without Consensus", resp["name"])
 	assert.Nil(t, resp["on_chain_warning"])
+}
+
+func TestHandleUpdateAgent_PermissionsSignedByGenesisAdmin(t *testing.T) {
+	var captured *tx.ParsedTx
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := strings.TrimPrefix(r.URL.Query().Get("tx"), "0x")
+		encoded, decErr := hex.DecodeString(raw)
+		require.NoError(t, decErr)
+		captured, decErr = tx.DecodeTx(encoded)
+		require.NoError(t, decErr)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"result":{"check_tx":{"code":0},"tx_result":{"code":0},"hash":"ABC123","height":"42"}}`)
+	}))
+	defer cometMock.Close()
+
+	h, s := newTestHandler(t)
+	h.CometBFTRPC = cometMock.URL
+	_, validatorKey, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	adminPub, adminKey, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	h.SigningKey = validatorKey
+	h.AdminSigningKey = adminKey
+	r := testRouter(h)
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: "agent-permission-1", Name: "Local Agent", Role: "member", Status: "active", CreatedAt: time.Now().UTC(),
+	}))
+
+	body, err := json.Marshal(map[string]any{
+		"domain_access": `[{"domain":"research","read":true,"write":false}]`,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPatch, "/v1/dashboard/network/agents/agent-permission-1", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NotNil(t, captured)
+	require.NotNil(t, captured.AgentSetPermission)
+	assert.Equal(t, []byte(adminPub), captured.AgentPubKey, "permission tx must carry genesis admin proof")
+	assert.NotEqual(t, validatorKey.Public(), captured.AgentPubKey, "validator key is not the RBAC admin")
+}
+
+func TestHandleUpdateAgent_AdminOverrideRejectsSignedAgent(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: "agent-override-target", Name: "Target", Role: "member", Status: "active", CreatedAt: time.Now().UTC(),
+	}))
+	_, callerKey, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	body, err := json.Marshal(map[string]any{
+		"domain_access": `[{"domain":"research","read":true,"write":false}]`,
+		"admin_override": []map[string]any{{
+			"domain": "research", "owner_id": strings.Repeat("a", 64), "owned_domain": "research", "level": 1,
+		}},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPatch, "/v1/dashboard/network/agents/agent-override-target", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Host = "localhost:8080"
+	signAgentRequest(t, req, callerKey, body)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	after, err := s.GetAgent(context.Background(), "agent-override-target")
+	require.NoError(t, err)
+	assert.Empty(t, after.DomainAccess, "rejected agent override must not mutate local policy")
+}
+
+func TestHandleUpdateAgent_AdminOverrideRejectsNoOriginCaller(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: "agent-override-target", Name: "Target", Role: "member", Status: "active", CreatedAt: time.Now().UTC(),
+	}))
+	body, err := json.Marshal(map[string]any{
+		"admin_override": []map[string]any{{
+			"domain": "research", "owner_id": strings.Repeat("a", 64), "owned_domain": "research", "level": 1,
+		}},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPatch, "/v1/dashboard/network/agents/agent-override-target", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
 // ed25519GenerateKey is a test helper wrapping crypto/ed25519.GenerateKey.

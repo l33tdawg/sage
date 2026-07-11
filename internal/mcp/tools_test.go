@@ -1480,7 +1480,7 @@ func TestIsSemanticMode_ProbeFailureNotCached(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
 		infoCalls++
-		if infoCalls == 1 {
+		if infoCalls <= 4 {
 			w.WriteHeader(http.StatusServiceUnavailable) // embedder transiently down
 			return
 		}
@@ -1497,7 +1497,7 @@ func TestIsSemanticMode_ProbeFailureNotCached(t *testing.T) {
 	// The failure must not have been cached — a second call re-probes and the
 	// now-healthy embedder flips the verdict to semantic.
 	assert.True(t, s.isSemanticMode(context.Background()), "must re-probe after a failed probe and recover")
-	assert.Equal(t, 2, infoCalls, "failed probe must not be cached; second call must re-probe")
+	assert.Equal(t, 5, infoCalls, "the first call exhausts bounded retries; the second call must re-probe")
 }
 
 func TestSageTurn_Signal_KeywordOnlyOnHashNode(t *testing.T) {

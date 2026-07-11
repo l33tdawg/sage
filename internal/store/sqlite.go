@@ -3864,7 +3864,7 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 		query += ` AND (provider = ? OR provider = '')`
 		args = append(args, provider)
 	}
-	query += ` ORDER BY created_at DESC`
+	query += ` ORDER BY created_at DESC LIMIT 500`
 
 	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -3894,6 +3894,8 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int) ([]*memory.MemoryRecord, error) {
 	if limit <= 0 {
 		limit = 100
+	} else if limit > 500 {
+		limit = 500
 	}
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
 		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at, COALESCE(task_status, '')
@@ -3912,7 +3914,7 @@ func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int)
 		WHEN 'planned' THEN 2
 		WHEN 'done' THEN 3
 		WHEN 'dropped' THEN 4
-		ELSE 5 END, created_at DESC LIMIT ?`
+		ELSE 0 END, created_at DESC LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.conn.QueryContext(ctx, query, args...)

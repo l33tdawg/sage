@@ -5,22 +5,28 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"crypto/sha256"
+	"crypto/rand"
 	"crypto/tls"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/tlsca"
 )
+
+var errMCPFrameTooLarge = errors.New("MCP JSON-RPC frame exceeds 2 MiB")
+
+const maxMCPFrameBytes = 2 << 20
 
 // JSON-RPC types.
 type jsonRPCRequest struct {
@@ -53,10 +59,10 @@ type Server struct {
 	project    string // Project directory name (e.g. "sage", "levelupctf") — derived from CWD.
 	httpClient *http.Client
 	tools      map[string]Tool
+	stateMu    sync.Mutex // shared preference caches
 
-	// Turn discipline tracking — nudge agents that forget to call sage_turn.
-	callsSinceTurn int
-	lastTurnTime   time.Time
+	conversationMu sync.Mutex
+	conversations  map[string]*conversationState
 
 	// Cached recall settings from dashboard preferences.
 	recallTopK     int
@@ -74,10 +80,48 @@ type Server struct {
 	semanticMode     *bool
 	semanticCacheAge time.Time
 
-	// Auto-inception: automatically initialize brain on first tool call if empty.
-	inceptionChecked bool
-
 	version string
+}
+
+type conversationState struct {
+	callsSinceTurn   int
+	lastTurnTime     time.Time
+	inceptionChecked bool
+	lastUsed         time.Time
+}
+
+type conversationIDContextKey struct{}
+
+// WithConversationID scopes turn discipline and auto-inception to one MCP
+// client/session. Stdio callers naturally use the empty/default conversation.
+func WithConversationID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, conversationIDContextKey{}, id)
+}
+
+func (s *Server) conversation(ctx context.Context) *conversationState {
+	id, _ := ctx.Value(conversationIDContextKey{}).(string)
+	if id == "" {
+		id = "stdio"
+	}
+	s.conversationMu.Lock()
+	defer s.conversationMu.Unlock()
+	if state := s.conversations[id]; state != nil {
+		state.lastUsed = time.Now()
+		return state
+	}
+	state := &conversationState{lastUsed: time.Now()}
+	s.conversations[id] = state
+	return state
+}
+
+// ForgetConversation releases state for a transport session that has closed.
+func (s *Server) ForgetConversation(id string) {
+	if id == "" || id == "stdio" {
+		return
+	}
+	s.conversationMu.Lock()
+	delete(s.conversations, id)
+	s.conversationMu.Unlock()
 }
 
 // NewServer creates a new MCP server instance.
@@ -89,12 +133,13 @@ func NewServer(baseURL string, agentKey ed25519.PrivateKey) *Server {
 	}
 	pub, _ := agentKey.Public().(ed25519.PublicKey) //nolint:errcheck
 	s := &Server{
-		baseURL:    baseURL,
-		agentKey:   agentKey,
-		agentID:    hex.EncodeToString(pub),
-		provider:   os.Getenv("SAGE_PROVIDER"),
-		httpClient: mcpHTTPClient(baseURL),
-		version:    "dev",
+		baseURL:       baseURL,
+		agentKey:      agentKey,
+		agentID:       hex.EncodeToString(pub),
+		provider:      os.Getenv("SAGE_PROVIDER"),
+		httpClient:    mcpHTTPClient(baseURL),
+		version:       "dev",
+		conversations: make(map[string]*conversationState),
 	}
 	s.tools = s.registerTools()
 	return s
@@ -108,11 +153,19 @@ func (s *Server) SetProject(name string) { s.project = name }
 
 // Run starts the stdio MCP server loop.
 func (s *Server) Run(ctx context.Context) error {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024) // 1MB buffer
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	reader := bufio.NewReaderSize(os.Stdin, 64<<10)
+	for {
+		line, readErr := readMCPFrame(reader, maxMCPFrameBytes)
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if errors.Is(readErr, errMCPFrameTooLarge) {
+			s.writeError(nil, -32600, "Request too large")
+			continue
+		}
+		if readErr != nil {
+			return readErr
+		}
 		if len(line) == 0 {
 			continue
 		}
@@ -128,7 +181,43 @@ func (s *Server) Run(ctx context.Context) error {
 			s.writeResponse(resp)
 		}
 	}
-	return scanner.Err()
+}
+
+// readMCPFrame reads one newline-delimited JSON-RPC frame while enforcing a
+// bound without poisoning the stdio session. Oversized input is discarded only
+// through its newline; the next valid frame remains readable.
+func readMCPFrame(reader *bufio.Reader, max int) ([]byte, error) {
+	frame := make([]byte, 0, 4096)
+	tooLarge := false
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if !tooLarge {
+			if len(frame)+len(fragment) > max {
+				tooLarge = true
+			} else {
+				frame = append(frame, fragment...)
+			}
+		}
+		switch {
+		case err == nil:
+			if tooLarge {
+				return nil, errMCPFrameTooLarge
+			}
+			return bytes.TrimSuffix(frame, []byte{'\n'}), nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			if tooLarge {
+				return nil, errMCPFrameTooLarge
+			}
+			if len(frame) == 0 {
+				return nil, io.EOF
+			}
+			return frame, nil
+		default:
+			return nil, err
+		}
+	}
 }
 
 // DispatchJSONRPC routes a single JSON-RPC request to the appropriate handler
@@ -239,23 +328,32 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 	// and auto-initialize if needed. This makes onboarding seamless — no need
 	// for the user to manually tell their AI to run sage_inception.
 	var autoInceptionMsg string
-	if !s.inceptionChecked {
-		s.inceptionChecked = true
+	doAutoInception := false
+	conversation := s.conversation(ctx)
+	s.conversationMu.Lock()
+	if !conversation.inceptionChecked {
+		conversation.inceptionChecked = true
 		if params.Name != "sage_inception" && params.Name != "sage_red_pill" {
-			autoInceptionMsg = s.maybeAutoInception(ctx)
+			doAutoInception = true
 		}
+	}
+	blocked := shouldBlockForTurn(params.Name, conversation)
+	blockedCount := conversation.callsSinceTurn
+	s.conversationMu.Unlock()
+	if doAutoInception {
+		autoInceptionMsg = s.maybeAutoInception(ctx)
 	}
 
 	// Enforce turn discipline: block non-SAGE tools after threshold.
 	// This guarantees memories are saved — agents can't just ignore the nudge.
-	if s.shouldBlockForTurn(params.Name) {
+	if blocked {
 		return &jsonRPCResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result: map[string]any{
 				"content": []map[string]any{
 					{"type": "text", "text": "[SAGE] ⛔ Turn checkpoint — call sage_turn before continuing. " +
-						"You have " + fmt.Sprintf("%d", s.callsSinceTurn) + " unrecorded tool calls. " +
+						"You have " + fmt.Sprintf("%d", blockedCount) + " unrecorded tool calls. " +
 						"Summarize what's happened so far (topic + observation), then retry this operation. " +
 						"This protects your work from being lost if the conversation ends unexpectedly."},
 				},
@@ -279,12 +377,16 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 	}
 
 	// Track turn discipline: reset counter on sage_turn, increment on everything else.
+	s.conversationMu.Lock()
 	if params.Name == "sage_turn" {
-		s.callsSinceTurn = 0
-		s.lastTurnTime = time.Now()
+		conversation.callsSinceTurn = 0
+		conversation.lastTurnTime = time.Now()
 	} else if params.Name != "sage_inception" && params.Name != "sage_red_pill" && params.Name != "sage_register" {
-		s.callsSinceTurn++
+		conversation.callsSinceTurn++
 	}
+	conversation.lastUsed = time.Now()
+	nudge := turnNudge(params.Name, conversation)
+	s.conversationMu.Unlock()
 
 	text, _ := json.MarshalIndent(result, "", "  ")
 	output := string(text)
@@ -296,7 +398,7 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 
 	// Nudge the agent if sage_turn hasn't been called recently.
 	// This is server-side enforcement — works across all providers (Claude, ChatGPT, etc).
-	if nudge := s.turnNudge(params.Name); nudge != "" {
+	if nudge != "" {
 		output += "\n\n" + nudge
 	}
 
@@ -327,7 +429,7 @@ func (s *Server) writeError(id any, code int, message string) {
 // shouldBlockForTurn returns true if the agent should be forced to call sage_turn
 // before any more non-SAGE tool calls. This is the hard enforcement — after 7 calls
 // or 5 minutes, we block until sage_turn is called.
-func (s *Server) shouldBlockForTurn(toolName string) bool {
+func shouldBlockForTurn(toolName string, state *conversationState) bool {
 	// Never block SAGE tools themselves.
 	switch toolName {
 	case "sage_turn", "sage_inception", "sage_red_pill", "sage_reflect", "sage_recall",
@@ -338,12 +440,12 @@ func (s *Server) shouldBlockForTurn(toolName string) bool {
 	}
 
 	// Block after 7 non-SAGE calls.
-	if s.callsSinceTurn >= 7 {
+	if state.callsSinceTurn >= 7 {
 		return true
 	}
 
 	// Block after 5 minutes without sage_turn (but only if we've had at least one turn).
-	if !s.lastTurnTime.IsZero() && time.Since(s.lastTurnTime).Minutes() > 5 && s.callsSinceTurn >= 2 {
+	if !state.lastTurnTime.IsZero() && time.Since(state.lastTurnTime).Minutes() > 5 && state.callsSinceTurn >= 2 {
 		return true
 	}
 
@@ -353,7 +455,7 @@ func (s *Server) shouldBlockForTurn(toolName string) bool {
 // turnNudge returns a reminder string if the agent hasn't called sage_turn recently.
 // Uses both call count AND elapsed time to catch agents with long turns (many
 // non-SAGE tool calls between SAGE calls). Escalates from gentle to urgent.
-func (s *Server) turnNudge(currentTool string) string {
+func turnNudge(currentTool string, state *conversationState) string {
 	// Don't nudge on sage_turn itself, inception, or reflect (they're memory operations).
 	switch currentTool {
 	case "sage_turn", "sage_inception", "sage_red_pill", "sage_reflect", "sage_register":
@@ -361,26 +463,26 @@ func (s *Server) turnNudge(currentTool string) string {
 	}
 
 	minutesSinceTurn := 0.0
-	if !s.lastTurnTime.IsZero() {
-		minutesSinceTurn = time.Since(s.lastTurnTime).Minutes()
+	if !state.lastTurnTime.IsZero() {
+		minutesSinceTurn = time.Since(state.lastTurnTime).Minutes()
 	}
 
 	switch {
-	case s.callsSinceTurn >= 5 || (minutesSinceTurn > 5 && !s.lastTurnTime.IsZero()):
+	case state.callsSinceTurn >= 5 || (minutesSinceTurn > 5 && !state.lastTurnTime.IsZero()):
 		// Urgent — too many calls or too much time without sage_turn.
 		return "[SAGE] ⚠️ You have not called sage_turn in " +
-			fmt.Sprintf("%d", s.callsSinceTurn) +
+			fmt.Sprintf("%d", state.callsSinceTurn) +
 			" tool calls (" + fmt.Sprintf("%.0f", minutesSinceTurn) + "min). " +
 			"Your experience this session is NOT being recorded. " +
 			"Call sage_turn now with the current topic and what's happened — " +
 			"otherwise this work is lost if the conversation ends."
-	case s.callsSinceTurn >= 3 || (minutesSinceTurn > 3 && !s.lastTurnTime.IsZero()):
+	case state.callsSinceTurn >= 3 || (minutesSinceTurn > 3 && !state.lastTurnTime.IsZero()):
 		// Firm reminder.
 		return "[SAGE] Reminder: call sage_turn with the current topic + observation. " +
 			"You haven't logged a turn in " +
-			fmt.Sprintf("%d", s.callsSinceTurn) + " calls (" +
+			fmt.Sprintf("%d", state.callsSinceTurn) + " calls (" +
 			fmt.Sprintf("%.0f", minutesSinceTurn) + "min) — your recent experience isn't being stored."
-	case s.callsSinceTurn == 2 && s.lastTurnTime.IsZero():
+	case state.callsSinceTurn == 2 && state.lastTurnTime.IsZero():
 		// First session, never called sage_turn — might not know about it yet.
 		return "[SAGE] Tip: call sage_turn every conversation turn to build persistent memory. " +
 			"It recalls relevant context AND stores what just happened, atomically."
@@ -447,15 +549,11 @@ func (s *Server) autoRegister(ctx context.Context) {
 func (s *Server) signedRequest(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	timestamp := time.Now().Unix()
 
-	// Build canonical request: "METHOD /path\n<body>"
-	canonical := []byte(method + " " + path + "\n")
-	canonical = append(canonical, body...)
-	hash := sha256.Sum256(canonical)
-	msg := make([]byte, 32+8)
-	copy(msg[:32], hash[:])
-	binary.BigEndian.PutUint64(msg[32:], uint64(timestamp)) // #nosec G115 -- timestamp from trusted int64
-
-	sig := ed25519.Sign(s.agentKey, msg)
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate request nonce: %w", err)
+	}
+	sig := auth.SignRequestWithNonce(s.agentKey, method, path, body, timestamp, nonce)
 
 	req, err := http.NewRequestWithContext(ctx, method, s.baseURL+path, bytes.NewReader(body))
 	if err != nil {
@@ -465,13 +563,45 @@ func (s *Server) signedRequest(ctx context.Context, method, path string, body []
 	req.Header.Set("X-Agent-ID", s.agentID)
 	req.Header.Set("X-Signature", hex.EncodeToString(sig))
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
+	req.Header.Set("X-Nonce", hex.EncodeToString(nonce))
 
 	return s.httpClient.Do(req)
 }
 
 // doSignedJSON makes a signed request and decodes the JSON response.
 func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []byte, out any) error {
-	resp, err := s.signedRequest(ctx, method, path, body)
+	attempts := 1
+	if method == http.MethodGet {
+		attempts = 4
+	}
+	var resp *http.Response
+	var err error
+	for attempt := 0; attempt < attempts; attempt++ {
+		resp, err = s.signedRequest(ctx, method, path, body)
+		retryStatus := err == nil && (resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable)
+		if err == nil && !retryStatus {
+			break
+		}
+		if attempt+1 == attempts {
+			if err != nil {
+				return err
+			}
+			break
+		}
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if err != nil && !isTransientMCPTransportErr(err) {
+			return err
+		}
+		s.httpClient.CloseIdleConnections()
+		delay := []time.Duration{100 * time.Millisecond, 300 * time.Millisecond, 700 * time.Millisecond}[attempt]
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -499,6 +629,22 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 	return nil
 }
 
+func isTransientMCPTransportErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, signature := range []string{
+		"connection refused", "connection reset", "broken pipe", "unexpected eof",
+		"server closed idle connection", "timeout", "temporarily unavailable",
+	} {
+		if strings.Contains(msg, signature) {
+			return true
+		}
+	}
+	return false
+}
+
 // submitRehealBackoffs is the wait schedule between re-handshake retries of a
 // stalled memory submit. The first retry is immediate (the agent has just been
 // re-registered and stale keep-alive connections dropped); the second gives a
@@ -508,13 +654,11 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 var submitRehealBackoffs = []time.Duration{0, 750 * time.Millisecond}
 
 // isStaleSessionErr reports whether a memory-write error carries the signature
-// of a SAGE node that was restarted (e.g. an in-place v8.x upgrade) out from
-// under a live MCP session. In that window a signed write reaches the node but
-// is rejected at the identity/access layer ("access denied" / "agent identity
-// verification failed"), or the keep-alive connection to the dead process drops
-// ("connection refused" / "connection reset" / "EOF"). All of these clear once
-// the agent re-handshakes against the fresh process — which is exactly what a
-// manual /mcp reconnect did.
+// of a SAGE node that was restarted under a live MCP session. Only explicit
+// pre-commit identity/access rejections are safe to retry. Transport failures
+// are deliberately excluded: if the response connection dies after commit,
+// delivery is ambiguous and resubmitting would create a second UUID-backed
+// memory proposal.
 //
 // We match on the inner detail (e.g. "access denied"), NOT the generic
 // "Broadcast error" title the REST layer stamps on EVERY consensus rejection —
@@ -533,9 +677,6 @@ func isStaleSessionErr(err error) bool {
 	for _, sig := range []string{
 		"access denied",
 		"agent identity verification failed",
-		"connection refused",
-		"connection reset",
-		"eof",
 	} {
 		if strings.Contains(msg, sig) {
 			return true
@@ -579,6 +720,12 @@ func (s *Server) submitMemoryResilient(ctx context.Context, submitReq []byte, ou
 			fmt.Fprintln(os.Stderr, "SAGE MCP: memory submit recovered after re-registration")
 			return nil
 		}
+		// A transport failure is ambiguous: the node may have committed the
+		// memory and only lost the response. Never resubmit an ambiguous POST;
+		// doing so would create a second UUID-backed proposal.
+		if !isStaleSessionErr(retryErr) {
+			return fmt.Errorf("%w (memory submission may have reached SAGE; check recall before retrying)", retryErr)
+		}
 		err = retryErr
 	}
 	return fmt.Errorf("%w (still failing after re-registration; if this persists, run /mcp to reconnect, "+
@@ -603,12 +750,31 @@ func defaultBaseURL() string {
 	return "http://localhost:8080"
 }
 
+// DefaultBaseURL exposes the same TLS-aware fallback used by NewServer for
+// launchers that need to resolve the URL before constructing the server.
+func DefaultBaseURL() string { return defaultBaseURL() }
+
+// mcpRequestTimeout stays above the REST commit-confirmation timeout so the
+// client does not give up on a write that can still commit server-side.
+func mcpRequestTimeout() time.Duration {
+	timeout := 75 * time.Second
+	if raw := os.Getenv("SAGE_TX_COMMIT_TIMEOUT_MS"); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
+			candidate := time.Duration(ms)*time.Millisecond + 15*time.Second
+			if candidate > timeout {
+				timeout = candidate
+			}
+		}
+	}
+	return timeout
+}
+
 // mcpHTTPClient returns an *http.Client configured for TLS if the baseURL uses https://.
 // For plain http:// URLs, returns a simple client with a timeout.
 // Checks SAGE_CA_CERT env var first, then ~/.sage/certs/, then falls back to system CAs.
 func mcpHTTPClient(baseURL string) *http.Client {
 	if !strings.HasPrefix(baseURL, "https://") {
-		return &http.Client{Timeout: 30 * time.Second}
+		return &http.Client{Timeout: mcpRequestTimeout()}
 	}
 
 	// Try SAGE_CA_CERT env var first (explicit CA path).
@@ -616,7 +782,7 @@ func mcpHTTPClient(baseURL string) *http.Client {
 		tlsCfg, err := tlsca.ClientTLSConfigFromCA(caPath)
 		if err == nil {
 			return &http.Client{
-				Timeout:   30 * time.Second,
+				Timeout:   mcpRequestTimeout(),
 				Transport: &http.Transport{TLSClientConfig: tlsCfg},
 			}
 		}
@@ -635,7 +801,7 @@ func mcpHTTPClient(baseURL string) *http.Client {
 		tlsCfg, err := tlsca.ClientTLSConfig(certsDir)
 		if err == nil {
 			return &http.Client{
-				Timeout:   30 * time.Second,
+				Timeout:   mcpRequestTimeout(),
 				Transport: &http.Transport{TLSClientConfig: tlsCfg},
 			}
 		}
@@ -643,7 +809,7 @@ func mcpHTTPClient(baseURL string) *http.Client {
 
 	// Fall back to system CAs — works with properly-signed certs (e.g. Let's Encrypt).
 	return &http.Client{
-		Timeout:   30 * time.Second,
+		Timeout:   mcpRequestTimeout(),
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS13}},
 	}
 }

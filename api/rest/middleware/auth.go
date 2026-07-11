@@ -43,6 +43,12 @@ func (rc *replayCache) check(key string) bool {
 				delete(rc.seen, k)
 			}
 		}
+		// Fail closed when the live replay window is saturated. Never grow past
+		// maxSize: otherwise a signer (or spoofed pre-auth rate-limit identities)
+		// can turn every request into an unbounded O(n) sweep and memory DoS.
+		if len(rc.seen) >= rc.maxSize {
+			return true
+		}
 	}
 
 	if _, exists := rc.seen[key]; exists {

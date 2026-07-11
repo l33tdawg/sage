@@ -401,4 +401,3 @@ func hasNetworkedPeers(cometHome string) bool {
 	}
 	return len(ab.Addrs) > 0
 }
-

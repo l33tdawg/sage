@@ -16,7 +16,8 @@ func TestRestBaseURL(t *testing.T) {
 		{"127.0.0.1:8080", "http://127.0.0.1:8080"}, // shipped default — must stay host:port
 		{":8080", "http://localhost:8080"},          // bare port — localhost filled in
 		{"sage.internal:8080", "http://sage.internal:8080"},
-		{"0.0.0.0:9090", "http://0.0.0.0:9090"},
+		{"0.0.0.0:9090", "http://localhost:9090"},
+		{"[::]:9091", "http://localhost:9091"},
 	}
 	for _, c := range cases {
 		if got := restBaseURL(c.addr); got != c.want {

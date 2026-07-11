@@ -21,6 +21,10 @@ import (
 // already has a non-empty owner. Use TransferDomain for authorized ownership changes.
 var ErrDomainAlreadyRegistered = errors.New("domain already registered")
 
+// ErrDomainPathTooDeep prevents callers from confusing a deliberately refused
+// ancestor walk with a genuinely unowned domain and auto-claiming beneath it.
+var ErrDomainPathTooDeep = errors.New("domain path exceeds 16 segments")
+
 // ErrAgentProofReplayed is returned when a delegated app-v17 agent proof has
 // already been consumed. The marker is consensus state, not the REST process's
 // in-memory replay cache, so a Byzantine proposer cannot bypass it.
@@ -1896,7 +1900,7 @@ func (s *BadgerStore) ResolveOwningAncestor(domain string) (owner, ownedDomain s
 		return "", "", nil
 	}
 	if len(segments) > 16 {
-		return "", "", nil
+		return "", "", ErrDomainPathTooDeep
 	}
 	for i := len(segments); i >= 1; i-- {
 		candidate := strings.Join(segments[:i], ".")
@@ -3425,15 +3429,31 @@ func (s *BadgerStore) GetFederationAllowedDepts(fedID string) ([]string, error) 
 // on the consensus path and app.IsPostV8Fork() (advisory chain-height read)
 // on REST handlers.
 func (s *BadgerStore) HasAccessMultiOrg(domain, agentID string, memoryClassification uint8, blockTime time.Time, postFork bool) (bool, error) {
+	return s.hasAccessMultiOrg(domain, agentID, 1, memoryClassification, blockTime, postFork)
+}
+
+// HasWriteAccessMultiOrg is the write-verb sibling of HasAccessMultiOrg.
+// app-v18 consensus callers use it so a read-only level-1 grant cannot submit
+// memories. Write is an explicit level-2 direct/ancestor grant: org membership
+// and federation clearance remain read-discovery mechanisms and cannot imply a
+// write verb. Effective domain owners are handled by the consensus caller.
+func (s *BadgerStore) HasWriteAccessMultiOrg(domain, agentID string, blockTime time.Time, postFork bool) (bool, error) {
+	if postFork {
+		return s.HasAccessOrAncestor(domain, agentID, 2, blockTime)
+	}
+	return s.HasAccess(domain, agentID, 2, blockTime)
+}
+
+func (s *BadgerStore) hasAccessMultiOrg(domain, agentID string, directGrantLevel, requiredClearance uint8, blockTime time.Time, postFork bool) (bool, error) {
 	// Step 1: Check direct grant. Post-fork walks the dotted path so a grant
 	// on a parent domain covers descendant writes; pre-fork preserves exact
 	// match (v7.1.1-equivalent replay).
 	var directAccess bool
 	var err error
 	if postFork {
-		directAccess, err = s.HasAccessOrAncestor(domain, agentID, 1, blockTime)
+		directAccess, err = s.HasAccessOrAncestor(domain, agentID, directGrantLevel, blockTime)
 	} else {
-		directAccess, err = s.HasAccess(domain, agentID, 1, blockTime)
+		directAccess, err = s.HasAccess(domain, agentID, directGrantLevel, blockTime)
 	}
 	if err == nil && directAccess {
 		return true, nil
@@ -3487,7 +3507,7 @@ func (s *BadgerStore) HasAccessMultiOrg(domain, agentID string, memoryClassifica
 		if gerr != nil {
 			continue
 		}
-		if clearance >= memoryClassification {
+		if clearance >= requiredClearance {
 			return true, nil
 		}
 	}
@@ -3504,7 +3524,7 @@ func (s *BadgerStore) HasAccessMultiOrg(domain, agentID string, memoryClassifica
 			if agentOrg == domainOrg {
 				continue
 			}
-			ok, fedErr := s.checkFederationAccess(agentOrg, domainOrg, agentID, clearance, memoryClassification, blockTime)
+			ok, fedErr := s.checkFederationAccess(agentOrg, domainOrg, agentID, clearance, requiredClearance, blockTime)
 			if fedErr == nil && ok {
 				return true, nil
 			}

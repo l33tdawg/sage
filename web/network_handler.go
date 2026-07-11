@@ -176,7 +176,7 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 		// Broadcast on-chain registration through CometBFT (non-blocking).
 		// The ABCI processor will set on_chain_height in BadgerDB.
 		if h.CometBFTRPC != "" && h.SigningKey != nil {
-			go func() {
+			h.runBackground(func(_ context.Context) {
 				registerTx := &tx.ParsedTx{
 					Type:      tx.TxTypeAgentRegister,
 					Nonce:     tx.MonotonicNonce(h.SigningKey),
@@ -215,9 +215,7 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 				// authoritative on-chain RBAC checks otherwise disagreed with the
 				// dashboard right after an agent was created).
 				permTx := &tx.ParsedTx{
-					Type:      tx.TxTypeAgentSetPermission,
-					Nonce:     tx.MonotonicNonce(h.SigningKey),
-					Timestamp: time.Now(),
+					Type: tx.TxTypeAgentSetPermission,
 					AgentSetPermission: &tx.AgentSetPermission{
 						AgentID:       agentID,
 						Clearance:     uint8(agent.Clearance), // #nosec G115 -- clearance is 0-4
@@ -227,17 +225,12 @@ func (h *DashboardHandler) handleCreateAgent(agentStore store.AgentStore) http.H
 						DeptID:        agent.DeptID,
 					},
 				}
-				embedDashboardAgentProof(permTx, h.SigningKey)
-				if signErr := tx.SignTx(permTx, h.SigningKey); signErr != nil {
-					log.Printf("agent-create: on-chain AgentSetPermission sign failed for %s: %v", agentID, signErr)
-					return
-				}
-				if penc, pencErr := tx.EncodeTx(permTx); pencErr != nil {
-					log.Printf("agent-create: on-chain AgentSetPermission encode failed for %s: %v", agentID, pencErr)
-				} else if bErr := broadcastTxSync(h.CometBFTRPC, penc); bErr != nil {
+				if len(h.AdminSigningKey) != ed25519.PrivateKeySize {
+					log.Printf("agent-create: on-chain AgentSetPermission skipped for %s: genesis admin key unavailable", agentID)
+				} else if _, _, _, bErr := h.signAndBroadcastCommit(permTx, h.AdminSigningKey); bErr != nil {
 					log.Printf("agent-create: on-chain AgentSetPermission broadcast failed for %s: %v", agentID, bErr)
 				}
-			}()
+			})
 		}
 
 		// Generate and save agent bundle
@@ -301,21 +294,49 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 		oldDomainAccess := existing.DomainAccess
 
 		var req struct {
-			Name          *string `json:"name"`
-			Role          *string `json:"role"`
-			Avatar        *string `json:"avatar"`
-			BootBio       *string `json:"boot_bio"`
-			Clearance     *int    `json:"clearance"`
-			OrgID         *string `json:"org_id"`
-			DeptID        *string `json:"dept_id"`
-			DomainAccess  *string `json:"domain_access"`
-			P2PAddress    *string `json:"p2p_address"`
-			VisibleAgents *string `json:"visible_agents"`
+			Name          *string                    `json:"name"`
+			Role          *string                    `json:"role"`
+			Avatar        *string                    `json:"avatar"`
+			BootBio       *string                    `json:"boot_bio"`
+			Clearance     *int                       `json:"clearance"`
+			OrgID         *string                    `json:"org_id"`
+			DeptID        *string                    `json:"dept_id"`
+			DomainAccess  *string                    `json:"domain_access"`
+			P2PAddress    *string                    `json:"p2p_address"`
+			VisibleAgents *string                    `json:"visible_agents"`
+			AdminOverride []adminOverrideExpectation `json:"admin_override"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON body")
 			return
+		}
+		overrides := make(map[string]adminOverrideExpectation, len(req.AdminOverride))
+		if len(req.AdminOverride) > 0 {
+			// The genesis key is a human/operator capability. A cryptographically
+			// valid agent request must never be able to turn a JSON flag into an
+			// admin-signed grant. Only the local CEREBRUM/operator boundary may
+			// invoke this explicit override.
+			if verifiedDashboardAgentID(r.Context()) != "" ||
+				(r.Header.Get("Sec-Fetch-Site") == "" && strings.TrimSpace(r.Header.Get("Origin")) == "") ||
+				!isLocalRequest(r) {
+				writeError(w, http.StatusForbidden, "administrator access override must be confirmed in local CEREBRUM")
+				return
+			}
+			for _, expected := range req.AdminOverride {
+				expected.Domain = strings.TrimSpace(expected.Domain)
+				expected.OwnerID = strings.TrimSpace(expected.OwnerID)
+				expected.OwnedDomain = strings.TrimSpace(expected.OwnedDomain)
+				if expected.Domain == "" || expected.OwnerID == "" || expected.OwnedDomain == "" || expected.Level < 0 || expected.Level > 2 {
+					writeError(w, http.StatusBadRequest, "invalid administrator override confirmation")
+					return
+				}
+				if _, duplicate := overrides[expected.Domain]; duplicate {
+					writeError(w, http.StatusBadRequest, "duplicate administrator override domain")
+					return
+				}
+				overrides[expected.Domain] = expected
+			}
 		}
 
 		if req.Name != nil {
@@ -360,6 +381,19 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 		if req.VisibleAgents != nil {
 			existing.VisibleAgents = *req.VisibleAgents
 		}
+		if len(overrides) > 0 {
+			desired := parseDomainAccessLevels(existing.DomainAccess)
+			if desired == nil {
+				writeError(w, http.StatusBadRequest, "invalid domain access policy")
+				return
+			}
+			for domain, expected := range overrides {
+				if desired[domain] != expected.Level {
+					writeError(w, http.StatusConflict, "administrator override no longer matches the selected access; review and confirm again")
+					return
+				}
+			}
+		}
 
 		if err := agentStore.UpdateAgent(r.Context(), existing); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -392,9 +426,7 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 			if req.Clearance != nil || req.DomainAccess != nil || req.VisibleAgents != nil || req.OrgID != nil || req.DeptID != nil {
 				clearance := uint8(existing.Clearance) // #nosec G115 -- clamped to 0-4 above
 				permTx := &tx.ParsedTx{
-					Type:      tx.TxTypeAgentSetPermission,
-					Nonce:     tx.MonotonicNonce(h.SigningKey),
-					Timestamp: time.Now(),
+					Type: tx.TxTypeAgentSetPermission,
 					AgentSetPermission: &tx.AgentSetPermission{
 						AgentID:       id,
 						Clearance:     clearance,
@@ -404,12 +436,9 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 						DeptID:        existing.DeptID,
 					},
 				}
-				embedDashboardAgentProof(permTx, h.SigningKey)
-				if signErr := tx.SignTx(permTx, h.SigningKey); signErr != nil {
-					warnings = append(warnings, "on-chain permission sync failed: "+signErr.Error())
-				} else if encoded, encErr := tx.EncodeTx(permTx); encErr != nil {
-					warnings = append(warnings, "on-chain permission sync failed: "+encErr.Error())
-				} else if bErr := broadcastTxSync(h.CometBFTRPC, encoded); bErr != nil {
+				if len(h.AdminSigningKey) != ed25519.PrivateKeySize {
+					warnings = append(warnings, "on-chain permission sync failed: genesis admin key unavailable")
+				} else if _, _, _, bErr := h.signAndBroadcastCommit(permTx, h.AdminSigningKey); bErr != nil {
 					warnings = append(warnings, "on-chain permission sync failed: "+bErr.Error())
 				}
 			}
@@ -423,7 +452,7 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 		// can be honest instead of claiming an enforcement that didn't happen.
 		var grantResults []grantResult
 		if req.DomainAccess != nil {
-			grantResults = h.reconcileDomainGrants(id, oldDomainAccess, existing.DomainAccess)
+			grantResults = h.reconcileDomainGrants(id, oldDomainAccess, existing.DomainAccess, overrides)
 		}
 
 		resp := map[string]any{
@@ -778,10 +807,9 @@ func (h *DashboardHandler) handleTriggerRedeploy(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Launch in background goroutine — client polls for status
-	//nolint:gosec // Redeploy is an operator-triggered background job; request ctx ends before the job should.
-	go func() {
-		ctx := context.Background()
+	// Launch in the node-owned background group so a CEREBRUM restart cancels
+	// and joins redeployment before consensus/stores are closed.
+	run := func(ctx context.Context) {
 		if err := h.Redeployer.DeployOp(ctx, req.Operation, req.AgentID); err != nil {
 			// Error is logged by the orchestrator and stored in the redeploy log.
 			// The client discovers failures by polling /redeploy/status.
@@ -799,7 +827,13 @@ func (h *DashboardHandler) handleTriggerRedeploy(w http.ResponseWriter, r *http.
 				},
 			})
 		}
-	}()
+	}
+	if h.RunBackground != nil {
+		h.RunBackground(run)
+	} else {
+		// Test/embedded handlers without a lifecycle owner retain async behavior.
+		go run(context.Background()) //nolint:gosec
+	}
 
 	writeJSONResp(w, http.StatusAccepted, map[string]any{
 		"status":    "started",
@@ -894,7 +928,7 @@ func (h *DashboardHandler) handleMergeAgent(agentStore store.AgentStore) http.Ha
 
 		// Also broadcast through CometBFT consensus for on-chain audit record
 		if h.CometBFTRPC != "" && h.SigningKey != nil {
-			go func() {
+			h.runBackground(func(_ context.Context) {
 				reassignTx := &tx.ParsedTx{
 					Type:      tx.TxTypeMemoryReassign,
 					Nonce:     tx.MonotonicNonce(h.SigningKey),
@@ -913,7 +947,7 @@ func (h *DashboardHandler) handleMergeAgent(agentStore store.AgentStore) http.Ha
 					return
 				}
 				_ = broadcastTxSync(h.CometBFTRPC, encoded)
-			}()
+			})
 		}
 
 		writeJSONResp(w, http.StatusOK, map[string]any{

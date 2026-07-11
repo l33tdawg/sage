@@ -456,6 +456,14 @@ type SageApp struct {
 	// {Name:"app-v17", TargetAppVersion:17}.
 	appV17AppliedHeight int64 // 0 => fork dormant
 
+	// appV18AppliedHeight gates the app-v18 RBAC administrator override. Once
+	// active, an on-chain global admin may grant or revoke domain access without
+	// taking ownership of that domain. This is an explicit, auditable override;
+	// ordinary agents remain owner/ancestor-owner gated. INDEPENDENT/additive,
+	// strict >, and dormant on every existing chain until governance activates
+	// {Name:"app-v18", TargetAppVersion:18}.
+	appV18AppliedHeight int64 // 0 => fork dormant
+
 	// retainBlocks, when > 0, is the number of most-recent blocks Commit asks
 	// CometBFT to keep: ResponseCommit.RetainHeight = height - retainBlocks
 	// (clamped at 0 = keep everything). Pruning is LOCAL and advisory — it never
@@ -574,6 +582,11 @@ const appV16UpgradeName = "app-v16"
 // {Name:"app-v17", TargetAppVersion:17}; validated purely as
 // CanonicalUpgradeName(17) == "app-v17" — no allowlist.
 const appV17UpgradeName = "app-v17"
+
+// appV18UpgradeName activates the global-admin domain-access override used by
+// CEREBRUM for explicit local-agent assignments. Ownership and authorship are
+// unchanged; only grant/revoke authorization gains an admin path.
+const appV18UpgradeName = "app-v18"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -926,17 +939,26 @@ func (app *SageApp) postAppV17Fork(height int64) bool {
 	return app.appV17AppliedHeight > 0 && height > app.appV17AppliedHeight
 }
 
+// postAppV18Fork is the consensus-side boundary for the administrator RBAC
+// override. The activation block retains v17 behavior; v18 starts at H+1.
+func (app *SageApp) postAppV18Fork(height int64) bool {
+	return app.appV18AppliedHeight > 0 && height > app.appV18AppliedHeight
+}
+
 // postAppV17Rules reports whether app-v17's consensus rules are in force at
-// this height. app-v17 is the highest independent gate, so this collapses to
-// exactly postAppV17Fork and historical blocks replay byte-identically (kept
-// as a named predicate for callsite clarity and future skip-ahead subsumption).
+// this height. app-v18 subsumes those additive rules on a skip-ahead chain;
+// historical blocks still collapse to exactly their original gate.
 //
 // (TxTypeMemoryReinstate + quorum-scaled challenge + delegated-proof
 // hardening) in this same sprint.
 //
 //nolint:unused // C1 mints the empty gate; the first callsites land with C2/C3
 func (app *SageApp) postAppV17Rules(height int64) bool {
-	return app.postAppV17Fork(height)
+	return app.postAppV17Fork(height) || app.postAppV18Fork(height)
+}
+
+func (app *SageApp) postAppV18Rules(height int64) bool {
+	return app.postAppV18Fork(height)
 }
 
 // IsAppV17ActiveForNextTx is the REST-side transaction-construction accessor.
@@ -945,7 +967,17 @@ func (app *SageApp) postAppV17Rules(height int64) bool {
 // where the strict consensus gate is active. This intentionally uses >= while
 // postAppV17Fork uses >.
 func (app *SageApp) IsAppV17ActiveForNextTx() bool {
-	return app.appV17AppliedHeight > 0 && app.state != nil && app.state.Height >= app.appV17AppliedHeight
+	if app.state == nil {
+		return false
+	}
+	return (app.appV17AppliedHeight > 0 && app.state.Height >= app.appV17AppliedHeight) ||
+		(app.appV18AppliedHeight > 0 && app.state.Height >= app.appV18AppliedHeight)
+}
+
+// IsAppV18ActiveForNextTx is the dashboard-side readiness accessor for an
+// explicit administrator access override broadcast after the activation block.
+func (app *SageApp) IsAppV18ActiveForNextTx() bool {
+	return app.appV18AppliedHeight > 0 && app.state != nil && app.state.Height >= app.appV18AppliedHeight
 }
 
 // postAppV16Rules reports whether app-v16's consensus rules are in force at this
@@ -955,7 +987,7 @@ func (app *SageApp) IsAppV17ActiveForNextTx() bool {
 // Collapses to exactly postAppV16Fork on every existing chain
 // (appV17AppliedHeight==0), so historical blocks replay byte-identically.
 func (app *SageApp) postAppV16Rules(height int64) bool {
-	return app.postAppV16Fork(height) || app.postAppV17Fork(height)
+	return app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
 }
 
 // shouldRecordMemoryDomain reports whether a successful submit must persist its
@@ -984,7 +1016,7 @@ func (app *SageApp) shouldRecordMemoryDomain(height int64) bool {
 // higher gates are 0, so this collapses to exactly postAppV8Fork and historical
 // blocks replay byte-identically.
 func (app *SageApp) postAppV8Rules(height int64) bool {
-	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height)
+	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
 }
 
 // postAppV9Rules reports whether app-v9's consensus rules (consensus-path
@@ -995,7 +1027,7 @@ func (app *SageApp) postAppV8Rules(height int64) bool {
 // postAppV9Fork on every existing chain (appV10/appV11AppliedHeight==0), so replay
 // is byte-identical.
 func (app *SageApp) postAppV9Rules(height int64) bool {
-	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height)
+	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
 }
 
 // postAppV10Rules reports whether app-v10's consensus rules (corroboration
@@ -1007,7 +1039,7 @@ func (app *SageApp) postAppV9Rules(height int64) bool {
 // when app-v11 landed — app-v10 was the highest fork until then and needed no
 // subsumption helper.
 func (app *SageApp) postAppV10Rules(height int64) bool {
-	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height)
+	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
 }
 
 // postAppV11Rules reports whether app-v11's consensus rules (the per-node
@@ -1018,7 +1050,7 @@ func (app *SageApp) postAppV10Rules(height int64) bool {
 // postAppV11Fork on every existing chain (appV12AppliedHeight==0), so
 // historical blocks replay byte-identically.
 func (app *SageApp) postAppV11Rules(height int64) bool {
-	return app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height)
+	return app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
 }
 
 // postAppV12Rules reports whether app-v12's consensus rule (the FLAWED
@@ -1056,7 +1088,7 @@ func (app *SageApp) postAppV13Rules(height int64) bool {
 // postAppV12Rules/postAppV13Rules — those are mutually-exclusive
 // AppHash-REPLACEMENT rules, deliberately non-subsumed.
 func (app *SageApp) postAppV15Rules(height int64) bool {
-	return app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height)
+	return app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
 }
 
 // refreshAppV9Fork populates appV9AppliedHeight from the persisted upgrade
@@ -1227,6 +1259,17 @@ func (app *SageApp) refreshAppV17Fork() {
 		return
 	}
 	app.appV17AppliedHeight = rec.AppliedHeight
+}
+
+func (app *SageApp) refreshAppV18Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV18UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV18UpgradeName).Msg("read app-v18 applied-upgrade record")
+		return
+	}
+	if rec != nil {
+		app.appV18AppliedHeight = rec.AppliedHeight
+	}
 }
 
 // recordAppV9Branch records which branch (pre/post app-v9) a gated handler took,
@@ -1637,6 +1680,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshAppV15Fork()
 	app.refreshAppV16Fork()
 	app.refreshAppV17Fork()
+	app.refreshAppV18Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -1696,6 +1740,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshAppV15Fork()
 	app.refreshAppV16Fork()
 	app.refreshAppV17Fork()
+	app.refreshAppV18Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1761,8 +1806,10 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV18AppliedHeight > 0:
+		return 18 // app-v18 (explicit global-admin RBAC override) — highest gate
 	case app.appV17AppliedHeight > 0:
-		return 17 // app-v17 (reinstate + quorum challenge + delegated-proof hardening, v11.5) — highest gate, rank first
+		return 17 // app-v17 (reinstate + quorum challenge + delegated-proof hardening, v11.5)
 	case app.appV16AppliedHeight > 0:
 		return 16 // app-v16 (domainless-forget remediation, v11.2) — independent gate, ranks above app-v15 (16 > 15)
 	case app.appV15AppliedHeight > 0:
@@ -1805,7 +1852,7 @@ func (app *SageApp) currentAppVersion() uint64 {
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 17
+const maxSupportedAppVersion uint64 = 18
 
 // MaxSupportedAppVersion returns the highest app version this binary has a
 // compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
@@ -2375,6 +2422,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if plan.Name == appV17UpgradeName {
 			app.appV17AppliedHeight = req.Height
 		}
+		if plan.Name == appV18UpgradeName {
+			app.appV18AppliedHeight = req.Height
+		}
 		if plan.Name == appV12UpgradeName {
 			app.appV12AppliedHeight = req.Height
 		}
@@ -2809,12 +2859,30 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	// Reserved shared domains (e.g. "general", "self") are writable by any authenticated agent
 	// and are never auto-registered — they are conventional catch-alls without single-owner semantics.
 	if submit.DomainTag != "" && !app.isSharedDomain(submit.DomainTag, height) {
-		domainOwner, domainErr := app.badgerStore.GetDomainOwner(submit.DomainTag)
+		var domainOwner string
+		var domainErr error
+		if app.postAppV18Rules(height) {
+			domainOwner, _, domainErr = app.badgerStore.ResolveOwningAncestor(submit.DomainTag)
+		} else {
+			domainOwner, domainErr = app.badgerStore.GetDomainOwner(submit.DomainTag)
+		}
+		if app.postAppV18Rules(height) && domainErr != nil {
+			return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf("access denied: invalid domain ownership path: %v", domainErr)}
+		}
 		if domainErr == nil && domainOwner != "" {
 			// Domain is owned — check write access (level 2).
 			postFork := app.postV8Fork(height)
 			recordV8Branch(postFork)
-			hasAccess, accessErr := app.badgerStore.HasAccessMultiOrg(submit.DomainTag, agentID, 0, blockTime, postFork)
+			hasAccess := app.postAppV18Rules(height) && domainOwner == agentID
+			var accessErr error
+			if hasAccess {
+				// app-v18: the effective owner inherently controls writes; an
+				// explicit self-grant is an optimization, not an authority source.
+			} else if app.postAppV18Rules(height) {
+				hasAccess, accessErr = app.badgerStore.HasWriteAccessMultiOrg(submit.DomainTag, agentID, blockTime, true)
+			} else {
+				hasAccess, accessErr = app.badgerStore.HasAccessMultiOrg(submit.DomainTag, agentID, 0, blockTime, postFork)
+			}
 			if accessErr != nil || !hasAccess {
 				return &abcitypes.ExecTxResult{Code: 11, Log: fmt.Sprintf("access denied: agent %s has no write access to domain %s", agentID[:16], submit.DomainTag)}
 			}
@@ -3204,9 +3272,26 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 	// coauthors are NOT run through this). Mirror processMemorySubmit's owned-domain
 	// write gate; auto-register an unowned, non-shared domain to the local submitter.
 	if env.Domain != "" && !app.isSharedDomain(env.Domain, height) {
-		domainOwner, domainErr := app.badgerStore.GetDomainOwner(env.Domain)
+		var domainOwner string
+		var domainErr error
+		if app.postAppV18Rules(height) {
+			domainOwner, _, domainErr = app.badgerStore.ResolveOwningAncestor(env.Domain)
+		} else {
+			domainOwner, domainErr = app.badgerStore.GetDomainOwner(env.Domain)
+		}
+		if app.postAppV18Rules(height) && domainErr != nil {
+			return &abcitypes.ExecTxResult{Code: 97, Log: fmt.Sprintf("co-commit: invalid domain ownership path: %v", domainErr)}
+		}
 		if domainErr == nil && domainOwner != "" {
-			hasAccess, accessErr := app.badgerStore.HasAccessMultiOrg(env.Domain, localID, 0, blockTime, app.postAppV8Rules(height))
+			hasAccess := app.postAppV18Rules(height) && domainOwner == localID
+			var accessErr error
+			if hasAccess {
+				// See processMemorySubmit: ownership itself is sufficient authority.
+			} else if app.postAppV18Rules(height) {
+				hasAccess, accessErr = app.badgerStore.HasWriteAccessMultiOrg(env.Domain, localID, blockTime, true)
+			} else {
+				hasAccess, accessErr = app.badgerStore.HasAccessMultiOrg(env.Domain, localID, 0, blockTime, app.postAppV8Rules(height))
+			}
 			if accessErr != nil || !hasAccess {
 				return &abcitypes.ExecTxResult{Code: 97, Log: fmt.Sprintf("co-commit: agent %s has no write access to domain %s", localID[:16], env.Domain)}
 			}
@@ -4323,10 +4408,24 @@ func (app *SageApp) processAccessGrant(parsedTx *tx.ParsedTx, height int64, bloc
 	// (general/self/meta/sage-*) are explicitly non-ownable and reject
 	// with the distinct Code 50 so callers can tell the two failures
 	// apart. Pre-fork blocks replay byte-identical to v7.1.1.
-	postFork := app.postV8Fork(height)
+	postFork := app.postV8Fork(height) || app.postAppV8Rules(height)
 	recordV8Branch(postFork)
+	ownerBindingPresent := grant.ExpectedOwnerID != "" || grant.ExpectedOwnedDomain != ""
+	if app.postAppV18Rules(height) && ownerBindingPresent {
+		currentOwner, currentOwnedDomain, resolveErr := app.badgerStore.ResolveOwningAncestor(grant.Domain)
+		if resolveErr != nil || grant.ExpectedOwnerID == "" || grant.ExpectedOwnedDomain == "" ||
+			grant.ExpectedOwnerID != currentOwner || grant.ExpectedOwnedDomain != currentOwnedDomain {
+			return &abcitypes.ExecTxResult{Code: 34, Log: "administrator override rejected: domain ownership changed or was not bound"}
+		}
+	}
 	if postFork {
 		isOwner, _ := app.badgerStore.IsDomainOwnerOrAncestor(grant.Domain, granterID)
+		adminOverride := false
+		if app.postAppV18Rules(height) {
+			if granter, lookupErr := app.badgerStore.GetRegisteredAgent(granterID); lookupErr == nil {
+				adminOverride = granter.Role == "admin"
+			}
+		}
 		if !isOwner {
 			// Empty-domain guard: must not auto-register the empty string
 			// (which would otherwise be flagged as "not shared, no
@@ -4348,66 +4447,74 @@ func (app *SageApp) processAccessGrant(parsedTx *tx.ParsedTx, height int64, bloc
 				}
 			}
 			if leafOwner != "" || anyAncestorOwned {
-				return &abcitypes.ExecTxResult{Code: 34, Log: fmt.Sprintf("access denied: %s is not owner of domain %s", granterID[:16], grant.Domain)}
-			}
-			// Unowned. Shared domains are never auto-registered —
-			// granting on them is a category error, reject explicitly.
-			if app.isSharedDomain(grant.Domain, height) {
-				return &abcitypes.ExecTxResult{Code: 50, Log: fmt.Sprintf("shared domain not ownable: %s", grant.Domain)}
-			}
-			// Auto-register the granter as owner of this unowned,
-			// non-shared domain. Mirrors processMemorySubmit's
-			// auto-register branch exactly — same pendingWrites shape,
-			// same idempotent owner self-grant.
-			regErr := app.badgerStore.RegisterDomain(grant.Domain, granterID, "", height)
-			if regErr != nil && !errors.Is(regErr, store.ErrDomainAlreadyRegistered) {
-				app.logger.Error().Err(regErr).Str("domain", grant.Domain).Msg("auto-register on grant failed")
-				return &abcitypes.ExecTxResult{Code: 34, Log: "auto-register failed"}
-			}
-			if errors.Is(regErr, store.ErrDomainAlreadyRegistered) {
-				// Same-block race: another tx registered the domain
-				// between our GetDomainOwner check and the RegisterDomain
-				// check-and-set. processMemorySubmit can swallow this
-				// because submits don't depend on the writer owning the
-				// domain — the next-block access check covers it. Grants
-				// DO depend on ownership, so we must re-check and reject
-				// the loser. No pendingWrites are appended on the loser
-				// path, mirroring TestAutoRegisterRaceLoss_NoSpuriousMirrorWrites.
-				if owner, _ := app.badgerStore.GetDomainOwner(grant.Domain); owner != granterID {
-					return &abcitypes.ExecTxResult{Code: 34, Log: fmt.Sprintf("access denied: %s lost auto-register race for domain %s", granterID[:16], grant.Domain)}
+				if !adminOverride {
+					return &abcitypes.ExecTxResult{Code: 34, Log: fmt.Sprintf("access denied: %s is not owner of domain %s", granterID[:16], grant.Domain)}
 				}
+				if !ownerBindingPresent {
+					return &abcitypes.ExecTxResult{Code: 34, Log: "administrator override rejected: domain ownership changed or was not bound"}
+				}
+				// Owned domain + app-v18 global admin: bypass ownership for this
+				// grant only. Ownership itself remains unchanged.
 			} else {
-				// First-write success. Mirror the auto-register to the
-				// off-chain accessStore so the mirror stays in sync from
-				// the moment the domain is created (v7.5.4 invariant).
-				app.logger.Info().Str("domain", grant.Domain).Str("owner", granterID[:16]).Msg("auto-registered domain on first access grant")
-				app.pendingWrites = append(app.pendingWrites, pendingWrite{
-					writeType: "domain_register",
-					data: &store.DomainEntry{
-						DomainName:    grant.Domain,
-						OwnerAgentID:  granterID,
-						CreatedHeight: height,
-						CreatedAt:     blockTime,
-					},
-				})
-				// Owner self-grant (level 2). Idempotent — if the grantee
-				// below happens to be the granter itself, the outer
-				// SetAccessGrant call is a no-op overwrite at the same
-				// level. Mirrors processMemorySubmit.
-				if grantErr := app.badgerStore.SetAccessGrant(grant.Domain, granterID, 2, 0, granterID); grantErr != nil {
-					app.logger.Error().Err(grantErr).Str("domain", grant.Domain).Msg("failed to auto-grant owner access on grant path")
+				// Unowned. Shared domains are never auto-registered —
+				// granting on them is a category error, reject explicitly.
+				if app.isSharedDomain(grant.Domain, height) {
+					return &abcitypes.ExecTxResult{Code: 50, Log: fmt.Sprintf("shared domain not ownable: %s", grant.Domain)}
+				}
+				// Auto-register the granter as owner of this unowned,
+				// non-shared domain. Mirrors processMemorySubmit's
+				// auto-register branch exactly — same pendingWrites shape,
+				// same idempotent owner self-grant.
+				regErr := app.badgerStore.RegisterDomain(grant.Domain, granterID, "", height)
+				if regErr != nil && !errors.Is(regErr, store.ErrDomainAlreadyRegistered) {
+					app.logger.Error().Err(regErr).Str("domain", grant.Domain).Msg("auto-register on grant failed")
+					return &abcitypes.ExecTxResult{Code: 34, Log: "auto-register failed"}
+				}
+				if errors.Is(regErr, store.ErrDomainAlreadyRegistered) {
+					// Same-block race: another tx registered the domain
+					// between our GetDomainOwner check and the RegisterDomain
+					// check-and-set. processMemorySubmit can swallow this
+					// because submits don't depend on the writer owning the
+					// domain — the next-block access check covers it. Grants
+					// DO depend on ownership, so we must re-check and reject
+					// the loser. No pendingWrites are appended on the loser
+					// path, mirroring TestAutoRegisterRaceLoss_NoSpuriousMirrorWrites.
+					if owner, _ := app.badgerStore.GetDomainOwner(grant.Domain); owner != granterID {
+						return &abcitypes.ExecTxResult{Code: 34, Log: fmt.Sprintf("access denied: %s lost auto-register race for domain %s", granterID[:16], grant.Domain)}
+					}
 				} else {
+					// First-write success. Mirror the auto-register to the
+					// off-chain accessStore so the mirror stays in sync from
+					// the moment the domain is created (v7.5.4 invariant).
+					app.logger.Info().Str("domain", grant.Domain).Str("owner", granterID[:16]).Msg("auto-registered domain on first access grant")
 					app.pendingWrites = append(app.pendingWrites, pendingWrite{
-						writeType: "access_grant",
-						data: &store.AccessGrantEntry{
-							Domain:        grant.Domain,
-							GranteeID:     granterID,
-							GranterID:     granterID,
-							Level:         2,
+						writeType: "domain_register",
+						data: &store.DomainEntry{
+							DomainName:    grant.Domain,
+							OwnerAgentID:  granterID,
 							CreatedHeight: height,
 							CreatedAt:     blockTime,
 						},
 					})
+					// Owner self-grant (level 2). Idempotent — if the grantee
+					// below happens to be the granter itself, the outer
+					// SetAccessGrant call is a no-op overwrite at the same
+					// level. Mirrors processMemorySubmit.
+					if grantErr := app.badgerStore.SetAccessGrant(grant.Domain, granterID, 2, 0, granterID); grantErr != nil {
+						app.logger.Error().Err(grantErr).Str("domain", grant.Domain).Msg("failed to auto-grant owner access on grant path")
+					} else {
+						app.pendingWrites = append(app.pendingWrites, pendingWrite{
+							writeType: "access_grant",
+							data: &store.AccessGrantEntry{
+								Domain:        grant.Domain,
+								GranteeID:     granterID,
+								GranterID:     granterID,
+								Level:         2,
+								CreatedHeight: height,
+								CreatedAt:     blockTime,
+							},
+						})
+					}
 				}
 			}
 			// Fall through to level validation + the grantee's SetAccessGrant below.
@@ -4489,10 +4596,31 @@ func (app *SageApp) processAccessRevoke(parsedTx *tx.ParsedTx, height int64, blo
 		return &abcitypes.ExecTxResult{Code: 37, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
 	}
 
-	// Authorization: revoker must own the domain or ancestor
+	// Authorization: revoker must own the domain or ancestor. app-v18 adds an
+	// explicit global-admin override, matching the grant path while preserving
+	// every pre-v18 block byte-for-byte.
+	ownerBindingPresent := revoke.ExpectedOwnerID != "" || revoke.ExpectedOwnedDomain != ""
+	if app.postAppV18Rules(height) && ownerBindingPresent {
+		currentOwner, currentOwnedDomain, resolveErr := app.badgerStore.ResolveOwningAncestor(revoke.Domain)
+		if resolveErr != nil || revoke.ExpectedOwnerID == "" || revoke.ExpectedOwnedDomain == "" ||
+			revoke.ExpectedOwnerID != currentOwner || revoke.ExpectedOwnedDomain != currentOwnedDomain {
+			return &abcitypes.ExecTxResult{Code: 38, Log: "administrator override rejected: domain ownership changed or was not bound"}
+		}
+	}
 	isOwner, err := app.badgerStore.IsDomainOwnerOrAncestor(revoke.Domain, revokerID)
-	if err != nil || !isOwner {
+	adminOverride := false
+	if app.postAppV18Rules(height) {
+		if revoker, lookupErr := app.badgerStore.GetRegisteredAgent(revokerID); lookupErr == nil {
+			adminOverride = revoker.Role == "admin"
+		}
+	}
+	if err != nil || (!isOwner && !adminOverride) {
 		return &abcitypes.ExecTxResult{Code: 38, Log: fmt.Sprintf("access denied: %s is not owner of domain %s", revokerID[:16], revoke.Domain)}
+	}
+	if !isOwner && adminOverride {
+		if !ownerBindingPresent {
+			return &abcitypes.ExecTxResult{Code: 38, Log: "administrator override rejected: domain ownership changed or was not bound"}
+		}
 	}
 
 	// Delete grant from BadgerDB

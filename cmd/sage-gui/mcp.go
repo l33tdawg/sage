@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -148,7 +149,7 @@ func runMCP() error {
 		keyPath = os.Getenv("SAGE_AGENT_KEY")
 	}
 
-	projectName := ""
+	projectName := strings.TrimSpace(os.Getenv("SAGE_PROJECT"))
 
 	if keyPath != "" {
 		keyPath = filepath.Clean(expandTilde(keyPath))
@@ -185,7 +186,7 @@ func runMCP() error {
 
 	baseURL := os.Getenv("SAGE_API_URL")
 	if baseURL == "" {
-		baseURL = "http://localhost:8080"
+		baseURL = mcp.DefaultBaseURL()
 	}
 
 	server := mcp.NewServer(baseURL, agentKey)
@@ -873,19 +874,38 @@ func selfHealProject(projectDir, sageHome string) {
 // loadOrGenerateKey loads an Ed25519 private key from disk, or generates one.
 // The key file stores the 32-byte seed; the full 64-byte private key is derived.
 func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path is from internal agent key directory
-	if err == nil {
+	readKey := func() (ed25519.PrivateKey, error) {
+		data, err := os.ReadFile(path) //nolint:gosec // path is from internal agent key directory
+		if err != nil {
+			return nil, err
+		}
 		switch len(data) {
-		case ed25519.SeedSize: // 32-byte seed
+		case ed25519.SeedSize:
 			return ed25519.NewKeyFromSeed(data), nil
-		case ed25519.PrivateKeySize: // 64-byte full key
+		case ed25519.PrivateKeySize:
 			return ed25519.PrivateKey(data), nil
 		default:
 			return nil, fmt.Errorf("invalid key file size: %d bytes (expected 32 or 64)", len(data))
 		}
 	}
+	key, err := readKey()
+	if err == nil {
+		return key, nil
+	}
 
 	if !os.IsNotExist(err) {
+		// O_EXCL creation publishes the directory entry before its seed write is
+		// visible. A concurrent opener can therefore observe a temporary 0-byte
+		// file on its very first read; wait only for undersized regular files, then
+		// surface genuinely corrupt/permission failures normally.
+		if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() && info.Size() < ed25519.SeedSize {
+			for attempt := 0; attempt < 50; attempt++ {
+				if existing, readErr := readKey(); readErr == nil {
+					return existing, nil
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
 		return nil, fmt.Errorf("read key file: %w", err)
 	}
 
@@ -895,7 +915,32 @@ func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
 		return nil, fmt.Errorf("generate key: %w", err)
 	}
 
-	if err := os.WriteFile(path, priv.Seed(), 0600); err != nil { //nolint:gosec // path is internal agent key dir
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) //nolint:gosec // trusted identity path
+	if errors.Is(err, os.ErrExist) {
+		// Another MCP process won first creation. Its O_EXCL file may exist a few
+		// milliseconds before the seed is fully written, so reread with a short
+		// bound instead of starting with a different in-memory identity.
+		for attempt := 0; attempt < 50; attempt++ {
+			if existing, readErr := readKey(); readErr == nil {
+				return existing, nil
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return nil, fmt.Errorf("read concurrently-created key file")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("create key file: %w", err)
+	}
+	seed := priv.Seed()
+	if _, err = f.Write(seed); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(path)
 		return nil, fmt.Errorf("save key file: %w", err)
 	}
 

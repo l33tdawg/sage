@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"time"
 
@@ -270,28 +268,22 @@ func (h *DashboardHandler) handleSetFederationSetting(w http.ResponseWriter, r *
 		})
 		return
 	}
-	execPath, err := os.Executable()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot determine binary path")
+	if h.RequestRestart == nil {
+		_ = h.SetFederationEnabledFn(!body.Enabled)
+		h.FederationEnabled = !body.Enabled
+		writeError(w, http.StatusServiceUnavailable, "clean restart coordinator is unavailable; the setting was not changed")
 		return
 	}
-	writeJSONResp(w, http.StatusOK, map[string]any{
-		"ok": true, "enabled": body.Enabled, "restarting": true,
-		"message": "Saving and restarting to apply the federation change…",
-	})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	if err := h.RequestRestart(); err != nil {
+		_ = h.SetFederationEnabledFn(!body.Enabled)
+		h.FederationEnabled = !body.Enabled
+		writeError(w, http.StatusServiceUnavailable, "could not begin a clean restart; the setting was not changed: "+err.Error())
+		return
 	}
-	// Re-exec after the response is flushed (handleRestart pattern). Only
-	// returns on failure; revert config so it never diverges from the live process.
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		if rErr := restartSelf(execPath); rErr != nil {
-			log.Printf("federation toggle: restart failed, reverting: %v", rErr)
-			_ = h.SetFederationEnabledFn(!body.Enabled)
-			h.FederationEnabled = !body.Enabled
-		}
-	}()
+	writeJSONResp(w, http.StatusAccepted, map[string]any{
+		"ok": true, "enabled": body.Enabled, "restarting": true,
+		"status": "draining", "message": "Saving and restarting cleanly to apply the federation change…",
+	})
 }
 
 // --- v11.6 host-controlled domain sync + status -----------------------------

@@ -113,8 +113,11 @@ func isRunning() bool {
 	if !processAlive(pid) {
 		return false
 	}
-	// Process exists; double-check health (PID might be reused by another process)
-	return healthOK()
+	// A live owned PID may be in its brief starting/draining window. Starting a
+	// second daemon here creates the exact port/DB contention that prevents the
+	// first one from recovering, so treat it as running and let the UI report
+	// readiness separately.
+	return true
 }
 
 func healthOK() bool {

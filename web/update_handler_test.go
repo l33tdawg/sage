@@ -2,6 +2,8 @@ package web
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,6 +43,136 @@ func TestSemverGreater(t *testing.T) {
 			assert.Equal(t, tt.want, semverGreater(tt.a, tt.b))
 		})
 	}
+}
+
+func TestHandleRestartQueuesCoordinatedLifecycle(t *testing.T) {
+	var calls atomic.Int32
+	h := &DashboardHandler{BootID: "boot-a", RequestRestart: func() error {
+		calls.Add(1)
+		return nil
+	}}
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/restart", nil)
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	h.handleRestart(w, req)
+	if runtime.GOOS == "windows" {
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Zero(t, calls.Load())
+		return
+	}
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	require.Equal(t, int32(1), calls.Load())
+	assert.Contains(t, w.Body.String(), `"status":"draining"`)
+	assert.Contains(t, w.Body.String(), `"boot_id":"boot-a"`)
+}
+
+func TestHandleRestartRejectsAgentAndUpdateRace(t *testing.T) {
+	h := &DashboardHandler{RequestRestart: func() error { return nil }}
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/restart", nil)
+	signAgentRequest(t, req, priv, nil)
+	w := httptest.NewRecorder()
+	h.handleRestart(w, req.WithContext(context.WithValue(req.Context(), verifiedDashboardAgentKey{}, hex.EncodeToString(priv.Public().(ed25519.PublicKey)))))
+	require.Equal(t, http.StatusForbidden, w.Code)
+
+	h.UpdateInProgress.Store(true)
+	req = httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/restart", nil)
+	markLocalCEREBRUM(req)
+	w = httptest.NewRecorder()
+	h.handleRestart(w, req)
+	require.Equal(t, http.StatusConflict, w.Code)
+}
+
+func TestHandleApplyUpdateRequiresTrustedChecksum(t *testing.T) {
+	h := &DashboardHandler{}
+	body := strings.NewReader(`{"download_url":"https://github.com/l33tdawg/sage/releases/download/v11.7.0/sage.tar.gz"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/apply", body)
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	h.handleApplyUpdate(w, req)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	if runtime.GOOS == "linux" {
+		assert.Contains(t, w.Body.String(), "checksum")
+	} else {
+		assert.Contains(t, w.Body.String(), "signed release installer")
+	}
+}
+
+func TestUpdateStatusSurvivesDroppedSSEConnection(t *testing.T) {
+	h := &DashboardHandler{}
+	h.UpdateInProgress.Store(true)
+	h.sendUpdateProgress("verify", "active", "Verifying SHA-256 checksum...")
+
+	w := httptest.NewRecorder()
+	h.handleGetUpdateStatus(w, httptest.NewRequest(http.MethodGet, "/v1/dashboard/settings/update/status", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.JSONEq(t, `{
+		"in_progress": true,
+		"state": {
+			"step": "verify",
+			"status": "active",
+			"message": "Verifying SHA-256 checksum..."
+		}
+	}`, w.Body.String())
+}
+
+func TestPendingBinaryInstallRollbackAndConfirmation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("executable replacement semantics differ on Windows")
+	}
+	makeExecutable := func(path, version string) {
+		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\necho sage-gui "+version+"\n"), 0755))
+	}
+
+	t.Run("rollback restores previous executable", func(t *testing.T) {
+		dir := t.TempDir()
+		execPath := filepath.Join(dir, "sage-gui")
+		newPath := filepath.Join(dir, "downloaded")
+		makeExecutable(execPath, "v11.6.1")
+		makeExecutable(newPath, "v11.7.0")
+
+		require.NoError(t, installPendingBinary(execPath, newPath, "v11.7.0"))
+		require.Equal(t, "v11.7.0", PendingUpdateVersion(execPath))
+		require.FileExists(t, execPath+".old")
+		require.Equal(t, "v11.7.0", diskBinaryVersion(context.Background(), execPath))
+
+		rolledBack, err := RollbackPendingUpdate(execPath)
+		require.NoError(t, err)
+		require.True(t, rolledBack)
+		require.Equal(t, "v11.6.1", diskBinaryVersion(context.Background(), execPath))
+		require.NoFileExists(t, execPath+pendingUpdateSuffix)
+	})
+
+	t.Run("healthy replacement removes rollback state", func(t *testing.T) {
+		dir := t.TempDir()
+		execPath := filepath.Join(dir, "sage-gui")
+		newPath := filepath.Join(dir, "downloaded")
+		makeExecutable(execPath, "v11.6.1")
+		makeExecutable(newPath, "v11.7.0")
+
+		require.NoError(t, installPendingBinary(execPath, newPath, "v11.7.0"))
+		require.NoError(t, ConfirmPendingUpdate(execPath))
+		require.FileExists(t, execPath+".old", "one previous healthy binary is retained for recovery")
+		require.NoFileExists(t, execPath+pendingUpdateSuffix)
+		require.Equal(t, "v11.7.0", diskBinaryVersion(context.Background(), execPath))
+	})
+
+	t.Run("second update cannot replace unconfirmed rollback ancestry", func(t *testing.T) {
+		dir := t.TempDir()
+		execPath := filepath.Join(dir, "sage-gui")
+		firstPath := filepath.Join(dir, "first")
+		secondPath := filepath.Join(dir, "second")
+		makeExecutable(execPath, "v11.6.1")
+		makeExecutable(firstPath, "v11.7.0")
+		makeExecutable(secondPath, "v11.8.0")
+
+		require.NoError(t, installPendingBinary(execPath, firstPath, "v11.7.0"))
+		require.Error(t, installPendingBinary(execPath, secondPath, "v11.8.0"))
+		require.Equal(t, "v11.7.0", diskBinaryVersion(context.Background(), execPath))
+		require.Equal(t, "v11.6.1", diskBinaryVersion(context.Background(), execPath+".old"))
+		require.Equal(t, "v11.7.0", PendingUpdateVersion(execPath))
+	})
 }
 
 func TestParseSemver(t *testing.T) {

@@ -3,7 +3,7 @@ package main
 // CLI for managing HTTP MCP bearer tokens.
 //
 // Usage:
-//   sage-gui mcp-token create --agent <agent_id> [--name <label>]
+//   sage-gui mcp-token create [--name <label>]
 //   sage-gui mcp-token list
 //   sage-gui mcp-token revoke <id>
 //
@@ -50,12 +50,12 @@ func printMCPTokenUsage() {
 	fmt.Println(`Manage HTTP MCP bearer tokens.
 
 Usage:
-  sage-gui mcp-token create --agent <agent_id> [--name <label>]
+  sage-gui mcp-token create [--name <label>]
   sage-gui mcp-token list
   sage-gui mcp-token revoke <id>
 
 Examples:
-  sage-gui mcp-token create --agent 1f2e... --name chatgpt-laptop
+  sage-gui mcp-token create --name chatgpt-laptop
   sage-gui mcp-token list
   sage-gui mcp-token revoke 6c5e9f8a-b21d-4d52-89c4-1a3a4d9e7c5a`)
 }
@@ -85,9 +85,14 @@ func runMCPTokenCreate() error {
 			}
 		}
 	}
-	if agentID == "" {
-		return fmt.Errorf("--agent <hex-pubkey> is required")
+	operatorID, _, _, identityErr := mcpTokenSigningIdentity()
+	if identityErr != nil {
+		return identityErr
 	}
+	if agentID != "" && agentID != operatorID {
+		return fmt.Errorf("HTTP MCP tokens execute as this node's operator (%s); remove --agent or use that identity", operatorID)
+	}
+	agentID = operatorID
 
 	body, _ := json.Marshal(map[string]string{
 		"agent_id": agentID,
@@ -153,7 +158,7 @@ func runMCPTokenList() error {
 
 	if len(out.Tokens) == 0 {
 		fmt.Println("No MCP tokens issued yet. Mint one with:")
-		fmt.Println("  sage-gui mcp-token create --agent <agent_id> --name <label>")
+		fmt.Println("  sage-gui mcp-token create --name <label>")
 		return nil
 	}
 
@@ -199,9 +204,23 @@ func runMCPTokenRevoke() error {
 // mcpTokenAPICall makes an ed25519-signed REST call to the local SAGE node.
 // Reuses the same signing protocol as `sage-gui seed` and the MCP stdio server.
 func mcpTokenAPICall(method, path string, body []byte) (*http.Response, error) {
+	agentID, priv, cfg, err := mcpTokenSigningIdentity()
+	if err != nil {
+		return nil, err
+	}
+
+	baseURL := os.Getenv("SAGE_API_URL")
+	if baseURL == "" {
+		baseURL = restBaseURL(cfg.RESTAddr)
+	}
+
+	return doSignedHTTP(method, baseURL+path, body, agentID, priv)
+}
+
+func mcpTokenSigningIdentity() (string, ed25519.PrivateKey, *Config, error) {
 	cfg, err := LoadConfig()
 	if err != nil {
-		return nil, fmt.Errorf("load config: %w", err)
+		return "", nil, nil, fmt.Errorf("load config: %w", err)
 	}
 
 	keyPath := cfg.AgentKey
@@ -210,7 +229,7 @@ func mcpTokenAPICall(method, path string, body []byte) (*http.Response, error) {
 	}
 	keyBytes, err := os.ReadFile(filepath.Clean(keyPath)) //nolint:gosec // path from trusted config
 	if err != nil {
-		return nil, fmt.Errorf("read agent key: %w", err)
+		return "", nil, nil, fmt.Errorf("read agent key: %w", err)
 	}
 	var priv ed25519.PrivateKey
 	switch len(keyBytes) {
@@ -219,19 +238,13 @@ func mcpTokenAPICall(method, path string, body []byte) (*http.Response, error) {
 	case ed25519.PrivateKeySize:
 		priv = ed25519.PrivateKey(keyBytes)
 	default:
-		return nil, fmt.Errorf("invalid agent key file size: %d", len(keyBytes))
+		return "", nil, nil, fmt.Errorf("invalid agent key file size: %d", len(keyBytes))
 	}
 
 	pub, ok := priv.Public().(ed25519.PublicKey)
 	if !ok {
-		return nil, fmt.Errorf("invalid agent key: not ed25519")
+		return "", nil, nil, fmt.Errorf("invalid agent key: not ed25519")
 	}
 	agentID := hex.EncodeToString(pub)
-
-	baseURL := os.Getenv("SAGE_API_URL")
-	if baseURL == "" {
-		baseURL = restBaseURL(cfg.RESTAddr)
-	}
-
-	return doSignedHTTP(method, baseURL+path, body, agentID, priv)
+	return agentID, priv, cfg, nil
 }

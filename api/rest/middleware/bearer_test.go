@@ -28,6 +28,7 @@ func stubLookup(plaintext, agentID string) MCPTokenLookupFn {
 func bearerProtected(lookup MCPTokenLookupFn) http.Handler {
 	final := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Test-Agent-ID", ContextAgentID(r.Context()))
+		w.Header().Set("X-Test-Token-Fingerprint", ContextMCPTokenFingerprint(r.Context()))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -94,6 +95,8 @@ func TestBearerAuth_Accepts_ValidToken(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rr.Code)
 	assert.Equal(t, "agent-abc", rr.Header().Get("X-Test-Agent-ID"))
+	digest := sha256.Sum256([]byte("the-good-token"))
+	assert.Equal(t, hex.EncodeToString(digest[:]), rr.Header().Get("X-Test-Token-Fingerprint"))
 }
 
 func TestBearerAuth_DBError_Fails500(t *testing.T) {

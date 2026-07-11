@@ -16,9 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -409,8 +407,7 @@ func (h *DashboardHandler) handleEmbeddingsReembed(w http.ResponseWriter, r *htt
 	h.reembed.startedAt = time.Now() // for ETA
 	h.reembed.mu.Unlock()
 
-	//nolint:gosec // Re-embedding is a deliberate background job that continues after the request returns.
-	go h.runReembed()
+	h.runBackground(h.runReembed)
 
 	writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
 }
@@ -440,8 +437,7 @@ func (h *DashboardHandler) handleEmbeddingsDeprecateUnreadable(w http.ResponseWr
 // runReembed is the background worker. It uses context.Background() so it is NOT
 // tied to the triggering request — the operator can close the modal, background
 // the tab, or lose the connection and the job keeps going.
-func (h *DashboardHandler) runReembed() {
-	ctx := context.Background()
+func (h *DashboardHandler) runReembed(ctx context.Context) {
 	defer func() {
 		h.reembed.mu.Lock()
 		h.reembed.running = false
@@ -579,8 +575,7 @@ func (h *DashboardHandler) recoverOrphans(w http.ResponseWriter, r *http.Request
 					h.reembed.running = true
 					h.reembed.done, h.reembed.skipped, h.reembed.total, h.reembed.errMsg = 0, 0, counts2[""], ""
 					h.reembed.startedAt = time.Now()
-					//nolint:gosec // Re-embedding is a deliberate background job that continues after the request returns.
-					go h.runReembed()
+					h.runBackground(h.runReembed)
 				}
 				h.reembed.mu.Unlock()
 				resp["reembed_started"] = true
@@ -629,21 +624,21 @@ func (h *DashboardHandler) handleEmbeddingsEnable(w http.ResponseWriter, r *http
 		})
 		return
 	}
-	execPath, err := os.Executable()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot determine binary path")
+	if h.RequestRestart == nil {
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"ok": true, "restart_required": true,
+			"message": "Semantic memory is on. Fully quit SAGE and open it again to finish switching.",
+		})
 		return
 	}
-	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "Turning on semantic memory and restarting..."})
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	if err := h.RequestRestart(); err != nil {
+		writeJSONResp(w, http.StatusServiceUnavailable, map[string]any{
+			"ok": true, "restart_required": true,
+			"message": "Semantic memory is saved, but SAGE could not restart cleanly. Fully quit and reopen it.",
+		})
+		return
 	}
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		if execErr := restartSelf(execPath); execErr != nil { // stays up in the old mode on failure
-			log.Printf("embeddings enable: restart failed: %v", execErr)
-		}
-	}()
+	writeJSONResp(w, http.StatusAccepted, map[string]any{"ok": true, "status": "draining", "message": "Turning on semantic memory and restarting cleanly…"})
 }
 
 // ollamaRunning reports whether the local Ollama daemon answers /api/tags.

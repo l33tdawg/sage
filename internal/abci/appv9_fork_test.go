@@ -436,16 +436,17 @@ func TestAppV9_ActiveUpgradeVote_SupportedTarget(t *testing.T) {
 func TestAppV9_ActiveUpgradeVote_UnsupportedTarget(t *testing.T) {
 	app, admin, _, _ := setupAppV8Chain(t, 5)
 
-	// Target 18 > maxSupportedAppVersion (17): the binary has no compiled fork
+	// One rung beyond maxSupportedAppVersion: the binary has no compiled fork
 	// gate for it. The readiness gate must report supported=false so the
 	// auto-voter abstains — the liveness-layer guard against the
 	// maxSupportedAppVersion halt footgun (no consensus reject, no divergence).
-	propose := encodeSignedUpgradePropose(t, admin, "app-v18", 18, "", 200)
+	unsupported := MaxSupportedAppVersion() + 1
+	propose := encodeSignedUpgradePropose(t, admin, tx.CanonicalUpgradeName(unsupported), unsupported, "", 200)
 	require.Equal(t, uint32(0), finalizeBlock(t, app, 10, propose).TxResults[0].Code)
 
 	pid, target, supported, ok := app.ActiveUpgradeVote()
 	require.True(t, ok, "the proposal is active even though unsupported")
 	assert.NotEmpty(t, pid)
-	assert.Equal(t, uint64(18), target)
-	assert.False(t, supported, "target 18 > maxSupportedAppVersion 17 => unsupported, auto-voter must NOT vote")
+	assert.Equal(t, unsupported, target)
+	assert.False(t, supported, "target above maxSupportedAppVersion => unsupported, auto-voter must NOT vote")
 }

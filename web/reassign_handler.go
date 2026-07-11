@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -69,11 +70,38 @@ func (h *DashboardHandler) handleAgentDomains(agentStore store.AgentStore) http.
 
 // grantResult is one per-domain outcome of a matrix Save, for an honest UI.
 type grantResult struct {
-	Domain string `json:"domain"`
-	Action string `json:"action"` // grant | revoke | skip
-	Level  int    `json:"level,omitempty"`
-	OK     bool   `json:"ok"`
-	Error  string `json:"error,omitempty"`
+	Domain            string `json:"domain"`
+	Action            string `json:"action"` // grant | revoke | shared | skip
+	Level             int    `json:"level,omitempty"`
+	OK                bool   `json:"ok"`
+	Code              string `json:"code,omitempty"`
+	Error             string `json:"error,omitempty"`
+	OwnerID           string `json:"owner_id,omitempty"`
+	OwnedDomain       string `json:"owned_domain,omitempty"`
+	OwnerLocal        bool   `json:"owner_local,omitempty"`
+	OverrideAvailable bool   `json:"override_available,omitempty"`
+	OverrideReady     bool   `json:"override_ready,omitempty"`
+}
+
+type adminOverrideExpectation struct {
+	Domain      string `json:"domain"`
+	OwnerID     string `json:"owner_id"`
+	OwnedDomain string `json:"owned_domain"`
+	Level       int    `json:"level"`
+}
+
+func overrideOwnerID(expected *adminOverrideExpectation) string {
+	if expected == nil {
+		return ""
+	}
+	return expected.OwnerID
+}
+
+func overrideOwnedDomain(expected *adminOverrideExpectation) string {
+	if expected == nil {
+		return ""
+	}
+	return expected.OwnedDomain
 }
 
 // domainAccessEntry is one row of the read/write matrix blob.
@@ -84,7 +112,7 @@ type domainAccessEntry struct {
 }
 
 // parseDomainAccessLevels parses the matrix blob into domain -> desired grant
-// level: write=3 (owner/modify), read-only=1 (access), neither=0 (no access).
+// level: write=2 (read+write), read-only=1 (read), neither=0 (no access).
 // Empty blob => empty map (no domains configured). Malformed => nil (caller
 // must not touch grants on a parse failure).
 func parseDomainAccessLevels(blob string) map[string]int {
@@ -103,7 +131,7 @@ func parseDomainAccessLevels(blob string) map[string]int {
 		}
 		switch {
 		case e.Write:
-			out[d] = 3
+			out[d] = 2
 		case e.Read:
 			out[d] = 1
 		default:
@@ -124,8 +152,8 @@ func parseDomainAccessLevels(blob string) map[string]int {
 // silently dropped. This is the fix for the cosmetic-enforcement bug: the matrix
 // now writes the enforced grant keys, not just the advisory blob. Consensus
 // logic is untouched. oldBlob is used only to bound the candidate domain set.
-func (h *DashboardHandler) reconcileDomainGrants(granteeID, oldBlob, newBlob string) []grantResult {
-	if h.CometBFTRPC == "" || h.BadgerStore == nil || h.ResolveAgentKeyFn == nil {
+func (h *DashboardHandler) reconcileDomainGrants(granteeID, oldBlob, newBlob string, overrides map[string]adminOverrideExpectation) []grantResult {
+	if h.CometBFTRPC == "" || h.BadgerStore == nil {
 		return nil
 	}
 	oldLevels := parseDomainAccessLevels(oldBlob)
@@ -140,6 +168,9 @@ func (h *DashboardHandler) reconcileDomainGrants(granteeID, oldBlob, newBlob str
 	for d := range oldLevels {
 		domains[d] = struct{}{}
 	}
+	for d := range overrides {
+		domains[d] = struct{}{}
+	}
 
 	var results []grantResult
 	for d := range domains {
@@ -152,9 +183,17 @@ func (h *DashboardHandler) reconcileDomainGrants(granteeID, oldBlob, newBlob str
 		}
 		switch {
 		case desired > 0 && curLevel != desired:
-			results = append(results, h.grantAs(d, granteeID, desired))
+			var override *adminOverrideExpectation
+			if expected, ok := overrides[d]; ok {
+				override = &expected
+			}
+			results = append(results, h.grantAs(d, granteeID, desired, override))
 		case desired == 0 && curLevel > 0:
-			results = append(results, h.revokeAs(d, granteeID))
+			var override *adminOverrideExpectation
+			if expected, ok := overrides[d]; ok {
+				override = &expected
+			}
+			results = append(results, h.revokeAs(d, granteeID, override))
 		default:
 			// already in the desired on-chain state - no tx
 		}
@@ -162,67 +201,181 @@ func (h *DashboardHandler) reconcileDomainGrants(granteeID, oldBlob, newBlob str
 	return results
 }
 
-// grantAs issues an AccessGrant(grantee, domain, level) signed as the domain
-// owner. Skips (with a clear reason) when the domain is unowned or its owner
-// key is not on this node.
-func (h *DashboardHandler) grantAs(domain, granteeID string, level int) grantResult {
-	owner, err := h.BadgerStore.GetDomainOwner(domain)
-	if err != nil || owner == "" {
-		return grantResult{Domain: domain, Action: "skip", Level: level, OK: false,
-			Error: "domain has no on-chain owner yet, so access cannot be granted (submit a memory to it or reassign it first)"}
+// grantAs issues an AccessGrant(grantee, domain, level) signed as the effective
+// domain owner. For a genuinely unowned domain, the genesis admin signs the
+// grant and consensus atomically registers that admin as owner before applying
+// the grant. This mirrors processAccessGrant's post-v8 first-grant-wins rule;
+// the dashboard must not reject a flow consensus explicitly supports.
+func (h *DashboardHandler) grantAs(domain, granteeID string, level int, override *adminOverrideExpectation) grantResult {
+	if h.isSharedDomain(domain) {
+		// Shared domains need no direct grant. The AgentSetPermission tx carrying
+		// DomainAccess is the only policy update required for this matrix row.
+		return grantResult{Domain: domain, Action: "shared", Level: level, OK: true}
 	}
-	ownerKey, ok := h.ResolveAgentKeyFn(owner)
-	if !ok {
+
+	owner, ownedDomain, err := h.BadgerStore.ResolveOwningAncestor(domain)
+	if err != nil {
 		return grantResult{Domain: domain, Action: "skip", Level: level, OK: false,
-			Error: fmt.Sprintf("domain is owned by %s, whose signing key is not on this node", shortID(owner))}
+			Code: "owner_lookup_failed", Error: "could not resolve domain owner: " + err.Error()}
 	}
+
+	ownerLocal := false
+	var resolvedOwnerKey ed25519.PrivateKey
+	if owner != "" && h.ResolveAgentKeyFn != nil {
+		resolvedOwnerKey, ownerLocal = h.ResolveAgentKeyFn(owner)
+	}
+	targetLocal := false
+	if h.ResolveAgentKeyFn != nil {
+		_, targetLocal = h.ResolveAgentKeyFn(granteeID)
+	}
+	overrideActive := h.AppV18ActiveFn != nil && h.AppV18ActiveFn()
+	overrideAvailable := targetLocal && len(h.AdminSigningKey) == ed25519.PrivateKeySize
+
+	var ownerKey ed25519.PrivateKey
+	if owner == "" {
+		ownerKey = h.AdminSigningKey
+		owner = agentIDForKey(ownerKey)
+		ownedDomain = domain
+		ownerLocal = owner != ""
+		if owner == "" {
+			return grantResult{Domain: domain, Action: "skip", Level: level, OK: false,
+				Code: "admin_key_unavailable", Error: "genesis admin signing key is unavailable"}
+		}
+	} else if override != nil {
+		if override.Domain != domain || override.OwnerID != owner || override.OwnedDomain != ownedDomain || override.Level != level {
+			return grantResult{Domain: domain, Action: "skip", Level: level, OK: false,
+				Code: "owner_changed", Error: "domain ownership or requested access changed after confirmation",
+				OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal,
+				OverrideAvailable: overrideAvailable, OverrideReady: overrideAvailable && overrideActive}
+		}
+		if !targetLocal {
+			return grantResult{Domain: domain, Action: "skip", Level: level, OK: false,
+				Code: "override_remote_target", Error: "administrator override is limited to agents whose signing key is held on this node",
+				OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal}
+		}
+		if !overrideActive {
+			return grantResult{Domain: domain, Action: "skip", Level: level, OK: false,
+				Code: "override_not_active", Error: "administrator override is waiting for the app-v18 chain upgrade",
+				OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal}
+		}
+		ownerKey = h.AdminSigningKey
+		if len(ownerKey) != ed25519.PrivateKeySize {
+			return grantResult{Domain: domain, Action: "skip", Level: level, OK: false,
+				Code: "admin_key_unavailable", Error: "genesis admin signing key is unavailable",
+				OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal}
+		}
+	} else {
+		ownerKey = resolvedOwnerKey
+	}
+	if len(ownerKey) != ed25519.PrivateKeySize {
+		return grantResult{Domain: domain, Action: "skip", Level: level, OK: false,
+			Code: "owner_key_unavailable", Error: fmt.Sprintf("domain is owned by %s, whose signing key is not on this node", shortID(owner)),
+			OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal,
+			OverrideAvailable: overrideAvailable, OverrideReady: overrideAvailable && overrideActive}
+	}
+	signerID := agentIDForKey(ownerKey)
 	grantTx := &tx.ParsedTx{
 		Type: tx.TxTypeAccessGrant,
 		AccessGrant: &tx.AccessGrant{
-			GranterID: owner,
-			GranteeID: granteeID,
-			Domain:    domain,
-			Level:     uint8(level), // #nosec G115 -- level is 1 or 3
+			GranterID:           signerID,
+			GranteeID:           granteeID,
+			Domain:              domain,
+			Level:               uint8(level), // #nosec G115 -- level is 1 or 2
+			ExpectedOwnerID:     overrideOwnerID(override),
+			ExpectedOwnedDomain: overrideOwnedDomain(override),
 		},
 	}
 	if _, _, _, gErr := h.signAndBroadcastCommit(grantTx, ownerKey); gErr != nil {
-		return grantResult{Domain: domain, Action: "grant", Level: level, OK: false, Error: gErr.Error()}
+		return grantResult{Domain: domain, Action: "grant", Level: level, OK: false,
+			Code: "grant_rejected", Error: gErr.Error(), OwnerID: owner, OwnedDomain: ownedDomain,
+			OwnerLocal: ownerLocal}
 	}
-	return grantResult{Domain: domain, Action: "grant", Level: level, OK: true}
+	return grantResult{Domain: domain, Action: "grant", Level: level, OK: true,
+		OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal}
 }
 
 // revokeAs issues an AccessRevoke(grantee, domain) signed as the domain owner.
-func (h *DashboardHandler) revokeAs(domain, granteeID string) grantResult {
-	owner, err := h.BadgerStore.GetDomainOwner(domain)
+func (h *DashboardHandler) revokeAs(domain, granteeID string, override *adminOverrideExpectation) grantResult {
+	if h.isSharedDomain(domain) {
+		return grantResult{Domain: domain, Action: "shared", OK: true}
+	}
+	owner, ownedDomain, err := h.BadgerStore.ResolveOwningAncestor(domain)
 	if err != nil || owner == "" {
 		return grantResult{Domain: domain, Action: "skip", OK: false,
-			Error: "domain has no on-chain owner, so there is nothing to revoke"}
+			Code: "owner_missing", Error: "domain has no on-chain owner, so there is nothing to revoke"}
 	}
 	if owner == granteeID {
 		// An owner cannot be meaningfully revoked from its own domain (it keeps
 		// ownership regardless); revoking here would only delete its direct-grant
 		// fast path. Use domain reassignment to move ownership instead.
 		return grantResult{Domain: domain, Action: "skip", OK: false,
-			Error: "agent owns this domain; access is not revoked from the matrix (use domain reassignment to transfer ownership)"}
+			Code: "owner_access", Error: "agent owns this domain; access is not revoked from the matrix (use domain reassignment to transfer ownership)"}
 	}
-	ownerKey, ok := h.ResolveAgentKeyFn(owner)
-	if !ok {
+	ownerLocal := false
+	var ownerKey ed25519.PrivateKey
+	if h.ResolveAgentKeyFn != nil {
+		ownerKey, ownerLocal = h.ResolveAgentKeyFn(owner)
+	}
+	targetLocal := false
+	if h.ResolveAgentKeyFn != nil {
+		_, targetLocal = h.ResolveAgentKeyFn(granteeID)
+	}
+	overrideActive := h.AppV18ActiveFn != nil && h.AppV18ActiveFn()
+	overrideAvailable := targetLocal && len(h.AdminSigningKey) == ed25519.PrivateKeySize
+	if override != nil {
+		if override.Domain != domain || override.OwnerID != owner || override.OwnedDomain != ownedDomain || override.Level != 0 {
+			return grantResult{Domain: domain, Action: "skip", OK: false, Code: "owner_changed",
+				Error: "domain ownership changed after confirmation", OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal,
+				OverrideAvailable: overrideAvailable, OverrideReady: overrideAvailable && overrideActive}
+		}
+		if !targetLocal {
+			return grantResult{Domain: domain, Action: "skip", OK: false, Code: "override_remote_target",
+				Error:   "administrator override is limited to agents whose signing key is held on this node",
+				OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal}
+		}
+		if h.AppV18ActiveFn == nil || !h.AppV18ActiveFn() {
+			return grantResult{Domain: domain, Action: "skip", OK: false, Code: "override_not_active",
+				Error:   "administrator override is waiting for the app-v18 chain upgrade",
+				OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal}
+		}
+		ownerKey = h.AdminSigningKey
+	}
+	if len(ownerKey) != ed25519.PrivateKeySize {
 		return grantResult{Domain: domain, Action: "skip", OK: false,
-			Error: fmt.Sprintf("domain is owned by %s, whose signing key is not on this node", shortID(owner))}
+			Code: "owner_key_unavailable", Error: fmt.Sprintf("domain is owned by %s, whose signing key is not on this node", shortID(owner)),
+			OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal,
+			OverrideAvailable: overrideAvailable, OverrideReady: overrideAvailable && overrideActive}
 	}
 	revokeTx := &tx.ParsedTx{
 		Type: tx.TxTypeAccessRevoke,
 		AccessRevoke: &tx.AccessRevoke{
-			RevokerID: owner,
-			GranteeID: granteeID,
-			Domain:    domain,
-			Reason:    "dashboard access matrix update",
+			RevokerID:           agentIDForKey(ownerKey),
+			GranteeID:           granteeID,
+			Domain:              domain,
+			Reason:              "dashboard access matrix update",
+			ExpectedOwnerID:     overrideOwnerID(override),
+			ExpectedOwnedDomain: overrideOwnedDomain(override),
 		},
 	}
 	if _, _, _, rErr := h.signAndBroadcastCommit(revokeTx, ownerKey); rErr != nil {
-		return grantResult{Domain: domain, Action: "revoke", OK: false, Error: rErr.Error()}
+		return grantResult{Domain: domain, Action: "revoke", OK: false,
+			Code: "revoke_rejected", Error: rErr.Error(), OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal}
 	}
-	return grantResult{Domain: domain, Action: "revoke", OK: true}
+	return grantResult{Domain: domain, Action: "revoke", OK: true, OwnerID: owner, OwnedDomain: ownedDomain, OwnerLocal: ownerLocal}
+}
+
+// isSharedDomain covers both the reserved shared namespace and domains opened
+// by the on-chain shared_domain sentinel. Shared domains are accessible without
+// direct owner grants and must never be auto-claimed by the dashboard.
+func (h *DashboardHandler) isSharedDomain(domain string) bool {
+	if store.IsSharedDomainName(domain) {
+		return true
+	}
+	if h.BadgerStore == nil {
+		return false
+	}
+	v, err := h.BadgerStore.GetState("shared_domain:" + domain)
+	return err == nil && len(v) > 0
 }
 
 // mirrorDomainAccessSet updates an agent's off-chain DomainAccess blob so the

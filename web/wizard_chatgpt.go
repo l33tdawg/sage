@@ -1114,8 +1114,13 @@ func (h *DashboardHandler) handleWizardMintToken(w http.ResponseWriter, r *http.
 	if req.TokenName == "" {
 		req.TokenName = "chatgpt"
 	}
-	if len(req.AgentID) != 64 {
-		writeError(w, http.StatusBadRequest, "agent_id must be a 64-char hex-encoded ed25519 public key")
+	operatorID := strings.TrimSpace(h.NodeOperatorAgentID)
+	if len(operatorID) != 64 {
+		writeError(w, http.StatusServiceUnavailable, "node operator identity unavailable — MCP tokens cannot be issued")
+		return
+	}
+	if req.AgentID != "" && req.AgentID != operatorID {
+		writeError(w, http.StatusBadRequest, "remote MCP connections run as the local node operator; choose the operator identity")
 		return
 	}
 
@@ -1126,7 +1131,7 @@ func (h *DashboardHandler) handleWizardMintToken(w http.ResponseWriter, r *http.
 	}
 
 	// Mint the token using the same primitives as the api/rest handler.
-	token, id, createdAt, err := mintMCPTokenForWizard(r.Context(), ts, req.AgentID, req.TokenName)
+	token, id, createdAt, err := mintMCPTokenForWizard(r.Context(), ts, operatorID, req.TokenName)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "mint token: "+err.Error())
 		return
@@ -1134,7 +1139,7 @@ func (h *DashboardHandler) handleWizardMintToken(w http.ResponseWriter, r *http.
 
 	writeJSONResp(w, http.StatusCreated, map[string]any{
 		"id":         id,
-		"agent_id":   req.AgentID,
+		"agent_id":   operatorID,
 		"name":       req.TokenName,
 		"token":      token,
 		"created_at": createdAt.Format(time.RFC3339),

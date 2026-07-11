@@ -15,7 +15,7 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 - **First-run onboarding wizard.** Fresh nodes get a three-step welcome (orientation, semantic memory, connect an AI tool). Closing it marks onboarding done; it is re-runnable any time from **Settings > Maintenance > Run setup**.
 - **Guided semantic-memory setup.** One flow turns on the bundled embedder (Ollama + `nomic-embed-text`): detect Ollama, pull the model, re-embed existing memories as a durable background job with a progress banner that survives reloads, then switch recall over. Includes recovery-key backup and honest handling of undecryptable memories (surfaced, not silently dropped).
 - **One-click managed reranker.** After a single consent click, SAGE downloads a pinned, sha256-checksum-verified llama.cpp engine build and the `bge-reranker-v2-m3` cross-encoder model, then runs and manages the sidecar process itself (loopback only, nothing leaves the machine). Recall results-per-query (k) is tunable 3-20. Bring-your-own TEI-compatible servers are still supported.
-- **Connect-an-AI-tool flows.** A single dashboard flow branches three ways: same-machine one-click config writing (Claude Code, Codex, Cursor, Windsurf, Claude Desktop), ChatGPT through OpenAI Secure MCP Tunnel, remote MCP over LAN/VPN or an operator-managed HTTPS endpoint, and LAN node-join (another computer becomes a peer node sharing this node's memory).
+- **Connect-an-AI-tool flows.** A single dashboard flow branches three ways: same-machine one-click config writing (ChatGPT desktop Codex mode, Claude Code, Codex CLI, Cursor, Windsurf, Claude Desktop), ChatGPT Work through an OpenAI plugin + Secure MCP Tunnel, remote MCP over LAN/VPN or an operator-managed HTTPS endpoint, and LAN node-join (another computer becomes a peer node sharing this node's memory).
 
 ### Federation
 
@@ -89,6 +89,14 @@ v11.6 does **not** label a two-node synchronized pair Byzantine fault tolerant. 
 ## v11.7 - planned
 
 Forward-looking. Nothing here is committed to a date; treat it as speculative until it ships.
+
+### CEREBRUM administrator access override
+
+Make the personal-node authority model match the product: the genesis admin can explicitly give a locally installed agent read or read+write access to a domain even when another agent is recorded as its owner. CEREBRUM shows the original owner and target before confirmation, binds that owner into the consensus transaction, records the override as an ordinary on-chain grant/revoke, and leaves ownership and immutable memory authorship unchanged. Federated/remote targets remain consent-gated. Consensus support is isolated behind the dormant app-v18 activation boundary so existing chains replay byte-identically.
+
+### ChatGPT desktop, Work, and Codex connection refresh
+
+Follow OpenAI's current product surfaces instead of treating every ChatGPT connection as the same runtime. The new ChatGPT desktop app combines Chat, ChatGPT Work, and Codex. Codex mode shares the user-level `~/.codex/config.toml` MCP configuration with Codex CLI and the IDE extension, so CEREBRUM provides a one-click app-wide local connection for that mode. ChatGPT Work on the web or in the desktop app uses the hosted plugin + Secure MCP Tunnel path because ChatGPT cannot invoke a local stdio MCP server directly. Regular Chat remains supported and starts with the **Quick chat** button. SAGE uses OpenAI's name **Work** rather than the unrelated **Cowork** label.
 
 ### Sharing & Sync control plane
 

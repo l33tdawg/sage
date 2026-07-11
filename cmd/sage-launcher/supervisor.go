@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -131,7 +132,7 @@ func (c *SupervisorConfig) haltPath() string {
 // pidFile is where we record the live child's PID so out-of-band
 // callers (GUI, CLI) can find it. Cleared on healthy exit.
 func (c *SupervisorConfig) pidFile() string {
-	return filepath.Join(c.SageHome, "sage-gui.pid")
+	return filepath.Join(c.SageHome, "sage.pid")
 }
 
 // Run is the supervisor's main loop. It returns the exit code the
@@ -258,7 +259,11 @@ func (c *SupervisorConfig) runOnce(ctx context.Context) (exitCode int, haltDetec
 	pidPath := c.pidFile()
 	_ = os.MkdirAll(filepath.Dir(pidPath), 0o755)
 	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
-	defer func() { _ = os.Remove(pidPath) }()
+	defer func() {
+		if data, readErr := os.ReadFile(pidPath); readErr == nil && strings.TrimSpace(string(data)) == strconv.Itoa(cmd.Process.Pid) {
+			_ = os.Remove(pidPath)
+		}
+	}()
 
 	// Forward SIGINT/SIGTERM to the child. We do this in a
 	// goroutine bound to the child's lifetime via stopCh.

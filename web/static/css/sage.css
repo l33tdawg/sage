@@ -3788,6 +3788,8 @@ input[type="range"]::-moz-range-thumb {
     justify-content: space-between;
     margin-bottom: 20px;
     flex-shrink: 0;
+	gap: 12px;
+	flex-wrap: wrap;
 }
 .tasks-title {
     font-size: 18px;
@@ -3798,6 +3800,7 @@ input[type="range"]::-moz-range-thumb {
     display: flex;
     gap: 8px;
     align-items: center;
+	flex-wrap: wrap;
 }
 .kanban-board {
     display: grid;
@@ -3811,6 +3814,11 @@ input[type="range"]::-moz-range-thumb {
 }
 @media (max-width: 600px) {
     .kanban-board { grid-template-columns: 1fr; }
+	.tasks-page { padding: 16px; }
+	.tasks-header { align-items: stretch; }
+	.tasks-header > div:first-child,
+	.tasks-filters { width: 100%; }
+	.tasks-filters .filter-select { flex: 1 1 140px; min-width: 0; }
 }
 .kanban-column {
     background: var(--bg-surface);
@@ -3948,6 +3956,16 @@ input[type="range"]::-moz-range-thumb {
     margin-top: 8px;
     padding-top: 8px;
     border-top: 1px solid var(--border);
+}
+.kanban-status-select {
+	flex: 1;
+	min-width: 0;
+	font-size: 11px;
+	padding: 4px 6px;
+	background: var(--bg-deep);
+	color: var(--text);
+	border: 1px solid var(--border);
+	border-radius: 4px;
 }
 .kanban-action {
     background: var(--bg-deep);

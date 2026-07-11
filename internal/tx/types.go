@@ -180,20 +180,24 @@ type AccessRequest struct {
 
 // AccessGrant grants an agent access to a domain.
 type AccessGrant struct {
-	GranterID string
-	GranteeID string
-	Domain    string
-	Level     uint8  // 1=read, 2=read+write
-	ExpiresAt int64  // Unix timestamp, 0=permanent
-	RequestID string // Links to original AccessRequest (optional)
+	GranterID           string
+	GranteeID           string
+	Domain              string
+	Level               uint8  // 1=read, 2=read+write
+	ExpiresAt           int64  // Unix timestamp, 0=permanent
+	RequestID           string // Links to original AccessRequest (optional)
+	ExpectedOwnerID     string // app-v18 admin override CAS binding (optional)
+	ExpectedOwnedDomain string // effective leaf/ancestor ownership record (optional)
 }
 
 // AccessRevoke revokes an agent's access to a domain.
 type AccessRevoke struct {
-	RevokerID string
-	GranteeID string
-	Domain    string
-	Reason    string
+	RevokerID           string
+	GranteeID           string
+	Domain              string
+	Reason              string
+	ExpectedOwnerID     string // app-v18 admin override CAS binding (optional)
+	ExpectedOwnedDomain string // effective leaf/ancestor ownership record (optional)
 }
 
 // AccessQuery queries memories in a federated domain with semantic search.

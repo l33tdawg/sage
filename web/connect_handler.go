@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,8 +34,9 @@ var connectFolderScoped = map[string]bool{
 // connectAppScoped lists the providers whose config is machine-wide — `path`
 // is ignored.
 var connectAppScoped = map[string]bool{
-	"windsurf":       true,
-	"claude-desktop": true,
+	"chatgpt-desktop": true,
+	"windsurf":        true,
+	"claude-desktop":  true,
 }
 
 // handleConnectProvider implements the same-machine one-click connect:
@@ -58,6 +60,15 @@ func (h *DashboardHandler) handleConnectProvider(w http.ResponseWriter, r *http.
 	}
 	if h.ConnectFunc == nil {
 		writeError(w, http.StatusServiceUnavailable, "connect is not configured on this node")
+		return
+	}
+	// Config installation writes files on the operator's machine. Keep that
+	// capability at the local human CEREBRUM boundary: signed agents, remote
+	// callers, and origin-less CLI requests must never rewrite MCP configs.
+	if verifiedDashboardAgentID(r.Context()) != "" ||
+		(r.Header.Get("Sec-Fetch-Site") == "" && strings.TrimSpace(r.Header.Get("Origin")) == "") ||
+		!isLocalRequest(r) || !isLoopbackRemote(r.RemoteAddr) {
+		writeError(w, http.StatusForbidden, "AI tool setup must be confirmed in local CEREBRUM")
 		return
 	}
 
@@ -128,6 +139,16 @@ func (h *DashboardHandler) handleConnectProvider(w http.ResponseWriter, r *http.
 		"files":    files,
 		"provider": provider,
 	})
+}
+
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	host = strings.Trim(host, "[]")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func cleanConnectDirectory(path string) (string, error) {

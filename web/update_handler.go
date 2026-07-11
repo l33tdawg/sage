@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -114,16 +113,28 @@ func (h *DashboardHandler) handleCheckUpdate(w http.ResponseWriter, r *http.Requ
 	}
 
 	result := map[string]any{
-		"current_version":  current,
-		"latest_version":   latest,
-		"update_available": updateAvailable,
-		"release_name":     release.Name,
-		"release_notes":    release.Body,
-		"release_url":      release.HTMLURL,
-		"download_url":     downloadURL,
-		"download_size":    assetSize,
-		"checksum":         expectedChecksum,
-		"platform":         runtime.GOOS + "/" + runtime.GOARCH,
+		"current_version":          current,
+		"latest_version":           latest,
+		"update_available":         updateAvailable,
+		"release_name":             release.Name,
+		"release_notes":            release.Body,
+		"release_url":              release.HTMLURL,
+		"download_url":             downloadURL,
+		"download_size":            assetSize,
+		"checksum":                 expectedChecksum,
+		"platform":                 runtime.GOOS + "/" + runtime.GOARCH,
+		"in_app_update_supported":  runtime.GOOS == "linux",
+		"in_app_restart_supported": runtime.GOOS != "windows",
+		"update_instructions": func() string {
+			switch runtime.GOOS {
+			case "darwin":
+				return "Download the signed DMG, fully quit SAGE, drag-replace the app, then open it again."
+			case "windows":
+				return "Download the signed installer, fully quit SAGE, install it, then open SAGE again."
+			default:
+				return "SAGE can install this verified update in the app."
+			}
+		}(),
 	}
 
 	// Detect an out-of-band update (e.g. drag-and-drop in Finder): the serve
@@ -191,12 +202,28 @@ func restartRequired(running, disk string) bool {
 // handleApplyUpdate kicks off an async download-and-replace of the sage-gui binary.
 // Progress is streamed to the dashboard via SSE events so the user sees each step.
 func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Request) {
+	if !h.isCEREBRUMOperatorRequest(r) {
+		writeError(w, http.StatusForbidden, "updates can only be installed from an authenticated CEREBRUM session")
+		return
+	}
+	if runtime.GOOS != "linux" {
+		writeError(w, http.StatusBadRequest, "This platform uses the signed release installer. Fully quit SAGE, install the release, then reopen it.")
+		return
+	}
 	var body struct {
 		DownloadURL string `json:"download_url"`
 		Checksum    string `json:"checksum"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.DownloadURL == "" {
 		writeError(w, http.StatusBadRequest, "download_url required")
+		return
+	}
+	if len(body.Checksum) != sha256.Size*2 {
+		writeError(w, http.StatusBadRequest, "this update has no trusted SHA-256 checksum; use the release installer instead")
+		return
+	}
+	if _, err := hex.DecodeString(body.Checksum); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid SHA-256 checksum")
 		return
 	}
 
@@ -223,6 +250,19 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "cannot resolve binary path: "+err.Error())
 		return
 	}
+	if pending := PendingUpdateVersion(execPath); pending != "" {
+		writeError(w, http.StatusConflict, "update "+pending+" is already installed and waiting for a restart; restart SAGE before installing another update")
+		return
+	}
+	if !h.UpdateInProgress.CompareAndSwap(false, true) {
+		writeError(w, http.StatusConflict, "an update is already in progress")
+		return
+	}
+	// Replace any terminal state from a previous attempt before replying. The
+	// durable status poll can run immediately after this response; leaving the
+	// old "complete" state visible for even one tick made the UI falsely claim
+	// the newly queued update was already installed.
+	h.sendUpdateProgress("queued", "active", "Update queued — preparing the verified download...")
 
 	// Return immediately — the heavy work happens in a goroutine with SSE progress
 	writeJSONResp(w, http.StatusOK, map[string]any{
@@ -232,11 +272,17 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 	})
 
 	// Run download + install async, broadcasting progress via SSE
-	go h.performUpdate(body.DownloadURL, body.Checksum, execPath)
+	h.runBackground(func(ctx context.Context) {
+		defer h.UpdateInProgress.Store(false)
+		h.performUpdate(ctx, body.DownloadURL, body.Checksum, execPath)
+	})
 }
 
 // sendUpdateProgress broadcasts an SSE update event with step/status info.
 func (h *DashboardHandler) sendUpdateProgress(step, status, message string) {
+	h.updateStateMu.Lock()
+	h.updateState = map[string]string{"step": step, "status": status, "message": message}
+	h.updateStateMu.Unlock()
 	if h.SSE == nil {
 		return
 	}
@@ -250,9 +296,22 @@ func (h *DashboardHandler) sendUpdateProgress(step, status, message string) {
 	})
 }
 
+func (h *DashboardHandler) handleGetUpdateStatus(w http.ResponseWriter, _ *http.Request) {
+	h.updateStateMu.RLock()
+	state := make(map[string]string, len(h.updateState))
+	for key, value := range h.updateState {
+		state[key] = value
+	}
+	h.updateStateMu.RUnlock()
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"in_progress": h.UpdateInProgress.Load(),
+		"state":       state,
+	})
+}
+
 // performUpdate does the actual download, checksum, extraction, and binary replacement.
 // It broadcasts progress via SSE at each step.
-func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string) {
+func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, checksum, execPath string) {
 	// Step 1: Download
 	h.sendUpdateProgress("download", "active", "Downloading update from GitHub...")
 
@@ -285,7 +344,7 @@ func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string)
 			return nil
 		},
 	}
-	dlReq, err := http.NewRequestWithContext(context.Background(), "GET", downloadURL, nil)
+	dlReq, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
 		h.sendUpdateProgress("download", "error", "Invalid download URL")
 		return
@@ -322,15 +381,13 @@ func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string)
 
 	// Step 2: Verify checksum
 	actualChecksum := hex.EncodeToString(hasher.Sum(nil))
-	if checksum != "" {
-		h.sendUpdateProgress("verify", "active", "Verifying SHA-256 checksum...")
-		if !strings.EqualFold(actualChecksum, checksum) {
-			_ = archiveTmp.Close()
-			h.sendUpdateProgress("verify", "error", "Checksum mismatch — archive may be corrupted")
-			return
-		}
-		h.sendUpdateProgress("verify", "done", "Checksum verified")
+	h.sendUpdateProgress("verify", "active", "Verifying SHA-256 checksum...")
+	if !strings.EqualFold(actualChecksum, checksum) {
+		_ = archiveTmp.Close()
+		h.sendUpdateProgress("verify", "error", "Checksum mismatch — archive may be corrupted")
+		return
 	}
+	h.sendUpdateProgress("verify", "done", "Checksum verified")
 
 	// Step 3: Extract
 	h.sendUpdateProgress("extract", "active", "Extracting sage-gui binary...")
@@ -349,6 +406,11 @@ func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string)
 	defer os.Remove(newBinary)
 
 	h.sendUpdateProgress("extract", "done", "Binary extracted")
+	stagedVersion := diskBinaryVersion(context.Background(), newBinary)
+	if stagedVersion == "" || stagedVersion == "dev" {
+		h.sendUpdateProgress("extract", "error", "The verified archive did not contain a runnable release build. Use the signed release installer instead.")
+		return
+	}
 
 	// Step 3.5: Protect vault key — back it up before touching any files.
 	// The vault key is irreplaceable: if lost, all encrypted memories are
@@ -365,60 +427,214 @@ func (h *DashboardHandler) performUpdate(downloadURL, checksum, execPath string)
 	// Step 4: Install
 	h.sendUpdateProgress("install", "active", "Installing new binary...")
 
-	backupPath := execPath + ".old"
-	os.Remove(backupPath)
-
-	if err := os.Rename(execPath, backupPath); err != nil {
-		h.sendUpdateProgress("install", "error", installErrorMessage("Failed to backup current binary", err, downloadURL))
-		return
-	}
-
-	if err := os.Rename(newBinary, execPath); err != nil {
-		_ = os.Rename(backupPath, execPath) // rollback
+	if err := installPendingBinary(execPath, newBinary, stagedVersion); err != nil {
 		h.sendUpdateProgress("install", "error", installErrorMessage("Failed to install", err, downloadURL))
 		return
 	}
-
-	if info, err := os.Stat(backupPath); err == nil {
-		_ = os.Chmod(execPath, info.Mode())
-	} else {
-		_ = os.Chmod(execPath, 0755)
-	}
-	os.Remove(backupPath)
-
-	// Also update the .app bundle on macOS
-	updateAppBundle(execPath)
 
 	h.sendUpdateProgress("install", "done", "Update installed — restart SAGE to apply")
 	h.sendUpdateProgress("complete", "done", "ready_to_restart")
 }
 
-// handleRestart gracefully restarts sage-gui by re-exec'ing itself.
-func (h *DashboardHandler) handleRestart(w http.ResponseWriter, r *http.Request) {
-	execPath, err := os.Executable()
+const pendingUpdateSuffix = ".update-pending"
+
+// installPendingBinary stages the verified executable in the destination
+// directory, durably snapshots the current executable, then atomically replaces
+// it. The backup remains until the replacement process proves its own boot ID
+// healthy; early exec/startup failure can therefore roll back automatically.
+func installPendingBinary(execPath, extractedPath, version string) error {
+	if pending := PendingUpdateVersion(execPath); pending != "" {
+		return fmt.Errorf("update %s is still pending boot confirmation", pending)
+	}
+	dir := filepath.Dir(execPath)
+	mode := os.FileMode(0755)
+	if info, err := os.Stat(execPath); err == nil {
+		mode = info.Mode()
+	}
+	staged, err := os.CreateTemp(dir, ".sage-gui-staged-*")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot determine binary path")
+		return fmt.Errorf("stage beside installed binary: %w", err)
+	}
+	stagedPath := staged.Name()
+	defer func() { _ = os.Remove(stagedPath) }()
+	src, err := os.Open(extractedPath) //nolint:gosec // verified updater temp path
+	if err != nil {
+		_ = staged.Close()
+		return fmt.Errorf("open verified binary: %w", err)
+	}
+	_, copyErr := io.Copy(staged, io.LimitReader(src, 500<<20))
+	closeSrcErr := src.Close()
+	if copyErr == nil {
+		copyErr = closeSrcErr
+	}
+	if copyErr == nil {
+		copyErr = staged.Chmod(mode)
+	}
+	if copyErr == nil {
+		copyErr = staged.Sync()
+	}
+	closeStageErr := staged.Close()
+	if copyErr == nil {
+		copyErr = closeStageErr
+	}
+	if copyErr != nil {
+		return fmt.Errorf("stage verified binary: %w", copyErr)
+	}
+
+	backupPath := execPath + ".old"
+	markerPath := execPath + pendingUpdateSuffix
+	_ = os.Remove(backupPath)
+	if err = copyFileDurable(execPath, backupPath, mode); err != nil {
+		return fmt.Errorf("preserve rollback binary: %w", err)
+	}
+	markerData := []byte(strings.TrimSpace(version) + "\n")
+	if err = writeFileAtomicDurable(markerPath, markerData, 0600); err != nil {
+		_ = os.Remove(backupPath)
+		return fmt.Errorf("record pending update: %w", err)
+	}
+	if err = os.Rename(stagedPath, execPath); err != nil {
+		_ = os.Remove(markerPath)
+		_ = os.Remove(backupPath)
+		return fmt.Errorf("atomically replace installed binary: %w", err)
+	}
+	return syncDirectory(dir)
+}
+
+func copyFileDurable(srcPath, dstPath string, mode os.FileMode) error {
+	src, err := os.Open(srcPath) //nolint:gosec // trusted installed executable
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(dstPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) //nolint:gosec // sibling rollback path
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(dst, io.LimitReader(src, 500<<20))
+	if err == nil {
+		err = dst.Sync()
+	}
+	closeErr := dst.Close()
+	if err == nil {
+		err = closeErr
+	}
+	return err
+}
+
+func writeFileAtomicDurable(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".sage-update-marker-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err = tmp.Chmod(mode); err == nil {
+		_, err = tmp.Write(data)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmpPath, path)
+	}
+	if err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(dir string) error {
+	f, err := os.Open(dir) //nolint:gosec // trusted executable directory
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+// PendingUpdateVersion reports the release awaiting boot confirmation.
+func PendingUpdateVersion(execPath string) string {
+	data, err := os.ReadFile(execPath + pendingUpdateSuffix) //nolint:gosec // trusted executable sibling
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// ConfirmPendingUpdate removes rollback state only after the replacement node
+// has served a new, matching boot identity and version.
+func ConfirmPendingUpdate(execPath string) error {
+	if PendingUpdateVersion(execPath) == "" {
+		return nil
+	}
+	// Make the installed executable + rollback copy durable before committing.
+	// Keep .old as a one-generation recovery artifact; the next update replaces
+	// it only after confirming no update is currently pending.
+	if err := syncDirectory(filepath.Dir(execPath)); err != nil {
+		return err
+	}
+	if err := os.Remove(execPath + pendingUpdateSuffix); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// A post-unlink fsync failure is not a boot failure: the replacement already
+	// proved healthy, and a crash may at worst leave the marker to reconfirm.
+	_ = syncDirectory(filepath.Dir(execPath))
+	return nil
+}
+
+// RollbackPendingUpdate atomically restores the previous executable after an
+// exec or early-boot failure. It returns false when no update is pending.
+func RollbackPendingUpdate(execPath string) (bool, error) {
+	if PendingUpdateVersion(execPath) == "" {
+		return false, nil
+	}
+	backupPath := execPath + ".old"
+	if _, err := os.Stat(backupPath); err != nil {
+		return false, fmt.Errorf("pending update has no rollback binary: %w", err)
+	}
+	if err := os.Rename(backupPath, execPath); err != nil {
+		return false, err
+	}
+	_ = os.Remove(execPath + pendingUpdateSuffix)
+	if err := syncDirectory(filepath.Dir(execPath)); err != nil {
+		// The atomic rename already restored the old executable. Tell the caller
+		// to relaunch it even if the durability barrier could not be confirmed.
+		return true, fmt.Errorf("rollback binary restored but directory sync failed: %w", err)
+	}
+	return true, nil
+}
+
+// handleRestart asks the main serve lifecycle to drain and restart. The handler
+// never execs from an HTTP goroutine: that skipped defers and could leave
+// consensus, stores, listeners, and sidecars in an indeterminate state.
+func (h *DashboardHandler) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if !h.isCEREBRUMOperatorRequest(r) {
+		writeError(w, http.StatusForbidden, "restart can only be requested from an authenticated CEREBRUM session")
 		return
 	}
-
-	writeJSONResp(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"message": "Restarting SAGE...",
-	})
-
-	// Flush the response
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
+	if h.UpdateInProgress.Load() {
+		writeError(w, http.StatusConflict, "wait for the update installation to finish before restarting")
+		return
 	}
-
-	// Give the response time to reach the client
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		// Re-exec the binary with the same args (no-op + logged on Windows).
-		if err := restartSelf(execPath); err != nil {
-			log.Printf("restart: re-exec failed: %v", err)
-		}
-	}()
+	if !restartInProcessSupported() || h.RequestRestart == nil {
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"ok": false, "restart_required": true,
+			"message": "The update is installed. Fully quit SAGE and open it again to finish.",
+		})
+		return
+	}
+	if err := h.RequestRestart(); err != nil {
+		writeError(w, http.StatusServiceUnavailable, "SAGE could not begin a clean restart: "+err.Error())
+		return
+	}
+	writeJSONResp(w, http.StatusAccepted, map[string]any{
+		"ok": true, "status": "draining", "boot_id": h.BootID,
+		"message": "SAGE is closing cleanly, then restarting…",
+	})
 }
 
 // isPermissionDenied reports whether err is a permission-style failure
@@ -587,31 +803,4 @@ func formatBytes(b int64) string {
 		return fmt.Sprintf("%.0f KB", float64(b)/1024)
 	}
 	return fmt.Sprintf("%.1f MB", float64(b)/1048576)
-}
-
-// updateAppBundle attempts to update the sage-gui binary inside the macOS .app bundle
-// after an in-app update. This prevents the launcher from reverting to the old version
-// on next relaunch.
-func updateAppBundle(newBinaryPath string) {
-	if runtime.GOOS != "darwin" {
-		return
-	}
-	// Check well-known .app bundle locations
-	appBundlePaths := []string{
-		"/Applications/SAGE.app/Contents/MacOS/sage-gui",
-		filepath.Join(os.Getenv("HOME"), "Applications/SAGE.app/Contents/MacOS/sage-gui"),
-	}
-	for _, appBin := range appBundlePaths {
-		if _, err := os.Stat(appBin); err != nil { //nolint:gosec // appBin is from hardcoded paths
-			continue
-		}
-		// Copy the new binary into the .app bundle
-		src, err := os.ReadFile(newBinaryPath) // #nosec G304 -- trusted path from update
-		if err != nil {
-			continue
-		}
-		if err := os.WriteFile(appBin, src, 0755); err != nil { //nolint:gosec // G306: executable binary needs 0755
-			continue
-		}
-	}
 }
