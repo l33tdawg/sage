@@ -5246,6 +5246,46 @@ function FederationSettingRow() {
     </div>`;
 }
 
+// Keep the live block countdown's frequent repaint scoped to this tiny card.
+// Re-rendering the entire Settings page every 100ms made an open/background
+// Settings tab consume substantial CPU even when the user was on another tab.
+function ChainCountdown({ blockTime }) {
+    const [, setFrame] = useState(0);
+    useEffect(() => {
+        if (!blockTime) return undefined;
+        let interval = null;
+        const sync = () => {
+            if (interval) { clearInterval(interval); interval = null; }
+            if (!document.hidden) interval = setInterval(() => setFrame(frame => frame + 1), 250);
+        };
+        sync();
+        document.addEventListener('visibilitychange', sync);
+        return () => {
+            if (interval) clearInterval(interval);
+            document.removeEventListener('visibilitychange', sync);
+        };
+    }, [blockTime]);
+
+    const elapsed = blockTime ? Date.now() - new Date(blockTime).getTime() : null;
+    if (elapsed === null || elapsed > 30000) {
+        return html`
+            <div class="chain-stat-card" title="No new block for over 30s. Since v10.5.0 an idle chain stops minting empty blocks — height advances when new transactions arrive.">
+                <div class="chain-stat-value countdown-value" style="color:var(--text-dim)">Idle</div>
+                <div class="chain-stat-label">Next Block</div>
+                <div style="font-size:10px;color:var(--text-muted);margin-top:4px">waiting for activity</div>
+            </div>
+        `;
+    }
+    const remaining = 5000 - (elapsed % 5000);
+    return html`
+        <div class="chain-stat-card" title="Countdown to the next block (~5s intervals while there is activity).">
+            <div class="chain-stat-value countdown-value">${(remaining / 1000).toFixed(1)}s</div>
+            <div class="chain-stat-label">Next Block</div>
+            <div class="countdown-bar"><div class="countdown-fill" style="width: ${Math.min(100, (remaining / 5000) * 100)}%"></div></div>
+        </div>
+    `;
+}
+
 function SettingsPage({ onRunSetup, requestedTab }) {
     const [settingsTab, setSettingsTab] = useState('overview');
     const [stats, setStats] = useState(null);
@@ -5294,13 +5334,6 @@ function SettingsPage({ onRunSetup, requestedTab }) {
         fetchMcpConfig().then(c => setMcpConfig(c)).catch(() => setMcpConfigErr(true));
     }, []);
 
-    // Countdown ticker — force re-render every 100ms for smooth display
-    const [, setTick] = useState(0);
-    useEffect(() => {
-        const iv = setInterval(() => setTick(t => t + 1), 100);
-        return () => clearInterval(iv);
-    }, []);
-
     const ver = health?.version || 'dev';
     const encrypted = health?.encrypted || false;
     const chain = health?.chain || null;
@@ -5333,13 +5366,9 @@ function SettingsPage({ onRunSetup, requestedTab }) {
     // the last block is normal, not a stall: past CHAIN_IDLE_AFTER_MS we render
     // an "idle — waiting for activity" state instead of a countdown that loops
     // forever and reads like a stalled node.
-    const BLOCK_INTERVAL_MS = 5000;
     const CHAIN_IDLE_AFTER_MS = 30000;
     const blockElapsed = chain?.block_time ? Date.now() - new Date(chain.block_time).getTime() : null;
     const chainIdle = blockElapsed !== null && blockElapsed > CHAIN_IDLE_AFTER_MS;
-    const liveCountdown = blockElapsed !== null && !chainIdle ? BLOCK_INTERVAL_MS - (blockElapsed % BLOCK_INTERVAL_MS) : null;
-    const countdownDisplay = liveCountdown !== null ? (liveCountdown / 1000).toFixed(1) + 's' : '--';
-    const countdownPct = liveCountdown !== null ? Math.min(100, (liveCountdown / BLOCK_INTERVAL_MS) * 100) : 0;
 
     // (statusDot is now a module-scope helper — see near the top of this file.)
 
@@ -5410,19 +5439,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                                     <div class="chain-stat-value block-height">${Number(chain.block_height || 0).toLocaleString()}</div>
                                     <div class="chain-stat-label">Block Height</div>
                                 </div>
-                                ${chainIdle ? html`
-                                    <div class="chain-stat-card" title="No new block for over 30s. Since v10.5.0 an idle chain stops minting empty blocks — height advances when new transactions arrive.">
-                                        <div class="chain-stat-value countdown-value" style="color:var(--text-dim)">Idle</div>
-                                        <div class="chain-stat-label">Next Block</div>
-                                        <div style="font-size:10px;color:var(--text-muted);margin-top:4px">waiting for activity</div>
-                                    </div>
-                                ` : html`
-                                    <div class="chain-stat-card" title="Countdown to the next block (~5s intervals while there is activity).">
-                                        <div class="chain-stat-value countdown-value">${countdownDisplay}</div>
-                                        <div class="chain-stat-label">Next Block</div>
-                                        <div class="countdown-bar"><div class="countdown-fill" style="width: ${countdownPct}%"></div></div>
-                                    </div>
-                                `}
+                                <${ChainCountdown} blockTime=${chain.block_time} />
                                 <div class="chain-stat-card" title="Connected SAGE nodes in quorum mode. 0 = solo.">
                                     <div class="chain-stat-value">${chain.peers || '0'}</div>
                                     <div class="chain-stat-label">Peers</div>

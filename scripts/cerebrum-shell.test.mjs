@@ -19,3 +19,9 @@ test('task board scrolls as one page instead of trapping wheel input in columns'
     assert.doesNotMatch(tasksPage, /overflow:\s*hidden/);
     assert.match(cards, /overflow-y:\s*visible/);
 });
+
+test('settings does not force a full-page render every 100ms', () => {
+    assert.doesNotMatch(appSource, /setInterval\(\(\) => setTick\([^\n]+, 100\)/);
+    assert.match(appSource, /function ChainCountdown\(\{ blockTime \}\)/);
+    assert.match(appSource, /document\.hidden/);
+});
