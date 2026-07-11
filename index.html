@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.7.0</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.7.2</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1186,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.7.0</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.7 is an administration, connection, and lifecycle-hardening release. Existing chains replay byte-identically; its consensus support remains behind the dormant app-v18 activation gate.</p>
+        <h3>What's new in <span id="whats-new-version">v11.7.2</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.7.2 restores secure background updates on macOS and fixes CEREBRUM navigation, scrolling, and Settings CPU usage. Existing chains replay byte-identically.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Updates find you</h4><p>CEREBRUM checks for new releases automatically and shows a dismissible banner across the top of the dashboard with release notes and a direct route to update or restart options.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Safer restarts and updates</h4><p>A single-instance lock prevents duplicate nodes. Coordinated restarts drain active sessions, while checksum verification, rollback, and proof-of-boot protect self-updates.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Reliable AI-tool connections</h4><p>v11.7 fixes intermittent MCP disconnects and misleading permission errors, adds one-click ChatGPT desktop Codex setup, and hardens the HTTP MCP transport.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Governed domain administration</h4><p>The genesis admin can grant a locally installed agent read or read-and-write access to another agent's domain, with owner-aware confirmation and ordinary on-chain grant and revoke records.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>One-click background updates</h4><p>The dashboard banner now downloads and installs the signed macOS release directly—no manual DMG drag-and-replace flow and no second click in Settings.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Signed-app safety</h4><p>SAGE verifies the published SHA-256, Developer ID team, bundle identity, and Gatekeeper result before atomically swapping the whole app, with proof-of-boot rollback.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>CEREBRUM fixes</h4><p>Access Controls is back in the sidebar, and the Task Board uses one natural page scroller so its bottom content and footer remain reachable.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Cooler Settings page</h4><p>The live block countdown no longer re-renders the entire Settings screen ten times per second, eliminating the background CPU hot loop.</p></div></div>
         </div>
       </div>
 
@@ -1466,7 +1466,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.7.0"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.7.2"</span></div>
         </div>
       </div>
 
