@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.6.1 is the current release.** This document records the v11.6 slate as shipped and looks forward to v11.7, v11.8, and the v12 completion milestone. Everything past v11.6 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.7.0 is the current release.** This document records the v11.7 slate as shipped and looks forward to v11.8, v11.9, and the v12 completion milestone. Everything past v11.7 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -86,9 +86,7 @@ v11.6 does **not** label a two-node synchronized pair Byzantine fault tolerant. 
 
 ---
 
-## v11.7 - planned
-
-Forward-looking. Nothing here is committed to a date; treat it as speculative until it ships.
+## v11.7 - shipped (admin override + connection & lifecycle hardening)
 
 ### CEREBRUM administrator access override
 
@@ -97,6 +95,10 @@ Make the personal-node authority model match the product: the genesis admin can 
 ### ChatGPT desktop, Work, and Codex connection refresh
 
 Follow OpenAI's current product surfaces instead of treating every ChatGPT connection as the same runtime. The new ChatGPT desktop app combines Chat, ChatGPT Work, and Codex. Codex mode shares the user-level `~/.codex/config.toml` MCP configuration with Codex CLI and the IDE extension, so CEREBRUM provides a one-click app-wide local connection for that mode. ChatGPT Work on the web or in the desktop app uses the hosted plugin + Secure MCP Tunnel path because ChatGPT cannot invoke a local stdio MCP server directly. Regular Chat remains supported and starts with the **Quick chat** button. SAGE uses OpenAI's name **Work** rather than the unrelated **Cowork** label.
+
+### Coordinated restart, update, and MCP hardening
+
+One instance per node (instance lock with owned pidfile), coordinated restart that drains MCP sessions and dashboard event streams before exec, checksum-verified updates with automatic rollback and proof-of-boot confirmation, and a hardened HTTP MCP transport: operator-only bearer principal resolution, a bounded nonce replay cache, an exact-match origin allowlist, and per-route write deadlines. Fixes the v11.6.1 reports of intermittent lost MCP connections and cannot-save-to-domain errors (boot-time key cache, transport errors mislabeled as permission denials, keep-alive reuse race).
 
 ---
 

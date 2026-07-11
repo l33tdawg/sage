@@ -51,13 +51,22 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.6.1
+## What's New in v11.7.0
+
+**Administration, connection, and lifecycle release.** The genesis admin can now give a locally installed agent read or read+write access to a domain another agent owns, directly from CEREBRUM: the original owner is shown before confirmation, bound into the consensus transaction, and the override is recorded as an ordinary on-chain grant/revoke. Consensus support ships behind the dormant `app-v18` gate; existing chains replay byte-identically. Connecting AI tools now follows OpenAI's current product surfaces: ChatGPT desktop's Codex mode gets a one-click app-wide local connection (shared with Codex CLI and the IDE extension), while ChatGPT Work uses the hosted connector path. Restarts and updates are coordinated end-to-end: a single-instance lock, clean draining of MCP sessions and dashboard streams, checksum-verified updates with automatic rollback and proof-of-boot verification. This release also fixes the v11.6.1 reports of intermittent lost MCP connections and "cannot save to domain" errors (a boot-time key cache, transport blips mislabeled as permission denials, and a keep-alive race), hardens the HTTP MCP transport (operator-only bearer principal, nonce replay cache, exact origin allowlist), and rewrites the in-app CEREBRUM guide in plain language for non-technical users.
+
+SDK 11.7.0.
+
+## Older releases
+
+<details>
+<summary>v11.6.1 - security + task-handoff maintenance</summary>
 
 **Security and task-handoff maintenance release.** v11.6.1 upgrades the transitive federation dependency quic-go to 0.59.1, incorporating the upstream fix for CVE-2026-40898. Assigned board tasks now reliably appear across provider boundaries, create dedicated one-way agent inbox notices, and are checked alongside backlog at agent boot. CEREBRUM also replaces browser-native confirmation prompts with accessible, themed SAGE dialogs. It changes no SAGE consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
 
 SDK 11.6.1.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.6.0 - internet federation + controlled memory sync</summary>
