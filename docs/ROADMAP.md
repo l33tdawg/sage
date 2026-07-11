@@ -76,15 +76,49 @@ Make the access model legible (who can read, write, and modify what, and why) an
 
 Replace the current same-LAN / bring-your-own-tunnel reachability story with **libp2p-based NAT traversal**, backed by an **author-operated connectivity service** (a relay / rendezvous the project runs) so two sovereign nodes behind home routers can find and reach each other without port-forwarding or a third-party cloud. Sovereignty is preserved: the service brokers connectivity only, it never sees or stores memory.
 
+### Domain-scoped memory sync foundation
+
+Let an operator opt specific domains into synchronization across their own machines or an established federation peer, on LAN or over the internet. A node might sync `eurorack` or `dmt-laser-experiments` while its `personal`, `family`, and every other unselected domain remain local and are never transmitted.
+
+The choice appears after the two-node federation signing ceremony completes and is controlled by the host. It is **off by default**. The host may enable all shareable domains, select any number of existing domains, and/or create new shared domains. That selected set is the bidirectional synchronization allowlist: guest memories whose tags are not selected never sync to the host, and host memories outside the set never sync to the guest. v11.6 delivers authenticated initial backfill, live updates, reconnect catch-up, deterministic full-content and serving-index replication for selected domains, basic health/progress visibility, and tests proving domain isolation. Federation connectivity and memory synchronization remain visibly separate choices.
+
+v11.6 does **not** label a two-node synchronized pair Byzantine fault tolerant. If one side is unavailable, writes may be queued or remain local according to an explicit degraded-mode policy; the release must not imply that one surviving member constitutes quorum.
+
 ---
 
 ## v11.7 - planned
 
 Forward-looking. Nothing here is committed to a date; treat it as speculative until it ships.
 
+### Sharing & Sync control plane
+
+Add a dedicated **Sharing & Sync** section, separate from Agents and identity management. It shows every synchronization group, member node, role and voting power where applicable, full-sync versus selective-sync status, shared domains, owner, backfill/catch-up position, health, and last successful synchronization.
+
+A domain's original/current owner may propose adding or removing that domain, create a new shared domain, backfill earlier memories, change eligible nodes, or stop future synchronization; group-level RBAC and validator governance authorize changes that affect other members. Removing a domain or node has explicit, auditable semantics for retained historical copies, tombstones, future updates, rejoin, and local deletion - it never silently erases another member's data.
+
+This release also adds multi-node group membership and explicit full-sync/selective-sync roles, but does not claim self-healing BFT until the v11.8 quorum gates below pass.
+
 ### Cross-network agent messaging (federated inbox)
 
 Extend the agent-to-agent pipe (today a node-local inbox) across a federation link so an agent on one SAGE can hand work to an agent on a peer SAGE - a **federated inbox**. Rides on the v11.6 connectivity substrate and inherits the same scope grants that bound recall exchange; delivery stays off-consensus and message content is never written to either chain.
+
+---
+
+## v11.8 - planned
+
+### Domain-scoped quorum + self-healing replication
+
+Turn selected shared domains into hardened replicated canonical state across validator groups. Validators independently evaluate proposed memories, commit only quorum-approved results, and retain replicated full content plus all serving indexes. A surviving **greater-than-two-thirds voting-power quorum** continues accepting memories while a member is offline; authenticated replay or state sync catches it up when it returns.
+
+The release gate includes offline-write/catch-up, snapshot/state-sync recovery, validator and membership reconfiguration, revocation, conflict/degraded-mode behavior, and chaos testing. Topologies remain honest: four equal-power validators tolerate one offline validator; three equal-power validators do not continue with only two online because CometBFT requires more than two-thirds voting power. The design must choose explicitly between domain-specific quorum shards and an extension of federation domain sync; it must never tunnel or replicate the whole current chain if that exposes unselected domains.
+
+---
+
+## v12 - product roadmap capstone
+
+v12 is the planned completion milestone for the SAGE product roadmap: the fully integrated product rather than another backend-only release. It ships as a standalone desktop application with CEREBRUM embedded in the application window instead of opening the user's web browser. The app owns installation, node lifecycle, onboarding, permissions, updates, health/recovery, federation, and Sharing & Sync as one coherent native-feeling experience, while the SAGE daemon and authenticated local APIs remain cleanly separated underneath.
+
+The desktop-shell technology is deliberately not locked here. It must be chosen through a security, packaging, accessibility, performance, offline-operation, and cross-platform evaluation; “native-feeling” must not come at the cost of weakening the local trust boundary or bundling an unmaintainable browser runtime.
 
 ---
 
