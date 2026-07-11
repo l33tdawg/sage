@@ -10549,6 +10549,8 @@ const UPDATE_BANNER_DISMISSED_KEY = 'sage-update-banner-dismissed';
 
 function UpdateBanner({ onOpenUpdates }) {
     const [update, setUpdate] = useState(null);
+    const [starting, setStarting] = useState(false);
+    const [startError, setStartError] = useState('');
 
     useEffect(() => {
         let active = true;
@@ -10573,19 +10575,35 @@ function UpdateBanner({ onOpenUpdates }) {
         try { sessionStorage.setItem(UPDATE_BANNER_DISMISSED_KEY, update.banner_release); } catch (_) {}
         setUpdate(null);
     };
+    const runPrimaryAction = async () => {
+        if (!update.banner_can_install) {
+            onOpenUpdates();
+            return;
+        }
+        setStarting(true);
+        setStartError('');
+        try {
+            const result = await applyUpdate(update.download_url, update.checksum);
+            if (!result.ok) throw new Error(result.error || 'Update failed to start');
+            onOpenUpdates();
+        } catch (error) {
+            setStartError(error.message || 'Update failed to start');
+            setStarting(false);
+        }
+    };
     return html`
         <div class="release-update-banner" role="status" aria-live="polite">
             <div class="release-update-icon" aria-hidden="true">↑</div>
             <div class="release-update-copy">
                 <strong>${update.banner_title}</strong>
-                <span>${update.banner_message}</span>
+                <span>${startError || update.banner_message}</span>
             </div>
             <div class="release-update-actions">
                 ${update.release_url && !update.restart_required && html`
                     <a href=${update.release_url} target="_blank" rel="noopener">Release notes</a>
                 `}
-                <button class="btn btn-primary release-update-button" onClick=${onOpenUpdates}>
-                    ${update.banner_action}
+                <button class="btn btn-primary release-update-button" onClick=${runPrimaryAction} disabled=${starting}>
+                    ${starting ? 'Starting...' : update.banner_action}
                 </button>
                 <button class="release-update-dismiss" onClick=${dismiss} aria-label="Remind me about this update next time" title="Remind me next time">×</button>
             </div>

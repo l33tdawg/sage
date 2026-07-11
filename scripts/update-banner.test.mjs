@@ -17,6 +17,19 @@ test('update banner describes a newly available release', () => {
     assert.equal(banner.banner_release, '11.8.0');
     assert.equal(banner.banner_title, 'SAGE 11.8.0 is available');
     assert.equal(banner.banner_action, 'View update');
+    assert.equal(banner.banner_can_install, false);
+});
+
+test('update banner offers one-click install when the signed artifact is ready', () => {
+    const banner = buildUpdateBanner({
+        latest_version: '11.8.0',
+        update_available: true,
+        in_app_update_supported: true,
+        download_url: 'https://example.com/SAGE.dmg',
+        checksum: 'abc123',
+    });
+    assert.equal(banner.banner_action, 'Download & Install');
+    assert.equal(banner.banner_can_install, true);
 });
 
 test('dismissal lasts for that release and a newer release appears again', () => {
