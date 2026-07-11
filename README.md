@@ -51,13 +51,22 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.7.2
+## What's New in v11.7.3
 
-**Background macOS updates are back, without compromising the signed app.** SAGE now downloads and installs directly from the update banner, verifies the architecture-specific DMG against its published SHA-256, mounts it read-only, enforces the expected bundle identifier and Developer ID team, and asks Gatekeeper to validate both the release app and its staged copy. Activation atomically exchanges the entire signed `SAGE.app` bundle while preserving the previous bundle for proof-of-boot rollback, so updates never patch a signed executable in place and never leave the application path missing. CEREBRUM also restores Access Controls as a dedicated sidebar destination that opens agents directly on their permission editor, makes the task board use one natural page scroller instead of trapping scrolling inside fixed-height columns, and stops the Settings page's block countdown from continuously re-rendering the entire screen. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+**Settings stays cool on large brains.** CEREBRUM no longer polls health, full memory statistics, and the complete agent inventory every three seconds. Health refreshes at a calmer interval, the existing health payload supplies memory totals without a duplicate full-store scan, agents load only when Overview is visible, and all Settings polling pauses in background tabs. An RBAC save that fails on-chain now says clearly that access is not active and keeps Save enabled for an actual retry. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+
+SDK 11.7.3.
+
+## Older releases
+
+<details>
+<summary>v11.7.2 - secure background updates and CEREBRUM fixes</summary>
+
+**Background macOS updates are back, without compromising the signed app.** SAGE now downloads and installs directly from the update banner, verifies the architecture-specific DMG against its published SHA-256, mounts it read-only, enforces the expected bundle identifier and Developer ID team, and asks Gatekeeper to validate both the release app and its staged copy. Activation atomically exchanges the entire signed `SAGE.app` bundle while preserving the previous bundle for proof-of-boot rollback. CEREBRUM also restores Access Controls, fixes Task Board page scrolling, and isolates the live block countdown so it no longer re-renders the entire Settings screen. Existing chains replay byte-identically.
 
 SDK 11.7.2.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.7.1 - smart-memory reliability and task-board maintenance</summary>

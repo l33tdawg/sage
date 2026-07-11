@@ -23,7 +23,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.7.2';
+const SAGE_VERSION = 'v11.7.3';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -5305,19 +5305,44 @@ function SettingsPage({ onRunSetup, requestedTab }) {
         if (requestedTab?.tab) setSettingsTab(requestedTab.tab);
     }, [requestedTab?.nonce]);
 
-    // Fetch health with live polling every 3s
+    // Health includes the same memory totals returned by fetchStats, so do not
+    // make a second full-store request. A 3s health+stats+agents loop made the
+    // server repeatedly scan/serialize 10k+ memories and burn a full CPU core.
+    // Refresh slowly while visible and pause completely in a background tab.
     useEffect(() => {
+        let interval = null;
         const poll = () => {
+            if (document.hidden) return;
             fetchHealth().then(h => {
                 setHealth(h);
+                if (h?.memories) setStats(h.memories);
             }).catch(() => {});
-            fetchStats().then(setStats).catch(() => {});
-            fetchAgents().then(a => setAgents(a?.agents || [])).catch(() => {});
         };
-        poll();
-        const iv = setInterval(poll, 3000);
-        return () => clearInterval(iv);
+        const sync = () => {
+            if (interval) { clearInterval(interval); interval = null; }
+            if (!document.hidden) {
+                poll();
+                interval = setInterval(poll, 30000);
+            }
+        };
+        sync();
+        document.addEventListener('visibilitychange', sync);
+        return () => {
+            if (interval) clearInterval(interval);
+            document.removeEventListener('visibilitychange', sync);
+        };
     }, []);
+
+    // The agent inventory is only rendered on Overview. Load it when that tab
+    // is actually visible instead of polling it from every Settings section.
+    useEffect(() => {
+        if (settingsTab !== 'overview' || document.hidden) return undefined;
+        let active = true;
+        fetchAgents().then(a => {
+            if (active) setAgents(a?.agents || []);
+        }).catch(() => {});
+        return () => { active = false; };
+    }, [settingsTab]);
 
     // Background update check on page load + every 12 hours
     useEffect(() => {
@@ -7347,7 +7372,13 @@ function NetworkPage({ sse, accessMode = false }) {
                 }
             } else if (res.on_chain_warning) {
                 console.warn('On-chain permission sync detail:', res.on_chain_warning);
-                showToast('Access was saved locally, but the network has not confirmed it yet. Try again in a moment.', 'warning', 7000);
+                showToast('Access is not active yet. CEREBRUM kept your selections, but the enforced on-chain RBAC update failed. Click Save to retry; if it fails again, check Network health.', 'warning', 10000);
+                // Enforcement is on-chain. Keep Save enabled until consensus
+                // confirms the RBAC transaction instead of telling the user to
+                // retry and then disabling the only retry control.
+                setAccessDirty(true);
+                setAccessSaved(false);
+                return;
             } else if (grantResults.length > 0) {
                 showToast(adminOverride
                     ? `Admin override applied. Access changed for ${grantResults.length} ${grantResults.length === 1 ? 'domain' : 'domains'}; ownership was not changed.`
