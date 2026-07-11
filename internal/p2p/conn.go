@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/network"
@@ -12,10 +13,30 @@ import (
 // federation TLS and HTTP stacks can run inside it unchanged.
 type streamConn struct {
 	network.Stream
+	releaseOnce sync.Once
+	onRelease   func()
 }
 
 func newStreamConn(stream network.Stream) net.Conn {
 	return &streamConn{Stream: stream}
+}
+
+func newTrackedStreamConn(stream network.Stream, onRelease func()) *streamConn {
+	return &streamConn{Stream: stream, onRelease: onRelease}
+}
+
+func (c *streamConn) Close() error {
+	err := c.Stream.Close()
+	c.release()
+	return err
+}
+
+func (c *streamConn) release() {
+	c.releaseOnce.Do(func() {
+		if c.onRelease != nil {
+			c.onRelease()
+		}
+	})
 }
 
 func (c *streamConn) LocalAddr() net.Addr {

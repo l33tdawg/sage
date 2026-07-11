@@ -935,13 +935,19 @@ func runServe() (rerr error) {
 	// boundary remains the mTLS+pin layer inside each stream.
 	var fedP2P *sagep2p.Transport
 	if cfg.Federation.P2PEnabled && fedMgr != nil {
+		allowedPeerAddrs := make([]string, 0)
+		for _, targets := range cfg.Federation.P2PPeers {
+			allowedPeerAddrs = append(allowedPeerAddrs, targets...)
+		}
 		p2pTransport, p2pErr := sagep2p.New(ctx, sagep2p.Config{
-			IdentityKeyPath: filepath.Join(SageHome(), "p2p.key"),
-			ListenAddrs:     cfg.Federation.P2PListenAddrs,
-			RelayAddrs:      cfg.Federation.P2PRelayAddrs,
-			AcceptInbound:   cfg.Federation.Enabled,
-			ForcePrivate:    cfg.Federation.P2PForcePrivate,
-			UserAgent:       "sage/" + version,
+			IdentityKeyPath:      filepath.Join(SageHome(), "p2p.key"),
+			ListenAddrs:          cfg.Federation.P2PListenAddrs,
+			RelayAddrs:           cfg.Federation.P2PRelayAddrs,
+			AcceptInbound:        cfg.Federation.Enabled,
+			AllowedPeerAddrs:     allowedPeerAddrs,
+			EnforcePeerAllowlist: cfg.Federation.Enabled,
+			ForcePrivate:         cfg.Federation.P2PForcePrivate,
+			UserAgent:            "sage/" + version,
 		})
 		if p2pErr != nil {
 			logger.Warn().Err(p2pErr).Msg("federation p2p transport unavailable; direct HTTPS remains active")

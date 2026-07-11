@@ -1,6 +1,6 @@
 # Connect your SAGE to another network
 
-This guide shows you how to link your whole SAGE to someone else's whole SAGE, so the two brains can share memories across a local network or another reachable address you provide. In the app this lives under the **Federation** section (the federation icon in the sidebar). v11.0 is LAN-first; first-class internet/NAT traversal is planned for v11.6.
+This guide shows you how to link your whole SAGE to someone else's whole SAGE, so the two brains can share memories across a local network or another reachable address you provide. In the app this lives under the **Federation** section (the federation icon in the sidebar). The guided flow remains LAN/reachable-address first. v11.6 adds an opt-in libp2p transport substrate for manually configured established peers, including relay fallback; QR-based internet onboarding is still being built.
 
 It is written for the person clicking the buttons. You do not need to understand consensus or certificates to follow it. There is a short honest section at the end that explains what actually keeps the link safe, and what it does not promise.
 
@@ -23,7 +23,7 @@ Every connection is one-directional in the sense that each side keeps its own tr
 ## Before you start
 
 - Both people need their SAGE running and reachable at an `https://host:port` address (the federation listener, usually port **8444** on your network). The wizard fills in a sensible default like `https://192.168.1.20:8444` - change it if that is not how the other person reaches you.
-- v11.0 does not broker public-internet reachability for you. Use the same LAN, a VPN, or a tunnel you operate. Built-in internet/NAT traversal is a v11.6 roadmap item.
+- The current wizard does not broker public-internet reachability for you. Use the same LAN, a VPN, or a tunnel you operate. Operators can configure the opt-in v11.6 libp2p substrate for established peers, but the wizard does not yet create or persist those internet peer routes.
 - You will each need a camera, or a shared screen, or at least a phone call you placed to a number you trust. The connection is safest when you are in the same room or on a video call you started.
 - Decide roughly what you are willing to share (which topics, and how sensitive) before you begin. You can leave it blank and share nothing, and you can change it later.
 
@@ -33,6 +33,29 @@ Open **Federation** in the sidebar. You will see two big choices:
 - **Let someone join mine** - you will show a code for them to scan.
 
 One of you picks each. Below are both walkthroughs, step by step, exactly matching the screens.
+
+### Advanced: manually configured libp2p transport
+
+Until the internet JOIN wizard lands, operators can opt established peers into the v11.6 transport in `~/.sage/config.yaml` and restart SAGE:
+
+```yaml
+federation:
+  enabled: true
+  p2p_enabled: true
+  p2p_listen_addrs:
+    - /ip4/0.0.0.0/tcp/0
+    - /ip4/0.0.0.0/udp/0/quic-v1
+  p2p_relay_addrs:
+    - /dns4/relay.example.org/tcp/443/wss/p2p/RELAY_PEER_ID
+  p2p_peers:
+    REMOTE_CHAIN_ID:
+      - /dns4/peer.example.org/tcp/443/wss/p2p/REMOTE_PEER_ID
+      # Relay-only form:
+      # - /dns4/relay.example.org/tcp/443/wss/p2p/RELAY_PEER_ID/p2p-circuit/p2p/REMOTE_PEER_ID
+  p2p_force_private: true
+```
+
+Every relay and peer value must be a complete multiaddr ending in `/p2p/<peer-id>`; `p2p_peers` is keyed by the remote SAGE chain ID from the established agreement. Configured peer IDs are an inbound connectivity allowlist only - the existing federation mTLS certificate, pinned CA, agreement, and signed requests still authenticate the remote chain. `p2p_force_private` asks for an immediate relay reservation and is useful behind known NAT; leave it false when automatic reachability is preferred. If P2P connectivity fails before TLS begins, SAGE falls back to that agreement's direct HTTPS endpoint. A TLS or identity failure never downgrades. The current wizard does not write these keys, so additions and removals require editing the file and restarting SAGE.
 
 ---
 

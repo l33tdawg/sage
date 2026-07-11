@@ -37,22 +37,18 @@ func LoadOrCreateIdentity(path string) (crypto.PrivKey, error) {
 		return nil, fmt.Errorf("marshal p2p identity: %w", err)
 	}
 
-	// O_EXCL makes concurrent first boots safe and refuses to follow an
-	// attacker-planted symlink. If another process won the race, load the key it
-	// committed instead of replacing it and changing this node's peer ID.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- operator-owned configured path
-	if errors.Is(err, os.ErrExist) {
-		return loadIdentity(path)
-	}
+	// Publish only a fully written key. A temporary file plus an atomic hard
+	// link gives concurrent first boots create-if-absent semantics: losers can
+	// only observe the winner's complete key, never an empty/partial file, and
+	// an existing symlink is never replaced or followed.
+	f, err := os.CreateTemp(filepath.Dir(path), ".sage-p2p-key-*")
 	if err != nil {
-		return nil, fmt.Errorf("create p2p identity: %w", err)
+		return nil, fmt.Errorf("create temporary p2p identity: %w", err)
 	}
-	committed := false
+	tempPath := f.Name()
 	defer func() {
 		_ = f.Close()
-		if !committed {
-			_ = os.Remove(path)
-		}
+		_ = os.Remove(tempPath)
 	}()
 	if _, err = f.Write(raw); err != nil {
 		return nil, fmt.Errorf("write p2p identity: %w", err)
@@ -63,19 +59,23 @@ func LoadOrCreateIdentity(path string) (crypto.PrivKey, error) {
 	if err = f.Close(); err != nil {
 		return nil, fmt.Errorf("close p2p identity: %w", err)
 	}
-	committed = true
+	if err = os.Link(tempPath, path); errors.Is(err, os.ErrExist) {
+		return loadIdentity(path)
+	} else if err != nil {
+		return nil, fmt.Errorf("publish p2p identity: %w", err)
+	}
 	return priv, nil
 }
 
 func loadIdentity(path string) (crypto.PrivKey, error) {
-	pathInfo, err := os.Lstat(path)
+	// os.Root.Open resolves the final component with no-follow semantics on all
+	// supported platforms, eliminating the Lstat/Open symlink-swap race.
+	root, err := os.OpenRoot(filepath.Dir(path))
 	if err != nil {
 		return nil, err
 	}
-	if pathInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("p2p identity %s must not be a symbolic link", path)
-	}
-	f, err := os.Open(path) // #nosec G304 -- operator-owned configured path
+	defer func() { _ = root.Close() }()
+	f, err := root.Open(filepath.Base(path))
 	if err != nil {
 		return nil, err
 	}

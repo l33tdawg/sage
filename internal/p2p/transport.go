@@ -9,8 +9,10 @@ import (
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/libp2p/go-libp2p/p2p/host/autorelay"
 	ma "github.com/multiformats/go-multiaddr"
 )
 
@@ -20,14 +22,18 @@ const FederationProtocol protocol.ID = "/sage/fed/1.0.0"
 // ending in /p2p/<relay-peer-id>; more than one is supported so a single
 // author-operated relay is never hardcoded as the only availability path.
 type Config struct {
-	IdentityKeyPath string
-	ListenAddrs     []string
-	RelayAddrs      []string
-	Protocol        protocol.ID
-	IncomingQueue   int
-	AcceptInbound   bool
-	ForcePrivate    bool
-	UserAgent       string
+	IdentityKeyPath         string
+	ListenAddrs             []string
+	RelayAddrs              []string
+	Protocol                protocol.ID
+	IncomingQueue           int
+	AcceptInbound           bool
+	AllowedPeerAddrs        []string
+	EnforcePeerAllowlist    bool
+	MaxActiveStreams        int
+	MaxActiveStreamsPerPeer int
+	ForcePrivate            bool
+	UserAgent               string
 }
 
 // Transport owns the SAGE-side libp2p host and the federation stream listener.
@@ -60,6 +66,10 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 	if err != nil {
 		return nil, err
 	}
+	allowed, err := parseAllowedPeers(cfg.AllowedPeerAddrs)
+	if err != nil {
+		return nil, err
+	}
 
 	opts := []libp2p.Option{
 		libp2p.Identity(priv),
@@ -73,7 +83,10 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 		opts = append(opts, libp2p.UserAgent(cfg.UserAgent))
 	}
 	if len(relays) > 0 {
-		opts = append(opts, libp2p.EnableAutoRelayWithStaticRelays(relays))
+		// Static operator-configured relays need no discovery/candidate window.
+		// The libp2p default boot delay is three minutes, which would make relay
+		// fallback appear unavailable after every node restart.
+		opts = append(opts, libp2p.EnableAutoRelayWithStaticRelays(relays, autorelay.WithBootDelay(0)))
 		if cfg.ForcePrivate {
 			opts = append(opts, libp2p.ForceReachabilityPrivate())
 		}
@@ -88,7 +101,7 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 	}
 	t := &Transport{host: h, protocol: cfg.Protocol, done: make(chan struct{})}
 	if cfg.AcceptInbound {
-		t.listener = newListener(h, cfg.Protocol, cfg.IncomingQueue)
+		t.listener = newListener(h, cfg.Protocol, cfg.IncomingQueue, allowed, cfg.EnforcePeerAllowlist, cfg.MaxActiveStreams, cfg.MaxActiveStreamsPerPeer)
 	}
 	go func() {
 		select {
@@ -119,11 +132,31 @@ func (t *Transport) DialContext(ctx context.Context, target string) (net.Conn, e
 	if err = t.host.Connect(ctx, *info); err != nil {
 		return nil, fmt.Errorf("connect p2p peer %s: %w", info.ID, err)
 	}
-	stream, err := t.host.NewStream(ctx, info.ID, t.protocol)
+	streamCtx := network.WithAllowLimitedConn(ctx, "SAGE federation relay fallback")
+	stream, err := t.host.NewStream(streamCtx, info.ID, t.protocol)
 	if err != nil {
 		return nil, fmt.Errorf("open p2p federation stream to %s: %w", info.ID, err)
 	}
 	return newStreamConn(stream), nil
+}
+
+func parseAllowedPeers(raw []string) (map[peer.ID]struct{}, error) {
+	allowed := make(map[peer.ID]struct{}, len(raw))
+	for _, value := range raw {
+		if value == "" {
+			continue
+		}
+		addr, err := ma.NewMultiaddr(value)
+		if err != nil {
+			return nil, fmt.Errorf("parse allowed peer address %q: %w", value, err)
+		}
+		info, err := peer.AddrInfoFromP2pAddr(addr)
+		if err != nil {
+			return nil, fmt.Errorf("allowed peer address %q must end in /p2p/<peer-id>: %w", value, err)
+		}
+		allowed[info.ID] = struct{}{}
+	}
+	return allowed, nil
 }
 
 // Addrs returns this node's currently advertised addresses with its stable

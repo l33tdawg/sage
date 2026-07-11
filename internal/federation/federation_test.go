@@ -187,6 +187,30 @@ func TestPeerStatusOverP2PStreamKeepsFederationMTLS(t *testing.T) {
 	}
 }
 
+func TestPeerStatusFallsBackToDirectHTTPSOnP2PDialFailure(t *testing.T) {
+	a := newTestChain(t, "fallback-a")
+	b := newTestChain(t, "fallback-b")
+	federate(t, b, a, "https://unused.invalid", []string{"*"}, 4, 0)
+	server := startListener(t, b)
+	federate(t, a, b, server.URL, []string{"*"}, 4, 0)
+
+	var attempted bool
+	a.mgr.SetPeerDialFunc(func(context.Context, string) (net.Conn, bool, error) {
+		attempted = true
+		return nil, true, errors.New("simulated p2p connectivity failure")
+	})
+	status, err := a.mgr.PeerStatus(context.Background(), b.chainID)
+	if err != nil {
+		t.Fatalf("PeerStatus direct fallback: %v", err)
+	}
+	if !attempted {
+		t.Fatal("p2p dial seam was not attempted")
+	}
+	if status.ChainID != b.chainID {
+		t.Fatalf("PeerStatus chain = %q, want %q", status.ChainID, b.chainID)
+	}
+}
+
 // fakeComet emulates the local CometBFT /broadcast_tx_commit RPC, capturing
 // every broadcast tx's raw bytes.
 func fakeComet(t *testing.T) (*httptest.Server, *[][]byte) {

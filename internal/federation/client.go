@@ -106,7 +106,12 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 			conn, handled, dialErr := peerDial(dialCtx, agreement.RemoteChainID)
 			if handled {
 				if dialErr != nil {
-					return nil, fmt.Errorf("peer %s p2p dial: %w", agreement.RemoteChainID, dialErr)
+					// Connectivity failure may fall back to the agreement's direct
+					// HTTPS endpoint. The same pinned-CA TLS config is applied below;
+					// TLS/authentication failures after a successful p2p dial do not
+					// downgrade or retry another transport.
+					m.logger.Warn().Err(dialErr).Str("chain_id", agreement.RemoteChainID).Msg("p2p dial failed; falling back to direct federation HTTPS")
+					return directDialer.DialContext(dialCtx, network, address)
 				}
 				if conn == nil {
 					return nil, fmt.Errorf("peer %s p2p dial returned no connection", agreement.RemoteChainID)
