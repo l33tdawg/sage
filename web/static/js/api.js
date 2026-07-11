@@ -480,7 +480,7 @@ export async function saveMemoryMode(mode) {
 // ─── Software Update API ───
 
 export async function checkForUpdate() {
-    const res = await fetch(`${API_BASE}/v1/dashboard/settings/update/check`);
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/update/check`, { cache: 'no-store' });
     return res.json();
 }
 

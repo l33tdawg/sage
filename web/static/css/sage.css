@@ -192,6 +192,63 @@ body {
 
 .top-bar .spacer { flex: 1; }
 
+.release-update-banner {
+    min-height: 48px;
+    padding: 8px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+    color: var(--text);
+    background: linear-gradient(90deg, var(--primary-tint), var(--bg-surface));
+    border-bottom: 1px solid var(--primary-dim);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.12);
+    z-index: 45;
+    animation: release-banner-in 0.25s ease-out;
+}
+.release-update-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    color: white;
+    background: var(--primary);
+    font-size: 18px;
+    font-weight: 700;
+}
+.release-update-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.release-update-copy strong { font-size: 13px; font-weight: 700; }
+.release-update-copy span { font-size: 11px; color: var(--text-muted); }
+.release-update-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.release-update-actions > a { color: var(--primary); font-size: 12px; font-weight: 600; text-decoration: none; }
+.release-update-actions > a:hover { text-decoration: underline; }
+.release-update-button { padding: 6px 12px; font-size: 12px; }
+.release-update-dismiss {
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 50%;
+    color: var(--text-muted);
+    background: transparent;
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+}
+.release-update-dismiss:hover { color: var(--text); background: var(--bg-hover); }
+@keyframes release-banner-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 700px) {
+    .release-update-banner { align-items: flex-start; padding: 10px 12px; }
+    .release-update-copy span { display: none; }
+    .release-update-actions { gap: 6px; }
+    .release-update-actions > a { display: none; }
+}
+
 .connection-badge {
     display: flex;
     align-items: center;

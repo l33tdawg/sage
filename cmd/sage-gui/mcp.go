@@ -898,7 +898,7 @@ func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
 		// visible. A concurrent opener can therefore observe a temporary 0-byte
 		// file on its very first read; wait only for undersized regular files, then
 		// surface genuinely corrupt/permission failures normally.
-		if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() && info.Size() < ed25519.SeedSize {
+		if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() && info.Size() < ed25519.SeedSize { //nolint:gosec // trusted identity path
 			for attempt := 0; attempt < 50; attempt++ {
 				if existing, readErr := readKey(); readErr == nil {
 					return existing, nil
@@ -940,7 +940,7 @@ func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
 		err = closeErr
 	}
 	if err != nil {
-		_ = os.Remove(path)
+		_ = os.Remove(path) //nolint:gosec // trusted identity path
 		return nil, fmt.Errorf("save key file: %w", err)
 	}
 

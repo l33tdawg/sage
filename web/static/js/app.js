@@ -11,6 +11,7 @@ fedConnections, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, 
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
+import { buildUpdateBanner } from './update-banner.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useLayoutEffect, useCallback, useContext } = preactHooks;
@@ -5244,7 +5245,7 @@ function FederationSettingRow() {
     </div>`;
 }
 
-function SettingsPage({ onRunSetup }) {
+function SettingsPage({ onRunSetup, requestedTab }) {
     const [settingsTab, setSettingsTab] = useState('overview');
     const [stats, setStats] = useState(null);
     const [health, setHealth] = useState(null);
@@ -5258,6 +5259,10 @@ function SettingsPage({ onRunSetup }) {
     const [mcpCopied, setMcpCopied] = useState(false);
     const [agents, setAgents] = useState([]);                // local agents using this node (Overview tab)
     const [peerAgentFilter, setPeerAgentFilter] = useState('all');
+
+    useEffect(() => {
+        if (requestedTab?.tab) setSettingsTab(requestedTab.tab);
+    }, [requestedTab?.nonce]);
 
     // Fetch health with live polling every 3s
     useEffect(() => {
@@ -10536,6 +10541,55 @@ function ReembedBanner() {
     `;
 }
 
+const UPDATE_BANNER_POLL_MS = 12 * 60 * 60 * 1000;
+const UPDATE_BANNER_DISMISSED_KEY = 'sage-update-banner-dismissed';
+
+function UpdateBanner({ onOpenUpdates }) {
+    const [update, setUpdate] = useState(null);
+
+    useEffect(() => {
+        let active = true;
+        const check = async () => {
+            try {
+                const data = await checkForUpdate();
+                let dismissed = '';
+                try { dismissed = sessionStorage.getItem(UPDATE_BANNER_DISMISSED_KEY) || ''; } catch (_) {}
+                if (active) setUpdate(buildUpdateBanner(data, dismissed));
+            } catch (_) {
+                if (active) setUpdate(null);
+            }
+        };
+        check();
+        const interval = setInterval(check, UPDATE_BANNER_POLL_MS);
+        return () => { active = false; clearInterval(interval); };
+    }, []);
+
+    if (!update) return null;
+
+    const dismiss = () => {
+        try { sessionStorage.setItem(UPDATE_BANNER_DISMISSED_KEY, update.banner_release); } catch (_) {}
+        setUpdate(null);
+    };
+    return html`
+        <div class="release-update-banner" role="status" aria-live="polite">
+            <div class="release-update-icon" aria-hidden="true">↑</div>
+            <div class="release-update-copy">
+                <strong>${update.banner_title}</strong>
+                <span>${update.banner_message}</span>
+            </div>
+            <div class="release-update-actions">
+                ${update.release_url && !update.restart_required && html`
+                    <a href=${update.release_url} target="_blank" rel="noopener">Release notes</a>
+                `}
+                <button class="btn btn-primary release-update-button" onClick=${onOpenUpdates}>
+                    ${update.banner_action}
+                </button>
+                <button class="release-update-dismiss" onClick=${dismiss} aria-label="Remind me about this update next time" title="Remind me next time">×</button>
+            </div>
+        </div>
+    `;
+}
+
 function App() {
     const [authState, setAuthState] = useState('loading'); // loading | login | ready
     const [isEncrypted, setIsEncrypted] = useState(false);
@@ -10543,6 +10597,7 @@ function App() {
     const [sseConnected, setSseConnected] = useState(false);
     const [showHelp, setShowHelp] = useState(false);
     const [showOnboarding, setShowOnboarding] = useState(false);
+    const [settingsTabRequest, setSettingsTabRequest] = useState({ tab: null, nonce: 0 });
     // Header badge version: prefer the running node's build version (from health)
     // over the hardcoded product constant, trimmed to base semver, so it never
     // goes stale the way the pinned SAGE_VERSION did.
@@ -10775,6 +10830,11 @@ function App() {
         window.location.hash = p === 'brain' ? '/' : '/' + p;
     }
 
+    function openUpdateSettings() {
+        setSettingsTabRequest(prev => ({ tab: 'updates', nonce: prev.nonce + 1 }));
+        navigate('settings');
+    }
+
     return html`<${TooltipsContext.Provider} value=${tooltipsEnabled}>
         <${ConfirmationDialogHost} />
         <${SmartTooltipLayer} />
@@ -10852,6 +10912,7 @@ function App() {
                     <${HelpTip} text="Real-time connection to your SAGE node via Server-Sent Events. When live, new memories appear automatically." align="right" />
                 </div>
             </div>
+            <${UpdateBanner} onOpenUpdates=${openUpdateSettings} />
             <${HealthBar} />
             <${ChainActivityLog} sse=${sseRef.current} />
 
@@ -10862,7 +10923,7 @@ function App() {
             ${page === 'import' && html`<${ImportPage} sse=${sseRef.current} />`}
             ${page === 'network' && html`<${NetworkPage} sse=${sseRef.current} />`}
             ${page === 'federation' && html`<${FederationPage} />`}
-            ${page === 'settings' && html`<${SettingsPage} onRunSetup=${() => setShowOnboarding(true)} />`}
+            ${page === 'settings' && html`<${SettingsPage} onRunSetup=${() => setShowOnboarding(true)} requestedTab=${settingsTabRequest} />`}
         </div>
         ${showHelp && html`<${HelpOverlay} onClose=${() => setShowHelp(false)} initialSection=${helpSection} />`}
     </${TooltipsContext.Provider}>`;
