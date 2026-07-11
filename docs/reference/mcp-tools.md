@@ -1,4 +1,4 @@
-Reconciled against internal/mcp at SAGE v11.6.0.
+Reconciled against internal/mcp at SAGE v11.6.1.
 
 # SAGE MCP Tools Reference
 
@@ -470,9 +470,12 @@ should be a task, not an observation.
 
 ### sage_backlog
 
-**Purpose:** View all open (planned and in-progress) tasks across domains.
+**Purpose:** View all open (planned and in-progress) tasks across domains. An
+explicit assignment to the signed agent ID takes precedence over the task
+author's provider, so cross-provider handoffs appear reliably; unassigned work
+remains provider-scoped.
 
-**Source:** `tools.go:167-178` (definition), `tools.go:1289-1333` (handler)
+**Source:** `tools.go:180-190` (definition), `tools.go:1508-1558` (handler)
 
 **Parameters:**
 
@@ -481,7 +484,7 @@ should be a task, not an observation.
 | `domain` | string | no       | Filter by domain. Omit for all domains. |
 
 **Returns:**
-- `tasks_by_domain`: map of domain → array of `{memory_id, content, task_status, confidence, created_at}`.
+- `tasks_by_domain`: map of domain → array of `{memory_id, content, task_status, confidence, created_at, assignee, assigned_to_you, task_picked_up_by, task_picked_up_at}`. `assigned_to_you` is true only for an explicit current assignment to the signed agent; provider-visible unassigned work remains false.
 - `total_open`: total open task count.
 - `message`: human-readable summary.
 
@@ -595,27 +598,32 @@ result arrives via `pipe_results` in the next `sage_turn` response or via
 
 ### sage_inbox
 
-**Purpose:** Check the pipeline inbox for work sent by other agents.
-Automatically claims items so duplicate processing is avoided.
+**Purpose:** Check the unified agent inbox for pipeline work and one-way task
+assignment notices. Pipeline items are atomically claimed and require
+`sage_pipe_result`. Task notices are acknowledged when read, carry
+`requires_result: false`, and direct the agent to verify current ownership in
+`sage_backlog` before acting.
 
-**Source:** `tools.go:228-240` (definition), `tools.go:1719-1770` (handler)
+**Source:** `tools.go:257-268` (definition), `tools.go:2048-2166` (handler)
 
 **Parameters:**
 
 | Name    | Type | Required | Description |
 |---------|------|----------|-------------|
-| `limit` | int  | no       | Max items to return. Default: 5. Max: 20. |
+| `limit` | int  | no       | Max combined items to return across both inbox sources. Default: 5. Max: 20. |
 
 **Returns:**
-- `items`: array of `{pipe_id, from, intent, payload, created_at}`.
-- `count`: number of items.
+- `items`: mixed array. Pipeline work contains `{pipe_id, from, intent, payload, created_at, requires_result:true}`; assignment notices contain `{notification_id, kind, task_id, assignment_version, domain, title, created_at, requires_result:false}`.
+- `count`: combined number of returned items, never greater than `limit`.
+- `pipeline_count` / `task_assignment_count`: source-specific counts.
+- `task_inbox_error`: present only when pipeline work was already claimed successfully but assignment notices could not be checked; returned pipeline work must still be processed.
 - `message`: human-readable summary.
 
-**REST:** `GET /v1/pipe/inbox`
+**REST:** `GET /v1/pipe/inbox`, then the remaining capacity from `GET /v1/dashboard/task-notifications`.
 
 **When to call:** When you need to check explicitly for pending work from other
 agents. `sage_turn` also checks the inbox automatically on every call
-(`tools.go:888-894`), so explicit `sage_inbox` calls are only needed between
+(`tools.go:2199-2278`), so explicit `sage_inbox` calls are only needed between
 turns or when you need more than 5 items.
 
 ---

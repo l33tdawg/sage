@@ -21,7 +21,152 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.6.0';
+const SAGE_VERSION = 'v11.6.1';
+
+// Promise-based, themed replacement for the browser's blocking confirmation API.
+// Requests are immutable and serialized so independent actions cannot replace
+// each other's prompt. Resolving by request ID also means a late click from a
+// closing dialog can never approve the next prompt (load-bearing for the
+// two-step durable-FACT warning).
+let confirmationID = 0;
+let confirmationRender = null;
+let confirmationOriginFocus = null;
+const confirmationQueue = [];
+
+function showConfirmation(message, options = {}) {
+    const snapshot = Object.freeze({
+        id: ++confirmationID,
+        title: String(options.title || 'Are you sure?'),
+        message: String(message || ''),
+        confirmLabel: String(options.confirmLabel || 'Confirm'),
+        cancelLabel: String(options.cancelLabel || 'Cancel'),
+        tone: options.tone === 'danger' ? 'danger' : 'primary',
+    });
+    if (!confirmationOriginFocus && document.activeElement instanceof HTMLElement) {
+        confirmationOriginFocus = document.activeElement;
+    }
+    return new Promise(resolve => {
+        confirmationQueue.push({ snapshot, resolve });
+        if (confirmationRender) confirmationRender();
+    });
+}
+
+function settleConfirmation(id, accepted) {
+    const current = confirmationQueue[0];
+    if (!current || current.snapshot.id !== id) return;
+    confirmationQueue.shift();
+    // Resolve first: an awaited second safety prompt enters the queue before
+    // Preact tears down this dialog, preserving the modal/focus boundary.
+    current.resolve(accepted);
+    if (confirmationRender) confirmationRender();
+}
+
+function ConfirmationDialogHost() {
+    const [request, setRequest] = useState(null);
+    const dialogRef = useRef(null);
+    const cancelRef = useRef(null);
+
+    useEffect(() => {
+        const sync = () => setRequest(confirmationQueue.length ? confirmationQueue[0].snapshot : null);
+        confirmationRender = sync;
+        sync();
+        return () => {
+            if (confirmationRender === sync) confirmationRender = null;
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!request || !dialogRef.current) {
+            if (confirmationQueue.length === 0 && confirmationOriginFocus) {
+                const target = confirmationOriginFocus;
+                confirmationOriginFocus = null;
+                if (target.isConnected) target.focus();
+            }
+            return;
+        }
+
+        const dialog = dialogRef.current;
+        const overlay = dialog.parentElement;
+        const app = document.getElementById('app');
+        const inerted = [];
+        if (app && overlay) {
+            for (const child of app.children) {
+                if (child !== overlay) {
+                    inerted.push([child, child.inert]);
+                    child.inert = true;
+                }
+            }
+        }
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+
+        const focusCancel = () => {
+            if (cancelRef.current) cancelRef.current.focus();
+        };
+        const frame = requestAnimationFrame(focusCancel);
+        const focusable = () => Array.from(dialog.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        ));
+        const onKeyDown = (event) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                settleConfirmation(request.id, false);
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const nodes = focusable();
+            if (!nodes.length) {
+                event.preventDefault();
+                dialog.focus();
+                return;
+            }
+            const first = nodes[0];
+            const last = nodes[nodes.length - 1];
+            if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        };
+        const onFocusIn = (event) => {
+            if (!dialog.contains(event.target)) focusCancel();
+        };
+        document.addEventListener('keydown', onKeyDown, true);
+        document.addEventListener('focusin', onFocusIn, true);
+        return () => {
+            cancelAnimationFrame(frame);
+            document.removeEventListener('keydown', onKeyDown, true);
+            document.removeEventListener('focusin', onFocusIn, true);
+            document.body.style.overflow = previousOverflow;
+            inerted.forEach(([child, wasInert]) => { child.inert = wasInert; });
+        };
+    }, [request]);
+
+    if (!request) return null;
+    const titleID = `confirmation-title-${request.id}`;
+    const bodyID = `confirmation-body-${request.id}`;
+    return html`
+        <div class="cerebrum-confirm-overlay" onClick=${event => {
+            if (event.target === event.currentTarget) settleConfirmation(request.id, false);
+        }}>
+            <div class="cerebrum-confirm-dialog" ref=${dialogRef} role="alertdialog" aria-modal="true"
+                aria-labelledby=${titleID} aria-describedby=${bodyID} tabIndex="-1">
+                <div class="cerebrum-confirm-mark ${request.tone}" aria-hidden="true">!</div>
+                <h2 id=${titleID}>${request.title}</h2>
+                <p id=${bodyID}>${request.message}</p>
+                <div class="cerebrum-confirm-actions">
+                    <button class="btn" ref=${cancelRef} autofocus
+                        onClick=${() => settleConfirmation(request.id, false)}>${request.cancelLabel}</button>
+                    <button class="btn ${request.tone === 'danger' ? 'btn-danger' : 'btn-primary'}"
+                        onClick=${() => settleConfirmation(request.id, true)}>${request.confirmLabel}</button>
+                </div>
+            </div>
+        </div>
+    `;
+}
 
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
@@ -2009,7 +2154,10 @@ function TasksPage({ sse }) {
         const action = terminal
             ? 'forget them from normal views. They stay audit-only on-chain.'
             : 'move them to Dropped.';
-        if (!window.confirm(`Clear ${count} ${col.label} task${count !== 1 ? 's' : ''}? This will ${action}`)) return;
+        if (!await showConfirmation(
+            `Clear ${count} ${col.label} task${count !== 1 ? 's' : ''}? This will ${action}`,
+            { title: `Clear ${col.label} tasks?`, confirmLabel: terminal ? 'Clear tasks' : 'Move to Dropped', tone: 'danger' }
+        )) return;
 
         setClearingColumn(col.key);
         const ids = colTasks.map(t => t.memory_id);
@@ -2382,15 +2530,21 @@ function SearchPage() {
     }
     const bulkMoveDomain = () => { const d = bulkDomain.trim(); if (!d) return; runBulk(ids => bulkUpdateMemories(ids, { domain: d }), `Moved %n memories to ${d}`); };
     const bulkAddTag = () => { const t = bulkTag.trim(); if (!t) return; runBulk(ids => bulkUpdateMemories(ids, { addTags: [t] }), `Tagged %n memories "${t}"`); };
-    const bulkForget = () => {
+    const bulkForget = async () => {
         const ids = Array.from(selected);
         if (!ids.length) return;
         // Double-confirm when any selected memory is a durable fact.
         const factCount = results.filter(m => selected.has(m.memory_id) && m.memory_type === 'fact').length;
         // Be honest when the result set is capped: bulk actions only touch the loaded page.
         const capNote = total > results.length ? ` Note: only the ${results.length} loaded on this page are affected, not all ${total} matching this filter.` : '';
-        if (!window.confirm(`Forget ${ids.length} selected ${ids.length === 1 ? 'memory' : 'memories'}? They stay on-chain but are marked deprecated (audit-only).${capNote}`)) return;
-        if (factCount > 0 && !window.confirm(`Careful: ${factCount} of these ${factCount === 1 ? 'is a durable FACT' : 'are durable FACTS'} (high-confidence, long-term knowledge). Forget ${factCount === 1 ? 'it' : 'them'} anyway?`)) return;
+        if (!await showConfirmation(
+            `Forget ${ids.length} selected ${ids.length === 1 ? 'memory' : 'memories'}? They stay on-chain but are marked deprecated (audit-only).${capNote}`,
+            { title: 'Forget selected memories?', confirmLabel: 'Forget memories', tone: 'danger' }
+        )) return;
+        if (factCount > 0 && !await showConfirmation(
+            `Careful: ${factCount} of these ${factCount === 1 ? 'is a durable FACT' : 'are durable FACTS'} (high-confidence, long-term knowledge). Forget ${factCount === 1 ? 'it' : 'them'} anyway?`,
+            { title: 'Durable FACT warning', confirmLabel: factCount === 1 ? 'Forget FACT' : 'Forget FACTS', tone: 'danger' }
+        )) return;
         runBulk(idList => Promise.all(idList.map(id => deleteMemory(id))), 'Forgot %n memories');
     };
 
@@ -4898,7 +5052,11 @@ function FederationSettingRow() {
         const msg = next
             ? 'Turn ON federation?\n\nThe node will restart and start accepting connections from networks you link with. The listener only accepts peers pinned to an agreement you approved.'
             : 'Turn OFF federation?\n\nThe node will restart and stop accepting inbound connections. You can still reach out to peers you already connected with, but no one can join or reach you until you turn it back on. Nothing is deleted.';
-        if (!confirm(msg)) return;
+        if (!await showConfirmation(msg, {
+            title: next ? 'Turn on federation?' : 'Turn off federation?',
+            confirmLabel: next ? 'Turn on' : 'Turn off',
+            tone: next ? 'primary' : 'danger',
+        })) return;
         setBusy(true);
         try {
             const r = await fedSettingSet(next);
@@ -10515,6 +10673,7 @@ function App() {
     }
 
     return html`<${TooltipsContext.Provider} value=${tooltipsEnabled}>
+        <${ConfirmationDialogHost} />
         <${SmartTooltipLayer} />
         <${ToastContainer} />
         <${ReembedBanner} />
@@ -11508,7 +11667,11 @@ function FederationMasterSwitch({ onChange }) {
         const msg = next
             ? 'Turn ON federation?\n\nThe node will restart and start accepting connections from networks you link with — on your LAN or over any route you provide. It only admits peers pinned to an agreement you approved. (Re-unlock your vault after the restart.)'
             : 'Turn OFF federation?\n\nThe node will restart and stop accepting inbound connections. Existing links stay saved and nothing is deleted — no one can reach you until you turn it back on.';
-        if (!confirm(msg)) return;
+        if (!await showConfirmation(msg, {
+            title: next ? 'Turn on federation?' : 'Turn off federation?',
+            confirmLabel: next ? 'Turn on' : 'Turn off',
+            tone: next ? 'primary' : 'danger',
+        })) return;
         setBusy(true);
         try {
             const r = await fedSettingSet(next);
@@ -11600,7 +11763,10 @@ function FederationPage() {
     const [warming, setWarming] = useState(true); // fork-ladder warm-up on a fresh node
     const [fedOn, setFedOn] = useState(null); // master switch: null=unknown, then bool
     const revoke = async (chain) => {
-        if (!confirm(`Turn off the connection to ${chain}? This does NOT erase anything - it just stops the two networks from reaching each other.`)) return;
+        if (!await showConfirmation(
+            `Turn off the connection to ${chain}? This does NOT erase anything - it just stops the two networks from reaching each other.`,
+            { title: 'Turn off this connection?', confirmLabel: 'Turn off connection', tone: 'danger' }
+        )) return;
         try { await fedRevoke(chain); showToast(`Disconnected from ${chain}`, 'success'); load(); }
         catch (e) { showToast(String(e.message || e), 'error'); }
     };

@@ -198,16 +198,22 @@ func (s *Server) handlePipeInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auto-claim all returned items
+	// Auto-claim returned items, but return ONLY CAS winners. Two concurrent
+	// inbox reads may select the same pending row; ignoring ClaimPipeline errors
+	// let both agents believe they owned it. The loser now omits that item.
+	claimedItems := items[:0]
 	for _, item := range items {
-		_ = pipeStore.ClaimPipeline(r.Context(), item.PipeID, agentID)
+		if err := pipeStore.ClaimPipeline(r.Context(), item.PipeID, agentID); err != nil {
+			continue
+		}
 		item.Status = "claimed"
 		item.ClaimedBy = agentID
+		claimedItems = append(claimedItems, item)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items": items,
-		"count": len(items),
+		"items": claimedItems,
+		"count": len(claimedItems),
 	})
 }
 

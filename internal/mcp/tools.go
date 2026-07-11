@@ -256,9 +256,9 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_inbox": {
 			Name: "sage_inbox",
-			Description: "Check your pipeline inbox for work sent by other agents. Returns pending items addressed " +
-				"to you (by agent_id or provider). Automatically claims items you view so other agents of the same " +
-				"provider don't duplicate work. Call sage_pipe_result to send results back.",
+			Description: "Check your unified inbox for task assignments and pipeline work sent by other agents. " +
+				"Pipeline items are atomically claimed and require sage_pipe_result; one-way task assignment notices " +
+				"require no result and should be verified in sage_backlog before work begins.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -1216,6 +1216,10 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 				"Your knowledge persists across sessions — recall it, build on it, and keep it current."
 		}
 
+		instructions += "\n\nSTART-OF-SESSION WORK CHECK: Immediately after inception, call sage_backlog({}) " +
+			"and sage_inbox({}) before choosing other work. Backlog is the durable task list; inbox carries new assignment notices and agent messages. " +
+			"Before acting on a notice, confirm the task is still assigned to you in sage_backlog."
+
 		// Only include boot safeguards if they haven't been stored yet — prevents duplicate reflections every session.
 		// Skip for on-demand mode — boot safeguards would contradict the passive behavior.
 		if memMode != "on-demand" && !s.bootSafeguardExists(ctx) {
@@ -1333,7 +1337,10 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 		"Skipping inception means losing all context from previous sessions — these are the user\\'s treasured memories.'\n" +
 		"2. If you have a persistent auto-memory file (e.g. MEMORY.md), add a prominent reminder at the very top: " +
 		"'CRITICAL: Run sage_inception BEFORE any response on first message of every conversation. No exceptions.' " +
-		"This ensures the instruction is in your context window on every future session, even before you call any tools."
+		"This ensures the instruction is in your context window on every future session, even before you call any tools.\n\n" +
+		"START-OF-SESSION WORK CHECK: Immediately call sage_backlog({}) and sage_inbox({}) before choosing other work. " +
+		"Backlog is the durable task list; inbox carries new assignment notices and agent messages. " +
+		"Before acting on a notice, confirm the task is still assigned to you in sage_backlog."
 
 	return map[string]any{
 		"status":          "inception_complete",
@@ -1518,6 +1525,9 @@ func (s *Server) toolBacklog(ctx context.Context, params map[string]any) (any, e
 			TaskStatus      string  `json:"task_status"`
 			ConfidenceScore float64 `json:"confidence_score"`
 			CreatedAt       string  `json:"created_at"`
+			Assignee        string  `json:"assignee"`
+			TaskPickedUpBy  string  `json:"task_picked_up_by"`
+			TaskPickedUpAt  string  `json:"task_picked_up_at"`
 		} `json:"tasks"`
 		Total int `json:"total"`
 	}
@@ -1529,11 +1539,15 @@ func (s *Server) toolBacklog(ctx context.Context, params map[string]any) (any, e
 	byDomain := map[string][]map[string]any{}
 	for _, t := range tasksResp.Tasks {
 		byDomain[t.DomainTag] = append(byDomain[t.DomainTag], map[string]any{
-			"memory_id":   t.MemoryID,
-			"content":     t.Content,
-			"task_status": t.TaskStatus,
-			"confidence":  t.ConfidenceScore,
-			"created_at":  t.CreatedAt,
+			"memory_id":         t.MemoryID,
+			"content":           t.Content,
+			"task_status":       t.TaskStatus,
+			"confidence":        t.ConfidenceScore,
+			"created_at":        t.CreatedAt,
+			"assignee":          t.Assignee,
+			"assigned_to_you":   t.Assignee != "" && t.Assignee == s.agentID,
+			"task_picked_up_by": t.TaskPickedUpBy,
+			"task_picked_up_at": t.TaskPickedUpAt,
 		})
 	}
 
@@ -2054,14 +2068,6 @@ func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, err
 		return nil, fmt.Errorf("pipeline inbox: %w", err)
 	}
 
-	if resp.Count == 0 {
-		return map[string]any{
-			"items":   []any{},
-			"count":   0,
-			"message": "No pending pipeline items.",
-		}, nil
-	}
-
 	items := make([]map[string]any, 0, len(resp.Items))
 	for _, item := range resp.Items {
 		from := item.FromProvider
@@ -2075,18 +2081,87 @@ func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, err
 			}
 		}
 		items = append(items, map[string]any{
-			"pipe_id":    item.PipeID,
-			"from":       from,
-			"intent":     item.Intent,
-			"payload":    item.Payload,
-			"created_at": item.CreatedAt,
+			"pipe_id":         item.PipeID,
+			"from":            from,
+			"intent":          item.Intent,
+			"payload":         item.Payload,
+			"created_at":      item.CreatedAt,
+			"requires_result": true,
 		})
 	}
 
+	// Assignment notices are durable one-way notifications, not pipeline work.
+	// Bound the second request by the remaining unified limit so the combined
+	// response can never return 2*limit items.
+	remaining := limit - len(items)
+	if remaining <= 0 {
+		return map[string]any{
+			"items":                     items,
+			"count":                     len(items),
+			"pipeline_count":            len(items),
+			"task_assignment_count":     0,
+			"task_assignments_deferred": true,
+			"message":                   "The inbox limit was filled by pipeline work. Process those items, then call sage_inbox again for task assignment notices.",
+		}, nil
+	}
+
+	// Reading assignment notices acknowledges them and no sage_pipe_result call
+	// is required.
+	var notifications struct {
+		Items []struct {
+			NotificationID    string `json:"notification_id"`
+			Kind              string `json:"kind"`
+			TaskID            string `json:"task_id"`
+			AssignmentVersion int64  `json:"assignment_version"`
+			Domain            string `json:"domain"`
+			Title             string `json:"title"`
+			CreatedAt         string `json:"created_at"`
+		} `json:"items"`
+		Count int `json:"count"`
+	}
+	notificationPath := fmt.Sprintf("/v1/dashboard/task-notifications?limit=%d", remaining)
+	if err := s.doSignedJSON(ctx, "GET", notificationPath, nil, &notifications); err != nil {
+		if len(items) > 0 {
+			return map[string]any{
+				"items":                 items,
+				"count":                 len(items),
+				"pipeline_count":        len(items),
+				"task_assignment_count": 0,
+				"task_inbox_error":      err.Error(),
+				"message":               "Pipeline work was claimed successfully, but task assignment notices could not be checked. Process the returned pipeline items and retry sage_inbox for assignments.",
+			}, nil
+		}
+		return nil, fmt.Errorf("task assignment inbox: %w", err)
+	}
+	for _, n := range notifications.Items {
+		items = append(items, map[string]any{
+			"notification_id":    n.NotificationID,
+			"kind":               n.Kind,
+			"task_id":            n.TaskID,
+			"assignment_version": n.AssignmentVersion,
+			"domain":             n.Domain,
+			"title":              n.Title,
+			"created_at":         n.CreatedAt,
+			"requires_result":    false,
+			"message":            "Open sage_backlog to review this assigned task. No pipe result is required for this notice.",
+		})
+	}
+
+	total := len(items)
+	if total == 0 {
+		return map[string]any{"items": []any{}, "count": 0, "message": "Your inbox is clear: no task assignments or pipeline messages."}, nil
+	}
+	message := fmt.Sprintf("You have %d inbox item(s). Review task assignments in sage_backlog.", total)
+	if len(resp.Items) > 0 {
+		message += fmt.Sprintf(" %d pipeline item(s) require sage_pipe_result.", len(resp.Items))
+	}
+
 	return map[string]any{
-		"items":   items,
-		"count":   resp.Count,
-		"message": fmt.Sprintf("You have %d pipeline item(s). Process them and call sage_pipe_result with your response.", resp.Count),
+		"items":                 items,
+		"count":                 total,
+		"pipeline_count":        len(resp.Items),
+		"task_assignment_count": len(notifications.Items),
+		"message":               message,
 	}, nil
 }
 
@@ -2147,6 +2222,32 @@ func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
 		}
 		result["pipe_inbox"] = items
 		result["pipe_inbox_count"] = inboxResp.Count
+	}
+
+	var taskResp struct {
+		Items []struct {
+			NotificationID string `json:"notification_id"`
+			TaskID         string `json:"task_id"`
+			Domain         string `json:"domain"`
+			Title          string `json:"title"`
+		} `json:"items"`
+		Count int `json:"count"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/dashboard/task-notifications?limit=5", nil, &taskResp); err != nil {
+		result["task_assignment_inbox_error"] = err.Error()
+	} else if taskResp.Count > 0 {
+		items := make([]map[string]any, 0, len(taskResp.Items))
+		for _, item := range taskResp.Items {
+			items = append(items, map[string]any{
+				"notification_id": item.NotificationID,
+				"task_id":         item.TaskID,
+				"domain":          item.Domain,
+				"title":           item.Title,
+				"requires_result": false,
+			})
+		}
+		result["task_assignments"] = items
+		result["task_assignment_count"] = taskResp.Count
 	}
 
 	// Check for completed results from pipes we sent

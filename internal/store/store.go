@@ -254,8 +254,8 @@ type MemoryStore interface {
 	GetAllTasks(ctx context.Context, domain string, limit int) ([]*memory.MemoryRecord, error)
 	// SetTaskAssignee assigns/claims a task for an agent (empty clears it).
 	SetTaskAssignee(ctx context.Context, memoryID, assignee string) error
-	// ClaimTask atomically claims a task iff unassigned or already owned by the
-	// agent (compare-and-swap). false = another agent owns it; do not proceed.
+	// ClaimTask atomically claims and starts an open task iff unassigned or
+	// already owned by the same agent. It rejects terminal tasks.
 	ClaimTask(ctx context.Context, memoryID, agentID string) (bool, error)
 	// Tags
 	SetTags(ctx context.Context, memoryID string, tags []string) error
@@ -581,6 +581,41 @@ type PipelineStore interface {
 	// never-claimed pipe even if it carried an oversized expires_at.
 	ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error)
 	PurgePipelines(ctx context.Context, olderThan time.Time) (int, error)
+}
+
+// AgentNotification is a durable, one-way notice for an agent. Unlike a
+// PipelineMessage it is not a claimable work request and requires no result.
+type AgentNotification struct {
+	NotificationID    string    `json:"notification_id"`
+	AgentID           string    `json:"agent_id"`
+	Kind              string    `json:"kind"`
+	TaskID            string    `json:"task_id"`
+	AssignmentVersion int64     `json:"assignment_version"`
+	Domain            string    `json:"domain"`
+	Title             string    `json:"title"`
+	State             string    `json:"state"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
+// TaskAssignmentResult describes one atomic assignment transition.
+type TaskAssignmentResult struct {
+	Changed             bool
+	Assignee            string
+	AssignmentVersion   int64
+	TaskStatus          string
+	NotificationCreated bool
+}
+
+// TaskAssignmentStore is implemented by stores that support dashboard task
+// assignment and durable agent notifications. Assignment, status, generation,
+// pickup reset, and notification creation must commit atomically.
+type TaskAssignmentStore interface {
+	AssignTaskAndNotify(ctx context.Context, memoryID, assignee string) (*TaskAssignmentResult, error)
+	CompleteTaskAsAgent(ctx context.Context, memoryID, agentID string, status memory.TaskStatus) (bool, error)
+	PeekAgentNotifications(ctx context.Context, agentID string, limit int) ([]*AgentNotification, error)
+	AcknowledgeAgentNotifications(ctx context.Context, agentID string, notificationIDs []string) ([]string, error)
+	SupersedeAgentNotifications(ctx context.Context, agentID string, notificationIDs []string) error
+	TakeAgentNotifications(ctx context.Context, agentID string, limit int) ([]*AgentNotification, error)
 }
 
 // GovernanceStore defines the interface for governance proposal and vote storage.

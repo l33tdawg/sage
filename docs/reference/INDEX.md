@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.6.0. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.6.1. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index

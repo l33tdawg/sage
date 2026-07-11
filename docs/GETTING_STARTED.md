@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v11.6.0
+# sage-gui v11.6.1
 ```
 
 ---

@@ -5,11 +5,13 @@ import (
 	"context"
 	ed25519pkg "crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -52,6 +55,53 @@ func insertTestMemory(t *testing.T, s *store.SQLiteStore, id, domain string) {
 		CreatedAt:       time.Now().UTC(),
 	}
 	require.NoError(t, s.InsertMemory(context.Background(), rec))
+}
+
+func insertTestTask(t *testing.T, s *store.SQLiteStore, id, domain, provider string) {
+	t.Helper()
+	h := sha256.Sum256([]byte("task-" + id))
+	rec := &memory.MemoryRecord{
+		MemoryID:        id,
+		SubmittingAgent: "author-agent",
+		Content:         "[TASK] " + id,
+		ContentHash:     h[:],
+		MemoryType:      memory.TypeTask,
+		DomainTag:       domain,
+		Provider:        provider,
+		ConfidenceScore: 0.9,
+		Status:          memory.StatusCommitted,
+		TaskStatus:      memory.TaskStatusPlanned,
+		CreatedAt:       time.Now().UTC(),
+	}
+	require.NoError(t, s.InsertMemory(context.Background(), rec))
+	require.NoError(t, s.UpdateMemoryClassification(context.Background(), id, store.ClearancePublic))
+}
+
+func signAgentGET(t *testing.T, req *http.Request, priv ed25519pkg.PrivateKey) string {
+	return signAgentRequest(t, req, priv, nil)
+}
+
+func signAgentRequest(t *testing.T, req *http.Request, priv ed25519pkg.PrivateKey, body []byte) string {
+	t.Helper()
+	pub := priv.Public().(ed25519pkg.PublicKey)
+	agentID := hex.EncodeToString(pub)
+	ts := time.Now().Unix()
+	req.Header.Set("X-Agent-ID", agentID)
+	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
+	req.Header.Set("X-Signature", hex.EncodeToString(auth.SignRequest(priv, req.Method, req.URL.RequestURI(), body, ts)))
+	return agentID
+}
+
+type transientClassificationStore struct {
+	*store.SQLiteStore
+	failNext atomic.Bool
+}
+
+func (s *transientClassificationStore) GetMemoryClassificationLocal(ctx context.Context, memoryID string) (int, error) {
+	if s.failNext.CompareAndSwap(true, false) {
+		return 0, fmt.Errorf("temporary classification lookup failure")
+	}
+	return s.SQLiteStore.GetMemoryClassificationLocal(ctx, memoryID)
 }
 
 func TestHandleListMemories(t *testing.T) {
@@ -91,6 +141,283 @@ func TestHandleStats(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, float64(2), resp["total_memories"])
+}
+
+func TestTaskAssignmentCrossProviderAppearsInBacklogAndInbox(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	ctx := context.Background()
+	insertTestTask(t, s, "assigned-task", "work", "codex")
+	agentPub, agentPriv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	agentID := hex.EncodeToString(agentPub)
+	require.NoError(t, s.CreateAgent(ctx, &store.AgentEntry{
+		AgentID: agentID, Name: "claude-code/tii-sage", RegisteredName: "claude-code/tii-sage",
+		Provider: "claude-code", Status: "active",
+	}))
+
+	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
+	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/assigned-task/assign", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Host = "localhost:8080"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var assigned struct {
+		NotificationCreated bool `json:"notification_created"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &assigned))
+	require.True(t, assigned.NotificationCreated)
+
+	body = bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
+	req = httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/assigned-task/assign", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Host = "localhost:8080"
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &assigned))
+	require.False(t, assigned.NotificationCreated)
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/tasks?provider=claude-code", nil)
+	require.Equal(t, agentID, signAgentGET(t, req, agentPriv))
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var backlog struct {
+		Tasks []struct {
+			MemoryID string `json:"memory_id"`
+			Assignee string `json:"assignee"`
+		} `json:"tasks"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &backlog))
+	require.Len(t, backlog.Tasks, 1)
+	require.Equal(t, "assigned-task", backlog.Tasks[0].MemoryID)
+	require.Equal(t, agentID, backlog.Tasks[0].Assignee)
+
+	// A dashboard/session/local caller cannot forge X-Agent-ID and consume the
+	// agent's notice. The subsequent signed read must still receive it.
+	req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
+	req.Header.Set("X-Agent-ID", agentID)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+
+	for wantCount := 1; wantCount >= 0; wantCount-- {
+		req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
+		require.Equal(t, agentID, signAgentGET(t, req, agentPriv))
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var inbox struct {
+			Items []*store.AgentNotification `json:"items"`
+			Count int                        `json:"count"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &inbox))
+		require.Equal(t, wantCount, inbox.Count)
+		if wantCount == 1 {
+			require.Equal(t, "assigned-task", inbox.Items[0].TaskID)
+		}
+	}
+}
+
+func TestTaskAssignmentRejectsInactiveOrUnknownAgent(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestTask(t, s, "guarded-task", "work", "codex")
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: "inactive-agent", Name: "inactive", RegisteredName: "inactive", Status: "inactive",
+	}))
+
+	for _, assignee := range []string{"missing-agent", "inactive-agent"} {
+		body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, assignee))
+		req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/guarded-task/assign", body)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Origin", "http://localhost:8080")
+		req.Host = "localhost:8080"
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	}
+}
+
+func TestTaskAssignmentRejectsSignedAgentCaller(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestTask(t, s, "operator-only-task", "work", "codex")
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: "target-agent", Name: "target", RegisteredName: "target", Status: "active",
+	}))
+
+	pub, priv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	body := []byte(`{"assignee":"target-agent"}`)
+	path := "/v1/dashboard/tasks/operator-only-task/assign"
+	ts := time.Now().Unix()
+	req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Agent-ID", hex.EncodeToString(pub))
+	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", ts))
+	req.Header.Set("X-Signature", hex.EncodeToString(auth.SignRequest(priv, http.MethodPut, path, body, ts)))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+}
+
+func TestTaskNotificationRechecksRBACAfterAssignment(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestTask(t, s, "reclassified-task", "work", "codex")
+	agentPub, agentPriv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	agentID := hex.EncodeToString(agentPub)
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: agentID, Name: "agent-a", RegisteredName: "agent-a", Status: "active",
+	}))
+
+	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
+	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/reclassified-task/assign", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Host = "localhost:8080"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NoError(t, s.UpdateMemoryClassification(context.Background(), "reclassified-task", store.ClearanceConfidential))
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
+	require.Equal(t, agentID, signAgentGET(t, req, agentPriv))
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var inbox struct {
+		Count int `json:"count"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &inbox))
+	require.Zero(t, inbox.Count, "a notice must not reveal a task after its read access is revoked")
+}
+
+func TestTaskNotificationRejectsAgentDeactivatedAfterAssignment(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestTask(t, s, "deactivated-task", "work", "codex")
+	agentPub, agentPriv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	agentID := hex.EncodeToString(agentPub)
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: agentID, Name: "agent-a", RegisteredName: "agent-a", Status: "active",
+	}))
+
+	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
+	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/deactivated-task/assign", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Host = "localhost:8080"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), agentID, "inactive"))
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
+	require.Equal(t, agentID, signAgentGET(t, req, agentPriv))
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+}
+
+func TestTaskNotificationTransientAuthorizationFailureDoesNotConsumeNotice(t *testing.T) {
+	h, sqliteStore := newTestHandler(t)
+	wrapped := &transientClassificationStore{SQLiteStore: sqliteStore}
+	h.store = wrapped
+	r := testRouter(h)
+	insertTestTask(t, sqliteStore, "retry-auth-task", "work", "codex")
+	agentPub, agentPriv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	agentID := hex.EncodeToString(agentPub)
+	require.NoError(t, sqliteStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: agentID, Name: "agent-a", RegisteredName: "agent-a", Status: "active",
+	}))
+
+	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
+	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/retry-auth-task/assign", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Host = "localhost:8080"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	wrapped.failNext.Store(true)
+	for _, wantCount := range []int{0, 1} {
+		req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
+		signAgentGET(t, req, agentPriv)
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var inbox struct {
+			Count int `json:"count"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &inbox))
+		require.Equal(t, wantCount, inbox.Count)
+	}
+}
+
+func TestAgentTaskStatusRequiresActiveCurrentOwnerAndCannotReopen(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestTask(t, s, "owned-task", "work", "codex")
+	pubA, privA, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	pubB, privB, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	agentA := hex.EncodeToString(pubA)
+	agentB := hex.EncodeToString(pubB)
+	for id, name := range map[string]string{agentA: "agent-a", agentB: "agent-b"} {
+		require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+			AgentID: id, Name: name, RegisteredName: name, Status: "active",
+		}))
+	}
+
+	assignBody := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentA))
+	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/owned-task/assign", assignBody)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Host = "localhost:8080"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	putStatus := func(priv ed25519pkg.PrivateKey, status string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := []byte(fmt.Sprintf(`{"task_status":%q}`, status))
+		path := "/v1/dashboard/tasks/owned-task/status"
+		req := httptest.NewRequest(http.MethodPut, path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		signAgentRequest(t, req, priv, body)
+		rr := httptest.NewRecorder()
+		r.ServeHTTP(rr, req)
+		return rr
+	}
+
+	for _, status := range []string{"done", "dropped"} {
+		rr := putStatus(privB, status)
+		require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	}
+	require.Equal(t, http.StatusForbidden, putStatus(privB, "planned").Code)
+
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), agentA, "inactive"))
+	require.Equal(t, http.StatusForbidden, putStatus(privA, "done").Code)
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), agentA, "active"))
+	require.Equal(t, http.StatusOK, putStatus(privA, "done").Code)
+	require.Equal(t, http.StatusForbidden, putStatus(privA, "planned").Code)
+
+	tasks, err := s.GetAllTasks(context.Background(), "work", 10)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, memory.TaskStatusDone, tasks[0].TaskStatus)
+	require.Empty(t, tasks[0].Assignee)
 }
 
 func TestHandleDeleteMemory(t *testing.T) {

@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.6.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.6.1. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -387,7 +387,10 @@ Corroborate a memory. Raises confidence via decay model.
 
 ### `PUT /v1/memory/{memory_id}/task-status`
 
-Update task status for a `task`-type memory (off-chain only, no tx).
+Start or finish a `task`-type memory as the active signed agent (off-chain only,
+no tx). `in_progress` atomically claims open unassigned/self-owned work;
+`done`/`dropped` requires the current assignee. Agents cannot set `planned` or
+reopen terminal work; use the local CEREBRUM operator board.
 
 **Request body:**
 
@@ -1115,6 +1118,46 @@ Fetch pending messages for the authenticated agent (by agent_id or provider). Au
 **Query parameters:** `limit` (1–20, default 5)
 
 **Response** (HTTP 200): `{"items": [...PipelineMessage], "count": N}`
+
+Concurrent inbox reads return only messages whose claim compare-and-swap the
+caller actually won; a losing reader never receives the same work item.
+
+---
+
+### Task assignment and agent notices
+
+`PUT /v1/dashboard/tasks/{id}/assign` accepts `{"assignee":"<agent-id>"}`
+(empty unassigns). This is a local CEREBRUM operator action; callers presenting
+an agent identity cannot assign or reassign work. On an unencrypted personal
+node, local processes are part of the documented trusted operator boundary, so
+same-origin headers prevent browser CSRF but are not authentication against
+untrusted local software. Encrypted nodes additionally require the dashboard
+session. The target must be an active registered agent and must be
+allowed to read a non-public task. SQLite commits the assignee, monotonic
+assignment generation, in-progress transition, pickup reset, retirement of the
+prior notice, and new one-way notice atomically. Repeating the same assignment
+is a true no-op that preserves pickup evidence and does not duplicate notices.
+Moving a task to `done` or `dropped` clears its current assignee while retaining
+pickup evidence; reopening therefore remains unassigned until the operator
+hands it off again, which creates a fresh generation and notice.
+For signed agents, `in_progress` is one atomic claim-and-start operation and
+`done`/`dropped` is allowed only for the current active assignee, using an
+atomic owner/status transition. Agents cannot re-plan or reopen work; those
+transitions stay on the local operator board. Current task read permission is
+checked before every agent status change.
+
+`GET /v1/dashboard/task-notifications?limit=5` is signed with `X-Agent-ID` and
+peeks current notices, applies current active-agent and task RBAC checks, then
+acknowledges only the notices actually returned. A transient authorization
+lookup failure leaves the notice unread for retry; a definitive denial retires
+it. Notices are not
+pipeline jobs and require no result. `sage_inbox` merges them into its response;
+`sage_inception` instructs agents to check both `sage_backlog` and `sage_inbox`
+at session start.
+The handler uses only the signature-verified agent identity bound by dashboard
+authentication, rechecks that the agent is active, and rechecks current task
+read permission before returning each notice. A bare `X-Agent-ID` header cannot
+read or consume another agent's inbox.
 
 ---
 

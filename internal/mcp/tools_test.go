@@ -495,6 +495,8 @@ func TestSageInception_ExistingMemories(t *testing.T) {
 	m := result.(map[string]any)
 	assert.Equal(t, "awakened", m["status"])
 	assert.Contains(t, m["instructions"], "EVERY TURN")
+	assert.Contains(t, m["instructions"], "sage_backlog({})")
+	assert.Contains(t, m["instructions"], "sage_inbox({})")
 	assert.Contains(t, m["message"], "Welcome back")
 }
 
@@ -526,6 +528,8 @@ func TestSageInception_FreshBrain(t *testing.T) {
 	assert.Equal(t, "inception_complete", m["status"])
 	assert.EqualValues(t, 5, m["memories_seeded"])
 	assert.Contains(t, m["message"], "SAGE memory initialized")
+	assert.Contains(t, m["message"], "sage_backlog({})")
+	assert.Contains(t, m["message"], "sage_inbox({})")
 }
 
 func TestSageReflect(t *testing.T) {
@@ -1512,4 +1516,135 @@ func TestSageTurn_Signal_KeywordOnlyOnHashNode(t *testing.T) {
 	assert.Equal(t, true, m["semantic_degraded"])
 	reason, _ := m["degraded_reason"].(string)
 	assert.Contains(t, reason, "non-semantic")
+}
+
+func TestSageInboxMergesTaskAssignmentNotices(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{
+				"notification_id": "task-assignment:task-1:1", "kind": "task_assignment",
+				"task_id": "task-1", "assignment_version": 1, "domain": "work",
+				"title": "A task was assigned to you", "created_at": "2026-07-11T00:00:00Z",
+			}},
+			"count": 1,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolInbox(context.Background(), map[string]any{})
+	require.NoError(t, err)
+	inbox := result.(map[string]any)
+	require.Equal(t, 1, inbox["count"])
+	require.Equal(t, 1, inbox["task_assignment_count"])
+	items := inbox["items"].([]map[string]any)
+	require.Len(t, items, 1)
+	require.Equal(t, "task-1", items[0]["task_id"])
+	require.Equal(t, false, items[0]["requires_result"])
+	require.Contains(t, inbox["message"], "sage_backlog")
+}
+
+func TestSageBacklogExposesCurrentAssignmentOwnership(t *testing.T) {
+	var agentID string
+	seenAgent := make(chan string, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/dashboard/tasks", func(w http.ResponseWriter, r *http.Request) {
+		requestAgent := r.Header.Get("X-Agent-ID")
+		seenAgent <- requestAgent
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"tasks": []map[string]any{
+				{"memory_id": "assigned", "content": "[TASK] assigned", "domain_tag": "work", "task_status": "in_progress", "assignee": requestAgent},
+				{"memory_id": "unassigned", "content": "[TASK] unassigned", "domain_tag": "work", "task_status": "planned", "assignee": ""},
+			},
+			"total": 2,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	agentID = s.agentID
+	result, err := s.toolBacklog(context.Background(), map[string]any{})
+	require.NoError(t, err)
+	require.Equal(t, agentID, <-seenAgent)
+	backlog := result.(map[string]any)
+	byDomain := backlog["tasks_by_domain"].(map[string][]map[string]any)
+	require.Len(t, byDomain["work"], 2)
+	require.Equal(t, agentID, byDomain["work"][0]["assignee"])
+	require.Equal(t, true, byDomain["work"][0]["assigned_to_you"])
+	require.Equal(t, "", byDomain["work"][1]["assignee"])
+	require.Equal(t, false, byDomain["work"][1]["assigned_to_you"])
+}
+
+func TestSageInboxLimitAppliesAcrossBothSources(t *testing.T) {
+	pipeLimit := make(chan string, 1)
+	notificationLimit := make(chan string, 1)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, r *http.Request) {
+		pipeLimit <- r.URL.Query().Get("limit")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{"pipe_id": "p1", "from_provider": "codex", "payload": "one"},
+				{"pipe_id": "p2", "from_provider": "codex", "payload": "two"},
+			},
+			"count": 2,
+		})
+	})
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, r *http.Request) {
+		notificationLimit <- r.URL.Query().Get("limit")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{"notification_id": "n1", "kind": "task_assignment", "task_id": "t1"}},
+			"count": 1,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolInbox(context.Background(), map[string]any{"limit": 3})
+	require.NoError(t, err)
+	require.Equal(t, "3", <-pipeLimit)
+	require.Equal(t, "1", <-notificationLimit, "only the remaining unified capacity may be requested")
+	inbox := result.(map[string]any)
+	require.Equal(t, 3, inbox["count"])
+	require.Len(t, inbox["items"].([]map[string]any), 3)
+}
+
+func TestSageInboxReturnsClaimedPipelineWorkWhenTaskInboxFails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{
+				"pipe_id": "pipe-claimed", "from_agent": "agent-a", "from_provider": "codex",
+				"intent": "review", "payload": "check this", "created_at": "2026-07-11T00:00:00Z",
+			}},
+			"count": 1,
+		})
+	})
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolInbox(context.Background(), map[string]any{})
+	require.NoError(t, err)
+	inbox := result.(map[string]any)
+	require.Equal(t, 1, inbox["count"])
+	require.Equal(t, 1, inbox["pipeline_count"])
+	require.Contains(t, inbox["task_inbox_error"], "503")
+	items := inbox["items"].([]map[string]any)
+	require.Len(t, items, 1)
+	require.Equal(t, "pipe-claimed", items[0]["pipe_id"])
+	require.Equal(t, true, items[0]["requires_result"])
 }

@@ -1801,8 +1801,70 @@ func (s *Server) handleUpdateTaskStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := s.store.UpdateTaskStatus(r.Context(), memoryID, ts); err != nil {
-		writeProblem(w, http.StatusNotFound, "Task not found", err.Error())
+	agentID := middleware.ContextAgentID(r.Context())
+	if agentID == "" || s.agentStore == nil {
+		writeProblem(w, http.StatusForbidden, "Active agent required", "A registered active agent identity is required.")
+		return
+	}
+	agent, err := s.agentStore.GetAgent(r.Context(), agentID)
+	if err != nil || agent == nil || agent.Status != "active" || agent.RemovedAt != nil {
+		writeProblem(w, http.StatusForbidden, "Active agent required", "A registered active agent identity is required.")
+		return
+	}
+	rec, err := s.store.GetMemory(r.Context(), memoryID)
+	if err != nil || rec == nil || rec.MemoryType != memory.TypeTask {
+		writeProblem(w, http.StatusNotFound, "Task not found", "No task was found with that ID.")
+		return
+	}
+	if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, rec.DomainTag, "read"); accessErr != nil {
+		writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+		return
+	}
+	if reader, ok := s.store.(interface {
+		GetMemoryClassificationLocal(context.Context, string) (int, error)
+	}); ok {
+		classification, classErr := reader.GetMemoryClassificationLocal(r.Context(), memoryID)
+		if classErr != nil {
+			writeProblem(w, http.StatusServiceUnavailable, "Authorization unavailable", "Task authorization could not be verified; retry later.")
+			return
+		}
+		if classification > 0 {
+			if s.badgerStore == nil {
+				writeProblem(w, http.StatusForbidden, "Access denied", "No verified read access to this classified task.")
+				return
+			}
+			allowed, accessErr := s.badgerStore.HasAccessMultiOrg(rec.DomainTag, agentID, uint8(classification), time.Now(), s.isPostV8Fork())
+			if accessErr != nil || !allowed {
+				writeProblem(w, http.StatusForbidden, "Access denied", "No verified read access to this classified task.")
+				return
+			}
+		}
+	} else {
+		writeProblem(w, http.StatusServiceUnavailable, "Authorization unavailable", "This datastore cannot verify task classification for an agent status change.")
+		return
+	}
+
+	var changed bool
+	switch ts {
+	case memory.TaskStatusInProgress:
+		changed, err = s.store.ClaimTask(r.Context(), memoryID, agentID)
+	case memory.TaskStatusDone, memory.TaskStatusDropped:
+		assignmentStore, ok := s.store.(store.TaskAssignmentStore)
+		if !ok {
+			writeProblem(w, http.StatusNotImplemented, "Task completion unavailable", "This datastore does not support agent-owned task completion.")
+			return
+		}
+		changed, err = assignmentStore.CompleteTaskAsAgent(r.Context(), memoryID, agentID, ts)
+	case memory.TaskStatusPlanned:
+		writeProblem(w, http.StatusForbidden, "Operator action required", "Only the local CEREBRUM task board can reopen or re-plan work.")
+		return
+	}
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Task update failed", err.Error())
+		return
+	}
+	if !changed {
+		writeProblem(w, http.StatusConflict, "Task update conflict", "The task is terminal or owned by another agent.")
 		return
 	}
 

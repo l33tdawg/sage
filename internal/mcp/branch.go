@@ -49,7 +49,11 @@ func currentBranchTag(ctx context.Context) string {
 	}
 
 	// Soft timeout so a wedged git process can't stall a memory write.
-	cmdCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	// Race-enabled full-suite runs can leave a healthy local git process queued
+	// behind CPU-heavy packages for longer than 750ms. Two seconds remains a
+	// tight user-facing bound while avoiding false "not a repository" results
+	// under ordinary machine load.
+	cmdCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, "git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD")

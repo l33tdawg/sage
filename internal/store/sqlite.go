@@ -583,6 +583,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	s.migrateTaskSupport(ctx)
 	s.migrateTaskAssignee(ctx)
 	s.migrateTaskPickup(ctx)
+	if err := s.migrateTaskAssignmentNotifications(ctx); err != nil {
+		return fmt.Errorf("migrate task assignment notifications: %w", err)
+	}
 
 	// Migration: add embedding_provider column. MUST run AFTER migrateTaskSupport,
 	// which recreates the memories table from a fixed schema (and would otherwise
@@ -757,6 +760,80 @@ func (s *SQLiteStore) migrateTaskPickup(ctx context.Context) {
 		_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_picked_up_by TEXT DEFAULT ''`)
 		_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_task_picked_up_by ON memories(task_picked_up_by) WHERE task_picked_up_by != ''`)
 	}
+}
+
+// migrateTaskAssignmentNotifications adds a monotonic assignment generation
+// and a dedicated one-way notification inbox. These notices are deliberately
+// separate from pipeline work items: reading one requires no result and does
+// not consume pipeline quota.
+func (s *SQLiteStore) migrateTaskAssignmentNotifications(ctx context.Context) error {
+	var hasVersion int
+	if err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='task_assignment_version'`).Scan(&hasVersion); err != nil {
+		return fmt.Errorf("inspect assignment generation: %w", err)
+	}
+	if hasVersion == 0 {
+		if _, err := s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_assignment_version INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add assignment generation: %w", err)
+		}
+	}
+	var hasHandoff int
+	if err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='task_requires_handoff'`).Scan(&hasHandoff); err != nil {
+		return fmt.Errorf("inspect task handoff gate: %w", err)
+	}
+	if hasHandoff == 0 {
+		if _, err := s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_requires_handoff INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("add task handoff gate: %w", err)
+		}
+	}
+	if _, err := s.writeExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS agent_notifications (
+			notification_id TEXT PRIMARY KEY,
+			agent_id TEXT NOT NULL,
+			kind TEXT NOT NULL CHECK (kind IN ('task_assignment')),
+			task_id TEXT NOT NULL,
+			assignment_version INTEGER NOT NULL,
+			domain TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL DEFAULT 'unread' CHECK (state IN ('unread','read','superseded')),
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			read_at TEXT,
+			UNIQUE(kind, task_id, assignment_version, agent_id)
+		)`); err != nil {
+		return fmt.Errorf("create agent notifications: %w", err)
+	}
+	if _, err := s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_agent_notifications_inbox ON agent_notifications(agent_id, state, created_at)`); err != nil {
+		return fmt.Errorf("index agent notification inbox: %w", err)
+	}
+	if _, err := s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_agent_notifications_task ON agent_notifications(task_id, assignment_version, state)`); err != nil {
+		return fmt.Errorf("index task notifications: %w", err)
+	}
+	// Upgrade repair: existing assigned/open tasks predate notifications. Give
+	// them generation 1 and create exactly one unread notice without disturbing
+	// any authenticated pickup timestamp.
+	if _, err := s.writeExecContext(ctx, `
+		UPDATE memories SET task_assignment_version = 1
+		WHERE memory_type = 'task' AND COALESCE(assignee, '') != '' AND task_assignment_version = 0`); err != nil {
+		return fmt.Errorf("backfill assignment generations: %w", err)
+	}
+	if _, err := s.writeExecContext(ctx, `
+		UPDATE memories SET task_requires_handoff = 1
+		WHERE memory_type = 'task' AND task_status IN ('done','dropped')`); err != nil {
+		return fmt.Errorf("backfill terminal task handoff gates: %w", err)
+	}
+	if _, err := s.writeExecContext(ctx, `
+		INSERT OR IGNORE INTO agent_notifications
+		 (notification_id, agent_id, kind, task_id, assignment_version, domain, title, state)
+		SELECT 'task-assignment:' || m.memory_id || ':' || m.task_assignment_version,
+		       m.assignee, 'task_assignment', m.memory_id, m.task_assignment_version,
+		       m.domain_tag, 'A task was assigned to you', 'unread'
+		FROM memories m
+		JOIN network_agents a ON a.agent_id = m.assignee
+		WHERE m.memory_type = 'task' AND m.status != 'deprecated'
+		  AND m.task_status IN ('planned','in_progress')
+		  AND a.status = 'active' AND a.removed_at IS NULL`); err != nil {
+		return fmt.Errorf("backfill assignment notifications: %w", err)
+	}
+	return nil
 }
 
 // migrateTaskSupport adds task_status column and updates the memory_type CHECK constraint
@@ -3600,15 +3677,40 @@ func (s *SQLiteStore) scanMemoryRow(rows *sql.Rows) (*memory.MemoryRecord, error
 
 // UpdateTaskStatus updates the task_status of a task memory.
 func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {
-	result, err := s.writeExecContext(ctx,
-		`UPDATE memories SET task_status = ? WHERE memory_id = ? AND memory_type = 'task'`,
-		string(taskStatus), memoryID)
+	terminal := taskStatus == memory.TaskStatusDone || taskStatus == memory.TaskStatusDropped
+	if terminal && s.db != nil {
+		return s.RunInTx(ctx, func(tx OffchainStore) error {
+			return tx.(*SQLiteStore).UpdateTaskStatus(ctx, memoryID, taskStatus)
+		})
+	}
+	query := `UPDATE memories
+		SET task_requires_handoff = CASE
+		      WHEN task_status IN ('done','dropped') THEN 1 ELSE task_requires_handoff END,
+		    task_status = ?
+		WHERE memory_id = ? AND memory_type = 'task'`
+	if terminal {
+		// Terminal work has no current owner. Preserve task_picked_up_by/at as
+		// completion evidence, but clear assignee so a later reopen is visibly
+		// unassigned and must be handed off again to create a fresh notice.
+		query = `UPDATE memories
+			SET task_status = ?,
+			    task_assignment_version = task_assignment_version + CASE WHEN COALESCE(assignee, '') != '' THEN 1 ELSE 0 END,
+			    assignee = '', task_requires_handoff = 1
+			WHERE memory_id = ? AND memory_type = 'task'`
+	}
+	result, err := s.writeExecContext(ctx, query, string(taskStatus), memoryID)
 	if err != nil {
 		return fmt.Errorf("update task status: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("task not found: %s", memoryID)
+	}
+	if terminal {
+		if _, err := s.writeExecContext(ctx,
+			`UPDATE agent_notifications SET state = 'superseded' WHERE task_id = ? AND state = 'unread'`, memoryID); err != nil {
+			return fmt.Errorf("supersede terminal task notifications: %w", err)
+		}
 	}
 	return nil
 }
@@ -3746,15 +3848,21 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 		query += ` AND domain_tag = ?`
 		args = append(args, domain)
 	}
-	if provider != "" {
+	// Explicit assignment outranks the task author's provider. An identified
+	// agent always sees tasks assigned to its immutable agent ID, while
+	// unassigned work remains scoped to its provider. The old independent ANDs
+	// made cross-provider assignments disappear from sage_backlog.
+	if assignee != "" {
+		if provider != "" {
+			query += ` AND (assignee = ? OR (COALESCE(assignee, '') = '' AND (provider = ? OR provider = '')))`
+			args = append(args, assignee, provider)
+		} else {
+			query += ` AND (COALESCE(assignee, '') = '' OR assignee = ?)`
+			args = append(args, assignee)
+		}
+	} else if provider != "" {
 		query += ` AND (provider = ? OR provider = '')`
 		args = append(args, provider)
-	}
-	// Ownership: an identified agent sees unassigned tasks + those assigned to it,
-	// never tasks another agent has claimed - so agents don't double-work.
-	if assignee != "" {
-		query += ` AND (COALESCE(assignee, '') = '' OR assignee = ?)`
-		args = append(args, assignee)
 	}
 	query += ` ORDER BY created_at DESC`
 
@@ -3772,7 +3880,14 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 		}
 		records = append(records, rec)
 	}
-	return records, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close() // release the query before hydrating board-only fields
+	if err := s.populateTaskAssignees(ctx, records); err != nil {
+		return nil, err
+	}
+	return records, nil
 }
 
 // GetAllTasks returns all task memories across all statuses for the Kanban board.
@@ -3818,15 +3933,17 @@ func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int)
 		return nil, err
 	}
 	_ = rows.Close() // done reading; the follow-up assignee query reuses the conn
-	s.populateTaskAssignees(ctx, records)
+	if err := s.populateTaskAssignees(ctx, records); err != nil {
+		return nil, err
+	}
 	return records, nil
 }
 
 // populateTaskAssignees fills task board-only fields that are not part of
 // scanMemoryRow's fixed column set.
-func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memory.MemoryRecord) {
+func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memory.MemoryRecord) error {
 	if len(records) == 0 {
-		return
+		return nil
 	}
 	ph := make([]string, len(records))
 	args := make([]any, len(records))
@@ -3838,7 +3955,7 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 		`SELECT memory_id, COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at
 		 FROM memories WHERE memory_id IN (`+strings.Join(ph, ",")+`)`, args...)
 	if err != nil {
-		return
+		return fmt.Errorf("query task assignment fields: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	type taskBoardFields struct {
@@ -3850,13 +3967,17 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 	for rows.Next() {
 		var id, a, pickedBy string
 		var pickedAt *string
-		if rows.Scan(&id, &a, &pickedBy, &pickedAt) == nil {
-			byID[id] = taskBoardFields{
-				assignee:   a,
-				pickedBy:   pickedBy,
-				pickedUpAt: parseTimePtr(pickedAt),
-			}
+		if err := rows.Scan(&id, &a, &pickedBy, &pickedAt); err != nil {
+			return fmt.Errorf("scan task assignment fields: %w", err)
 		}
+		byID[id] = taskBoardFields{
+			assignee:   a,
+			pickedBy:   pickedBy,
+			pickedUpAt: parseTimePtr(pickedAt),
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read task assignment fields: %w", err)
 	}
 	for _, rec := range records {
 		fields := byID[rec.MemoryID]
@@ -3864,24 +3985,77 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 		rec.TaskPickedUpBy = fields.pickedBy
 		rec.TaskPickedUpAt = fields.pickedUpAt
 	}
+	return nil
 }
 
-// ClaimTask atomically assigns a task to agentID ONLY if it is currently
-// unassigned OR already owned by agentID (a compare-and-swap). Returns whether
-// the claim was taken: (false, nil) means another agent owns it (or it does not
-// exist), so the caller must not proceed. This is the mutual-exclusion that stops
-// two agents doing the same work.
+// ClaimTask atomically assigns and starts an OPEN task only if it is currently
+// unassigned or already owned by agentID. Terminal tasks are never reopened by
+// agent pickup; they require an operator handoff first. First pickup evidence is
+// preserved on retries.
 func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (bool, error) {
 	res, err := s.writeExecContext(ctx,
 		`UPDATE memories
-		 SET assignee = ?, task_picked_up_by = ?, task_picked_up_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		 WHERE memory_id = ? AND memory_type = 'task' AND COALESCE(assignee, '') IN ('', ?)`,
-		agentID, agentID, memoryID, agentID)
+		 SET assignee = ?, task_status = 'in_progress',
+		     task_picked_up_by = CASE
+		       WHEN COALESCE(assignee, '') = '' THEN ?
+		       WHEN COALESCE(task_picked_up_by, '') = '' THEN ?
+		       ELSE task_picked_up_by END,
+		     task_picked_up_at = CASE
+		       WHEN COALESCE(assignee, '') = '' OR task_picked_up_at IS NULL
+		       THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_picked_up_at END
+		 WHERE memory_id = ? AND memory_type = 'task'
+		   AND task_status IN ('planned','in_progress')
+		   AND task_requires_handoff = 0
+		   AND COALESCE(assignee, '') IN ('', ?)
+		   AND EXISTS (SELECT 1 FROM network_agents a
+		               WHERE a.agent_id = ? AND a.status = 'active' AND a.removed_at IS NULL)`,
+		agentID, agentID, agentID, memoryID, agentID, agentID)
 	if err != nil {
 		return false, fmt.Errorf("claim task: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// CompleteTaskAsAgent atomically completes/drops an open task only for its
+// current active assignee. It clears current ownership, preserves pickup
+// evidence, advances the assignment generation, and retires unread notices in
+// the same transaction.
+func (s *SQLiteStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agentID string, status memory.TaskStatus) (bool, error) {
+	if status != memory.TaskStatusDone && status != memory.TaskStatusDropped {
+		return false, fmt.Errorf("agent terminal status must be done or dropped")
+	}
+	if s.db != nil {
+		var completed bool
+		err := s.RunInTx(ctx, func(tx OffchainStore) error {
+			var innerErr error
+			completed, innerErr = tx.(*SQLiteStore).CompleteTaskAsAgent(ctx, memoryID, agentID, status)
+			return innerErr
+		})
+		return completed, err
+	}
+	result, err := s.conn.ExecContext(ctx,
+		`UPDATE memories
+		 SET task_status = ?, task_assignment_version = task_assignment_version + 1,
+		     assignee = '', task_requires_handoff = 1
+		 WHERE memory_id = ? AND memory_type = 'task'
+		   AND task_status IN ('planned','in_progress') AND assignee = ?
+		   AND EXISTS (SELECT 1 FROM network_agents a
+		               WHERE a.agent_id = ? AND a.status = 'active' AND a.removed_at IS NULL)`,
+		string(status), memoryID, agentID, agentID)
+	if err != nil {
+		return false, fmt.Errorf("complete task as agent: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return false, nil
+	}
+	if _, err := s.conn.ExecContext(ctx,
+		`UPDATE agent_notifications SET state = 'superseded'
+		 WHERE task_id = ? AND state = 'unread'`, memoryID); err != nil {
+		return false, fmt.Errorf("supersede completed task notifications: %w", err)
+	}
+	return true, nil
 }
 
 // SetTaskAssignee assigns a task to (or claims it for) an agent. Empty assignee
@@ -3898,6 +4072,245 @@ func (s *SQLiteStore) SetTaskAssignee(ctx context.Context, memoryID, assignee st
 		return fmt.Errorf("task not found: %s", memoryID)
 	}
 	return nil
+}
+
+// AssignTaskAndNotify commits the assignment transition and its one-way inbox
+// notice together. Repeating the same assignment is idempotent and preserves
+// authenticated pickup evidence. A monotonic generation makes A->B->A a new,
+// independently deliverable event while stale notices are superseded.
+func (s *SQLiteStore) AssignTaskAndNotify(ctx context.Context, memoryID, assignee string) (*TaskAssignmentResult, error) {
+	if s.db != nil {
+		var out *TaskAssignmentResult
+		err := s.RunInTx(ctx, func(tx OffchainStore) error {
+			var innerErr error
+			out, innerErr = tx.(*SQLiteStore).AssignTaskAndNotify(ctx, memoryID, assignee)
+			return innerErr
+		})
+		return out, err
+	}
+
+	var current, domain, taskStatus, memoryStatus string
+	var version int64
+	if assignee != "" {
+		var active int
+		if err := s.conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM network_agents
+			 WHERE agent_id = ? AND status = 'active' AND removed_at IS NULL`, assignee).Scan(&active); err != nil {
+			return nil, fmt.Errorf("validate task assignee: %w", err)
+		}
+		if active != 1 {
+			return nil, fmt.Errorf("choose an active registered agent")
+		}
+	}
+	err := s.conn.QueryRowContext(ctx,
+		`SELECT COALESCE(assignee, ''), COALESCE(task_assignment_version, 0), domain_tag,
+		        COALESCE(task_status, ''), status
+		 FROM memories WHERE memory_id = ? AND memory_type = 'task'`, memoryID).
+		Scan(&current, &version, &domain, &taskStatus, &memoryStatus)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("task not found: %s", memoryID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read task assignment: %w", err)
+	}
+	if memoryStatus == string(memory.StatusDeprecated) || taskStatus == string(memory.TaskStatusDone) || taskStatus == string(memory.TaskStatusDropped) {
+		return nil, fmt.Errorf("task is no longer open: %s", memoryID)
+	}
+
+	changed := current != assignee
+	if changed {
+		version++
+		newStatus := taskStatus
+		if assignee != "" {
+			newStatus = string(memory.TaskStatusInProgress)
+		}
+		if _, err = s.conn.ExecContext(ctx,
+			`UPDATE memories SET assignee = ?, task_assignment_version = ?, task_status = ?,
+			 task_picked_up_by = '', task_picked_up_at = NULL,
+			 task_requires_handoff = CASE WHEN ? != '' THEN 0 ELSE task_requires_handoff END
+			 WHERE memory_id = ? AND memory_type = 'task'`,
+			assignee, version, newStatus, assignee, memoryID); err != nil {
+			return nil, fmt.Errorf("update task assignment: %w", err)
+		}
+		taskStatus = newStatus
+		if _, err = s.conn.ExecContext(ctx,
+			`UPDATE agent_notifications SET state = 'superseded'
+			 WHERE task_id = ? AND state = 'unread'`, memoryID); err != nil {
+			return nil, fmt.Errorf("supersede task notifications: %w", err)
+		}
+	} else if assignee != "" && version == 0 {
+		// Backfill a generation for legacy assigned rows without resetting pickup.
+		version = 1
+		if _, err = s.conn.ExecContext(ctx,
+			`UPDATE memories SET task_assignment_version = ? WHERE memory_id = ?`, version, memoryID); err != nil {
+			return nil, fmt.Errorf("backfill task assignment generation: %w", err)
+		}
+	}
+
+	notificationCreated := false
+	if assignee != "" {
+		notificationID := fmt.Sprintf("task-assignment:%s:%d", memoryID, version)
+		insertResult, insertErr := s.conn.ExecContext(ctx,
+			`INSERT OR IGNORE INTO agent_notifications
+			 (notification_id, agent_id, kind, task_id, assignment_version, domain, title, state)
+			 VALUES (?, ?, 'task_assignment', ?, ?, ?, 'A task was assigned to you', 'unread')`,
+			notificationID, assignee, memoryID, version, domain)
+		if insertErr != nil {
+			return nil, fmt.Errorf("create task notification: %w", insertErr)
+		}
+		inserted, _ := insertResult.RowsAffected()
+		notificationCreated = inserted == 1
+	}
+
+	return &TaskAssignmentResult{
+		Changed: changed, Assignee: assignee, AssignmentVersion: version, TaskStatus: taskStatus,
+		NotificationCreated: notificationCreated,
+	}, nil
+}
+
+// PeekAgentNotifications returns unread notices without acknowledging them.
+// Joining the task row prevents a superseded assignment from authorizing or
+// resurfacing stale work. The handler performs current RBAC checks before it
+// acknowledges only the notices it will actually return.
+func (s *SQLiteStore) PeekAgentNotifications(ctx context.Context, agentID string, limit int) ([]*AgentNotification, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 5
+	}
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT n.notification_id, n.agent_id, n.kind, n.task_id, n.assignment_version,
+		        n.domain, n.title, n.state, n.created_at
+		 FROM agent_notifications n
+		 JOIN memories m ON m.memory_id = n.task_id
+		 WHERE n.agent_id = ? AND n.state = 'unread'
+		   AND m.memory_type = 'task' AND m.status != 'deprecated'
+		   AND m.task_status IN ('planned','in_progress')
+		   AND m.assignee = n.agent_id
+		   AND m.task_assignment_version = n.assignment_version
+		 ORDER BY n.created_at ASC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get agent notifications: %w", err)
+	}
+	items := make([]*AgentNotification, 0)
+	for rows.Next() {
+		var n AgentNotification
+		var createdAt string
+		if err := rows.Scan(&n.NotificationID, &n.AgentID, &n.Kind, &n.TaskID,
+			&n.AssignmentVersion, &n.Domain, &n.Title, &n.State, &createdAt); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		n.CreatedAt = parseTime(createdAt)
+		items = append(items, &n)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+// AcknowledgeAgentNotifications marks only notices already authorized for and
+// returned to this agent. The current task assignment/version is rechecked at
+// the write boundary so a concurrent reassignment cannot acknowledge stale work.
+func (s *SQLiteStore) AcknowledgeAgentNotifications(ctx context.Context, agentID string, notificationIDs []string) ([]string, error) {
+	if len(notificationIDs) == 0 {
+		return []string{}, nil
+	}
+	if s.db != nil {
+		var acknowledged []string
+		err := s.RunInTx(ctx, func(tx OffchainStore) error {
+			var innerErr error
+			acknowledged, innerErr = tx.(*SQLiteStore).AcknowledgeAgentNotifications(ctx, agentID, notificationIDs)
+			return innerErr
+		})
+		return acknowledged, err
+	}
+	acknowledged := make([]string, 0, len(notificationIDs))
+	for _, notificationID := range notificationIDs {
+		result, err := s.conn.ExecContext(ctx,
+			`UPDATE agent_notifications SET state = 'read', read_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			 WHERE notification_id = ? AND agent_id = ? AND state = 'unread'
+			   AND EXISTS (
+			     SELECT 1 FROM memories m
+			     WHERE m.memory_id = agent_notifications.task_id
+			       AND m.memory_type = 'task' AND m.status != 'deprecated'
+			       AND m.task_status IN ('planned','in_progress')
+			       AND m.assignee = agent_notifications.agent_id
+			       AND m.task_assignment_version = agent_notifications.assignment_version
+			   )
+			   AND EXISTS (
+			     SELECT 1 FROM network_agents a
+			     WHERE a.agent_id = agent_notifications.agent_id
+			       AND a.status = 'active' AND a.removed_at IS NULL
+			   )`, notificationID, agentID)
+		if err != nil {
+			return nil, fmt.Errorf("acknowledge agent notification: %w", err)
+		}
+		rows, _ := result.RowsAffected()
+		if rows == 1 {
+			acknowledged = append(acknowledged, notificationID)
+		}
+	}
+	return acknowledged, nil
+}
+
+// SupersedeAgentNotifications retires notices for which current authorization
+// was definitively denied (as opposed to a transient lookup failure).
+func (s *SQLiteStore) SupersedeAgentNotifications(ctx context.Context, agentID string, notificationIDs []string) error {
+	if len(notificationIDs) == 0 {
+		return nil
+	}
+	if s.db != nil {
+		return s.RunInTx(ctx, func(tx OffchainStore) error {
+			return tx.(*SQLiteStore).SupersedeAgentNotifications(ctx, agentID, notificationIDs)
+		})
+	}
+	for _, notificationID := range notificationIDs {
+		if _, err := s.conn.ExecContext(ctx,
+			`UPDATE agent_notifications SET state = 'superseded'
+			 WHERE notification_id = ? AND agent_id = ? AND state = 'unread'`,
+			notificationID, agentID); err != nil {
+			return fmt.Errorf("supersede agent notification: %w", err)
+		}
+	}
+	return nil
+}
+
+// TakeAgentNotifications remains as the atomic store-level convenience used by
+// internal callers/tests that do not need an external RBAC decision.
+func (s *SQLiteStore) TakeAgentNotifications(ctx context.Context, agentID string, limit int) ([]*AgentNotification, error) {
+	if s.db != nil {
+		var out []*AgentNotification
+		err := s.RunInTx(ctx, func(tx OffchainStore) error {
+			var innerErr error
+			out, innerErr = tx.(*SQLiteStore).TakeAgentNotifications(ctx, agentID, limit)
+			return innerErr
+		})
+		return out, err
+	}
+	items, err := s.PeekAgentNotifications(ctx, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.NotificationID)
+	}
+	acknowledged, err := s.AcknowledgeAgentNotifications(ctx, agentID, ids)
+	if err != nil {
+		return nil, err
+	}
+	winners := make(map[string]bool, len(acknowledged))
+	for _, id := range acknowledged {
+		winners[id] = true
+	}
+	returned := items[:0]
+	for _, item := range items {
+		if winners[item.NotificationID] {
+			item.State = "read"
+			returned = append(returned, item)
+		}
+	}
+	return returned, nil
 }
 
 // ---- Tag operations ----

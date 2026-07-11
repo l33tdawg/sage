@@ -270,11 +270,11 @@ type PreValidateVote struct {
 }
 
 // resolveAgentRBAC checks whether the request comes from an authenticated MCP agent
-// (X-Agent-ID header present) and resolves on-chain RBAC visibility.
+// (a signature-bound agent identity in request context) and resolves on-chain RBAC visibility.
 // Returns (allowedAgents, seeAll). If no agent header or no BadgerStore, returns (nil, true)
 // meaning no filtering (human dashboard user).
 func (h *DashboardHandler) resolveAgentRBAC(r *http.Request) ([]string, bool) {
-	agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+	agentID := verifiedDashboardAgentID(r.Context())
 	if agentID == "" || h.BadgerStore == nil {
 		return nil, true // Human dashboard — no filtering
 	}
@@ -368,6 +368,13 @@ func (h *DashboardHandler) handlePreValidate(w http.ResponseWriter, r *http.Requ
 
 const sessionCookieName = "sage_session"
 const sessionTTL = 24 * time.Hour
+
+type verifiedDashboardAgentKey struct{}
+
+func verifiedDashboardAgentID(ctx context.Context) string {
+	agentID, _ := ctx.Value(verifiedDashboardAgentKey{}).(string)
+	return agentID
+}
 
 // securityHeaders adds standard security headers to all responses.
 func securityHeaders(next http.Handler) http.Handler {
@@ -482,6 +489,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Post("/v1/dashboard/tasks", h.handleCreateTaskDashboard)
 			r.Put("/v1/dashboard/tasks/{id}/status", h.handleUpdateTaskStatusDashboard)
 			r.Put("/v1/dashboard/tasks/{id}/assign", h.handleAssignTask)
+			r.Get("/v1/dashboard/task-notifications", h.handleTaskNotifications)
 
 			// Tags
 			r.Get("/v1/dashboard/tags", h.handleListTags)
@@ -668,16 +676,25 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 // browser tab whose Origin is not localhost / 127.0.0.1.
 func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// An agent identity is usable only when this exact request verifies. Check
+		// it before the local/browser path so a caller cannot forge X-Agent-ID (or
+		// omit a bad signature) and inherit same-origin/session authorization.
+		if strings.TrimSpace(r.Header.Get("X-Agent-ID")) != "" {
+			if !h.validAgentSignature(r) {
+				writeUnauthorized(w)
+				return
+			}
+			agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+			ctx := context.WithValue(r.Context(), verifiedDashboardAgentKey{}, agentID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
 		if !h.Encrypted.Load() {
-			if isLocalRequest(r) || h.validAgentSignature(r) {
+			if isLocalRequest(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
 			writeUnauthorized(w)
-			return
-		}
-		if h.validAgentSignature(r) {
-			next.ServeHTTP(w, r)
 			return
 		}
 		cookie, err := r.Cookie(sessionCookieName)
@@ -1026,7 +1043,7 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
 	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
 		// Grant-aware override: skip agent isolation when agent has a grant OR domain is unregistered
-		listAgentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+		listAgentID := verifiedDashboardAgentID(r.Context())
 		if opts.DomainTag != "" && h.BadgerStore != nil && listAgentID != "" {
 			var hasGrant bool
 			if h.isPostV8Fork() {
@@ -1745,8 +1762,17 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		provider := r.URL.Query().Get("provider")
 		// X-Agent-ID (set by the MCP server on every request) drives ownership: an
 		// agent's backlog excludes tasks claimed by another agent.
-		agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID"))
+		agentID := verifiedDashboardAgentID(r.Context())
 		tasks, err = h.store.GetOpenTasks(r.Context(), domain, provider, agentID)
+		if err == nil && agentID != "" {
+			filtered := tasks[:0]
+			for _, task := range tasks {
+				if h.agentCanReadTask(r.Context(), agentID, task.MemoryID, task.DomainTag) {
+					filtered = append(filtered, task)
+				}
+			}
+			tasks = filtered
+		}
 	}
 
 	if err != nil {
@@ -1813,21 +1839,59 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 		writeError(w, http.StatusBadRequest, "task_status must be one of: planned, in_progress, done, dropped")
 		return
 	}
-	// Claim-on-pickup (atomic, BEFORE the status write): when an AGENT (X-Agent-ID
-	// present) starts a task, it must win an exclusive compare-and-swap claim. If
-	// another agent already owns it, reject with 409 so the loser picks different
-	// work - this is what actually prevents two agents doing the same task. Humans
-	// (dashboard, no header) never claim and are unaffected.
-	if agentID := strings.TrimSpace(r.Header.Get("X-Agent-ID")); agentID != "" && ts == memory.TaskStatusInProgress {
-		claimed, cErr := h.store.ClaimTask(r.Context(), id, agentID)
-		if cErr != nil {
-			writeError(w, http.StatusInternalServerError, cErr.Error())
+	// Agent status changes require an active signature-bound identity and current
+	// task read permission. Starting and terminal completion are store-level CAS
+	// operations; reopening/planning is reserved for the operator task board.
+	if agentID := verifiedDashboardAgentID(r.Context()); agentID != "" {
+		agentStore, ok := h.store.(store.AgentStore)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "agent registry is not available on this datastore")
 			return
 		}
-		if !claimed {
-			writeError(w, http.StatusConflict, "task is already claimed by another agent")
+		agent, agentErr := agentStore.GetAgent(r.Context(), agentID)
+		if agentErr != nil || agent == nil || agent.Status != "active" || agent.RemovedAt != nil {
+			writeError(w, http.StatusForbidden, "active registered agent identity required")
 			return
 		}
+		task, taskErr := h.store.GetMemory(r.Context(), id)
+		if taskErr != nil {
+			writeError(w, http.StatusNotFound, taskErr.Error())
+			return
+		}
+		if !h.agentCanReadTask(r.Context(), agentID, id, task.DomainTag) {
+			writeError(w, http.StatusForbidden, "you do not have permission to update this task")
+			return
+		}
+
+		var changed bool
+		var changeErr error
+		switch ts {
+		case memory.TaskStatusInProgress:
+			changed, changeErr = h.store.ClaimTask(r.Context(), id, agentID)
+		case memory.TaskStatusDone, memory.TaskStatusDropped:
+			assignmentStore, supported := h.store.(store.TaskAssignmentStore)
+			if !supported {
+				writeError(w, http.StatusNotImplemented, "agent task completion is not available on this datastore")
+				return
+			}
+			changed, changeErr = assignmentStore.CompleteTaskAsAgent(r.Context(), id, agentID, ts)
+		case memory.TaskStatusPlanned:
+			writeError(w, http.StatusForbidden, "only the local CEREBRUM task board can reopen or re-plan work")
+			return
+		}
+		if changeErr != nil {
+			writeError(w, http.StatusInternalServerError, changeErr.Error())
+			return
+		}
+		if !changed {
+			writeError(w, http.StatusConflict, "task is terminal or owned by another agent")
+			return
+		}
+		if h.SSE != nil {
+			h.SSE.Broadcast(SSEEvent{Type: EventTask, MemoryID: id})
+		}
+		writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "task_status": body.TaskStatus})
+		return
 	}
 	if err := h.store.UpdateTaskStatus(r.Context(), id, ts); err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -1845,6 +1909,17 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 // specific agent from the dashboard. Assigning is treated as handing the job to
 // that agent now, so the card moves to In Progress immediately.
 func (h *DashboardHandler) handleAssignTask(w http.ResponseWriter, r *http.Request) {
+	// Assignment is a dashboard operator action. A caller presenting an agent
+	// identity cannot assign, reassign, or unassign work. On an unencrypted
+	// personal node, every local process is already inside the documented trusted
+	// operator boundary; Origin/Sec-Fetch only defend against cross-site browser
+	// requests and are not claimed as authentication against local software.
+	if verifiedDashboardAgentID(r.Context()) != "" ||
+		(r.Header.Get("Sec-Fetch-Site") == "" && strings.TrimSpace(r.Header.Get("Origin")) == "") ||
+		!isLocalRequest(r) {
+		writeError(w, http.StatusForbidden, "task assignments can only be changed from the local CEREBRUM task board")
+		return
+	}
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "missing task id")
@@ -1859,22 +1934,155 @@ func (h *DashboardHandler) handleAssignTask(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	assignee := strings.TrimSpace(body.Assignee)
-	if err := h.store.SetTaskAssignee(r.Context(), id, assignee); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	taskStatus := ""
 	if assignee != "" {
-		taskStatus = string(memory.TaskStatusInProgress)
-		if err := h.store.UpdateTaskStatus(r.Context(), id, memory.TaskStatusInProgress); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		agentStore, ok := h.store.(store.AgentStore)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "task assignment is not available on this datastore")
 			return
 		}
+		agent, err := agentStore.GetAgent(r.Context(), assignee)
+		if err != nil || agent == nil || agent.Status != "active" || agent.RemovedAt != nil {
+			writeError(w, http.StatusBadRequest, "choose an active registered agent")
+			return
+		}
+		task, err := h.store.GetMemory(r.Context(), id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if !h.agentCanReadTask(r.Context(), assignee, id, task.DomainTag) {
+			writeError(w, http.StatusForbidden, "that agent does not have permission to read this task")
+			return
+		}
+	}
+	assignmentStore, ok := h.store.(store.TaskAssignmentStore)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "task assignment notifications are not available on this datastore")
+		return
+	}
+	result, err := assignmentStore.AssignTaskAndNotify(r.Context(), id, assignee)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
 	}
 	if h.SSE != nil {
 		h.SSE.Broadcast(SSEEvent{Type: EventTask, MemoryID: id})
 	}
-	writeJSONResp(w, http.StatusOK, map[string]string{"memory_id": id, "assignee": assignee, "task_status": taskStatus})
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"memory_id": id, "assignee": assignee, "task_status": result.TaskStatus,
+		"assignment_version": result.AssignmentVersion, "changed": result.Changed,
+		"notification_created": result.NotificationCreated,
+	})
+}
+
+type taskClassificationReader interface {
+	GetMemoryClassificationLocal(ctx context.Context, memoryID string) (int, error)
+}
+
+// agentCanReadTask prevents assignment/backlog from becoming an RBAC side
+// channel. Public tasks are readable; non-public tasks must pass the same
+// multi-org/domain access check as memory reads.
+func (h *DashboardHandler) agentCanReadTask(ctx context.Context, agentID, memoryID, domain string) bool {
+	allowed, _ := h.agentTaskReadDecision(ctx, agentID, memoryID, domain)
+	return allowed
+}
+
+// agentTaskReadDecision distinguishes a definitive access denial from a
+// transient/unavailable authorization lookup. Notification delivery keeps a
+// notice unread on transient failures and supersedes only definitive denials.
+func (h *DashboardHandler) agentTaskReadDecision(ctx context.Context, agentID, memoryID, domain string) (allowed, definitive bool) {
+	reader, ok := h.store.(taskClassificationReader)
+	if !ok {
+		return false, false
+	}
+	classification, err := reader.GetMemoryClassificationLocal(ctx, memoryID)
+	if err != nil {
+		return false, false
+	}
+	if classification == 0 {
+		return true, true
+	}
+	if h.BadgerStore == nil {
+		return false, false
+	}
+	postFork := h.PostV8ForkFn != nil && h.PostV8ForkFn()
+	allowed, err = h.BadgerStore.HasAccessMultiOrg(domain, agentID, uint8(classification), time.Now(), postFork)
+	if err != nil {
+		return false, false
+	}
+	return allowed, true
+}
+
+// handleTaskNotifications returns one-way assignment notices for the signed
+// agent. Reading atomically acknowledges them; unlike pipeline work, these
+// notices require no claim or result.
+func (h *DashboardHandler) handleTaskNotifications(w http.ResponseWriter, r *http.Request) {
+	agentID := verifiedDashboardAgentID(r.Context())
+	if agentID == "" {
+		writeError(w, http.StatusUnauthorized, "agent identity required")
+		return
+	}
+	agentStore, ok := h.store.(store.AgentStore)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent registry is not available on this datastore")
+		return
+	}
+	agent, err := agentStore.GetAgent(r.Context(), agentID)
+	if err != nil || agent == nil || agent.Status != "active" || agent.RemovedAt != nil {
+		writeError(w, http.StatusForbidden, "active registered agent identity required")
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	assignmentStore, ok := h.store.(store.TaskAssignmentStore)
+	if !ok {
+		writeJSONResp(w, http.StatusOK, map[string]any{"items": []any{}, "count": 0})
+		return
+	}
+	items, err := assignmentStore.PeekAgentNotifications(r.Context(), agentID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	filtered := items[:0]
+	ackIDs := make([]string, 0, len(items))
+	deniedIDs := make([]string, 0)
+	for _, item := range items {
+		allowed, definitive := h.agentTaskReadDecision(r.Context(), agentID, item.TaskID, item.Domain)
+		if allowed {
+			filtered = append(filtered, item)
+			ackIDs = append(ackIDs, item.NotificationID)
+		} else if definitive {
+			deniedIDs = append(deniedIDs, item.NotificationID)
+		}
+	}
+	// Close the small status-change window between the first active check and
+	// response serialization. RBAC is rechecked per task immediately above.
+	agent, err = agentStore.GetAgent(r.Context(), agentID)
+	if err != nil || agent == nil || agent.Status != "active" || agent.RemovedAt != nil {
+		writeError(w, http.StatusForbidden, "active registered agent identity required")
+		return
+	}
+	if err = assignmentStore.SupersedeAgentNotifications(r.Context(), agentID, deniedIDs); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	acknowledged, err := assignmentStore.AcknowledgeAgentNotifications(r.Context(), agentID, ackIDs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	winners := make(map[string]bool, len(acknowledged))
+	for _, id := range acknowledged {
+		winners[id] = true
+	}
+	returned := filtered[:0]
+	for _, item := range filtered {
+		if winners[item.NotificationID] {
+			item.State = "read"
+			returned = append(returned, item)
+		}
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"items": returned, "count": len(returned)})
 }
 
 // handleCreateTaskDashboard creates a new task from the CEREBRUM dashboard.

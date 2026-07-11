@@ -1,8 +1,8 @@
-<!-- Reconciled through SAGE v11.6.0. -->
+<!-- Reconciled through SAGE v11.6.1. -->
 
 # Memory Lifecycle
 
-Verified against code at SAGE v11.6.0.
+Verified against code at SAGE v11.6.1.
 
 ## Overview
 

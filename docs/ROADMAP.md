@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.6.0 is the current release.** This document records the v11.6 slate as shipped and looks forward to v11.7, v11.8, and the v12 completion milestone. Everything past v11.6 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.6.1 is the current release.** This document records the v11.6 slate as shipped and looks forward to v11.7, v11.8, and the v12 completion milestone. Everything past v11.6 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -117,6 +117,8 @@ The release gate includes offline-write/catch-up, snapshot/state-sync recovery, 
 ## v12 - product roadmap capstone
 
 v12 is the planned completion milestone for the SAGE product roadmap: the fully integrated product rather than another backend-only release. It ships as a standalone desktop application with CEREBRUM embedded in the application window instead of opening the user's web browser. The app owns installation, node lifecycle, onboarding, permissions, updates, health/recovery, federation, and Sharing & Sync as one coherent native-feeling experience, while the SAGE daemon and authenticated local APIs remain cleanly separated underneath.
+
+**Consumer usability is a release criterion, not polish.** A nontechnical person must be able to install SAGE, create or join a node, connect an AI tool, choose what is private or shared, recover from ordinary failures, and keep the app updated without opening a terminal or learning SAGE internals. Every choice uses plain language and safe defaults; destructive or privacy-affecting actions use consistent accessible SAGE dialogs; errors explain what happened, what remains safe, and the next recovery action. The v12 release gate includes clean-machine onboarding and recovery usability tests with people who have not used SAGE before.
 
 The desktop-shell technology is deliberately not locked here. It must be chosen through a security, packaging, accessibility, performance, offline-operation, and cross-platform evaluation; “native-feeling” must not come at the cost of weakening the local trust boundary or bundling an unmaintainable browser runtime.
 

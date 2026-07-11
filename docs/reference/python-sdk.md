@@ -1,8 +1,8 @@
-Verified against SDK source at SAGE v11.6.0. Package: sage-agent-sdk.
+Verified against SDK source at SAGE v11.6.1. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.6.0
+**Package:** `sage-agent-sdk` **Version:** 11.6.1
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -433,7 +433,10 @@ update_task_status(memory_id: str, task_status: str) -> dict
 
 `PUT /v1/memory/{memory_id}/task-status`
 
-`task_status`: `"planned"` | `"in_progress"` | `"done"` | `"dropped"`.
+The API schema accepts `"planned"` | `"in_progress"` | `"done"` | `"dropped"`,
+but signed SDK callers are authorized only for `in_progress` (atomic claim/start)
+and `done`/`dropped` when they are the current active assignee. `planned` and
+terminal reopen are local CEREBRUM operator actions and return HTTP 403 here.
 
 ---
 

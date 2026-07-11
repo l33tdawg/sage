@@ -11,7 +11,7 @@ SAGE has two distinct deployment models with fundamentally different threat mode
 | **Who** | One user, one local operator | Multiple agents, teams, organizations |
 | **Trust model** | User IS the only validator | Byzantine fault tolerance across validators |
 | **Database** | Local BadgerDB/SQLite stores in `~/.sage/data/` | BadgerDB consensus state plus off-chain mirror |
-| **Release** | v11.6.0 personal-node surface | v11.6.0 quorum/federation surface |
+| **Release** | v11.6.1 personal-node surface | v11.6.1 quorum/federation surface |
 
 Many concerns raised about the enterprise codebase do not apply to SAGE Personal, and vice versa. Each item below is tagged with which deployment it affects.
 
@@ -108,7 +108,7 @@ The `make byzantine` target and GitHub Actions CI job spin up a 4-validator Dock
 
 The following boundaries describe the current v11 codebase:
 
-**SAGE Personal (sage-gui v11.6.0):**
+**SAGE Personal (sage-gui v11.6.1):**
 - Designed for one operator. The management dashboard/API remains a local surface; anyone with access to the operator session or machine should be treated as trusted.
 - Federation is an explicit network-facing feature, off by default. When enabled it uses a separate pinned-mTLS listener, active on-chain treaty checks, chain-qualified signed requests, and replay protection. v11.6 may carry that same authenticated protocol over libp2p NAT traversal and Circuit Relay v2; the relay sees encrypted traffic and connection metadata, not plaintext memories or federation keys.
 - SQLite database supports optional AES-256-GCM encryption at rest (Synaptic Ledger). Enable from CEREBRUM Settings → Security.

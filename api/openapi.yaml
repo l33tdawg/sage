@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.6.0
+  version: 11.6.1
   description: >-
     (Sovereign) Agent Governed Experience — REST API for memory submission,
     validation, and query.
@@ -1973,7 +1973,12 @@ paths:
   /v1/memory/{memory_id}/task-status:
     put:
       operationId: updateTaskStatus
-      summary: Update task status for a task-type memory (off-chain only, no tx).
+      summary: Start or finish an owned task (off-chain only, no tx).
+      description: >-
+        Requires an active signed agent with current task read access. in_progress
+        atomically claims an open unowned/self-owned task; done or dropped requires
+        the current assignee. Agents cannot set planned or reopen terminal work;
+        use the local CEREBRUM operator board for those transitions.
       tags:
         - Memory
       parameters:
@@ -1995,6 +2000,10 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Task is terminal or owned by another agent.
         "404":
           $ref: "#/components/responses/NotFound"
         "500":

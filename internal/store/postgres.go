@@ -1396,8 +1396,14 @@ func (s *PostgresStore) SetTaskAssignee(_ context.Context, _, _ string) error {
 	return fmt.Errorf("SetTaskAssignee not implemented for PostgresStore (SQLite-only feature)")
 }
 
-func (s *PostgresStore) ClaimTask(_ context.Context, _, _ string) (bool, error) {
-	return true, nil // no assignee column on Postgres; claim is a no-op that never blocks
+func (s *PostgresStore) ClaimTask(ctx context.Context, memoryID, _ string) (bool, error) {
+	result, err := s.db.Exec(ctx,
+		`UPDATE memories SET task_status = 'in_progress'
+		 WHERE memory_id = $1 AND memory_type = 'task' AND task_status IN ('planned','in_progress')`, memoryID)
+	if err != nil {
+		return false, fmt.Errorf("claim and start task: %w", err)
+	}
+	return result.RowsAffected() > 0, nil
 }
 
 func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, taskStatus memory.TaskStatus) error {

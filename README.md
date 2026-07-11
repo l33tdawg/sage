@@ -51,7 +51,16 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.6.0
+## What's New in v11.6.1
+
+**Security and task-handoff maintenance release.** v11.6.1 upgrades the transitive federation dependency quic-go to 0.59.1, incorporating the upstream fix for CVE-2026-40898. Assigned board tasks now reliably appear across provider boundaries, create dedicated one-way agent inbox notices, and are checked alongside backlog at agent boot. CEREBRUM also replaces browser-native confirmation prompts with accessible, themed SAGE dialogs. It changes no SAGE consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+
+SDK 11.6.1.
+
+## Older releases
+
+<details>
+<summary>v11.6.0 - internet federation + controlled memory sync</summary>
 
 **SAGE federation can now travel with you, and selected memories can become a shared, durable two-node brain without turning the relay into a trusted server.** v11.6.0 is an off-consensus connectivity, replication-control, and UX release: it changes no consensus rule, AppHash, transaction type, key encoding, or fork. `app-v17` remains shipped-dormant until governed activation, and existing chains replay byte-identically.
 
@@ -64,7 +73,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 SDK 11.6.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.5.0 - quorum-governed memory lifecycle + pipe hardening</summary>
