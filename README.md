@@ -53,7 +53,9 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ## What's New in v11.7.3
 
-**Settings stays cool on large brains.** CEREBRUM no longer polls health, full memory statistics, and the complete agent inventory every three seconds. Health refreshes at a calmer interval, the existing health payload supplies memory totals without a duplicate full-store scan, agents load only when Overview is visible, and all Settings polling pauses in background tabs. An RBAC save that fails on-chain now says clearly that access is not active and keeps Save enabled for an actual retry. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+**Strict project memory and task ownership, plus a cooler Settings page.** `sage_turn` now treats its domain as an exact recall boundary, so a `tii-sage` session cannot be re-anchored by memories from upstream `sage-*` projects. Agent backlogs return only tasks whose assignee exactly matches the signature-verified agent ID; unassigned work stays in human CEREBRUM triage and cannot be self-claimed. Agent-created tasks are assigned to their creator, every `in_progress` task must have an owner, and historical ownerless running rows return to Planned on upgrade. Assignment also remains subject to the agent's domain-access policy.
+
+CEREBRUM no longer polls health, full memory statistics, and the complete agent inventory every three seconds. Health refreshes at a calmer interval, the existing health payload supplies memory totals without a duplicate full-store scan, agents load only when Overview is visible, and all Settings polling pauses in background tabs. An RBAC save that fails on-chain now says clearly that access is not active and keeps Save enabled for an actual retry. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
 
 SDK 11.7.3.
 
