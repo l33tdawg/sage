@@ -55,7 +55,7 @@ func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusT
 		return fmt.Errorf("delegated agent signature is invalid: %w", err)
 	}
 	if !agentProofTimestampFresh(parsedTx.AgentTimestamp, consensusTime) {
-		return fmt.Errorf("delegated agent proof timestamp is outside the 5-minute consensus window")
+		return fmt.Errorf("delegated agent proof timestamp is older than the 5-minute consensus window")
 	}
 
 	req, err := parseSignedAgentRequest(parsedTx.AgentRequest)
@@ -134,11 +134,14 @@ func agentProofTimestampFresh(timestamp int64, consensusTime time.Time) bool {
 	if now >= math.MinInt64+skew {
 		min = now - skew
 	}
-	max := int64(math.MaxInt64)
-	if now <= math.MaxInt64-skew {
-		max = now + skew
-	}
-	return timestamp >= min && timestamp <= max
+	// Reject captured old authorizations, but do not reject a proof merely
+	// because it is ahead of consensus time. SAGE intentionally mints no idle
+	// heartbeat blocks; after a long idle period a single-validator chain's next
+	// deterministic block time can lag the REST/MCP wall clock by more than five
+	// minutes. The HTTP boundary already checks the signed timestamp against its
+	// wall clock before constructing the transaction, and the agent signature
+	// means a future-dated proof still cannot be forged by the outer node.
+	return timestamp >= min
 }
 
 func delegatedAgentProofFingerprint(parsedTx *tx.ParsedTx) [sha256.Size]byte {
@@ -255,17 +258,6 @@ func validRESTMemoryID(value string) bool {
 	return err == nil && len(raw) == 16 && raw[6]>>4 == 4 && raw[8]&0xc0 == 0x80
 }
 
-func hashRESTEmbedding(values []float32) []byte {
-	if len(values) == 0 {
-		return nil
-	}
-	h := sha256.New()
-	for _, value := range values {
-		_, _ = fmt.Fprintf(h, "%f", value)
-	}
-	return h.Sum(nil)
-}
-
 func compareAgentPayload(actual, expected *tx.ParsedTx) error {
 	actualPayload, err := tx.PayloadBytes(actual)
 	if err != nil {
@@ -312,11 +304,21 @@ func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string,
 		if actual.MemorySubmit == nil || !validRESTMemoryID(actual.MemorySubmit.MemoryID) {
 			return fmt.Errorf("memory submit has no valid server-generated UUID")
 		}
+		if len(actual.MemorySubmit.EmbeddingHash) != 0 && len(actual.MemorySubmit.EmbeddingHash) != sha256.Size {
+			return fmt.Errorf("memory submit has an invalid node-generated embedding hash")
+		}
 		contentHash := sha256.Sum256([]byte(body.Content))
 		expected.MemorySubmit = &tx.MemorySubmit{
-			MemoryID:        actual.MemorySubmit.MemoryID,
-			ContentHash:     contentHash[:],
-			EmbeddingHash:   hashRESTEmbedding(body.Embedding),
+			MemoryID:    actual.MemorySubmit.MemoryID,
+			ContentHash: contentHash[:],
+			// v11.7.4 made the receiving node authoritative for the active
+			// embedding space: REST regenerates the vector after authenticating
+			// the request. The outer node signature binds that derived hash; it
+			// cannot equal a stale client vector after a provider cutover and is
+			// therefore deliberately not reconstructed from the signed JSON.
+			// Agent authority remains bound to content, type, domain, confidence,
+			// classification, parent, and task status below.
+			EmbeddingHash:   actual.MemorySubmit.EmbeddingHash,
 			MemoryType:      memoryType,
 			DomainTag:       body.DomainTag,
 			ConfidenceScore: body.ConfidenceScore,

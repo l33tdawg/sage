@@ -70,3 +70,30 @@ func TestBroadcastErrorPublic_DeprecationGate(t *testing.T) {
 		})
 	}
 }
+
+func TestBroadcastErrorPublic_DelegatedProofFailuresAreActionable(t *testing.T) {
+	cases := []struct {
+		name string
+		log  string
+		want string
+	}{
+		{
+			name: "node-derived embedding changed the action payload",
+			log:  "tx rejected in CheckTx (code 109): agent proof rejected: delegated agent action mismatch: transaction payload differs from the signed request",
+			want: "agent proof does not match the submitted action",
+		},
+		{
+			name: "proof aged before an idle chain produced a block",
+			log:  "tx rejected in FinalizeBlock (code 109): agent proof rejected: delegated agent proof timestamp is older than the 5-minute consensus window",
+			want: "agent proof expired before consensus",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, message := broadcastErrorPublic(errors.New(tc.log))
+			assert.Equal(t, http.StatusConflict, status)
+			assert.Contains(t, message, tc.want)
+			assert.NotEqual(t, "request rejected", message)
+		})
+	}
+}

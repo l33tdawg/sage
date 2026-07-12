@@ -4031,6 +4031,53 @@ input[type="range"]::-moz-range-thumb {
     -webkit-line-clamp: 4;
     -webkit-box-orient: vertical;
     overflow: hidden;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+.kanban-card.expanded .kanban-card-content {
+    display: block;
+    overflow: visible;
+    -webkit-line-clamp: unset;
+}
+.kanban-card-content-actions,
+.kanban-card-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin: -2px 0 8px;
+}
+.kanban-card-text-action {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: var(--primary);
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+    padding: 2px 0;
+}
+.kanban-card-text-action:hover {
+    text-decoration: underline;
+}
+.kanban-card-editor textarea {
+    background: var(--bg-deep);
+    border: 1px solid var(--border-light);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.5;
+    min-height: 140px;
+    padding: 9px 10px;
+    resize: vertical;
+    width: 100%;
+}
+.kanban-card-editor textarea:focus {
+    border-color: var(--primary);
+    outline: 2px solid color-mix(in srgb, var(--primary) 22%, transparent);
+}
+.kanban-card-edit-actions {
+    margin-top: 8px;
 }
 .kanban-card-meta {
     display: flex;
