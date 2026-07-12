@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"testing"
 
 	"github.com/l33tdawg/sage/internal/store"
@@ -149,5 +150,56 @@ func TestCanonicalPayloadOrderIndependent(t *testing.T) {
 	// Boundary injectivity: {"a":"bc"} != {"ab":"c"} (length-prefixed).
 	if bytes.Equal(canonicalPayloadBytes(map[string]string{"a": "bc"}), canonicalPayloadBytes(map[string]string{"ab": "c"})) {
 		t.Fatalf("length-prefix boundary collision")
+	}
+}
+
+// TestFoldRejectsForgedAuthor locks the AuthorKeyResolver security contract: the
+// fold rejects an entry not signed by the resolver's AUTHORITATIVE key, and a
+// naive self-trusting resolver would accept a forgery (documenting the footgun).
+func TestFoldRejectsForgedAuthor(t *testing.T) {
+	ctlPub, _, _ := ed25519.GenerateKey(nil)
+	forgerPub, forgerKey, _ := ed25519.GenerateKey(nil)
+
+	// A forger self-signs a member_remove — internally consistent under its OWN key.
+	forged := mustEntry(t, "g1", RosterSubchain, 0, "", "member_remove", "chain-forger",
+		forgerPub, forgerKey, map[string]string{"member": "chain-victim"})
+	if err := verifyJournalEntry(forged, forgerPub); err != nil {
+		t.Fatalf("self-consistent entry should verify against its own key: %v", err)
+	}
+
+	// The fold with a resolver returning the AUTHORITATIVE controller key rejects
+	// it (author-key mismatch) — the contract that keeps forgeries out.
+	rejectByController := func(store.SyncGroupLogEntry) ed25519.PublicKey { return ctlPub }
+	if _, err := foldSubchain([]store.SyncGroupLogEntry{forged}, rejectByController); err == nil {
+		t.Fatalf("fold must reject an entry not signed by the resolver's authoritative key")
+	}
+
+	// A NAIVE self-trusting resolver (return decodeHex(e.AuthorAgentPubkey)) WOULD
+	// accept the forgery — the exact contract violation AuthorKeyResolver forbids.
+	// Asserting it accepts here documents WHY a resolver must never trust the entry.
+	naiveSelfTrust := func(e store.SyncGroupLogEntry) ed25519.PublicKey {
+		b, _ := hex.DecodeString(e.AuthorAgentPubkey)
+		return ed25519.PublicKey(b)
+	}
+	if _, err := foldSubchain([]store.SyncGroupLogEntry{forged}, naiveSelfTrust); err != nil {
+		t.Fatalf("self-trusting resolver would accept the forgery (footgun demo): %v", err)
+	}
+}
+
+// TestJournalPayloadNonCanonicalRejected verifies payload_json is authenticated
+// byte-for-byte: a non-canonical spelling that parses to the same map is rejected.
+func TestJournalPayloadNonCanonicalRejected(t *testing.T) {
+	pub, key, _ := ed25519.GenerateKey(nil)
+	e := mustEntry(t, "g1", RosterSubchain, 0, "", "member_invite", "c", pub, key,
+		map[string]string{"a": "1", "b": "2"})
+	if err := verifyJournalEntry(e, pub); err != nil {
+		t.Fatalf("canonical entry must verify: %v", err)
+	}
+	for _, spelling := range []string{`{"b":"2","a":"1"}`, `{"a":"1", "b":"2"}`, ` {"a":"1","b":"2"}`, "{}", ""} {
+		c := e
+		c.PayloadJSON = spelling
+		if err := verifyJournalEntry(c, pub); err == nil {
+			t.Fatalf("non-canonical payload_json %q must be rejected", spelling)
+		}
 	}
 }

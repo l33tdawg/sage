@@ -290,7 +290,9 @@ func (s *SQLiteStore) UpsertSyncGroup(ctx context.Context, g SyncGroup) error {
 			controller_chain_id=excluded.controller_chain_id,
 			controller_agent_pubkey=excluded.controller_agent_pubkey,
 			epoch=excluded.epoch,
-			roster_revision=excluded.roster_revision,
+			-- roster_revision is monotonic (MAX): it only advances, so a stale
+			-- full-row writeback can never regress it below its floor (docs §5.5).
+			roster_revision=MAX(sync_group.roster_revision, excluded.roster_revision),
 			roster_revision_floor=MAX(sync_group.roster_revision_floor, excluded.roster_revision_floor),
 			manifest_hash=excluded.manifest_hash,
 			roster_journal_head=excluded.roster_journal_head,
@@ -355,6 +357,24 @@ func (s *SQLiteStore) ListSyncGroups(ctx context.Context) ([]SyncGroup, error) {
 		out = append(out, *g)
 	}
 	return out, rows.Err()
+}
+
+// SetSyncGroupRosterJournalHead advances ONLY the roster head cache (a
+// projection re-derivable from sync_group_log). Targeted so a routine head bump
+// never rewrites the whole sync_group row — which could otherwise regress
+// roster_revision/manifest_hash from a stale snapshot once a concurrent writer
+// exists (docs §5.5). No-op if the group row is absent.
+func (s *SQLiteStore) SetSyncGroupRosterJournalHead(ctx context.Context, groupID, head string) error {
+	if groupID == "" {
+		return fmt.Errorf("group_id is required")
+	}
+	_, err := s.writeExecContext(ctx,
+		`UPDATE sync_group SET roster_journal_head=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE group_id=?`,
+		head, groupID)
+	if err != nil {
+		return fmt.Errorf("set roster journal head: %w", err)
+	}
+	return nil
 }
 
 // ---- sync_group_member ----

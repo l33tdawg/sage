@@ -144,6 +144,18 @@ func verifyJournalEntry(e store.SyncGroupLogEntry, expectedAuthorPub ed25519.Pub
 			return fmt.Errorf("entry %s/%d: undecodable payload: %w", e.Subchain, e.Seq, err)
 		}
 	}
+	if payload == nil {
+		payload = map[string]string{}
+	}
+	// Authenticate payload_json BYTE-FOR-BYTE, not just the parsed map: reject any
+	// non-canonical spelling (whitespace, key reorder, "" vs "{}", \uXXXX escaping,
+	// duplicate keys) even when it parses to the same map. Otherwise an
+	// audit/dashboard renderer or a step-4/5 exchange consumer could be shown a
+	// different byte string than the one the author signed while entry_hash + sig
+	// still verify. The canonical form is exactly what buildJournalEntry stored.
+	if canon, _ := json.Marshal(payload); string(canon) != e.PayloadJSON {
+		return fmt.Errorf("entry %s/%d: non-canonical payload_json", e.Subchain, e.Seq)
+	}
 	cb := entryCanonicalBytes(e.GroupID, e.Subchain, e.Seq, e.PrevHash, e.EntryType, e.AuthorChainID, e.AuthorAgentPubkey, payload)
 	sum := sha256.Sum256(cb)
 	if hex.EncodeToString(sum[:]) != e.EntryHash {
@@ -159,8 +171,22 @@ func verifyJournalEntry(e store.SyncGroupLogEntry, expectedAuthorPub ed25519.Pub
 // AuthorKeyResolver returns the ed25519 public key an entry MUST be signed by —
 // the controller for most roster entries, the leaving member for a self-signed
 // member_leave, the domain owner for a domain sub-chain entry — or nil to reject
-// the entry as having no legitimate author. The caller supplies the policy; the
-// fold enforces it.
+// the entry as having no legitimate author.
+//
+// SECURITY CONTRACT — the fold delegates ALL author-authorization to this
+// resolver, so a wrong resolver silently admits forgeries. An implementation MUST:
+//   1. Return the key from SIGNATURE-VERIFIED authoritative state ONLY — the
+//      group's controller_agent_pubkey, a member's member_agent_pubkey, or a
+//      domain owner (IsDomainOwnerOrAncestor). It MUST NEVER derive the key from
+//      the entry itself (e.g. `decodeHex(e.AuthorAgentPubkey)` or keyed solely on
+//      e.AuthorChainID) — that trusts the forger and defeats the whole journal.
+//   2. Gate ENTRY_TYPE vs AUTHORITY: e.g. member_remove/domain_add must be
+//      controller/owner-authored; a self-signed member_leave is valid only for
+//      the leaving member's own key. Return nil for any entry_type the claimed
+//      author is not authorized to write.
+// verifyJournalEntry pins e.AuthorAgentPubkey to the returned key, so a valid
+// signature from the WRONG key is caught — but only if the resolver returns the
+// RIGHT key. TestFoldRejectsForgedAuthor locks this contract.
 type AuthorKeyResolver func(e store.SyncGroupLogEntry) ed25519.PublicKey
 
 // FoldResult is the verified tip of a sub-chain.
@@ -173,9 +199,17 @@ type FoldResult struct {
 // foldSubchain verifies an ordered sub-chain end to end: seq continuity from 0,
 // prev_hash linkage (genesis prev_hash == ""), and each entry's signature against
 // the key the resolver returns. It returns the verified head or an error at the
-// first break. An empty chain is valid (genesis-empty). Anti-rollback (rejecting
-// a head whose derived roster_revision < the stored floor) is applied by the
-// caller at the exchange/apply layer, not here — this proves INTEGRITY.
+// first break. An empty chain is valid (genesis-empty). It proves INTEGRITY of a
+// single LINEAR input only; two caller concerns are deliberately NOT handled here
+// and MUST be enforced at the step-4 exchange/apply layer:
+//   - ANTI-ROLLBACK (§5.5): a clean fold to a valid PREFIX is still valid, so a
+//     controller-signed truncation that un-removes a member folds fine. The
+//     caller MUST reject a head whose derived roster_revision < SyncGroup
+//     .RosterRevisionFloor and confirm it reaches the on-chain anchored_head.
+//   - FORK DETECTION (§5.4): a fork from concurrent legitimate authors is NOT
+//     equivocation, but this function reports it with the same error as a genuine
+//     tamper. The caller (peer exchange) owns detecting competing signature-valid
+//     entries at the same seq and distinguishing them from an integrity break.
 func foldSubchain(entries []store.SyncGroupLogEntry, resolve AuthorKeyResolver) (FoldResult, error) {
 	prev := ""
 	for i, e := range entries {
@@ -232,11 +266,10 @@ func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain
 	}
 	// Best-effort head-cache advance for the roster sub-chain (a projection; the
 	// log is authoritative, so a failure here is non-fatal — the fold re-derives).
+	// Uses the TARGETED mutator (not a full-row read-modify-write) so it can never
+	// regress roster_revision/manifest_hash from a stale snapshot.
 	if subchain == RosterSubchain {
-		if g, gErr := ss.GetSyncGroup(ctx, groupID); gErr == nil && g != nil {
-			g.RosterJournalHead = entry.EntryHash
-			_ = ss.UpsertSyncGroup(ctx, *g)
-		}
+		_ = ss.SetSyncGroupRosterJournalHead(ctx, groupID, entry.EntryHash)
 	}
 	return entry, nil
 }
