@@ -296,25 +296,26 @@ func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain
 	if err != nil {
 		return store.SyncGroupLogEntry{}, err
 	}
-	// SELF-CHECK: the entry we just built MUST verify under the group's OWN author
-	// resolver, so a node never authors an entry it (or any peer) will later reject
-	// on ingest/fold — which would permanently wedge the sub-chain at this seq (there
-	// is no delete/rewrite path). This binds the caller-supplied author identity to
-	// the roster's authoritative keys before the entry is persisted.
-	resolve, rErr := m.groupAuthorResolver(ctx, ss, groupID)
+	// SELF-CHECK: the entry MUST verify under the group's OWN author resolver, so a
+	// node never authors an entry it (or a peer) will later reject on ingest/fold —
+	// which would permanently wedge the sub-chain at this seq (no delete/rewrite
+	// path). Then APPLY it to our own projection tables, exactly as a peer would on
+	// ingest, so the author's roster stays consistent with the log.
+	gs, rErr := loadGroupApplyState(ctx, ss, groupID)
 	if rErr != nil {
-		return store.SyncGroupLogEntry{}, fmt.Errorf("author self-check resolver: %w", rErr)
+		return store.SyncGroupLogEntry{}, fmt.Errorf("author self-check: %w", rErr)
 	}
-	if key := resolve(entry); key == nil || verifyJournalEntry(entry, key) != nil {
+	if key := gs.resolve(entry); key == nil || verifyJournalEntry(entry, key) != nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("refusing to author an entry that fails the group's own resolver (author=%s type=%s subchain=%s)", entry.AuthorChainID, entry.EntryType, entry.Subchain)
 	}
 	if err := ss.AppendSyncGroupLog(ctx, entry); err != nil {
 		return store.SyncGroupLogEntry{}, err
 	}
+	if err := gs.apply(ctx, ss, entry); err != nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("apply own %s entry: %w", entry.EntryType, err)
+	}
 	// Best-effort head-cache advance for the roster sub-chain (a projection; the
 	// log is authoritative, so a failure here is non-fatal — the fold re-derives).
-	// Uses the TARGETED mutator (not a full-row read-modify-write) so it can never
-	// regress roster_revision/manifest_hash from a stale snapshot.
 	if subchain == RosterSubchain {
 		_ = ss.SetSyncGroupRosterJournalHead(ctx, groupID, entry.EntryHash)
 	}

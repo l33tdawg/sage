@@ -536,6 +536,67 @@ func (s *SQLiteStore) SetSyncGroupMemberState(ctx context.Context, groupID, memb
 	return nil
 }
 
+// SetSyncGroupMemberRole transitions ONLY a member's role (a role_change apply).
+func (s *SQLiteStore) SetSyncGroupMemberRole(ctx context.Context, groupID, memberChainID, role string) error {
+	switch role {
+	case GroupRoleFullSync, GroupRoleSelectiveSync, GroupRoleEnrolledNoSync:
+	default:
+		return fmt.Errorf("invalid group member role %q", role)
+	}
+	_, err := s.writeExecContext(ctx,
+		`UPDATE sync_group_member SET role=? WHERE group_id=? AND member_chain_id=?`, role, groupID, memberChainID)
+	if err != nil {
+		return fmt.Errorf("set sync group member role: %w", err)
+	}
+	return nil
+}
+
+// SetSyncGroupController rotates the controller identity + epoch (an epoch_rotate
+// apply). controller_agent_pubkey becomes the key subsequent controller-authored
+// entries are verified against.
+func (s *SQLiteStore) SetSyncGroupController(ctx context.Context, groupID, controllerChainID, controllerAgentPubkey, epoch string) error {
+	if controllerChainID == "" || controllerAgentPubkey == "" {
+		return fmt.Errorf("controller chain and pubkey are required")
+	}
+	_, err := s.writeExecContext(ctx, `
+		UPDATE sync_group SET controller_chain_id=?, controller_agent_pubkey=?, epoch=?,
+			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE group_id=?`,
+		controllerChainID, controllerAgentPubkey, epoch, groupID)
+	if err != nil {
+		return fmt.Errorf("set sync group controller: %w", err)
+	}
+	return nil
+}
+
+// SetSyncGroupManifest advances roster_revision + manifest_hash on a manifest
+// apply. roster_revision and its floor are monotonic (MAX): a stale/rolled-back
+// manifest can never lower them (docs §5.5).
+func (s *SQLiteStore) SetSyncGroupManifest(ctx context.Context, groupID string, rosterRevision int64, manifestHash string) error {
+	_, err := s.writeExecContext(ctx, `
+		UPDATE sync_group SET
+			roster_revision = MAX(roster_revision, ?),
+			roster_revision_floor = MAX(roster_revision_floor, ?),
+			manifest_hash = ?,
+			updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		 WHERE group_id=?`, rosterRevision, rosterRevision, manifestHash, groupID)
+	if err != nil {
+		return fmt.Errorf("set sync group manifest: %w", err)
+	}
+	return nil
+}
+
+// SetSyncGroupDomainRemoved stamps a domain's removed_revision (a domain_remove
+// apply) without disturbing its owner/clearance.
+func (s *SQLiteStore) SetSyncGroupDomainRemoved(ctx context.Context, groupID, domainTag string, removedRevision int64) error {
+	_, err := s.writeExecContext(ctx,
+		`UPDATE sync_group_domain SET removed_revision=? WHERE group_id=? AND domain_tag=?`,
+		removedRevision, groupID, domainTag)
+	if err != nil {
+		return fmt.Errorf("set sync group domain removed: %w", err)
+	}
+	return nil
+}
+
 // ---- sync_group_domain ----
 
 // UpsertSyncGroupDomain inserts or updates a shared-domain row.

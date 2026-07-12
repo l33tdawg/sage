@@ -107,67 +107,17 @@ var domainOwnerTypes = map[string]bool{
 	"domain_add": true, "domain_remove": true, "tombstone": true, "anchor": true,
 }
 
-// groupAuthorResolver builds an AuthorKeyResolver from a SNAPSHOT of the local
-// roster (docs §5.4). It returns the AUTHORITATIVE key an entry must be signed by
-// and NEVER trusts the entry's own author field:
-//   - roster controller-types  -> the group's controller_agent_pubkey (and the
-//     entry's author_chain_id must equal the controller's chain);
-//   - roster member_leave       -> the leaving member's member_agent_pubkey
-//     (self-signed; the payload member==author is enforced at apply/step 5);
-//   - domain sub-chain types    -> the domain OWNER's member_agent_pubkey (and
-//     author_chain_id must equal owner_chain_id).
-// Any other (type, subchain, author) combination returns nil -> the fold/ingest
-// rejects the entry. (Epoch rotation changing the controller mid-chain, and
-// members added within the same batch, are refined in step 5.)
+// groupAuthorResolver returns a SNAPSHOT AuthorKeyResolver = groupApplyState.resolve
+// over the current roster (docs §5.4). Used where a single entry is checked against
+// a fixed view (AppendGroupJournalEntry's self-check, a whole-chain fold of a pure
+// controller chain). The INGEST path uses a live, growing groupApplyState instead,
+// so an in-batch member_invite is visible to a later member_leave in the same batch.
 func (m *Manager) groupAuthorResolver(ctx context.Context, ss *store.SQLiteStore, groupID string) (AuthorKeyResolver, error) {
-	g, err := ss.GetSyncGroup(ctx, groupID)
+	gs, err := loadGroupApplyState(ctx, ss, groupID)
 	if err != nil {
 		return nil, err
 	}
-	if g == nil {
-		return nil, fmt.Errorf("group %s not found", groupID)
-	}
-	ctlPub, err := decodePub(g.ControllerAgentPubkey)
-	if err != nil {
-		return nil, fmt.Errorf("group %s: invalid controller pubkey: %w", groupID, err)
-	}
-	members, err := ss.ListSyncGroupMembers(ctx, groupID)
-	if err != nil {
-		return nil, err
-	}
-	memberKey := make(map[string]ed25519.PublicKey, len(members))
-	for _, mem := range members {
-		if k, e := decodePub(mem.MemberAgentPubkey); e == nil {
-			memberKey[mem.MemberChainID] = k
-		}
-	}
-	domains, err := ss.ListSyncGroupDomains(ctx, groupID, false)
-	if err != nil {
-		return nil, err
-	}
-	domainOwner := make(map[string]string, len(domains))
-	for _, d := range domains {
-		domainOwner[d.DomainTag] = d.OwnerChainID
-	}
-
-	return func(e store.SyncGroupLogEntry) ed25519.PublicKey {
-		if e.Subchain == RosterSubchain {
-			if e.EntryType == "member_leave" {
-				return memberKey[e.AuthorChainID] // self-signed by the leaver
-			}
-			if rosterControllerTypes[e.EntryType] && e.AuthorChainID == g.ControllerChainID {
-				return ctlPub
-			}
-			return nil
-		}
-		if tag, ok := strings.CutPrefix(e.Subchain, "domain:"); ok {
-			owner, known := domainOwner[tag]
-			if known && domainOwnerTypes[e.EntryType] && e.AuthorChainID == owner {
-				return memberKey[owner]
-			}
-		}
-		return nil
-	}, nil
+	return gs.resolve, nil
 }
 
 func decodePub(hexKey string) (ed25519.PublicKey, error) {
@@ -288,14 +238,28 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// ingestJournalEntriesLocked verifies and appends a batch of foreign entries.
-// The CALLER MUST hold m.journalMu (so the read-head/append is atomic against
-// local appends). It is append-only: verify author (resolver) + hash/sig, then
-//   - an existing seq with a DIFFERENT hash => FORK (equivocation) -> halt;
-//   - an existing seq with the same hash    => idempotent skip;
-//   - a new entry must extend the local head (seq == head+1, prev-links).
-// Returns the count appended and the first error (partial progress is kept).
-func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, resolve AuthorKeyResolver, entries []store.SyncGroupLogEntry) (int, error) {
+// ingestJournalEntriesLocked verifies, appends, AND APPLIES a batch of foreign
+// entries. The CALLER MUST hold m.journalMu (so the read-head/append is atomic
+// against local appends). For each entry:
+//   - size cap (cheap) then fork check: an existing seq with a DIFFERENT hash =>
+//     FORK (equivocation) -> halt; same hash => idempotent skip;
+//   - a NEW entry is authorized against a GROWING groupApplyState (so an in-batch
+//     member_invite is visible to a later member_leave), verified, and must extend
+//     the local head (seq == head+1, prev-links); then appended and APPLIED to the
+//     roster/domain projection tables. Returns the count appended (partial kept).
+func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry) (int, error) {
+	gs, err := loadGroupApplyState(ctx, ss, groupID)
+	if err != nil {
+		return 0, err
+	}
+	head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, subchain)
+	if err != nil {
+		return 0, err
+	}
+	wantSeq, wantPrev := int64(0), ""
+	if head != nil {
+		wantSeq, wantPrev = head.Seq+1, head.EntryHash
+	}
 	appended := 0
 	for i := range entries {
 		e := entries[i]
@@ -303,18 +267,10 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		if e.Subchain != subchain {
 			return appended, fmt.Errorf("entry subchain %q != requested %q", e.Subchain, subchain)
 		}
-		// Size cap BEFORE any signature work (cheap, and bounds a full page well
-		// under the transport read limit) — a peer can't force expensive verifies
-		// on an over-limit payload, and no over-limit entry can ever be admitted.
+		// Size cap BEFORE any signature work (cheap; a peer can't force verifies on
+		// an over-limit payload, and no over-limit entry can ever be admitted).
 		if len(e.PayloadJSON) > SyncJournalMaxPayloadBytes {
 			return appended, fmt.Errorf("entry %s/%d payload %d bytes exceeds cap %d", subchain, e.Seq, len(e.PayloadJSON), SyncJournalMaxPayloadBytes)
-		}
-		key := resolve(e)
-		if key == nil {
-			return appended, fmt.Errorf("entry %s/%d: unauthorized author", subchain, e.Seq)
-		}
-		if err := verifyJournalEntry(e, key); err != nil {
-			return appended, err
 		}
 		existing, err := ss.GetSyncGroupLogEntry(ctx, groupID, subchain, e.Seq)
 		if err != nil {
@@ -322,22 +278,20 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		}
 		if existing != nil {
 			if existing.EntryHash != e.EntryHash {
-				// STEP-5 NOTE: once local authoring runs concurrently with a pull, a
-				// self-collision (our own head advanced between the lock-free fetch and
-				// this re-lock) can land here too. Then the caller should re-read head
-				// and re-fetch from head+1 rather than halt; the FORK halt must be
-				// reserved for a genuine divergence at/above the pre-fetch head.
 				return appended, fmt.Errorf("FORK at %s/%d: local entry diverges from peer (equivocation) — halting ingest", subchain, e.Seq)
 			}
-			continue // idempotent
+			// Already held + already applied; advance our expected position past it.
+			if e.Seq >= wantSeq {
+				wantSeq, wantPrev = e.Seq+1, existing.EntryHash
+			}
+			continue
 		}
-		head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, subchain)
-		if err != nil {
+		key := gs.resolve(e)
+		if key == nil {
+			return appended, fmt.Errorf("entry %s/%d: unauthorized author", subchain, e.Seq)
+		}
+		if err := verifyJournalEntry(e, key); err != nil {
 			return appended, err
-		}
-		wantSeq, wantPrev := int64(0), ""
-		if head != nil {
-			wantSeq, wantPrev = head.Seq+1, head.EntryHash
 		}
 		if e.Seq != wantSeq {
 			return appended, fmt.Errorf("entry %s/%d out of order (want seq %d)", subchain, e.Seq, wantSeq)
@@ -346,18 +300,19 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 			return appended, fmt.Errorf("entry %s/%d prev_hash does not link to local head", subchain, e.Seq)
 		}
 		// Persist the canonical payload spelling (the signature binds the parsed map,
-		// so a peer's non-Go JSON spelling is accepted above but normalized here) —
-		// stored + displayed form is always canonical, and entry_hash is unchanged.
+		// so a peer's non-Go JSON spelling is accepted above but normalized here).
 		e.PayloadJSON = canonicalPayloadJSON(e.PayloadJSON)
 		if err := ss.AppendSyncGroupLog(ctx, e); err != nil {
 			return appended, err
 		}
+		if err := gs.apply(ctx, ss, e); err != nil {
+			return appended, fmt.Errorf("apply %s/%d (%s): %w", subchain, e.Seq, e.EntryType, err)
+		}
 		appended++
+		wantSeq, wantPrev = e.Seq+1, e.EntryHash
 	}
 	if subchain == RosterSubchain && appended > 0 {
-		if head, _ := ss.GetSyncGroupSubchainHead(ctx, groupID, subchain); head != nil {
-			_ = ss.SetSyncGroupRosterJournalHead(ctx, groupID, head.EntryHash)
-		}
+		_ = ss.SetSyncGroupRosterJournalHead(ctx, groupID, wantPrev)
 	}
 	return appended, nil
 }
@@ -369,10 +324,6 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 	ss := m.syncStore()
 	if ss == nil {
 		return 0, fmt.Errorf("group journal requires the SQLite store backend")
-	}
-	resolve, err := m.groupAuthorResolver(ctx, ss, groupID)
-	if err != nil {
-		return 0, err
 	}
 	pull := m.syncJournalFn
 	if pull == nil {
@@ -432,7 +383,7 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		// Ingest this page under the lock (fetch was lock-free); re-reads the head
 		// each iteration so append-atomicity holds.
 		m.journalMu.Lock()
-		n, iErr := m.ingestJournalEntriesLocked(ctx, ss, groupID, subchain, resolve, st)
+		n, iErr := m.ingestJournalEntriesLocked(ctx, ss, groupID, subchain, st)
 		m.journalMu.Unlock()
 		appended += n
 		if iErr != nil {

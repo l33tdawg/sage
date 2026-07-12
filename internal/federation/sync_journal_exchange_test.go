@@ -89,15 +89,11 @@ func TestPullGroupJournalIngest(t *testing.T) {
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
 	memPub, _, _ := ed25519.GenerateKey(nil)
-	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
-		GroupID: "g1", MemberChainID: "chain-peer", Role: store.GroupRoleFullSync,
-		MemberState: store.GroupMemberActive, MemberAgentPubkey: hex.EncodeToString(memPub),
-	}); err != nil {
-		t.Fatalf("add peer member: %v", err)
-	}
+	// chain-peer is NOT pre-seeded — the pulled member_invite CREATES it (apply).
 
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
-	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey, map[string]string{"member": "chain-peer"})
+	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
+		memberInvitePayload("chain-peer", hex.EncodeToString(memPub), store.GroupRoleFullSync, "pinP"))
 	peerChain := []store.SyncGroupLogEntry{e0, e1}
 	m.syncJournalFn = func(_ context.Context, _ string, req *SyncJournalRequest) (*SyncJournalResponse, error) {
 		resp := &SyncJournalResponse{NextCursor: req.AfterSeq, RosterHead: e1.EntryHash}
@@ -124,8 +120,12 @@ func TestPullGroupJournalIngest(t *testing.T) {
 	if n2, err := m.PullGroupJournal(ctx, "chain-peer", "g1", RosterSubchain); err != nil || n2 != 0 {
 		t.Fatalf("idempotent re-pull: n=%d err=%v", n2, err)
 	}
-	// Convergence tracking recorded the peer's head without disturbing last_acked.
+	// APPLY created chain-peer as an invited member with its signed pubkey.
 	mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-peer")
+	if mem == nil || mem.MemberState != store.GroupMemberInvited || mem.MemberAgentPubkey != hex.EncodeToString(memPub) {
+		t.Fatalf("member_invite not applied: %+v", mem)
+	}
+	// Convergence tracking recorded the peer's head without disturbing last_acked.
 	if mem.LastSeenJournalHead != e1.EntryHash || mem.LastAckedRosterRevision != 0 {
 		t.Fatalf("convergence not tracked cleanly: %+v", mem)
 	}
@@ -137,14 +137,10 @@ func TestJournalIngestRejectsForgeryForkAndDisorder(t *testing.T) {
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
 	forgerPub, forgerKey, _ := ed25519.GenerateKey(nil)
-	resolve, err := m.groupAuthorResolver(ctx, ms, "g1")
-	if err != nil {
-		t.Fatalf("resolver: %v", err)
-	}
 	ingest := func(entries ...store.SyncGroupLogEntry) (int, error) {
 		m.journalMu.Lock()
 		defer m.journalMu.Unlock()
-		return m.ingestJournalEntriesLocked(ctx, ms, "g1", RosterSubchain, resolve, entries)
+		return m.ingestJournalEntriesLocked(ctx, ms, "g1", RosterSubchain, entries)
 	}
 
 	// FORGERY: a member_remove claiming controller authorship but signed by a forger.
@@ -232,13 +228,10 @@ func TestPullGroupJournalRejectsReplaySpin(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
-	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
-		GroupID: "g1", MemberChainID: "chain-peer", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive,
-	}); err != nil {
-		t.Fatalf("member: %v", err)
-	}
+	memPub, _, _ := ed25519.GenerateKey(nil)
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
-	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey, map[string]string{"member": "chain-peer"})
+	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
+		memberInvitePayload("chain-peer", hex.EncodeToString(memPub), store.GroupRoleFullSync, "pinP"))
 
 	calls := 0
 	// ALWAYS returns [e0,e1] regardless of after_seq, with a cursor claiming

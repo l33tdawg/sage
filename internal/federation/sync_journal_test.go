@@ -115,16 +115,22 @@ func TestAppendGroupJournalEntry(t *testing.T) {
 		t.Fatalf("UpsertSyncGroup: %v", err)
 	}
 
+	memberPub, _, _ := ed25519.GenerateKey(nil)
 	e0, err := m.AppendGroupJournalEntry(ctx, "g1", RosterSubchain, "group_create", "c", pub, key, nil)
 	if err != nil {
 		t.Fatalf("append e0: %v", err)
 	}
-	e1, err := m.AppendGroupJournalEntry(ctx, "g1", RosterSubchain, "member_invite", "c", pub, key, map[string]string{"member": "chain-a"})
+	e1, err := m.AppendGroupJournalEntry(ctx, "g1", RosterSubchain, "member_invite", "c", pub, key,
+		memberInvitePayload("chain-a", hex.EncodeToString(memberPub), store.GroupRoleFullSync, "pinA"))
 	if err != nil {
 		t.Fatalf("append e1: %v", err)
 	}
 	if e0.Seq != 0 || e1.Seq != 1 || e1.PrevHash != e0.EntryHash {
 		t.Fatalf("append seq/prev wrong: e0=%+v e1=%+v", e0, e1)
+	}
+	// The author applied its own member_invite: chain-a is now an invited member.
+	if mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-a"); mem == nil || mem.MemberState != store.GroupMemberInvited {
+		t.Fatalf("controller did not apply its own member_invite: %+v", mem)
 	}
 
 	// The roster head cache advanced to the latest entry.
