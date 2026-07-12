@@ -103,28 +103,32 @@ func TestAppV17DelegatedProofAcceptedOnce(t *testing.T) {
 }
 
 func TestAppV17DelegatedProofConsensusFreshness(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		offset time.Duration
-	}{
-		{name: "stale", offset: -5*time.Minute - time.Second},
-		{name: "future", offset: 5*time.Minute + time.Second},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			app := setupTestApp(t)
-			app.appV17AppliedHeight = 5
-			agent := newAgentKey(t)
-			outer := newAgentKey(t)
-			blockTime := time.Now().Truncate(time.Second)
-			proofTime := blockTime.Add(tc.offset)
-			request := []byte("POST /v1/domain/register\n{\"name\":\"freshness-" + tc.name + "\"}")
-			parsed := makeDelegatedDomainRegisterTx(t, agent, outer, request, proofTime, "freshness-"+tc.name, "", true)
+	app := setupTestApp(t)
+	app.appV17AppliedHeight = 5
+	agent := newAgentKey(t)
+	outer := newAgentKey(t)
+	blockTime := time.Now().Truncate(time.Second)
+	proofTime := blockTime.Add(-5*time.Minute - time.Second)
+	request := []byte("POST /v1/domain/register\n{\"name\":\"freshness-stale\"}")
+	parsed := makeDelegatedDomainRegisterTx(t, agent, outer, request, proofTime, "freshness-stale", "", true)
 
-			result := app.processTx(parsed, 6, blockTime)
-			assert.Equal(t, uint32(109), result.Code, result.Log)
-			assert.Contains(t, result.Log, "5-minute consensus window")
-		})
-	}
+	result := app.processTx(parsed, 6, blockTime)
+	assert.Equal(t, uint32(109), result.Code, result.Log)
+	assert.Contains(t, result.Log, "older than the 5-minute consensus window")
+}
+
+func TestAppV17DelegatedProofAcceptsWallClockAheadOfIdleConsensus(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV17AppliedHeight = 5
+	agent := newAgentKey(t)
+	outer := newAgentKey(t)
+	blockTime := time.Now().Truncate(time.Second)
+	proofTime := blockTime.Add(30 * time.Minute)
+	request := []byte("POST /v1/domain/register\n{\"name\":\"after-idle\"}")
+	parsed := makeDelegatedDomainRegisterTx(t, agent, outer, request, proofTime, "after-idle", "", true)
+
+	result := app.processTx(parsed, 6, blockTime)
+	assert.Equal(t, uint32(0), result.Code, result.Log)
 }
 
 func TestAppV17SameKeyTransactionNeedsNoHTTPRequestEnvelope(t *testing.T) {

@@ -21,6 +21,18 @@ test('task board scrolls as one page instead of trapping wheel input in columns'
     assert.match(cards, /overflow-y:\s*visible/);
 });
 
+test('task cards expand fully and planned task edits preserve consensus history', () => {
+    const tasksPage = appSource.slice(appSource.indexOf('function TasksPage('), appSource.indexOf('function PipelineView('));
+    assert.match(tasksPage, /expandedTasks\.has\(task\.memory_id\) \? 'Collapse' : 'Expand'/);
+    assert.match(tasksPage, /task\.task_status === 'planned'/);
+    assert.match(tasksPage, /const created = await createTask\(content, task\.domain_tag \|\| 'general'\)/);
+    assert.match(tasksPage, /await updateTaskStatus\(task\.memory_id, 'dropped'\)/);
+    assert.ok(tasksPage.indexOf('const created = await createTask') < tasksPage.indexOf("await updateTaskStatus(task.memory_id, 'dropped')"),
+        'the replacement must commit before the original planned task is retired');
+    assert.match(cssSource, /\.kanban-card\.expanded \.kanban-card-content\s*\{[^}]*display:\s*block/s);
+    assert.match(cssSource, /white-space:\s*pre-wrap/);
+});
+
 test('settings does not force a full-page render every 100ms', () => {
     assert.doesNotMatch(appSource, /setInterval\(\(\) => setTick\([^\n]+, 100\)/);
     assert.match(appSource, /function ChainCountdown\(\{ blockTime \}\)/);

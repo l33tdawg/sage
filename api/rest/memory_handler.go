@@ -1777,6 +1777,10 @@ func broadcastErrorPublic(err error) (int, string) {
 		return http.StatusNotFound, "memory not found"
 	case strings.Contains(msg, "is not challenged"):
 		return http.StatusConflict, "memory is not currently challenged"
+	case strings.Contains(msg, "delegated agent action mismatch"):
+		return http.StatusConflict, "agent proof does not match the submitted action; update or reconnect the SAGE MCP client and retry"
+	case strings.Contains(msg, "delegated agent proof timestamp") && strings.Contains(msg, "consensus window"):
+		return http.StatusConflict, "agent proof expired before consensus; retry the request"
 	case strings.Contains(msg, "tx rejected in CheckTx"):
 		return http.StatusBadRequest, "request rejected"
 	case strings.Contains(msg, "tx rejected in FinalizeBlock"):

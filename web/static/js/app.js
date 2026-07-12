@@ -2110,11 +2110,65 @@ function TasksPage({ sse }) {
     const [showOldDone, setShowOldDone] = useState(false);
     const [agentList, setAgentList] = useState([]);
     const [clearingColumn, setClearingColumn] = useState('');
+    const [expandedTasks, setExpandedTasks] = useState(new Set());
+    const [editingTask, setEditingTask] = useState('');
+    const [editContent, setEditContent] = useState('');
+    const [savingTask, setSavingTask] = useState('');
     const draggingRef = useRef(false);
     const reloadTimer = useRef(null);
     const movedThisSession = useRef(new Set()); // keeps just-completed old cards visible (see isRecentDone)
     const agentName = (id) => { const a = agentList.find(x => x.agent_id === id); return a ? a.name : (id ? id.slice(0, 8) : ''); };
 	const taskSummary = (task) => task.content.replace(/^\[TASK\]\s*/i, '').trim().slice(0, 80) || 'Untitled task';
+	const taskContent = (task) => task.content.replace(/^\[TASK\]\s*/i, '');
+
+    function toggleTaskExpanded(taskId) {
+        setExpandedTasks(prev => {
+            const next = new Set(prev);
+            if (next.has(taskId)) next.delete(taskId); else next.add(taskId);
+            return next;
+        });
+    }
+
+    function startTaskEdit(task) {
+        setExpandedTasks(prev => new Set(prev).add(task.memory_id));
+        setEditingTask(task.memory_id);
+        setEditContent(taskContent(task));
+    }
+
+    async function saveTaskEdit(task) {
+        const content = editContent.trim();
+        if (!content) {
+            showToast('Task text cannot be empty', 'error');
+            return;
+        }
+        if (content === taskContent(task).trim()) {
+            setEditingTask('');
+            return;
+        }
+        setSavingTask(task.memory_id);
+        try {
+            // Memory content is consensus-immutable. Editing safely creates a
+            // replacement planned task, then retires the old card only after
+            // the replacement has been confirmed.
+            const created = await createTask(content, task.domain_tag || 'general');
+            if (!created || created.error || !created.memory_id) {
+                throw new Error(created && created.error ? created.error : 'replacement task was not confirmed');
+            }
+            const retired = await updateTaskStatus(task.memory_id, 'dropped');
+            if (retired && retired.error) {
+                throw new Error(`replacement saved, but the old task could not be retired: ${retired.error}`);
+            }
+            setEditingTask('');
+            setEditContent('');
+            showToast('Planned task saved', 'success');
+            loadTasks();
+        } catch (e) {
+            showToast('Could not save task: ' + e.message, 'error');
+            loadTasks();
+        } finally {
+            setSavingTask('');
+        }
+    }
 
     // Board / Messages tabs. The agent message bus (formerly its own Pipeline
     // page) lives here as a second tab; #/pipeline deep-links keep working and
@@ -2470,14 +2524,41 @@ function TasksPage({ sse }) {
                                     ${(() => {
                                         const workState = taskWorkState(task);
                                         return html`
-                                    <div class="kanban-card ${dragging === task.memory_id ? 'dragging' : ''}"
-                                         draggable="true"
+                                    <div class="kanban-card ${dragging === task.memory_id ? 'dragging' : ''} ${expandedTasks.has(task.memory_id) ? 'expanded' : ''} ${editingTask === task.memory_id ? 'editing' : ''}"
+										 draggable=${editingTask !== task.memory_id}
                                          onDragStart=${e => handleDragStart(e, task)}
                                          onDragEnd=${() => { draggingRef.current = false; scheduleReload(); }}>
                                         ${workState && html`
                                             <span class="kanban-work-led ${workState.tone}" title=${workState.label} aria-label=${workState.label}></span>
                                         `}
-                                        <div class="kanban-card-content">${task.content.replace(/^\[TASK\]\s*/i, '')}</div>
+                                        ${editingTask === task.memory_id ? html`
+                                            <div class="kanban-card-editor" onClick=${e => e.stopPropagation()}>
+                                                <textarea value=${editContent}
+                                                    aria-label=${`Edit ${taskSummary(task)}`}
+                                                    disabled=${savingTask === task.memory_id}
+                                                    onInput=${e => setEditContent(e.target.value)}
+                                                    onKeyDown=${e => {
+                                                        if (e.key === 'Escape') { setEditingTask(''); setEditContent(''); }
+                                                        if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') saveTaskEdit(task);
+                                                    }}></textarea>
+                                                <div class="kanban-card-edit-actions">
+                                                    <button class="btn btn-sm" disabled=${savingTask === task.memory_id}
+                                                        onClick=${() => { setEditingTask(''); setEditContent(''); }}>Cancel</button>
+                                                    <button class="btn btn-primary btn-sm" disabled=${savingTask === task.memory_id || !editContent.trim()}
+                                                        onClick=${() => saveTaskEdit(task)}>${savingTask === task.memory_id ? 'Saving…' : 'Save'}</button>
+                                                </div>
+                                            </div>
+                                        ` : html`
+                                            <div class="kanban-card-content">${taskContent(task)}</div>
+                                            <div class="kanban-card-content-actions">
+                                                <button class="kanban-card-text-action" onClick=${e => { e.stopPropagation(); toggleTaskExpanded(task.memory_id); }}>
+                                                    ${expandedTasks.has(task.memory_id) ? 'Collapse' : 'Expand'}
+                                                </button>
+                                                ${task.task_status === 'planned' && html`
+                                                    <button class="kanban-card-text-action" onClick=${e => { e.stopPropagation(); startTaskEdit(task); }}>Edit</button>
+                                                `}
+                                            </div>
+                                        `}
                                         <div class="kanban-card-meta">
                                             <span class="domain-badge" style="background:${getDomainColor(task.domain_tag)}20;color:${getDomainColor(task.domain_tag)};font-size:10px;padding:2px 6px;">
                                                 ${task.domain_tag}
