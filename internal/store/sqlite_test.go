@@ -1303,7 +1303,7 @@ func TestUpdateMemoryEmbedding_PreservesAgentProvider(t *testing.T) {
 	require.NoError(t, s.InsertMemory(ctx, rec))
 
 	// Before embedding it's in the work set (embedding_provider = ''), decryptable.
-	items, err := s.ListMemoriesForReembed(ctx, 100)
+	items, err := s.ListMemoriesForReembed(ctx, "ollama", 100)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	require.True(t, items[0].Decryptable)
@@ -1328,15 +1328,29 @@ func TestUpdateMemoryEmbedding_PreservesAgentProvider(t *testing.T) {
 	require.Equal(t, 0, counts["claude-code"], "counts must be keyed on embedding_provider, not agent provider")
 
 	// After embedding it has left the work set.
-	items, err = s.ListMemoriesForReembed(ctx, 100)
+	items, err = s.ListMemoriesForReembed(ctx, "ollama", 100)
 	require.NoError(t, err)
 	require.Len(t, items, 0, "an ollama-tagged memory is no longer in the re-embed set")
+
+	// Provider migration is target-specific: the same row must enter the hash
+	// work set, then leave it only after its vector and stamp are replaced.
+	items, err = s.ListMemoriesForReembed(ctx, "hash", 100)
+	require.NoError(t, err)
+	require.Len(t, items, 1, "an ollama vector must be migrated before hash becomes authoritative")
+	require.NoError(t, s.UpdateMemoryEmbedding(ctx, "m1", emb, "hash"))
+	items, err = s.ListMemoriesForReembed(ctx, "hash", 100)
+	require.NoError(t, err)
+	require.Empty(t, items)
+	items, err = s.ListMemoriesForReembed(ctx, "ollama", 100)
+	require.NoError(t, err)
+	require.Len(t, items, 1, "switching back must re-enter the Ollama migration set")
+	require.NoError(t, s.UpdateMemoryEmbedding(ctx, "m1", emb, "ollama"))
 
 	// A memory tagged skipped (e.g. undecryptable) also leaves the work set.
 	rec2 := testMemory("m2", "agent1", "unreadable", "general")
 	require.NoError(t, s.InsertMemory(ctx, rec2))
 	require.NoError(t, s.MarkMemoryEmbeddingSkipped(ctx, "m2"))
-	items, err = s.ListMemoriesForReembed(ctx, 100)
+	items, err = s.ListMemoriesForReembed(ctx, "ollama", 100)
 	require.NoError(t, err)
 	require.Len(t, items, 0, "a skipped memory is not retried")
 	counts, _ = s.CountMemoriesByProvider(ctx)
@@ -1405,7 +1419,7 @@ func TestRekeyUnreadableMemories(t *testing.T) {
 	require.NoError(t, err)
 	s.SetVault(vB)
 
-	items, err := s.ListMemoriesForReembed(ctx, 100)
+	items, err := s.ListMemoriesForReembed(ctx, "ollama", 100)
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	require.False(t, items[0].Decryptable, "content must be undecryptable under the new key")
@@ -1457,7 +1471,7 @@ func TestReembedExcludesDeprecated(t *testing.T) {
 	require.NoError(t, s.InsertMemory(ctx, testMemory("dep", "a", "deprecated content", "g")))
 	require.NoError(t, s.UpdateStatus(ctx, "dep", memory.StatusDeprecated, time.Now().UTC()))
 
-	items, err := s.ListMemoriesForReembed(ctx, 100)
+	items, err := s.ListMemoriesForReembed(ctx, "ollama", 100)
 	require.NoError(t, err)
 	require.Len(t, items, 1, "deprecated memory must not be in the re-embed set")
 	require.Equal(t, "visible", items[0].MemoryID)
@@ -1542,6 +1556,41 @@ func TestInsertMemory_StampsEmbeddingProvider(t *testing.T) {
 	counts, err = s.CountMemoriesByProvider(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, counts[""], "unstamped memory stays re-embeddable")
+}
+
+func TestQuerySimilar_FiltersExactVectorSpace(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		id, provider string
+	}{
+		{"ollama", "ollama"},
+		{"hash", "hash"},
+		{"errored", "error"},
+		{"missing", ""},
+	} {
+		rec := testMemory(tc.id, "agent", "same-shaped vector "+tc.id, "migration")
+		rec.Embedding = []float32{1, 0, 0}
+		rec.EmbeddingProvider = tc.provider
+		require.NoError(t, s.InsertMemory(ctx, rec))
+	}
+
+	results, err := s.QuerySimilar(ctx, []float32{1, 0, 0}, QueryOptions{
+		VectorProvider: "ollama",
+		TopK:           10,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "ollama", results[0].MemoryID,
+		"hash, blank, and error-tagged vectors must never enter an Ollama query")
+
+	results, err = s.QuerySimilar(ctx, []float32{1, 0, 0}, QueryOptions{
+		VectorProvider: "hash",
+		TopK:           10,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Equal(t, "hash", results[0].MemoryID)
 }
 
 func TestGetDomainLastActivity(t *testing.T) {

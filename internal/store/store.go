@@ -69,10 +69,14 @@ type EpochScore struct {
 
 // QueryOptions defines parameters for similarity queries.
 type QueryOptions struct {
-	DomainTag     string  `json:"domain_tag,omitempty"`
-	Provider      string  `json:"provider,omitempty"`
-	MinConfidence float64 `json:"min_confidence,omitempty"` // stored-column floor (SQL, undecayed) — legacy; recall paths use DecayFloor
-	StatusFilter  string  `json:"status_filter,omitempty"`
+	DomainTag string `json:"domain_tag,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	// VectorProvider restricts cosine/distance candidates to the vector space
+	// that produced the query embedding. Empty preserves legacy/internal callers;
+	// live REST recall always sets it from the node's active embedder.
+	VectorProvider string  `json:"-"`
+	MinConfidence  float64 `json:"min_confidence,omitempty"` // stored-column floor (SQL, undecayed) — legacy; recall paths use DecayFloor
+	StatusFilter   string  `json:"status_filter,omitempty"`
 	// IncludeDisputed, when true AND StatusFilter=="committed", widens the status
 	// predicate to `status IN ('committed','challenged')` so app-v17 two-phase-
 	// disputed-but-LIVE memories remain recallable (flagged disputed at the
@@ -198,9 +202,10 @@ type MemoryStore interface {
 	UpdateMemoryEmbedding(ctx context.Context, memoryID string, emb []float32, provider string) error
 	// CountMemoriesByProvider returns memory counts keyed by embedding provider.
 	CountMemoriesByProvider(ctx context.Context) (map[string]int, error)
-	// ListMemoriesForReembed returns up to `limit` memories still needing an
-	// embedding (embedding_provider = ''), with decrypted content.
-	ListMemoriesForReembed(ctx context.Context, limit int) ([]ReembedItem, error)
+	// ListMemoriesForReembed returns up to `limit` memories not yet embedded by
+	// targetProvider, with decrypted content. This makes provider migration
+	// converge without ever treating mixed vector spaces as compatible.
+	ListMemoriesForReembed(ctx context.Context, targetProvider string, limit int) ([]ReembedItem, error)
 	// MarkMemoryEmbeddingSkipped tags a memory as UNREADABLE (undecryptable/empty)
 	// so it leaves the re-embed work set and is a deprecation candidate.
 	MarkMemoryEmbeddingSkipped(ctx context.Context, memoryID string) error

@@ -190,7 +190,7 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 	logger.Info().Str("addr", abciAddr).Msg("ABCI server listening")
 
 	// Start metrics + REST + health in background
-	startServices(app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
+	startServices(ctx, app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
 
 	// Socket mode: the consensus key lives with the separate CometBFT process, so
 	// the voter needs it supplied explicitly (operator mounts priv_validator_key.json
@@ -268,7 +268,7 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCe
 
 	// In-process: CometBFT RPC is localhost
 	cometRPC := fmt.Sprintf("http://127.0.0.1%s", cometCfg.RPC.ListenAddress[len("tcp://0.0.0.0"):])
-	startServices(app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
+	startServices(ctx, app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
 
 	// In-process: the consensus key is right here under --home; the voter signs
 	// memory votes with it (same key CometBFT validates blocks with).
@@ -288,7 +288,7 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCe
 }
 
 // startServices launches the metrics server and REST API.
-func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
+func startServices(ctx context.Context, app *sageabci.SageApp, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
 	// Prometheus metrics server
 	metricsServer := metrics.NewMetricsServer(metricsAddr, health)
 	go func() {
@@ -302,6 +302,7 @@ func startServices(app *sageabci.SageApp, restAddr, metricsAddr, cometRPC, tlsCe
 	pgStore := app.GetOffchainStore()
 	badgerStore := app.GetBadgerStore()
 	restServer := rest.NewServer(cometRPC, pgStore, pgStore, badgerStore, health, logger, embedding.NewClient("", ""))
+	restServer.StartEmbeddingRepair(ctx)
 	restServer.SetSuppCache(app.SuppCache)
 	// v8.0: wire the off-consensus fork-gate accessor so REST handlers
 	// flip to ancestor-walk access checks once the chain reports a post-fork

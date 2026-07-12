@@ -42,7 +42,7 @@ func TestPostgresInsertMemoryPersistsTaskStatusWithoutReplayOverwrite(t *testing
 		WithArgs(
 			record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
 			pgxmock.AnyArg(), record.EmbeddingHash, string(record.MemoryType), record.DomainTag,
-			record.Provider, record.ConfidenceScore, string(record.Status), record.ParentHash,
+			record.Provider, record.EmbeddingProvider, record.ConfidenceScore, string(record.Status), record.ParentHash,
 			string(record.TaskStatus), record.Assignee, record.CreatedAt,
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
@@ -117,6 +117,10 @@ func TestPostgresEnsureMemoriesSchemaRepairsTaskStatusAndClassification(t *testi
 		WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
 	mock.ExpectExec(regexp.QuoteMeta(`ALTER TABLE memories ADD COLUMN IF NOT EXISTS classification SMALLINT NOT NULL DEFAULT 1`)).
 		WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
+	mock.ExpectExec(regexp.QuoteMeta(`ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding_provider TEXT NOT NULL DEFAULT ''`)).
+		WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
+	mock.ExpectExec(regexp.QuoteMeta(`CREATE INDEX IF NOT EXISTS idx_memories_embedding_provider ON memories (embedding_provider)`)).
+		WillReturnResult(pgxmock.NewResult("CREATE INDEX", 0))
 	for _, stmt := range postgresTaskAssignmentSchema {
 		mock.ExpectExec(regexp.QuoteMeta(stmt)).WillReturnResult(pgxmock.NewResult("DDL", 0))
 	}
@@ -130,6 +134,43 @@ func TestPostgresEnsureMemoriesSchemaRepairsTaskStatusAndClassification(t *testi
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 
 	require.NoError(t, store.ensureMemoriesSchema(context.Background()))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPostgresEmbeddingRepairOperations(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(mock.Close)
+	store := &PostgresStore{db: mock}
+
+	mock.ExpectQuery(`SELECT COALESCE\(embedding_provider, ''\), COUNT\(\*\) FROM memories`).
+		WillReturnRows(pgxmock.NewRows([]string{"embedding_provider", "count"}).
+			AddRow("ollama", 7).AddRow("", 2))
+	counts, err := store.CountMemoriesByProvider(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, map[string]int{"ollama": 7, "": 2}, counts)
+
+	mock.ExpectQuery(`(?s)SELECT memory_id, content FROM memories.*embedding_provider.*LIMIT \$2`).
+		WithArgs("ollama", 50).
+		WillReturnRows(pgxmock.NewRows([]string{"memory_id", "content"}).AddRow("mem-1", "legacy content"))
+	items, err := store.ListMemoriesForReembed(context.Background(), "ollama", 50)
+	require.NoError(t, err)
+	require.Equal(t, []ReembedItem{{MemoryID: "mem-1", Content: "legacy content", Decryptable: true}}, items)
+
+	mock.ExpectExec(`UPDATE memories SET embedding = \$2, embedding_provider = \$3 WHERE memory_id = \$1`).
+		WithArgs("mem-1", pgxmock.AnyArg(), "ollama").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	require.NoError(t, store.UpdateMemoryEmbedding(context.Background(), "mem-1", []float32{0.1, 0.2}, "ollama"))
+
+	mock.ExpectExec(`UPDATE memories SET embedding_provider = 'error' WHERE memory_id = \$1`).
+		WithArgs("mem-2").WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	require.NoError(t, store.MarkMemoryEmbeddingError(context.Background(), "mem-2"))
+
+	mock.ExpectExec(`UPDATE memories SET embedding_provider = '' WHERE embedding_provider = 'error'`).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	reset, err := store.ResetErroredEmbeddings(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, reset)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

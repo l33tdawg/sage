@@ -52,11 +52,11 @@ func (hashOnlyEmbedder) Semantic() bool { return false }
 func TestEmbeddingProviderStamp(t *testing.T) {
 	t.Run("semantic named provider", func(t *testing.T) {
 		e := &fakeEmbedder{name: "ollama", dimension: 3, ready: true, semantic: true}
-		assert.Equal(t, "ollama", embeddingProviderStamp(e, []float32{1, 2, 3}))
+		assert.Equal(t, "ollama:3", embeddingProviderStamp(e, []float32{1, 2, 3}))
 	})
 
-	t.Run("hash vectors remain repairable", func(t *testing.T) {
-		assert.Empty(t, embeddingProviderStamp(hashOnlyEmbedder{}, []float32{1, 2, 3}))
+	t.Run("hash vectors carry explicit provenance", func(t *testing.T) {
+		assert.Equal(t, "hash", embeddingProviderStamp(hashOnlyEmbedder{}, []float32{1, 2, 3}))
 	})
 
 	t.Run("missing vector has no provenance", func(t *testing.T) {

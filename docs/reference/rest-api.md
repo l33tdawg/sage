@@ -51,7 +51,7 @@ Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (F
 | `domain_tag` | string | yes | Domain label; agent must have write access |
 | `confidence_score` | float64 | yes | 0.0–1.0 inclusive |
 | `classification` | int | no | 0–4; see table below. **Omitting sends 0 (PUBLIC)** |
-| `embedding` | []float32 | no | Precomputed vector; stored off-chain via supplementary cache |
+| `embedding` | []float32 | no | Compatibility field. The node regenerates the vector from `content` with its currently selected provider so stale/foreign vector spaces cannot mix. |
 | `knowledge_triples` | []KnowledgeTriple | no | `{subject, predicate, object}` triples |
 | `parent_hash` | string | no | SHA-256 hex of parent memory for lineage |
 | `task_status` | string | no | For `task` type: `planned`, `in_progress`, `done`, `dropped` |
@@ -76,9 +76,15 @@ Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (F
 {
   "memory_id": "<uuid>",
   "tx_hash": "<hex>",
-  "status": "proposed"
+  "status": "proposed",
+  "embedding_provider": "ollama"
 }
 ```
+
+If the selected provider is temporarily unavailable, the memory still commits
+without accepting the caller's possibly mismatched vector and the response adds
+`"embedding_queued": true`. The node repairs it automatically once that same
+provider is healthy and the vault is unlocked.
 
 **Auth:** Ed25519 required. Agent must have write access to `domain_tag` if per-domain access control is configured (`memory_handler.go:425-428`). Observer-role agents are rejected.
 

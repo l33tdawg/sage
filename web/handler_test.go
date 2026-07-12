@@ -413,7 +413,7 @@ func TestCreateTaskStandaloneStoresProposedAuthoredTask(t *testing.T) {
 	require.Equal(t, memory.TaskStatusPlanned, got.TaskStatus)
 	counts, err := s.CountMemoriesByProvider(context.Background())
 	require.NoError(t, err)
-	require.Equal(t, 1, counts["ollama"])
+	require.Equal(t, 1, counts["ollama:3"])
 	require.Zero(t, counts[""], "a newly embedded dashboard task must not re-enter the repair queue")
 }
 

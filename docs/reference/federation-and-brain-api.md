@@ -70,6 +70,7 @@ Scoped read-only recall served to an authenticated peer (`handleQuery`, `server.
 | `mode` | string | `semantic`, `text`, or `hybrid` (`types.go:38-42`) |
 | `query` | string | required for `text`; used by `hybrid` |
 | `embedding` | []float32 | required for `semantic`; used by `hybrid` |
+| `embedding_provider` | string | exact vector-space ID; required whenever `embedding` is present. A serving peer filters candidates to this space and rejects an unstamped vector rather than comparing mixed spaces. |
 | `domain_tag` | string | must be covered by `AllowedDomains`; empty only under a `*` agreement, else `403` |
 | `min_confidence` | float64 | optional filter |
 | `top_k` | int | default 10, capped at 50 (`server.go:28-29`) |
@@ -84,6 +85,12 @@ Scoped read-only recall served to an authenticated peer (`handleQuery`, `server.
 | `total_count` | int | length of `results` |
 
 Per-record enforcement runs as defense in depth over the store filter (`server.go:366-407`): non-committed, out-of-domain, or above-ceiling records are dropped. A classification read error hides the record (fail closed). The count of records hidden by the classification ceiling is **logged, never returned** - disclosing it would turn the response into an existence/keyword oracle (`types.go:82-88`).
+
+Semantic and vector-assisted hybrid federation are also vector-space gated: the
+request's `embedding_provider` becomes `QueryOptions.VectorProvider`. Text-only
+federation is unchanged. This makes a provider transition temporarily reduce
+semantic coverage while rows are repaired, but never compares Ollama vectors with
+hash or another model/dimension space (`server.go`, `types.go`).
 
 ### `POST /fed/v1/receipt`
 

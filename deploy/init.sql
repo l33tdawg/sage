@@ -18,6 +18,7 @@ CREATE TABLE memories (
     memory_type      TEXT             NOT NULL CHECK (memory_type IN ('fact', 'observation', 'inference', 'task')),
     domain_tag       TEXT             NOT NULL,
     provider         TEXT             NOT NULL DEFAULT '',
+    embedding_provider TEXT           NOT NULL DEFAULT '',
     confidence_score DOUBLE PRECISION NOT NULL CHECK (confidence_score BETWEEN 0 AND 1),
     status           TEXT             NOT NULL DEFAULT 'proposed',
     parent_hash      TEXT,
@@ -31,6 +32,7 @@ CREATE TABLE memories (
     committed_at     TIMESTAMPTZ,
     deprecated_at    TIMESTAMPTZ
 );
+CREATE INDEX idx_memories_embedding_provider ON memories(embedding_provider);
 
 -- ============================================================
 -- 1b. memory_links

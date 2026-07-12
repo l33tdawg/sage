@@ -207,10 +207,9 @@ type DashboardHandler struct {
 	// reembed holds the state of the background re-embed job (server-side, decoupled
 	// from any request so it survives client disconnects). See embeddings_handler.go.
 	reembed reembedJob
-	// SetEmbeddingOllama persists the embedding provider switch to Ollama +
-	// nomic-embed-text in config.yaml (the node re-reads it on the next restart).
-	// Wired in cmd/sage-gui. nil disables the enable endpoint.
-	SetEmbeddingOllama func() error
+	// SetEmbeddingProvider persists the active vector space ("ollama" or
+	// "hash") in config.yaml; the node re-reads it after the controlled restart.
+	SetEmbeddingProvider func(provider string) error
 	// Rerankd manages the optional llama.cpp reranker sidecar (guided setup,
 	// pinned model download, spawn/adopt/stop). Wired in cmd/sage-gui; nil
 	// disables the /v1/dashboard/reranker/setup/* endpoints.
@@ -991,6 +990,10 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		vs.SetVault(v)
 	}
 	h.VaultLocked.Store(false)
+	// A transient MCP embed failure may have preserved observations without
+	// vectors while the vault was locked. Repair them now that plaintext is
+	// available instead of leaving a manual setup banner behind.
+	h.runBackground(func(ctx context.Context) { _, _ = h.StartEmbeddingRepairIfNeeded(ctx) })
 
 	// Create session
 	token := generateToken()

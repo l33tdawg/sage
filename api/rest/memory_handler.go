@@ -47,9 +47,11 @@ type SubmitMemoryRequest struct {
 
 // SubmitMemoryResponse is the JSON body for a successful submission.
 type SubmitMemoryResponse struct {
-	MemoryID string `json:"memory_id"`
-	TxHash   string `json:"tx_hash"`
-	Status   string `json:"status"`
+	MemoryID          string `json:"memory_id"`
+	TxHash            string `json:"tx_hash"`
+	Status            string `json:"status"`
+	EmbeddingProvider string `json:"embedding_provider,omitempty"`
+	EmbeddingQueued   bool   `json:"embedding_queued,omitempty"`
 }
 
 // QueryMemoryRequest is the JSON body for POST /v1/memory/query.
@@ -442,6 +444,21 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The node - not the agent - is authoritative for the active vector space.
+	// Always regenerate from the current setting, even when a client supplied a
+	// vector: a long-lived MCP process may have minted it before a provider switch.
+	// If the active provider is temporarily unavailable, preserve the observation
+	// without a vector; the repair worker backfills it in the same vector space.
+	if s.embedder != nil {
+		if emb, embedErr := s.embedder.Embed(r.Context(), req.Content); embedErr != nil {
+			s.logger.Warn().Err(embedErr).Msg("active embedding provider unavailable; memory queued for repair")
+			req.Embedding = nil
+		} else {
+			req.Embedding = emb
+		}
+	}
+	embeddingProvider := s.embedderStampFor(req.Embedding)
+
 	memoryID := generateUUID()
 
 	// Compute content hash.
@@ -513,7 +530,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 			EmbeddingHash:     embeddingHash,
 			Provider:          req.Provider,
 			Assignee:          taskAssignee,
-			EmbeddingProvider: s.embedderStampFor(req.Embedding),
+			EmbeddingProvider: embeddingProvider,
 			KnowledgeTriples:  req.KnowledgeTriples,
 		})
 	}
@@ -591,9 +608,11 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, SubmitMemoryResponse{
-		MemoryID: memoryID,
-		TxHash:   txHash,
-		Status:   string(memory.StatusProposed),
+		MemoryID:          memoryID,
+		TxHash:            txHash,
+		Status:            string(memory.StatusProposed),
+		EmbeddingProvider: embeddingProvider,
+		EmbeddingQueued:   len(req.Embedding) == 0,
 	})
 }
 
@@ -737,13 +756,14 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	opts := store.QueryOptions{
-		DomainTag:     req.DomainTag,
-		Provider:      req.Provider,
-		MinConfidence: req.MinConfidence,
-		StatusFilter:  req.StatusFilter,
-		TopK:          req.TopK,
-		Cursor:        req.Cursor,
-		Tags:          req.Tags,
+		DomainTag:      req.DomainTag,
+		Provider:       req.Provider,
+		VectorProvider: s.activeEmbeddingProvider(),
+		MinConfidence:  req.MinConfidence,
+		StatusFilter:   req.StatusFilter,
+		TopK:           req.TopK,
+		Cursor:         req.Cursor,
+		Tags:           req.Tags,
 		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
 		// at serialize). A no-op unless the caller's filter is "committed".
 		IncludeDisputed: true,
@@ -887,12 +907,13 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
 
 	s.mergeFederatedRecall(r, &resp, req.Federated, req.FederateChains, &federation.QueryRequest{
-		Mode:          federation.ModeSemantic,
-		Embedding:     req.Embedding,
-		DomainTag:     req.DomainTag,
-		MinConfidence: req.MinConfidence,
-		TopK:          req.TopK,
-		Tags:          req.Tags,
+		Mode:              federation.ModeSemantic,
+		Embedding:         req.Embedding,
+		EmbeddingProvider: s.activeEmbeddingProvider(),
+		DomainTag:         req.DomainTag,
+		MinConfidence:     req.MinConfidence,
+		TopK:              req.TopK,
+		Tags:              req.Tags,
 	})
 
 	writeJSON(w, http.StatusOK, resp)
@@ -1345,12 +1366,13 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	start := time.Now()
 
 	opts := store.QueryOptions{
-		DomainTag:     req.DomainTag,
-		Provider:      req.Provider,
-		MinConfidence: req.MinConfidence,
-		StatusFilter:  req.StatusFilter,
-		TopK:          req.TopK,
-		Tags:          req.Tags,
+		DomainTag:      req.DomainTag,
+		Provider:       req.Provider,
+		VectorProvider: s.activeEmbeddingProvider(),
+		MinConfidence:  req.MinConfidence,
+		StatusFilter:   req.StatusFilter,
+		TopK:           req.TopK,
+		Tags:           req.Tags,
 		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
 		// at serialize). A no-op unless the caller's filter is "committed".
 		IncludeDisputed: true,
@@ -1477,13 +1499,14 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
 
 	s.mergeFederatedRecall(r, &resp, req.Federated, req.FederateChains, &federation.QueryRequest{
-		Mode:          federation.ModeHybrid,
-		Query:         req.Query,
-		Embedding:     req.Embedding,
-		DomainTag:     req.DomainTag,
-		MinConfidence: req.MinConfidence,
-		TopK:          req.TopK,
-		Tags:          req.Tags,
+		Mode:              federation.ModeHybrid,
+		Query:             req.Query,
+		Embedding:         req.Embedding,
+		EmbeddingProvider: s.activeEmbeddingProvider(),
+		DomainTag:         req.DomainTag,
+		MinConfidence:     req.MinConfidence,
+		TopK:              req.TopK,
+		Tags:              req.Tags,
 	})
 
 	writeJSON(w, http.StatusOK, resp)

@@ -48,13 +48,16 @@ const (
 // cross_fed agreement scope (AllowedDomains, MaxClearance ceiling, committed-
 // only) regardless of what is asked for.
 type QueryRequest struct {
-	Mode          string    `json:"mode"`
-	Query         string    `json:"query,omitempty"`
-	Embedding     []float32 `json:"embedding,omitempty"`
-	DomainTag     string    `json:"domain_tag,omitempty"`
-	MinConfidence float64   `json:"min_confidence,omitempty"`
-	TopK          int       `json:"top_k,omitempty"`
-	Tags          []string  `json:"tags,omitempty"`
+	Mode      string    `json:"mode"`
+	Query     string    `json:"query,omitempty"`
+	Embedding []float32 `json:"embedding,omitempty"`
+	// EmbeddingProvider identifies the exact vector space of Embedding. Serving
+	// peers fail closed when a vector is supplied without it.
+	EmbeddingProvider string   `json:"embedding_provider,omitempty"`
+	DomainTag         string   `json:"domain_tag,omitempty"`
+	MinConfidence     float64  `json:"min_confidence,omitempty"`
+	TopK              int      `json:"top_k,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
 }
 
 // MemoryResult is one shared memory record as served across a federation

@@ -896,9 +896,10 @@ func loadOrGenerateKey(path string) (ed25519.PrivateKey, error) {
 	if !os.IsNotExist(err) {
 		// O_EXCL creation publishes the directory entry before its seed write is
 		// visible. A concurrent opener can therefore observe a temporary 0-byte
-		// file on its very first read; wait only for undersized regular files, then
-		// surface genuinely corrupt/permission failures normally.
-		if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() && info.Size() < ed25519.SeedSize { //nolint:gosec // trusted identity path
+		// file on its first read. Do not gate the retry on Stat.Size(): the winner
+		// may finish its write between ReadFile and Stat, leaving us with a stale
+		// 0-byte read but a 32-byte stat (the original first-launch race).
+		if info, statErr := os.Stat(path); statErr == nil && info.Mode().IsRegular() { //nolint:gosec // trusted identity path
 			for attempt := 0; attempt < 50; attempt++ {
 				if existing, readErr := readKey(); readErr == nil {
 					return existing, nil

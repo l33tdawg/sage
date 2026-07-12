@@ -7,6 +7,7 @@ import Cocoa
 class SAGEApp: NSObject, NSApplicationDelegate {
     var serverProcess: Process?
     var vaultPassphrase: String?
+    private let dashboardOpenQueue = DispatchQueue(label: "com.sage.dashboard-open", qos: .userInitiated)
 
     let sageHome: String = {
         ProcessInfo.processInfo.environment["SAGE_HOME"] ?? NSHomeDirectory() + "/.sage"
@@ -32,7 +33,10 @@ class SAGEApp: NSObject, NSApplicationDelegate {
 
         // Open dashboard after server has a moment to start
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            self.openDashboard()
+            // First launch cannot have a SAGE tab from this app instance; open
+            // directly so users are not asked for browser Automation permission
+            // until tab reuse is actually needed on a later dock click.
+            NSWorkspace.shared.open(URL(string: "http://localhost:8080/ui/launch")!)
         }
     }
 
@@ -118,9 +122,101 @@ class SAGEApp: NSObject, NSApplicationDelegate {
     }
 
     @objc func openDashboard() {
-        // /ui/launch uses window.open with a named target ('cerebrum'),
-        // so the browser reuses the same tab across ALL browsers — no AppleScript needed.
-        NSWorkspace.shared.open(URL(string: "http://localhost:8080/ui/launch")!)
+        dashboardOpenQueue.async { [weak self] in
+            self?.openDashboardOnce()
+        }
+    }
+
+    private func openDashboardOnce() {
+        // NSWorkspace.open always asks the browser to open a URL, which creates a
+        // fresh tab on every dock-icon click. Focus a matching tab first; only
+        // open /ui/launch when no supported running browser already has CEREBRUM.
+        if focusExistingDashboardTab() { return }
+        _ = DispatchQueue.main.sync {
+            NSWorkspace.shared.open(URL(string: "http://localhost:8080/ui/launch")!)
+        }
+    }
+
+    /// Focus an existing CEREBRUM tab without launching a browser that is not
+    /// already running. The browser list is keyed by bundle id so localized app
+    /// names do not break detection. AppleScript failures (unsupported browser,
+    /// denied Automation permission, browser update) safely fall back to opening
+    /// the dashboard normally.
+    func focusExistingDashboardTab() -> Bool {
+        let runningIDs = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
+        let chromiumIDs = [
+            "com.google.Chrome",
+            "com.google.Chrome.canary",
+            "com.brave.Browser",
+            "com.microsoft.edgemac",
+            "company.thebrowser.Browser",
+            "com.vivaldi.Vivaldi",
+            "org.chromium.Chromium",
+        ]
+
+        for bundleID in chromiumIDs where runningIDs.contains(bundleID) {
+            let script = """
+            tell application id "\(bundleID)"
+                repeat with w in windows
+                    set tabIndex to 0
+                    repeat with t in tabs of w
+                        set tabIndex to tabIndex + 1
+                        if (URL of t) contains "localhost:8080" or (URL of t) contains "127.0.0.1:8080" then
+                            set active tab index of w to tabIndex
+                            set index of w to 1
+                            activate
+                            return "focused"
+                        end if
+                    end repeat
+                end repeat
+            end tell
+            return "none"
+            """
+            if runAppleScript(script) == "focused" { return true }
+        }
+
+        if runningIDs.contains("com.apple.Safari") {
+            let script = """
+            tell application id "com.apple.Safari"
+                repeat with w in windows
+                    repeat with t in tabs of w
+                        if (URL of t) contains "localhost:8080" or (URL of t) contains "127.0.0.1:8080" then
+                            set current tab of w to t
+                            set index of w to 1
+                            activate
+                            return "focused"
+                        end if
+                    end repeat
+                end repeat
+            end tell
+            return "none"
+            """
+            if runAppleScript(script) == "focused" { return true }
+        }
+        return false
+    }
+
+    private func runAppleScript(_ source: String) -> String? {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", source]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        if finished.wait(timeout: .now() + 5) == .timedOut {
+            process.terminate()
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     @objc func showLog() {

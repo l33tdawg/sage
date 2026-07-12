@@ -4,6 +4,7 @@ import test from 'node:test';
 
 const appSource = await readFile(new URL('../web/static/js/app.js', import.meta.url), 'utf8');
 const cssSource = await readFile(new URL('../web/static/css/sage.css', import.meta.url), 'utf8');
+const traySource = await readFile(new URL('../cmd/sage-tray/main.swift', import.meta.url), 'utf8');
 
 test('Access Controls is a first-class sidebar route', () => {
     assert.match(appSource, /hash === '\/access'\) setPage\('access'\)/);
@@ -39,4 +40,24 @@ test('unconfirmed RBAC remains retryable and clearly says it is not active', () 
     assert.match(appSource, /Access is not active yet\./);
     assert.match(appSource, /setAccessDirty\(true\);\s*setAccessSaved\(false\);\s*return;/);
     assert.doesNotMatch(appSource, /Access was saved locally, but the network has not confirmed it yet/);
+});
+
+test('embedding cutover happens before migration and controls expose accessible state', () => {
+    const runAll = appSource.slice(appSource.indexOf('const runAll = async () => {'), appSource.indexOf('const pct = prog'));
+    assert.ok(runAll.indexOf('await enableToReady()') < runAll.indexOf('await reembedToDone()'),
+        'Ollama must become authoritative before the background migration starts');
+    assert.match(appSource, /role="group" aria-label="Embedding provider"/);
+    assert.match(appSource, /aria-pressed=\$\{embedderStatus\.provider === 'ollama'\}/);
+    assert.match(appSource, /role="status" aria-live="polite"/);
+    assert.match(appSource, /Reranker \$\{rerankerOn \? 'on' : 'off'\}/);
+});
+
+test('macOS tray focuses an existing CEREBRUM tab before opening a new one', () => {
+    const reopen = traySource.match(/func applicationShouldHandleReopen[\s\S]+?\n    \}/)?.[0] || '';
+    const open = traySource.match(/private func openDashboardOnce\(\)[\s\S]+?\n    \}/)?.[0] || '';
+    assert.match(reopen, /openDashboard\(\)/);
+    assert.match(open, /focusExistingDashboardTab\(\)/);
+    assert.ok(open.indexOf('focusExistingDashboardTab()') < open.indexOf('NSWorkspace.shared.open'));
+    assert.match(traySource, /finished\.wait\(timeout: \.now\(\) \+ 5\)/,
+        'browser automation must be time-bounded so dock clicks cannot freeze the app');
 });

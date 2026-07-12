@@ -1,6 +1,10 @@
 package embedding
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 // Provider is the interface for embedding generation.
 type Provider interface {
@@ -40,4 +44,35 @@ type Modeler interface {
 // where the upstream embed server may have gone away after boot.
 type Pinger interface {
 	Ping(ctx context.Context) error
+}
+
+// SpaceID identifies the exact vector space produced by p. The default legacy
+// spaces keep their historical stamps so existing personal nodes do not need a
+// full re-embed on upgrade; configurable/non-default models include model and
+// dimension so changing either can never silently mix incompatible vectors.
+func SpaceID(p Provider) string {
+	if p == nil {
+		return ""
+	}
+	name := "hash"
+	if named, ok := p.(Named); ok && strings.TrimSpace(named.Name()) != "" {
+		name = strings.TrimSpace(named.Name())
+	} else if p.Semantic() {
+		name = "ollama"
+	}
+	model := ""
+	if modeled, ok := p.(Modeler); ok {
+		model = strings.TrimSpace(modeled.Model())
+	}
+	dimension := p.Dimension()
+	if name == "ollama" && model == "nomic-embed-text" && dimension == 768 {
+		return "ollama"
+	}
+	if name == "hash" && dimension == 768 {
+		return "hash"
+	}
+	if model == "" {
+		return fmt.Sprintf("%s:%d", name, dimension)
+	}
+	return fmt.Sprintf("%s:%s:%d", name, model, dimension)
 }

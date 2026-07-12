@@ -1793,7 +1793,8 @@ func isLowValueObservation(obs string) bool {
 	return false
 }
 
-// storeMemory is a helper that embeds, optionally pre-validates, and submits a memory.
+// storeMemory is a helper that optionally pre-validates and submits a memory.
+// The REST node generates the vector with its active provider.
 // If the pre-validate endpoint exists and rejects the memory, returns an error with
 // validator reasons. Falls through to normal submission if pre-validate returns 404
 // (backwards compatible with older servers).
@@ -1830,24 +1831,23 @@ func (s *Server) storeMemory(ctx context.Context, content, domain, memType strin
 		return false, fmt.Errorf("memory rejected by validators: %s", strings.Join(reasons, "; "))
 	}
 
-	// Step 2: Get embedding (best-effort). The /v1/embed path already retries transient
-	// Ollama blips; if it STILL fails (embedder genuinely down/unreachable) we submit
-	// WITHOUT a vector rather than lose the observation — the memory commits and is
-	// re-embeddable, but it is NOT semantically recallable until a re-embed backfills
-	// the vector (and on a vault-encrypted node it isn't keyword-searchable either). We
-	// flag this as degraded so the caller can tell the user, rather than degrading
-	// semantic memory silently.
+	// Step 2: Mint a client vector for backward compatibility with pre-v11.7.4
+	// nodes. Current nodes regenerate it with their active provider (so this can
+	// never override the server's vector-space authority), while older nodes need
+	// the attached vector to avoid silently storing an unsearchable observation.
 	embedReq, _ := json.Marshal(map[string]string{"text": content})
 	var embedResp struct {
 		Embedding []float32 `json:"embedding"`
 	}
+	degraded = false
 	if embErr := s.doSignedJSON(ctx, "POST", "/v1/embed", embedReq, &embedResp); embErr != nil {
-		fmt.Fprintf(os.Stderr, "SAGE MCP: embedder unavailable (%v) — storing memory WITHOUT a vector; it will not be semantically recallable until a re-embed backfills it (dashboard → Settings → Embeddings → Re-embed)\n", embErr)
 		embedResp.Embedding = nil
 		degraded = true
 	}
 
-	// Step 3: Submit memory (embedding omitted when the embedder was unavailable).
+	// Step 3: Current nodes report whether their authoritative embedding attempt
+	// queued repair. Older responses omit the field; the client-side result above
+	// remains the compatibility signal in that case.
 	submitReq, _ := json.Marshal(map[string]any{
 		"content":          content,
 		"memory_type":      memType,
@@ -1856,10 +1856,13 @@ func (s *Server) storeMemory(ctx context.Context, content, domain, memType strin
 		"confidence_score": confidence,
 		"embedding":        embedResp.Embedding,
 	})
-	if subErr := s.submitMemoryResilient(ctx, submitReq, nil); subErr != nil {
+	var submitResp struct {
+		EmbeddingQueued bool `json:"embedding_queued"`
+	}
+	if subErr := s.submitMemoryResilient(ctx, submitReq, &submitResp); subErr != nil {
 		return false, subErr
 	}
-	return degraded, nil
+	return degraded || submitResp.EmbeddingQueued, nil
 }
 
 // --- Param helpers ---

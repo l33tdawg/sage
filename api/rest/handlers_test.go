@@ -88,7 +88,7 @@ func (m *mockMemoryStore) UpdateMemoryEmbedding(_ context.Context, _ string, _ [
 func (m *mockMemoryStore) CountMemoriesByProvider(_ context.Context) (map[string]int, error) {
 	return map[string]int{}, nil
 }
-func (m *mockMemoryStore) ListMemoriesForReembed(_ context.Context, _ int) ([]store.ReembedItem, error) {
+func (m *mockMemoryStore) ListMemoriesForReembed(_ context.Context, _ string, _ int) ([]store.ReembedItem, error) {
 	return nil, nil
 }
 func (m *mockMemoryStore) MarkMemoryEmbeddingSkipped(_ context.Context, _ string) error { return nil }
@@ -380,6 +380,20 @@ type capturingSuppCache struct {
 	data     *memory.SupplementaryData
 }
 
+type authoritativeTestEmbedder struct {
+	vector []float32
+	err    error
+	name   string
+}
+
+func (e authoritativeTestEmbedder) Embed(context.Context, string) ([]float32, error) {
+	return e.vector, e.err
+}
+func (e authoritativeTestEmbedder) Dimension() int { return len(e.vector) }
+func (e authoritativeTestEmbedder) Ready() bool    { return e.err == nil }
+func (e authoritativeTestEmbedder) Semantic() bool { return e.name != "hash" }
+func (e authoritativeTestEmbedder) Name() string   { return e.name }
+
 func (c *capturingSuppCache) Put(memoryID string, data *memory.SupplementaryData) {
 	c.memoryID = memoryID
 	c.data = data
@@ -482,6 +496,55 @@ func TestSubmitMemory(t *testing.T) {
 	// Note: memory is no longer stored directly by the REST handler.
 	// It is written by ABCI Commit after consensus finalizes the block.
 	// This test verifies the REST layer correctly broadcasts and returns.
+}
+
+func TestSubmitMemory_RegeneratesVectorFromActiveProvider(t *testing.T) {
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{
+			"check_tx": map[string]any{"code": 0}, "tx_result": map[string]any{"code": 0},
+			"hash": "ACTIVEVECTOR", "height": "1",
+		}})
+	}))
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+	srv.embedder = authoritativeTestEmbedder{vector: []float32{0.4, 0.5, 0.6}, name: "ollama"}
+	cache := &capturingSuppCache{}
+	srv.SetSuppCache(cache)
+	body := []byte(`{"content":"provider invariant","memory_type":"fact","domain_tag":"test","confidence_score":0.9,"embedding":[9,9,9]}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	require.NotNil(t, cache.data)
+	assert.Equal(t, []float32{0.4, 0.5, 0.6}, cache.data.Embedding,
+		"an agent-supplied vector from an unknown space must never enter the active index")
+	assert.Equal(t, "ollama:3", cache.data.EmbeddingProvider)
+}
+
+func TestSubmitMemory_DropsClientVectorWhenActiveProviderFails(t *testing.T) {
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{
+			"check_tx": map[string]any{"code": 0}, "tx_result": map[string]any{"code": 0},
+			"hash": "QUEUEDREPAIR", "height": "1",
+		}})
+	}))
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+	srv.embedder = authoritativeTestEmbedder{err: fmt.Errorf("provider down"), name: "ollama"}
+	cache := &capturingSuppCache{}
+	srv.SetSuppCache(cache)
+	body := []byte(`{"content":"preserve without mismatch","memory_type":"observation","domain_tag":"test","confidence_score":0.8,"embedding":[9,9,9]}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	require.NotNil(t, cache.data)
+	assert.Empty(t, cache.data.Embedding)
+	assert.Empty(t, cache.data.EmbeddingProvider)
 }
 
 func TestSubmitAgentTaskStagesCreatingAgentAsAssignee(t *testing.T) {

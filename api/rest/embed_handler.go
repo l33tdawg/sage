@@ -123,20 +123,22 @@ func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// embedderStampFor returns the embedding_provider stamp for a submission
-// carrying `emb`: the SEMANTIC embedder's Named id (e.g. "ollama") when one
-// is active, "" otherwise. Hash pseudo-vectors deliberately stay unstamped -
-// ” means "needs re-embed", so they get picked up when the operator turns
-// semantic search on. Callers on the submit path can't distinguish a vector
-// minted by this node's /v1/embed from one the SDK computed elsewhere, but
-// the dimension gate already forces schema compatibility, and mislabeling a
-// foreign-but-valid vector merely skips a redundant re-embed.
+// embedderStampFor returns the active vector-space stamp for a submission.
+// Empty means no vector. Hash vectors are explicitly stamped "hash" so a
+// provider migration can distinguish them from missing vectors and can never
+// mix them with Ollama vectors.
 func (s *Server) embedderStampFor(emb []float32) string {
-	if len(emb) == 0 || s.embedder == nil || !s.embedder.Semantic() {
+	if len(emb) == 0 || s.embedder == nil {
 		return ""
 	}
-	if n, ok := s.embedder.(embedding.Named); ok {
-		return n.Name()
+	return embedding.SpaceID(s.embedder)
+}
+
+// activeEmbeddingProvider names the vector space used by live query embeddings.
+// Unlike embedderStampFor it does not require a materialized vector.
+func (s *Server) activeEmbeddingProvider() string {
+	if s.embedder == nil {
+		return ""
 	}
-	return ""
+	return embedding.SpaceID(s.embedder)
 }

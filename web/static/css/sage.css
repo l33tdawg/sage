@@ -372,6 +372,8 @@ body {
 }
 .health-dot.ok { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .health-dot.err { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+.health-dot.muted { background: var(--text-muted); box-shadow: none; }
+.health-dot.configured { background: var(--primary); box-shadow: none; }
 .health-num { font-weight: 700; color: var(--primary); }
 .health-sep { width: 1px; height: 12px; background: var(--border-light); }
 

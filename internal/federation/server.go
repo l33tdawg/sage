@@ -328,6 +328,13 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 		TopK:         topK,
 		Tags:         req.Tags,
 	}
+	if len(req.Embedding) > 0 {
+		if req.EmbeddingProvider == "" {
+			httpError(w, http.StatusBadRequest, "embedding_provider is required with an embedding")
+			return
+		}
+		opts.VectorProvider = req.EmbeddingProvider
+	}
 	// min_confidence is a DECAYED floor (parity with local recall): the store filters
 	// the decayed value over the full candidate set before trim — so top_k is filled
 	// and corroboration-boosted memories aren't starved — pinned to `now` so it

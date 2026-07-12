@@ -1,7 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
-rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus,
+rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
@@ -23,7 +23,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.7.3';
+const SAGE_VERSION = 'v11.7.4';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -4401,7 +4401,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                 // Re-attach if a background re-embed is already running (reopened
                 // modal, or it kept going after the modal was closed).
                 const prog = await reembedProgress().catch(() => null);
-                if (prog && prog.running) {
+                if (prog && prog.running && prog.target === 'ollama') {
                     setStatus(await embeddingsStatus().catch(() => null));
                     setProg({ done: prog.done || 0, total: prog.total || 0 });
                     setStep('reembed');
@@ -4512,7 +4512,7 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                 if (k === 'done' && v === '1' && !streamErr) { streamErr = 'The model download did not complete.'; setErr(streamErr); }
             });
             const s = await checkOllamaEmbed();
-            if (s.model_available) setStep('reembed');
+            if (s.model_available) setStep(status?.is_semantic ? 'reembed' : 'enable');
             else if (!streamErr) setErr('The model download did not finish. Try again.');
         } catch (e) { setErr(e.message || String(e)); }
         setPulling(false);
@@ -4588,11 +4588,11 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
         setEnabling(true); setErr(null);
         try {
             const r = await enableSemanticEmbeddings();
-            setStep('done');
             if (r && r.restart_required) {
                 // Platform without in-process restart (Windows): the switch is
                 // saved; the operator relaunches SAGE manually.
                 setWarn(r.message || 'Semantic memory is on. Quit SAGE and relaunch it to finish switching.');
+                setStep('done');
                 setEnabling(false);
                 return;
             }
@@ -4612,6 +4612,13 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
             if (latest) setStatus(latest);
             if (!latest || !latest.is_semantic) {
                 setWarn('Semantic memory was saved, but SAGE is still restarting. Close this window and relaunch SAGE if it does not come back automatically.');
+                setStep('done');
+            } else if ((latest.need_reembed || 0) > 0 || (latest.errored || 0) > 0) {
+                setStep('reembed');
+                await reembedMemories();
+                pollReembed();
+            } else {
+                setStep('done');
             }
             setEnabling(false);
         } catch (e) { setErr(e.message); setEnabling(false); }
@@ -4624,10 +4631,8 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
         if (r && r.restart_required) {
             setWarn(r.message || 'Semantic memory is on. Quit SAGE and relaunch it to finish switching.');
             setStepState(p => ({ ...p, enable: 'done' }));
-            setStep('done');
-            return;
+            return false;
         }
-        setStep('done');
         for (let i = 0; i < 60; i++) {
             if (!alive.current) return;
             await sleep(2000);
@@ -4637,11 +4642,12 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                 if (s.is_semantic) {
                     setStepState(p => ({ ...p, enable: 'done' }));
                     setSetupMsg('Semantic memory is on.');
-                    return;
+                    return true;
                 }
             }
         }
         setWarn('Semantic memory was saved, but SAGE is still restarting. Close this window and relaunch SAGE if it does not come back automatically.');
+        return false;
     };
 
     const runAll = async () => {
@@ -4671,8 +4677,19 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
             } else {
                 s = await pullModelToReady();
             }
-            const latest = await embeddingsStatus();
+            let latest = await embeddingsStatus();
             setStatus(latest);
+            // Cut over write/query authority first. Vector reads are filtered to
+            // the active space, so recall is temporarily partial but never mixed;
+            // every new MCP write now lands in Ollama and the migration converges.
+            if (!latest.is_semantic) {
+                const enabled = await enableToReady();
+                if (!enabled) return;
+                latest = await embeddingsStatus();
+                setStatus(latest);
+            } else {
+                setStepState(p => ({ ...p, enable: 'done' }));
+            }
             if ((latest.need_reembed || 0) > 0 || (latest.errored || 0) > 0) {
                 await reembedToDone();
             } else {
@@ -4680,11 +4697,6 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
             }
             const afterReembed = await embeddingsStatus().catch(() => null);
             if (afterReembed) setStatus(afterReembed);
-            if (!(afterReembed && afterReembed.is_semantic)) {
-                await enableToReady();
-            } else {
-                setStepState(p => ({ ...p, enable: 'done' }));
-            }
             setStep('done');
             if (onDone) onDone();
         } catch (e) {
@@ -4763,8 +4775,8 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                             <ul style="padding-left:18px;margin:0;color:var(--text-dim);font-size:12px;line-height:1.7;">
                                 <li>${needOllama ? 'Install and start the local Ollama runtime' : 'Ollama is already running ✓'}</li>
                                 <li>${needModel ? 'Download nomic-embed-text once' : 'Memory model is already installed ✓'}</li>
-                                <li>${needReembed ? `Re-read ${setupSummaryCount} memor${setupSummaryCount === 1 ? 'y' : 'ies'} for semantic recall` : 'Memories are already semantically indexed ✓'}</li>
                                 <li>${needEnable ? 'Switch SAGE to smart memory and restart briefly' : 'Smart memory is already active ✓'}</li>
+                                <li>${needReembed ? `Re-read ${setupSummaryCount} memor${setupSummaryCount === 1 ? 'y' : 'ies'} for semantic recall` : 'Memories are already semantically indexed ✓'}</li>
                             </ul>
                         </div>
                         <button class="btn btn-primary" style="width:100%;padding:12px;" onClick=${runAll} disabled=${busy || !status}>Set it all up</button>
@@ -4788,8 +4800,8 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
                         <div>
                             ${stepRow('ollama', 'Ollama runtime', 'Runs the local embedding model on this machine.')}
                             ${stepRow('model', 'Memory model: nomic-embed-text', 'One-time local model download.')}
-                            ${stepRow('reembed', 'Re-read existing memories', 'Keeps IDs and content intact; only embeddings are regenerated.')}
                             ${stepRow('enable', 'Switch SAGE to smart memory', 'Saves the embedder config and restarts the node when needed.')}
+                            ${stepRow('reembed', 'Re-read existing memories', 'Keeps IDs and content intact; only embeddings are regenerated.')}
                         </div>
                         ${setupMsg && html`<p style="color:var(--text-dim);font-size:12px;margin-top:12px;">${setupMsg}</p>`}
                         <p style="color:var(--text-muted);font-size:12px;margin-top:8px;">Safe to leave open. Downloads continue on the node and the re-embed banner keeps tracking memory progress.</p>
@@ -5292,6 +5304,9 @@ function SettingsPage({ onRunSetup, requestedTab }) {
     const [health, setHealth] = useState(null);
     const [showEmbedSetup, setShowEmbedSetup] = useState(false); // semantic-memory setup modal
     const [embStatus, setEmbStatus] = useState(null);            // GET /embeddings/status (need_reembed etc)
+    const [embeddingSwitching, setEmbeddingSwitching] = useState(false);
+    const [embeddingSwitchMsg, setEmbeddingSwitchMsg] = useState('');
+    const [confirmHashEmbedding, setConfirmHashEmbedding] = useState(false);
     const refreshEmb = useCallback(() => { embeddingsStatus().then(setEmbStatus).catch(() => {}); }, []);
     useEffect(() => { refreshEmb(); }, [refreshEmb]);
     const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -5366,6 +5381,37 @@ function SettingsPage({ onRunSetup, requestedTab }) {
     // older servers only set the `ollama` string. Derive a normalized view
     // so the row below this can render any provider without branching twice.
     const embedderStatus = describeEmbedder(health);
+    const chooseEmbeddingProvider = async (provider) => {
+        if (provider === embedderStatus.provider || embeddingSwitching) return;
+        if (provider === 'ollama') {
+            setShowEmbedSetup(true); // migrates every row before activating Ollama
+            return;
+        }
+        if (!confirmHashEmbedding) {
+            setConfirmHashEmbedding(true);
+            setEmbeddingSwitchMsg('Hash mode turns off meaning-based recall. The reranker remains a separate setting below. Click Hash embeddings again to confirm.');
+            return;
+        }
+        setConfirmHashEmbedding(false);
+        setEmbeddingSwitching(true); setEmbeddingSwitchMsg('Switching to hash embeddings and restarting...');
+        try {
+            const result = await selectEmbeddingProvider('hash');
+            if (result?.restart_required) {
+                setEmbeddingSwitchMsg(result.message || 'Hash embeddings saved. Fully quit and reopen SAGE.');
+                setEmbeddingSwitching(false);
+                return;
+            }
+            for (let i = 0; i < 60; i++) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                const status = await embeddingsStatus().catch(() => null);
+                if (status?.provider === 'hash') { window.location.reload(); return; }
+            }
+            setEmbeddingSwitchMsg('Hash embeddings were saved. Fully quit and reopen SAGE if it does not return automatically.');
+        } catch (e) {
+            setEmbeddingSwitchMsg('Could not switch embeddings: ' + (e.message || 'error'));
+        }
+        setEmbeddingSwitching(false);
+    };
     const uptimeRaw = health?.uptime || '';
     const uptimeBaseSec = useRef(0);
     const [uptimeOffset, setUptimeOffset] = useState(0);
@@ -5501,7 +5547,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                                     <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : embStatus.need_reembed > 0 ? 'Finish setup →' : embStatus.unreadable > 0 ? 'Review →' : 'Retry →'}</button>
                                 </div>
                             `}
-                            <div class="settings-row"><span class="label">${statusDot(!!(health?.embedder?.reranker?.enabled))} Reranker</span><span class="value" style="color: ${health?.embedder?.reranker?.enabled ? 'var(--accent)' : 'var(--text-muted)'}">${health?.embedder?.reranker?.enabled ? (health.embedder.reranker.model || 'On') : 'Off'}</span></div>
+                            <div class="settings-row"><span class="label">${statusDot(!!(health?.embedder?.reranker?.enabled))} Reranker</span><span class="value" style="display:flex;align-items:center;gap:10px;color: ${health?.embedder?.reranker?.enabled ? 'var(--accent)' : 'var(--text-muted)'}">${health?.embedder?.reranker?.enabled ? (health.embedder.reranker.model || 'On') : 'Off'} <button class="btn" style="padding:4px 10px;font-size:11px;" onClick=${() => setSettingsTab('recall')}>Manage</button></span></div>
                             <div class="settings-row"><span class="label">${statusDot(encrypted)} Synaptic Ledger Encryption</span>${encrypted
                                 ? html`<span class="value" style="color:var(--accent)">AES-256-GCM</span>`
                                 : html`<span style="display:flex;align-items:center;gap:8px;"><span class="value" style="color:var(--text-muted)">Off</span><button class="btn btn-primary" style="padding:4px 12px;font-size:12px;" title="Encrypt all memories at rest with a passphrase (Security tab)" onClick=${() => setSettingsTab('security')}>Enable →</button></span>`}</div>
@@ -5611,7 +5657,17 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                 <div class="settings-tab-content">
                     <div class="settings-section">
                         <h3>Memory engine <${HelpTip} text="The two models that power recall: the embedding model that turns memories into vectors for semantic search (managed by SAGE), and the optional reranker that re-scores recall results for sharper relevance (one-click managed setup)." /></h3>
-                        <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} Embedding model</span><span class="value" style="color: ${embedderStatus.online ? 'var(--accent)' : 'var(--text-muted)'}" title="${embedderStatus.detail || ''}">${embedderStatus.displayName || (embedderStatus.online ? 'Connected' : 'Offline')}${embedderStatus.detail ? ' · ' + embedderStatus.detail : ''}</span></div>
+                        <div class="settings-row" style="align-items:center;">
+                            <span class="label">${statusDot(embedderStatus.online)} Smart memory embeddings</span>
+                            <span class="value" role="group" aria-label="Embedding provider" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                                <button class="btn ${embedderStatus.provider === 'ollama' ? 'btn-primary' : ''}" aria-pressed=${embedderStatus.provider === 'ollama'} disabled=${embeddingSwitching} onClick=${() => chooseEmbeddingProvider('ollama')}>Ollama <span style="opacity:.75;">(preferred)</span></button>
+                                <button class="btn ${embedderStatus.provider === 'hash' ? 'btn-primary' : ''}" aria-pressed=${embedderStatus.provider === 'hash'} style=${confirmHashEmbedding ? 'border-color:var(--warning);color:var(--warning);' : ''} disabled=${embeddingSwitching} onClick=${() => chooseEmbeddingProvider('hash')}>${confirmHashEmbedding ? 'Click again to switch' : 'Hash embeddings'}</button>
+                            </span>
+                        </div>
+                        <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 14px;">${embedderStatus.provider === 'ollama'
+                            ? `On - ${embedderStatus.displayName}${embedderStatus.detail ? ' · ' + embedderStatus.detail : ''}. New memories and repairs use this exact vector space.`
+                            : 'Basic mode - deterministic local hash vectors. Meaning-based recall is off; the reranker remains independently configurable below.'}</div>
+                        ${embeddingSwitchMsg && html`<div class="warning-banner" role="status" aria-live="polite" style="margin-bottom:12px;">${embeddingSwitchMsg}</div>`}
                         ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0 || embStatus.errored > 0))) ? html`
                             <div class="settings-row" style="align-items:center;">
                                 <span class="label" style="color:var(--text-dim);font-size:12px;">${embedderStatus.provider === 'hash'
@@ -5623,9 +5679,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                                             : `${embStatus.errored} memor${embStatus.errored === 1 ? 'y' : 'ies'} failed to embed — run the retry.`}</span>
                                 <button class="btn btn-primary" style="padding:6px 14px;font-size:12px;" onClick=${() => setShowEmbedSetup(true)}>${embedderStatus.provider === 'hash' ? 'Turn on smart memory →' : embStatus.need_reembed > 0 ? 'Finish setup →' : embStatus.unreadable > 0 ? 'Review →' : 'Retry →'}</button>
                             </div>
-                        ` : html`
-                            <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 14px;">The embedding model is managed by SAGE and is not configurable here.</div>
-                        `}
+                        ` : ''}
                         ${html`<${RerankerControl} />`}
                     </div>
                     <div class="settings-section" style="margin-top:16px">
@@ -6401,6 +6455,8 @@ function HealthBar() {
     if (!health) return null;
 
     const embedderStatus = describeEmbedder(health);
+    const reranker = health?.embedder?.reranker;
+    const rerankerOn = !!reranker?.enabled;
     const totalMem = health.memories?.total_memories || 0;
     const domains = health.memories?.by_domain ? Object.keys(health.memories.by_domain).length : 0;
 
@@ -6409,6 +6465,11 @@ function HealthBar() {
             <div class="health-item" title="${embedderStatus.detail || ''}">
                 <div class="health-dot ${embedderStatus.online ? 'ok' : 'err'}"></div>
                 <span>${embedderStatus.label}</span>
+            </div>
+            <div class="health-sep"></div>
+            <div class="health-item" title="${rerankerOn ? `Enabled - ${reranker.model || 'cross-encoder reranker'}. Availability is verified when enabled.` : 'Reranker off'}">
+                <div class="health-dot ${rerankerOn ? 'configured' : 'muted'}"></div>
+                <span>Reranker ${rerankerOn ? 'on' : 'off'}</span>
             </div>
             <div class="health-sep"></div>
             <div class="health-item">

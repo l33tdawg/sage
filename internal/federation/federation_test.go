@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -418,6 +419,16 @@ func TestFederatedQueryEndToEnd(t *testing.T) {
 	}
 	if len(resp.Results) != 1 || resp.Results[0].MemoryID != "mem-1" {
 		t.Fatalf("expected mem-1, got %+v", resp.Results)
+	}
+
+	// Vector federation must identify its exact space. An older/foreign caller
+	// that omits provenance fails closed instead of comparing mixed vectors.
+	if _, err := a.mgr.QueryPeer(ctx, b.chainID, &QueryRequest{
+		Mode:      ModeSemantic,
+		Embedding: []float32{0.1, 0.2},
+		DomainTag: "shared.notes",
+	}); err == nil || !strings.Contains(err.Error(), "embedding_provider is required") {
+		t.Fatalf("expected missing vector-space rejection, got %v", err)
 	}
 
 	// The proxy fan-out stamps provenance + chain-qualifies the author.

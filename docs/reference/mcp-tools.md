@@ -126,9 +126,11 @@ most important operational tool.
   low-value).
 - `skip_reason`: populated when `stored` is false.
 - `store_mode`: set to `no_vector` when the observation was committed but the
-  embedder was unavailable, so it was stored WITHOUT a vector. In that case
+  node's selected embedder was unavailable, so the REST boundary queued it
+  WITHOUT accepting a possibly stale client vector. In that case
   `semantic_degraded` is `true` and `degraded_reason` explains it — the memory is
-  not semantically recallable until a re-embed backfills the vector.
+  not semantically recallable until the node's automatic provider repair
+  backfills the vector after recovery/unlock.
 - `pipe_inbox`: pipeline items addressed to this agent (if any).
 - `pipe_inbox_count`, `pipe_results`, `pipe_results_count`: pipeline data.
 - `recall_error` / `store_error`: set if a phase failed.

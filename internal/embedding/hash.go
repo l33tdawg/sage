@@ -72,3 +72,10 @@ func (p *HashProvider) Ready() bool {
 func (p *HashProvider) Semantic() bool {
 	return false
 }
+
+// Name identifies the vector space stamped onto stored memories. Provider
+// provenance must include hash vectors too; an empty stamp means no vector, not
+// "probably hash".
+func (p *HashProvider) Name() string {
+	return "hash"
+}

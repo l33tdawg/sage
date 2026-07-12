@@ -186,6 +186,21 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Co-commit vectors obey the same provider invariant as ordinary submits.
+	// A caller-supplied vector may belong to a stale or foreign vector space, so
+	// regenerate from raw content with the node's active provider. Hash-only
+	// envelopes cannot be embedded locally and remain queued for content repair.
+	if req.Content != "" && s.embedder != nil {
+		if emb, embedErr := s.embedder.Embed(r.Context(), req.Content); embedErr != nil {
+			s.logger.Warn().Err(embedErr).Msg("active embedding provider unavailable for co-commit; queued for repair")
+			req.Embedding = nil
+		} else {
+			req.Embedding = emb
+		}
+	} else {
+		req.Embedding = nil
+	}
+
 	// Stage the raw content + embedding off-chain, keyed by SharedID, for the
 	// ABCI app to fold into the local record at commit (consensus-first write).
 	if s.suppCache != nil && (req.Content != "" || len(req.Embedding) > 0) {

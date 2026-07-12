@@ -67,6 +67,7 @@ func (h *DashboardHandler) RegisterEmbeddingsRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/embeddings/recover-preview", h.handleEmbeddingsRecoverPreview)
 	r.Post("/v1/dashboard/embeddings/recover", h.handleEmbeddingsRecover)
 	r.Post("/v1/dashboard/embeddings/enable", h.handleEmbeddingsEnable)
+	r.Post("/v1/dashboard/embeddings/provider", h.handleEmbeddingsProvider)
 }
 
 // handleEmbeddingsStatus reports the current embedder + how much re-embedding is
@@ -83,8 +84,35 @@ func (h *DashboardHandler) handleEmbeddingsStatus(w http.ResponseWriter, r *http
 		total += n
 	}
 	current := currentEmbedProvider(h.embedder)
-	ollamaUp := h.embeddingOllamaRunning(r.Context())
-	modelReady := ollamaUp && h.embeddingOllamaHasModel(r.Context())
+	activeSemantic := false
+	targetSpace := embedProviderOllama
+	model := embedModel
+	dimension := embedDimension
+	if provider, ok := h.embedder.(embedding.Provider); ok && provider.Semantic() {
+		activeSemantic = true
+		targetSpace = currentVectorSpace(h.embedder)
+		dimension = provider.Dimension()
+		if modeled, ok := h.embedder.(embedding.Modeler); ok && strings.TrimSpace(modeled.Model()) != "" {
+			model = modeled.Model()
+		}
+	}
+	needOllama := 0
+	for provider, n := range counts {
+		if provider != targetSpace && provider != "skipped" && provider != "error" {
+			needOllama += n
+		}
+	}
+	ollamaUp := false
+	modelReady := false
+	if activeSemantic {
+		modelReady = h.activeEmbedderReady(r.Context())
+		ollamaUp = modelReady
+	} else {
+		// Hash mode reports readiness of the managed default that setup would
+		// switch to, rather than readiness of the active hash provider.
+		ollamaUp = h.embeddingOllamaRunning(r.Context())
+		modelReady = ollamaUp && h.embeddingOllamaHasModel(r.Context())
+	}
 	binPath, binFound := "", false
 	engineInstalled, installSupported, installing, pulling := false, false, false, false
 	var engineBytes, modelDone, modelTotal int64
@@ -102,9 +130,10 @@ func (h *DashboardHandler) handleEmbeddingsStatus(w http.ResponseWriter, r *http
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"provider":                 current, // active embedder: "hash" | "ollama" | ...
-		"is_semantic":              current == embedProviderOllama,
-		"model":                    embedModel,
-		"dimension":                embedDimension,
+		"is_semantic":              activeSemantic,
+		"model":                    model,
+		"dimension":                dimension,
+		"vector_space":             targetSpace,
 		"ollama_running":           ollamaUp,
 		"model_available":          modelReady,
 		"ollama_binary_found":      binFound,
@@ -124,8 +153,9 @@ func (h *DashboardHandler) handleEmbeddingsStatus(w http.ResponseWriter, r *http
 			return ollamaBaseURL
 		}(),
 		"total_memories": total,
-		"need_reembed":   counts[""], // untagged memories still needing an embedding (excludes done + skipped)
-		"on_ollama":      counts[embedProviderOllama],
+		"need_reembed":   needOllama, // rows outside the Ollama vector space (blank/hash/other)
+		"on_ollama":      counts[targetSpace],
+		"on_hash":        counts["hash"],
 		"unreadable":     counts["skipped"], // undecryptable/empty — deprecation candidates
 		"errored":        counts["error"],   // readable but embed failed — retryable
 		"vault_locked":   h.VaultLocked.Load(),
@@ -156,14 +186,17 @@ func embeddingProviderStamp(e Embedder, emb []float32) string {
 	if len(emb) == 0 || e == nil {
 		return ""
 	}
-	if ep, ok := e.(embedderProvider); !ok || !ep.Semantic() {
-		return ""
+	if provider, ok := e.(embedding.Provider); ok {
+		return embedding.SpaceID(provider)
 	}
-	if named, ok := e.(embedding.Named); ok {
-		return named.Name()
+	return currentEmbedProvider(e)
+}
+
+func currentVectorSpace(e Embedder) string {
+	if provider, ok := e.(embedding.Provider); ok {
+		return embedding.SpaceID(provider)
 	}
-	// Pre-Named semantic providers in SAGE were Ollama clients.
-	return embedProviderOllama
+	return currentEmbedProvider(e)
 }
 
 // handleEmbeddingsCheckOllama reports whether Ollama is reachable and whether the
@@ -363,6 +396,8 @@ type reembedJob struct {
 	total     int // memories needing embedding at the start of the run
 	errMsg    string
 	startedAt time.Time
+	provider  Embedder // target provider captured when the job starts
+	target    string   // provider stamp written by this migration
 }
 
 func (j *reembedJob) snapshot() map[string]any {
@@ -374,6 +409,7 @@ func (j *reembedJob) snapshot() map[string]any {
 		"skipped": j.skipped,
 		"total":   j.total,
 		"error":   j.errMsg,
+		"target":  j.target,
 	}
 	// ETA from the observed rate (processed / elapsed). Only meaningful while
 	// running with some progress; the client shows it as "~N min left".
@@ -403,31 +439,109 @@ func (h *DashboardHandler) handleEmbeddingsReembed(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusForbidden, "unlock the vault before re-embedding")
 		return
 	}
-	if !h.embeddingOllamaRunning(r.Context()) || !h.embeddingOllamaHasModel(r.Context()) {
-		writeError(w, http.StatusPreconditionFailed, "Ollama with "+embedModel+" is not available")
+	provider, ok := h.embedder.(embedding.Provider)
+	if !ok || currentEmbedProvider(h.embedder) != embedProviderOllama {
+		writeError(w, http.StatusPreconditionFailed, "switch Smart Memory to Ollama before re-embedding")
+		return
+	}
+	if pinger, ok := provider.(embedding.Pinger); ok {
+		if err := pinger.Ping(r.Context()); err != nil {
+			writeError(w, http.StatusPreconditionFailed, "the active Ollama embedder is not available")
+			return
+		}
+	} else if !provider.Ready() {
+		writeError(w, http.StatusPreconditionFailed, "the active Ollama embedder is not ready")
+		return
+	}
+	target := currentVectorSpace(h.embedder)
+	if target == "" {
+		writeError(w, http.StatusPreconditionFailed, "the active Ollama vector space is unknown")
 		return
 	}
 
+	// The provider cutover happens first. Exact-space filtering may temporarily
+	// reduce recall coverage during repair, but it can never mix vector spaces.
+	if _, err := h.beginEmbeddingRepair(r.Context(), h.embedder, target); err != nil {
+		writeError(w, http.StatusInternalServerError, "start embedding migration: "+err.Error())
+		return
+	}
+
+	writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
+}
+
+// StartEmbeddingRepairIfNeeded quietly heals vectorless memories on an already
+// semantic node. MCP intentionally preserves observations during a transient
+// embedder outage by committing them without a vector; requiring a human to
+// revisit setup afterward leaves a permanent "Finish setup" banner. Startup,
+// startup and vault unlock call this idempotent helper so those rows converge
+// automatically as soon as the selected provider and plaintext are available.
+func (h *DashboardHandler) StartEmbeddingRepairIfNeeded(ctx context.Context) (bool, error) {
+	if h.VaultLocked.Load() {
+		return false, nil
+	}
+	target := currentVectorSpace(h.embedder)
+	if target == "" {
+		return false, nil
+	}
+	if !h.activeEmbedderReady(ctx) {
+		return false, nil
+	}
+	counts, err := h.store.CountMemoriesByProvider(ctx)
+	if err != nil {
+		return false, err
+	}
+	pending := 0
+	for provider, count := range counts {
+		if provider != target && provider != "skipped" {
+			pending += count
+		}
+	}
+	if pending == 0 {
+		return false, nil
+	}
+	return h.beginEmbeddingRepair(ctx, h.embedder, target)
+}
+
+// beginEmbeddingRepair starts the shared re-embed worker exactly once.
+func (h *DashboardHandler) beginEmbeddingRepair(ctx context.Context, provider Embedder, target string) (bool, error) {
 	h.reembed.mu.Lock()
 	if h.reembed.running {
+		runningTarget := h.reembed.target
 		h.reembed.mu.Unlock()
-		writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
-		return
+		if runningTarget != target {
+			return false, fmt.Errorf("embedding migration to %s is already running", runningTarget)
+		}
+		return false, nil
 	}
 	// Retry previously-errored embeds by clearing the 'error' tag back to '' so
 	// they re-enter the work set this run (transient failures aren't stuck forever).
-	_, _ = h.store.ResetErroredEmbeddings(r.Context())
-	// Count what's left (untagged memories) up front for the progress bar.
-	counts, _ := h.store.CountMemoriesByProvider(r.Context())
-	total := counts[""]
+	if _, err := h.store.ResetErroredEmbeddings(ctx); err != nil {
+		h.reembed.mu.Unlock()
+		return false, fmt.Errorf("reset errored embeddings: %w", err)
+	}
+	counts, err := h.store.CountMemoriesByProvider(ctx)
+	if err != nil {
+		h.reembed.mu.Unlock()
+		return false, fmt.Errorf("count embedding providers: %w", err)
+	}
+	total := 0
+	for current, count := range counts {
+		if current != target && current != "skipped" {
+			total += count
+		}
+	}
+	if total == 0 {
+		h.reembed.mu.Unlock()
+		return false, nil
+	}
 	h.reembed.running = true
 	h.reembed.done, h.reembed.skipped, h.reembed.total, h.reembed.errMsg = 0, 0, total, ""
-	h.reembed.startedAt = time.Now() // for ETA
+	h.reembed.startedAt = time.Now()
+	h.reembed.provider, h.reembed.target = provider, target
 	h.reembed.mu.Unlock()
 
 	h.runBackground(h.runReembed)
-
-	writeJSONResp(w, http.StatusOK, h.reembed.snapshot())
+	return true, nil
 }
 
 // handleEmbeddingsReembedProgress returns the background job's current snapshot.
@@ -462,7 +576,15 @@ func (h *DashboardHandler) runReembed(ctx context.Context) {
 		h.reembed.mu.Unlock()
 	}()
 
-	client := embedding.NewClient(ollamaBaseURL, embedModel)
+	h.reembed.mu.Lock()
+	provider, target := h.reembed.provider, h.reembed.target
+	h.reembed.mu.Unlock()
+	if provider == nil || target == "" {
+		h.reembed.mu.Lock()
+		h.reembed.errMsg = "embedding migration target is unavailable"
+		h.reembed.mu.Unlock()
+		return
+	}
 	fail := func(msg string) {
 		h.reembed.mu.Lock()
 		h.reembed.errMsg = msg
@@ -496,7 +618,7 @@ func (h *DashboardHandler) runReembed(ctx context.Context) {
 		// tagged below (ollama / skipped / error), so the set converges to empty.
 		// ListMemoriesForReembed returns an error if the vault key is unavailable
 		// (locked mid-run), so we never mis-tag readable memories as unreadable.
-		mems, err := h.store.ListMemoriesForReembed(ctx, reembedPageSize)
+		mems, err := h.store.ListMemoriesForReembed(ctx, target, reembedPageSize)
 		if err != nil {
 			fail("list memories: " + err.Error())
 			return
@@ -509,9 +631,9 @@ func (h *DashboardHandler) runReembed(ctx context.Context) {
 			// Unreadable: undecryptable (vault-key mismatch) or empty content.
 			if !m.Decryptable || strings.TrimSpace(m.Content) == "" {
 				tagErr = markUnreadable(m.MemoryID)
-			} else if emb, embErr := client.Embed(ctx, m.Content); embErr != nil {
+			} else if emb, embErr := provider.Embed(ctx, m.Content); embErr != nil {
 				tagErr = markErrored(m.MemoryID) // readable but embed failed — retryable
-			} else if upErr := h.store.UpdateMemoryEmbedding(ctx, m.MemoryID, emb, embedProviderOllama); upErr != nil {
+			} else if upErr := h.store.UpdateMemoryEmbedding(ctx, m.MemoryID, emb, target); upErr != nil {
 				tagErr = markErrored(m.MemoryID)
 			} else {
 				h.reembed.mu.Lock()
@@ -585,17 +707,7 @@ func (h *DashboardHandler) recoverOrphans(w http.ResponseWriter, r *http.Request
 			// start the background job so the "queued for re-embedding" copy
 			// is true - otherwise they sit unembedded until someone finds the
 			// Settings CTA. Same guarded start as handleEmbeddingsReembed.
-			if currentEmbedProvider(h.embedder) == embedProviderOllama &&
-				h.embeddingOllamaRunning(r.Context()) && h.embeddingOllamaHasModel(r.Context()) {
-				h.reembed.mu.Lock()
-				if !h.reembed.running {
-					counts2, _ := h.store.CountMemoriesByProvider(r.Context())
-					h.reembed.running = true
-					h.reembed.done, h.reembed.skipped, h.reembed.total, h.reembed.errMsg = 0, 0, counts2[""], ""
-					h.reembed.startedAt = time.Now()
-					h.runBackground(h.runReembed)
-				}
-				h.reembed.mu.Unlock()
+			if started, _ := h.StartEmbeddingRepairIfNeeded(r.Context()); started {
 				resp["reembed_started"] = true
 			}
 		}
@@ -617,18 +729,63 @@ func (h *DashboardHandler) embeddingOllamaHasModel(ctx context.Context) bool {
 	return ollamaHasModel(ctx, embedModel)
 }
 
+// activeEmbedderReady checks the provider actually selected by the node. The
+// managed Ollama probes above intentionally describe the future default during
+// hash-mode setup; using them for an active custom model would probe the wrong
+// URL/model and strand automatic repair forever.
+func (h *DashboardHandler) activeEmbedderReady(ctx context.Context) bool {
+	provider, ok := h.embedder.(embedding.Provider)
+	if !ok {
+		return false
+	}
+	if pinger, ok := provider.(embedding.Pinger); ok {
+		return pinger.Ping(ctx) == nil
+	}
+	return provider.Ready()
+}
+
 // handleEmbeddingsEnable switches the node's embedding provider to Ollama in
 // config and restarts so every consumer (the /v1/embed endpoint, import, search)
-// picks it up. Re-embedding should be run FIRST (while unlocked) so memories are
-// already on the Ollama vector space when the switch takes effect.
+// picks it up. After restart the active Ollama provider repairs rows into its
+// exact vector space; reads remain provider-filtered throughout.
 func (h *DashboardHandler) handleEmbeddingsEnable(w http.ResponseWriter, r *http.Request) {
-	if h.SetEmbeddingOllama == nil {
+	h.persistEmbeddingProvider(w, r, embedProviderOllama)
+}
+
+func (h *DashboardHandler) handleEmbeddingsProvider(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Provider string `json:"provider"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if body.Provider != "hash" && body.Provider != embedProviderOllama {
+		writeError(w, http.StatusBadRequest, "provider must be ollama or hash")
+		return
+	}
+	if body.Provider == embedProviderOllama &&
+		(!h.embeddingOllamaRunning(r.Context()) || !h.embeddingOllamaHasModel(r.Context())) {
+		writeError(w, http.StatusPreconditionFailed, "set up the Ollama memory model before selecting it")
+		return
+	}
+	h.persistEmbeddingProvider(w, r, body.Provider)
+}
+
+func (h *DashboardHandler) persistEmbeddingProvider(w http.ResponseWriter, r *http.Request, provider string) {
+	if h.SetEmbeddingProvider == nil {
 		writeError(w, http.StatusServiceUnavailable, "embedding switch not available on this node")
 		return
 	}
-	if err := h.SetEmbeddingOllama(); err != nil {
-		writeError(w, http.StatusInternalServerError, "enable ollama embeddings: "+err.Error())
+	if err := h.SetEmbeddingProvider(provider); err != nil {
+		writeError(w, http.StatusInternalServerError, "save embedding provider: "+err.Error())
 		return
+	}
+	semantic := provider == embedProviderOllama
+	modeName := "Basic memory"
+	if semantic {
+		modeName = "Smart memory"
 	}
 	// The provider switch is persisted above; a restart just makes every
 	// consumer pick it up. Where an in-process restart isn't supported (Windows
@@ -638,14 +795,14 @@ func (h *DashboardHandler) handleEmbeddingsEnable(w http.ResponseWriter, r *http
 		writeJSONResp(w, http.StatusOK, map[string]any{
 			"ok":               true,
 			"restart_required": true,
-			"message":          "Semantic memory is on. Quit SAGE and relaunch it to finish switching.",
+			"message":          modeName + " is selected. Quit SAGE and relaunch it to finish switching.",
 		})
 		return
 	}
 	if h.RequestRestart == nil {
 		writeJSONResp(w, http.StatusOK, map[string]any{
 			"ok": true, "restart_required": true,
-			"message": "Semantic memory is on. Fully quit SAGE and open it again to finish switching.",
+			"message": modeName + " is selected. Fully quit SAGE and open it again to finish switching.",
 		})
 		return
 	}
@@ -656,11 +813,11 @@ func (h *DashboardHandler) handleEmbeddingsEnable(w http.ResponseWriter, r *http
 		// restart_required branches above.
 		writeJSONResp(w, http.StatusOK, map[string]any{
 			"ok": true, "restart_required": true,
-			"message": "Semantic memory is saved, but SAGE could not restart cleanly. Fully quit and reopen it.",
+			"message": modeName + " is saved, but SAGE could not restart cleanly. Fully quit and reopen it.",
 		})
 		return
 	}
-	writeJSONResp(w, http.StatusAccepted, map[string]any{"ok": true, "status": "draining", "message": "Turning on semantic memory and restarting cleanly…"})
+	writeJSONResp(w, http.StatusAccepted, map[string]any{"ok": true, "status": "draining", "provider": provider, "message": "Switching the memory engine and restarting cleanly…"})
 }
 
 // ollamaRunning reports whether the local Ollama daemon answers /api/tags.

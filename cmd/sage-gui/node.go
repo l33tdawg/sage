@@ -515,7 +515,13 @@ func runServe() (rerr error) {
 	// Embedder health watchdog: keeps /ready's semantic-recall signal current so a
 	// down embedding provider surfaces as "degraded" instead of a silently
 	// keyword-only recall. Non-blocking (probes in its own goroutine).
-	trackDone(startEmbedderWatchdog(ctx, embedProvider, health, logger))
+	embedderReady := make(chan struct{}, 1)
+	trackDone(startEmbedderWatchdog(ctx, embedProvider, health, logger, func() {
+		select {
+		case embedderReady <- struct{}{}:
+		default:
+		}
+	}))
 
 	// Start CometBFT in-process
 	cometCfg := config.DefaultConfig()
@@ -732,6 +738,21 @@ func runServe() (rerr error) {
 	}
 	dashboard.Encrypted.Store(cfg.Encryption.Enabled)
 	dashboard.VaultLocked.Store(cfg.Encryption.Enabled && !vaultUnlocked)
+	// The health watchdog signals every healthy probe, not only startup. This
+	// makes vector repair eventual after a late Ollama start or transient provider
+	// outage without a full-store UI poll or a manual "Finish setup" click.
+	startWorker(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-embedderReady:
+				if _, repairErr := dashboard.StartEmbeddingRepairIfNeeded(ctx); repairErr != nil {
+					logger.Warn().Err(repairErr).Msg("automatic embedding repair could not start")
+				}
+			}
+		}
+	})
 	dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")
 	dashboard.SaveEncryptionConfig = func(enabled bool) error {
 		cfg.Encryption.Enabled = enabled
@@ -769,11 +790,16 @@ func runServe() (rerr error) {
 	dashboard.AppV18ActiveFn = app.IsAppV18ActiveForNextTx
 	// Embeddings setup: flip the config to the bundled Ollama + nomic-embed-text
 	// provider (the node re-reads it on restart). The embedder is locked to this.
-	dashboard.SetEmbeddingOllama = func() error {
-		cfg.Embedding.Provider = "ollama"
-		cfg.Embedding.BaseURL = "http://localhost:11434"
-		cfg.Embedding.Model = "nomic-embed-text"
+	dashboard.SetEmbeddingProvider = func(provider string) error {
+		cfg.Embedding.Provider = provider
 		cfg.Embedding.Dimension = 768
+		if provider == "ollama" {
+			cfg.Embedding.BaseURL = "http://localhost:11434"
+			cfg.Embedding.Model = "nomic-embed-text"
+		} else {
+			cfg.Embedding.BaseURL = ""
+			cfg.Embedding.Model = ""
+		}
 		return SaveConfig(cfg)
 	}
 	dashboard.SetNetworkMode = func(enabled bool) error {
@@ -1928,13 +1954,15 @@ size = 5000
 	return os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configToml), 0600)
 }
 
+var embedderWatchdogInterval = 30 * time.Second
+
 // startEmbedderWatchdog probes the embedding provider every 30s so /ready reflects
 // real semantic-recall availability (a down provider degrades hybrid recall to
 // keyword-only). It prefers the optional Pinger for a live check — an Ollama Ping hits
 // /api/tags, an OpenAI-compatible Ping is a real embed request, so the 30s cadence
 // keeps it cheap — and falls back to the sticky Ready() flag otherwise. Non-blocking:
 // the initial probe runs inside the goroutine so boot never waits on the embedder.
-func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger) <-chan struct{} {
+func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger, onReady func()) <-chan struct{} {
 	done := make(chan struct{})
 	if p == nil || health == nil {
 		close(done)
@@ -1962,6 +1990,9 @@ func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *me
 			s.OK = p.Ready()
 		}
 		health.SetEmbedderHealth(s)
+		if s.OK && onReady != nil {
+			onReady()
+		}
 		return s
 	}
 	go func() {
@@ -1982,7 +2013,7 @@ func startEmbedderWatchdog(ctx context.Context, p embedding.Provider, health *me
 			prevOK, probed = s.OK, true
 		}
 		record(probe()) // seed immediately (in-goroutine, so it doesn't block boot)
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(embedderWatchdogInterval)
 		defer ticker.Stop()
 		for {
 			select {

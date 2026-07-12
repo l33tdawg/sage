@@ -737,6 +737,15 @@ export async function enableSemanticEmbeddings() {
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
     return res.json();
 }
+export async function selectEmbeddingProvider(provider) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider }),
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
 export async function deprecateUnreadable() {
     const res = await fetch(`${API_BASE}/v1/dashboard/embeddings/deprecate-unreadable`, { method: 'POST' });
     if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }

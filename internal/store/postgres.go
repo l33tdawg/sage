@@ -284,6 +284,18 @@ func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 			`ALTER TABLE memories ADD COLUMN IF NOT EXISTS classification SMALLINT NOT NULL DEFAULT 1`); err != nil {
 			return fmt.Errorf("migrate memories.classification: %w", err)
 		}
+		if _, err := ps.db.Exec(ctx,
+			`ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding_provider TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate memories.embedding_provider: %w", err)
+		}
+		// Historical vectors remain unstamped on purpose. Older REST clients could
+		// supply their own vector, so labeling every legacy row "ollama" would risk
+		// mixing an unknown space into live recall. Amid's lifecycle repair rewrites
+		// these rows through the active, authoritative provider after upgrade.
+		if _, err := ps.db.Exec(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_memories_embedding_provider ON memories (embedding_provider)`); err != nil {
+			return fmt.Errorf("index memories.embedding_provider: %w", err)
+		}
 		for _, stmt := range postgresTaskAssignmentSchema {
 			if _, err := ps.db.Exec(ctx, stmt); err != nil {
 				return fmt.Errorf("migrate task assignment schema: %w", err)
@@ -321,8 +333,8 @@ func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 }
 
 const postgresInsertMemorySQL = `INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-	memory_type, domain_tag, provider, confidence_score, status, parent_hash, task_status, assignee, created_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+	memory_type, domain_tag, provider, embedding_provider, confidence_score, status, parent_hash, task_status, assignee, created_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	ON CONFLICT (memory_id) DO UPDATE SET
 		submitting_agent = EXCLUDED.submitting_agent,
 		status = EXCLUDED.status,
@@ -330,6 +342,7 @@ const postgresInsertMemorySQL = `INSERT INTO memories (memory_id, submitting_age
 		embedding = COALESCE(EXCLUDED.embedding, memories.embedding),
 		embedding_hash = COALESCE(EXCLUDED.embedding_hash, memories.embedding_hash),
 		provider = COALESCE(NULLIF(EXCLUDED.provider, ''), memories.provider),
+		embedding_provider = COALESCE(NULLIF(EXCLUDED.embedding_provider, ''), memories.embedding_provider),
 		assignee = COALESCE(NULLIF(EXCLUDED.assignee, ''), memories.assignee),
 		parent_hash = COALESCE(NULLIF(EXCLUDED.parent_hash, ''), memories.parent_hash)`
 
@@ -343,7 +356,7 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 	_, err := s.db.Exec(ctx, postgresInsertMemorySQL,
 		record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
 		emb, record.EmbeddingHash,
-		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,
+		string(record.MemoryType), record.DomainTag, record.Provider, record.EmbeddingProvider, record.ConfidenceScore,
 		string(record.Status), record.ParentHash, string(record.TaskStatus), record.Assignee, record.CreatedAt,
 	)
 	if err != nil {
@@ -352,32 +365,76 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 	return nil
 }
 
-func (s *PostgresStore) UpdateMemoryEmbedding(_ context.Context, _ string, _ []float32, _ string) error {
-	return fmt.Errorf("UpdateMemoryEmbedding not implemented for PostgresStore")
+func (s *PostgresStore) UpdateMemoryEmbedding(ctx context.Context, memoryID string, emb []float32, embeddingProvider string) error {
+	tag, err := s.db.Exec(ctx, `UPDATE memories SET embedding = $2, embedding_provider = $3 WHERE memory_id = $1`,
+		memoryID, pgvector.NewVector(emb), embeddingProvider)
+	if err != nil {
+		return fmt.Errorf("update embedding: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("memory %s not found", memoryID)
+	}
+	return nil
 }
 
-func (s *PostgresStore) CountMemoriesByProvider(_ context.Context) (map[string]int, error) {
-	return nil, fmt.Errorf("CountMemoriesByProvider not implemented for PostgresStore")
+func (s *PostgresStore) CountMemoriesByProvider(ctx context.Context) (map[string]int, error) {
+	rows, err := s.db.Query(ctx, `SELECT COALESCE(embedding_provider, ''), COUNT(*) FROM memories WHERE status != 'deprecated' GROUP BY embedding_provider`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var provider string
+		var n int
+		if err := rows.Scan(&provider, &n); err != nil {
+			return nil, err
+		}
+		out[provider] = n
+	}
+	return out, rows.Err()
 }
 
-func (s *PostgresStore) ListMemoriesForReembed(_ context.Context, _ int) ([]ReembedItem, error) {
-	return nil, fmt.Errorf("ListMemoriesForReembed not implemented for PostgresStore")
+func (s *PostgresStore) ListMemoriesForReembed(ctx context.Context, targetProvider string, limit int) ([]ReembedItem, error) {
+	rows, err := s.db.Query(ctx, `SELECT memory_id, content FROM memories
+		WHERE COALESCE(embedding_provider, '') NOT IN ($1, 'skipped', 'error') AND status != 'deprecated'
+		ORDER BY created_at ASC, memory_id ASC LIMIT $2`, targetProvider, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReembedItem
+	for rows.Next() {
+		var it ReembedItem
+		if err := rows.Scan(&it.MemoryID, &it.Content); err != nil {
+			return nil, err
+		}
+		it.Decryptable = true
+		out = append(out, it)
+	}
+	return out, rows.Err()
 }
 
-func (s *PostgresStore) MarkMemoryEmbeddingSkipped(_ context.Context, _ string) error {
-	return fmt.Errorf("MarkMemoryEmbeddingSkipped not implemented for PostgresStore")
+func (s *PostgresStore) MarkMemoryEmbeddingSkipped(ctx context.Context, memoryID string) error {
+	_, err := s.db.Exec(ctx, `UPDATE memories SET embedding_provider = 'skipped' WHERE memory_id = $1`, memoryID)
+	return err
 }
 
-func (s *PostgresStore) MarkMemoryEmbeddingError(_ context.Context, _ string) error {
-	return fmt.Errorf("MarkMemoryEmbeddingError not implemented for PostgresStore")
+func (s *PostgresStore) MarkMemoryEmbeddingError(ctx context.Context, memoryID string) error {
+	_, err := s.db.Exec(ctx, `UPDATE memories SET embedding_provider = 'error' WHERE memory_id = $1`, memoryID)
+	return err
 }
 
 func (s *PostgresStore) DeprecateUnreadableMemories(_ context.Context) (int, error) {
 	return 0, fmt.Errorf("DeprecateUnreadableMemories not implemented for PostgresStore")
 }
 
-func (s *PostgresStore) ResetErroredEmbeddings(_ context.Context) (int, error) {
-	return 0, fmt.Errorf("ResetErroredEmbeddings not implemented for PostgresStore")
+func (s *PostgresStore) ResetErroredEmbeddings(ctx context.Context) (int, error) {
+	tag, err := s.db.Exec(ctx, `UPDATE memories SET embedding_provider = '' WHERE embedding_provider = 'error'`)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
 }
 
 func (s *PostgresStore) RekeyUnreadableMemories(_ context.Context, _ *vault.Vault, _ bool) (int, error) {
@@ -453,9 +510,14 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding,
 		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
 		committed_at, deprecated_at, COALESCE(task_status, ''), embedding <=> $1 AS distance
-		FROM memories WHERE embedding IS NOT NULL`
+	FROM memories WHERE embedding IS NOT NULL`
 	args := []any{pgvector.NewVector(embedding)}
 	argIdx := 2
+	if opts.VectorProvider != "" {
+		query += fmt.Sprintf(" AND embedding_provider = $%d", argIdx)
+		args = append(args, opts.VectorProvider)
+		argIdx++
+	}
 
 	if opts.DomainTag != "" {
 		query += fmt.Sprintf(" AND domain_tag = $%d", argIdx)

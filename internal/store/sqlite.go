@@ -1141,21 +1141,22 @@ type ReembedItem struct {
 	Decryptable bool
 }
 
-// ListMemoriesForReembed returns up to `limit` memories that still need embedding
-// (embedding_provider = ”), decrypting their content. It deliberately uses a
-// WHERE filter + LIMIT (no OFFSET): the re-embed loop tags every returned row
-// (ollama or skipped), so each subsequent call returns the NEXT batch of
-// still-untagged rows — stable, no skips, and it converges to empty. A decrypt
-// failure is tolerated (Decryptable=false), never fatal, matching every other
-// list path in this store.
-func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, limit int) ([]ReembedItem, error) {
+// ListMemoriesForReembed returns up to `limit` memories whose provider stamp
+// differs from targetProvider, decrypting their content. It deliberately uses a
+// WHERE filter + LIMIT (no OFFSET): the migration loop retags every returned row
+// (target / skipped / error), so each subsequent call returns the next batch and
+// converges without mixing vector spaces. A decrypt failure is tolerated
+// (Decryptable=false), never fatal, matching every other list path in this store.
+func (s *SQLiteStore) ListMemoriesForReembed(ctx context.Context, targetProvider string, limit int) ([]ReembedItem, error) {
 	// Skip deprecated memories: they're hidden from every view and never
 	// searched, so embedding them is wasted work (and would keep failing on
 	// undecryptable-but-deprecated rows). They stay untagged; the status counts
-	// below also exclude them so they never inflate "needs re-embedding".
+	// below also exclude them so they never inflate migration counts.
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT memory_id, content FROM memories WHERE COALESCE(embedding_provider, '') = '' AND status != 'deprecated' ORDER BY created_at ASC, memory_id ASC LIMIT ?`,
-		limit)
+		`SELECT memory_id, content FROM memories
+		 WHERE COALESCE(embedding_provider, '') NOT IN (?, 'skipped', 'error') AND status != 'deprecated'
+		 ORDER BY created_at ASC, memory_id ASC LIMIT ?`,
+		targetProvider, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1377,8 +1378,12 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 	query := `SELECT memory_id, submitting_agent, content, content_hash, embedding,
 		memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at,
 		committed_at, deprecated_at, COALESCE(task_status, '')
-		FROM memories WHERE embedding IS NOT NULL`
+	FROM memories WHERE embedding IS NOT NULL`
 	var args []any
+	if opts.VectorProvider != "" {
+		query += " AND embedding_provider = ?"
+		args = append(args, opts.VectorProvider)
+	}
 
 	if opts.DomainTag != "" {
 		query += " AND domain_tag = ?"

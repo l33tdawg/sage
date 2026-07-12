@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -257,6 +258,7 @@ func (h *DashboardHandler) handleRecoverLedger(w http.ResponseWriter, r *http.Re
 		vs.SetVault(v)
 	}
 	h.VaultLocked.Store(false)
+	h.runBackground(func(ctx context.Context) { _, _ = h.StartEmbeddingRepairIfNeeded(ctx) })
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"ok":      true,

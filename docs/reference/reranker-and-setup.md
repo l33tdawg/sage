@@ -135,6 +135,7 @@ Reports the active embedder, migration counts, and managed-Ollama setup state
   "total_memories": 6948,
   "need_reembed": 6948,
   "on_ollama": 0,
+  "on_hash": 0,
   "unreadable": 0,
   "errored": 0,
   "vault_locked": false
@@ -144,6 +145,20 @@ Reports the active embedder, migration counts, and managed-Ollama setup state
 `ollama_running` is a live `/api/tags` probe, not a pid check. `model_available`
 requires a real embedding probe through the Ollama API and a 768-dimensional vector,
 so the UI does not declare setup complete merely because `/api/tags` listed a model.
+`need_reembed` counts every active row outside the Ollama vector space (including
+explicit `hash` provenance and legacy blank provenance), not only missing vectors.
+
+### `POST /v1/dashboard/embeddings/provider`
+
+Selects the active embedding mode with `{"provider":"ollama"}` or
+`{"provider":"hash"}` and performs the same controlled restart used by the setup
+flow. Ollama must be healthy and have `nomic-embed-text` ready before it can be
+selected. The node automatically migrates every non-matching active row to the
+selected provider after startup/unlock. The Ollama setup wizard activates the new
+provider first, then migrates in the background: vector recall filters candidates to
+the exact active vector-space stamp, so results can be temporarily incomplete but
+never compare hash and Ollama vectors. New writes immediately use the selected space,
+so migration converges even while MCP agents remain active.
 
 ### `POST /v1/dashboard/embeddings/install-ollama`
 
@@ -552,9 +567,14 @@ any TEI-compatible server) with no SAGE-specific adapter; llama.cpp is the diale
 
 Each memory record carries an `embedding_provider` string recording **which embedder**
 produced its vector - distinct from `provider`, which is the submitting agent's LLM
-identity (`internal/memory/model.go:49-52`). Empty string means "none / unknown, i.e.
-needs re-embed"; the dashboard's re-embed flow and the embedder-coverage counts key on
-this column.
+identity (`internal/memory/model.go:49-52`). The default legacy-compatible spaces are
+`ollama` (`nomic-embed-text`, 768 dimensions) and `hash` (768 dimensions); other
+model/dimension combinations use `provider:model:dimension` (or
+`provider:dimension`) via `embedding.SpaceID` (`internal/embedding/provider.go:53`).
+Empty string means no/unknown vector. The dashboard migration selects every row whose
+stamp differs from the target, while `QueryOptions.VectorProvider` makes vector reads
+admit only the exact active stamp (`internal/store/store.go:74-77`,
+`internal/store/sqlite.go:1370-1385`).
 
 **Why it is stamped at insert (v11 fix):** the off-chain record is stamped at insert
 time via `SupplementaryData.EmbeddingProvider` (`internal/memory/model.go:92-96`).
@@ -562,13 +582,13 @@ Without it, every new memory would land at `embedding_provider = ''` and the das
 would forever count it as "needs re-embed" even though its vector is already semantic
 (v11.0.2 release behavior).
 
-- **Where the stamp is computed:** `Server.embedderStampFor(emb)` returns the semantic
-  embedder's `Named` id (e.g. `"ollama"`) when one is active and the submission carries
-  a vector, and `""` otherwise - hash pseudo-vectors deliberately stay unstamped so
-  they get picked up when the operator turns semantic search on
-  (`api/rest/embed_handler.go:126-142`).
+- **Where the vector and stamp are computed:** the REST submit boundary regenerates
+  the vector from content with the node's currently selected provider, ignoring an
+  agent-supplied vector that may belong to an old setting. `Server.embedderStampFor`
+  records the exact `SpaceID`; `""` is reserved for a provider outage/no vector. The successful submit response reports
+  `embedding_provider`, or `embedding_queued=true` when automatic repair is needed.
 - **Where it is applied:** on the submit and co-commit paths
-  (`api/rest/memory_handler.go:481`, `api/rest/cocommit_handler.go:201`).
+  (`api/rest/memory_handler.go:402-460`, `api/rest/cocommit_handler.go:88-211`).
 - **Direct-ingest paths:** CEREBRUM task creation and imports stamp vectors with
   the same semantic-provider rule, while pipeline auto-journals generate and
   stamp their vector before the off-chain insert. These paths do not traverse
@@ -576,16 +596,22 @@ would forever count it as "needs re-embed" even though its vector is already sem
   Settings repair count grow again after a successful repair
   (`web/handler.go`, `web/import.go`, `api/rest/pipe_handler.go`).
 - **Where it is persisted:** `SQLiteStore.InsertMemory` writes the
-  `embedding_provider` column (`internal/store/sqlite.go:843-884`). The upsert uses
+  `embedding_provider` column (`internal/store/sqlite.go:1007-1049`). The upsert uses
   `COALESCE(NULLIF(excluded.embedding_provider, ''), memories.embedding_provider)`
-  (`sqlite.go:879`) so a re-insert that omits the stamp never clobbers an existing one.
+  (`sqlite.go:1043`) so a re-insert that omits the stamp never clobbers an existing one.
   The column is added by an idempotent migration with a supporting index
-  (`sqlite.go:661-668`).
+  (`sqlite.go:688-691`). PostgreSQL uses the same exact-space filter and repair
+  operations. Pre-v11.7.4 pgvector rows remain deliberately unstamped because
+  older REST clients could supply an arbitrary vector; amid's lifecycle repair
+  regenerates them through the active provider instead of guessing and risking
+  a mixed space (`internal/store/postgres.go`, `api/rest/embedding_repair.go`).
 
 The same column carries the re-embed lifecycle states the embeddings-setup flow uses:
-`''` (needs re-embed), `'skipped'` (undecryptable under the current vault, hidden from
-views), and `'error'` (`internal/store/sqlite.go:1016-1034`). The re-embed backfill
-that clears them is node-local and off-consensus; for the on-chain lifecycle a record
+`''` (no vector), `'skipped'` (undecryptable under the current vault, hidden from
+views), and `'error'` (`internal/store/sqlite.go:1205-1221`). The provider-targeted
+backfill (`sqlite.go:1144-1170`, `web/embeddings_handler.go:435-608`) is node-local
+and off-consensus. A lifecycle-owned provider watchdog retries it after late startup
+or transient outages; for the on-chain lifecycle a record
 moves through (submit -> proposed -> committed / deprecated) see
 [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md).
 

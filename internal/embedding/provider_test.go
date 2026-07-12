@@ -33,6 +33,13 @@ func TestHashProvider_Dimension(t *testing.T) {
 	assert.Equal(t, 768, p2.Dimension())
 }
 
+func TestSpaceIDPreservesDefaultsAndSeparatesConfiguredSpaces(t *testing.T) {
+	assert.Equal(t, "hash", SpaceID(NewHashProvider(768)))
+	assert.Equal(t, "hash:512", SpaceID(NewHashProvider(512)))
+	assert.Equal(t, "ollama", SpaceID(NewClient("http://localhost:11434", "nomic-embed-text")))
+	assert.Equal(t, "ollama:other-model:768", SpaceID(NewClient("http://localhost:11434", "other-model")))
+}
+
 func TestHashProvider_Ready(t *testing.T) {
 	p := NewHashProvider(768)
 	assert.True(t, p.Ready())

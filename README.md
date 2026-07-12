@@ -51,7 +51,18 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.7.3
+## What's New in v11.7.4
+
+**Provider-safe Smart Memory, automatic repair, and one CEREBRUM tab.** The SAGE node is now authoritative for every stored vector: it regenerates agent submissions with the selected embedding provider, stamps the exact vector space, and filters vector recall to that same space. Switching between preferred Ollama embeddings and local hash embeddings cuts write/query authority over before background migration, so active agents cannot keep a migration alive forever and recall never compares incompatible vectors. Provider recovery is watched continuously, so vectorless observations left by a transient outage repair automatically after Ollama or another configured embedder returns. New MCP clients still attach a compatibility vector for older SAGE nodes, while v11.7.4 nodes safely regenerate it.
+
+CEREBRUM Settings now presents Ollama/hash embeddings and the independent reranker On/Off control directly, and the top status strip shows reranker state. The macOS dock app focuses an existing localhost CEREBRUM tab before opening a new one, with bounded browser automation and a safe fallback. PostgreSQL mirrors the embedding-provider provenance used by personal SQLite nodes. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+
+SDK 11.7.4.
+
+## Older releases
+
+<details>
+<summary>v11.7.3 - strict project memory, task ownership, and Settings efficiency</summary>
 
 **Strict project memory and task ownership, plus a cooler Settings page.** `sage_turn` now treats its domain as an exact recall boundary, so one repository's session cannot be re-anchored by memories from another repository. Agent backlogs return only tasks whose assignee exactly matches the signature-verified agent ID; unassigned work stays in human CEREBRUM triage and cannot be self-claimed. Agent-created tasks are assigned to their creator, every `in_progress` task must have an owner, and historical ownerless running rows return to Planned on upgrade. Assignment also remains subject to the agent's domain-access policy.
 
@@ -59,7 +70,7 @@ CEREBRUM no longer polls health, full memory statistics, and the complete agent 
 
 SDK 11.7.3.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.7.2 - secure background updates and CEREBRUM fixes</summary>
