@@ -532,6 +532,15 @@ export async function updateTaskStatus(id, taskStatus) {
     return res.json();
 }
 
+export async function reorderTasks(taskStatus, taskIds) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/tasks/order`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_status: taskStatus, task_ids: taskIds }),
+    });
+    return res.json();
+}
+
 export async function createTask(content, domain) {
     const res = await fetch(`${API_BASE}/v1/dashboard/tasks`, {
         method: 'POST',

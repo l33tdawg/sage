@@ -340,6 +340,53 @@ func TestTaskBoardAllTrueRequiresLocalHumanCEREBRUM(t *testing.T) {
 	}
 }
 
+func TestTaskBoardReturnsStatusTransitionClock(t *testing.T) {
+	h, s := newTestHandler(t)
+	insertTestTask(t, s, "completed-board-task", "work", "codex")
+	require.NoError(t, s.UpdateTaskStatus(context.Background(), "completed-board-task", memory.TaskStatusDone))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/tasks?all=true", nil)
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	h.handleGetTasks(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var payload struct {
+		Tasks []struct {
+			MemoryID            string `json:"memory_id"`
+			TaskStatusUpdatedAt string `json:"task_status_updated_at"`
+		} `json:"tasks"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+	require.Len(t, payload.Tasks, 1)
+	require.Equal(t, "completed-board-task", payload.Tasks[0].MemoryID)
+	require.NotEmpty(t, payload.Tasks[0].TaskStatusUpdatedAt)
+}
+
+func TestTaskBoardReorderPersistsForLocalOperator(t *testing.T) {
+	h, s := newTestHandler(t)
+	insertTestTask(t, s, "order-a", "work", "codex")
+	insertTestTask(t, s, "order-b", "work", "codex")
+
+	body := bytes.NewBufferString(`{"task_status":"planned","task_ids":["order-a","order-b"]}`)
+	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/order", body)
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	h.handleReorderTasksDashboard(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	tasks, err := s.GetAllTasks(context.Background(), "", 10)
+	require.NoError(t, err)
+	require.Equal(t, []string{"order-a", "order-b"}, []string{tasks[0].MemoryID, tasks[1].MemoryID})
+
+	body = bytes.NewBufferString(`{"task_status":"planned","task_ids":["order-b","order-a"]}`)
+	req = httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/order", body)
+	req.RemoteAddr = "192.168.1.20:54321"
+	w = httptest.NewRecorder()
+	h.handleReorderTasksDashboard(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+}
+
 func TestTaskOperatorSurfacesRejectAgentsAndUnauthenticatedLANCallers(t *testing.T) {
 	h, s := newTestHandler(t)
 	r := testRouter(h)

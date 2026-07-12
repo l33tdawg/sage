@@ -272,6 +272,8 @@ var postgresTaskAssignmentSchema = []string{
 	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_picked_up_by TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_assignment_version BIGINT NOT NULL DEFAULT 0`,
 	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_requires_handoff BOOLEAN NOT NULL DEFAULT FALSE`,
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_status_updated_at TIMESTAMPTZ`,
+	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_board_position BIGINT NOT NULL DEFAULT 0`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_assignee ON memories (assignee) WHERE assignee != ''`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_task_picked_up_by ON memories (task_picked_up_by) WHERE task_picked_up_by != ''`,
 	`CREATE TABLE IF NOT EXISTS agent_notifications (
@@ -353,6 +355,11 @@ func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 		if _, err := ps.db.Exec(ctx, `UPDATE memories SET task_requires_handoff = TRUE
 			WHERE memory_type = 'task' AND task_status IN ('done','dropped')`); err != nil {
 			return fmt.Errorf("backfill terminal task handoff gates: %w", err)
+		}
+		if _, err := ps.db.Exec(ctx, `UPDATE memories SET task_status_updated_at = NOW()
+			WHERE memory_type = 'task' AND task_status IN ('done','dropped')
+			  AND task_status_updated_at IS NULL`); err != nil {
+			return fmt.Errorf("backfill terminal task status timestamps: %w", err)
 		}
 		if _, err := ps.db.Exec(ctx, `UPDATE memories SET task_status = 'planned'
 			WHERE memory_type = 'task' AND task_status = 'in_progress'
@@ -1685,6 +1692,8 @@ func (s *PostgresStore) SetTaskAssignee(ctx context.Context, memoryID, assignee 
 func (s *PostgresStore) ClaimTask(ctx context.Context, memoryID, agentID string) (bool, error) {
 	result, err := s.db.Exec(ctx, `UPDATE memories m
 		SET assignee = $2, task_status = 'in_progress',
+		    task_board_position = CASE WHEN m.task_status != 'in_progress' THEN 0 ELSE m.task_board_position END,
+		    task_status_updated_at = CASE WHEN m.task_status != 'in_progress' THEN NOW() ELSE m.task_status_updated_at END,
 		    task_picked_up_by = CASE
 		      WHEN COALESCE(m.assignee, '') = '' THEN $2
 		      WHEN COALESCE(m.task_picked_up_by, '') = '' THEN $2
@@ -1713,10 +1722,14 @@ func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, t
 	}
 	query := `UPDATE memories SET
 		task_requires_handoff = CASE WHEN task_status IN ('done','dropped') THEN TRUE ELSE task_requires_handoff END,
+		task_board_position = CASE WHEN task_status != $2 THEN 0 ELSE task_board_position END,
+		task_status_updated_at = CASE WHEN task_status != $2 THEN NOW() ELSE task_status_updated_at END,
 		task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'
 		AND ($2 != 'in_progress' OR COALESCE(assignee, '') != '')`
 	if terminal {
 		query = `UPDATE memories SET task_status = $2,
+			task_board_position = CASE WHEN task_status != $2 THEN 0 ELSE task_board_position END,
+			task_status_updated_at = CASE WHEN task_status != $2 THEN NOW() ELSE task_status_updated_at END,
 			task_assignment_version = task_assignment_version + CASE WHEN COALESCE(assignee, '') != '' THEN 1 ELSE 0 END,
 			assignee = '', task_requires_handoff = TRUE
 			WHERE memory_id = $1 AND memory_type = 'task'`
@@ -1784,7 +1797,10 @@ func (s *PostgresStore) AssignTaskAndNotify(ctx context.Context, memoryID, assig
 			newStatus = string(memory.TaskStatusInProgress)
 		}
 		if _, err := s.db.Exec(ctx, `UPDATE memories SET assignee = $2,
-			task_assignment_version = $3, task_status = $4,
+			task_assignment_version = $3,
+			task_board_position = CASE WHEN task_status != $4 THEN 0 ELSE task_board_position END,
+			task_status_updated_at = CASE WHEN task_status != $4 THEN NOW() ELSE task_status_updated_at END,
+			task_status = $4,
 			task_picked_up_by = '', task_picked_up_at = NULL,
 			task_requires_handoff = CASE WHEN $2 != '' THEN FALSE ELSE task_requires_handoff END
 			WHERE memory_id = $1 AND memory_type = 'task'`, memoryID, assignee, version, newStatus); err != nil {
@@ -1834,6 +1850,8 @@ func (s *PostgresStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agent
 		return completed, err
 	}
 	result, err := s.db.Exec(ctx, `UPDATE memories m SET task_status = $3,
+		task_board_position = 0,
+		task_status_updated_at = NOW(),
 		task_assignment_version = task_assignment_version + 1,
 		assignee = '', task_requires_handoff = TRUE
 		FROM agents a
@@ -2056,7 +2074,7 @@ func (s *PostgresStore) GetLinksAmong(ctx context.Context, memoryIDs []string) (
 func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provider string, assignee string) ([]*memory.MemoryRecord, error) {
 	query := `SELECT memory_id, submitting_agent, content, content_hash,
 		memory_type, domain_tag, COALESCE(provider, ''), confidence_score, status, parent_hash, COALESCE(task_status, ''),
-		COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at,
+		COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at, task_status_updated_at,
 		created_at, committed_at, deprecated_at
 		FROM memories
 		WHERE memory_type = 'task'
@@ -2093,10 +2111,10 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 		var r memory.MemoryRecord
 		var mt, st, ts string
 		var parentHash *string
-		var pickedUpAt *time.Time
+		var pickedUpAt, statusUpdatedAt *time.Time
 		if err := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 			&mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash, &ts,
-			&r.Assignee, &r.TaskPickedUpBy, &pickedUpAt,
+			&r.Assignee, &r.TaskPickedUpBy, &pickedUpAt, &statusUpdatedAt,
 			&r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -2104,6 +2122,7 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 		r.Status = memory.MemoryStatus(st)
 		r.TaskStatus = memory.TaskStatus(ts)
 		r.TaskPickedUpAt = pickedUpAt
+		r.TaskStatusUpdatedAt = statusUpdatedAt
 		if parentHash != nil {
 			r.ParentHash = *parentHash
 		}
@@ -2121,7 +2140,7 @@ func (s *PostgresStore) GetAllTasks(ctx context.Context, domain string, limit in
 	}
 	query := `SELECT memory_id, submitting_agent, content, content_hash,
 		memory_type, domain_tag, COALESCE(provider, ''), confidence_score, status, parent_hash, COALESCE(task_status, ''),
-		COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at,
+		COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at, task_status_updated_at,
 		created_at, committed_at, deprecated_at
 		FROM memories
 		WHERE memory_type = 'task' AND status != 'deprecated'`
@@ -2137,7 +2156,9 @@ func (s *PostgresStore) GetAllTasks(ctx context.Context, domain string, limit in
 		WHEN 'planned' THEN 2
 		WHEN 'done' THEN 3
 		WHEN 'dropped' THEN 4
-		ELSE 0 END, created_at DESC`
+		ELSE 0 END,
+		CASE WHEN COALESCE(task_board_position, 0) = 0 THEN 0 ELSE 1 END,
+		task_board_position ASC, created_at DESC`
 	query += fmt.Sprintf(" LIMIT $%d", argN)
 	args = append(args, limit)
 
@@ -2151,10 +2172,10 @@ func (s *PostgresStore) GetAllTasks(ctx context.Context, domain string, limit in
 		var r memory.MemoryRecord
 		var mt, st, ts string
 		var parentHash *string
-		var pickedUpAt *time.Time
+		var pickedUpAt, statusUpdatedAt *time.Time
 		if err := rows.Scan(&r.MemoryID, &r.SubmittingAgent, &r.Content, &r.ContentHash,
 			&mt, &r.DomainTag, &r.Provider, &r.ConfidenceScore, &st, &parentHash, &ts,
-			&r.Assignee, &r.TaskPickedUpBy, &pickedUpAt,
+			&r.Assignee, &r.TaskPickedUpBy, &pickedUpAt, &statusUpdatedAt,
 			&r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt); err != nil {
 			return nil, fmt.Errorf("scan task: %w", err)
 		}
@@ -2162,12 +2183,66 @@ func (s *PostgresStore) GetAllTasks(ctx context.Context, domain string, limit in
 		r.Status = memory.MemoryStatus(st)
 		r.TaskStatus = memory.TaskStatus(ts)
 		r.TaskPickedUpAt = pickedUpAt
+		r.TaskStatusUpdatedAt = statusUpdatedAt
 		if parentHash != nil {
 			r.ParentHash = *parentHash
 		}
 		records = append(records, &r)
 	}
 	return records, rows.Err()
+}
+
+func (s *PostgresStore) ReorderTasks(ctx context.Context, taskStatus memory.TaskStatus, orderedIDs []string) error {
+	if s.pool != nil {
+		return s.RunInTx(ctx, func(tx OffchainStore) error {
+			return tx.(*PostgresStore).ReorderTasks(ctx, taskStatus, orderedIDs)
+		})
+	}
+	rows, err := s.db.Query(ctx, `SELECT memory_id::text FROM memories
+		WHERE memory_type = 'task' AND status != 'deprecated' AND task_status = $1
+		ORDER BY CASE WHEN COALESCE(task_board_position, 0) = 0 THEN 0 ELSE 1 END,
+		         task_board_position ASC, created_at DESC`, string(taskStatus))
+	if err != nil {
+		return fmt.Errorf("read task board order: %w", err)
+	}
+	defer rows.Close()
+	all := make([]string, 0)
+	valid := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan task board order: %w", err)
+		}
+		all = append(all, id)
+		valid[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read task board order: %w", err)
+	}
+	rows.Close()
+	seen := make(map[string]struct{}, len(orderedIDs))
+	final := make([]string, 0, len(all))
+	for _, id := range orderedIDs {
+		if _, ok := valid[id]; !ok {
+			return fmt.Errorf("task %s is not a board card in %s", id, taskStatus)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("duplicate task in board order: %s", id)
+		}
+		seen[id] = struct{}{}
+		final = append(final, id)
+	}
+	for _, id := range all {
+		if _, included := seen[id]; !included {
+			final = append(final, id)
+		}
+	}
+	for i, id := range final {
+		if _, err := s.db.Exec(ctx, `UPDATE memories SET task_board_position = $2 WHERE memory_id = $1`, id, i+1); err != nil {
+			return fmt.Errorf("persist task board order: %w", err)
+		}
+	}
+	return nil
 }
 
 // ---- Tag operations ----

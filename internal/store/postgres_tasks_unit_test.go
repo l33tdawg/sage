@@ -61,14 +61,15 @@ func TestPostgresGetAllTasksClampsLimitAndReturnsUnclassifiedHistory(t *testing.
 		"memory_id", "submitting_agent", "content", "content_hash", "memory_type",
 		"domain_tag", "provider", "confidence_score", "status", "parent_hash",
 		"task_status", "assignee", "task_picked_up_by", "task_picked_up_at",
+		"task_status_updated_at",
 		"created_at", "committed_at", "deprecated_at",
 	}
 	rows := pgxmock.NewRows(columns).AddRow(
 		"historical-task", "agent-1", "[TASK] Historical work", []byte("content-hash"),
 		string(memory.TypeTask), "work", "codex", 0.9, string(memory.StatusCommitted),
-		nil, "", "agent-2", "agent-2", nil, createdAt, nil, nil,
+		nil, "", "agent-2", "agent-2", nil, nil, createdAt, nil, nil,
 	)
-	mock.ExpectQuery(`(?s)SELECT .*FROM memories.*domain_tag = \$1.*ELSE 0 END, created_at DESC.*LIMIT \$2`).
+	mock.ExpectQuery(`(?s)SELECT .*FROM memories.*domain_tag = \$1.*ELSE 0 END,.*task_board_position ASC, created_at DESC.*LIMIT \$2`).
 		WithArgs("work", 500).
 		WillReturnRows(rows).
 		RowsWillBeClosed()
@@ -82,6 +83,25 @@ func TestPostgresGetAllTasksClampsLimitAndReturnsUnclassifiedHistory(t *testing.
 	require.Equal(t, "agent-2", tasks[0].Assignee)
 	require.Equal(t, "agent-2", tasks[0].TaskPickedUpBy)
 	require.Nil(t, tasks[0].TaskPickedUpAt)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPostgresReorderTasksPersistsRequestedThenRemainingCards(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(mock.Close)
+	store := &PostgresStore{db: mock}
+	mock.ExpectQuery(`(?s)SELECT memory_id::text FROM memories.*task_status = \$1.*task_board_position ASC`).
+		WithArgs(string(memory.TaskStatusDone)).
+		WillReturnRows(pgxmock.NewRows([]string{"memory_id"}).AddRow("done-a").AddRow("done-b").AddRow("done-c"))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE memories SET task_board_position = $2 WHERE memory_id = $1`)).
+		WithArgs("done-c", 1).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE memories SET task_board_position = $2 WHERE memory_id = $1`)).
+		WithArgs("done-a", 2).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+	mock.ExpectExec(regexp.QuoteMeta(`UPDATE memories SET task_board_position = $2 WHERE memory_id = $1`)).
+		WithArgs("done-b", 3).WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
+	require.NoError(t, store.ReorderTasks(context.Background(), memory.TaskStatusDone, []string{"done-c", "done-a"}))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -134,6 +154,8 @@ func TestPostgresEnsureMemoriesSchemaRepairsTaskStatusAndClassification(t *testi
 	mock.ExpectExec(`UPDATE memories SET task_assignment_version = 1`).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec(`UPDATE memories SET task_requires_handoff = TRUE`).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec(`UPDATE memories SET task_status_updated_at = NOW\(\)`).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec(`UPDATE memories SET task_status = 'planned'`).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
@@ -230,12 +252,13 @@ func TestPostgresGetOpenTasksUsesExactAssigneeNotProvider(t *testing.T) {
 		"memory_id", "submitting_agent", "content", "content_hash", "memory_type",
 		"domain_tag", "provider", "confidence_score", "status", "parent_hash",
 		"task_status", "assignee", "task_picked_up_by", "task_picked_up_at",
+		"task_status_updated_at",
 		"created_at", "committed_at", "deprecated_at",
 	}
 	rows := pgxmock.NewRows(columns).AddRow(
 		"task-a", "author", "[TASK] assigned", []byte("hash"), string(memory.TypeTask),
 		"tii-sage", "other-provider", 0.9, string(memory.StatusCommitted), nil,
-		string(memory.TaskStatusPlanned), "agent-a", "", nil, createdAt, nil, nil,
+		string(memory.TaskStatusPlanned), "agent-a", "", nil, nil, createdAt, nil, nil,
 	)
 	mock.ExpectQuery(`(?s)FROM memories.*domain_tag = \$1.*AND assignee = \$2.*ORDER BY`).
 		WithArgs("tii-sage", "agent-a").WillReturnRows(rows)
