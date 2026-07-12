@@ -212,6 +212,29 @@ function HelpTip({ text, align }) {
     const [show, setShow] = useState(false);
     const [below, setBelow] = useState(false);
     const rootRef = useRef(null);
+    const popupRef = useRef(null);
+
+    // Viewport checks alone are insufficient here: Settings lives below fixed
+    // chrome inside scroll/clipping containers, so a popup can be geometrically
+    // inside the window yet still lose its first lines at an ancestor's top edge.
+    // Measure the rendered popup and every clipping ancestor, then flip it below
+    // the trigger whenever its top would be obscured.
+    useLayoutEffect(() => {
+        if (!enabled || !show || below) return;
+        const root = rootRef.current;
+        const popup = popupRef.current;
+        if (!root || !popup) return;
+        let visibleTop = 8;
+        for (let node = root.parentElement; node; node = node.parentElement) {
+            const style = window.getComputedStyle(node);
+            const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`;
+            if (/\b(auto|scroll|hidden|clip)\b/.test(overflow)) {
+                visibleTop = Math.max(visibleTop, node.getBoundingClientRect().top);
+            }
+        }
+        if (popup.getBoundingClientRect().top < visibleTop + 8) setBelow(true);
+    }, [enabled, show, below, text, align]);
+
     if (!enabled) return null;
     const open = () => {
         // The popup renders above the trigger by default; triggers living in
@@ -226,7 +249,7 @@ function HelpTip({ text, align }) {
         <span class="help-tip-trigger" tabIndex="0" role="button" aria-label="More information"
             onFocus=${open} onBlur=${() => setShow(false)}
             onKeyDown=${(e) => { if (e.key === 'Escape') setShow(false); }}>?</span>
-        ${show && html`<span class="help-tip-popup ${align ? 'align-' + align : ''} ${below ? 'below' : ''}">${text}</span>`}
+        ${show && html`<span ref=${popupRef} class="help-tip-popup ${align ? 'align-' + align : ''} ${below ? 'below' : ''}">${text}</span>`}
     </span>`;
 }
 

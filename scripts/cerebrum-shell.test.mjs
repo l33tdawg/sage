@@ -52,6 +52,15 @@ test('embedding cutover happens before migration and controls expose accessible 
     assert.match(appSource, /Reranker \$\{rerankerOn \? 'on' : 'off'\}/);
 });
 
+test('contextual help flips below clipping-container top edges', () => {
+    const helpTip = appSource.slice(appSource.indexOf('function HelpTip('), appSource.indexOf('// SmartTooltipLayer'));
+    assert.match(helpTip, /popupRef/);
+    assert.match(helpTip, /getComputedStyle\(node\)/);
+    assert.match(helpTip, /auto\|scroll\|hidden\|clip/);
+    assert.match(helpTip, /popup\.getBoundingClientRect\(\)\.top < visibleTop \+ 8/);
+    assert.match(helpTip, /setBelow\(true\)/);
+});
+
 test('macOS tray focuses an existing CEREBRUM tab before opening a new one', () => {
     const reopen = traySource.match(/func applicationShouldHandleReopen[\s\S]+?\n    \}/)?.[0] || '';
     const open = traySource.match(/private func openDashboardOnce\(\)[\s\S]+?\n    \}/)?.[0] || '';
