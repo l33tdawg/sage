@@ -263,9 +263,11 @@ func TestSyncPushRelayOriginAuth(t *testing.T) {
 	assert.Equal(t, 400, rr.Code, "an unauthorized third-chain relay is refused at the door")
 }
 
-// TestSyncReconcileSkipsWhileResyncing proves §10 row 6: while THIS node is
-// resyncing in a group shared with the peer, no digest REQUEST is issued and no
-// backfill is enqueued — so a suppressed memory cannot resurrect mid-rebuild.
+// TestSyncReconcileSkipsWhileResyncing proves D5 (SF2, §10 row 6): while THIS node
+// is resyncing in a group shared with the peer, the GROUP backfill pass is paused
+// and a group-owned domain is NOT re-originated — so a suppressed memory cannot
+// resurrect mid-rebuild. (The pairwise-continues property is TestSyncReconcile-
+// PairwiseContinuesWhileResyncing in the step-7 suite.)
 func TestSyncReconcileSkipsWhileResyncing(t *testing.T) {
 	ctx := context.Background()
 	m, ms, bs := newDrainTestManager(t)
@@ -274,18 +276,20 @@ func TestSyncReconcileSkipsWhileResyncing(t *testing.T) {
 	// Local is REBUILDING (resyncing); the peer is an active member of the group.
 	seedGroupMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, store.GroupMemberResyncing, "")
 	seedGroupMember(t, ms, "g1", "chain-b", store.GroupRoleFullSync, store.GroupMemberActive, "")
-	seedGroupDomain(t, ms, "g1", "studio", "chain-b", 0)
+	seedGroupDomain(t, ms, "g1", "studio", "chain-b", 0) // owned by the PEER, not local
 	seedCommitted(t, ms, "m-cand", "studio", "would-be backfill")
 
-	called := false
-	m.syncDigestFn = func(_ context.Context, _ string, _ *SyncDigestRequest) (*SyncDigestResponse, error) {
-		called = true
+	groupCalled := false
+	m.syncDigestFn = func(_ context.Context, _ string, req *SyncDigestRequest) (*SyncDigestResponse, error) {
+		if req.GroupID != "" {
+			groupCalled = true
+		}
 		return &SyncDigestResponse{}, nil
 	}
 	m.reconcilePeer(ctx, ms, mustAgreement(t, m, "chain-b"), []string{"studio"})
 
-	assert.False(t, called, "no digest request while resyncing")
+	assert.False(t, groupCalled, "no GROUP backfill digest while resyncing")
 	counts, err := ms.CountSyncOutboxByState(ctx, "chain-b")
 	require.NoError(t, err)
-	assert.Empty(t, counts, "no backfill enqueued while resyncing")
+	assert.Empty(t, counts, "no group-owned backfill enqueued while resyncing")
 }

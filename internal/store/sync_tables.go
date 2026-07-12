@@ -77,6 +77,11 @@ type SyncOutboxItem struct {
 	NextAttemptAt time.Time
 	LastError     string
 	CreatedAt     time.Time
+	// OriginChainID is '' for a NATIVE row (this node authored MemoryID; the
+	// drainer signs the item with the operator key) or the ORIGINAL origin chain
+	// for a v11.8 RELAYED row (the drainer re-serves the stored origin_sig and
+	// does NOT re-sign — docs §9.2).
+	OriginChainID string
 }
 
 // SyncOrigin records where a synced copy came from and what the admission
@@ -88,7 +93,12 @@ type SyncOrigin struct {
 	LocalMemoryID   string
 	DomainTag       string
 	Outcome         string
-	CreatedAt       time.Time
+	// OriginSig is the ORIGIN agent's ed25519 signature persisted at admission
+	// (v11.8 mesh relay, docs §9.2). Nil for pre-v11.8 pairwise rows / rejections;
+	// a relayer re-serves it verbatim so the receiver verifies authenticity
+	// against the origin's roster key, never the relayer's.
+	OriginSig []byte
+	CreatedAt time.Time
 }
 
 // SyncOriginPending is a durable pre-broadcast quarantine. Its local ID is
@@ -215,6 +225,26 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		name            TEXT NOT NULL,
 		updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	)`)
+	// v11.8 mesh pull-relay (docs §9.2 must-fix #1). Both additive + idempotent,
+	// pragma-guarded (the migrateTaskPickup / sync_control.group_id idiom):
+	//   - sync_origin.origin_sig: the ORIGIN agent's ed25519 signature over the
+	//     admitted copy, persisted so a relayer can re-serve the copy VERBATIM
+	//     and the receiver verifies it against the origin's roster key. Without
+	//     it a relayer cannot re-attribute authentically (the blocking gap).
+	//   - sync_outbox.origin_chain_id: '' = a NATIVE row (this node is the
+	//     origin, sign at drain with the operator key); non-'' = a RELAYED row
+	//     carrying the ORIGINAL origin chain while memory_id still points at the
+	//     LOCAL copy for content, so one drain loop serves both.
+	var hasOriginSig int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('sync_origin') WHERE name='origin_sig'`).Scan(&hasOriginSig); err == nil && hasOriginSig == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_origin ADD COLUMN origin_sig BLOB`)
+	}
+	var hasOriginChain int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('sync_outbox') WHERE name='origin_chain_id'`).Scan(&hasOriginChain); err == nil && hasOriginChain == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_outbox ADD COLUMN origin_chain_id TEXT NOT NULL DEFAULT ''`)
+	}
 }
 
 func (s *SQLiteStore) PrepareSyncControl(ctx context.Context, c SyncControl) error {
@@ -570,6 +600,27 @@ func (s *SQLiteStore) EnqueueSyncOutbox(ctx context.Context, remoteChainID, memo
 	return n > 0, nil
 }
 
+// EnqueueRelayedSyncOutbox queues a RELAYED mesh-backfill copy toward a peer
+// (v11.8, docs §9.2). MemoryID is the LOCAL copy this node holds; originChainID
+// is the ORIGINAL author chain (never this node) so the drainer re-serves the
+// stored origin_sig verbatim and does NOT re-sign — the relayer is a pure cache.
+// INSERT OR IGNORE on the same (remote_chain_id, memory_id) PK: idempotent under
+// re-discovery, and a pre-existing NATIVE row for the same pair is left intact
+// (a synced copy never has a native outbox row — ListSyncCandidates excludes it).
+func (s *SQLiteStore) EnqueueRelayedSyncOutbox(ctx context.Context, remoteChainID, localMemoryID, originChainID string) (bool, error) {
+	if remoteChainID == "" || localMemoryID == "" || originChainID == "" {
+		return false, fmt.Errorf("remote_chain_id, memory_id, and origin_chain_id are required")
+	}
+	res, err := s.writeExecContext(ctx,
+		`INSERT OR IGNORE INTO sync_outbox (remote_chain_id, memory_id, origin_chain_id) VALUES (?, ?, ?)`,
+		remoteChainID, localMemoryID, originChainID)
+	if err != nil {
+		return false, fmt.Errorf("enqueue relayed sync outbox: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // ResetDeliveringToPending returns all rows stuck in 'delivering' back to
 // 'pending' — crash/shutdown recovery. A row is claimed (pending->delivering)
 // before a network push; if the process dies before the outcome is recorded,
@@ -598,7 +649,7 @@ func (s *SQLiteStore) ClaimDueSyncOutbox(ctx context.Context, remoteChainID stri
 		return nil, nil
 	}
 	rows, err := s.conn.QueryContext(ctx, `
-		SELECT memory_id, attempts, created_at FROM sync_outbox
+		SELECT memory_id, attempts, created_at, COALESCE(origin_chain_id, '') FROM sync_outbox
 		 WHERE remote_chain_id = ? AND state = 'pending'
 		   AND next_attempt_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		 ORDER BY created_at ASC
@@ -607,14 +658,15 @@ func (s *SQLiteStore) ClaimDueSyncOutbox(ctx context.Context, remoteChainID stri
 		return nil, fmt.Errorf("select due sync outbox: %w", err)
 	}
 	type cand struct {
-		memoryID  string
-		attempts  int
-		createdAt string
+		memoryID    string
+		attempts    int
+		createdAt   string
+		originChain string
 	}
 	var cands []cand
 	for rows.Next() {
 		var c cand
-		if scanErr := rows.Scan(&c.memoryID, &c.attempts, &c.createdAt); scanErr != nil {
+		if scanErr := rows.Scan(&c.memoryID, &c.attempts, &c.createdAt, &c.originChain); scanErr != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan due sync outbox: %w", scanErr)
 		}
@@ -641,6 +693,7 @@ func (s *SQLiteStore) ClaimDueSyncOutbox(ctx context.Context, remoteChainID stri
 				State:         SyncStateDelivering,
 				Attempts:      c.attempts,
 				CreatedAt:     parseTime(c.createdAt),
+				OriginChainID: c.originChain,
 			})
 		}
 	}
@@ -855,11 +908,18 @@ func (s *SQLiteStore) RecordSyncOrigin(ctx context.Context, o SyncOrigin) error 
 	if o.OriginChainID == "" || o.OriginMemoryID == "" || o.Outcome == "" {
 		return fmt.Errorf("origin_chain_id, origin_memory_id, and outcome are required")
 	}
+	// origin_sig is stored as NULL when absent (pre-v11.8 / rejections) so the
+	// BLOB column stays clean; a relayer serving a NULL sig is caught fail-closed
+	// at the receiver (an unsigned relay is terminally rejected at Gate 5.5).
+	var sig any
+	if len(o.OriginSig) > 0 {
+		sig = o.OriginSig
+	}
 	_, err := s.writeExecContext(ctx, `
 		INSERT OR IGNORE INTO sync_origin
-			(origin_chain_id, origin_memory_id, origin_created_at, local_memory_id, domain_tag, outcome)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		o.OriginChainID, o.OriginMemoryID, o.OriginCreatedAt, o.LocalMemoryID, o.DomainTag, o.Outcome)
+			(origin_chain_id, origin_memory_id, origin_created_at, local_memory_id, domain_tag, outcome, origin_sig)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		o.OriginChainID, o.OriginMemoryID, o.OriginCreatedAt, o.LocalMemoryID, o.DomainTag, o.Outcome, sig)
 	if err != nil {
 		return fmt.Errorf("record sync origin: %w", err)
 	}
@@ -870,13 +930,13 @@ func (s *SQLiteStore) RecordSyncOrigin(ctx context.Context, o SyncOrigin) error 
 // or sql.ErrNoRows if this pair has never been decided.
 func (s *SQLiteStore) GetSyncOrigin(ctx context.Context, originChainID, originMemoryID string) (*SyncOrigin, error) {
 	row := s.conn.QueryRowContext(ctx, `
-		SELECT origin_chain_id, origin_memory_id, origin_created_at, local_memory_id, domain_tag, outcome, created_at
+		SELECT origin_chain_id, origin_memory_id, origin_created_at, local_memory_id, domain_tag, outcome, origin_sig, created_at
 		  FROM sync_origin
 		 WHERE origin_chain_id = ? AND origin_memory_id = ?`, originChainID, originMemoryID)
 	var o SyncOrigin
 	var createdAt string
 	if err := row.Scan(&o.OriginChainID, &o.OriginMemoryID, &o.OriginCreatedAt,
-		&o.LocalMemoryID, &o.DomainTag, &o.Outcome, &createdAt); err != nil {
+		&o.LocalMemoryID, &o.DomainTag, &o.Outcome, &o.OriginSig, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, sql.ErrNoRows
 		}
@@ -884,6 +944,41 @@ func (s *SQLiteStore) GetSyncOrigin(ctx context.Context, originChainID, originMe
 	}
 	o.CreatedAt = parseTime(createdAt)
 	return &o, nil
+}
+
+// RelayOrigin is the stored provenance a relayer re-serves verbatim for a local
+// copy: the ORIGINAL origin memory id, its opaque origin timestamp, and the
+// origin agent's persisted signature (v11.8 mesh relay, docs §9.2).
+type RelayOrigin struct {
+	OriginMemoryID  string
+	OriginCreatedAt string
+	OriginSig       []byte
+}
+
+// GetRelayOrigin resolves the stored origin provenance for one local copy this
+// node ADMITTED from originChainID — the drainer's per-relayed-row lookup. Keyed
+// on (origin_chain_id, local_memory_id) via idx_sync_origin_local (local id is
+// the deterministic syncMemoryID, unique per origin pair). Returns sql.ErrNoRows
+// when there is no admitted copy (the relayed row is then dropped fail-closed).
+// A row whose origin_sig is NULL is returned with a nil OriginSig so the caller
+// can refuse to serve an unsigned copy rather than forge one.
+func (s *SQLiteStore) GetRelayOrigin(ctx context.Context, originChainID, localMemoryID string) (*RelayOrigin, error) {
+	if originChainID == "" || localMemoryID == "" {
+		return nil, fmt.Errorf("origin_chain_id and local_memory_id are required")
+	}
+	var ro RelayOrigin
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT origin_memory_id, origin_created_at, origin_sig
+		  FROM sync_origin
+		 WHERE origin_chain_id = ? AND local_memory_id = ? AND outcome = 'admitted'`,
+		originChainID, localMemoryID).Scan(&ro.OriginMemoryID, &ro.OriginCreatedAt, &ro.OriginSig)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get relay origin: %w", err)
+	}
+	return &ro, nil
 }
 
 // IsSyncedCopy reports whether a LOCAL memory ID was admitted as a synced

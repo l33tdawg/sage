@@ -127,6 +127,19 @@ type Manager struct {
 	syncStatusMu  sync.Mutex
 	syncReconcile map[string]SyncReconcileStatus
 
+	// syncAnchorFn is the D1 removal-anchor seam (same test-seam pattern as
+	// syncPushFn): nil in production (anchorSubchain broadcasts a locally-signed
+	// MemorySubmit of the affected sub-chain head into sage-syncaudit-<group>),
+	// non-nil only in tests so enforceRemovalBatch is testable without consensus.
+	// The subchain arg distinguishes the roster head (member removals) from a
+	// per-domain sub-chain head (domain removals — which never advance the roster head).
+	syncAnchorFn func(ctx context.Context, groupID, subchain, head string) error
+	// syncAnchorMu guards syncAnchoredHead — the last head this node anchored on-chain
+	// per (group|subchain), so a removal-enforcement batch never re-anchors an unchanged
+	// head (docs §5.6 rate-limit: at most once per distinct sub-chain head).
+	syncAnchorMu     sync.Mutex
+	syncAnchoredHead map[string]string
+
 	// journalMu serializes v11.8 group-journal appends within this node so a
 	// read-head -> build+sign -> append sequence is atomic against concurrent
 	// appenders (the (group_id,subchain,seq) PK is the backstop; this avoids the

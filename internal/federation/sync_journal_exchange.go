@@ -246,39 +246,45 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 //   - a NEW entry is authorized against a GROWING groupApplyState (so an in-batch
 //     member_invite is visible to a later member_leave), verified, and must extend
 //     the local head (seq == head+1, prev-links); then appended and APPLIED to the
-//     roster/domain projection tables. Returns the count appended (partial kept).
-func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry) (int, error) {
+//     roster/domain projection tables. Returns the count appended (partial kept)
+//     PLUS the chains/domains that transitioned to removed/left in this batch, so
+//     the caller can run the POST-BATCH removal-enforcement hook once journalMu is
+//     released (never from inside apply()'s transaction).
+func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry) (int, []string, []string, error) {
 	gs, err := loadGroupApplyState(ctx, ss, groupID)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
 	head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, subchain)
 	if err != nil {
-		return 0, err
+		return 0, nil, nil, err
 	}
 	wantSeq, wantPrev := int64(0), ""
 	if head != nil {
 		wantSeq, wantPrev = head.Seq+1, head.EntryHash
 	}
 	appended := 0
+	// gs.evictedChains/removedDomains accumulate as removal entries apply; they are
+	// returned on EVERY path (including a partial-batch error) so the caller enforces
+	// exactly what durably transitioned before the break.
 	for i := range entries {
 		e := entries[i]
 		e.GroupID = groupID
 		if e.Subchain != subchain {
-			return appended, fmt.Errorf("entry subchain %q != requested %q", e.Subchain, subchain)
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry subchain %q != requested %q", e.Subchain, subchain)
 		}
 		// Size cap BEFORE any signature work (cheap; a peer can't force verifies on
 		// an over-limit payload, and no over-limit entry can ever be admitted).
 		if len(e.PayloadJSON) > SyncJournalMaxPayloadBytes {
-			return appended, fmt.Errorf("entry %s/%d payload %d bytes exceeds cap %d", subchain, e.Seq, len(e.PayloadJSON), SyncJournalMaxPayloadBytes)
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry %s/%d payload %d bytes exceeds cap %d", subchain, e.Seq, len(e.PayloadJSON), SyncJournalMaxPayloadBytes)
 		}
 		existing, err := ss.GetSyncGroupLogEntry(ctx, groupID, subchain, e.Seq)
 		if err != nil {
-			return appended, err
+			return appended, gs.evictedChains, gs.removedDomains, err
 		}
 		if existing != nil {
 			if existing.EntryHash != e.EntryHash {
-				return appended, fmt.Errorf("FORK at %s/%d: local entry diverges from peer (equivocation) — halting ingest", subchain, e.Seq)
+				return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("FORK at %s/%d: local entry diverges from peer (equivocation) — halting ingest", subchain, e.Seq)
 			}
 			// Already held + already applied; advance our expected position past it.
 			if e.Seq >= wantSeq {
@@ -288,16 +294,16 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		}
 		key := gs.resolve(e)
 		if key == nil {
-			return appended, fmt.Errorf("entry %s/%d: unauthorized author", subchain, e.Seq)
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry %s/%d: unauthorized author", subchain, e.Seq)
 		}
 		if err := verifyJournalEntry(e, key); err != nil {
-			return appended, err
+			return appended, gs.evictedChains, gs.removedDomains, err
 		}
 		if e.Seq != wantSeq {
-			return appended, fmt.Errorf("entry %s/%d out of order (want seq %d)", subchain, e.Seq, wantSeq)
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry %s/%d out of order (want seq %d)", subchain, e.Seq, wantSeq)
 		}
 		if e.PrevHash != wantPrev {
-			return appended, fmt.Errorf("entry %s/%d prev_hash does not link to local head", subchain, e.Seq)
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry %s/%d prev_hash does not link to local head", subchain, e.Seq)
 		}
 		// Persist the canonical payload spelling (the signature binds the parsed map,
 		// so a peer's non-Go JSON spelling is accepted above but normalized here).
@@ -306,7 +312,7 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		// logged entry is always fully applied (semantic-fault skips are no-ops that
 		// commit); the idempotent-skip path can never meet a logged-but-unapplied entry.
 		if err := m.appendAndApply(ctx, ss, gs, e); err != nil {
-			return appended, fmt.Errorf("append+apply %s/%d (%s): %w", subchain, e.Seq, e.EntryType, err)
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("append+apply %s/%d (%s): %w", subchain, e.Seq, e.EntryType, err)
 		}
 		appended++
 		wantSeq, wantPrev = e.Seq+1, e.EntryHash
@@ -314,7 +320,7 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 	if subchain == RosterSubchain && appended > 0 {
 		_ = ss.SetSyncGroupRosterJournalHead(ctx, groupID, wantPrev)
 	}
-	return appended, nil
+	return appended, gs.evictedChains, gs.removedDomains, nil
 }
 
 // PullGroupJournal fetches a peer's sub-chain from the local head onward,
@@ -345,6 +351,13 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		after = head.Seq
 	}
 	appended := 0
+	// Accumulate the removals that transition across ALL pages, and run the
+	// enforcement hook ONCE after the pull returns — AFTER journalMu is released
+	// (the per-page ingest lock is dropped each iteration). A no-op when nothing
+	// transitioned; fires even on an early error return so a partial batch still
+	// enforces exactly what durably applied (docs §10, POST-BATCH hook).
+	var evictedChains, removedDomains []string
+	defer func() { m.enforceRemovalBatch(ss, groupID, evictedChains, removedDomains) }()
 	var peerRosterHead string
 	for page := 0; page < syncJournalMaxPages; page++ {
 		if ctx.Err() != nil {
@@ -383,9 +396,11 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		// Ingest this page under the lock (fetch was lock-free); re-reads the head
 		// each iteration so append-atomicity holds.
 		m.journalMu.Lock()
-		n, iErr := m.ingestJournalEntriesLocked(ctx, ss, groupID, subchain, st)
+		n, evicted, removed, iErr := m.ingestJournalEntriesLocked(ctx, ss, groupID, subchain, st)
 		m.journalMu.Unlock()
 		appended += n
+		evictedChains = append(evictedChains, evicted...)
+		removedDomains = append(removedDomains, removed...)
 		if iErr != nil {
 			return appended, iErr
 		}

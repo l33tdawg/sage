@@ -140,7 +140,8 @@ func TestJournalIngestRejectsForgeryForkAndDisorder(t *testing.T) {
 	ingest := func(entries ...store.SyncGroupLogEntry) (int, error) {
 		m.journalMu.Lock()
 		defer m.journalMu.Unlock()
-		return m.ingestJournalEntriesLocked(ctx, ms, "g1", RosterSubchain, entries)
+		n, _, _, err := m.ingestJournalEntriesLocked(ctx, ms, "g1", RosterSubchain, entries)
+		return n, err
 	}
 
 	// FORGERY: a member_remove claiming controller authorship but signed by a forger.

@@ -299,12 +299,29 @@ func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain
 	if ss == nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("group journal requires the SQLite store backend")
 	}
+	entry, evictedChains, removedDomains, err := m.appendGroupJournalLocked(ctx, ss, groupID, subchain, entryType, authorChainID, authorPub, authorKey, payload)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	// POST-BATCH removal enforcement, AFTER journalMu is released (the group-scoped
+	// purge opens its own tx+locks and the anchor is a consensus broadcast, neither
+	// of which may run while holding journalMu). A no-op unless this entry evicted a
+	// member or removed a domain. Identical to the pulled-entry path (PullGroupJournal).
+	m.enforceRemovalBatch(ss, groupID, evictedChains, removedDomains)
+	return entry, nil
+}
+
+// appendGroupJournalLocked holds journalMu for the read-head -> build+sign ->
+// self-check -> append+apply sequence and returns the appended entry plus the
+// members/domains that transitioned to removed/left (for the caller's POST-BATCH
+// hook). Split out so the hook runs OUTSIDE the lock.
+func (m *Manager) appendGroupJournalLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain, entryType, authorChainID string, authorPub ed25519.PublicKey, authorKey ed25519.PrivateKey, payload map[string]string) (store.SyncGroupLogEntry, []string, []string, error) {
 	m.journalMu.Lock()
 	defer m.journalMu.Unlock()
 
 	head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, subchain)
 	if err != nil {
-		return store.SyncGroupLogEntry{}, fmt.Errorf("read sub-chain head: %w", err)
+		return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("read sub-chain head: %w", err)
 	}
 	seq := int64(0)
 	prev := ""
@@ -314,7 +331,7 @@ func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain
 	}
 	entry, err := buildJournalEntry(groupID, subchain, seq, prev, entryType, authorChainID, authorPub, authorKey, payload)
 	if err != nil {
-		return store.SyncGroupLogEntry{}, err
+		return store.SyncGroupLogEntry{}, nil, nil, err
 	}
 	// SELF-CHECK: the entry MUST verify under the group's OWN author resolver, so a
 	// node never authors an entry it (or a peer) will later reject on ingest/fold —
@@ -324,24 +341,24 @@ func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain
 	// A node must never AUTHOR a malformed entry that its own (and every peer's)
 	// apply would silently skip — reject it before signing/appending.
 	if err := validateAuthoredEntry(entry); err != nil {
-		return store.SyncGroupLogEntry{}, fmt.Errorf("refusing to author a malformed %s entry: %w", entry.EntryType, err)
+		return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("refusing to author a malformed %s entry: %w", entry.EntryType, err)
 	}
 	gs, rErr := loadGroupApplyState(ctx, ss, groupID)
 	if rErr != nil {
-		return store.SyncGroupLogEntry{}, fmt.Errorf("author self-check: %w", rErr)
+		return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("author self-check: %w", rErr)
 	}
 	if key := gs.resolve(entry); key == nil || verifyJournalEntry(entry, key) != nil {
-		return store.SyncGroupLogEntry{}, fmt.Errorf("refusing to author an entry that fails the group's own resolver (author=%s type=%s subchain=%s)", entry.AuthorChainID, entry.EntryType, entry.Subchain)
+		return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("refusing to author an entry that fails the group's own resolver (author=%s type=%s subchain=%s)", entry.AuthorChainID, entry.EntryType, entry.Subchain)
 	}
 	if err := m.appendAndApply(ctx, ss, gs, entry); err != nil {
-		return store.SyncGroupLogEntry{}, err
+		return store.SyncGroupLogEntry{}, nil, nil, err
 	}
 	// Best-effort head-cache advance for the roster sub-chain (a projection; the
 	// log is authoritative, so a failure here is non-fatal — the fold re-derives).
 	if subchain == RosterSubchain {
 		_ = ss.SetSyncGroupRosterJournalHead(ctx, groupID, entry.EntryHash)
 	}
-	return entry, nil
+	return entry, gs.evictedChains, gs.removedDomains, nil
 }
 
 // LoadAndFoldSubchain reads a whole sub-chain from the store (paging) and folds

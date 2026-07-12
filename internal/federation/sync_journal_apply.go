@@ -94,6 +94,15 @@ type groupApplyState struct {
 	domainOwner         map[string]string // active AND removed (owner is needed to verify a domain_remove)
 	rosterRevision      int64
 	rosterRevisionFloor int64
+	// evictedChains / removedDomains accumulate the members and domains that
+	// TRANSITIONED to removed/left (member) or removed (domain) in the batch being
+	// applied. They are the input to the POST-BATCH removal-enforcement hook
+	// (m.enforceRemovalBatch): keying the group-scoped purge + on-chain anchor on
+	// what actually transitioned (not a full rescan) makes the hook idempotent and
+	// cheap. Appended ONLY after the store write for the transition succeeds
+	// (matching the gs-mutate-last discipline); a rolled-back append discards gs.
+	evictedChains  []string
+	removedDomains []string
 }
 
 // loadGroupApplyState snapshots the current roster into a mutable state.
@@ -245,6 +254,10 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 			return err
 		}
 		gs.memberState[mc] = state
+		// D1: record the eviction so the POST-BATCH hook stops group sync toward
+		// this chain (group-scoped purge) and fires the mandatory anchor. Recorded
+		// only after both store writes succeed.
+		gs.evictedChains = append(gs.evictedChains, mc)
 
 	case "role_change":
 		mc := p[pkMemberChain]
@@ -255,8 +268,11 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 
 	case "domain_add":
 		tag, owner := p[pkDomainTag], p[pkOwnerChain]
-		if tag == "" || owner != e.AuthorChainID {
-			return nil // SKIP: domain_add must declare its own author as owner
+		if tag == "" || owner != e.AuthorChainID || DomainSubchain(tag) != e.Subchain {
+			// SKIP: domain_add must declare its own author as owner AND target the
+			// sub-chain it lands on (a domain:<tag> entry's payload tag must be <tag>),
+			// so the payload tag, the sub-chain, and the owner-authorization all agree.
+			return nil
 		}
 		if _, ok := gs.memberKey[owner]; !ok {
 			return nil // SKIP: owner is not a group member
@@ -275,7 +291,13 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 
 	case "domain_remove":
 		tag := p[pkDomainTag]
-		if tag == "" {
+		if tag == "" || DomainSubchain(tag) != e.Subchain {
+			// SKIP: a domain_remove MUST target the sub-chain it lands on. resolve()
+			// authorizes this entry on e.Subchain's domain owner, so binding the payload
+			// tag to the sub-chain prevents an owner of domain A removing an UNOWNED
+			// domain B by authoring on domain:A with payload B — and keeps the §5.5
+			// anti-truncation anchor (DomainSubchain(tag)) on the head that actually
+			// carried the removal (must-fix: the anchor/authz/tombstone tags now agree).
 			return nil
 		}
 		// removed_revision must be strictly positive (0 is the "active" sentinel).
@@ -293,6 +315,10 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		}); err != nil {
 			return err
 		}
+		// D2: record the domain removal so the POST-BATCH hook fires the anchor
+		// (the removed_revision filter already drops the domain from every serve
+		// path; this is the audit-anchor trigger). Recorded after the writes succeed.
+		gs.removedDomains = append(gs.removedDomains, tag)
 
 	case "epoch_rotate":
 		cc, cp := p[pkControllerChain], p[pkControllerPubkey]
@@ -352,8 +378,15 @@ func validateAuthoredEntry(e store.SyncGroupLogEntry) error {
 		if p[pkDomainTag] == "" || p[pkOwnerChain] != e.AuthorChainID {
 			return fmt.Errorf("domain_add: owner must equal author")
 		}
+		if DomainSubchain(p[pkDomainTag]) != e.Subchain {
+			return fmt.Errorf("domain_add: payload domain_tag must match the sub-chain")
+		}
 		if c, err := strconv.Atoi(p[pkMaxClearance]); err != nil || c < 0 || c > 4 {
 			return fmt.Errorf("domain_add: bad max_clearance")
+		}
+	case "domain_remove":
+		if p[pkDomainTag] == "" || DomainSubchain(p[pkDomainTag]) != e.Subchain {
+			return fmt.Errorf("domain_remove: payload domain_tag must match the sub-chain")
 		}
 	case "epoch_rotate":
 		if p[pkControllerChain] == "" || badPub(p[pkControllerPubkey]) {

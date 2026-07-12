@@ -13,7 +13,8 @@ func ingestRoster(t *testing.T, m *Manager, ms *store.SQLiteStore, groupID, subc
 	t.Helper()
 	m.journalMu.Lock()
 	defer m.journalMu.Unlock()
-	return m.ingestJournalEntriesLocked(context.Background(), ms, groupID, subchain, entries)
+	n, _, _, err := m.ingestJournalEntriesLocked(context.Background(), ms, groupID, subchain, entries)
+	return n, err
 }
 
 // TestJournalApplyGrowingResolver is the headline step-5 property: a single batch

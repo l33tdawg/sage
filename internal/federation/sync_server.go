@@ -436,6 +436,12 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 			LocalMemoryID:   localID,
 			DomainTag:       item.Domain,
 			Outcome:         store.SyncOutcomeAdmitted,
+			// Persist the origin's signature so THIS node can later relay the copy
+			// authentically (v11.8 mesh, docs §9.2): a relayer re-serves this sig
+			// verbatim and the receiver verifies it against the origin's roster key.
+			// Empty for a same-domain-dup admission (localID="") or a pre-v11.8
+			// unsigned pairwise push — neither is a relayable distinct copy.
+			OriginSig: item.OriginSig,
 		}); err != nil {
 			m.logger.Error().Err(err).Str("origin", item.OriginMemoryID).Msg("sync: record origin failed")
 			return err

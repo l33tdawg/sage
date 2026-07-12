@@ -1131,6 +1131,106 @@ func (s *SQLiteStore) ListGroupServableOriginIDs(ctx context.Context, groupID, r
 	return out, next, nil
 }
 
+// GroupRelayCandidate is one admitted copy this node HOLDS that it may relay to a
+// group member who lacks it (v11.8 mesh pull-relay, docs §9.2). LocalMemoryID is
+// the deterministic local copy id (drain content source); OriginChainID/OriginMemoryID
+// are the ORIGINAL provenance (never this node) re-served verbatim with the stored sig.
+type GroupRelayCandidate struct {
+	OriginChainID  string
+	OriginMemoryID string
+	LocalMemoryID  string
+}
+
+// ListGroupRelayCandidates is the leak-safe SENDER-side twin of
+// ListGroupServableOriginIDs (docs §9.2 must-fix #1/#7/#12): the admitted COPIES
+// this responder (this node) HOLDS that it may relay to requesterChainID for
+// `domain`, applying the IDENTICAL most-specific-covering-domain predicate
+// (origin an active group member; the row's longest covering active group domain
+// is unclassified OR owned by this responder — classified is owner-star-only; and
+// BOTH requester and responder are entitled to that covering domain). It differs
+// from the digest twin in four ways that make it a RELAY-ENQUEUE source rather
+// than a digest-serve source:
+//   - it returns the LOCAL copy id (so.local_memory_id) alongside the origin pair,
+//     and requires local_memory_id != '' — we can only relay a copy we actually hold
+//     as an immutable local memory (a same-domain-dup admission with an empty local
+//     id is NOT relayable — there is no distinct copy to serve);
+//   - it EXCLUDES origin_chain_id = requesterChainID — the requester IS the origin of
+//     its own memories (that is a pairwise star, not a relay), so never relay them back;
+//   - it EXCLUDES rows under a memory-scope local_suppress tombstone (Gate 6.5:
+//     a locally-deleted item must never be re-originated to anyone); and
+//   - it does NOT constrain by requester-supplied umbrella beyond the covering-domain
+//     entitlement, so the caller subtracts what the peer already holds (the digest set).
+//
+// Paged by the same composite (origin_memory_id, origin_chain_id) cursor.
+func (s *SQLiteStore) ListGroupRelayCandidates(ctx context.Context, groupID, requesterChainID, responderChainID, domain, after string, limit int) ([]GroupRelayCandidate, string, error) {
+	if groupID == "" || requesterChainID == "" || responderChainID == "" || domain == "" {
+		return nil, "", nil
+	}
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	afterMem, afterChain := decodeOriginCursor(after)
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT so.origin_memory_id, so.origin_chain_id, so.local_memory_id
+		  FROM sync_origin so
+		  JOIN sync_group_member om
+		       ON om.group_id = ? AND om.member_chain_id = so.origin_chain_id AND om.member_state = 'active'
+		 WHERE so.outcome = 'admitted'
+		   AND so.local_memory_id != ''
+		   AND so.origin_chain_id != ?
+		   AND (so.domain_tag = ? OR so.domain_tag LIKE ? ESCAPE '\')
+		   AND NOT EXISTS (
+		       SELECT 1 FROM sync_tombstone t
+		        WHERE t.scope = 'memory' AND t.enforcement = 'local_suppress'
+		          AND t.origin_chain_id = so.origin_chain_id AND t.origin_memory_id = so.origin_memory_id)
+		   AND EXISTS (
+		       SELECT 1 FROM sync_group_domain mc
+		        WHERE mc.group_id = ? AND mc.removed_revision = 0
+		          AND (mc.domain_tag = so.domain_tag OR so.domain_tag LIKE REPLACE(REPLACE(REPLACE(mc.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		          AND NOT EXISTS (
+		              SELECT 1 FROM sync_group_domain mc2
+		               WHERE mc2.group_id = mc.group_id AND mc2.removed_revision = 0
+		                 AND (mc2.domain_tag = so.domain_tag OR so.domain_tag LIKE REPLACE(REPLACE(REPLACE(mc2.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		                 AND length(mc2.domain_tag) > length(mc.domain_tag)
+		          )
+		          AND (mc.max_clearance = 0 OR mc.owner_chain_id = ?)
+		          AND EXISTS (SELECT 1 FROM sync_group_member rm
+		                       WHERE rm.group_id = mc.group_id AND rm.member_chain_id = ? AND rm.member_state = 'active'
+		                         AND (rm.role = 'full-sync' OR rm.member_chain_id = mc.owner_chain_id))
+		          AND EXISTS (SELECT 1 FROM sync_group_member sm
+		                       WHERE sm.group_id = mc.group_id AND sm.member_chain_id = ? AND sm.member_state = 'active'
+		                         AND (sm.role = 'full-sync' OR sm.member_chain_id = mc.owner_chain_id))
+		   )
+		   AND (so.origin_memory_id > ? OR (so.origin_memory_id = ? AND so.origin_chain_id > ?))
+		 ORDER BY so.origin_memory_id ASC, so.origin_chain_id ASC
+		 LIMIT ?`,
+		groupID, requesterChainID, domain, likeEscapeSubtree(domain),
+		groupID, responderChainID, requesterChainID, responderChainID,
+		afterMem, afterMem, afterChain, limit)
+	if err != nil {
+		return nil, "", fmt.Errorf("list group relay candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []GroupRelayCandidate
+	var lastMem, lastChain string
+	for rows.Next() {
+		var c GroupRelayCandidate
+		if err := rows.Scan(&c.OriginMemoryID, &c.OriginChainID, &c.LocalMemoryID); err != nil {
+			return nil, "", fmt.Errorf("scan group relay candidate: %w", err)
+		}
+		out = append(out, c)
+		lastMem, lastChain = c.OriginMemoryID, c.OriginChainID
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) == limit {
+		next = encodeOriginCursor(lastMem, lastChain)
+	}
+	return out, next, nil
+}
+
 // GroupOwnedDomainsForPeer returns the active group domains THIS node (ownerChainID)
 // OWNS that peerChainID is entitled to receive (peer is an active full-sync member of
 // the same group). This is the SENDER-side group scope (docs §9.1 must-fix #3): a node
@@ -1248,6 +1348,72 @@ func (s *SQLiteStore) SelfResyncingSharedWithPeer(ctx context.Context, localChai
 		return false, fmt.Errorf("self resyncing shared with peer: %w", err)
 	}
 	return n > 0, nil
+}
+
+// ---- group-scoped removal purge (build step 7, docs §10 rows 2-3, I10) ----
+
+// PurgeGroupSyncPeerState stops GROUP sync (outbox/backfill) toward a chain that
+// was removed from — or voluntarily left — a sync group, WITHOUT disturbing an
+// INDEPENDENT PAIRWISE relationship the group removal has no authority over
+// (docs §10 row 2, invariant I10: "cross_fed kept unless separately tx-34
+// revoked"). It deletes ONLY sync_outbox rows toward remoteChainID whose synced
+// memory's domain is NOT covered — subtree-aware — by any surviving pairwise
+// sync_domains consent row for that same peer. It touches NEITHER sync_domains
+// (the pairwise consent table), NOR cross_fed, NOR sync_control.
+//
+// CONTRAST with PurgeSyncPeerState (sync_tables.go), which DELETEs sync_domains
+// + sync_outbox + sync_control for the peer: that primitive is for a PAIRWISE
+// revoke and MUST NEVER be used for a group removal — it would wipe an
+// independent pairwise cross_fed / sync_domains relationship (I10). Here a
+// group-only peer (no pairwise sync_domains rows) has ALL of its outbox purged,
+// while a peer that also holds an independent pairwise relationship keeps exactly
+// its pairwise-covered NATIVE outbox rows. The drain-time consent gate
+// (sync_outbox.go: DomainAllowed(effectiveConsent, ...) where effectiveConsent =
+// pairwise ∪ GroupSharedDomains, PLUS a ResolveGroupRelay re-check for relayed rows)
+// is the authoritative send-time backstop that terminally rejects any straggler; this
+// purge is hygiene + an explicit backfill-stop on top.
+//
+// RELAYED rows (origin_chain_id != '') are ALWAYS purged on a group removal (docs §10
+// R1): a pairwise relationship authorizes this node to originate its OWN memories to the
+// peer, but NEVER to relay a THIRD member's group copy — so a relayed row must not be
+// spared just because a pairwise domain coincidentally covers its tag (that was a
+// cross-group leak to an ex-member). Only NATIVE rows may be spared by pairwise coverage.
+// (A relayed row still owed to the peer via ANOTHER surviving group re-enqueues on the
+// next reconcile via ListGroupRelayCandidates — transient churn, not data loss.)
+func (s *SQLiteStore) PurgeGroupSyncPeerState(ctx context.Context, remoteChainID string) error {
+	if remoteChainID == "" {
+		return fmt.Errorf("remote_chain_id is required")
+	}
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
+	return s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx, ok := txStore.(*SQLiteStore)
+		if !ok {
+			return fmt.Errorf("group sync purge requires the SQLite store backend")
+		}
+		// A row survives ONLY if it is NATIVE (origin_chain_id = '') AND a pairwise
+		// sync_domains row for this peer covers the outbox memory's domain (exact or
+		// ancestor, subtree-aware via the same LIKE-escape idiom as likeEscapeSubtree).
+		// Everything else — every relayed row, and any native row no pairwise consent
+		// covers — is purged.
+		if _, err := tx.writeExecContext(ctx, `
+			DELETE FROM sync_outbox
+			 WHERE remote_chain_id = ?
+			   AND NOT (
+			       sync_outbox.origin_chain_id = ''
+			       AND EXISTS (
+			           SELECT 1
+			             FROM memories m
+			             JOIN sync_domains sd ON sd.remote_chain_id = sync_outbox.remote_chain_id
+			            WHERE m.memory_id = sync_outbox.memory_id
+			              AND (sd.domain_tag = m.domain_tag
+			                   OR m.domain_tag LIKE REPLACE(REPLACE(REPLACE(sd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+			       )
+			   )`, remoteChainID); err != nil {
+			return fmt.Errorf("purge group sync outbox: %w", err)
+		}
+		return nil
+	})
 }
 
 // ---- sync_control binding ----

@@ -36,7 +36,9 @@ package federation
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"time"
 
@@ -452,8 +454,38 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			ContentHash:     contentHashHex(rec.Content),
 			Tags:            tags,
 		}
+		if row.OriginChainID != "" && row.OriginChainID != m.localChainID {
+			// D4 RELAYED row (docs §9.2): this node is a pure cache, NOT the origin.
+			// Re-serve the ORIGINAL provenance + the origin agent's stored signature
+			// VERBATIM — never re-sign with our own key (that would forge/mis-attribute).
+			// Content/Domain/Classification/ContentHash/Tags still come from the LOCAL
+			// copy above; the receiver admits via the group relay path (ResolveGroupRelay
+			// + roster-key origin_sig verify + Gate 6.5). All egress gates already re-ran
+			// against the local copy's domain/classification. An absent stored sig means
+			// we cannot serve it authentically — terminal (never forge an unsigned relay).
+			ro, roErr := ss.GetRelayOrigin(ctx, row.OriginChainID, row.MemoryID)
+			if roErr != nil {
+				if errors.Is(roErr, sql.ErrNoRows) {
+					_ = ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID, "relay origin provenance missing")
+				} else {
+					retry(row, true, false, syncBackoff(row.Attempts+1), "relay origin read failed")
+				}
+				continue
+			}
+			if len(ro.OriginSig) == 0 {
+				_ = ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID, "relay origin signature missing")
+				continue
+			}
+			item.OriginChainID = row.OriginChainID
+			item.OriginMemoryID = ro.OriginMemoryID
+			item.OriginCreatedAt = ro.OriginCreatedAt
+			item.OriginSig = ro.OriginSig
+			items = append(items, item)
+			itemRows = append(itemRows, row)
+			continue
+		}
 		// Sign the item with our operator agent key: we are the ORIGIN of every
-		// item we enqueue (OriginChainID == localChainID), so this is the origin
+		// NATIVE item we enqueue (OriginChainID == localChainID), so this is the origin
 		// signature a downstream mesh relayer carries verbatim and the receiver
 		// verifies (docs §4.4). Harmless to pre-v11.8 receivers (unknown JSON
 		// field is ignored).
@@ -499,6 +531,25 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			_ = ss.MarkSyncOutboxRejected(writeCtx, chain, itemRows[i].MemoryID, "domain out of scope at final policy gate")
 			continue
 		}
+		// A RELAYED item (this node is a cache, not the origin) is authorized ONLY while
+		// the receiver, this relayer, and the origin all remain active members of ONE group
+		// sharing the domain. Re-verify at send time under the policy lease (docs §10 R1):
+		// pairwise consent above (currentConsent = pairwise ∪ GroupSharedDomains) can pass a
+		// relayed item whose domain a pairwise relationship coincidentally covers, but a
+		// pairwise relationship NEVER authorizes relaying a third party's copy — so a peer
+		// removed from the group must not receive a relayed backfill. This is the
+		// AUTHORITATIVE anti-leak (receiver Gate 6.5 only fires AFTER the bytes cross).
+		if item.OriginChainID != "" && item.OriginChainID != m.localChainID {
+			_, ok, rErr := ss.ResolveGroupRelay(ctx, m.localChainID, chain, item.OriginChainID, item.Domain)
+			if rErr != nil {
+				retry(itemRows[i], true, false, syncBackoff(itemRows[i].Attempts+1), "relay re-authorization read failed")
+				continue
+			}
+			if !ok {
+				_ = ss.MarkSyncOutboxRejected(writeCtx, chain, itemRows[i].MemoryID, "relay no longer authorized by a shared group")
+				continue
+			}
+		}
 		filteredItems = append(filteredItems, item)
 		filteredRows = append(filteredRows, itemRows[i])
 	}
@@ -535,15 +586,19 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		return
 	}
 
-	// Map per-item outcomes BY ORIGIN ID, not array index: a misbehaving (but
-	// authenticated) peer that permutes its results must not cause us to mark
-	// the wrong outbox row. SyncPush already verified the count matches.
+	// Map per-item outcomes BY THE ORIGIN ID WE SENT, not array index: a misbehaving
+	// (but authenticated) peer that permutes its results must not cause us to mark
+	// the wrong outbox row. SyncPush already verified the count matches. The result
+	// key is the item's OriginMemoryID as PUSHED — which for a RELAYED row is the
+	// ORIGINAL origin memory id (items[i].OriginMemoryID), NOT the local copy id the
+	// outbox row is keyed by — so we index itemRows/items in parallel to recover the
+	// row from its sent origin id.
 	byID := make(map[string]string, len(resp.Results))
 	for _, res := range resp.Results {
 		byID[res.OriginMemoryID] = res.Outcome
 	}
-	for _, row := range itemRows {
-		outcome, ok := byID[row.MemoryID]
+	for i, row := range itemRows {
+		outcome, ok := byID[items[i].OriginMemoryID]
 		if !ok {
 			// Peer omitted this row's id — retry rather than silently drop.
 			// Cheap (no re-broadcast on the peer), so never give up on it.
@@ -658,20 +713,22 @@ func (m *Manager) syncReconcileAll(ctx context.Context, ss *store.SQLiteStore) {
 // for surfacing the peer's consent posture.
 func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
 	chain := agreement.RemoteChainID
-	// §9.2/§10 must-fix #3 RESYNCING watermark: while THIS node is rebuilding its
-	// journal + local_suppress set in a group shared with this peer, PAUSE reconcile with
-	// it — a backfill digest/enqueue must not run until the tombstone set is restored, or a
-	// suppressed memory could be resurrected mid-rebuild. Gate 6.5 (receiver-side) is the
-	// mandatory backstop; this request-side pause is defense-in-depth. The journal PULL
-	// path stays open — that is how the tombstone set rebuilds. (Scoping the pause to only
-	// the group backfill pass, letting unrelated pairwise domains keep reconciling, is a
-	// deferred should-fix; the whole-peer pause is the fail-safe.)
-	if resyncing, rErr := ss.SelfResyncingSharedWithPeer(ctx, m.localChainID, chain); rErr != nil {
+	// D5 (SF2, §6/§9.2/§10 must-fix #3) RESYNCING watermark, GROUP-SCOPED: while THIS
+	// node is rebuilding its journal + local_suppress set in a group shared with this
+	// peer, PAUSE only the GROUP backfill pass (the group digest sub-loop, and any
+	// group-owned-domain re-origination) — NOT the whole peer. A group backfill could
+	// resurrect a suppressed memory mid-rebuild; unrelated PAIRWISE domains carry no
+	// group-suppression risk, so blocking them is pure availability loss. Gate 6.5
+	// (receiver-side) is the mandatory anti-resurrection backstop; this request-side
+	// pause is defense-in-depth. The journal PULL path stays open — that is how the
+	// tombstone set rebuilds — unchanged by this scoping.
+	selfResyncing, rErr := ss.SelfResyncingSharedWithPeer(ctx, m.localChainID, chain)
+	if rErr != nil {
 		m.logger.Warn().Err(rErr).Str("peer", chain).Msg("sync reconcile: resyncing check failed")
 		return
-	} else if resyncing {
-		m.logger.Debug().Str("peer", chain).Msg("sync reconcile: skipped (self resyncing in shared group)")
-		return
+	}
+	if selfResyncing {
+		m.logger.Debug().Str("peer", chain).Msg("sync reconcile: group backfill paused (self resyncing); pairwise reconcile continues")
 	}
 	// SENDER scope (must-fix #3): the enqueue backfills LOCAL candidates, so it may only
 	// originate pairwise + owned group domains — never re-export a domain owned by another
@@ -680,6 +737,18 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 	if scErr != nil {
 		m.logger.Warn().Err(scErr).Str("peer", chain).Msg("sync reconcile: sender scope failed")
 		return
+	}
+	// While self-resyncing, restrict what we ORIGINATE to the pairwise consent set only:
+	// dropping owned group domains from senderScope stops a group-owned domain's backfill
+	// from re-exporting (and thus round-tripping / resurrecting) an item mid-rebuild,
+	// while leaving the pairwise candidate reconcile fully live.
+	if selfResyncing {
+		pairwise, pErr := ss.GetSyncDomains(ctx, chain)
+		if pErr != nil {
+			m.logger.Warn().Err(pErr).Str("peer", chain).Msg("sync reconcile: pairwise scope failed")
+			return
+		}
+		senderScope = pairwise
 	}
 	// Group domains shared with this peer, indexed by domain -> the groups carrying it, so
 	// a group-scoped digest (GroupID set) actually reaches handleSyncDigestGroup (must-fix
@@ -729,8 +798,12 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 		// member origin in this domain, merged into the SAME decided-set so we never
 		// re-push an item the peer already holds. The handler scopes what it serves
 		// (leak-safe); acting on ids we still LACK (mesh pull-relay of a third member's
-		// copy) is step 7. Not reached while self-resyncing (reconcile returns early above).
+		// copy) is Part B. D5: SKIPPED while self-resyncing so a group backfill can't
+		// resurrect a suppressed item mid-rebuild (pairwise reconcile continues above).
 		for _, gid := range groupsByDomain[domain] {
+			if selfResyncing {
+				break
+			}
 			gafter := ""
 			for page := 0; page < syncReconcileMaxPages; page++ {
 				dctx, cancel := context.WithTimeout(context.Background(), syncDigestTimeout)
@@ -779,6 +852,47 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 				// row as delivered rather than re-pushing it. (Rejections are
 				// never in the digest, so we never falsely settle one.)
 				_ = ss.MarkSyncOutboxDelivered(context.Background(), chain, c.MemoryID)
+			}
+		}
+		// D4 MESH PULL-RELAY enqueue (docs §9.2): beyond the domains this node
+		// OWNS (native origination above), relay admitted COPIES of a THIRD member's
+		// memories that this node HOLDS and the peer LACKS. Leak-safety is enforced
+		// by ListGroupRelayCandidates (same most-specific-covering-domain rule as the
+		// digest serve: origin an active member; covering domain unclassified OR
+		// relayer-owned; both entitled; local_suppress excluded). We subtract the
+		// decided set (what the peer already holds) so a relay is only enqueued for a
+		// genuine gap. SKIPPED while self-resyncing (D5) — a backfill must not
+		// re-originate a third member's item into the peer while THIS node's tombstone
+		// set is still rebuilding.
+		if !selfResyncing {
+			for _, gid := range groupsByDomain[domain] {
+				rafter := ""
+				for page := 0; page < syncReconcileMaxPages; page++ {
+					if enqueued >= syncReconcileMaxEnqueue {
+						break
+					}
+					rcands, next, rErr := ss.ListGroupRelayCandidates(ctx, gid, chain, m.localChainID, domain, rafter, syncReconcileMaxEnqueue)
+					if rErr != nil {
+						break
+					}
+					for _, rc := range rcands {
+						if enqueued >= syncReconcileMaxEnqueue {
+							break
+						}
+						if decided[rc.OriginMemoryID] {
+							continue // peer already holds this origin's copy
+						}
+						created, eErr := ss.EnqueueRelayedSyncOutbox(ctx, chain, rc.LocalMemoryID, rc.OriginChainID)
+						if eErr != nil || !created {
+							continue
+						}
+						enqueued++
+					}
+					if next == "" {
+						break
+					}
+					rafter = next
+				}
 			}
 		}
 	}
