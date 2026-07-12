@@ -44,8 +44,14 @@ const (
 	syncJournalMaxPages    = 4096
 )
 
+// JournalWireVersion is the /fed/v1/sync/journal protocol version. A request may
+// omit it (0 = treat as current for pre-freeze compatibility) or send this value;
+// any other value is rejected, so a future breaking change has a clean discriminator.
+const JournalWireVersion = 1
+
 // SyncJournalRequest asks for entries of one sub-chain after an exclusive cursor.
 type SyncJournalRequest struct {
+	Version  int    `json:"version,omitempty"`
 	GroupID  string `json:"group_id"`
 	Subchain string `json:"subchain"`  // 'roster' or 'domain:<tag>'
 	AfterSeq int64  `json:"after_seq"` // exclusive; -1 = from genesis
@@ -210,7 +216,16 @@ func (m *Manager) authorizeJournalSubchain(ctx context.Context, ss *store.SQLite
 		if d.DomainTag != tag {
 			continue
 		}
-		return member.Role == store.GroupRoleFullSync || d.OwnerChainID == memberChainID, nil
+		if d.RemovedRevision == 0 {
+			// ACTIVE domain: any full-sync member or the owner may pull it.
+			return member.Role == store.GroupRoleFullSync || d.OwnerChainID == memberChainID, nil
+		}
+		// REMOVED domain: restrict to the OWNER only. A full-sync member who
+		// joined AFTER the removal (or was never a sharer) must NOT learn the
+		// domain's NAME via its removal record (§5.2/I5). Broader convergence for
+		// full-sync members who ACTUALLY shared it pre-removal is deferred to
+		// step-5 per-member domain-consent tracking.
+		return d.OwnerChainID == memberChainID, nil
 	}
 	return false, nil // not a group domain (active or removed)
 }
@@ -230,6 +245,10 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 	var req SyncJournalRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Version != 0 && req.Version != JournalWireVersion {
+		httpError(w, http.StatusBadRequest, "unsupported journal wire version")
 		return
 	}
 	if req.GroupID == "" || req.Subchain == "" {
@@ -284,6 +303,12 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		if e.Subchain != subchain {
 			return appended, fmt.Errorf("entry subchain %q != requested %q", e.Subchain, subchain)
 		}
+		// Size cap BEFORE any signature work (cheap, and bounds a full page well
+		// under the transport read limit) — a peer can't force expensive verifies
+		// on an over-limit payload, and no over-limit entry can ever be admitted.
+		if len(e.PayloadJSON) > SyncJournalMaxPayloadBytes {
+			return appended, fmt.Errorf("entry %s/%d payload %d bytes exceeds cap %d", subchain, e.Seq, len(e.PayloadJSON), SyncJournalMaxPayloadBytes)
+		}
 		key := resolve(e)
 		if key == nil {
 			return appended, fmt.Errorf("entry %s/%d: unauthorized author", subchain, e.Seq)
@@ -297,6 +322,11 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		}
 		if existing != nil {
 			if existing.EntryHash != e.EntryHash {
+				// STEP-5 NOTE: once local authoring runs concurrently with a pull, a
+				// self-collision (our own head advanced between the lock-free fetch and
+				// this re-lock) can land here too. Then the caller should re-read head
+				// and re-fetch from head+1 rather than halt; the FORK halt must be
+				// reserved for a genuine divergence at/above the pre-fetch head.
 				return appended, fmt.Errorf("FORK at %s/%d: local entry diverges from peer (equivocation) — halting ingest", subchain, e.Seq)
 			}
 			continue // idempotent
@@ -315,6 +345,10 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		if e.PrevHash != wantPrev {
 			return appended, fmt.Errorf("entry %s/%d prev_hash does not link to local head", subchain, e.Seq)
 		}
+		// Persist the canonical payload spelling (the signature binds the parsed map,
+		// so a peer's non-Go JSON spelling is accepted above but normalized here) —
+		// stored + displayed form is always canonical, and entry_hash is unchanged.
+		e.PayloadJSON = canonicalPayloadJSON(e.PayloadJSON)
 		if err := ss.AppendSyncGroupLog(ctx, e); err != nil {
 			return appended, err
 		}
@@ -373,6 +407,9 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		if pErr != nil {
 			return appended, pErr
 		}
+		if resp == nil {
+			return appended, fmt.Errorf("peer %s returned a nil journal response", remoteChainID)
+		}
 		if resp.RosterHead != "" {
 			peerRosterHead = resp.RosterHead
 		}
@@ -406,18 +443,20 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		}
 		after = maxSeq
 	}
-	// Convergence tracking: record the peer's roster head without disturbing our
-	// own last_acked_roster_revision (that advances at apply/step 5).
+	// Convergence tracking: record the peer's roster head via the targeted mutator
+	// (a no-op if the peer isn't a member row), so last_acked_roster_revision — which
+	// the step-5 apply layer owns — is never read-modify-written by a pull.
 	if subchain == RosterSubchain && peerRosterHead != "" {
-		if mem, _ := ss.GetSyncGroupMember(ctx, groupID, remoteChainID); mem != nil {
-			_ = ss.UpdateSyncGroupMemberProgress(ctx, groupID, remoteChainID, mem.LastAckedRosterRevision, peerRosterHead, time.Now().UTC().Format(time.RFC3339))
-		}
+		_ = ss.SetSyncGroupMemberSeen(ctx, groupID, remoteChainID, peerRosterHead, time.Now().UTC().Format(time.RFC3339))
 	}
 	return appended, nil
 }
 
 // SyncJournalPull is the production client for POST /fed/v1/sync/journal.
 func (m *Manager) SyncJournalPull(ctx context.Context, remoteChainID string, req *SyncJournalRequest) (*SyncJournalResponse, error) {
+	if req.Version == 0 {
+		req.Version = JournalWireVersion
+	}
 	agreement, err := m.ActiveAgreement(remoteChainID)
 	if err != nil {
 		return nil, err

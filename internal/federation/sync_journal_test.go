@@ -109,7 +109,9 @@ func TestAppendGroupJournalEntry(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	pub, key, _ := ed25519.GenerateKey(nil)
-	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "c", ControllerAgentPubkey: "cpub"}); err != nil {
+	// The controller key must match what we author with (AppendGroupJournalEntry
+	// now self-checks the entry against the group's own author resolver).
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "c", ControllerAgentPubkey: hex.EncodeToString(pub)}); err != nil {
 		t.Fatalf("UpsertSyncGroup: %v", err)
 	}
 
@@ -186,20 +188,35 @@ func TestFoldRejectsForgedAuthor(t *testing.T) {
 	}
 }
 
-// TestJournalPayloadNonCanonicalRejected verifies payload_json is authenticated
-// byte-for-byte: a non-canonical spelling that parses to the same map is rejected.
-func TestJournalPayloadNonCanonicalRejected(t *testing.T) {
+// TestJournalPayloadCodecRobust verifies the signature binds the parsed MAP
+// (§5.3), independent of JSON escaping: a non-canonical spelling that parses to
+// the SAME map still verifies (so a conformant non-Go peer isn't false-rejected),
+// while a spelling that CHANGES the map fails the hash. canonicalPayloadJSON
+// normalizes any accepted spelling back to the canonical stored form.
+func TestJournalPayloadCodecRobust(t *testing.T) {
 	pub, key, _ := ed25519.GenerateKey(nil)
 	e := mustEntry(t, "g1", RosterSubchain, 0, "", "member_invite", "c", pub, key,
 		map[string]string{"a": "1", "b": "2"})
 	if err := verifyJournalEntry(e, pub); err != nil {
 		t.Fatalf("canonical entry must verify: %v", err)
 	}
-	for _, spelling := range []string{`{"b":"2","a":"1"}`, `{"a":"1", "b":"2"}`, ` {"a":"1","b":"2"}`, "{}", ""} {
+	// Same map, different (RFC-equal) spelling -> ACCEPTED, and normalizes back.
+	for _, spelling := range []string{`{"b":"2","a":"1"}`, `{"a":"1", "b":"2"}`, ` {"a":"1","b":"2"}`} {
+		c := e
+		c.PayloadJSON = spelling
+		if err := verifyJournalEntry(c, pub); err != nil {
+			t.Fatalf("same-map spelling %q must verify (sig binds the map): %v", spelling, err)
+		}
+		if got := canonicalPayloadJSON(spelling); got != e.PayloadJSON {
+			t.Fatalf("canonicalPayloadJSON(%q)=%q, want %q", spelling, got, e.PayloadJSON)
+		}
+	}
+	// A spelling that CHANGES the map (empty vs non-empty, dropped key) -> REJECTED.
+	for _, spelling := range []string{"{}", "", `{"a":"1"}`} {
 		c := e
 		c.PayloadJSON = spelling
 		if err := verifyJournalEntry(c, pub); err == nil {
-			t.Fatalf("non-canonical payload_json %q must be rejected", spelling)
+			t.Fatalf("map-changing payload %q must be rejected", spelling)
 		}
 	}
 }

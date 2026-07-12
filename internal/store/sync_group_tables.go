@@ -500,6 +500,24 @@ func (s *SQLiteStore) UpdateSyncGroupMemberProgress(ctx context.Context, groupID
 	return nil
 }
 
+// SetSyncGroupMemberSeen records ONLY where a peer member was last observed
+// (last_seen_journal_head, last_sync_at) — used by the journal pull. It never
+// touches last_acked_roster_revision (which the step-5 apply layer advances), so
+// a pull can never regress a member's acknowledged revision via a read-modify-write.
+func (s *SQLiteStore) SetSyncGroupMemberSeen(ctx context.Context, groupID, memberChainID, seenHead, syncAt string) error {
+	if groupID == "" || memberChainID == "" {
+		return fmt.Errorf("group_id and member_chain_id are required")
+	}
+	_, err := s.writeExecContext(ctx, `
+		UPDATE sync_group_member SET last_seen_journal_head = ?, last_sync_at = ?
+		 WHERE group_id = ? AND member_chain_id = ?`,
+		seenHead, syncAt, groupID, memberChainID)
+	if err != nil {
+		return fmt.Errorf("set sync group member seen: %w", err)
+	}
+	return nil
+}
+
 // SetSyncGroupMemberState transitions ONLY a member's lifecycle state (+ its
 // left_revision when leaving/removed). It never touches identity/trust columns.
 func (s *SQLiteStore) SetSyncGroupMemberState(ctx context.Context, groupID, memberChainID, state string, leftRevision int64) error {

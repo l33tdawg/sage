@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"unicode/utf8"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -41,6 +42,13 @@ const (
 	journalDomainSep = "sage-sync-journal-v1\x00"
 	// RosterSubchain names the membership sub-chain (all members converge on it).
 	RosterSubchain = "roster"
+	// SyncJournalMaxPayloadBytes bounds one entry's canonical payload_json. Enforced
+	// fail-closed at BUILD and at INGEST (before any signature work), so a full
+	// SyncJournalMaxEntries page stays far under the transport's 16MB read limit and
+	// no over-limit entry can ever be authored or admitted — an over-limit entry
+	// embedded at seq N would otherwise wedge every peer's replication at N with no
+	// non-breaking cure once the wire format is frozen.
+	SyncJournalMaxPayloadBytes = 16 * 1024
 )
 
 // DomainSubchain names the per-domain audit sub-chain for a shared domain. Only
@@ -105,9 +113,19 @@ func buildJournalEntry(groupID, subchain string, seq int64, prevHash, entryType,
 	if payload == nil {
 		payload = map[string]string{}
 	}
+	// Keys/values MUST be valid UTF-8 so json.Marshal->Unmarshal round-trips the map
+	// losslessly (0xFF would be coerced to U+FFFD, making the entry unverifiable).
+	for k, v := range payload {
+		if !utf8.ValidString(k) || !utf8.ValidString(v) {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("journal payload key/value must be valid UTF-8")
+		}
+	}
 	pj, err := json.Marshal(payload)
 	if err != nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("marshal payload: %w", err)
+	}
+	if len(pj) > SyncJournalMaxPayloadBytes {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("journal payload %d bytes exceeds cap %d", len(pj), SyncJournalMaxPayloadBytes)
 	}
 	authorPubHex := hex.EncodeToString(authorPub)
 	cb := entryCanonicalBytes(groupID, subchain, seq, prevHash, entryType, authorChainID, authorPubHex, payload)
@@ -147,15 +165,11 @@ func verifyJournalEntry(e store.SyncGroupLogEntry, expectedAuthorPub ed25519.Pub
 	if payload == nil {
 		payload = map[string]string{}
 	}
-	// Authenticate payload_json BYTE-FOR-BYTE, not just the parsed map: reject any
-	// non-canonical spelling (whitespace, key reorder, "" vs "{}", \uXXXX escaping,
-	// duplicate keys) even when it parses to the same map. Otherwise an
-	// audit/dashboard renderer or a step-4/5 exchange consumer could be shown a
-	// different byte string than the one the author signed while entry_hash + sig
-	// still verify. The canonical form is exactly what buildJournalEntry stored.
-	if canon, _ := json.Marshal(payload); string(canon) != e.PayloadJSON {
-		return fmt.Errorf("entry %s/%d: non-canonical payload_json", e.Subchain, e.Seq)
-	}
+	// The signature binds the parsed MAP via the length-prefixed canonical encoding
+	// (§5.3), independent of JSON escaping — so a conformant peer using a different
+	// (RFC-equal) JSON spelling still verifies. payload_json is NOT byte-authenticated
+	// here; ingest normalizes it to the canonical Go form before storage/display, so
+	// what is stored + shown is always canonical without false-rejecting a peer.
 	cb := entryCanonicalBytes(e.GroupID, e.Subchain, e.Seq, e.PrevHash, e.EntryType, e.AuthorChainID, e.AuthorAgentPubkey, payload)
 	sum := sha256.Sum256(cb)
 	if hex.EncodeToString(sum[:]) != e.EntryHash {
@@ -166,6 +180,27 @@ func verifyJournalEntry(e store.SyncGroupLogEntry, expectedAuthorPub ed25519.Pub
 		return fmt.Errorf("entry %s/%d: signature invalid", e.Subchain, e.Seq)
 	}
 	return nil
+}
+
+// canonicalPayloadJSON re-marshals a received payload_json into the canonical Go
+// form (sorted keys), so what is persisted + displayed is always canonical
+// regardless of a peer's JSON spelling. Unparseable input is returned unchanged
+// (verifyJournalEntry will have rejected it on the hash), empty -> "{}".
+func canonicalPayloadJSON(payloadJSON string) string {
+	var m map[string]string
+	if payloadJSON != "" {
+		if err := json.Unmarshal([]byte(payloadJSON), &m); err != nil {
+			return payloadJSON
+		}
+	}
+	if m == nil {
+		m = map[string]string{}
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return payloadJSON
+	}
+	return string(b)
 }
 
 // AuthorKeyResolver returns the ed25519 public key an entry MUST be signed by —
@@ -260,6 +295,18 @@ func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain
 	entry, err := buildJournalEntry(groupID, subchain, seq, prev, entryType, authorChainID, authorPub, authorKey, payload)
 	if err != nil {
 		return store.SyncGroupLogEntry{}, err
+	}
+	// SELF-CHECK: the entry we just built MUST verify under the group's OWN author
+	// resolver, so a node never authors an entry it (or any peer) will later reject
+	// on ingest/fold — which would permanently wedge the sub-chain at this seq (there
+	// is no delete/rewrite path). This binds the caller-supplied author identity to
+	// the roster's authoritative keys before the entry is persisted.
+	resolve, rErr := m.groupAuthorResolver(ctx, ss, groupID)
+	if rErr != nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("author self-check resolver: %w", rErr)
+	}
+	if key := resolve(entry); key == nil || verifyJournalEntry(entry, key) != nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("refusing to author an entry that fails the group's own resolver (author=%s type=%s subchain=%s)", entry.AuthorChainID, entry.EntryType, entry.Subchain)
 	}
 	if err := ss.AppendSyncGroupLog(ctx, entry); err != nil {
 		return store.SyncGroupLogEntry{}, err

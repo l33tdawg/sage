@@ -316,10 +316,10 @@ func TestHandleSyncJournalAuthzNonOracle(t *testing.T) {
 	}
 }
 
-// TestJournalAuthzServesRemovedDomain locks the activeOnly=false fix: a removed
-// domain's sub-chain is still servable to a prior sharer (so they converge on the
-// removal), but still denied to a non-sharer.
-func TestJournalAuthzServesRemovedDomain(t *testing.T) {
+// TestJournalAuthzRemovedDomainOwnerOnly locks the removed-domain leak fix: a
+// REMOVED domain's sub-chain is served ONLY to its owner (so they converge on the
+// removal); a full-sync member who never shared it must NOT learn its name (§5.2).
+func TestJournalAuthzRemovedDomainOwnerOnly(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	seedGroup(t, ms, "g1", "chain-ctl")
@@ -329,16 +329,24 @@ func TestJournalAuthzServesRemovedDomain(t *testing.T) {
 		}
 	}
 	add("chain-full", store.GroupRoleFullSync)
-	add("chain-sel", store.GroupRoleSelectiveSync)
-	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
-		GroupID: "g1", DomainTag: "eurorack", OwnerChainID: "chain-owner", AddedRevision: 2, RemovedRevision: 7, // removed
-	}); err != nil {
-		t.Fatalf("domain: %v", err)
+	add("chain-owner", store.GroupRoleSelectiveSync)
+
+	// ACTIVE domain: full-sync member and owner both served.
+	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{GroupID: "g1", DomainTag: "live", OwnerChainID: "chain-owner", AddedRevision: 2}); err != nil {
+		t.Fatalf("active domain: %v", err)
 	}
-	if ok, _ := m.authorizeJournalSubchain(ctx, ms, "g1", "chain-full", DomainSubchain("eurorack")); !ok {
-		t.Fatalf("full-sync member must still be served a REMOVED domain's sub-chain (to learn of the removal)")
+	if ok, _ := m.authorizeJournalSubchain(ctx, ms, "g1", "chain-full", DomainSubchain("live")); !ok {
+		t.Fatalf("full-sync member must be served an ACTIVE shared domain")
 	}
-	if ok, _ := m.authorizeJournalSubchain(ctx, ms, "g1", "chain-sel", DomainSubchain("eurorack")); ok {
-		t.Fatalf("selective non-owner must still be denied a removed domain")
+
+	// REMOVED domain: owner served, full-sync member (never shared it) DENIED.
+	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{GroupID: "g1", DomainTag: "gone", OwnerChainID: "chain-owner", AddedRevision: 2, RemovedRevision: 7}); err != nil {
+		t.Fatalf("removed domain: %v", err)
+	}
+	if ok, _ := m.authorizeJournalSubchain(ctx, ms, "g1", "chain-full", DomainSubchain("gone")); ok {
+		t.Fatalf("full-sync member must NOT be served a removed domain it never shared (§5.2 leak)")
+	}
+	if ok, _ := m.authorizeJournalSubchain(ctx, ms, "g1", "chain-owner", DomainSubchain("gone")); !ok {
+		t.Fatalf("the owner must still be served its removed domain (to converge on the removal)")
 	}
 }
