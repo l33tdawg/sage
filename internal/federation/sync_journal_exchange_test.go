@@ -1,14 +1,34 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
+
+// journalAs drives handleSyncJournal with an injected authenticated peer.
+func journalAs(t *testing.T, m *Manager, peerChain string, req SyncJournalRequest) (*httptest.ResponseRecorder, *SyncJournalResponse) {
+	t.Helper()
+	body, _ := json.Marshal(req)
+	httpReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/journal", bytes.NewReader(body))
+	httpReq = httpReq.WithContext(context.WithValue(httpReq.Context(), peerCtxKey{}, &peerIdentity{ChainID: peerChain}))
+	rr := httptest.NewRecorder()
+	m.handleSyncJournal(rr, httpReq)
+	if rr.Code != http.StatusOK {
+		return rr, nil
+	}
+	var resp SyncJournalResponse
+	_ = json.NewDecoder(rr.Body).Decode(&resp)
+	return rr, &resp
+}
 
 // seedGroup creates a group with a controller and returns its keypair.
 func seedGroup(t *testing.T, ms *store.SQLiteStore, groupID, controllerChain string) (ed25519.PublicKey, ed25519.PrivateKey) {
@@ -201,5 +221,124 @@ func TestGroupAuthorResolver(t *testing.T) {
 	// Wrong entry_type on a domain sub-chain -> nil.
 	if k := resolve(store.SyncGroupLogEntry{Subchain: DomainSubchain("eurorack"), EntryType: "member_remove", AuthorChainID: "chain-owner"}); k != nil {
 		t.Fatalf("mismatched type/subchain must resolve to nil")
+	}
+}
+
+// TestPullGroupJournalRejectsReplaySpin locks the #8 fix: a hostile peer that
+// re-serves already-held entries with a fabricated forward cursor must be
+// rejected (contiguity) with a BOUNDED number of calls — never an infinite spin
+// re-verifying signatures while holding journalMu.
+func TestPullGroupJournalRejectsReplaySpin(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "g1", MemberChainID: "chain-peer", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive,
+	}); err != nil {
+		t.Fatalf("member: %v", err)
+	}
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
+	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey, map[string]string{"member": "chain-peer"})
+
+	calls := 0
+	// ALWAYS returns [e0,e1] regardless of after_seq, with a cursor claiming
+	// forward progress — the replay/spin attack.
+	m.syncJournalFn = func(_ context.Context, _ string, req *SyncJournalRequest) (*SyncJournalResponse, error) {
+		calls++
+		if calls > 20 {
+			t.Fatalf("PullGroupJournal is spinning (%d calls) — loop control trusts the peer cursor", calls)
+		}
+		return &SyncJournalResponse{
+			Entries:    []JournalEntryWire{storeToWire(e0), storeToWire(e1)},
+			NextCursor: req.AfterSeq + 1, // fabricated forward progress
+			RosterHead: e1.EntryHash,
+		}, nil
+	}
+
+	// First pull ingests the two genuinely-new entries and STOPS (short page).
+	if n, err := m.PullGroupJournal(ctx, "chain-peer", "g1", RosterSubchain); err != nil || n != 2 {
+		t.Fatalf("first pull: n=%d err=%v", n, err)
+	}
+	// Second pull: our head is now seq 1; the peer replays seq 0..1, which is at/
+	// below our head -> contiguity rejects it immediately, no spin.
+	if _, err := m.PullGroupJournal(ctx, "chain-peer", "g1", RosterSubchain); err == nil {
+		t.Fatalf("replayed page must be rejected (non-contiguous)")
+	}
+	if calls > 3 {
+		t.Fatalf("too many peer calls (%d) — replay was not rejected promptly", calls)
+	}
+}
+
+// TestHandleSyncJournalAuthzNonOracle drives the real handler and asserts the
+// metadata-isolation gate returns a BYTE-IDENTICAL 403 for every deny reason
+// (non-member, absent group, non-active member) so it is not an existence oracle.
+func TestHandleSyncJournalAuthzNonOracle(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "g1", MemberChainID: "chain-a", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive,
+	}); err != nil {
+		t.Fatalf("member: %v", err)
+	}
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "g1", MemberChainID: "chain-inv", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberInvited,
+	}); err != nil {
+		t.Fatalf("invited member: %v", err)
+	}
+	if _, err := m.AppendGroupJournalEntry(ctx, "g1", RosterSubchain, "group_create", "chain-ctl", ctlPub, ctlKey, nil); err != nil {
+		t.Fatalf("seed entry: %v", err)
+	}
+
+	// Authorized active member -> 200 with entries.
+	rr, resp := journalAs(t, m, "chain-a", SyncJournalRequest{GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
+	if rr.Code != http.StatusOK || resp == nil || len(resp.Entries) != 1 {
+		t.Fatalf("authorized pull: code=%d resp=%+v", rr.Code, resp)
+	}
+
+	// Every deny reason -> identical 403 body (no oracle).
+	rrNonMember, _ := journalAs(t, m, "chain-nobody", SyncJournalRequest{GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
+	rrAbsentGroup, _ := journalAs(t, m, "chain-a", SyncJournalRequest{GroupID: "g-absent", Subchain: RosterSubchain, AfterSeq: -1})
+	rrNonActive, _ := journalAs(t, m, "chain-inv", SyncJournalRequest{GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
+	for name, d := range map[string]*httptest.ResponseRecorder{"non-member": rrNonMember, "absent-group": rrAbsentGroup, "non-active": rrNonActive} {
+		if d.Code != http.StatusForbidden {
+			t.Fatalf("%s: code=%d want 403", name, d.Code)
+		}
+	}
+	if rrNonMember.Body.String() != rrAbsentGroup.Body.String() || rrNonMember.Body.String() != rrNonActive.Body.String() {
+		t.Fatalf("403 bodies differ -> existence oracle:\n non-member=%q\n absent=%q\n non-active=%q",
+			rrNonMember.Body.String(), rrAbsentGroup.Body.String(), rrNonActive.Body.String())
+	}
+
+	// Malformed request -> 400.
+	if rrBad, _ := journalAs(t, m, "chain-a", SyncJournalRequest{GroupID: "", Subchain: ""}); rrBad.Code != http.StatusBadRequest {
+		t.Fatalf("missing fields: code=%d want 400", rrBad.Code)
+	}
+}
+
+// TestJournalAuthzServesRemovedDomain locks the activeOnly=false fix: a removed
+// domain's sub-chain is still servable to a prior sharer (so they converge on the
+// removal), but still denied to a non-sharer.
+func TestJournalAuthzServesRemovedDomain(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	seedGroup(t, ms, "g1", "chain-ctl")
+	add := func(chain, role string) {
+		if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{GroupID: "g1", MemberChainID: chain, Role: role, MemberState: store.GroupMemberActive}); err != nil {
+			t.Fatalf("member %s: %v", chain, err)
+		}
+	}
+	add("chain-full", store.GroupRoleFullSync)
+	add("chain-sel", store.GroupRoleSelectiveSync)
+	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
+		GroupID: "g1", DomainTag: "eurorack", OwnerChainID: "chain-owner", AddedRevision: 2, RemovedRevision: 7, // removed
+	}); err != nil {
+		t.Fatalf("domain: %v", err)
+	}
+	if ok, _ := m.authorizeJournalSubchain(ctx, ms, "g1", "chain-full", DomainSubchain("eurorack")); !ok {
+		t.Fatalf("full-sync member must still be served a REMOVED domain's sub-chain (to learn of the removal)")
+	}
+	if ok, _ := m.authorizeJournalSubchain(ctx, ms, "g1", "chain-sel", DomainSubchain("eurorack")); ok {
+		t.Fatalf("selective non-owner must still be denied a removed domain")
 	}
 }

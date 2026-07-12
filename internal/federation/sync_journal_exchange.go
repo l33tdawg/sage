@@ -36,6 +36,14 @@ import (
 // SyncJournalMaxEntries bounds one exchange page.
 const SyncJournalMaxEntries = 256
 
+// syncJournalPullTimeout bounds ONE page fetch (never held across a page), and
+// syncJournalMaxPages is a hard backstop on pages per pull so no cursor sequence
+// a peer returns can spin unboundedly.
+const (
+	syncJournalPullTimeout = 20 * time.Second
+	syncJournalMaxPages    = 4096
+)
+
 // SyncJournalRequest asks for entries of one sub-chain after an exclusive cursor.
 type SyncJournalRequest struct {
 	GroupID  string `json:"group_id"`
@@ -188,7 +196,13 @@ func (m *Manager) authorizeJournalSubchain(ctx context.Context, ss *store.SQLite
 	if !ok || tag == "" {
 		return false, nil
 	}
-	domains, err := ss.ListSyncGroupDomains(ctx, groupID, true) // active only
+	// activeOnly=FALSE on purpose: a domain_remove/tombstone lands on the domain's
+	// OWN sub-chain, so a prior sharer must still be able to PULL that sub-chain
+	// after removal to learn of it — otherwise an offline member never converges on
+	// the removal. Serving is still gated by role/ownership (below); step 5's apply
+	// layer, not this serve gate, is what refuses APPENDING new content to a
+	// removed domain.
+	domains, err := ss.ListSyncGroupDomains(ctx, groupID, false)
 	if err != nil {
 		return false, err
 	}
@@ -198,7 +212,7 @@ func (m *Manager) authorizeJournalSubchain(ctx context.Context, ss *store.SQLite
 		}
 		return member.Role == store.GroupRoleFullSync || d.OwnerChainID == memberChainID, nil
 	}
-	return false, nil // not an active group domain
+	return false, nil // not a group domain (active or removed)
 }
 
 // handleSyncJournal implements POST /fed/v1/sync/journal (behind peerAuth).
@@ -330,10 +344,14 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 	if pull == nil {
 		pull = m.SyncJournalPull
 	}
+	// The cursor is driven by OUR OWN head, never by the peer's NextCursor: a
+	// hostile member could otherwise replay already-held entries with a fabricated
+	// cursor and spin us forever re-verifying signatures. Each page must begin at
+	// after+1 and be contiguous+ascending; we advance `after` to the last verified
+	// seq and stop when the page is short, empty, or the hard page cap is hit.
 	m.journalMu.Lock()
-	defer m.journalMu.Unlock()
-
 	head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, subchain)
+	m.journalMu.Unlock()
 	if err != nil {
 		return 0, err
 	}
@@ -343,10 +361,17 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 	}
 	appended := 0
 	var peerRosterHead string
-	for {
-		resp, err := pull(ctx, remoteChainID, &SyncJournalRequest{GroupID: groupID, Subchain: subchain, AfterSeq: after, Limit: SyncJournalMaxEntries})
-		if err != nil {
-			return appended, err
+	for page := 0; page < syncJournalMaxPages; page++ {
+		if ctx.Err() != nil {
+			return appended, ctx.Err()
+		}
+		// Fetch LOCK-FREE with a bounded per-page deadline, so a slow/hostile peer
+		// can never pin journalMu (and thus stall all local journal appends).
+		pctx, cancel := context.WithTimeout(ctx, syncJournalPullTimeout)
+		resp, pErr := pull(pctx, remoteChainID, &SyncJournalRequest{GroupID: groupID, Subchain: subchain, AfterSeq: after, Limit: SyncJournalMaxEntries})
+		cancel()
+		if pErr != nil {
+			return appended, pErr
 		}
 		if resp.RosterHead != "" {
 			peerRosterHead = resp.RosterHead
@@ -357,19 +382,29 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		if len(resp.Entries) > SyncJournalMaxEntries {
 			return appended, fmt.Errorf("peer %s returned %d entries (max %d)", remoteChainID, len(resp.Entries), SyncJournalMaxEntries)
 		}
+		// Contiguity/ascending check BEFORE any verification work — a peer cannot
+		// make us re-verify entries at or below our head.
 		st := make([]store.SyncGroupLogEntry, 0, len(resp.Entries))
-		for _, wentry := range resp.Entries {
+		for i, wentry := range resp.Entries {
+			if wentry.Seq != after+1+int64(i) {
+				return appended, fmt.Errorf("peer %s: non-contiguous journal page at seq %d (want %d)", remoteChainID, wentry.Seq, after+1+int64(i))
+			}
 			st = append(st, wireToStore(groupID, wentry))
 		}
+		maxSeq := st[len(st)-1].Seq
+		// Ingest this page under the lock (fetch was lock-free); re-reads the head
+		// each iteration so append-atomicity holds.
+		m.journalMu.Lock()
 		n, iErr := m.ingestJournalEntriesLocked(ctx, ss, groupID, subchain, resolve, st)
+		m.journalMu.Unlock()
 		appended += n
 		if iErr != nil {
 			return appended, iErr
 		}
-		if resp.NextCursor <= after || len(resp.Entries) < SyncJournalMaxEntries {
-			break // no forward progress or last page
+		if maxSeq <= after || len(resp.Entries) < SyncJournalMaxEntries {
+			break // no forward progress (defensive) or last page
 		}
-		after = resp.NextCursor
+		after = maxSeq
 	}
 	// Convergence tracking: record the peer's roster head without disturbing our
 	// own last_acked_roster_revision (that advances at apply/step 5).
