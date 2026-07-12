@@ -162,6 +162,69 @@ func TestSyncPushGateOrder(t *testing.T) {
 	assert.Equal(t, broadcastsBefore, comet.calls.Load(), "replay must not broadcast")
 }
 
+// TestSyncPushOriginSig exercises Gate 5.5: an origin-signed item is admitted;
+// a forged (corrupted-sig) or mis-attributed (sig over different content) item
+// is rejected terminally; and a pre-v11.8 item with no sig still admits.
+func TestSyncPushOriginSig(t *testing.T) {
+	ctx := context.Background()
+	comet := &scriptedComet{responses: []string{cometOK}}
+	m, ms := newSyncTestManager(t, comet)
+
+	// The origin IS the authenticated peer; its AgentID is the hex of the key it
+	// signs items with, so the receiver resolves the verifier from peer.AgentID.
+	originPub, originPriv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	peer := &peerIdentity{
+		ChainID: "chain-b",
+		AgentID: hex.EncodeToString(originPub),
+		Agreement: &store.CrossFedRecord{
+			RemoteChainID: "chain-b", MaxClearance: 2, AllowedDomains: []string{"hr"}, Status: "active",
+		},
+	}
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+
+	good := syncItem("m-signed", "hr", "signed hr fact")
+	good.OriginSig = signOriginSig(originPriv, &good)
+	comet.after = func() {
+		localID := syncMemoryID("chain-b", "m-signed")
+		sum := sha256.Sum256([]byte(good.Content))
+		_ = seedCommittedMemory(ctx, ms, localID, good.Domain, good.Content, sum[:])
+	}
+
+	// Forged: signature present but corrupted.
+	forged := syncItem("m-forged", "hr", "forged hr fact")
+	forged.OriginSig = signOriginSig(originPriv, &forged)
+	forged.OriginSig[0] ^= 0xFF
+
+	// Mis-attributed: a valid signature over the ORIGINAL content, but the
+	// content (and its now-recomputed hash) were swapped after signing — the
+	// relayer-forgery vector. content_hash stays self-consistent so it passes
+	// structural validation; Gate 5.5 must still catch the stale signature.
+	misattr := syncItem("m-misattr", "hr", "original content")
+	misattr.OriginSig = signOriginSig(originPriv, &misattr)
+	misattr.Content = "swapped content"
+	swapped := sha256.Sum256([]byte(misattr.Content))
+	misattr.ContentHash = hex.EncodeToString(swapped[:])
+
+	_, resp := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{good, forged, misattr}})
+	require.NotNil(t, resp)
+	require.Len(t, resp.Results, 3)
+	assert.Equal(t, SyncOutcomeAccepted, resp.Results[0].Outcome)
+	assert.Equal(t, SyncOutcomeRejectedOriginSig, resp.Results[1].Outcome)
+	assert.Equal(t, SyncOutcomeRejectedOriginSig, resp.Results[2].Outcome)
+
+	// Backward compatibility: an unsigned item (pre-v11.8 sender) still admits.
+	legacy := syncItem("m-legacy", "hr", "legacy hr fact")
+	comet.after = func() {
+		localID := syncMemoryID("chain-b", "m-legacy")
+		s := sha256.Sum256([]byte(legacy.Content))
+		_ = seedCommittedMemory(ctx, ms, localID, legacy.Domain, legacy.Content, s[:])
+	}
+	_, resp2 := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{legacy}})
+	require.NotNil(t, resp2)
+	assert.Equal(t, SyncOutcomeAccepted, resp2.Results[0].Outcome)
+}
+
 func TestSyncItemTagValidationAndPersistence(t *testing.T) {
 	item := syncItem("m-tags", "hr", "tagged fact")
 	item.Tags = []string{"zeta", "alpha", "alpha"}

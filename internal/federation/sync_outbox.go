@@ -322,7 +322,7 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			retry(row, true, false, syncBackoff(row.Attempts+1), "tag read failed")
 			continue
 		}
-		items = append(items, SyncItem{
+		item := SyncItem{
 			OriginChainID:   m.localChainID,
 			OriginMemoryID:  row.MemoryID,
 			OriginCreatedAt: rec.CreatedAt.UTC().Format(time.RFC3339),
@@ -333,7 +333,14 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			Content:         rec.Content,
 			ContentHash:     contentHashHex(rec.Content),
 			Tags:            tags,
-		})
+		}
+		// Sign the item with our operator agent key: we are the ORIGIN of every
+		// item we enqueue (OriginChainID == localChainID), so this is the origin
+		// signature a downstream mesh relayer carries verbatim and the receiver
+		// verifies (docs §4.4). Harmless to pre-v11.8 receivers (unknown JSON
+		// field is ignored).
+		item.OriginSig = signOriginSig(m.agentKey, &item)
+		items = append(items, item)
 		itemRows = append(itemRows, row)
 	}
 	if len(items) == 0 {
@@ -430,9 +437,10 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			if err := ss.MarkSyncOutboxDelivered(writeCtx, chain, row.MemoryID); err != nil {
 				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: delivered mark failed")
 			}
-		case SyncOutcomeRejectedXDomainDup:
-			// Content-derived on the receiver — will not change without a
-			// deprecation there, so terminal on our side.
+		case SyncOutcomeRejectedXDomainDup, SyncOutcomeRejectedOriginSig:
+			// Content-derived on the receiver — a cross-domain dup won't change
+			// without a deprecation there, and a bad origin signature will never
+			// verify — terminal on our side (never retry).
 			if err := ss.MarkSyncOutboxRejected(writeCtx, chain, row.MemoryID, outcome); err != nil {
 				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: rejected mark failed")
 			}

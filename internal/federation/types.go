@@ -192,7 +192,13 @@ const (
 	// receiver a full consensus round per attempt, so the sender treats it as a
 	// #14-class dead-end (attempts-capped), not an infinite cheap retry.
 	SyncOutcomeRejectedWriteAccess = "rejected_write_access"
-	SyncOutcomeRetry               = "retry"
+	// SyncOutcomeRejectedOriginSig: the item carried an origin signature that
+	// did not verify against the origin agent's key — a forged / corrupted /
+	// mis-attributed item (v11.8 mesh-backfill anti-forgery, docs §4.4).
+	// Content-derived and terminal: it will never verify, so the sender must
+	// not retry it forever.
+	SyncOutcomeRejectedOriginSig = "rejected_origin_sig"
+	SyncOutcomeRetry             = "retry"
 )
 
 // SyncItem is one memory offered for replication. Content travels raw (the
@@ -211,6 +217,15 @@ type SyncItem struct {
 	Content         string   `json:"content"`
 	ContentHash     string   `json:"content_hash"`
 	Tags            []string `json:"tags,omitempty"`
+	// OriginSig is the ORIGIN agent's ed25519 signature over the canonical
+	// provenance+content+classification bytes (originSigMessage). It is produced
+	// at the origin's native commit and carried VERBATIM by every relayer, so a
+	// v11.8 group mesh-backfill relayer provably cannot forge, mis-attribute, or
+	// re-classify an item — it can only delay/withhold. OPTIONAL on the wire for
+	// rolling compatibility with pre-v11.8 2-node pairs (an empty sig skips
+	// verification); when present it is verified at admission BEFORE the
+	// idempotency step. Base64 on the wire (the ReceiptPush.ValSig convention).
+	OriginSig []byte `json:"origin_sig,omitempty"`
 }
 
 // SyncPushRequest is the body of POST /fed/v1/sync/push.

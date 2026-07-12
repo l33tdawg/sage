@@ -44,6 +44,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -293,6 +294,21 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 	if item.Classification > int(peer.Agreement.MaxClearance) {
 		out.Outcome = SyncOutcomeRejectedClearance
 		return out
+	}
+	// Gate 5.5 — origin authenticity (docs §4.4). When the item carries an origin
+	// signature, it must verify against the ORIGIN agent's key. validateSyncItem
+	// enforces origin_chain == the authenticated peer, so in the pairwise star the
+	// origin IS the peer and its authenticated agent key (peer.AgentID) is the
+	// verifier. (Mesh backfill — a relayer serving ANOTHER origin's item — will
+	// resolve the origin's key from the group roster; build step 6.) An EMPTY sig
+	// is accepted for rolling compatibility with pre-v11.8 senders; a PRESENT but
+	// invalid sig is a forged/mis-attributed item and is rejected terminally.
+	if len(item.OriginSig) > 0 {
+		originPub, keyErr := auth.AgentIDToPublicKey(peer.AgentID)
+		if keyErr != nil || !verifyOriginSig(originPub, item) {
+			out.Outcome = SyncOutcomeRejectedOriginSig
+			return out
+		}
 	}
 	localID := syncMemoryID(item.OriginChainID, item.OriginMemoryID)
 	expectedPending := store.SyncOriginPending{
