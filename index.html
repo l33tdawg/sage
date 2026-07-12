@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.7.2</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.7.3</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1186,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.7.2</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.7.2 restores secure background updates on macOS and fixes CEREBRUM navigation, scrolling, and Settings CPU usage. Existing chains replay byte-identically.</p>
+        <h3>What's new in <span id="whats-new-version">v11.7.3</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.7.3 enforces exact memory-domain and task-owner boundaries, repairs ownerless running work, and keeps large Settings pages efficient. Existing chains replay byte-identically.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>One-click background updates</h4><p>The dashboard banner now downloads and installs the signed macOS release directly—no manual DMG drag-and-replace flow and no second click in Settings.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Signed-app safety</h4><p>SAGE verifies the published SHA-256, Developer ID team, bundle identity, and Gatekeeper result before atomically swapping the whole app, with proof-of-boot rollback.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>CEREBRUM fixes</h4><p>Access Controls is back in the sidebar, and the Task Board uses one natural page scroller so its bottom content and footer remain reachable.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Cooler Settings page</h4><p>The live block countdown no longer re-renders the entire Settings screen ten times per second, eliminating the background CPU hot loop.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Exact project recall</h4><p>Per-turn recall now stays inside the requested domain, preventing memories from another repository from silently re-anchoring an agent's context.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Exact task ownership</h4><p>Agent backlogs return only work explicitly assigned to that verified agent ID. Unassigned tasks remain human triage and cannot be self-claimed.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Safe task lifecycle</h4><p>Agent-created tasks are owned by their creator, every In Progress task requires an owner, and historical ownerless running work returns to Planned.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Efficient Settings</h4><p>Background polling pauses off-screen, duplicate full-store scans are gone, and failed RBAC saves remain clearly retryable.</p></div></div>
         </div>
       </div>
 
@@ -1466,7 +1466,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.7.2"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.7.3"</span></div>
         </div>
       </div>
 
