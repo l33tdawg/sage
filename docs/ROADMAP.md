@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.7.5 is the current release.** This document records the v11.7 slate as shipped and looks forward to v11.8, v11.9, and the v12 completion milestone. Everything past v11.7 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.7.7 is the current release.** This document records the v11.7 slate as shipped and looks forward to v11.8, v11.9, the v11.10–v11.13 productization bridge, and the v12 completion milestone. Everything past v11.7 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -130,9 +130,38 @@ The release gate includes offline-write/catch-up, snapshot/state-sync recovery, 
 
 ---
 
+## v11.10 – v11.13 - planned (the productization bridge to v12)
+
+v11.9 completes the trust and replication **backend**. v12 is the **product**: a standalone native application in which every CEREBRUM function is mapped to a real app experience, with the web dashboard kept only as a still-supported fallback. The releases between them de-risk and stage that transition so v12 is an integration-and-polish capstone, not a from-scratch rewrite. Every step keeps the hard constraints — no chain reset, upgrade-in-place, the SAGE daemon and authenticated local APIs cleanly separated from any shell, and no weakening of the local trust boundary. Order and grouping are indicative; nothing here is dated.
+
+### v11.10 - the native shell foundation
+
+Choose the desktop-shell technology through the deliberate evaluation v12 requires, then ship the first additive, opt-in native application that embeds CEREBRUM in its own window. The browser CEREBRUM remains fully supported as the fallback. v11.10 is an architectural release, not a cosmetic wrapper, and must complete these deliverables:
+
+- **Desktop-shell decision record.** Compare the credible macOS, Windows, and Linux options with a weighted scorecard covering threat surface and sandboxing, signed packaging/notarization, accessibility, performance and memory cost, offline operation, cross-platform maintenance, update behavior, and long-term ownership. Build small proof-of-concept spikes for the finalists, document the threat model, and record the chosen shell plus rejected alternatives before product code commits to it.
+- **App–daemon trust and compatibility contract.** Specify authenticated bootstrap, credential/key storage, IPC versus loopback transport, origin/navigation restrictions, process and port ownership, startup readiness, crash detection and recovery, graceful drain/shutdown, version negotiation, and rollback-compatible independent updates. The shell receives no implicit validator/admin authority and cannot weaken the existing local API boundary.
+- **Single-instance lifecycle and navigation ownership.** The native app owns its window, deep links, route restoration, external-link handoff, foreground/background behavior, and daemon supervision. Reopening SAGE focuses the existing native window; it does not depend on browser tab inspection or browser-specific automation. Browser CEREBRUM remains an explicit fallback, not an accidental second primary UI.
+- **Measurable foundation gate.** Set budgets for cold/warm launch, idle CPU, memory, large-store interaction latency, and animation frame pacing on supported hardware. Use a monotonic animation clock and compositor-friendly transforms for continuous motion instead of coarse React timer rerenders; establish keyboard navigation, focus visibility, screen-reader naming, and reduced-motion architecture now even though v11.13 performs the full hardening pass. Automated packaging and smoke tests must cover clean install, daemon unavailable/recovery, app restart, deep-link routing, offline launch, and shell/daemon version skew on every supported OS.
+
+No chain reset. The SAGE daemon and authenticated local APIs remain independently testable and operable underneath the shell.
+
+### v11.11 - consumer onboarding and recovery
+
+Make first run and recovery survivable by someone who has never used SAGE, natively and without a terminal. Guided create-or-join, connect-an-AI-tool, and choose-what-is-private-or-shared flows; recovery-key backup and restore; and honest, consistent dialogs for destructive or privacy-affecting actions that explain what happened, what remains safe, and the next step. Plain language and safe defaults throughout. The gate includes clean-machine onboarding and recovery usability tests with real nontechnical users — the same bar v12 sets, brought forward so it is proven early rather than at the end.
+
+### v11.12 - native lifecycle: install, updates, health, permissions
+
+Move the operational surface a desktop product needs out of terminal-and-dashboard-only paths and into the app: installation and OS-level permission prompts (login item, notifications, and any capability the product uses) with plain-language rationale; checksum-verified background updates with automatic rollback and proof-of-boot; continuous node-health monitoring with one-click guided recovery; and unobtrusive background/tray operation. Reuses the v11.7 coordinated-restart, verified-update, and instance-lock machinery rather than reinventing it.
+
+### v11.13 - accessibility, performance, and offline hardening
+
+Meet the accessibility bar v12 treats as a release criterion: full keyboard navigation, screen-reader labeling, sufficient contrast, and reduced-motion support across CEREBRUM and the native shell. Hold the v11.10 performance budgets for the embedded experience on large memory stores and the 3D connectome view. Verify fully offline operation end to end — the bundled embedder and reranker, onboarding, recall, and recovery all work with no network — so a sovereign node is genuinely sovereign.
+
+---
+
 ## v12 - product roadmap capstone
 
-v12 is the planned completion milestone for the SAGE product roadmap: the fully integrated product rather than another backend-only release. It ships as a standalone desktop application with CEREBRUM embedded in the application window instead of opening the user's web browser. The app owns installation, node lifecycle, onboarding, permissions, updates, health/recovery, federation, and Sharing & Sync as one coherent native-feeling experience, while the SAGE daemon and authenticated local APIs remain cleanly separated underneath.
+v12 is the planned completion milestone for the SAGE product roadmap: the fully integrated product rather than another backend-only release. It ships as a standalone desktop application in which every CEREBRUM dashboard function is mapped to a real native app experience — the same capabilities, but presented as a proper application rather than a set of web pages. The web CEREBRUM remains a supported fallback for anyone who wants it; it simply is not the primary product surface. By v12 the v11.10–v11.13 bridge has already chosen the desktop shell, proven consumer onboarding and recovery, moved lifecycle into the app, and established accessibility/performance/offline gates, so v12 is the integration-and-polish capstone that ties it into one coherent product. The app owns installation, node lifecycle, onboarding, permissions, updates, health/recovery, federation, and Sharing & Sync as one coherent native-feeling experience, while the SAGE daemon and authenticated local APIs remain cleanly separated underneath.
 
 **Consumer usability is a release criterion, not polish.** A nontechnical person must be able to install SAGE, create or join a node, connect an AI tool, choose what is private or shared, recover from ordinary failures, and keep the app updated without opening a terminal or learning SAGE internals. Every choice uses plain language and safe defaults; destructive or privacy-affecting actions use consistent accessible SAGE dialogs; errors explain what happened, what remains safe, and the next recovery action. The v12 release gate includes clean-machine onboarding and recovery usability tests with people who have not used SAGE before.
 
