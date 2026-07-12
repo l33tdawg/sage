@@ -116,6 +116,11 @@ type Manager struct {
 	// nil in production (m.SyncDigest), non-nil only in tests.
 	syncDigestFn func(ctx context.Context, remoteChainID string, req *SyncDigestRequest) (*SyncDigestResponse, error)
 
+	// syncJournalFn is the v11.8 group-journal exchange seam (same pattern):
+	// nil in production (m.SyncJournalPull), non-nil only in tests so the
+	// pull/verify/ingest logic is testable without a live TLS peer.
+	syncJournalFn func(ctx context.Context, remoteChainID string, req *SyncJournalRequest) (*SyncJournalResponse, error)
+
 	// syncStatusMu guards syncReconcile — per-peer anti-entropy bookkeeping
 	// (last run, the peer's advertised consent, unsupported flag) surfaced by
 	// the sync status endpoint. Node-local observability only.

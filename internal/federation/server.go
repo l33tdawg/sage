@@ -54,6 +54,7 @@ func (m *Manager) Router() http.Handler {
 		r.Post("/fed/v1/receipt", m.handleReceipt)
 		r.Post("/fed/v1/sync/push", m.handleSyncPush)     // v11.5 domain sync
 		r.Post("/fed/v1/sync/digest", m.handleSyncDigest) // v11.5 anti-entropy
+		r.Post("/fed/v1/sync/journal", m.handleSyncJournal) // v11.8 group journal exchange
 		r.Put("/fed/v1/sync/policy", m.handleSyncPolicy)  // v11.6 host-controlled sync
 		r.Post("/fed/v1/p2p/routes", m.handleP2PRoutes)   // v11.6 authenticated LAN roaming upgrade
 	})

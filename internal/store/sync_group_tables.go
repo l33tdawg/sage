@@ -616,6 +616,28 @@ func (s *SQLiteStore) GetSyncGroupSubchainHead(ctx context.Context, groupID, sub
 	return &h, nil
 }
 
+// GetSyncGroupLogEntry returns the entry at a specific (group, subchain, seq),
+// or (nil, nil) if absent — the fork-detection lookup for journal ingest (an
+// incoming entry whose seq already exists locally must match by entry_hash).
+func (s *SQLiteStore) GetSyncGroupLogEntry(ctx context.Context, groupID, subchain string, seq int64) (*SyncGroupLogEntry, error) {
+	var e SyncGroupLogEntry
+	var createdAt string
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT group_id, subchain, seq, prev_hash, entry_hash, entry_type, payload_json,
+		       author_chain_id, author_agent_pubkey, author_sig, created_at
+		  FROM sync_group_log WHERE group_id=? AND subchain=? AND seq=?`, groupID, subchain, seq).
+		Scan(&e.GroupID, &e.Subchain, &e.Seq, &e.PrevHash, &e.EntryHash, &e.EntryType, &e.PayloadJSON,
+			&e.AuthorChainID, &e.AuthorAgentPubkey, &e.AuthorSig, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get sync group log entry: %w", err)
+	}
+	e.CreatedAt = parseTime(createdAt)
+	return &e, nil
+}
+
 // ListSyncGroupLog pages a sub-chain in append order from an exclusive seq cursor
 // (afterSeq < 0 starts at the beginning).
 func (s *SQLiteStore) ListSyncGroupLog(ctx context.Context, groupID, subchain string, afterSeq int64, limit int) ([]SyncGroupLogEntry, error) {
