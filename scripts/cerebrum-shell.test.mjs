@@ -74,11 +74,21 @@ test('contextual help flips below clipping-container top edges', () => {
 });
 
 test('macOS tray focuses an existing CEREBRUM tab before opening a new one', () => {
+    const launch = traySource.slice(
+        traySource.indexOf('func applicationDidFinishLaunching'),
+        traySource.indexOf('// Clicking dock icon'),
+    );
     const reopen = traySource.match(/func applicationShouldHandleReopen[\s\S]+?\n    \}/)?.[0] || '';
     const open = traySource.match(/private func openDashboardOnce\(\)[\s\S]+?\n    \}/)?.[0] || '';
+    assert.match(launch, /self\.openDashboard\(\)/,
+        'an app restart must reuse a browser tab left alive by the previous app process');
+    assert.doesNotMatch(launch, /NSWorkspace\.shared\.open/);
     assert.match(reopen, /openDashboard\(\)/);
     assert.match(open, /focusExistingDashboardTab\(\)/);
+    assert.match(open, /hasActiveDashboard\(\), activateDefaultBrowser\(\)/,
+        'Firefox needs SSE presence plus default-browser activation because it has no tab AppleScript API');
     assert.ok(open.indexOf('focusExistingDashboardTab()') < open.indexOf('NSWorkspace.shared.open'));
+    assert.ok(open.indexOf('hasActiveDashboard()') < open.indexOf('NSWorkspace.shared.open'));
     assert.match(traySource, /finished\.wait\(timeout: \.now\(\) \+ 5\)/,
         'browser automation must be time-bounded so dock clicks cannot freeze the app');
 });

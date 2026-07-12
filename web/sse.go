@@ -75,6 +75,16 @@ func (b *SSEBroadcaster) Unsubscribe(ch chan []byte) {
 	}
 }
 
+// ClientCount reports how many dashboard event streams are currently alive.
+// The macOS launcher uses this as a browser-independent presence signal: Firefox
+// does not expose its tabs to AppleScript, but an open CEREBRUM tab keeps this
+// stream connected for its lifetime.
+func (b *SSEBroadcaster) ClientCount() int {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return len(b.clients)
+}
+
 // CloseAll disconnects every connected client and rejects new subscriptions.
 // The dashboard holds its event stream open for the whole tab lifetime, so a
 // coordinated shutdown must drain these handlers explicitly — otherwise

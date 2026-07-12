@@ -12,13 +12,16 @@ import (
 
 func TestSSEBroadcaster_SubscribeUnsubscribe(t *testing.T) {
 	b := NewSSEBroadcaster()
+	assert.Zero(t, b.ClientCount())
 
 	ch := b.Subscribe()
+	assert.Equal(t, 1, b.ClientCount())
 	b.mu.RLock()
 	assert.Len(t, b.clients, 1)
 	b.mu.RUnlock()
 
 	b.Unsubscribe(ch)
+	assert.Zero(t, b.ClientCount())
 	b.mu.RLock()
 	assert.Len(t, b.clients, 0)
 	b.mu.RUnlock()
