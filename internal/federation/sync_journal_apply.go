@@ -46,6 +46,15 @@ const (
 	pkManifestHash     = "manifest_hash"
 )
 
+// syncJournalMaxRevisionJump bounds how far a single manifest may advance
+// roster_revision, so a controller-signed manifest with an absurd revision (e.g.
+// MaxInt64) can never poison the monotonic floor and freeze the group forever.
+const syncJournalMaxRevisionJump = 1_000_000
+
+func validRole(r string) bool {
+	return r == store.GroupRoleFullSync || r == store.GroupRoleSelectiveSync || r == store.GroupRoleEnrolledNoSync
+}
+
 // ---- payload builders (authoring side) ----
 
 func memberInvitePayload(memberChain, memberPubkeyHex, role, caPin string) map[string]string {
@@ -124,12 +133,24 @@ func loadGroupApplyState(ctx context.Context, ss *store.SQLiteStore, groupID str
 	return gs, nil
 }
 
+// memberActive reports whether a member may still AUTHOR journal entries. Eviction
+// (removed/left) or a not-yet-activated invite revokes authoring authority.
+func (gs *groupApplyState) memberActive(chain string) bool {
+	s := gs.memberState[chain]
+	return s == store.GroupMemberActive || s == store.GroupMemberResyncing
+}
+
 // resolve is THE canonical AuthorKeyResolver (docs §5.4): it returns the key an
 // entry MUST be signed by from the CURRENT (growing) state, never from the entry
-// itself, and gates entry_type vs authority.
+// itself, gates entry_type vs authority, AND revokes authority from evicted /
+// non-active members so a removed member can no longer author (member_leave, a
+// domain establish, or an established-owner entry).
 func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey {
 	if e.Subchain == RosterSubchain {
 		if e.EntryType == "member_leave" {
+			if !gs.memberActive(e.AuthorChainID) {
+				return nil // only an active member may leave; an evicted one cannot author
+			}
 			return gs.memberKey[e.AuthorChainID]
 		}
 		if rosterControllerTypes[e.EntryType] && e.AuthorChainID == gs.controllerChain {
@@ -144,17 +165,18 @@ func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey 
 		owner, known := gs.domainOwner[tag]
 		if !known {
 			// ESTABLISHING entry: the first domain sub-chain entry MUST be a
-			// domain_add whose author (a group member) claims ownership. (The
-			// controller-sequencing / governance gate for adding a domain to the
+			// domain_add whose author is an ACTIVE group member claiming ownership.
+			// (The controller-sequencing / governance gate for adding a domain to the
 			// shared SET that affects other members is step-8 authz; here the
 			// owner-signature + metadata isolation bound the blast radius.)
-			if e.EntryType != "domain_add" {
+			if e.EntryType != "domain_add" || !gs.memberActive(e.AuthorChainID) {
 				return nil
 			}
 			return gs.memberKey[e.AuthorChainID]
 		}
-		// ESTABLISHED: only the recorded owner may author further entries.
-		if e.AuthorChainID == owner {
+		// ESTABLISHED: only the recorded owner may author further entries, and only
+		// while still an active member.
+		if e.AuthorChainID == owner && gs.memberActive(owner) {
 			return gs.memberKey[owner]
 		}
 	}
@@ -162,18 +184,24 @@ func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey 
 }
 
 // apply mutates the projection tables + the in-memory state from ONE verified
-// entry. Called in seq order immediately after the entry is appended to the log.
+// entry, inside the SAME store transaction as the entry's append (see
+// appendAndApply), so the log and projection can never diverge on a partial
+// write. SEMANTIC faults (a malformed-but-signed payload, an unknown member) are
+// SKIPPED (return nil) — the entry stays in the log (auditable) with no effect —
+// NEVER a hard error, so one signed entry can never wedge a whole sub-chain. Only
+// a genuine STORE-WRITE failure returns an error (which rolls the append back and
+// lets the pull retry). gs is mutated only AFTER the store write succeeds.
 func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e store.SyncGroupLogEntry) error {
 	p := parseJournalPayload(e.PayloadJSON)
 	switch e.EntryType {
-	case "group_create", "anchor":
-		return nil // group row seeded by the ceremony; anchor is rebuild-staleness metadata (§5.6)
+	case "group_create", "anchor", "tombstone":
+		return nil // group row seeded by the ceremony; anchor/tombstone reserved
 
 	case "member_invite":
 		mc, mp := p[pkMemberChain], p[pkMemberPubkey]
 		mk, err := decodePub(mp)
-		if err != nil {
-			return fmt.Errorf("member_invite: bad member pubkey: %w", err)
+		if mc == "" || err != nil || !validRole(p[pkRole]) {
+			return nil // SKIP a malformed invite
 		}
 		if err := ss.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
 			GroupID: gs.groupID, MemberChainID: mc, MemberAgentPubkey: mp, Role: p[pkRole],
@@ -186,6 +214,9 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 
 	case "member_activate":
 		mc := p[pkMemberChain]
+		if _, known := gs.memberKey[mc]; !known {
+			return nil // SKIP: unknown member (its invite was skipped)
+		}
 		if err := ss.SetSyncGroupMemberState(ctx, gs.groupID, mc, store.GroupMemberActive, 0); err != nil {
 			return err
 		}
@@ -193,34 +224,47 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 
 	case "member_remove", "member_leave":
 		mc := p[pkMemberChain]
+		if _, known := gs.memberKey[mc]; !known {
+			return nil // SKIP: unknown member
+		}
 		state := store.GroupMemberRemoved
 		if e.EntryType == "member_leave" {
-			// self-signed: the departing member IS the author.
 			if mc != e.AuthorChainID {
-				return fmt.Errorf("member_leave: payload member %q != author %q", mc, e.AuthorChainID)
+				return nil // SKIP: malformed self-leave (payload member != author)
 			}
 			state = store.GroupMemberLeft
 		}
 		if err := ss.SetSyncGroupMemberState(ctx, gs.groupID, mc, state, gs.rosterRevision); err != nil {
 			return err
 		}
-		_ = ss.InsertSyncTombstone(ctx, store.SyncTombstone{
+		if err := ss.InsertSyncTombstone(ctx, store.SyncTombstone{
 			GroupID: gs.groupID, Scope: store.TombstoneScopeMember, Enforcement: store.TombstoneEnforceAdvisory,
 			MemberChainID: mc, Reason: e.EntryType, Revision: gs.rosterRevision, Subchain: e.Subchain,
 			JournalSeq: e.Seq, AuthorChainID: e.AuthorChainID, AuthorSig: e.AuthorSig,
-		})
+		}); err != nil {
+			return err
+		}
 		gs.memberState[mc] = state
 
 	case "role_change":
-		return ss.SetSyncGroupMemberRole(ctx, gs.groupID, p[pkMemberChain], p[pkRole])
+		mc := p[pkMemberChain]
+		if _, known := gs.memberKey[mc]; !known || !validRole(p[pkRole]) {
+			return nil // SKIP: unknown member or invalid role
+		}
+		return ss.SetSyncGroupMemberRole(ctx, gs.groupID, mc, p[pkRole])
 
 	case "domain_add":
 		tag, owner := p[pkDomainTag], p[pkOwnerChain]
-		// resolve already required author == owner; keep them consistent here.
-		if owner != e.AuthorChainID {
-			return fmt.Errorf("domain_add: owner %q != author %q", owner, e.AuthorChainID)
+		if tag == "" || owner != e.AuthorChainID {
+			return nil // SKIP: domain_add must declare its own author as owner
 		}
-		clr, _ := strconv.Atoi(p[pkMaxClearance])
+		if _, ok := gs.memberKey[owner]; !ok {
+			return nil // SKIP: owner is not a group member
+		}
+		clr, cErr := strconv.Atoi(p[pkMaxClearance])
+		if cErr != nil || clr < 0 || clr > 4 {
+			return nil // SKIP: bad clearance
+		}
 		if err := ss.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
 			GroupID: gs.groupID, DomainTag: tag, OwnerChainID: owner, OwnerSig: e.AuthorSig,
 			MaxClearance: clr, AddedRevision: gs.rosterRevision,
@@ -231,9 +275,10 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 
 	case "domain_remove":
 		tag := p[pkDomainTag]
-		// removed_revision must be strictly positive (0 is the "active" sentinel in
-		// ListSyncGroupDomains), so a removal at genesis (roster_revision 0, before
-		// any manifest) still reads as removed.
+		if tag == "" {
+			return nil
+		}
+		// removed_revision must be strictly positive (0 is the "active" sentinel).
 		removedRev := gs.rosterRevision
 		if removedRev < 1 {
 			removedRev = 1
@@ -241,17 +286,19 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		if err := ss.SetSyncGroupDomainRemoved(ctx, gs.groupID, tag, removedRev); err != nil {
 			return err
 		}
-		_ = ss.InsertSyncTombstone(ctx, store.SyncTombstone{
+		if err := ss.InsertSyncTombstone(ctx, store.SyncTombstone{
 			GroupID: gs.groupID, Scope: store.TombstoneScopeDomain, Enforcement: store.TombstoneEnforceAdvisory,
 			DomainTag: tag, Reason: "domain_remove", Revision: gs.rosterRevision, Subchain: e.Subchain,
 			JournalSeq: e.Seq, AuthorChainID: e.AuthorChainID, AuthorSig: e.AuthorSig,
-		})
+		}); err != nil {
+			return err
+		}
 
 	case "epoch_rotate":
 		cc, cp := p[pkControllerChain], p[pkControllerPubkey]
 		ck, err := decodePub(cp)
-		if err != nil {
-			return fmt.Errorf("epoch_rotate: bad controller pubkey: %w", err)
+		if cc == "" || err != nil {
+			return nil // SKIP a malformed rotation: never wedge the roster sub-chain
 		}
 		if err := ss.SetSyncGroupController(ctx, gs.groupID, cc, cp, p[pkEpoch]); err != nil {
 			return err
@@ -262,25 +309,60 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 	case "manifest":
 		rev, err := strconv.ParseInt(p[pkRosterRevision], 10, 64)
 		if err != nil {
-			return fmt.Errorf("manifest: bad roster_revision: %w", err)
+			return nil // SKIP: malformed revision
 		}
-		// ANTI-ROLLBACK (§5.5): a manifest below the durable floor never LOWERS the
-		// revision — but it is SKIPPED (not a hard error), so a stale/rolled-back
-		// manifest from a lagging or misbehaving controller cannot wedge convergence.
-		// The entry is still recorded in the log (auditable); the projection holds.
-		if rev < gs.rosterRevisionFloor {
+		// Apply ONLY a strictly-forward manifest within a bounded jump. rev<=floor
+		// skips (anti-rollback §5.5, and avoids re-binding manifest_hash at the same
+		// revision); rev beyond a sane delta skips, so a controller-signed absurd
+		// revision (e.g. MaxInt64) can never poison the monotonic floor and freeze
+		// the group forever. Skip-not-error either way, so a bad manifest never wedges.
+		if rev <= gs.rosterRevisionFloor || rev > gs.rosterRevision+syncJournalMaxRevisionJump {
 			return nil
 		}
 		if err := ss.SetSyncGroupManifest(ctx, gs.groupID, rev, p[pkManifestHash]); err != nil {
 			return err
 		}
 		gs.rosterRevision = rev
-		if rev > gs.rosterRevisionFloor {
-			gs.rosterRevisionFloor = rev
-		}
+		gs.rosterRevisionFloor = rev
+	}
+	return nil
+}
 
-	case "tombstone":
-		return nil // member/domain tombstones are emitted by their remove applies; a standalone journaled tombstone is reserved
+// validateAuthoredEntry rejects a payload the local node is about to AUTHOR that
+// apply() would silently SKIP (a malformed pubkey, bad role, mismatched self-leave
+// / owner, non-numeric revision). Ingest of a FOREIGN entry uses skip-not-error to
+// avoid wedging, but a node must never author an entry that will have no effect.
+func validateAuthoredEntry(e store.SyncGroupLogEntry) error {
+	p := parseJournalPayload(e.PayloadJSON)
+	badPub := func(hexKey string) bool { _, err := decodePub(hexKey); return err != nil }
+	switch e.EntryType {
+	case "member_invite":
+		if p[pkMemberChain] == "" || badPub(p[pkMemberPubkey]) || !validRole(p[pkRole]) {
+			return fmt.Errorf("member_invite: malformed payload")
+		}
+	case "role_change":
+		if p[pkMemberChain] == "" || !validRole(p[pkRole]) {
+			return fmt.Errorf("role_change: malformed payload")
+		}
+	case "member_leave":
+		if p[pkMemberChain] != e.AuthorChainID {
+			return fmt.Errorf("member_leave: payload member must equal author")
+		}
+	case "domain_add":
+		if p[pkDomainTag] == "" || p[pkOwnerChain] != e.AuthorChainID {
+			return fmt.Errorf("domain_add: owner must equal author")
+		}
+		if c, err := strconv.Atoi(p[pkMaxClearance]); err != nil || c < 0 || c > 4 {
+			return fmt.Errorf("domain_add: bad max_clearance")
+		}
+	case "epoch_rotate":
+		if p[pkControllerChain] == "" || badPub(p[pkControllerPubkey]) {
+			return fmt.Errorf("epoch_rotate: malformed controller identity")
+		}
+	case "manifest":
+		if _, err := strconv.ParseInt(p[pkRosterRevision], 10, 64); err != nil {
+			return fmt.Errorf("manifest: non-numeric roster_revision")
+		}
 	}
 	return nil
 }

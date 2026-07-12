@@ -302,11 +302,11 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		// Persist the canonical payload spelling (the signature binds the parsed map,
 		// so a peer's non-Go JSON spelling is accepted above but normalized here).
 		e.PayloadJSON = canonicalPayloadJSON(e.PayloadJSON)
-		if err := ss.AppendSyncGroupLog(ctx, e); err != nil {
-			return appended, err
-		}
-		if err := gs.apply(ctx, ss, e); err != nil {
-			return appended, fmt.Errorf("apply %s/%d (%s): %w", subchain, e.Seq, e.EntryType, err)
+		// ATOMIC append + apply: a store-write failure rolls the append back, so a
+		// logged entry is always fully applied (semantic-fault skips are no-ops that
+		// commit); the idempotent-skip path can never meet a logged-but-unapplied entry.
+		if err := m.appendAndApply(ctx, ss, gs, e); err != nil {
+			return appended, fmt.Errorf("append+apply %s/%d (%s): %w", subchain, e.Seq, e.EntryType, err)
 		}
 		appended++
 		wantSeq, wantPrev = e.Seq+1, e.EntryHash

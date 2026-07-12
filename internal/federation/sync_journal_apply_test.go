@@ -148,3 +148,79 @@ func TestJournalApplyEpochRotate(t *testing.T) {
 		t.Fatalf("new controller's member_invite did not apply")
 	}
 }
+
+// TestJournalApplyEvictionRevokesAuthority: a removed member can no longer author
+// (resolve consults member_state), and an active member still can.
+func TestJournalApplyEvictionRevokesAuthority(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	seedGroup(t, ms, "g1", "chain-ctl")
+	evilPub, evilKey, _ := ed25519.GenerateKey(nil)
+	goodPub, goodKey, _ := ed25519.GenerateKey(nil)
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "g1", MemberChainID: "chain-evil", Role: store.GroupRoleSelectiveSync,
+		MemberState: store.GroupMemberRemoved, MemberAgentPubkey: hex.EncodeToString(evilPub),
+	}); err != nil {
+		t.Fatalf("evil member: %v", err)
+	}
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "g1", MemberChainID: "chain-good", Role: store.GroupRoleSelectiveSync,
+		MemberState: store.GroupMemberActive, MemberAgentPubkey: hex.EncodeToString(goodPub),
+	}); err != nil {
+		t.Fatalf("good member: %v", err)
+	}
+	// A REMOVED member cannot establish a domain (authority revoked).
+	evil := mustEntry(t, "g1", DomainSubchain("secret"), 0, "", "domain_add", "chain-evil", evilPub, evilKey, domainAddPayload("secret", "chain-evil", 0))
+	if _, err := ingestRoster(t, m, ms, "g1", DomainSubchain("secret"), evil); err == nil {
+		t.Fatalf("a removed member must NOT be able to author a domain_add")
+	}
+	// An ACTIVE member still can.
+	good := mustEntry(t, "g1", DomainSubchain("ok"), 0, "", "domain_add", "chain-good", goodPub, goodKey, domainAddPayload("ok", "chain-good", 0))
+	if n, err := ingestRoster(t, m, ms, "g1", DomainSubchain("ok"), good); err != nil || n != 1 {
+		t.Fatalf("active member domain_add: n=%d err=%v", n, err)
+	}
+}
+
+// TestJournalApplyMalformedSkipsNoWedge: a controller-signed entry with a bad
+// payload is LOGGED and SKIPPED (no effect), and the chain still advances so a
+// following valid entry applies — no wedge.
+func TestJournalApplyMalformedSkipsNoWedge(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
+	// member_invite with a BAD member pubkey — authentically controller-signed.
+	bad := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
+		map[string]string{"member_chain": "chain-b", "member_pubkey": "not-a-real-key", "role": "full-sync"})
+	fwd := mustEntry(t, "g1", RosterSubchain, 2, bad.EntryHash, "manifest", "chain-ctl", ctlPub, ctlKey, manifestPayload(1, "h1"))
+
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0, bad, fwd); err != nil || n != 3 {
+		t.Fatalf("malformed entry must be logged+skipped, not wedge: n=%d err=%v", n, err)
+	}
+	if mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-b"); mem != nil {
+		t.Fatalf("a malformed invite must not add a member: %+v", mem)
+	}
+	if g, _ := ms.GetSyncGroup(ctx, "g1"); g.RosterRevision != 1 {
+		t.Fatalf("chain wedged: the manifest after a skipped entry did not apply (rev=%d)", g.RosterRevision)
+	}
+	if head, _ := ms.GetSyncGroupSubchainHead(ctx, "g1", RosterSubchain); head == nil || head.Seq != 2 {
+		t.Fatalf("all 3 entries must be logged: %+v", head)
+	}
+}
+
+// TestJournalApplyManifestUpperBound: an absurd manifest revision is skipped
+// (never poisons the monotonic floor); a later legit manifest still applies.
+func TestJournalApplyManifestUpperBound(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
+	absurd := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "manifest", "chain-ctl", ctlPub, ctlKey, manifestPayload(int64(1)<<50, "hbad"))
+	legit := mustEntry(t, "g1", RosterSubchain, 2, absurd.EntryHash, "manifest", "chain-ctl", ctlPub, ctlKey, manifestPayload(1, "h1"))
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0, absurd, legit); err != nil || n != 3 {
+		t.Fatalf("ingest: n=%d err=%v", n, err)
+	}
+	if g, _ := ms.GetSyncGroup(ctx, "g1"); g.RosterRevision != 1 || g.RosterRevisionFloor != 1 {
+		t.Fatalf("absurd manifest poisoned the floor; legit manifest could not apply: rev=%d floor=%d", g.RosterRevision, g.RosterRevisionFloor)
+	}
+}

@@ -269,6 +269,26 @@ func foldSubchain(entries []store.SyncGroupLogEntry, resolve AuthorKeyResolver) 
 	return FoldResult{HeadHash: prev, HeadSeq: int64(len(entries) - 1), Count: len(entries)}, nil
 }
 
+// appendAndApply atomically appends an entry to the log AND applies it to the
+// projection tables in ONE store transaction: a store-write failure inside apply
+// rolls the append back, so the log and projection can never diverge on a partial
+// write, and the idempotent-skip path can never re-encounter a logged-but-unapplied
+// entry. Semantic-fault SKIPs inside apply commit normally (the entry is logged
+// with no effect). gs is mutated by apply only after each write succeeds; on a
+// rollback the caller discards gs.
+func (m *Manager) appendAndApply(ctx context.Context, ss *store.SQLiteStore, gs *groupApplyState, e store.SyncGroupLogEntry) error {
+	return ss.RunInTx(ctx, func(txStore store.OffchainStore) error {
+		tx, ok := txStore.(*store.SQLiteStore)
+		if !ok {
+			return fmt.Errorf("group journal requires the SQLite store backend")
+		}
+		if err := tx.AppendSyncGroupLog(ctx, e); err != nil {
+			return err
+		}
+		return gs.apply(ctx, tx, e)
+	})
+}
+
 // AppendGroupJournalEntry builds, signs, and appends the next entry to a group
 // sub-chain under journalMu (so read-head -> build -> append is atomic against
 // concurrent appenders), then best-effort advances the roster head cache. The
@@ -301,6 +321,11 @@ func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain
 	// which would permanently wedge the sub-chain at this seq (no delete/rewrite
 	// path). Then APPLY it to our own projection tables, exactly as a peer would on
 	// ingest, so the author's roster stays consistent with the log.
+	// A node must never AUTHOR a malformed entry that its own (and every peer's)
+	// apply would silently skip — reject it before signing/appending.
+	if err := validateAuthoredEntry(entry); err != nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("refusing to author a malformed %s entry: %w", entry.EntryType, err)
+	}
 	gs, rErr := loadGroupApplyState(ctx, ss, groupID)
 	if rErr != nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("author self-check: %w", rErr)
@@ -308,11 +333,8 @@ func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain
 	if key := gs.resolve(entry); key == nil || verifyJournalEntry(entry, key) != nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("refusing to author an entry that fails the group's own resolver (author=%s type=%s subchain=%s)", entry.AuthorChainID, entry.EntryType, entry.Subchain)
 	}
-	if err := ss.AppendSyncGroupLog(ctx, entry); err != nil {
+	if err := m.appendAndApply(ctx, ss, gs, entry); err != nil {
 		return store.SyncGroupLogEntry{}, err
-	}
-	if err := gs.apply(ctx, ss, entry); err != nil {
-		return store.SyncGroupLogEntry{}, fmt.Errorf("apply own %s entry: %w", entry.EntryType, err)
 	}
 	// Best-effort head-cache advance for the roster sub-chain (a projection; the
 	// log is authoritative, so a failure here is non-fatal — the fold re-derives).
