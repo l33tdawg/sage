@@ -51,13 +51,24 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.7.5
+## What's New in v11.7.6
+
+**Reliable MCP turn writes and task cards that show the whole job.** v11.7.6 fixes two post-app-v17 delegated-proof failures that v11.7.4 exposed after making the node authoritative for embeddings. Consensus now keeps every agent-controlled memory field bound to the exact signed request while accepting the validator-signed node's derived embedding hash, so provider cutovers no longer turn valid `sage_turn` observations into opaque CheckTx rejections. Fresh requests also survive the first block after a long idle period even when deterministic chain time trails the already wall-clock-validated MCP request; captured old proofs remain rejected. Public REST/MCP errors now distinguish proof mismatch and expiry from a generic `request rejected`.
+
+CEREBRUM task cards stay compact by default but can expand to show complete multiline text. Planned tasks can be edited and saved without rewriting consensus history: SAGE confirms a replacement task first, then retires the original card. Existing committed blocks replay byte-identically; this patch changes only admission of requests that older binaries incorrectly rejected.
+
+SDK 11.7.6.
+
+## Older releases
+
+<details>
+<summary>v11.7.5 - readable contextual help</summary>
 
 **Readable contextual help at every CEREBRUM boundary.** Help tooltips now account for the nearest scroll-clipping container as well as the browser viewport, so hints near the top of Settings and other bounded panels flip downward instead of opening behind the fixed application chrome. The positioning check runs after the tooltip is rendered and keeps keyboard/focus behavior intact. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
 
 SDK 11.7.5.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.7.4 - provider-safe Smart Memory and CEREBRUM launch</summary>
