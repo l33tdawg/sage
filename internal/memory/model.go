@@ -59,9 +59,13 @@ type MemoryRecord struct {
 	Assignee       string     `json:"assignee,omitempty"`
 	TaskPickedUpBy string     `json:"task_picked_up_by,omitempty"`
 	TaskPickedUpAt *time.Time `json:"task_picked_up_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	CommittedAt    *time.Time `json:"committed_at,omitempty"`
-	DeprecatedAt   *time.Time `json:"deprecated_at,omitempty"`
+	// TaskStatusUpdatedAt is the local lifecycle clock for board retention. It is
+	// deliberately separate from CreatedAt: an old task completed today must stay
+	// on the Done board for the full retention window.
+	TaskStatusUpdatedAt *time.Time `json:"task_status_updated_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	CommittedAt         *time.Time `json:"committed_at,omitempty"`
+	DeprecatedAt        *time.Time `json:"deprecated_at,omitempty"`
 	// CorroborationCount is a display-only augmentation (not persisted on this
 	// struct) populated by list/detail handlers so the UI can show how many
 	// agents have backed a memory toward consensus.

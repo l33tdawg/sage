@@ -28,6 +28,8 @@ CREATE TABLE memories (
     task_picked_up_by TEXT            NOT NULL DEFAULT '',
     task_assignment_version BIGINT    NOT NULL DEFAULT 0,
     task_requires_handoff BOOLEAN     NOT NULL DEFAULT FALSE,
+    task_status_updated_at TIMESTAMPTZ,
+    task_board_position BIGINT           NOT NULL DEFAULT 0,
     created_at       TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
     committed_at     TIMESTAMPTZ,
     deprecated_at    TIMESTAMPTZ

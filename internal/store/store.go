@@ -624,6 +624,12 @@ type TaskAssignmentStore interface {
 	TakeAgentNotifications(ctx context.Context, agentID string, limit int) ([]*AgentNotification, error)
 }
 
+// TaskBoardOrderStore persists the operator's within-column Kanban ordering.
+// Task content remains governed memory; ordering is local board state.
+type TaskBoardOrderStore interface {
+	ReorderTasks(ctx context.Context, taskStatus memory.TaskStatus, orderedIDs []string) error
+}
+
 // GovernanceStore defines the interface for governance proposal and vote storage.
 type GovernanceStore interface {
 	InsertGovProposal(ctx context.Context, proposal *GovProposal) error

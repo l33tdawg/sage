@@ -43,6 +43,28 @@ func TestGetAllTasksIncludesHistoricalEmptyStatusForRecovery(t *testing.T) {
 	require.Empty(t, tasks[0].TaskStatus, "unknown history must remain explicit until the user classifies it")
 }
 
+func TestReorderTasksPersistsWithinColumnAndKeepsOmittedCards(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "order-a", "codex")
+	insertOpenTask(t, s, "order-b", "codex")
+	insertOpenTask(t, s, "order-c", "codex")
+
+	require.NoError(t, s.ReorderTasks(ctx, memory.TaskStatusPlanned, []string{"order-a", "order-c"}))
+	tasks, err := s.GetAllTasks(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, tasks, 3)
+	require.Equal(t, []string{"order-a", "order-c", "order-b"}, []string{
+		tasks[0].MemoryID, tasks[1].MemoryID, tasks[2].MemoryID,
+	})
+
+	require.NoError(t, s.UpdateTaskStatus(ctx, "order-a", memory.TaskStatusDone))
+	var position int
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT task_board_position FROM memories WHERE memory_id = 'order-a'`).Scan(&position))
+	require.Zero(t, position, "moving columns must put the card at the top of its new column")
+}
+
 func insertOpenTask(t *testing.T, s *SQLiteStore, id, provider string) {
 	t.Helper()
 	rec := testMemory(id, "author", "[TASK] "+id, "work")
@@ -490,6 +512,46 @@ func TestTerminalTaskSupersedesUnreadAssignmentNotice(t *testing.T) {
 	notices, err = s.TakeAgentNotifications(ctx, "agent-a", 5)
 	require.NoError(t, err)
 	require.Len(t, notices, 1)
+}
+
+func TestTaskStatusUpdatedAtTracksTransitionsNotTaskAge(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "status-clock", "codex")
+	insertActiveTestAgent(t, s, "agent-a", "codex")
+	_, err := s.conn.ExecContext(ctx, `UPDATE memories
+		SET created_at = '2020-01-01T00:00:00Z', task_status_updated_at = '2020-01-01T00:00:00Z'
+		WHERE memory_id = 'status-clock'`)
+	require.NoError(t, err)
+	_, err = s.AssignTaskAndNotify(ctx, "status-clock", "agent-a")
+	require.NoError(t, err)
+
+	var inProgressAt string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT task_status_updated_at FROM memories WHERE memory_id = 'status-clock'`).Scan(&inProgressAt))
+	require.NotEqual(t, "2020-01-01T00:00:00Z", inProgressAt)
+
+	_, err = s.conn.ExecContext(ctx, `UPDATE memories SET task_status_updated_at = '2020-01-02T00:00:00Z'
+		WHERE memory_id = 'status-clock'`)
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateTaskStatus(ctx, "status-clock", memory.TaskStatusDone))
+
+	var doneAt string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT task_status_updated_at FROM memories WHERE memory_id = 'status-clock'`).Scan(&doneAt))
+	require.NotEqual(t, "2020-01-02T00:00:00Z", doneAt,
+		"completion retention must start when the task enters Done")
+
+	require.NoError(t, s.UpdateTaskStatus(ctx, "status-clock", memory.TaskStatusDone))
+	var repeatedDoneAt string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT task_status_updated_at FROM memories WHERE memory_id = 'status-clock'`).Scan(&repeatedDoneAt))
+	require.Equal(t, doneAt, repeatedDoneAt, "a no-op Done update must not extend retention forever")
+
+	tasks, err := s.GetAllTasks(ctx, "", 10)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.NotNil(t, tasks[0].TaskStatusUpdatedAt)
 }
 
 func TestTaskAssignmentMigrationBackfillsWithoutLosingPickup(t *testing.T) {

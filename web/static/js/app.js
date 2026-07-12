@@ -1,7 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
-rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
+rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, reorderTasks, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
@@ -2114,6 +2114,7 @@ function TasksPage({ sse }) {
     const [editingTask, setEditingTask] = useState('');
     const [editContent, setEditContent] = useState('');
     const [savingTask, setSavingTask] = useState('');
+    const [reorderingColumn, setReorderingColumn] = useState('');
     const draggingRef = useRef(false);
     const reloadTimer = useRef(null);
     const movedThisSession = useRef(new Set()); // keeps just-completed old cards visible (see isRecentDone)
@@ -2241,7 +2242,7 @@ function TasksPage({ sse }) {
         setLoading(true);
         setError(null);
         try {
-            const data = await fetchTasks({ all: true, limit: 200 });
+            const data = await fetchTasks({ all: true, limit: 500 });
             const items = data.tasks || [];
             setTasks(items);
             const ds = [...new Set(items.map(t => t.domain_tag).filter(Boolean))].sort();
@@ -2266,6 +2267,33 @@ function TasksPage({ sse }) {
         } catch (e) {
             showToast('Could not move task: ' + (e.message || 'network error'), 'error');
             loadTasks(); // revert on error
+        }
+    }
+
+    async function reorderTask(task, direction) {
+		if (reorderingColumn) return;
+        const columnTasks = tasks.filter(t => t.task_status === task.task_status);
+        const from = columnTasks.findIndex(t => t.memory_id === task.memory_id);
+        const to = from + direction;
+        if (from < 0 || to < 0 || to >= columnTasks.length) return;
+        [columnTasks[from], columnTasks[to]] = [columnTasks[to], columnTasks[from]];
+        const orderedIDs = columnTasks.map(t => t.memory_id);
+        const rank = new Map(orderedIDs.map((id, index) => [id, index]));
+        const previousTasks = tasks;
+		setReorderingColumn(task.task_status);
+        setTasks(prev => [...prev].sort((a, b) => {
+            if (a.task_status !== task.task_status || b.task_status !== task.task_status) return 0;
+            return rank.get(a.memory_id) - rank.get(b.memory_id);
+        }));
+        try {
+            const res = await reorderTasks(task.task_status, orderedIDs);
+            if (res && res.error) throw new Error(res.error);
+        } catch (e) {
+            setTasks(previousTasks);
+            showToast('Could not save task order: ' + (e.message || 'network error'), 'error');
+            loadTasks();
+		} finally {
+			setReorderingColumn('');
         }
     }
 
@@ -2325,17 +2353,16 @@ function TasksPage({ sse }) {
         setAdding(false);
     }
 
-    // Filter out done/dropped items older than 7 days unless showOldDone is on.
-    // The cutoff uses created_at (the API has no completed_at), so a week-old
-    // card dropped on Done would vanish MID-DROP - exempt anything the user
-    // moved this session.
+    // Keep terminal cards on the board for seven days after their actual status
+    // transition. They may still be cleared manually at any time. created_at is
+    // only a compatibility fallback for nodes that have not migrated yet.
     function isRecentDone(task) {
         if (task.task_status !== 'done' && task.task_status !== 'dropped') return true;
         if (showOldDone) return true;
         if (movedThisSession.current.has(task.memory_id)) return true;
-        const created = new Date(task.created_at);
+        const completed = new Date(task.task_status_updated_at || task.created_at);
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        return created > sevenDaysAgo;
+        return completed > sevenDaysAgo;
     }
 
     function handleDragStart(e, task) {
@@ -2520,12 +2547,12 @@ function TasksPage({ sse }) {
                                 `}
                             </div>
                             <div class="kanban-cards">
-                                ${colTasks.map(task => html`
+                                ${colTasks.map((task, taskIndex) => html`
                                     ${(() => {
                                         const workState = taskWorkState(task);
                                         return html`
-                                    <div class="kanban-card ${dragging === task.memory_id ? 'dragging' : ''} ${expandedTasks.has(task.memory_id) ? 'expanded' : ''} ${editingTask === task.memory_id ? 'editing' : ''}"
-										 draggable=${editingTask !== task.memory_id}
+                                    <div class="kanban-card status-${task.task_status} ${workState ? 'has-work-state' : ''} ${dragging === task.memory_id ? 'dragging' : ''} ${expandedTasks.has(task.memory_id) ? 'expanded' : ''} ${editingTask === task.memory_id ? 'editing' : ''}"
+                                         draggable=${editingTask !== task.memory_id}
                                          onDragStart=${e => handleDragStart(e, task)}
                                          onDragEnd=${() => { draggingRef.current = false; scheduleReload(); }}>
                                         ${workState && html`
@@ -2583,6 +2610,10 @@ function TasksPage({ sse }) {
                                             </div>
                                         `}
 						<div class="kanban-card-actions">
+							<button class="kanban-action kanban-order-action" title="Move task up" aria-label=${`Move ${taskSummary(task)} up`}
+								disabled=${taskIndex === 0 || reorderingColumn === task.task_status} onClick=${e => { e.stopPropagation(); reorderTask(task, -1); }}>↑</button>
+							<button class="kanban-action kanban-order-action" title="Move task down" aria-label=${`Move ${taskSummary(task)} down`}
+								disabled=${taskIndex === colTasks.length - 1 || reorderingColumn === task.task_status} onClick=${e => { e.stopPropagation(); reorderTask(task, 1); }}>↓</button>
 							<span style="font-size:10px;color:var(--text-muted);">Status:</span>
 							<select class="kanban-status-select"
 								value=${task.task_status}
