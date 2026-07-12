@@ -51,7 +51,16 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.7.4
+## What's New in v11.7.5
+
+**Readable contextual help at every CEREBRUM boundary.** Help tooltips now account for the nearest scroll-clipping container as well as the browser viewport, so hints near the top of Settings and other bounded panels flip downward instead of opening behind the fixed application chrome. The positioning check runs after the tooltip is rendered and keeps keyboard/focus behavior intact. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+
+SDK 11.7.5.
+
+## Older releases
+
+<details>
+<summary>v11.7.4 - provider-safe Smart Memory and CEREBRUM launch</summary>
 
 **Provider-safe Smart Memory, automatic repair, and one CEREBRUM tab.** The SAGE node is now authoritative for every stored vector: it regenerates agent submissions with the selected embedding provider, stamps the exact vector space, and filters vector recall to that same space. Switching between preferred Ollama embeddings and local hash embeddings cuts write/query authority over before background migration, so active agents cannot keep a migration alive forever and recall never compares incompatible vectors. Provider recovery is watched continuously, so vectorless observations left by a transient outage repair automatically after Ollama or another configured embedder returns. New MCP clients still attach a compatibility vector for older SAGE nodes, while v11.7.4 nodes safely regenerate it.
 
@@ -59,7 +68,7 @@ CEREBRUM Settings now presents Ollama/hash embeddings and the independent rerank
 
 SDK 11.7.4.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.7.3 - strict project memory, task ownership, and Settings efficiency</summary>
