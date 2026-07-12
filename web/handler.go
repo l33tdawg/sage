@@ -610,6 +610,26 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 		r.Get("/ui/launch", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/ui/", http.StatusFound)
 		})
+		// Browser-independent dashboard presence for the native macOS launcher.
+		// Firefox has no useful AppleScript tab API, so the tray checks whether an
+		// authenticated CEREBRUM tab already owns an SSE stream before deciding to
+		// open another URL. This endpoint exposes only an aggregate local UI count.
+		r.Get("/ui/presence", func(w http.ResponseWriter, r *http.Request) {
+			if !isLoopbackRemote(r.RemoteAddr) {
+				http.NotFound(w, r)
+				return
+			}
+			clients := 0
+			if h.SSE != nil {
+				clients = h.SSE.ClientCount()
+			}
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"active":  clients > 0,
+				"clients": clients,
+			})
+		})
 
 		// SPA - serve static files, fallback to index.html. SAGE_UI_DIR (dev only)
 		// serves from disk instead of the embed, so UI edits show on a browser
