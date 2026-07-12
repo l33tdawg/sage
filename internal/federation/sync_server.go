@@ -80,13 +80,28 @@ func (m *Manager) syncStore() *store.SQLiteStore {
 // admit a relayed item whose OriginChainID != peer.ChainID, THIS is the one place
 // that must change — resolve the origin's key from the group roster
 // (sync_group_member.member_agent_pubkey WHERE member_chain_id == OriginChainID).
-// Until then the guard below trips loudly, so a relayer can never self-sign a
-// forgery by having verification keyed on its own AgentID.
-func (m *Manager) originVerifyKey(peer *peerIdentity, item *SyncItem) (ed25519.PublicKey, error) {
-	if item.OriginChainID != peer.ChainID {
-		return nil, fmt.Errorf("origin %q is not the authenticated peer %q: origin-key resolution must switch to the group roster before relayed items are admitted (docs §4.4 step-6 coupling)", item.OriginChainID, peer.ChainID)
+// The pairwise star still keys on peer.AgentID (origin IS the peer). For a
+// v11.8 group-relayed item (OriginChainID != peer.ChainID), the key is resolved
+// from the GROUP ROSTER — the origin author's pinned member_agent_pubkey — never
+// the relayer's AgentID, so a relayer is a pure cache that cannot forge or
+// mis-attribute (docs §9.2 must-fix #1). Fails closed when no shared group
+// authorizes the relay or the origin's roster key is unresolved.
+func (m *Manager) originVerifyKey(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, item *SyncItem) (ed25519.PublicKey, error) {
+	if item.OriginChainID == peer.ChainID {
+		return auth.AgentIDToPublicKey(peer.AgentID)
 	}
-	return auth.AgentIDToPublicKey(peer.AgentID)
+	groupID, ok, err := ss.ResolveGroupRelay(ctx, m.localChainID, peer.ChainID, item.OriginChainID, item.Domain)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("origin %q relayed by peer %q is not authorized by any group in which this node, the relayer, and the origin all share domain %q", item.OriginChainID, peer.ChainID, item.Domain)
+	}
+	hexKey, err := ss.GetGroupMemberAgentPubkey(ctx, groupID, item.OriginChainID)
+	if err != nil {
+		return nil, err
+	}
+	return decodePub(hexKey)
 }
 
 // handleSyncPush implements POST /fed/v1/sync/push (behind peerAuth).
@@ -116,9 +131,29 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	}
 	// Structural validation is all-or-nothing: violations are sender bugs (or
 	// malice), not policy outcomes, and rejecting the batch keeps the per-item
-	// outcome enum small and honest.
+	// outcome enum small and honest. An item whose origin chain != the
+	// authenticated peer is a RELAY: allowed ONLY when a shared group authorizes
+	// it (peer + origin both active members, domain shared). Otherwise the
+	// third-chain-laundering door stays shut (whole-batch 400). When authorized,
+	// the item is validated against its OWN origin chain; Gate 5.5 then verifies
+	// its origin_sig against the origin's roster key.
 	for i := range req.Items {
-		if err := validateSyncItem(peer.ChainID, &req.Items[i]); err != nil {
+		item := &req.Items[i]
+		expectedOrigin := peer.ChainID
+		if item.OriginChainID != "" && item.OriginChainID != peer.ChainID {
+			groupID, ok, aErr := ss.ResolveGroupRelay(r.Context(), m.localChainID, peer.ChainID, item.OriginChainID, item.Domain)
+			if aErr != nil {
+				httpError(w, http.StatusInternalServerError, "relay authorization failed")
+				return
+			}
+			if !ok {
+				httpError(w, http.StatusBadRequest, fmt.Sprintf("item %d: origin chain %q does not match authenticated peer %q and no group with this node as a member authorizes relay", i, item.OriginChainID, peer.ChainID))
+				return
+			}
+			_ = groupID
+			expectedOrigin = item.OriginChainID
+		}
+		if err := validateSyncItem(expectedOrigin, item); err != nil {
 			httpError(w, http.StatusBadRequest, fmt.Sprintf("item %d: %v", i, err))
 			return
 		}
@@ -130,11 +165,21 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	policyUnlock := ss.LockSyncPolicyRead()
 	defer policyUnlock()
 
-	// Receiver-side consent rows for this peer, loaded once per batch.
+	// Receiver-side consent for this peer, loaded once per batch: the union of
+	// pairwise sync_domains rows AND the active group domains this node and the
+	// peer both share (docs §9.1). Group membership is the consent for a group
+	// domain, so a group-only member (no pairwise sync_domains row) is admitted
+	// for its shared domains without a spurious rejected_not_consented.
 	consented, err := ss.GetSyncDomains(r.Context(), peer.ChainID)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "consent lookup failed")
 		return
+	}
+	if groupConsent, gErr := ss.GroupSharedDomains(r.Context(), m.localChainID, peer.ChainID); gErr != nil {
+		httpError(w, http.StatusInternalServerError, "consent lookup failed")
+		return
+	} else {
+		consented = unionDomains(consented, groupConsent)
 	}
 
 	deadline := time.Now().Add(syncPushBudget)
@@ -147,6 +192,13 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		res := m.admitSyncItem(r, ss, peer, consented, item)
+		// I5: collapse the sovereign-delete outcome to a generic terminal reason on
+		// the wire so the pushing peer cannot distinguish "you deleted this" from an
+		// ordinary durable reject. The receiver-internal suppression already happened
+		// (not recorded, not broadcast) inside admitSyncItem.
+		if res.Outcome == SyncOutcomeSuppressed {
+			res.Outcome = SyncOutcomeRejectedNotAdmitted
+		}
 		results = append(results, res)
 	}
 	writeJSON(w, http.StatusOK, &SyncPushResponse{Results: results})
@@ -179,6 +231,16 @@ func (m *Manager) handleSyncDigest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "domain is required")
 		return
 	}
+	limit := req.Limit
+	if limit <= 0 || limit > SyncDigestMaxIDs {
+		limit = SyncDigestMaxIDs
+	}
+	if req.GroupID != "" {
+		m.handleSyncDigestGroup(w, r, ss, peer, &req, limit)
+		return
+	}
+	// Pairwise (2-node) path — unchanged: serve the requester's OWN admitted
+	// origin ids (origin_chain_id = requester) and surface asymmetric consent.
 	consented, err := ss.GetSyncDomains(r.Context(), peer.ChainID)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "consent lookup failed")
@@ -186,10 +248,6 @@ func (m *Manager) handleSyncDigest(w http.ResponseWriter, r *http.Request) {
 	}
 	if consented == nil {
 		consented = []string{}
-	}
-	limit := req.Limit
-	if limit <= 0 || limit > SyncDigestMaxIDs {
-		limit = SyncDigestMaxIDs
 	}
 	ids, err := ss.ListSyncOriginIDs(r.Context(), peer.ChainID, req.Domain, req.After, limit)
 	if err != nil {
@@ -208,6 +266,93 @@ func (m *Manager) handleSyncDigest(w http.ResponseWriter, r *http.Request) {
 		resp.NextCursor = ids[len(ids)-1]
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleSyncDigestGroup serves the v11.8 multi-node backfill digest (docs §9.2).
+// It HARD-GATES on membership+domain, serves ANY origin chain's admitted ids for
+// the shared domain (relaxing the pairwise origin_chain_id=requester filter), and
+// clamps ConsentedDomains to the group∩responder intersection. It NEVER discloses
+// hidden domains or counts: a failed precondition collapses to one generic 403
+// (I5). Classified group domains (max_clearance>0) are OWNER-serve-only (star): a
+// non-owner relayer refuses backfill for them (docs §9.2 must-fix #12).
+func (m *Manager) handleSyncDigestGroup(w http.ResponseWriter, r *http.Request, ss *store.SQLiteStore, peer *peerIdentity, req *SyncDigestRequest, limit int) {
+	ctx := r.Context()
+	// Precondition: the requester must actively share req.Domain in this group.
+	shares, err := ss.MemberSharesGroupDomain(ctx, req.GroupID, peer.ChainID, req.Domain)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "authorization failed")
+		return
+	}
+	if !shares {
+		// Generic — one reason for "not a member", "domain not shared", and
+		// "group unknown", so the response is not a group/domain existence oracle.
+		httpError(w, http.StatusForbidden, "not_admitted")
+		return
+	}
+	// Serve admitted ids GROUP-SCOPED and leak-safe (must-fix #1/#7/#12): only origins
+	// that are members of req.GroupID (no cross-group provenance leak), only rows whose
+	// MOST-SPECIFIC covering group domain is servable by this responder (unclassified OR
+	// responder-owned — classified is owner-star-only) and entitled to BOTH parties. This
+	// replaces the earlier gate-on-req.Domain-only + raw-subtree serve, which disclosed a
+	// classified child domain's ids via its unclassified parent tag.
+	ids, next, err := ss.ListGroupServableOriginIDs(ctx, req.GroupID, peer.ChainID, m.localChainID, req.Domain, req.After, limit)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "digest read failed")
+		return
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	// Clamp ConsentedDomains to the group∩responder intersection — the domains
+	// BOTH the requester and this node are entitled to in the group. Never echo
+	// the raw sync_domains list (that would leak non-shared pairwise domains).
+	reqDomains, err := ss.GroupDomainsForMember(ctx, req.GroupID, peer.ChainID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "consent lookup failed")
+		return
+	}
+	ownDomains, err := ss.GroupDomainsForMember(ctx, req.GroupID, m.localChainID)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "consent lookup failed")
+		return
+	}
+	clamped := intersectDomains(reqDomains, ownDomains)
+	resp := &SyncDigestResponse{
+		Consented:        true,
+		ConsentedDomains: clamped,
+		OriginMemoryIDs:  ids,
+		NextCursor:       next,
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// intersectDomains returns the domains present in BOTH slices (deduped, order of
+// the first slice). The digest ConsentedDomains clamp (I5): only the shared
+// intersection is ever disclosed.
+func intersectDomains(a, b []string) []string {
+	if len(a) == 0 || len(b) == 0 {
+		return []string{}
+	}
+	inB := make(map[string]struct{}, len(b))
+	for _, d := range b {
+		inB[d] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(a))
+	out := make([]string, 0, len(a))
+	for _, d := range a {
+		if d == "" {
+			continue
+		}
+		if _, ok := inB[d]; !ok {
+			continue
+		}
+		if _, dup := seen[d]; dup {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
 }
 
 // validateSyncItem enforces the structural (protocol-level) invariants.
@@ -314,22 +459,42 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 		out.Outcome = SyncOutcomeRejectedClearance
 		return out
 	}
-	// Gate 5.5 — origin authenticity (docs §4.4). When the item carries an origin
-	// signature, it must verify against the ORIGIN agent's key. validateSyncItem
-	// enforces origin_chain == the authenticated peer, so in the pairwise star the
-	// origin IS the peer and its authenticated agent key (peer.AgentID) is the
-	// verifier. (Mesh backfill — a relayer serving ANOTHER origin's item — will
-	// resolve the origin's key from the group roster; build step 6.) An EMPTY sig
-	// is accepted for rolling compatibility with pre-v11.8 senders; a PRESENT but
-	// invalid sig is a forged/mis-attributed item and is rejected terminally.
+	// Gate 5.5 — origin authenticity (docs §4.4 / §9.2). The item's origin_sig must
+	// verify against the ORIGIN agent's key: peer.AgentID in the pairwise star
+	// (origin IS the peer), or the origin author's pinned roster key for a
+	// group-relayed item (originVerifyKey resolves it). An EMPTY sig is accepted
+	// ONLY for a pairwise-origin item (rolling compat with pre-v11.8 senders); a
+	// RELAYED item MUST be signed — an unsigned relay is unauthenticatable and
+	// terminally rejected. A present-but-invalid sig is a forgery/mis-attribution
+	// and is rejected terminally.
+	relayed := item.OriginChainID != peer.ChainID
+	if relayed && len(item.OriginSig) == 0 {
+		out.Outcome = SyncOutcomeRejectedOriginSig
+		return out
+	}
 	if len(item.OriginSig) > 0 {
-		originPub, keyErr := m.originVerifyKey(peer, item)
+		originPub, keyErr := m.originVerifyKey(ctx, ss, peer, item)
 		if keyErr != nil || !verifyOriginSig(originPub, item) {
 			out.Outcome = SyncOutcomeRejectedOriginSig
 			return out
 		}
 	}
 	localID := syncMemoryID(item.OriginChainID, item.OriginMemoryID)
+
+	// Gate 6.5 — local_suppress anti-resurrection (docs §10 must-fix #7). If this
+	// node locally deleted this origin memory (a memory-scope local_suppress
+	// tombstone), NEVER re-admit it — from ANY inbound path (owner star fan-out,
+	// group relay backfill, owner re-enqueue). Placed after localID and BEFORE the
+	// Gate-6 idempotency record + Gate-9 broadcast so a suppressed item is never
+	// written to sync_origin and never rebroadcast. groupID="" matches ANY group:
+	// a local delete suppresses re-admission no matter which group offers it back.
+	if suppressed, sErr := ss.IsLocallySuppressed(ctx, "", item.OriginChainID, item.OriginMemoryID); sErr != nil {
+		out.Outcome = SyncOutcomeRetry
+		return out
+	} else if suppressed {
+		out.Outcome = SyncOutcomeSuppressed
+		return out
+	}
 	expectedPending := store.SyncOriginPending{
 		OriginChainID: item.OriginChainID, OriginMemoryID: item.OriginMemoryID,
 		OriginCreatedAt: item.OriginCreatedAt, LocalMemoryID: localID, DomainTag: item.Domain,

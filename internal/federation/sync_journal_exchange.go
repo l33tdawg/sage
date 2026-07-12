@@ -394,11 +394,24 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		}
 		after = maxSeq
 	}
-	// Convergence tracking: record the peer's roster head via the targeted mutator
-	// (a no-op if the peer isn't a member row), so last_acked_roster_revision — which
-	// the step-5 apply layer owns — is never read-modify-written by a pull.
-	if subchain == RosterSubchain && peerRosterHead != "" {
-		_ = ss.SetSyncGroupMemberSeen(ctx, groupID, remoteChainID, peerRosterHead, time.Now().UTC().Format(time.RFC3339))
+	// Convergence tracking (§9.3, the #3 dashboard "N revisions behind / last
+	// synced T / converged Y/N"):
+	//   - the PEER's observed roster head (a no-op if the peer isn't a member row),
+	//     leaving last_acked_roster_revision — which the apply layer owns — untouched;
+	//   - THIS node's own catch-up: once the roster page is verified + applied, our
+	//     self member row advances to the group's current roster_revision (monotonic
+	//     via SetSyncGroupManifest), so "am I converged" is renderable. Only after a
+	//     real append, and never regressing (roster_revision only advances).
+	if subchain == RosterSubchain {
+		now := time.Now().UTC().Format(time.RFC3339)
+		if peerRosterHead != "" {
+			_ = ss.SetSyncGroupMemberSeen(ctx, groupID, remoteChainID, peerRosterHead, now)
+		}
+		if appended > 0 {
+			if g, gErr := ss.GetSyncGroup(ctx, groupID); gErr == nil && g != nil {
+				_ = ss.UpdateSyncGroupMemberProgress(ctx, groupID, m.localChainID, g.RosterRevision, g.RosterJournalHead, now)
+			}
+		}
 	}
 	return appended, nil
 }

@@ -307,3 +307,108 @@ func TestVotingPowerNotInConsensusPaths(t *testing.T) {
 		}
 	}
 }
+
+// TestGroupStep6ReadModels exercises the build-step 6 group-aware fan-out getters:
+// star targets, digest membership/intersection, relay authorization, the origin-
+// chain-agnostic digest source, and the resyncing watermark.
+func TestGroupStep6ReadModels(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+
+	// Group g1: chain-a OWNS "studio"; chain-b full-sync, chain-c selective-sync.
+	mustMember := func(chain, role, state, pub string) {
+		if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{
+			GroupID: "g1", MemberChainID: chain, MemberAgentPubkey: pub, Role: role, MemberState: state, CAPin: "pin",
+		}); err != nil {
+			t.Fatalf("UpsertSyncGroupMember(%s): %v", chain, err)
+		}
+	}
+	mustMember("chain-a", GroupRoleFullSync, GroupMemberActive, "aa")
+	mustMember("chain-b", GroupRoleFullSync, GroupMemberActive, "bb")
+	mustMember("chain-c", GroupRoleSelectiveSync, GroupMemberActive, "cc")
+	if err := s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{GroupID: "g1", DomainTag: "studio", OwnerChainID: "chain-a"}); err != nil {
+		t.Fatalf("UpsertSyncGroupDomain: %v", err)
+	}
+
+	// Star fan-out from the owner: only the full-sync non-owner member.
+	targets, err := s.ListGroupFanoutTargets(ctx, "chain-a", "studio.public")
+	if err != nil {
+		t.Fatalf("ListGroupFanoutTargets: %v", err)
+	}
+	if len(targets) != 1 || targets[0].MemberChainID != "chain-b" {
+		t.Fatalf("fanout targets = %+v, want [chain-b]", targets)
+	}
+
+	// Digest precondition: full-sync member shares the subtree; selective-sync
+	// member (no per-member consent storage) is fail-closed.
+	if ok, _ := s.MemberSharesGroupDomain(ctx, "g1", "chain-b", "studio.public"); !ok {
+		t.Fatalf("chain-b should share studio.public")
+	}
+	if ok, _ := s.MemberSharesGroupDomain(ctx, "g1", "chain-c", "studio"); ok {
+		t.Fatalf("selective-sync chain-c must NOT share studio (fail closed)")
+	}
+
+	// Effective consent between two full-sync peers.
+	if got, _ := s.GroupSharedDomains(ctx, "chain-a", "chain-b"); len(got) != 1 || got[0] != "studio" {
+		t.Fatalf("GroupSharedDomains = %v, want [studio]", got)
+	}
+
+	// Relay authorization binds RECEIVER + relayer + origin to ONE group (must-fix #6):
+	// chain-c receives chain-b's relay of chain-a's origin in studio — all g1 members.
+	if gid, ok, _ := s.ResolveGroupRelay(ctx, "chain-c", "chain-b", "chain-a", "studio"); !ok || gid != "g1" {
+		t.Fatalf("ResolveGroupRelay = (%q,%v), want (g1,true)", gid, ok)
+	}
+	// A non-member ORIGIN is denied.
+	if _, ok, _ := s.ResolveGroupRelay(ctx, "chain-c", "chain-b", "chain-z", "studio"); ok {
+		t.Fatalf("relay of non-member origin must be denied")
+	}
+	// A non-member RECEIVER is denied — closes cross-group laundering: a bridge relayer
+	// cannot deliver an origin's memory to a node the origin shares no group with (MF2).
+	if _, ok, _ := s.ResolveGroupRelay(ctx, "chain-outsider", "chain-b", "chain-a", "studio"); ok {
+		t.Fatalf("relay to a non-member receiver must be denied (cross-group laundering)")
+	}
+	if key, err := s.GetGroupMemberAgentPubkey(ctx, "g1", "chain-a"); err != nil || key != "aa" {
+		t.Fatalf("GetGroupMemberAgentPubkey = (%q,%v), want aa", key, err)
+	}
+
+	// Group-scoped, leak-safe digest source (must-fix #1/#3/#12). Fixture:
+	//   chain-a/a1 in "studio"        — member origin, unclassified, owned by chain-a
+	//   chain-x/x1 in "studio.public" — NON-member origin (chain-x is not in g1)
+	//   chain-b/s1 in "studio.secret" — member origin, CLASSIFIED child owned by chain-b
+	if err := s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{GroupID: "g1", DomainTag: "studio.secret", OwnerChainID: "chain-b", MaxClearance: 1}); err != nil {
+		t.Fatalf("UpsertSyncGroupDomain(secret): %v", err)
+	}
+	for _, o := range []SyncOrigin{
+		{OriginChainID: "chain-a", OriginMemoryID: "a1", DomainTag: "studio", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l1"},
+		{OriginChainID: "chain-x", OriginMemoryID: "x1", DomainTag: "studio.public", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l2"},
+		{OriginChainID: "chain-b", OriginMemoryID: "s1", DomainTag: "studio.secret", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l3"},
+	} {
+		if err := s.RecordSyncOrigin(ctx, o); err != nil {
+			t.Fatalf("RecordSyncOrigin: %v", err)
+		}
+	}
+	// Responder chain-a (owns "studio", NOT "studio.secret") serving requester chain-b:
+	// a1 only — x1's origin is not a member (MF3); s1 is a classified child chain-a does
+	// not own (MF1, owner-star-only serving).
+	ids, next, err := s.ListGroupServableOriginIDs(ctx, "g1", "chain-b", "chain-a", "studio", "", 100)
+	if err != nil || next != "" || len(ids) != 1 || ids[0] != "a1" {
+		t.Fatalf("ListGroupServableOriginIDs(non-owner) = (%v,%q,%v), want [a1]", ids, next, err)
+	}
+	// The OWNER of the classified child (chain-b) may serve s1 to an entitled full-sync
+	// requester (chain-a) — owner-star serving is allowed.
+	sids, _, sErr := s.ListGroupServableOriginIDs(ctx, "g1", "chain-a", "chain-b", "studio.secret", "", 100)
+	if sErr != nil || len(sids) != 1 || sids[0] != "s1" {
+		t.Fatalf("ListGroupServableOriginIDs(owner of classified) = (%v,%v), want [s1]", sids, sErr)
+	}
+
+	// Resyncing watermark: none active yet.
+	if r, _ := s.SelfResyncingSharedWithPeer(ctx, "chain-a", "chain-b"); r {
+		t.Fatalf("chain-a is active, not resyncing")
+	}
+	if err := s.SetSyncGroupMemberState(ctx, "g1", "chain-a", GroupMemberResyncing, 0); err != nil {
+		t.Fatalf("SetSyncGroupMemberState: %v", err)
+	}
+	if r, _ := s.SelfResyncingSharedWithPeer(ctx, "chain-a", "chain-b"); !r {
+		t.Fatalf("chain-a resyncing in a group shared with chain-b should report true")
+	}
+}

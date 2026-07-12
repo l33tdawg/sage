@@ -170,7 +170,11 @@ func (m *Manager) syncTick(ctx context.Context, ss *store.SQLiteStore) {
 	} else {
 		m.logger.Warn().Err(err).Msg("sync: list pending policies failed")
 	}
-	chains, err := ss.ListSyncDomainChains(ctx)
+	// Enumerate the UNION of pairwise consent chains and active group members: a
+	// group-only member (a cross_fed edge but no pairwise sync_domains row) is
+	// never returned by ListSyncDomainChains, so without the union its live
+	// fan-out outbox rows would strand undrained (docs §9.1 strand fix).
+	chains, err := m.syncPeerChains(ctx, ss)
 	if err != nil {
 		m.logger.Warn().Err(err).Msg("sync: list consent chains failed")
 		return
@@ -181,17 +185,131 @@ func (m *Manager) syncTick(ctx context.Context, ss *store.SQLiteStore) {
 		}
 		agreement, err := m.ActiveAgreement(chain)
 		if err != nil {
-			// Revoked/expired/missing agreement: consent rows linger until the
-			// revoke purge, but nothing moves — fail closed and quiet.
+			// Revoked/expired/missing agreement (or self): consent rows linger
+			// until the revoke purge, but nothing moves — fail closed and quiet.
 			continue
 		}
-		consented, err := ss.GetSyncDomains(ctx, chain)
+		consented, err := m.effectiveConsent(ctx, ss, chain)
 		if err != nil || len(consented) == 0 {
 			continue
 		}
-		m.syncScan(ctx, ss, agreement, consented)
+		// SENDER scope (docs §9.1 must-fix #3): the scan enqueues LOCAL candidates, so
+		// it may only originate pairwise domains + group domains this node OWNS — never
+		// re-export a full-sync domain owned by another member. The drain keeps the
+		// broader effectiveConsent for its receiver-consent gate.
+		senderScope, sErr := m.senderConsent(ctx, ss, chain)
+		if sErr != nil {
+			continue
+		}
+		if len(senderScope) > 0 {
+			m.syncScan(ctx, ss, agreement, senderScope)
+		}
 		m.syncDrain(ctx, ss, agreement, consented)
 	}
+}
+
+// syncPeerChains is the drainer's iteration set: the union of pairwise
+// sync-consent chains (ListSyncDomainChains) and active group-member chains
+// (ListActiveGroupMemberChains). Deduped; the local chain is harmlessly present
+// and skipped by ActiveAgreement's self-federation guard.
+func (m *Manager) syncPeerChains(ctx context.Context, ss *store.SQLiteStore) ([]string, error) {
+	pairwise, err := ss.ListSyncDomainChains(ctx)
+	if err != nil {
+		return nil, err
+	}
+	group, gErr := ss.ListActiveGroupMemberChains(ctx)
+	if gErr != nil {
+		return nil, gErr
+	}
+	if len(group) == 0 {
+		return pairwise, nil
+	}
+	seen := make(map[string]struct{}, len(pairwise)+len(group))
+	out := make([]string, 0, len(pairwise)+len(group))
+	for _, c := range pairwise {
+		if _, ok := seen[c]; ok {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	for _, c := range group {
+		if c == m.localChainID {
+			continue
+		}
+		if _, ok := seen[c]; ok {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// effectiveConsent is the sender-side domain scope toward one peer: the union of
+// pairwise receiver consent (sync_domains) and the active group domains both this
+// node and the peer are entitled to (docs §9.1). For a 2-node pair the group half
+// is empty, so behaviour is unchanged; for a group-only member the pairwise half
+// is empty and the group domains carry the fan-out.
+func (m *Manager) effectiveConsent(ctx context.Context, ss *store.SQLiteStore, chain string) ([]string, error) {
+	pairwise, err := ss.GetSyncDomains(ctx, chain)
+	if err != nil {
+		return nil, err
+	}
+	group, gErr := ss.GroupSharedDomains(ctx, m.localChainID, chain)
+	if gErr != nil {
+		return nil, gErr
+	}
+	return unionDomains(pairwise, group), nil
+}
+
+// senderConsent is the SENDER-side scope toward one peer (docs §9.1 must-fix #3):
+// pairwise receiver consent (sync_domains) unioned ONLY with the group domains THIS
+// node OWNS that the peer is entitled to receive. A node originates star fan-out only
+// for domains it owns, so the anti-entropy SCAN/ENQUEUE must use this — never the
+// symmetric effectiveConsent, which also includes group domains a full-sync member
+// merely holds (scanning those would re-export another owner's domain).
+func (m *Manager) senderConsent(ctx context.Context, ss *store.SQLiteStore, chain string) ([]string, error) {
+	pairwise, err := ss.GetSyncDomains(ctx, chain)
+	if err != nil {
+		return nil, err
+	}
+	owned, oErr := ss.GroupOwnedDomainsForPeer(ctx, m.localChainID, chain)
+	if oErr != nil {
+		return nil, oErr
+	}
+	return unionDomains(pairwise, owned), nil
+}
+
+// unionDomains merges two domain slices, dropping duplicates and empties while
+// preserving the first slice's order then appending new entries from the second.
+func unionDomains(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, d := range a {
+		if d == "" {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	for _, d := range b {
+		if d == "" {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	return out
 }
 
 // syncScan enqueues committed memories from the consented subtrees.
@@ -358,7 +476,7 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		}
 	}()
 	currentAgreement, gateErr := m.ActiveAgreement(chain)
-	currentConsent, consentErr := ss.GetSyncDomains(ctx, chain)
+	currentConsent, consentErr := m.effectiveConsent(ctx, ss, chain)
 	control, controlErr := ss.GetSyncControl(ctx, chain)
 	policyPending := control != nil && control.Role == "host" && control.Revision > control.DeliveredRevision
 	if gateErr != nil || consentErr != nil || controlErr != nil || len(currentConsent) == 0 || policyPending {
@@ -437,10 +555,14 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			if err := ss.MarkSyncOutboxDelivered(writeCtx, chain, row.MemoryID); err != nil {
 				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: delivered mark failed")
 			}
-		case SyncOutcomeRejectedXDomainDup, SyncOutcomeRejectedOriginSig:
-			// Content-derived on the receiver — a cross-domain dup won't change
-			// without a deprecation there, and a bad origin signature will never
-			// verify — terminal on our side (never retry).
+		case SyncOutcomeRejectedXDomainDup, SyncOutcomeRejectedOriginSig, SyncOutcomeSuppressed, SyncOutcomeRejectedNotAdmitted:
+			// Content-derived / durable on the receiver — a cross-domain dup won't
+			// change without a deprecation there, a bad origin signature will never
+			// verify, and a local_suppress tombstone is a sovereign local delete
+			// (docs §10 Gate 6.5) — all terminal on our side (never retry). The
+			// receiver collapses the suppressed reason to the generic
+			// rejected_not_admitted on the wire (I5); SyncOutcomeSuppressed is kept
+			// here too in case a peer reports the internal value verbatim.
 			if err := ss.MarkSyncOutboxRejected(writeCtx, chain, row.MemoryID, outcome); err != nil {
 				m.logger.Warn().Err(err).Str("memory", row.MemoryID).Msg("sync: rejected mark failed")
 			}
@@ -507,7 +629,7 @@ func (m *Manager) setSyncReconcileInfo(remoteChainID string, st SyncReconcileSta
 
 // syncReconcileAll runs one anti-entropy pass over every consented peer.
 func (m *Manager) syncReconcileAll(ctx context.Context, ss *store.SQLiteStore) {
-	chains, err := ss.ListSyncDomainChains(ctx)
+	chains, err := m.syncPeerChains(ctx, ss)
 	if err != nil {
 		return
 	}
@@ -519,7 +641,7 @@ func (m *Manager) syncReconcileAll(ctx context.Context, ss *store.SQLiteStore) {
 		if aErr != nil {
 			continue
 		}
-		consented, cErr := ss.GetSyncDomains(ctx, chain)
+		consented, cErr := m.effectiveConsent(ctx, ss, chain)
 		if cErr != nil || len(consented) == 0 {
 			continue
 		}
@@ -536,6 +658,40 @@ func (m *Manager) syncReconcileAll(ctx context.Context, ss *store.SQLiteStore) {
 // for surfacing the peer's consent posture.
 func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
 	chain := agreement.RemoteChainID
+	// §9.2/§10 must-fix #3 RESYNCING watermark: while THIS node is rebuilding its
+	// journal + local_suppress set in a group shared with this peer, PAUSE reconcile with
+	// it — a backfill digest/enqueue must not run until the tombstone set is restored, or a
+	// suppressed memory could be resurrected mid-rebuild. Gate 6.5 (receiver-side) is the
+	// mandatory backstop; this request-side pause is defense-in-depth. The journal PULL
+	// path stays open — that is how the tombstone set rebuilds. (Scoping the pause to only
+	// the group backfill pass, letting unrelated pairwise domains keep reconciling, is a
+	// deferred should-fix; the whole-peer pause is the fail-safe.)
+	if resyncing, rErr := ss.SelfResyncingSharedWithPeer(ctx, m.localChainID, chain); rErr != nil {
+		m.logger.Warn().Err(rErr).Str("peer", chain).Msg("sync reconcile: resyncing check failed")
+		return
+	} else if resyncing {
+		m.logger.Debug().Str("peer", chain).Msg("sync reconcile: skipped (self resyncing in shared group)")
+		return
+	}
+	// SENDER scope (must-fix #3): the enqueue backfills LOCAL candidates, so it may only
+	// originate pairwise + owned group domains — never re-export a domain owned by another
+	// member. The digest still REQUESTS over the full consented set.
+	senderScope, scErr := m.senderConsent(ctx, ss, chain)
+	if scErr != nil {
+		m.logger.Warn().Err(scErr).Str("peer", chain).Msg("sync reconcile: sender scope failed")
+		return
+	}
+	// Group domains shared with this peer, indexed by domain -> the groups carrying it, so
+	// a group-scoped digest (GroupID set) actually reaches handleSyncDigestGroup (must-fix
+	// #8: without this the multi-node digest handler is never reached in production).
+	groupsByDomain := map[string][]string{}
+	if refs, gErr := ss.GroupSharedDomainsWithGroup(ctx, m.localChainID, chain); gErr == nil {
+		for _, ref := range refs {
+			groupsByDomain[ref.DomainTag] = append(groupsByDomain[ref.DomainTag], ref.GroupID)
+		}
+	} else {
+		m.logger.Debug().Err(gErr).Str("peer", chain).Msg("sync reconcile: group domain lookup failed")
+	}
 	digest := m.syncDigestFn
 	if digest == nil {
 		digest = m.SyncDigest
@@ -569,6 +725,33 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 			}
 			after = resp.NextCursor
 		}
+		// GROUP backfill digest (must-fix #8): discover what the peer holds from ANY
+		// member origin in this domain, merged into the SAME decided-set so we never
+		// re-push an item the peer already holds. The handler scopes what it serves
+		// (leak-safe); acting on ids we still LACK (mesh pull-relay of a third member's
+		// copy) is step 7. Not reached while self-resyncing (reconcile returns early above).
+		for _, gid := range groupsByDomain[domain] {
+			gafter := ""
+			for page := 0; page < syncReconcileMaxPages; page++ {
+				dctx, cancel := context.WithTimeout(context.Background(), syncDigestTimeout)
+				dctx = mergeCancel(dctx, ctx)
+				resp, dErr := digest(dctx, chain, &SyncDigestRequest{Domain: domain, After: gafter, GroupID: gid})
+				cancel()
+				if dErr != nil {
+					if dErr == ErrSyncUnsupported {
+						status.PeerUnsupported = true
+					}
+					break
+				}
+				for _, id := range resp.OriginMemoryIDs {
+					decided[id] = true
+				}
+				if resp.NextCursor == "" {
+					break
+				}
+				gafter = resp.NextCursor
+			}
+		}
 		cands, lErr := ss.ListSyncCandidates(ctx, chain, []string{domain}, syncReconcileMaxEnqueue)
 		if lErr != nil {
 			continue
@@ -576,6 +759,11 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 		for _, c := range cands {
 			if enqueued >= syncReconcileMaxEnqueue {
 				break
+			}
+			// Only ORIGINATE domains in the sender scope (must-fix #3): never enqueue a
+			// group domain this node does not own, even though we requested its digest.
+			if !DomainAllowed(senderScope, c.DomainTag) {
+				continue
 			}
 			if !DomainAllowed(agreement.AllowedDomains, c.DomainTag) || c.Classification > int(agreement.MaxClearance) {
 				continue

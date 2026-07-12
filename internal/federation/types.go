@@ -198,7 +198,20 @@ const (
 	// Content-derived and terminal: it will never verify, so the sender must
 	// not retry it forever.
 	SyncOutcomeRejectedOriginSig = "rejected_origin_sig"
-	SyncOutcomeRetry             = "retry"
+	// SyncOutcomeSuppressed: the receiver locally deleted this origin memory and
+	// holds a memory-scope local_suppress tombstone for it (docs §10 Gate 6.5).
+	// TERMINAL and anti-resurrection: the item is NOT recorded to sync_origin and
+	// NEVER broadcast, and the sender must never redeliver it (a local delete on
+	// the receiver is durable and sovereign). This is the RECEIVER-INTERNAL value;
+	// handleSyncPush COLLAPSES it to the generic SyncOutcomeRejectedNotAdmitted on the
+	// wire so the sender learns "not admitted", never that a tombstone exists (I5).
+	SyncOutcomeSuppressed = "suppressed"
+	// SyncOutcomeRejectedNotAdmitted is the generic terminal wire reason a suppressed
+	// item is reported as (I5): indistinguishable from an ordinary durable reject, so a
+	// pushing peer cannot learn that the receiver sovereignly deleted the item. Terminal
+	// on the sender (never retried) — it is ONLY ever emitted for a local_suppress hit.
+	SyncOutcomeRejectedNotAdmitted = "rejected_not_admitted"
+	SyncOutcomeRetry               = "retry"
 )
 
 // SyncItem is one memory offered for replication. Content travels raw (the
@@ -254,6 +267,11 @@ type SyncDigestRequest struct {
 	Domain string `json:"domain"`
 	After  string `json:"after,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
+	// GroupID selects the v11.8 multi-node backfill path (docs §9.2). When set,
+	// handleSyncDigest applies the membership+domain hard-gate and serves ANY
+	// origin chain's admitted ids for the shared domain (not just the requester's).
+	// Empty preserves the pairwise 2-node behaviour (origin_chain_id = requester).
+	GroupID string `json:"group_id,omitempty"`
 }
 
 // SyncDigestMaxIDs caps one digest page (~140KB of 64-char ids — well under

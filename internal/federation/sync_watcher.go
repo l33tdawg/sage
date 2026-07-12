@@ -38,11 +38,11 @@ func (m *Manager) onCommitted(ids []string) {
 	}
 	ctx := context.Background()
 	chains, err := ss.ListSyncDomainChains(ctx)
-	if err != nil || len(chains) == 0 {
+	if err != nil {
 		return
 	}
 
-	// Load per-chain scope once per batch.
+	// Load per-chain PAIRWISE scope once per batch.
 	type scope struct {
 		agreement *store.CrossFedRecord
 		consented []string
@@ -59,8 +59,13 @@ func (m *Manager) onCommitted(ids []string) {
 		}
 		scopes = append(scopes, scope{agreement: agreement, consented: consented})
 	}
+	// A group-only node has no pairwise scopes but still owns domains to fan out
+	// (§9.1). Only bail when there is NEITHER pairwise consent NOR any active
+	// group member to receive a star push.
 	if len(scopes) == 0 {
-		return
+		if groupChains, gErr := ss.ListActiveGroupMemberChains(ctx); gErr != nil || len(groupChains) == 0 {
+			return
+		}
 	}
 
 	enqueued := false
@@ -89,6 +94,31 @@ func (m *Manager) onCommitted(ids []string) {
 				continue
 			}
 			enqueued = true
+		}
+		// §9.1 group STAR fan-out: when THIS node OWNS domain D of the (native, per
+		// the IsSyncedCopy guard above) memory, enqueue one outbox row per active
+		// member holding D. Star only — the owner pushes directly to each member, so
+		// there is no A->B->C relay and no cycle. The IsSyncedCopy(:71) lease still
+		// covers this loop (I7): a received copy is never fanned out. Clearance +
+		// scope bind to the PAIRWISE edge (ActiveAgreement(member)), never the
+		// display-only sync_group_domain.max_clearance (docs §9.2 must-fix #12).
+		if targets, tErr := ss.ListGroupFanoutTargets(ctx, m.localChainID, domain); tErr == nil {
+			for _, tg := range targets {
+				ag, aErr := m.ActiveAgreement(tg.MemberChainID)
+				if aErr != nil {
+					continue // no active trust edge to this member: fail closed
+				}
+				if !DomainAllowed(ag.AllowedDomains, domain) || cls > int(ag.MaxClearance) {
+					continue
+				}
+				if _, eErr := ss.EnqueueSyncOutbox(ctx, tg.MemberChainID, id); eErr != nil {
+					m.logger.Warn().Err(eErr).Str("memory", id).Str("member", tg.MemberChainID).Msg("sync watcher: group enqueue failed")
+					continue
+				}
+				enqueued = true
+			}
+		} else {
+			m.logger.Warn().Err(tErr).Str("memory", id).Msg("sync watcher: group fanout lookup failed")
 		}
 		originUnlock()
 	}

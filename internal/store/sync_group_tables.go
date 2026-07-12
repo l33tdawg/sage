@@ -834,6 +834,422 @@ func (s *SQLiteStore) ListSyncTombstones(ctx context.Context, groupID, scope str
 	return out, rows.Err()
 }
 
+// ---- v11.8 build-step 6: group-aware fan-out read models ----
+//
+// These concrete *SQLiteStore getters drive the group-aware sender/receiver
+// paths in internal/federation (per-member star fan-out, the digest hard-gate,
+// relayed origin-auth, and the effective group consent that keeps a group-only
+// member's outbox draining). Every one is READ-ONLY and role-aware: entitlement
+// to a shared domain is full-sync members + the domain's owner. Selective-sync
+// subsets have no per-member storage yet (docs deferral, sync_journal_exchange.go:
+// authorizeJournalSubchain), so a selective-sync member is treated as sharing
+// NOTHING but its own owned domains — UNDER-serving, never over-serving (I1/I5).
+
+// GroupFanoutTarget is one active group member that should receive an owner's
+// native memory in a shared domain (docs §9.1 star fan-out).
+type GroupFanoutTarget struct {
+	GroupID       string
+	MemberChainID string
+}
+
+// ListGroupFanoutTargets returns the active members (other than the owner) that
+// share domainTag (or an ancestor of it) where ownerChainID owns the domain —
+// the §9.1 STAR fan-out set. Only full-sync members are targeted; selective-sync
+// per-member consent is deferred (fail closed = no leak). The owner is excluded
+// so a memory is never fanned back to its author.
+func (s *SQLiteStore) ListGroupFanoutTargets(ctx context.Context, ownerChainID, domainTag string) ([]GroupFanoutTarget, error) {
+	if ownerChainID == "" || domainTag == "" {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT gm.group_id, gm.member_chain_id
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member gm ON gm.group_id = gd.group_id
+		 WHERE gd.owner_chain_id = ? AND gd.removed_revision = 0
+		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		   AND gm.member_state = 'active'
+		   AND gm.member_chain_id != gd.owner_chain_id
+		   AND gm.role = 'full-sync'`, ownerChainID, domainTag, domainTag)
+	if err != nil {
+		return nil, fmt.Errorf("list group fanout targets: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []GroupFanoutTarget
+	for rows.Next() {
+		var t GroupFanoutTarget
+		if err := rows.Scan(&t.GroupID, &t.MemberChainID); err != nil {
+			return nil, fmt.Errorf("scan group fanout target: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveGroupMemberChains returns every DISTINCT chain that is an active
+// member of any group. Unioned with ListSyncDomainChains in the drainer so a
+// group-only member (a cross_fed edge but no pairwise sync_domains consent) is
+// still enumerated and its fan-out outbox rows actually drain (the strand fix).
+func (s *SQLiteStore) ListActiveGroupMemberChains(ctx context.Context) ([]string, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT DISTINCT member_chain_id FROM sync_group_member WHERE member_state='active' ORDER BY member_chain_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list active group member chains: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, fmt.Errorf("scan active group member chain: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// GroupDomainsForMember returns the active shared domains one member is entitled
+// to across a single group (full-sync: all active domains; any role: its own
+// owned domains). Feeds the digest ConsentedDomains clamp (docs §9.2).
+func (s *SQLiteStore) GroupDomainsForMember(ctx context.Context, groupID, memberChainID string) ([]string, error) {
+	if groupID == "" || memberChainID == "" {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT gd.domain_tag
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member gm ON gm.group_id = gd.group_id
+		 WHERE gd.group_id = ? AND gm.member_chain_id = ? AND gm.member_state = 'active'
+		   AND gd.removed_revision = 0
+		   AND (gm.role = 'full-sync' OR gm.member_chain_id = gd.owner_chain_id)
+		 ORDER BY gd.domain_tag`, groupID, memberChainID)
+	if err != nil {
+		return nil, fmt.Errorf("group domains for member: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, fmt.Errorf("scan group domain for member: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// MemberSharesGroupDomain is the digest hard-gate precondition (docs §9.2): true
+// iff memberChainID is an active member of groupID AND domainTag is covered by an
+// active group domain the member is entitled to (subtree match, role-aware).
+func (s *SQLiteStore) MemberSharesGroupDomain(ctx context.Context, groupID, memberChainID, domainTag string) (bool, error) {
+	if groupID == "" || memberChainID == "" || domainTag == "" {
+		return false, nil
+	}
+	var n int
+	if err := s.conn.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member gm ON gm.group_id = gd.group_id
+		 WHERE gd.group_id = ? AND gm.member_chain_id = ? AND gm.member_state = 'active'
+		   AND gd.removed_revision = 0
+		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		   AND (gm.role = 'full-sync' OR gm.member_chain_id = gd.owner_chain_id)`,
+		groupID, memberChainID, domainTag, domainTag).Scan(&n); err != nil {
+		return false, fmt.Errorf("member shares group domain: %w", err)
+	}
+	return n > 0, nil
+}
+
+// GroupSharedDomains returns the active group domains that BOTH chains are
+// entitled to (across every group where both are active members). This is the
+// effective group consent between two peers — unioned with pairwise sync_domains
+// so a group-only member's outbox both enqueues and drains (docs §9.1 strand fix)
+// and the receive-side consent gate admits group-shared domains.
+func (s *SQLiteStore) GroupSharedDomains(ctx context.Context, chainA, chainB string) ([]string, error) {
+	if chainA == "" || chainB == "" {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT DISTINCT gd.domain_tag
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member ma ON ma.group_id = gd.group_id AND ma.member_chain_id = ? AND ma.member_state = 'active'
+		  JOIN sync_group_member mb ON mb.group_id = gd.group_id AND mb.member_chain_id = ? AND mb.member_state = 'active'
+		 WHERE gd.removed_revision = 0
+		   AND (ma.role = 'full-sync' OR ma.member_chain_id = gd.owner_chain_id)
+		   AND (mb.role = 'full-sync' OR mb.member_chain_id = gd.owner_chain_id)
+		 ORDER BY gd.domain_tag`, chainA, chainB)
+	if err != nil {
+		return nil, fmt.Errorf("group shared domains: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, fmt.Errorf("scan group shared domain: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ResolveGroupRelay authorizes a relayed backfill item (docs §9.2 must-fix #1/#6):
+// returns the SINGLE group in which the RECEIVER (localChainID, this node), the
+// relayerChainID (the authenticated pushing peer), AND originChainID (the memory's
+// author) are ALL active members and domainTag is an active shared domain (subtree).
+// Binding all three to ONE group closes cross-group laundering: because (group_id,
+// domain_tag) is per-group, the same tag can exist in multiple groups, so a
+// dual-group bridge relayer must NOT be able to move an origin's memory into a group
+// the origin never joined. ok=false denies relay — the receiver keeps the door shut
+// (validateSyncItem/originVerifyKey stay fail-closed).
+func (s *SQLiteStore) ResolveGroupRelay(ctx context.Context, localChainID, relayerChainID, originChainID, domainTag string) (string, bool, error) {
+	if localChainID == "" || relayerChainID == "" || originChainID == "" || domainTag == "" {
+		return "", false, nil
+	}
+	var groupID string
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT gd.group_id
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member relayer ON relayer.group_id = gd.group_id
+		       AND relayer.member_chain_id = ? AND relayer.member_state = 'active'
+		  JOIN sync_group_member origin ON origin.group_id = gd.group_id
+		       AND origin.member_chain_id = ? AND origin.member_state = 'active'
+		  JOIN sync_group_member receiver ON receiver.group_id = gd.group_id
+		       AND receiver.member_chain_id = ? AND receiver.member_state = 'active'
+		 WHERE gd.removed_revision = 0
+		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		 LIMIT 1`, relayerChainID, originChainID, localChainID, domainTag, domainTag).Scan(&groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("resolve group relay: %w", err)
+	}
+	return groupID, true, nil
+}
+
+// GetGroupMemberAgentPubkey resolves the pinned ed25519 pubkey (hex) that a
+// relayed item's origin_sig must verify against (docs §9.2 must-fix #1). Only an
+// active/resyncing member's key is returned — a removed/left/invited member can
+// never be an authenticatable origin. Fails closed (error) when the key is
+// unresolved so Gate 5.5 rejects rather than trusting the relayer's own key.
+func (s *SQLiteStore) GetGroupMemberAgentPubkey(ctx context.Context, groupID, memberChainID string) (string, error) {
+	if groupID == "" || memberChainID == "" {
+		return "", fmt.Errorf("group_id and member_chain_id are required")
+	}
+	var key string
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT member_agent_pubkey FROM sync_group_member
+		 WHERE group_id = ? AND member_chain_id = ? AND member_state IN ('active','resyncing')`,
+		groupID, memberChainID).Scan(&key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("no active roster key for %s in group %s", memberChainID, groupID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("get group member agent pubkey: %w", err)
+	}
+	if key == "" {
+		return "", fmt.Errorf("empty roster key for %s in group %s", memberChainID, groupID)
+	}
+	return key, nil
+}
+
+// ListGroupServableOriginIDs is the group-scoped, leak-safe backfill source for the
+// multi-node digest (docs §9.2, must-fix #1/#7/#12). It supersedes an origin-chain-
+// agnostic raw-subtree serve (which leaked across groups and over classified children):
+// it serves an admitted origin id ONLY when, for the row's OWN domain_tag:
+//   - the ORIGIN chain is an active member of groupID — no cross-group provenance
+//     leak (sync_origin has no group_id, and a domain tag can exist in many groups); AND
+//   - the MOST-SPECIFIC active group domain in groupID that covers the row (the longest
+//     covering tag) is servable by THIS responder — unclassified (max_clearance=0) OR
+//     owned by responderChainID (classified serving is owner-star-only, must-fix #12); AND
+//   - BOTH the requester and the responder are entitled to that most-specific covering
+//     domain (role-aware), so a member sharing only an ancestor is never served a nested
+//     domain's ids.
+// Binding these to the row's most-specific covering domain (not the requester-supplied
+// umbrella tag) is what closes the classified-child-via-unclassified-parent oracle.
+// Paged by the composite (origin_memory_id, origin_chain_id) cursor.
+func (s *SQLiteStore) ListGroupServableOriginIDs(ctx context.Context, groupID, requesterChainID, responderChainID, domain, after string, limit int) ([]string, string, error) {
+	if groupID == "" || requesterChainID == "" || responderChainID == "" || domain == "" {
+		return nil, "", nil
+	}
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	afterMem, afterChain := decodeOriginCursor(after)
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT so.origin_memory_id, so.origin_chain_id
+		  FROM sync_origin so
+		  JOIN sync_group_member om
+		       ON om.group_id = ? AND om.member_chain_id = so.origin_chain_id AND om.member_state = 'active'
+		 WHERE so.outcome = 'admitted'
+		   AND (so.domain_tag = ? OR so.domain_tag LIKE ? ESCAPE '\')
+		   AND EXISTS (
+		       SELECT 1 FROM sync_group_domain mc
+		        WHERE mc.group_id = ? AND mc.removed_revision = 0
+		          AND (mc.domain_tag = so.domain_tag OR so.domain_tag LIKE REPLACE(REPLACE(REPLACE(mc.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		          AND NOT EXISTS (
+		              SELECT 1 FROM sync_group_domain mc2
+		               WHERE mc2.group_id = mc.group_id AND mc2.removed_revision = 0
+		                 AND (mc2.domain_tag = so.domain_tag OR so.domain_tag LIKE REPLACE(REPLACE(REPLACE(mc2.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		                 AND length(mc2.domain_tag) > length(mc.domain_tag)
+		          )
+		          AND (mc.max_clearance = 0 OR mc.owner_chain_id = ?)
+		          AND EXISTS (SELECT 1 FROM sync_group_member rm
+		                       WHERE rm.group_id = mc.group_id AND rm.member_chain_id = ? AND rm.member_state = 'active'
+		                         AND (rm.role = 'full-sync' OR rm.member_chain_id = mc.owner_chain_id))
+		          AND EXISTS (SELECT 1 FROM sync_group_member sm
+		                       WHERE sm.group_id = mc.group_id AND sm.member_chain_id = ? AND sm.member_state = 'active'
+		                         AND (sm.role = 'full-sync' OR sm.member_chain_id = mc.owner_chain_id))
+		   )
+		   AND (so.origin_memory_id > ? OR (so.origin_memory_id = ? AND so.origin_chain_id > ?))
+		 ORDER BY so.origin_memory_id ASC, so.origin_chain_id ASC
+		 LIMIT ?`,
+		groupID, domain, likeEscapeSubtree(domain),
+		groupID, responderChainID, requesterChainID, responderChainID,
+		afterMem, afterMem, afterChain, limit)
+	if err != nil {
+		return nil, "", fmt.Errorf("list group servable origin ids: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	var lastMem, lastChain string
+	for rows.Next() {
+		var mem, chain string
+		if err := rows.Scan(&mem, &chain); err != nil {
+			return nil, "", fmt.Errorf("scan group servable origin id: %w", err)
+		}
+		out = append(out, mem)
+		lastMem, lastChain = mem, chain
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) == limit {
+		next = encodeOriginCursor(lastMem, lastChain)
+	}
+	return out, next, nil
+}
+
+// GroupOwnedDomainsForPeer returns the active group domains THIS node (ownerChainID)
+// OWNS that peerChainID is entitled to receive (peer is an active full-sync member of
+// the same group). This is the SENDER-side group scope (docs §9.1 must-fix #3): a node
+// only ORIGINATES star fan-out for domains it owns, so anti-entropy scan/enqueue must
+// use this (NOT the symmetric GroupSharedDomains, which includes domains a full-sync
+// member holds but does not own and would wrongly re-export).
+func (s *SQLiteStore) GroupOwnedDomainsForPeer(ctx context.Context, ownerChainID, peerChainID string) ([]string, error) {
+	if ownerChainID == "" || peerChainID == "" {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT DISTINCT gd.domain_tag
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member peer ON peer.group_id = gd.group_id
+		       AND peer.member_chain_id = ? AND peer.member_state = 'active' AND peer.role = 'full-sync'
+		 WHERE gd.owner_chain_id = ? AND gd.removed_revision = 0
+		 ORDER BY gd.domain_tag`, peerChainID, ownerChainID)
+	if err != nil {
+		return nil, fmt.Errorf("group owned domains for peer: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, fmt.Errorf("scan group owned domain: %w", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// GroupDomainRef is one (group, domain) pair both peers are entitled to.
+type GroupDomainRef struct {
+	GroupID   string
+	DomainTag string
+}
+
+// GroupSharedDomainsWithGroup returns the (group_id, domain_tag) pairs that BOTH
+// chains are entitled to as active members — the same set as GroupSharedDomains but
+// carrying which GROUP each domain belongs to, so the reconciler can issue a
+// group-scoped digest (SyncDigestRequest.GroupID set) per pair (docs §9.2 must-fix
+// #8: without this the multi-node digest handler is never reached in production).
+func (s *SQLiteStore) GroupSharedDomainsWithGroup(ctx context.Context, chainA, chainB string) ([]GroupDomainRef, error) {
+	if chainA == "" || chainB == "" {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT DISTINCT gd.group_id, gd.domain_tag
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member ma ON ma.group_id = gd.group_id AND ma.member_chain_id = ? AND ma.member_state = 'active'
+		  JOIN sync_group_member mb ON mb.group_id = gd.group_id AND mb.member_chain_id = ? AND mb.member_state = 'active'
+		 WHERE gd.removed_revision = 0
+		   AND (ma.role = 'full-sync' OR ma.member_chain_id = gd.owner_chain_id)
+		   AND (mb.role = 'full-sync' OR mb.member_chain_id = gd.owner_chain_id)
+		 ORDER BY gd.group_id, gd.domain_tag`, chainA, chainB)
+	if err != nil {
+		return nil, fmt.Errorf("group shared domains with group: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []GroupDomainRef
+	for rows.Next() {
+		var g GroupDomainRef
+		if err := rows.Scan(&g.GroupID, &g.DomainTag); err != nil {
+			return nil, fmt.Errorf("scan group shared domain with group: %w", err)
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// origin cursor codec — the composite (origin_memory_id, origin_chain_id) page
+// key for ListGroupServableOriginIDs, packed into the single wire cursor string.
+const originCursorSep = "\x1f"
+
+func encodeOriginCursor(mem, chain string) string { return mem + originCursorSep + chain }
+
+func decodeOriginCursor(cur string) (mem, chain string) {
+	if cur == "" {
+		return "", ""
+	}
+	if i := indexByte(cur, originCursorSep[0]); i >= 0 {
+		return cur[:i], cur[i+1:]
+	}
+	// A legacy (pairwise) cursor is a bare origin_memory_id.
+	return cur, ""
+}
+
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+// SelfResyncingSharedWithPeer reports whether THIS node (localChainID) is in the
+// 'resyncing' rebuild state in any group where peerChainID is also present — the
+// watermark that excludes tombstoned items / backfill until the journal and the
+// local_suppress set are rebuilt (docs §9.2/§10 must-fix #3). Gates digest
+// REQUESTS so backfill can't resurrect a suppressed memory mid-rebuild.
+func (s *SQLiteStore) SelfResyncingSharedWithPeer(ctx context.Context, localChainID, peerChainID string) (bool, error) {
+	if localChainID == "" || peerChainID == "" {
+		return false, nil
+	}
+	var n int
+	if err := s.conn.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		  FROM sync_group_member self
+		  JOIN sync_group_member peer ON peer.group_id = self.group_id
+		 WHERE self.member_chain_id = ? AND self.member_state = 'resyncing'
+		   AND peer.member_chain_id = ? AND peer.member_state IN ('active','resyncing')`,
+		localChainID, peerChainID).Scan(&n); err != nil {
+		return false, fmt.Errorf("self resyncing shared with peer: %w", err)
+	}
+	return n > 0, nil
+}
+
 // ---- sync_control binding ----
 
 // SetSyncControlGroupID binds an existing pairwise sync_control row to a group.
