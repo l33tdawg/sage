@@ -245,7 +245,11 @@ func (s *SQLiteStore) migrateSyncGroupTables(ctx context.Context) {
 		author_chain_id  TEXT NOT NULL DEFAULT '',
 		author_sig       TEXT NOT NULL DEFAULT '',
 		created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-		PRIMARY KEY (group_id, scope, member_chain_id, domain_tag, origin_chain_id, origin_memory_id)
+		-- enforcement is part of the PK so a local_suppress row can always be
+		-- recorded even if an advisory row for the same target already exists;
+		-- INSERT OR IGNORE must never let a pre-existing advisory tombstone
+		-- swallow a later local_suppress (which would defeat Gate 6.5).
+		PRIMARY KEY (group_id, scope, enforcement, member_chain_id, domain_tag, origin_chain_id, origin_memory_id)
 	)`)
 	// Fast anti-resurrection lookup on the receive path (docs §10 Gate 6.5).
 	_, _ = s.writeExecContext(ctx,
@@ -355,10 +359,18 @@ func (s *SQLiteStore) ListSyncGroups(ctx context.Context) ([]SyncGroup, error) {
 
 // ---- sync_group_member ----
 
-// UpsertSyncGroupMember inserts or updates a member. voting_power is ZERO-PINNED
-// (docs §6.3 guard layer b): a non-zero value is rejected in v11.8 so display
-// metadata can never be mistaken for or promoted into a v11.9 quorum weight
-// without a fork.
+// UpsertSyncGroupMember inserts or REPLACES a member as a FULL ROW: on conflict
+// every durable column is overwritten from m. It therefore REQUIRES an explicit,
+// valid member_state (no silent default) so a caller can never accidentally
+// demote an active member to 'invited' or wipe its ca_pin trust edge /
+// member_agent_pubkey origin key by re-upserting a partially-filled struct. For
+// partial updates use the targeted mutators — UpdateSyncGroupMemberProgress
+// (catch-up cursors) and SetSyncGroupMemberState (state transitions) — which
+// touch only their own columns and never reset identity or state.
+//
+// voting_power is ZERO-PINNED (docs §6.3 guard layer b): a non-zero value is
+// rejected in v11.8 so display metadata can never be mistaken for or promoted
+// into a v11.9 quorum weight without a fork.
 func (s *SQLiteStore) UpsertSyncGroupMember(ctx context.Context, m SyncGroupMember) error {
 	if m.GroupID == "" || m.MemberChainID == "" {
 		return fmt.Errorf("group_id and member_chain_id are required")
@@ -371,8 +383,10 @@ func (s *SQLiteStore) UpsertSyncGroupMember(ctx context.Context, m SyncGroupMemb
 	if m.VotingPower != 0 {
 		return fmt.Errorf("voting_power is reserved for v11.9 and must be 0 in v11.8")
 	}
-	if m.MemberState == "" {
-		m.MemberState = GroupMemberInvited
+	switch m.MemberState {
+	case GroupMemberInvited, GroupMemberActive, GroupMemberResyncing, GroupMemberLeft, GroupMemberRemoved:
+	default:
+		return fmt.Errorf("full-row upsert requires an explicit member_state, got %q", m.MemberState)
 	}
 	_, err := s.writeExecContext(ctx, `
 		INSERT INTO sync_group_member
@@ -444,6 +458,44 @@ func (s *SQLiteStore) ListSyncGroupMembers(ctx context.Context, groupID string) 
 		out = append(out, *m)
 	}
 	return out, rows.Err()
+}
+
+// UpdateSyncGroupMemberProgress advances ONLY a member's catch-up cursors
+// (last_acked_roster_revision, last_seen_journal_head, last_sync_at) — the
+// per-member convergence the #3 health surface renders (docs §9.3). It never
+// touches role, member_state, ca_pin, or member_agent_pubkey, so a routine
+// progress bump can never demote or de-identify a member.
+func (s *SQLiteStore) UpdateSyncGroupMemberProgress(ctx context.Context, groupID, memberChainID string, lastAckedRosterRevision int64, lastSeenJournalHead, lastSyncAt string) error {
+	if groupID == "" || memberChainID == "" {
+		return fmt.Errorf("group_id and member_chain_id are required")
+	}
+	_, err := s.writeExecContext(ctx, `
+		UPDATE sync_group_member
+		   SET last_acked_roster_revision = ?, last_seen_journal_head = ?, last_sync_at = ?
+		 WHERE group_id = ? AND member_chain_id = ?`,
+		lastAckedRosterRevision, lastSeenJournalHead, lastSyncAt, groupID, memberChainID)
+	if err != nil {
+		return fmt.Errorf("update sync group member progress: %w", err)
+	}
+	return nil
+}
+
+// SetSyncGroupMemberState transitions ONLY a member's lifecycle state (+ its
+// left_revision when leaving/removed). It never touches identity/trust columns.
+func (s *SQLiteStore) SetSyncGroupMemberState(ctx context.Context, groupID, memberChainID, state string, leftRevision int64) error {
+	switch state {
+	case GroupMemberInvited, GroupMemberActive, GroupMemberResyncing, GroupMemberLeft, GroupMemberRemoved:
+	default:
+		return fmt.Errorf("invalid group member state %q", state)
+	}
+	_, err := s.writeExecContext(ctx, `
+		UPDATE sync_group_member SET member_state = ?, left_revision = ?
+		 WHERE group_id = ? AND member_chain_id = ?`,
+		state, leftRevision, groupID, memberChainID)
+	if err != nil {
+		return fmt.Errorf("set sync group member state: %w", err)
+	}
+	return nil
 }
 
 // ---- sync_group_domain ----

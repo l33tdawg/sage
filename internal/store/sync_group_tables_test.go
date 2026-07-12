@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -189,5 +192,118 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 
 	if groups, err := s.ListSyncGroups(ctx); err != nil || len(groups) != 1 {
 		t.Fatalf("ListSyncGroups: %d %v", len(groups), err)
+	}
+}
+
+// TestSyncGroupMemberUpsertContract pins the review's finding: the full-row
+// upsert requires an explicit state, and the targeted mutators never reset a
+// member's identity/state (so a step-3/4 progress bump cannot demote an active
+// member or wipe its trust pin).
+func TestSyncGroupMemberUpsertContract(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	require := func(err error, msg string) {
+		if err != nil {
+			t.Fatalf("%s: %v", msg, err)
+		}
+	}
+	require(s.UpsertSyncGroup(ctx, SyncGroup{GroupID: "g1", ControllerChainID: "c", ControllerAgentPubkey: "p"}), "group")
+
+	// Full-row upsert requires an explicit, valid state.
+	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{GroupID: "g1", MemberChainID: "a", Role: GroupRoleFullSync}); err == nil {
+		t.Fatalf("upsert without explicit state should error")
+	}
+	require(s.UpsertSyncGroupMember(ctx, SyncGroupMember{
+		GroupID: "g1", MemberChainID: "a", Role: GroupRoleFullSync, MemberState: GroupMemberActive,
+		MemberAgentPubkey: "apub", CAPin: "pinA", JoinedRevision: 5,
+	}), "upsert active member")
+
+	// A progress bump touches ONLY the cursors — state/pin/pubkey/joined survive.
+	require(s.UpdateSyncGroupMemberProgress(ctx, "g1", "a", 9, "headZ", "2026-07-12T00:00:00Z"), "progress")
+	got, err := s.GetSyncGroupMember(ctx, "g1", "a")
+	require(err, "get after progress")
+	if got.MemberState != GroupMemberActive || got.CAPin != "pinA" || got.MemberAgentPubkey != "apub" || got.JoinedRevision != 5 {
+		t.Fatalf("progress bump mutated identity/state: %+v", got)
+	}
+	if got.LastAckedRosterRevision != 9 || got.LastSeenJournalHead != "headZ" {
+		t.Fatalf("progress not applied: %+v", got)
+	}
+
+	// A state transition touches only state + left_revision.
+	require(s.SetSyncGroupMemberState(ctx, "g1", "a", GroupMemberRemoved, 12), "set state")
+	got, _ = s.GetSyncGroupMember(ctx, "g1", "a")
+	if got.MemberState != GroupMemberRemoved || got.LeftRevision != 12 || got.CAPin != "pinA" {
+		t.Fatalf("state transition wrong: %+v", got)
+	}
+	if err := s.SetSyncGroupMemberState(ctx, "g1", "a", "bogus", 0); err == nil {
+		t.Fatalf("invalid state transition should error")
+	}
+}
+
+// TestSyncTombstoneEnforcementCoexist verifies a local_suppress row is never
+// swallowed by a pre-existing advisory row for the same target (enforcement is
+// part of the PK), and IsLocallySuppressed still discriminates correctly.
+func TestSyncTombstoneEnforcementCoexist(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	base := SyncTombstone{GroupID: "g1", Scope: TombstoneScopeMemory, OriginChainID: "cx", OriginMemoryID: "m1"}
+
+	adv := base
+	adv.Enforcement = TombstoneEnforceAdvisory
+	if err := s.InsertSyncTombstone(ctx, adv); err != nil {
+		t.Fatalf("insert advisory: %v", err)
+	}
+	// Before the local_suppress lands, it is NOT suppressed.
+	if got, _ := s.IsLocallySuppressed(ctx, "g1", "cx", "m1"); got {
+		t.Fatalf("advisory alone must not suppress")
+	}
+	sup := base
+	sup.Enforcement = TombstoneEnforceLocalSuppress
+	if err := s.InsertSyncTombstone(ctx, sup); err != nil {
+		t.Fatalf("insert suppress (must not be swallowed): %v", err)
+	}
+	if got, _ := s.IsLocallySuppressed(ctx, "g1", "cx", "m1"); !got {
+		t.Fatalf("local_suppress must suppress even with a prior advisory row")
+	}
+	if got, _ := s.IsLocallySuppressed(ctx, "g2", "cx", "m1"); got {
+		t.Fatalf("suppression must not leak across groups")
+	}
+}
+
+// TestVotingPowerNotInConsensusPaths is guard layer 3 (docs §6.3): the group's
+// inert quorum-shaped state (sync_group_member.voting_power, min_quorum,
+// quorum_mode, and the SyncGroupMember type) must never be referenced by any
+// consensus / quorum code path, so it can never become a v11.9 acceptance input
+// without a deliberate fork. Scans the consensus packages for the group-specific
+// identifiers (PoE validator VotingPower is a DIFFERENT, legitimate thing and is
+// not matched).
+func TestVotingPowerNotInConsensusPaths(t *testing.T) {
+	root := "../.." // internal/store -> repo root
+	consensusDirs := []string{"internal/abci", "internal/consensus", "internal/validator"}
+	forbidden := []string{"sync_group", "SyncGroupMember", "min_quorum", "quorum_mode"}
+	for _, dir := range consensusDirs {
+		full := filepath.Join(root, dir)
+		if _, err := os.Stat(full); err != nil {
+			continue // package may not exist under that exact name
+		}
+		err := filepath.WalkDir(full, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return err
+			}
+			b, rErr := os.ReadFile(path)
+			if rErr != nil {
+				return rErr
+			}
+			src := string(b)
+			for _, tok := range forbidden {
+				if strings.Contains(src, tok) {
+					t.Errorf("consensus path %s references group inert state %q — voting_power/group tables must never reach a quorum decision (docs §6.3)", path, tok)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", full, err)
+		}
 	}
 }
