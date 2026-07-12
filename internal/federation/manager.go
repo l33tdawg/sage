@@ -122,6 +122,15 @@ type Manager struct {
 	syncStatusMu  sync.Mutex
 	syncReconcile map[string]SyncReconcileStatus
 
+	// journalMu serializes v11.8 group-journal appends within this node so a
+	// read-head -> build+sign -> append sequence is atomic against concurrent
+	// appenders (the (group_id,subchain,seq) PK is the backstop; this avoids the
+	// retryable-loser churn). The append advances sync_group's head/revision
+	// cache best-effort — the sync_group_log rows are the source of truth and the
+	// fold re-derives the head, so a crash between append and cache-advance is
+	// harmless.
+	journalMu sync.Mutex
+
 	// seedMu guards seedCache — per-agreement TOTP seeds (v11 join ceremony),
 	// keyed by remote chain id → the candidate seeds (current + previous epoch
 	// during a rotation cutover). Populated once at unlock; zeroized on
