@@ -627,6 +627,11 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// sync_outbox store-and-forward queue, sync_origin admission ledger).
 	s.migrateSyncTables(ctx)
 
+	// Migration: add the v11.8 synchronization-GROUP overlay tables (off-consensus:
+	// sync_group roster, sync_group_member, sync_group_domain, sync_group_log audit
+	// journal, sync_tombstone) + the sync_control.group_id binding column.
+	s.migrateSyncGroupTables(ctx)
+
 	// FTS5 full-text search index on memory content.
 	// Used as a fallback when semantic embeddings are unavailable (hash mode).
 	_, _ = s.writeExecContext(ctx, `
