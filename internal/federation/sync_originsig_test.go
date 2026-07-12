@@ -13,8 +13,11 @@ func testSyncItem() *SyncItem {
 		OriginCreatedAt: "2026-07-12T10:00:00Z",
 		Domain:          "eurorack",
 		Classification:  2,
+		MemoryType:      "observation",
+		ConfidenceScore: 0.8,
 		Content:         "patch notes",
 		ContentHash:     "ABCDEF0123", // case-insensitive; signer lowercases
+		Tags:            []string{"oscillator", "eurorack"},
 	}
 }
 
@@ -57,6 +60,19 @@ func TestOriginSigTamperRejected(t *testing.T) {
 	mutate("origin_memory_id", func(i *SyncItem) { i.OriginMemoryID = "mem-43" })
 	mutate("origin_chain_id", func(i *SyncItem) { i.OriginChainID = "sage-evil" })
 	mutate("origin_created_at", func(i *SyncItem) { i.OriginCreatedAt = "2026-07-12T10:00:01Z" })
+	// The widened envelope also binds memory_type, confidence, and tags — a
+	// step-6 relayer must not be able to mutate any of them (docs §4.4).
+	mutate("memory_type", func(i *SyncItem) { i.MemoryType = "fact" })
+	mutate("confidence_score", func(i *SyncItem) { i.ConfidenceScore = 0.1 })
+	mutate("tags-add", func(i *SyncItem) { i.Tags = []string{"oscillator", "eurorack", "extra"} })
+	mutate("tags-drop", func(i *SyncItem) { i.Tags = []string{"eurorack"} })
+
+	// Tag ORDER is not material (canonicalized): re-ordering still verifies.
+	reordered := *base
+	reordered.Tags = []string{"eurorack", "oscillator"}
+	if !verifyOriginSig(pub, &reordered) {
+		t.Fatalf("tag reorder should still verify (canonicalized)")
+	}
 
 	// Wrong key must not verify.
 	otherPub, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -80,8 +96,8 @@ func TestOriginSigTamperRejected(t *testing.T) {
 // A field-boundary confusion (moving a byte between adjacent fields) must not
 // collide, because the encoding is length-prefixed / injective.
 func TestOriginSigInjective(t *testing.T) {
-	a := originSigMessage("ab", "c", "00", "d", 0, "")
-	b := originSigMessage("a", "bc", "00", "d", 0, "")
+	a := originSigMessage(&SyncItem{OriginChainID: "ab", OriginMemoryID: "c", ContentHash: "00", Domain: "d"})
+	b := originSigMessage(&SyncItem{OriginChainID: "a", OriginMemoryID: "bc", ContentHash: "00", Domain: "d"})
 	if string(a) == string(b) {
 		t.Fatalf("length-prefix boundary collision")
 	}

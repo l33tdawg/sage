@@ -70,6 +70,25 @@ func (m *Manager) syncStore() *store.SQLiteStore {
 	return ss
 }
 
+// originVerifyKey resolves the ed25519 key that item.OriginSig must verify
+// against at Gate 5.5. LOAD-BEARING COUPLING (docs §4.4 / §9.2): the verifier
+// MUST be the key of the agent that authored the memory on item.OriginChainID —
+// NEVER the relaying peer's key when they differ. Today the model enforces
+// origin_chain == the authenticated peer (validateSyncItem), so origin IS the
+// peer and peer.AgentID is correct. This function makes that coupling explicit
+// and fail-closed: when mesh backfill (build step 6) relaxes validateSyncItem to
+// admit a relayed item whose OriginChainID != peer.ChainID, THIS is the one place
+// that must change — resolve the origin's key from the group roster
+// (sync_group_member.member_agent_pubkey WHERE member_chain_id == OriginChainID).
+// Until then the guard below trips loudly, so a relayer can never self-sign a
+// forgery by having verification keyed on its own AgentID.
+func (m *Manager) originVerifyKey(peer *peerIdentity, item *SyncItem) (ed25519.PublicKey, error) {
+	if item.OriginChainID != peer.ChainID {
+		return nil, fmt.Errorf("origin %q is not the authenticated peer %q: origin-key resolution must switch to the group roster before relayed items are admitted (docs §4.4 step-6 coupling)", item.OriginChainID, peer.ChainID)
+	}
+	return auth.AgentIDToPublicKey(peer.AgentID)
+}
+
 // handleSyncPush implements POST /fed/v1/sync/push (behind peerAuth).
 func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 	peer := peerFromCtx(r.Context())
@@ -304,7 +323,7 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 	// is accepted for rolling compatibility with pre-v11.8 senders; a PRESENT but
 	// invalid sig is a forged/mis-attributed item and is rejected terminally.
 	if len(item.OriginSig) > 0 {
-		originPub, keyErr := auth.AgentIDToPublicKey(peer.AgentID)
+		originPub, keyErr := m.originVerifyKey(peer, item)
 		if keyErr != nil || !verifyOriginSig(originPub, item) {
 			out.Outcome = SyncOutcomeRejectedOriginSig
 			return out

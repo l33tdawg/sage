@@ -20,18 +20,26 @@ package federation
 import (
 	"crypto/ed25519"
 	"encoding/binary"
+	"math"
+	"sort"
 	"strings"
 )
 
 // originSigMessage builds the exact bytes an origin agent signs. Fields are
 // length-prefixed (injective: no two distinct tuples collide) and domain-
 // separated. content_hash is lowercased hex; classification is a fixed 4-byte
-// big-endian int; origin_created_at is the verbatim wire string. The receiver
-// rebuilds this from the received item, so every field bound here is one the
-// receiver already trusts end-to-end (content_hash is re-derived from content in
-// validateSyncItem; classification is the value the ceiling is enforced against).
-func originSigMessage(originChainID, originMemoryID, contentHash, domain string, classification int, originCreatedAt string) []byte {
-	b := make([]byte, 0, 64+len(originChainID)+len(originMemoryID)+len(contentHash)+len(domain)+len(originCreatedAt))
+// big-endian int; confidence_score is the IEEE-754 bit pattern (deterministic);
+// tags are canonicalized (sorted + deduped) then count-prefixed; origin_created_at
+// and memory_type are verbatim wire strings.
+//
+// The envelope binds EVERY SyncItem field that persists on the admitted copy —
+// content (via content_hash), domain, classification, memory_type, confidence,
+// and tags — so a v11.8 group mesh-backfill relayer cannot mutate ANY of them and
+// still present a valid signature. The receiver rebuilds this from the received
+// item, and each bound field is one it already trusts end-to-end (content_hash is
+// re-derived from content in validateSyncItem; tags are canonicalized there).
+func originSigMessage(item *SyncItem) []byte {
+	b := make([]byte, 0, 96+len(item.OriginChainID)+len(item.OriginMemoryID)+len(item.ContentHash)+len(item.Domain)+len(item.OriginCreatedAt))
 	b = append(b, []byte("sage-sync-origin-v1\x00")...)
 	writePart := func(s string) {
 		var n [4]byte
@@ -39,14 +47,35 @@ func originSigMessage(originChainID, originMemoryID, contentHash, domain string,
 		b = append(b, n[:]...)
 		b = append(b, []byte(s)...)
 	}
-	writePart(originChainID)
-	writePart(originMemoryID)
-	writePart(strings.ToLower(contentHash))
-	writePart(domain)
+	writePart(item.OriginChainID)
+	writePart(item.OriginMemoryID)
+	writePart(strings.ToLower(item.ContentHash))
+	writePart(item.Domain)
 	var cls [4]byte
-	binary.BigEndian.PutUint32(cls[:], uint32(classification)) // #nosec G115 -- validated 0-4
+	binary.BigEndian.PutUint32(cls[:], uint32(item.Classification)) // #nosec G115 -- validated 0-4
 	b = append(b, cls[:]...)
-	writePart(originCreatedAt)
+	writePart(item.OriginCreatedAt)
+	writePart(item.MemoryType)
+	var conf [8]byte
+	binary.BigEndian.PutUint64(conf[:], math.Float64bits(item.ConfidenceScore))
+	b = append(b, conf[:]...)
+	// Tags: canonicalized (sort + dedupe) so sender and receiver — which
+	// independently order/dedupe tags — derive identical bytes; count-prefixed
+	// so the tag boundary can't be confused with the trailing fields.
+	tags := append([]string(nil), item.Tags...)
+	sort.Strings(tags)
+	canon := tags[:0]
+	for i, t := range tags {
+		if i == 0 || tags[i-1] != t {
+			canon = append(canon, t)
+		}
+	}
+	var tc [4]byte
+	binary.BigEndian.PutUint32(tc[:], uint32(len(canon))) // #nosec G115 -- bounded by SyncMaxTags
+	b = append(b, tc[:]...)
+	for _, t := range canon {
+		writePart(t)
+	}
 	return b
 }
 
@@ -54,8 +83,7 @@ func originSigMessage(originChainID, originMemoryID, contentHash, domain string,
 // operator agent key. Called by the sender (which is the origin) when building a
 // SyncItem.
 func signOriginSig(key ed25519.PrivateKey, item *SyncItem) []byte {
-	return ed25519.Sign(key, originSigMessage(item.OriginChainID, item.OriginMemoryID,
-		item.ContentHash, item.Domain, item.Classification, item.OriginCreatedAt))
+	return ed25519.Sign(key, originSigMessage(item))
 }
 
 // verifyOriginSig checks item.OriginSig against the origin agent's public key.
@@ -64,6 +92,5 @@ func verifyOriginSig(originPub ed25519.PublicKey, item *SyncItem) bool {
 	if len(originPub) != ed25519.PublicKeySize || len(item.OriginSig) != ed25519.SignatureSize {
 		return false
 	}
-	return ed25519.Verify(originPub, originSigMessage(item.OriginChainID, item.OriginMemoryID,
-		item.ContentHash, item.Domain, item.Classification, item.OriginCreatedAt), item.OriginSig)
+	return ed25519.Verify(originPub, originSigMessage(item), item.OriginSig)
 }
