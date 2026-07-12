@@ -91,6 +91,41 @@ func markLocalCEREBRUM(req *http.Request) {
 	req.RemoteAddr = "127.0.0.1:54321"
 }
 
+func TestDashboardPresenceTracksLiveSSEClients(t *testing.T) {
+	h, _ := newTestHandler(t)
+	router := testRouter(h)
+
+	check := func(wantActive bool, wantClients int) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/ui/presence", nil)
+		req.RemoteAddr = "127.0.0.1:54321"
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+		var payload struct {
+			Active  bool `json:"active"`
+			Clients int  `json:"clients"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &payload))
+		assert.Equal(t, wantActive, payload.Active)
+		assert.Equal(t, wantClients, payload.Clients)
+	}
+
+	check(false, 0)
+	ch := h.SSE.Subscribe()
+	require.NotNil(t, ch)
+	check(true, 1)
+	h.SSE.Unsubscribe(ch)
+	check(false, 0)
+
+	remoteReq := httptest.NewRequest(http.MethodGet, "/ui/presence", nil)
+	remoteReq.RemoteAddr = "192.0.2.10:54321"
+	remoteW := httptest.NewRecorder()
+	router.ServeHTTP(remoteW, remoteReq)
+	assert.Equal(t, http.StatusNotFound, remoteW.Code)
+}
+
 func signAgentRequest(t *testing.T, req *http.Request, priv ed25519pkg.PrivateKey, body []byte) string {
 	t.Helper()
 	pub := priv.Public().(ed25519pkg.PublicKey)

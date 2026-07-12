@@ -33,10 +33,9 @@ class SAGEApp: NSObject, NSApplicationDelegate {
 
         // Open dashboard after server has a moment to start
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-            // First launch cannot have a SAGE tab from this app instance; open
-            // directly so users are not asked for browser Automation permission
-            // until tab reuse is actually needed on a later dock click.
-            NSWorkspace.shared.open(URL(string: "http://localhost:8080/ui/launch")!)
+            // Browser tabs outlive app restarts and upgrades. Run the same
+            // reuse/presence checks on initial launch as on later dock clicks.
+            self.openDashboard()
         }
     }
 
@@ -132,9 +131,48 @@ class SAGEApp: NSObject, NSApplicationDelegate {
         // fresh tab on every dock-icon click. Focus a matching tab first; only
         // open /ui/launch when no supported running browser already has CEREBRUM.
         if focusExistingDashboardTab() { return }
+
+        // Firefox does not expose tab URLs through AppleScript. CEREBRUM keeps
+        // an SSE stream alive for the lifetime of an unlocked dashboard tab, so
+        // use that browser-independent signal and activate the default browser
+        // instead of blindly creating a duplicate tab. If the user closed every
+        // dashboard tab, the count falls to zero and the normal open path runs.
+        if hasActiveDashboard(), activateDefaultBrowser() { return }
+
         _ = DispatchQueue.main.sync {
             NSWorkspace.shared.open(URL(string: "http://localhost:8080/ui/launch")!)
         }
+    }
+
+    private func hasActiveDashboard() -> Bool {
+        guard let url = URL(string: "http://localhost:8080/ui/presence") else { return false }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2
+
+        let finished = DispatchSemaphore(value: 0)
+        var active = false
+        let task = URLSession.shared.dataTask(with: request) { data, _, _ in
+            defer { finished.signal() }
+            guard let data,
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let value = payload["active"] as? Bool else { return }
+            active = value
+        }
+        task.resume()
+        if finished.wait(timeout: .now() + 2.5) == .timedOut {
+            task.cancel()
+            return false
+        }
+        return active
+    }
+
+    private func activateDefaultBrowser() -> Bool {
+        guard let dashboardURL = URL(string: "http://localhost:8080/ui/"),
+              let appURL = NSWorkspace.shared.urlForApplication(toOpen: dashboardURL),
+              let bundleID = Bundle(url: appURL)?.bundleIdentifier,
+              let browser = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first
+        else { return false }
+        return browser.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
     }
 
     /// Focus an existing CEREBRUM tab without launching a browser that is not
