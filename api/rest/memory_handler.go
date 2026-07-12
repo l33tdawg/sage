@@ -426,6 +426,15 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agentID := middleware.ContextAgentID(r.Context())
+	if req.MemoryType == string(memory.TypeTask) {
+		if req.TaskStatus == "" {
+			req.TaskStatus = string(memory.TaskStatusPlanned)
+		}
+		if req.TaskStatus != string(memory.TaskStatusPlanned) {
+			writeProblem(w, http.StatusBadRequest, "Invalid initial task status", "A new task must enter consensus as planned; its assigned agent may start it after creation.")
+			return
+		}
+	}
 
 	// Enforce domain access policy from network_agents registry
 	if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, req.DomainTag, "write"); accessErr != nil {
@@ -495,10 +504,15 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	// and includes it in the pending write that Commit flushes to the store.
 	// This ensures memories only appear in the query layer AFTER consensus.
 	if s.suppCache != nil {
+		taskAssignee := ""
+		if req.MemoryType == string(memory.TypeTask) {
+			taskAssignee = agentID
+		}
 		s.suppCache.Put(memoryID, &memory.SupplementaryData{
 			Embedding:         req.Embedding,
 			EmbeddingHash:     embeddingHash,
 			Provider:          req.Provider,
+			Assignee:          taskAssignee,
 			EmbeddingProvider: s.embedderStampFor(req.Embedding),
 			KnowledgeTriples:  req.KnowledgeTriples,
 		})
@@ -1864,7 +1878,7 @@ func (s *Server) handleUpdateTaskStatus(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !changed {
-		writeProblem(w, http.StatusConflict, "Task update conflict", "The task is terminal or owned by another agent.")
+		writeProblem(w, http.StatusConflict, "Task update conflict", "The task is terminal or not currently assigned to this agent.")
 		return
 	}
 

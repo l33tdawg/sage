@@ -114,13 +114,13 @@ most important operational tool.
 
 | Name          | Type   | Required | Description |
 |---------------|--------|----------|-------------|
-| `topic`       | string | yes      | What the current conversation is about. Used for contextual recall across all domains. |
+| `topic`       | string | yes      | What the current conversation is about. Used for contextual recall inside the exact `domain`. |
 | `observation` | string | no       | What happened this turn — user request and key points of your response. Kept concise. Low-value observations (< 30 chars, noise patterns) are silently skipped. |
-| `domain`      | string | no       | Knowledge domain for storing the observation. Create dynamically (e.g. `go-debugging`, `user-project-x`). Default: `general`. |
+| `domain`      | string | no       | Exact knowledge boundary for both recall and storage. Create dynamically (e.g. `go-debugging`, `user-project-x`). Default: `general`. |
 
 **Returns:**
-- `recalled`: array of relevant committed memories (from all domains, not
-  filtered by the `domain` param).
+- `recalled`: array of relevant committed memories from the exact requested
+  domain. Cross-domain rows are dropped client-side as a fail-closed safeguard.
 - `recalled_count`: number of recalled memories.
 - `stored`: `true` if observation was stored, `false` if skipped (duplicate or
   low-value).
@@ -456,7 +456,7 @@ verifying memories were committed after storing.
 returns an error.
 
 **Returns:**
-- Create: `{memory_id, task_status, domain, action: "created", linked, message}`.
+- Create: `{memory_id, task_status, domain, assignee, action: "created", linked, message}`.
 - Update: `{memory_id, status, action: "updated", linked, message}`.
 
 **REST:** `POST /v1/memory/submit` (create), `PUT /v1/dashboard/tasks/{id}/status`
@@ -466,14 +466,19 @@ returns an error.
 survive session boundaries. Tasks don't decay, so anything with a future action
 should be a task, not an observation.
 
+Tasks created by a signed agent enter consensus as `planned` and are assigned to
+that creating agent ID in the same local off-chain insert as the task record. If
+`sage_task` was called with `status: "in_progress"`, it then performs a local
+exact-owner start transition. Human-created/unassigned tasks remain `planned`
+until CEREBRUM assigns them, so every `in_progress` task has an owner.
+
 ---
 
 ### sage_backlog
 
-**Purpose:** View all open (planned and in-progress) tasks across domains. An
-explicit assignment to the signed agent ID takes precedence over the task
-author's provider, so cross-provider handoffs appear reliably; unassigned work
-remains provider-scoped.
+**Purpose:** View open (planned and in-progress) tasks explicitly assigned to
+the signed agent ID. The task author's provider does not confer ownership.
+Unassigned tasks remain visible only to the local CEREBRUM operator for triage.
 
 **Source:** `tools.go:180-190` (definition), `tools.go:1508-1558` (handler)
 
@@ -484,15 +489,14 @@ remains provider-scoped.
 | `domain` | string | no       | Filter by domain. Omit for all domains. |
 
 **Returns:**
-- `tasks_by_domain`: map of domain → array of `{memory_id, content, task_status, confidence, created_at, assignee, assigned_to_you, task_picked_up_by, task_picked_up_at}`. `assigned_to_you` is true only for an explicit current assignment to the signed agent; provider-visible unassigned work remains false.
+- `tasks_by_domain`: map of domain → array of `{memory_id, content, task_status, confidence, created_at, assignee, assigned_to_you, task_picked_up_by, task_picked_up_at}`. Every row has `assignee` equal to the signed agent ID and `assigned_to_you: true`.
 - `total_open`: total open task count.
 - `message`: human-readable summary.
 
 **REST:** `GET /v1/dashboard/tasks`
 
-**When to call:** Session start (to pick up where you left off); before planning
-new work (to avoid duplicating tracked items); reviewing priorities across
-projects.
+**When to call:** Session start to resume work the operator assigned to this
+agent; reviewing that agent's priorities across projects.
 
 ---
 

@@ -820,6 +820,14 @@ func (s *SQLiteStore) migrateTaskAssignmentNotifications(ctx context.Context) er
 		WHERE memory_type = 'task' AND task_status IN ('done','dropped')`); err != nil {
 		return fmt.Errorf("backfill terminal task handoff gates: %w", err)
 	}
+	// Workflow repair: in-progress without an owner is not actionable and can be
+	// mistaken for live assigned work. Return historical rows to human triage.
+	if _, err := s.writeExecContext(ctx, `
+		UPDATE memories SET task_status = 'planned'
+		WHERE memory_type = 'task' AND task_status = 'in_progress'
+		  AND COALESCE(assignee, '') = ''`); err != nil {
+		return fmt.Errorf("repair ownerless in-progress tasks: %w", err)
+	}
 	if _, err := s.writeExecContext(ctx, `
 		INSERT OR IGNORE INTO agent_notifications
 		 (notification_id, agent_id, kind, task_id, assignment_version, domain, title, state)
@@ -1010,8 +1018,8 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 
 	_, err = s.writeExecContext(ctx,
 		`INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, provider, embedding_provider, confidence_score, status, parent_hash, task_status, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			memory_type, domain_tag, provider, embedding_provider, confidence_score, status, parent_hash, task_status, assignee, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (memory_id) DO UPDATE SET
 			submitting_agent = excluded.submitting_agent,
 			status = excluded.status,
@@ -1033,11 +1041,12 @@ func (s *SQLiteStore) InsertMemory(ctx context.Context, record *memory.MemoryRec
 			embedding_hash = COALESCE(excluded.embedding_hash, memories.embedding_hash),
 			provider = COALESCE(NULLIF(excluded.provider, ''), memories.provider),
 			embedding_provider = COALESCE(NULLIF(excluded.embedding_provider, ''), memories.embedding_provider),
+			assignee = COALESCE(NULLIF(excluded.assignee, ''), memories.assignee),
 			parent_hash = COALESCE(NULLIF(excluded.parent_hash, ''), memories.parent_hash)`,
 		record.MemoryID, record.SubmittingAgent, content, record.ContentHash,
 		encEmb, record.EmbeddingHash,
 		string(record.MemoryType), record.DomainTag, record.Provider, record.EmbeddingProvider, record.ConfidenceScore,
-		string(record.Status), record.ParentHash, string(record.TaskStatus), formatTime(record.CreatedAt))
+		string(record.Status), record.ParentHash, string(record.TaskStatus), record.Assignee, formatTime(record.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
 	}
@@ -3687,7 +3696,9 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 		SET task_requires_handoff = CASE
 		      WHEN task_status IN ('done','dropped') THEN 1 ELSE task_requires_handoff END,
 		    task_status = ?
-		WHERE memory_id = ? AND memory_type = 'task'`
+		WHERE memory_id = ? AND memory_type = 'task'
+		  AND (? != 'in_progress' OR COALESCE(assignee, '') != '')`
+	args := []any{string(taskStatus), memoryID, string(taskStatus)}
 	if terminal {
 		// Terminal work has no current owner. Preserve task_picked_up_by/at as
 		// completion evidence, but clear assignee so a later reopen is visibly
@@ -3697,14 +3708,15 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 			    task_assignment_version = task_assignment_version + CASE WHEN COALESCE(assignee, '') != '' THEN 1 ELSE 0 END,
 			    assignee = '', task_requires_handoff = 1
 			WHERE memory_id = ? AND memory_type = 'task'`
+		args = []any{string(taskStatus), memoryID}
 	}
-	result, err := s.writeExecContext(ctx, query, string(taskStatus), memoryID)
+	result, err := s.writeExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("update task status: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("task not found: %s", memoryID)
+		return fmt.Errorf("task not found or in_progress requires an assignee: %s", memoryID)
 	}
 	if terminal {
 		if _, err := s.writeExecContext(ctx,
@@ -3848,18 +3860,12 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 		query += ` AND domain_tag = ?`
 		args = append(args, domain)
 	}
-	// Explicit assignment outranks the task author's provider. An identified
-	// agent always sees tasks assigned to its immutable agent ID, while
-	// unassigned work remains scoped to its provider. The old independent ANDs
-	// made cross-provider assignments disappear from sage_backlog.
+	// A signed agent sees only work explicitly assigned to its immutable agent
+	// ID. Provider identifies the authoring client, not the owner, and must never
+	// widen an agent backlog to unassigned work.
 	if assignee != "" {
-		if provider != "" {
-			query += ` AND (assignee = ? OR (COALESCE(assignee, '') = '' AND (provider = ? OR provider = '')))`
-			args = append(args, assignee, provider)
-		} else {
-			query += ` AND (COALESCE(assignee, '') = '' OR assignee = ?)`
-			args = append(args, assignee)
-		}
+		query += ` AND assignee = ?`
+		args = append(args, assignee)
 	} else if provider != "" {
 		query += ` AND (provider = ? OR provider = '')`
 		args = append(args, provider)
@@ -3990,10 +3996,10 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 	return nil
 }
 
-// ClaimTask atomically assigns and starts an OPEN task only if it is currently
-// unassigned or already owned by agentID. Terminal tasks are never reopened by
-// agent pickup; they require an operator handoff first. First pickup evidence is
-// preserved on retries.
+// ClaimTask atomically starts an OPEN task only if it is already assigned to
+// agentID. Unassigned work requires an operator handoff first. Terminal tasks
+// are never reopened by agent pickup. First pickup evidence is preserved on
+// retries.
 func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (bool, error) {
 	res, err := s.writeExecContext(ctx,
 		`UPDATE memories
@@ -4008,7 +4014,7 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (
 		 WHERE memory_id = ? AND memory_type = 'task'
 		   AND task_status IN ('planned','in_progress')
 		   AND task_requires_handoff = 0
-		   AND COALESCE(assignee, '') IN ('', ?)
+		   AND assignee = ?
 		   AND EXISTS (SELECT 1 FROM network_agents a
 		               WHERE a.agent_id = ? AND a.status = 'active' AND a.removed_at IS NULL)`,
 		agentID, agentID, agentID, memoryID, agentID, agentID)

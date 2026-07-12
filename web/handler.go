@@ -1997,7 +1997,7 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 			return
 		}
 		if !changed {
-			writeError(w, http.StatusConflict, "task is terminal or owned by another agent")
+			writeError(w, http.StatusConflict, "task is terminal or not currently assigned to this agent")
 			return
 		}
 		if h.SSE != nil {
@@ -2106,6 +2106,9 @@ func (h *DashboardHandler) agentCanReadTask(ctx context.Context, agentID, memory
 // transient/unavailable authorization lookup. Notification delivery keeps a
 // notice unread on transient failures and supersedes only definitive denials.
 func (h *DashboardHandler) agentTaskReadDecision(ctx context.Context, agentID, memoryID, domain string) (allowed, definitive bool) {
+	if domainAllowed, domainDefinitive := h.agentDomainReadDecision(ctx, agentID, domain); !domainAllowed {
+		return false, domainDefinitive
+	}
 	reader, ok := h.store.(taskClassificationReader)
 	if !ok {
 		return false, false
@@ -2126,6 +2129,45 @@ func (h *DashboardHandler) agentTaskReadDecision(ctx context.Context, agentID, m
 		return false, false
 	}
 	return allowed, true
+}
+
+// agentDomainReadDecision applies the same explicit domain allowlist used by
+// the REST memory APIs. Assignment is workflow ownership, not an implicit RBAC
+// grant, even for a PUBLIC task.
+func (h *DashboardHandler) agentDomainReadDecision(ctx context.Context, agentID, domain string) (allowed, definitive bool) {
+	check := func(role, raw string) (bool, bool) {
+		if role == "admin" || strings.TrimSpace(raw) == "" {
+			return true, true
+		}
+		var entries []struct {
+			Domain string `json:"domain"`
+			Read   bool   `json:"read"`
+		}
+		if err := json.Unmarshal([]byte(raw), &entries); err != nil || len(entries) == 0 {
+			return true, true // backward-compatible unrestricted legacy value
+		}
+		for _, entry := range entries {
+			if entry.Domain == domain {
+				return entry.Read, true
+			}
+		}
+		return false, true
+	}
+
+	if h.BadgerStore != nil {
+		if agent, err := h.BadgerStore.GetRegisteredAgent(agentID); err == nil && agent != nil {
+			return check(agent.Role, agent.DomainAccess)
+		}
+	}
+	agentStore, ok := h.store.(store.AgentStore)
+	if !ok {
+		return false, false
+	}
+	agent, err := agentStore.GetAgent(ctx, agentID)
+	if err != nil || agent == nil {
+		return false, false
+	}
+	return check(agent.Role, agent.DomainAccess)
 }
 
 // handleTaskNotifications returns one-way assignment notices for the signed

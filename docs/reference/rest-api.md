@@ -388,9 +388,9 @@ Corroborate a memory. Raises confidence via decay model.
 ### `PUT /v1/memory/{memory_id}/task-status`
 
 Start or finish a `task`-type memory as the active signed agent (off-chain only,
-no tx). `in_progress` atomically claims open unassigned/self-owned work;
-`done`/`dropped` requires the current assignee. Agents cannot set `planned` or
-reopen terminal work; use the local CEREBRUM operator board.
+no tx). Every status mutation requires the task's assignee to exactly match the
+signature-verified agent ID. Unassigned work requires assignment from the local
+CEREBRUM operator board. Agents cannot set `planned` or reopen terminal work.
 
 **Request body:**
 
@@ -1142,13 +1142,20 @@ is a true no-op that preserves pickup evidence and does not duplicate notices.
 Moving a task to `done` or `dropped` clears its current assignee while retaining
 pickup evidence; reopening therefore remains unassigned until the operator
 hands it off again, which creates a fresh generation and notice.
-For signed agents, `in_progress` is one atomic claim-and-start operation and
-`done`/`dropped` is allowed only for the current active assignee, using an
-atomic owner/status transition. Agents cannot re-plan or reopen work; those
-transitions stay on the local operator board. Current task read permission is
-checked before every agent status change.
+For signed agents, the scoped backlog contains only tasks whose assignee exactly
+matches the verified agent ID. `in_progress`, `done`, and `dropped` all require
+that same current active assignee, using an atomic owner/status transition.
+Unassigned work is human triage and cannot be self-claimed. Agents cannot
+re-plan or reopen work; those transitions stay on the local operator board.
+Current task read permission is checked before every agent status change.
 
 Task content/creation follows the memory consensus path. Board workflow metadata—assignee, assignment generation, status transitions, and agent inbox notifications—is deliberately local-node operational state. It is not federated or consensus-replicated: agents claim work from the node they are connected to, while other nodes may independently organize the same shared task memory. CEREBRUM labels the board as “This computer's work queue” so this boundary is explicit.
+
+A task submitted by a verified agent enters consensus as `planned` and is
+locally assigned to that creating agent as part of the consensus-flushed
+off-chain insert. Starting it is a subsequent local exact-owner transition. An
+ownerless historical `in_progress` row is repaired back to `planned` at startup
+so the operator can triage it safely.
 
 `GET /v1/dashboard/task-notifications?limit=5` is signed with `X-Agent-ID` and
 peeks current notices, applies current active-agent and task RBAC checks, then

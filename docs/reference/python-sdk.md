@@ -421,7 +421,11 @@ list_tasks(
 
 `GET /v1/memory/tasks`
 
-Returns `TaskListResponse(tasks: list[TaskRecord], total)`. Each `TaskRecord` has `memory_id`, `content`, `domain_tag`, `task_status`, `confidence_score`, `created_at`.
+Returns only open tasks explicitly assigned to the authenticated agent ID as
+`TaskListResponse(tasks: list[TaskRecord], total)`. Provider is an optional
+authoring-client filter only when no agent identity is present; it never widens
+an authenticated agent's ownership scope. Each `TaskRecord` has `memory_id`,
+`content`, `domain_tag`, `task_status`, `confidence_score`, `created_at`.
 
 ---
 
@@ -434,9 +438,9 @@ update_task_status(memory_id: str, task_status: str) -> dict
 `PUT /v1/memory/{memory_id}/task-status`
 
 The API schema accepts `"planned"` | `"in_progress"` | `"done"` | `"dropped"`,
-but signed SDK callers are authorized only for `in_progress` (atomic claim/start)
-and `done`/`dropped` when they are the current active assignee. `planned` and
-terminal reopen are local CEREBRUM operator actions and return HTTP 403 here.
+but signed SDK callers are authorized only when the task's assignee exactly
+matches their verified agent ID. `planned`, unassigned pickup, and terminal
+reopen are local CEREBRUM operator actions and return HTTP 403/409 here.
 
 ---
 

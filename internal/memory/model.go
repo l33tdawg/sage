@@ -91,6 +91,11 @@ type SupplementaryData struct {
 	Embedding     []float32
 	EmbeddingHash []byte
 	Provider      string
+	// Assignee is node-local workflow ownership staged by an authenticated REST
+	// task creator. It never enters consensus or AppHash, but applying it in the
+	// same off-chain insert prevents a creator-owned task from appearing
+	// ownerless between commit and local status transitions.
+	Assignee string
 	// EmbeddingProvider names the embedder that produced Embedding, so the
 	// off-chain row is stamped at insert time. Without it every new memory
 	// lands at embedding_provider='' and the dashboard forever counts it as

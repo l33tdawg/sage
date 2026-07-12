@@ -14,7 +14,7 @@ import (
 )
 
 func TestPostgresInsertMemoryPersistsTaskStatusWithoutReplayOverwrite(t *testing.T) {
-	require.Contains(t, postgresInsertMemorySQL, "parent_hash, task_status, created_at")
+	require.Contains(t, postgresInsertMemorySQL, "parent_hash, task_status, assignee, created_at")
 	require.NotContains(t, postgresInsertMemorySQL, "task_status =")
 
 	mock, err := pgxmock.NewPool()
@@ -34,6 +34,7 @@ func TestPostgresInsertMemoryPersistsTaskStatusWithoutReplayOverwrite(t *testing
 		Status:          memory.StatusCommitted,
 		ParentHash:      "parent-hash",
 		TaskStatus:      memory.TaskStatusDone,
+		Assignee:        "agent-1",
 		CreatedAt:       createdAt,
 	}
 
@@ -42,7 +43,7 @@ func TestPostgresInsertMemoryPersistsTaskStatusWithoutReplayOverwrite(t *testing
 			record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
 			pgxmock.AnyArg(), record.EmbeddingHash, string(record.MemoryType), record.DomainTag,
 			record.Provider, record.ConfidenceScore, string(record.Status), record.ParentHash,
-			string(record.TaskStatus), record.CreatedAt,
+			string(record.TaskStatus), record.Assignee, record.CreatedAt,
 		).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
@@ -123,6 +124,8 @@ func TestPostgresEnsureMemoriesSchemaRepairsTaskStatusAndClassification(t *testi
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec(`UPDATE memories SET task_requires_handoff = TRUE`).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec(`UPDATE memories SET task_status = 'planned'`).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec(`INSERT INTO agent_notifications`).
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 
@@ -135,13 +138,40 @@ func TestPostgresClaimTaskBindsActiveAgentAndOwnership(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(mock.Close)
 	store := &PostgresStore{db: mock}
-	mock.ExpectExec(`(?s)UPDATE memories m.*SET assignee = \$2.*FROM agents a.*m\.task_requires_handoff = FALSE.*a\.agent_id = \$2`).
+	mock.ExpectExec(`(?s)UPDATE memories m.*SET assignee = \$2.*FROM agents a.*m\.task_requires_handoff = FALSE.*m\.assignee = \$2.*a\.agent_id = \$2`).
 		WithArgs("task-1", "agent-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	claimed, err := store.ClaimTask(context.Background(), "task-1", "agent-1")
 	require.NoError(t, err)
 	require.True(t, claimed)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPostgresGetOpenTasksUsesExactAssigneeNotProvider(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(mock.Close)
+	store := &PostgresStore{db: mock}
+	createdAt := time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)
+	columns := []string{
+		"memory_id", "submitting_agent", "content", "content_hash", "memory_type",
+		"domain_tag", "provider", "confidence_score", "status", "parent_hash",
+		"task_status", "assignee", "task_picked_up_by", "task_picked_up_at",
+		"created_at", "committed_at", "deprecated_at",
+	}
+	rows := pgxmock.NewRows(columns).AddRow(
+		"task-a", "author", "[TASK] assigned", []byte("hash"), string(memory.TypeTask),
+		"tii-sage", "other-provider", 0.9, string(memory.StatusCommitted), nil,
+		string(memory.TaskStatusPlanned), "agent-a", "", nil, createdAt, nil, nil,
+	)
+	mock.ExpectQuery(`(?s)FROM memories.*domain_tag = \$1.*AND assignee = \$2.*ORDER BY`).
+		WithArgs("tii-sage", "agent-a").WillReturnRows(rows)
+
+	tasks, err := store.GetOpenTasks(context.Background(), "tii-sage", "spoofed-provider", "agent-a")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "agent-a", tasks[0].Assignee)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

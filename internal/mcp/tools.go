@@ -179,7 +179,7 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_backlog": {
 			Name: "sage_backlog",
-			Description: "View your open task backlog — all planned and in-progress tasks across domains. " +
+			Description: "View open tasks explicitly assigned to this agent ID across domains. Unassigned and other agents' work is never returned. " +
 				"Use this to see what's been discussed but not yet done, review priorities, and avoid losing track of ideas across sessions.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -1027,7 +1027,7 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 		} else {
 			queryReq, _ := json.Marshal(map[string]any{
 				"embedding":      embedResp.Embedding,
-				"domain_tag":     "", // Search ALL domains — the topic determines relevance, not a filter
+				"domain_tag":     domain,
 				"provider":       s.provider,
 				"status_filter":  "committed",
 				"top_k":          recallTopK,
@@ -1043,7 +1043,7 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 		// FTS5 path: full-text search when embeddings aren't semantic.
 		searchReq, _ := json.Marshal(map[string]any{
 			"query":          topic,
-			"domain_tag":     "", // Search ALL domains
+			"domain_tag":     domain,
 			"provider":       s.provider,
 			"status_filter":  "committed",
 			"top_k":          recallTopK,
@@ -1057,6 +1057,12 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 	if _, hasErr := result["recall_error"]; !hasErr && len(recallResp.Results) > 0 {
 		memories := make([]map[string]any, 0, len(recallResp.Results))
 		for _, r := range recallResp.Results {
+			// Fail closed if an older or misbehaving node ignores domain_tag.
+			// A turn belongs to exactly one project/domain; cross-domain memories
+			// can silently re-anchor an agent in the wrong repository.
+			if r.DomainTag != domain {
+				continue
+			}
 			content := r.Content
 			entry := map[string]any{
 				"memory_id":  r.MemoryID,
@@ -1072,8 +1078,10 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 			}
 			memories = append(memories, entry)
 		}
-		result["recalled"] = memories
-		result["recalled_count"] = len(memories)
+		if len(memories) > 0 {
+			result["recalled"] = memories
+			result["recalled_count"] = len(memories)
+		}
 	}
 
 	// Phase 2: Store — save this turn's observation as an episodic memory.
@@ -1451,6 +1459,9 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 		result["action"] = "updated"
 	} else if content != "" {
 		// Create new task
+		if status != "planned" && status != "in_progress" {
+			return nil, fmt.Errorf("a new task must start as planned or in_progress")
+		}
 		taskContent := fmt.Sprintf("[TASK] %s", content)
 		embedReq, _ := json.Marshal(map[string]string{"text": taskContent})
 		var embedResp struct {
@@ -1467,7 +1478,10 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 			"provider":         s.provider,
 			"confidence_score": 0.90,
 			"embedding":        embedResp.Embedding,
-			"task_status":      status,
+			// Assignment is node-local while task content/status is consensus data.
+			// Create as planned everywhere, then start locally after the creator's
+			// assignee is atomically applied from supplementary data.
+			"task_status": "planned",
 		})
 		var submitResp struct {
 			MemoryID string `json:"memory_id"`
@@ -1477,8 +1491,16 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 			return nil, fmt.Errorf("submit task: %w", err)
 		}
 		memoryID = submitResp.MemoryID
+		if status == "in_progress" {
+			updateReq, _ := json.Marshal(map[string]any{"task_status": status})
+			path := fmt.Sprintf("/v1/dashboard/tasks/%s/status", url.PathEscape(memoryID))
+			if err := s.doSignedJSON(ctx, "PUT", path, updateReq, nil); err != nil {
+				return nil, fmt.Errorf("start newly created task: %w", err)
+			}
+		}
 		result["memory_id"] = memoryID
 		result["task_status"] = status
+		result["assignee"] = s.agentID
 		result["domain"] = domain
 		result["action"] = "created"
 	} else {
@@ -1537,7 +1559,14 @@ func (s *Server) toolBacklog(ctx context.Context, params map[string]any) (any, e
 
 	// Group by domain
 	byDomain := map[string][]map[string]any{}
+	visibleTotal := 0
 	for _, t := range tasksResp.Tasks {
+		// Defense in depth for mixed-version deployments: the signed agent may
+		// only receive work explicitly assigned to its immutable agent ID.
+		if t.Assignee != s.agentID {
+			continue
+		}
+		visibleTotal++
 		byDomain[t.DomainTag] = append(byDomain[t.DomainTag], map[string]any{
 			"memory_id":         t.MemoryID,
 			"content":           t.Content,
@@ -1545,7 +1574,7 @@ func (s *Server) toolBacklog(ctx context.Context, params map[string]any) (any, e
 			"confidence":        t.ConfidenceScore,
 			"created_at":        t.CreatedAt,
 			"assignee":          t.Assignee,
-			"assigned_to_you":   t.Assignee != "" && t.Assignee == s.agentID,
+			"assigned_to_you":   true,
 			"task_picked_up_by": t.TaskPickedUpBy,
 			"task_picked_up_at": t.TaskPickedUpAt,
 		})
@@ -1553,8 +1582,8 @@ func (s *Server) toolBacklog(ctx context.Context, params map[string]any) (any, e
 
 	return map[string]any{
 		"tasks_by_domain": byDomain,
-		"total_open":      tasksResp.Total,
-		"message":         fmt.Sprintf("You have %d open tasks across %d domains.", tasksResp.Total, len(byDomain)),
+		"total_open":      visibleTotal,
+		"message":         fmt.Sprintf("You have %d assigned open tasks across %d domains.", visibleTotal, len(byDomain)),
 	}, nil
 }
 

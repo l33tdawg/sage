@@ -459,6 +459,24 @@ func TestTaskAssignmentRejectsSignedAgentCaller(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 }
 
+func TestTaskAssignmentDoesNotBypassAgentDomainAllowlist(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestTask(t, s, "forbidden-domain-task", "work", "codex")
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: "restricted-agent", Name: "restricted", RegisteredName: "restricted", Status: "active",
+		DomainAccess: `[{"domain":"other","read":true,"write":true}]`,
+	}))
+
+	body := bytes.NewBufferString(`{"assignee":"restricted-agent"}`)
+	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/forbidden-domain-task/assign", body)
+	req.Header.Set("Content-Type", "application/json")
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+}
+
 func TestTaskNotificationRechecksRBACAfterAssignment(t *testing.T) {
 	h, s := newTestHandler(t)
 	r := testRouter(h)

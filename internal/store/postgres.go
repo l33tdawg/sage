@@ -299,6 +299,11 @@ func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 			WHERE memory_type = 'task' AND task_status IN ('done','dropped')`); err != nil {
 			return fmt.Errorf("backfill terminal task handoff gates: %w", err)
 		}
+		if _, err := ps.db.Exec(ctx, `UPDATE memories SET task_status = 'planned'
+			WHERE memory_type = 'task' AND task_status = 'in_progress'
+			  AND COALESCE(assignee, '') = ''`); err != nil {
+			return fmt.Errorf("repair ownerless in-progress tasks: %w", err)
+		}
 		if _, err := ps.db.Exec(ctx, `INSERT INTO agent_notifications
 			(notification_id, agent_id, kind, task_id, assignment_version, domain, title, state)
 			SELECT 'task-assignment:' || m.memory_id || ':' || m.task_assignment_version,
@@ -316,8 +321,8 @@ func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 }
 
 const postgresInsertMemorySQL = `INSERT INTO memories (memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-	memory_type, domain_tag, provider, confidence_score, status, parent_hash, task_status, created_at)
-	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+	memory_type, domain_tag, provider, confidence_score, status, parent_hash, task_status, assignee, created_at)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 	ON CONFLICT (memory_id) DO UPDATE SET
 		submitting_agent = EXCLUDED.submitting_agent,
 		status = EXCLUDED.status,
@@ -325,6 +330,7 @@ const postgresInsertMemorySQL = `INSERT INTO memories (memory_id, submitting_age
 		embedding = COALESCE(EXCLUDED.embedding, memories.embedding),
 		embedding_hash = COALESCE(EXCLUDED.embedding_hash, memories.embedding_hash),
 		provider = COALESCE(NULLIF(EXCLUDED.provider, ''), memories.provider),
+		assignee = COALESCE(NULLIF(EXCLUDED.assignee, ''), memories.assignee),
 		parent_hash = COALESCE(NULLIF(EXCLUDED.parent_hash, ''), memories.parent_hash)`
 
 func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryRecord) error {
@@ -338,7 +344,7 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 		record.MemoryID, record.SubmittingAgent, record.Content, record.ContentHash,
 		emb, record.EmbeddingHash,
 		string(record.MemoryType), record.DomainTag, record.Provider, record.ConfidenceScore,
-		string(record.Status), record.ParentHash, string(record.TaskStatus), record.CreatedAt,
+		string(record.Status), record.ParentHash, string(record.TaskStatus), record.Assignee, record.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
@@ -1491,7 +1497,7 @@ func (s *PostgresStore) ClaimTask(ctx context.Context, memoryID, agentID string)
 		WHERE m.memory_id = $1 AND m.memory_type = 'task'
 		  AND m.task_status IN ('planned','in_progress')
 		  AND m.task_requires_handoff = FALSE
-		  AND COALESCE(m.assignee, '') IN ('', $2)
+		  AND m.assignee = $2
 		  AND a.agent_id = $2 AND a.status = 'active' AND a.removed_at IS NULL`, memoryID, agentID)
 	if err != nil {
 		return false, fmt.Errorf("claim task: %w", err)
@@ -1508,7 +1514,8 @@ func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, t
 	}
 	query := `UPDATE memories SET
 		task_requires_handoff = CASE WHEN task_status IN ('done','dropped') THEN TRUE ELSE task_requires_handoff END,
-		task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'`
+		task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'
+		AND ($2 != 'in_progress' OR COALESCE(assignee, '') != '')`
 	if terminal {
 		query = `UPDATE memories SET task_status = $2,
 			task_assignment_version = task_assignment_version + CASE WHEN COALESCE(assignee, '') != '' THEN 1 ELSE 0 END,
@@ -1520,7 +1527,7 @@ func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, t
 		return fmt.Errorf("update task status: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("task not found: %s", memoryID)
+		return fmt.Errorf("task not found or in_progress requires an assignee: %s", memoryID)
 	}
 	if terminal {
 		if _, err := s.db.Exec(ctx, `UPDATE agent_notifications SET state = 'superseded'
@@ -1865,15 +1872,9 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 		argN++
 	}
 	if assignee != "" {
-		if provider != "" {
-			query += fmt.Sprintf(" AND (assignee = $%d OR (COALESCE(assignee, '') = '' AND (provider = $%d OR provider = '')))", argN, argN+1)
-			args = append(args, assignee, provider)
-			argN += 2
-		} else {
-			query += fmt.Sprintf(" AND (COALESCE(assignee, '') = '' OR assignee = $%d)", argN)
-			args = append(args, assignee)
-			argN++
-		}
+		query += fmt.Sprintf(" AND assignee = $%d", argN)
+		args = append(args, assignee)
+		argN++
 	} else if provider != "" {
 		query += fmt.Sprintf(" AND (provider = $%d OR provider = '')", argN)
 		args = append(args, provider)

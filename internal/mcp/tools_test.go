@@ -450,7 +450,71 @@ func TestSageTurn(t *testing.T) {
 	assert.Equal(t, "debugging config path expansion", m["topic"])
 	assert.Equal(t, "go-debugging", m["domain"])
 	assert.True(t, m["stored"].(bool))
-	assert.NotNil(t, m["recalled"])
+	assert.Nil(t, m["recalled"], "a backend row from another domain must be dropped")
+}
+
+func TestSageTurnScopesSemanticRecallToExactDomain(t *testing.T) {
+	var requestedDomain string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"semantic": true, "ready": true})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1, 0.2}})
+	})
+	mux.HandleFunc("/v1/memory/query", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			DomainTag string `json:"domain_tag"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		requestedDomain = req.DomainTag
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []map[string]any{
+			{"memory_id": "right", "content": "tii context", "domain_tag": "tii-sage", "confidence_score": 0.9, "memory_type": "fact"},
+			{"memory_id": "wrong", "content": "upstream context", "domain_tag": "sage-release", "confidence_score": 0.99, "memory_type": "fact"},
+		}})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolTurn(context.Background(), map[string]any{"topic": "current work", "domain": "tii-sage"})
+	require.NoError(t, err)
+	require.Equal(t, "tii-sage", requestedDomain)
+	recalled := result.(map[string]any)["recalled"].([]map[string]any)
+	require.Len(t, recalled, 1)
+	require.Equal(t, "tii-sage", recalled[0]["domain"])
+}
+
+func TestSageTurnScopesKeywordRecallToExactDomain(t *testing.T) {
+	var requestedDomain string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"semantic": false, "ready": true})
+	})
+	mux.HandleFunc("/v1/memory/search", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			DomainTag string `json:"domain_tag"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		requestedDomain = req.DomainTag
+		_ = json.NewEncoder(w).Encode(map[string]any{"results": []map[string]any{
+			{"memory_id": "right", "content": "tii context", "domain_tag": "tii-sage", "confidence_score": 0.9, "memory_type": "fact"},
+			{"memory_id": "wrong", "content": "upstream context", "domain_tag": "sage-release", "confidence_score": 0.99, "memory_type": "fact"},
+		}})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	t.Setenv("SAGE_RECALL_HYBRID", "0")
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolTurn(context.Background(), map[string]any{"topic": "current work", "domain": "tii-sage"})
+	require.NoError(t, err)
+	require.Equal(t, "tii-sage", requestedDomain)
+	recalled := result.(map[string]any)["recalled"].([]map[string]any)
+	require.Len(t, recalled, 1)
+	require.Equal(t, "tii-sage", recalled[0]["domain"])
 }
 
 func TestSageTurn_RecallOnly(t *testing.T) {
@@ -480,6 +544,44 @@ func TestSageTurn_MissingTopic(t *testing.T) {
 	_, err := s.toolTurn(context.Background(), map[string]any{})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "topic is required")
+}
+
+func TestSageTaskCreatesPlannedAssignedThenStartsAsExactOwner(t *testing.T) {
+	var submittedStatus, startedStatus string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1}})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			TaskStatus string `json:"task_status"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		submittedStatus = req.TaskStatus
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"memory_id": "task-new", "status": "proposed"})
+	})
+	mux.HandleFunc("/v1/dashboard/tasks/task-new/status", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, http.MethodPut, r.Method)
+		var req struct {
+			TaskStatus string `json:"task_status"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		startedStatus = req.TaskStatus
+		_ = json.NewEncoder(w).Encode(map[string]any{"memory_id": "task-new", "task_status": req.TaskStatus})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolTask(context.Background(), map[string]any{
+		"content": "own this work", "domain": "tii-sage", "status": "in_progress",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "planned", submittedStatus)
+	require.Equal(t, "in_progress", startedStatus)
+	require.Equal(t, s.agentID, result.(map[string]any)["assignee"])
 }
 
 func TestSageInception_ExistingMemories(t *testing.T) {
@@ -1576,11 +1678,10 @@ func TestSageBacklogExposesCurrentAssignmentOwnership(t *testing.T) {
 	require.Equal(t, agentID, <-seenAgent)
 	backlog := result.(map[string]any)
 	byDomain := backlog["tasks_by_domain"].(map[string][]map[string]any)
-	require.Len(t, byDomain["work"], 2)
+	require.Len(t, byDomain["work"], 1)
 	require.Equal(t, agentID, byDomain["work"][0]["assignee"])
 	require.Equal(t, true, byDomain["work"][0]["assigned_to_you"])
-	require.Equal(t, "", byDomain["work"][1]["assignee"])
-	require.Equal(t, false, byDomain["work"][1]["assigned_to_you"])
+	require.Equal(t, 1, backlog["total_open"])
 }
 
 func TestSageInboxLimitAppliesAcrossBothSources(t *testing.T) {

@@ -3063,6 +3063,7 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		if supp := app.SuppCache.Pop(memoryID); supp != nil {
 			record.Embedding = supp.Embedding
 			record.Provider = supp.Provider
+			record.Assignee = supp.Assignee
 			record.EmbeddingProvider = supp.EmbeddingProvider
 			if len(supp.EmbeddingHash) > 0 {
 				record.EmbeddingHash = supp.EmbeddingHash

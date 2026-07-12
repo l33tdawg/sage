@@ -254,8 +254,9 @@ type MemoryStore interface {
 	GetAllTasks(ctx context.Context, domain string, limit int) ([]*memory.MemoryRecord, error)
 	// SetTaskAssignee assigns/claims a task for an agent (empty clears it).
 	SetTaskAssignee(ctx context.Context, memoryID, assignee string) error
-	// ClaimTask atomically claims and starts an open task iff unassigned or
-	// already owned by the same agent. It rejects terminal tasks.
+	// ClaimTask atomically starts an open task iff it is already assigned to the
+	// same agent. Unassigned work requires an operator handoff; terminal tasks
+	// are rejected.
 	ClaimTask(ctx context.Context, memoryID, agentID string) (bool, error)
 	// Tags
 	SetTags(ctx context.Context, memoryID string, tags []string) error

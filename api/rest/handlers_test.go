@@ -375,6 +375,16 @@ func newTestServer(t *testing.T, cometbftURL string) (*Server, *mockMemoryStore,
 	return srv, memStore, scoreStore
 }
 
+type capturingSuppCache struct {
+	memoryID string
+	data     *memory.SupplementaryData
+}
+
+func (c *capturingSuppCache) Put(memoryID string, data *memory.SupplementaryData) {
+	c.memoryID = memoryID
+	c.data = data
+}
+
 // signedRequest creates an authenticated HTTP request.
 func signedRequest(t *testing.T, method, path string, body []byte) (*http.Request, string) {
 	t.Helper()
@@ -472,6 +482,27 @@ func TestSubmitMemory(t *testing.T) {
 	// Note: memory is no longer stored directly by the REST handler.
 	// It is written by ABCI Commit after consensus finalizes the block.
 	// This test verifies the REST layer correctly broadcasts and returns.
+}
+
+func TestSubmitAgentTaskStagesCreatingAgentAsAssignee(t *testing.T) {
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{
+			"check_tx": map[string]any{"code": 0}, "tx_result": map[string]any{"code": 0},
+			"hash": "TASKHASH", "height": "1",
+		}})
+	}))
+	defer cometMock.Close()
+
+	srv, _, _ := newTestServer(t, cometMock.URL)
+	cache := &capturingSuppCache{}
+	srv.SetSuppCache(cache)
+	body := []byte(`{"content":"self-created task","memory_type":"task","domain_tag":"tii-sage","confidence_score":0.9,"task_status":"planned"}`)
+	req, agentID := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+	require.NotNil(t, cache.data)
+	require.Equal(t, agentID, cache.data.Assignee)
 }
 
 func TestSubmitMemory_AttachesTagsAfterCommit(t *testing.T) {
@@ -632,6 +663,7 @@ func TestSubmitMemory_ValidationErrors(t *testing.T) {
 		{"missing domain", `{"content":"test","memory_type":"fact","domain_tag":"","confidence_score":0.5}`},
 		{"confidence > 1", `{"content":"test","memory_type":"fact","domain_tag":"crypto","confidence_score":1.5}`},
 		{"confidence < 0", `{"content":"test","memory_type":"fact","domain_tag":"crypto","confidence_score":-0.1}`},
+		{"task starts in progress", `{"content":"task","memory_type":"task","domain_tag":"crypto","confidence_score":0.9,"task_status":"in_progress"}`},
 	}
 
 	for _, tt := range tests {

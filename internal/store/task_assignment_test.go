@@ -78,7 +78,7 @@ func TestGetOpenTasks_AssignmentOutranksAuthorProvider(t *testing.T) {
 		ids[task.MemoryID] = true
 	}
 	require.True(t, ids["cross-provider"], "explicit cross-provider assignment must be visible")
-	require.True(t, ids["unassigned-mine"], "same-provider unassigned work remains visible")
+	require.False(t, ids["unassigned-mine"], "unassigned work is human triage, not an agent backlog")
 	require.False(t, ids["unassigned-foreign"], "foreign-provider unassigned work stays hidden")
 
 	other, err := s.GetOpenTasks(ctx, "", "codex", "agent-other")
@@ -86,6 +86,64 @@ func TestGetOpenTasks_AssignmentOutranksAuthorProvider(t *testing.T) {
 	for _, task := range other {
 		require.NotEqual(t, "cross-provider", task.MemoryID, "another agent must not see assigned work")
 	}
+	require.Empty(t, other, "provider must not widen another agent's backlog")
+}
+
+func TestClaimTaskRejectsUnassignedAndOtherAgentWork(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "unassigned", "claude-code")
+	insertOpenTask(t, s, "owned-by-b", "claude-code")
+	insertActiveTestAgent(t, s, "agent-a", "claude-code")
+	insertActiveTestAgent(t, s, "agent-b", "claude-code")
+	_, err := s.AssignTaskAndNotify(ctx, "owned-by-b", "agent-b")
+	require.NoError(t, err)
+
+	claimed, err := s.ClaimTask(ctx, "unassigned", "agent-a")
+	require.NoError(t, err)
+	require.False(t, claimed)
+	claimed, err = s.ClaimTask(ctx, "owned-by-b", "agent-a")
+	require.NoError(t, err)
+	require.False(t, claimed)
+}
+
+func TestInsertAgentCreatedTaskPersistsOwner(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	rec := testMemory("self-created", "agent-a", "[TASK] self-created", "work")
+	rec.MemoryType = memory.TypeTask
+	rec.Status = memory.StatusCommitted
+	rec.TaskStatus = memory.TaskStatusInProgress
+	rec.Provider = "claude-code"
+	rec.Assignee = "agent-a"
+	require.NoError(t, s.InsertMemory(ctx, rec))
+
+	tasks, err := s.GetOpenTasks(ctx, "work", "spoofed-provider", "agent-a")
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.Equal(t, "agent-a", tasks[0].Assignee)
+}
+
+func TestMigrationReturnsOwnerlessInProgressTaskToPlanned(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "ownerless-running", "claude-code")
+	_, err := s.writeExecContext(ctx, `UPDATE memories SET task_status = 'in_progress', assignee = '' WHERE memory_id = 'ownerless-running'`)
+	require.NoError(t, err)
+	require.NoError(t, s.migrateTaskAssignmentNotifications(ctx))
+	var status string
+	require.NoError(t, s.conn.QueryRowContext(ctx, `SELECT task_status FROM memories WHERE memory_id = 'ownerless-running'`).Scan(&status))
+	require.Equal(t, string(memory.TaskStatusPlanned), status)
+}
+
+func TestUpdateTaskStatusRejectsOwnerlessInProgress(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "needs-owner", "claude-code")
+	require.ErrorContains(t, s.UpdateTaskStatus(ctx, "needs-owner", memory.TaskStatusInProgress), "requires an assignee")
+	var status string
+	require.NoError(t, s.conn.QueryRowContext(ctx, `SELECT task_status FROM memories WHERE memory_id = 'needs-owner'`).Scan(&status))
+	require.Equal(t, string(memory.TaskStatusPlanned), status)
 }
 
 func TestAssignTaskAndNotify_IdempotentAndVersioned(t *testing.T) {
@@ -245,6 +303,8 @@ func TestFreshLifecycleClaimReplacesPriorPickupEvidence(t *testing.T) {
 	insertOpenTask(t, s, "fresh-lifecycle", "codex")
 	insertActiveTestAgent(t, s, "agent-a", "codex")
 	insertActiveTestAgent(t, s, "agent-b", "claude-code")
+	_, err := s.AssignTaskAndNotify(ctx, "fresh-lifecycle", "agent-a")
+	require.NoError(t, err)
 	claimed, err := s.ClaimTask(ctx, "fresh-lifecycle", "agent-a")
 	require.NoError(t, err)
 	require.True(t, claimed)
