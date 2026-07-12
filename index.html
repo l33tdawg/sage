@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.7.3</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.7.5</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1186,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.7.3</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.7.3 enforces exact memory-domain and task-owner boundaries, repairs ownerless running work, and keeps large Settings pages efficient. Existing chains replay byte-identically.</p>
+        <h3>What's new in <span id="whats-new-version">v11.7.5</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.7.5 keeps contextual help readable at every CEREBRUM panel boundary, building on v11.7.4's provider-safe Smart Memory, direct embedding controls, and one-tab launch behavior. Existing chains replay byte-identically.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Exact project recall</h4><p>Per-turn recall now stays inside the requested domain, preventing memories from another repository from silently re-anchoring an agent's context.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Exact task ownership</h4><p>Agent backlogs return only work explicitly assigned to that verified agent ID. Unassigned tasks remain human triage and cannot be self-claimed.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Safe task lifecycle</h4><p>Agent-created tasks are owned by their creator, every In Progress task requires an owner, and historical ownerless running work returns to Planned.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Efficient Settings</h4><p>Background polling pauses off-screen, duplicate full-store scans are gone, and failed RBAC saves remain clearly retryable.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Boundary-aware help</h4><p>Tooltips now account for the nearest scroll-clipping panel as well as the viewport, flipping below top edges instead of hiding behind fixed chrome.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Provider-safe vectors</h4><p>The node regenerates and stamps vectors in the selected embedding space, preventing Ollama and hash embeddings from being compared or mixed.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Direct memory controls</h4><p>Settings exposes Ollama or hash embeddings plus an independent reranker switch, and the status strip reports the active reranker state.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>One CEREBRUM tab</h4><p>The macOS dock app focuses an existing localhost CEREBRUM tab before opening a new one, with bounded automation and a safe fallback.</p></div></div>
         </div>
       </div>
 
@@ -1466,7 +1466,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.7.3"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.7.5"</span></div>
         </div>
       </div>
 
