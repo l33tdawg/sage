@@ -176,6 +176,42 @@ func (m *Manager) authorizeSyncPolicyDomains(domains []string) error {
 	return nil
 }
 
+// authorizeOwnerUnilateralDomain is the anti-hijack authority check for an
+// OWNER-UNILATERAL domain emit (docs §8): adding/removing MY domain to/from MY
+// scope is locally effective and needs no controller quorum, but the local
+// operator MUST have authority over the domain. Mirrors authorizeSyncPolicyDomains'
+// admin-or-owner rule (an admin, or IsDomainOwnerOrAncestor over the NEW tag), and
+// — like that check's anti-hijack rule over both new and stored scope — ALSO
+// asserts authority over the STORED scope when requireStoredOwner: the group must
+// already record THIS node as the domain's owner_chain_id, so a re-add / remove can
+// never retarget a domain another member owns in the group. gs is the current
+// group projection (its domainOwner map carries the stored owner_chain_id).
+func (m *Manager) authorizeOwnerUnilateralDomain(tag string, requireStoredOwner bool, gs *groupApplyState) error {
+	if tag == "" {
+		return fmt.Errorf("domain tag is required")
+	}
+	if m.badger == nil {
+		return fmt.Errorf("domain authorization store is unavailable")
+	}
+	if requireStoredOwner {
+		if gs == nil {
+			return fmt.Errorf("stored-owner authorization requires group state")
+		}
+		if owner, ok := gs.domainOwner[tag]; !ok || owner != m.localChainID {
+			return fmt.Errorf("local node is not the recorded owner of domain %q in this group", tag)
+		}
+	}
+	agentID := hex.EncodeToString(m.agentPub)
+	if rec, err := m.badger.GetRegisteredAgent(agentID); err == nil && rec != nil && rec.Role == "admin" {
+		return nil
+	}
+	owns, err := m.badger.IsDomainOwnerOrAncestor(tag, agentID)
+	if err != nil || !owns {
+		return fmt.Errorf("local operator is not admin or owner of domain %q", tag)
+	}
+	return nil
+}
+
 func (m *Manager) deliverSyncPolicy(ctx context.Context, ss *store.SQLiteStore, remoteChainID string) error {
 	control, err := ss.GetSyncControl(ctx, remoteChainID)
 	if err != nil || control == nil || control.Role != "host" || control.Revision <= control.DeliveredRevision {

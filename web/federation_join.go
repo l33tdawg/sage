@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -96,6 +97,18 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/federation/join/guest/request", h.handleFedGuestRequest)
 	r.Get("/v1/dashboard/federation/join/guest/{session_id}/status", h.handleFedGuestStatus)
 	r.Post("/v1/dashboard/federation/join/guest/confirm", h.handleFedGuestConfirm)
+
+	// v11.8 sync-group management (INT1): the local operator's authoring surface
+	// over the group-journal EMIT layer. Split by the §8 authorization model —
+	// owner-unilateral (domain add/remove on MY scope, MY own role) and
+	// controller-affecting (roster control). Everything is OFF-consensus and
+	// locally authored; the emit self-check refuses an entry whose resolver-pinned
+	// key is not this node's, so a caller can never author for another owner.
+	r.Get("/v1/dashboard/federation/groups", h.handleFedGroupList)
+	r.Post("/v1/dashboard/federation/groups/{group_id}/domains", h.handleFedGroupDomainAdd)
+	r.Post("/v1/dashboard/federation/groups/{group_id}/domains/remove", h.handleFedGroupDomainRemove)
+	r.Post("/v1/dashboard/federation/groups/{group_id}/self-role", h.handleFedGroupSelfRole)
+	r.Post("/v1/dashboard/federation/groups/{group_id}/roster", h.handleFedGroupRosterControl)
 }
 
 // --- LAN endpoint suggestion (fix the localhost-in-join-code footgun) -------
@@ -834,4 +847,253 @@ func (h *DashboardHandler) handleFedGuestConfirm(w http.ResponseWriter, r *http.
 		return
 	}
 	fedWriteJSON(w, http.StatusOK, map[string]string{"session_id": body.SessionID, "status": "active", "tx_hash": txHash})
+}
+
+// --- v11.8 sync-group management (INT1) -------------------------------------
+
+// groupManagementDriver is the slice of the federation Manager that AUTHORS
+// v11.8 group-journal entries. It is reached by a type assertion on h.Federation
+// (the same optional-capability idiom as hostSyncPolicyDriver / NudgeSync) so the
+// core FederationJoinDriver interface stays unchanged; the concrete *Manager wired
+// by SetFederation always satisfies it. Every method is OFF-consensus (journal +
+// SQLite overlay only) and locally operator-authored — the emit self-check in the
+// federation layer refuses an entry whose resolver-pinned key is not this node's,
+// so a REST caller can never author on behalf of another owner or controller, and
+// none of this routes into the consensus WRITE gate (write-never-widens).
+type groupManagementDriver interface {
+	EmitDomainAdd(ctx context.Context, groupID, domainTag string, maxClearance int) (store.SyncGroupLogEntry, error)
+	EmitDomainRemove(ctx context.Context, groupID, domainTag string) (store.SyncGroupLogEntry, error)
+	EmitSelfRoleChange(ctx context.Context, groupID, role string, selectedDomains []string) (store.SyncGroupLogEntry, error)
+	EmitRosterControl(ctx context.Context, groupID, entryType string, payload map[string]string) (store.SyncGroupLogEntry, error)
+}
+
+// groupDriver resolves the emit surface after the fedReady guard, or writes the
+// canonical 501/not-implemented envelope and returns false.
+func (h *DashboardHandler) groupDriver(w http.ResponseWriter) (groupManagementDriver, bool) {
+	if !h.fedReady(w) {
+		return nil, false
+	}
+	d, ok := h.Federation.(groupManagementDriver)
+	if !ok {
+		fedWriteErr(w, http.StatusNotImplemented, "Sync-group management is unavailable on this node.")
+		return nil, false
+	}
+	return d, true
+}
+
+// groupEmitResult is the compact receipt for an authored journal entry (NEVER any
+// memory content — the payload is roster/domain metadata only).
+func groupEmitResult(e store.SyncGroupLogEntry) map[string]any {
+	return map[string]any{
+		"group_id":   e.GroupID,
+		"subchain":   e.Subchain,
+		"seq":        e.Seq,
+		"entry_type": e.EntryType,
+		"entry_hash": e.EntryHash,
+	}
+}
+
+// handleFedGroupList enumerates the local node's sync groups with their roster and
+// active owner-signed shared domains — the operator's read view of the group plane.
+func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	ss := h.syncStore()
+	if ss == nil {
+		fedWriteErr(w, http.StatusNotImplemented, "Sync-group management requires the SQLite store backend.")
+		return
+	}
+	ctx := r.Context()
+	groups, err := ss.ListSyncGroups(ctx)
+	if err != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Failed to list sync groups.")
+		return
+	}
+	local := h.Federation.LocalChainID()
+	type memberView struct {
+		ChainID string `json:"chain_id"`
+		Role    string `json:"role"`
+		State   string `json:"state"`
+	}
+	type domainView struct {
+		DomainTag    string `json:"domain_tag"`
+		OwnerChainID string `json:"owner_chain_id"`
+		MaxClearance int    `json:"max_clearance"`
+	}
+	type groupView struct {
+		GroupID       string       `json:"group_id"`
+		DisplayName   string       `json:"display_name,omitempty"`
+		Controller    string       `json:"controller_chain_id"`
+		Epoch         string       `json:"epoch"`
+		IsController  bool         `json:"is_controller"`
+		LocalRole     string       `json:"local_role,omitempty"`
+		Members       []memberView `json:"members"`
+		SharedDomains []domainView `json:"shared_domains"`
+	}
+	out := make([]groupView, 0, len(groups))
+	for i := range groups {
+		g := groups[i]
+		gv := groupView{
+			GroupID: g.GroupID, DisplayName: g.DisplayName,
+			Controller: g.ControllerChainID, Epoch: g.Epoch,
+			IsController:  g.ControllerChainID == local,
+			Members:       []memberView{},
+			SharedDomains: []domainView{},
+		}
+		members, mErr := ss.ListSyncGroupMembers(ctx, g.GroupID)
+		if mErr != nil {
+			fedWriteErr(w, http.StatusInternalServerError, "Failed to read group members.")
+			return
+		}
+		for _, mem := range members {
+			gv.Members = append(gv.Members, memberView{ChainID: mem.MemberChainID, Role: mem.Role, State: mem.MemberState})
+			if mem.MemberChainID == local {
+				gv.LocalRole = mem.Role
+			}
+		}
+		domains, dErr := ss.ListSyncGroupDomains(ctx, g.GroupID, true)
+		if dErr != nil {
+			fedWriteErr(w, http.StatusInternalServerError, "Failed to read group domains.")
+			return
+		}
+		for _, d := range domains {
+			gv.SharedDomains = append(gv.SharedDomains, domainView{
+				DomainTag: d.DomainTag, OwnerChainID: d.OwnerChainID, MaxClearance: d.MaxClearance,
+			})
+		}
+		out = append(out, gv)
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{"local_chain_id": local, "groups": out})
+}
+
+// handleFedGroupDomainAdd authors an owner-unilateral domain_add (EmitDomainAdd):
+// the local node must be an active member AND the on-chain owner/admin of the tag.
+func (h *DashboardHandler) handleFedGroupDomainAdd(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w)
+	if !ok {
+		return
+	}
+	groupID := chi.URLParam(r, "group_id")
+	var body struct {
+		DomainTag    string `json:"domain_tag"`
+		MaxClearance int    `json:"max_clearance"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected {\"domain_tag\": \"...\", \"max_clearance\": 0-4}.")
+		return
+	}
+	if strings.TrimSpace(body.DomainTag) == "" {
+		fedWriteErr(w, http.StatusBadRequest, "domain_tag is required.")
+		return
+	}
+	if body.MaxClearance < 0 || body.MaxClearance > 4 {
+		fedWriteErr(w, http.StatusBadRequest, "max_clearance must be 0..4.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	entry, err := d.EmitDomainAdd(ctx, groupID, body.DomainTag, body.MaxClearance)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, groupEmitResult(entry))
+}
+
+// handleFedGroupDomainRemove authors an owner-unilateral domain_remove
+// (EmitDomainRemove): the group must already record THIS node as the tag's owner.
+func (h *DashboardHandler) handleFedGroupDomainRemove(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w)
+	if !ok {
+		return
+	}
+	groupID := chi.URLParam(r, "group_id")
+	var body struct {
+		DomainTag string `json:"domain_tag"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected {\"domain_tag\": \"...\"}.")
+		return
+	}
+	if strings.TrimSpace(body.DomainTag) == "" {
+		fedWriteErr(w, http.StatusBadRequest, "domain_tag is required.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	entry, err := d.EmitDomainRemove(ctx, groupID, body.DomainTag)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, groupEmitResult(entry))
+}
+
+// handleFedGroupSelfRole authors the local member's OWN role_change
+// (EmitSelfRoleChange), optionally carrying the selective-sync consent subset. It
+// only ever changes THIS node's role; a controller changing ANOTHER member's role
+// goes through the roster-control surface below.
+func (h *DashboardHandler) handleFedGroupSelfRole(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w)
+	if !ok {
+		return
+	}
+	groupID := chi.URLParam(r, "group_id")
+	var body struct {
+		Role            string   `json:"role"`
+		SelectedDomains []string `json:"selected_domains"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected {\"role\": \"...\", \"selected_domains\": [...]}.")
+		return
+	}
+	switch body.Role {
+	case store.GroupRoleFullSync, store.GroupRoleSelectiveSync, store.GroupRoleEnrolledNoSync:
+	default:
+		fedWriteErr(w, http.StatusBadRequest, "role must be full-sync, selective-sync, or enrolled-no-sync.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	entry, err := d.EmitSelfRoleChange(ctx, groupID, body.Role, body.SelectedDomains)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, groupEmitResult(entry))
+}
+
+// handleFedGroupRosterControl authors a controller-affecting roster entry
+// (EmitRosterControl): group_create, member_invite/activate, member_remove(other),
+// role_change(other), epoch_rotate, manifest. Gated by authorizeControllerAffecting
+// (local == controller; a passed tx-24/25 governance proposal on multi-validator).
+// The emitter validates the entry_type and authority, so the operator supplies the
+// already-built payload (member/role/epoch fields as the journal apply expects).
+func (h *DashboardHandler) handleFedGroupRosterControl(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w)
+	if !ok {
+		return
+	}
+	groupID := chi.URLParam(r, "group_id")
+	var body struct {
+		EntryType string            `json:"entry_type"`
+		Payload   map[string]string `json:"payload"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected {\"entry_type\": \"...\", \"payload\": {...}}.")
+		return
+	}
+	if strings.TrimSpace(body.EntryType) == "" {
+		fedWriteErr(w, http.StatusBadRequest, "entry_type is required.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	entry, err := d.EmitRosterControl(ctx, groupID, body.EntryType, body.Payload)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, groupEmitResult(entry))
 }

@@ -121,6 +121,18 @@ type Manager struct {
 	// pull/verify/ingest logic is testable without a live TLS peer.
 	syncJournalFn func(ctx context.Context, remoteChainID string, req *SyncJournalRequest) (*SyncJournalResponse, error)
 
+	// controllerGovGate is the v11.8 §8 multi-validator authorization seam for a
+	// CONTROLLER-AFFECTING emit (create/dissolve group, add a domain to the shared
+	// set, remove/role-change ANOTHER member). On a single-validator personal node
+	// the controller commits directly (validatorCount()<=1) and this is never
+	// consulted; on a multi-validator deployment a controller-affecting change
+	// SHOULD additionally carry a passed tx-24/25 GovPropose/Vote (NOT tx-30
+	// DomainReassign). It returns whether such a passage authorizes the change for
+	// groupID. nil (production default today) => fail-closed on multi-validator:
+	// authorizeControllerAffecting refuses rather than silently committing a
+	// group-affecting change without the quorum §8 requires. Tests inject it.
+	controllerGovGate func(ctx context.Context, groupID string) (bool, error)
+
 	// syncStatusMu guards syncReconcile — per-peer anti-entropy bookkeeping
 	// (last run, the peer's advertised consent, unsupported flag) surfaced by
 	// the sync status endpoint. Node-local observability only.

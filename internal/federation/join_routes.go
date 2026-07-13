@@ -492,6 +492,14 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	if hooks.End != nil {
 		hooks.End(sessionID)
 	}
+	// Best-effort seed the host-controlled 2-of-2 enrollment group (docs §8, I11):
+	// establishes the roster the domain-owner co-sign ceremony + anti-entropy build
+	// on. Additive and non-fatal — a seed failure never affects the now-active
+	// agreement (mirrors rememberPeerName). No domains are shared until an explicit
+	// EmitDomainAdd, so an empty enrollment group has no sync effect.
+	if _, sgErr := m.seedEnrollmentGroup(context.Background(), ctx.GuestChain, ctx.GuestAgentID, epoch); sgErr != nil {
+		m.logger.Debug().Err(sgErr).Str("guest", ctx.GuestChain).Msg("could not seed enrollment sync group (non-fatal)")
+	}
 	m.rememberPeerName(ctx.GuestChain, ctx.GuestName)
 	m.logger.Info().Str("guest", ctx.GuestChain).Str("tx", txHash).Msg("federation join activated (host side)")
 	return txHash, m.localChainID, nil

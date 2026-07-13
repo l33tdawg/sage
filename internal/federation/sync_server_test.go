@@ -427,6 +427,56 @@ func TestSyncPushNonceRaceRetriesOnce(t *testing.T) {
 	assert.EqualValues(t, 2, comet.calls.Load(), "one nonce retry with a fresh tx")
 }
 
+// TestT2fWriteNeverWidens is T2(f): the WRITE-never-widens end-to-end invariant
+// (docs/v11.8-PLAN.md §8, plan T2(f)). A synced item is admitted ONLY by the
+// receiver's OWN operator-signed MemorySubmit (buildSyncSubmitTx), which
+// FinalizeBlock re-validates. When the receiver's operator has NO write access to
+// the item's (non-owned) domain, the chain returns the SAME Code 11 "no write
+// access to domain" it always has (app.go processMemorySubmit write gate, level-2
+// HasWriteAccessMultiOrg), the sync layer surfaces it as
+// SyncOutcomeRejectedWriteAccess, and NOTHING is persisted or recorded. The
+// off-consensus app-v19 default-READ flip (web/handler.go) never opens a write
+// path: no emit, widened getter, or read-default touches this gate. Hermetic — a
+// scripted CometBFT stands in for FinalizeBlock (no real node, no make down-clean).
+func TestT2fWriteNeverWidens(t *testing.T) {
+	ctx := context.Background()
+	// FinalizeBlock rejects the operator's MemorySubmit for lack of RBAC write
+	// access on the receiver — the unchanged Code 11 write gate. The Log text is
+	// the exact literal classifySyncBroadcast keys on (pinned by
+	// TestClassifySyncBroadcast against internal/abci/app.go).
+	comet := &scriptedComet{responses: []string{cometReject(11, "access denied: agent 0123456789abcdef has no write access to domain hr")}}
+	m, ms := newSyncTestManager(t, comet)
+	peer := testPeer(2, "hr")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
+
+	item := syncItem("m-nowrite", "hr", "receiver operator lacks write access to hr")
+	_, resp := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{item}})
+	require.NotNil(t, resp)
+	require.Len(t, resp.Results, 1)
+	// A no-write-access reject is surfaced as its own terminal outcome — never
+	// admitted, never silently widened into a local write despite any read-side flip.
+	assert.Equal(t, SyncOutcomeRejectedWriteAccess, resp.Results[0].Outcome)
+	assert.Empty(t, resp.Results[0].LocalMemoryID, "a write-gated item never lands a local copy")
+
+	// Nothing durable: no admission ledger row (a config-dependent reject must stay
+	// re-evaluable, never poison a later legitimate push) and no synced copy landed.
+	_, err := ms.GetSyncOrigin(ctx, "chain-b", "m-nowrite")
+	assert.ErrorIs(t, err, sql.ErrNoRows, "a write-gated item is never recorded as admitted")
+	localID := syncMemoryID("chain-b", "m-nowrite")
+	isCopy, err := ms.IsSyncedCopy(ctx, localID)
+	require.NoError(t, err)
+	assert.False(t, isCopy, "a write-gated item is never persisted as a synced copy")
+
+	// The receiver's own operator-signed submit is required on EVERY attempt: a
+	// redelivery re-runs the write gate through a fresh broadcast rather than
+	// replaying a cached admission, so the sync path can never bypass the gate.
+	broadcastsAfterFirst := comet.calls.Load()
+	_, resp2 := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{item}})
+	require.NotNil(t, resp2)
+	assert.Equal(t, SyncOutcomeRejectedWriteAccess, resp2.Results[0].Outcome)
+	assert.Greater(t, comet.calls.Load(), broadcastsAfterFirst, "each attempt re-submits through the write gate; the reject is never cached as an admission")
+}
+
 func TestClassifySyncBroadcast(t *testing.T) {
 	// Pins the Log-text soft contract with internal/abci/app.go. If a wording
 	// change over there breaks these, update BOTH sides deliberately.

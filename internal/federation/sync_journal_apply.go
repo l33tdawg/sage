@@ -44,6 +44,14 @@ const (
 	pkControllerPubkey = "controller_pubkey"
 	pkRosterRevision   = "roster_revision"
 	pkManifestHash     = "manifest_hash"
+	// pkSelectedDomains rides on a SELF-authored role_change to selective-sync: the
+	// JSON-encoded subset of the ALREADY-SHARED group domains this member consents to
+	// receive (docs §8, decision #4). It is the v11.8 consent-subset transport, so no
+	// new entry_type / sync_group_log CHECK-constraint migration is needed. The apply
+	// layer captures it into the per-(group,member,domain) consent table (fold-in F1);
+	// resolve() only widens WHO may author the role_change (the member itself), never
+	// what it grants — consent is read/serve-only and never a write-authz vehicle.
+	pkSelectedDomains = "selected_domains"
 )
 
 // syncJournalMaxRevisionJump bounds how far a single manifest may advance
@@ -81,6 +89,21 @@ func parseJournalPayload(payloadJSON string) map[string]string {
 		_ = json.Unmarshal([]byte(payloadJSON), &m)
 	}
 	return m
+}
+
+// decodeSelectedDomains parses the JSON-array consent subset that encodeSelectedDomains
+// (sync_emit.go) puts on a self-authored role_change payload (pkSelectedDomains). A
+// missing/malformed value decodes to nil — the fold-in then clears the member's consent
+// set (fail-closed under-serve), never a hard error that would wedge the sub-chain.
+func decodeSelectedDomains(enc string) []string {
+	if enc == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(enc), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // ---- groupApplyState: the growing roster view + canonical resolver ----
@@ -161,6 +184,19 @@ func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey 
 				return nil // only an active member may leave; an evicted one cannot author
 			}
 			return gs.memberKey[e.AuthorChainID]
+		}
+		// SELF role_change (owner-unilateral, docs §8): an ACTIVE member may change
+		// its OWN role — and carry its selective-sync consent subset (pkSelectedDomains)
+		// — without the controller. STRICTLY scoped: author == payload member AND the
+		// author is an active member. Placed BEFORE the controller branch so a
+		// role_change(other) (author != subject) still falls through to the
+		// controller-authored path — a member can NEVER forge another member's
+		// role_change (a foreign author fails both this self-gate and the controller gate).
+		if e.EntryType == "role_change" {
+			p := parseJournalPayload(e.PayloadJSON)
+			if e.AuthorChainID == p[pkMemberChain] && gs.memberActive(e.AuthorChainID) {
+				return gs.memberKey[e.AuthorChainID]
+			}
 		}
 		if rosterControllerTypes[e.EntryType] && e.AuthorChainID == gs.controllerChain {
 			return gs.controllerKey
@@ -264,7 +300,21 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		if _, known := gs.memberKey[mc]; !known || !validRole(p[pkRole]) {
 			return nil // SKIP: unknown member or invalid role
 		}
-		return ss.SetSyncGroupMemberRole(ctx, gs.groupID, mc, p[pkRole])
+		if err := ss.SetSyncGroupMemberRole(ctx, gs.groupID, mc, p[pkRole]); err != nil {
+			return err
+		}
+		// Fold-in F1: capture the selective-sync consent subset that rides on the
+		// (self-authored, resolve()-gated) role_change via pkSelectedDomains. A move to
+		// selective-sync records the chosen subset; ANY other role clears the member's
+		// consent set (empty desired set stamps every active row removed) so a full-sync
+		// member is served the whole shared set via the role branch, never stale rows.
+		// ReplaceGroupMemberConsentDomains is revision-guarded, so replaying this entry
+		// is idempotent. Consent is READ/SERVE-ONLY — never a write-authz vehicle.
+		var selected []string
+		if p[pkRole] == store.GroupRoleSelectiveSync {
+			selected = decodeSelectedDomains(p[pkSelectedDomains])
+		}
+		return ss.ReplaceGroupMemberConsentDomains(ctx, gs.groupID, mc, selected, gs.rosterRevision)
 
 	case "domain_add":
 		tag, owner := p[pkDomainTag], p[pkOwnerChain]
@@ -313,6 +363,13 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 			DomainTag: tag, Reason: "domain_remove", Revision: gs.rosterRevision, Subchain: e.Subchain,
 			JournalSeq: e.Seq, AuthorChainID: e.AuthorChainID, AuthorSig: e.AuthorSig,
 		}); err != nil {
+			return err
+		}
+		// Fold-in F1: retire any selective-sync consent rows that referenced the removed
+		// domain (or a domain nested beneath it) so a stale consent row can never keep a
+		// removed tag serving. Monotonic + idempotent (removed_revision guard), so a
+		// journal replay re-stamps nothing.
+		if err := ss.StampGroupMemberConsentDomainRemoved(ctx, gs.groupID, tag, removedRev); err != nil {
 			return err
 		}
 		// D2: record the domain removal so the POST-BATCH hook fires the anchor

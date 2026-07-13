@@ -167,8 +167,17 @@ func (m *Manager) authorizeJournalSubchain(ctx context.Context, ss *store.SQLite
 			continue
 		}
 		if d.RemovedRevision == 0 {
-			// ACTIVE domain: any full-sync member or the owner may pull it.
-			return member.Role == store.GroupRoleFullSync || d.OwnerChainID == memberChainID, nil
+			// ACTIVE domain: any full-sync member or the owner may pull it; a
+			// selective-sync member may pull it ONLY if it holds an active consent row
+			// covering the tag (exact or an ancestor) — fold-in F2. A selective member
+			// with no covering consent row fails closed (under-serve, no metadata leak).
+			if member.Role == store.GroupRoleFullSync || d.OwnerChainID == memberChainID {
+				return true, nil
+			}
+			if member.Role == store.GroupRoleSelectiveSync {
+				return ss.MemberConsentsGroupDomain(ctx, groupID, memberChainID, tag)
+			}
+			return false, nil
 		}
 		// REMOVED domain: restrict to the OWNER only. A full-sync member who
 		// joined AFTER the removal (or was never a sharer) must NOT learn the
