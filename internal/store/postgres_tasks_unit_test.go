@@ -155,6 +155,8 @@ func TestPostgresEnsureMemoriesSchemaRepairsTaskStatusAndClassification(t *testi
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec(`UPDATE memories SET task_requires_handoff = TRUE`).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	mock.ExpectExec(`UPDATE memories SET assignee = CASE`).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec(`UPDATE memories SET task_status_updated_at = NOW\(\)`).
 		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
 	mock.ExpectExec(`UPDATE memories SET task_status = 'planned'`).

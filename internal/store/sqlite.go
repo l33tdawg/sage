@@ -966,6 +966,17 @@ func (s *SQLiteStore) migrateTaskAssignmentNotifications(ctx context.Context) er
 		WHERE memory_type = 'task' AND task_status IN ('done','dropped')`); err != nil {
 		return fmt.Errorf("backfill terminal task handoff gates: %w", err)
 	}
+	if _, err := s.writeExecContext(ctx, `
+		UPDATE memories SET assignee = CASE
+		  WHEN COALESCE(task_picked_up_by, '') != '' THEN task_picked_up_by
+		  WHEN EXISTS (SELECT 1 FROM network_agents a WHERE a.agent_id = memories.submitting_agent) THEN submitting_agent
+		  ELSE '' END
+		WHERE memory_type = 'task' AND task_status IN ('done','dropped')
+		  AND COALESCE(assignee, '') = ''
+		  AND (COALESCE(task_picked_up_by, '') != ''
+		       OR EXISTS (SELECT 1 FROM network_agents a WHERE a.agent_id = memories.submitting_agent))`); err != nil {
+		return fmt.Errorf("backfill terminal task attribution: %w", err)
+	}
 	// Workflow repair: in-progress without an owner is not actionable and can be
 	// mistaken for live assigned work. Return historical rows to human triage.
 	if _, err := s.writeExecContext(ctx, `
@@ -4003,24 +4014,29 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 	query := `UPDATE memories
 		SET task_requires_handoff = CASE
 		      WHEN task_status IN ('done','dropped') THEN 1 ELSE task_requires_handoff END,
+		    assignee = CASE WHEN task_status IN ('done','dropped') AND ? IN ('planned','in_progress')
+		      THEN '' ELSE assignee END,
 		    task_board_position = CASE WHEN task_status != ? THEN 0 ELSE task_board_position END,
 		    task_status_updated_at = CASE WHEN task_status != ?
 		      THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_status_updated_at END,
 		    task_status = ?
 		WHERE memory_id = ? AND memory_type = 'task'
-		  AND (? != 'in_progress' OR COALESCE(assignee, '') != '')`
-	args := []any{string(taskStatus), string(taskStatus), string(taskStatus), memoryID, string(taskStatus)}
+		  AND (? != 'in_progress' OR (task_status NOT IN ('done','dropped') AND COALESCE(assignee, '') != ''))`
+	args := []any{string(taskStatus), string(taskStatus), string(taskStatus), string(taskStatus), memoryID, string(taskStatus)}
 	if terminal {
-		// Terminal work has no current owner. Preserve task_picked_up_by/at as
-		// completion evidence, but clear assignee so a later reopen is visibly
-		// unassigned and must be handed off again to create a fresh notice.
+		// Keep the last assignee on terminal cards as durable attribution. A later
+		// reopen clears it in the non-terminal arm and requires a fresh handoff.
 		query = `UPDATE memories
 			SET task_status = ?,
 			    task_board_position = CASE WHEN task_status != ? THEN 0 ELSE task_board_position END,
 			    task_status_updated_at = CASE WHEN task_status != ?
 			      THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_status_updated_at END,
 			    task_assignment_version = task_assignment_version + CASE WHEN COALESCE(assignee, '') != '' THEN 1 ELSE 0 END,
-			    assignee = '', task_requires_handoff = 1
+			    assignee = CASE WHEN COALESCE(assignee, '') != '' THEN assignee
+			      WHEN COALESCE(task_picked_up_by, '') != '' THEN task_picked_up_by
+			      WHEN EXISTS (SELECT 1 FROM network_agents a WHERE a.agent_id = memories.submitting_agent) THEN submitting_agent
+			      ELSE '' END,
+			    task_requires_handoff = 1
 			WHERE memory_id = ? AND memory_type = 'task'`
 		args = []any{string(taskStatus), string(taskStatus), string(taskStatus), memoryID}
 	}
@@ -4406,8 +4422,8 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (
 }
 
 // CompleteTaskAsAgent atomically completes/drops an open task only for its
-// current active assignee. It clears current ownership, preserves pickup
-// evidence, advances the assignment generation, and retires unread notices in
+// current active assignee. It preserves that assignee as terminal attribution,
+// advances the assignment generation, and retires unread notices in
 // the same transaction.
 func (s *SQLiteStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agentID string, status memory.TaskStatus) (bool, error) {
 	if status != memory.TaskStatusDone && status != memory.TaskStatusDropped {
@@ -4427,7 +4443,7 @@ func (s *SQLiteStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agentID
 		 SET task_status = ?, task_assignment_version = task_assignment_version + 1,
 		     task_board_position = 0,
 		     task_status_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-		     assignee = '', task_requires_handoff = 1
+		     task_requires_handoff = 1
 		 WHERE memory_id = ? AND memory_type = 'task'
 		   AND task_status IN ('planned','in_progress') AND assignee = ?
 		   AND EXISTS (SELECT 1 FROM network_agents a

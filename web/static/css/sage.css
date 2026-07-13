@@ -4097,6 +4097,29 @@ input[type="range"]::-moz-range-thumb {
     justify-content: space-between;
     gap: 6px;
 }
+.kanban-card-attribution {
+    align-items: center;
+    background: var(--success-tint);
+    border: 1px solid rgba(var(--accent-rgb), 0.3);
+    border-radius: 6px;
+    color: var(--success);
+    display: flex;
+    font-size: 11px;
+    font-weight: 600;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 6px 8px;
+}
+.kanban-card-attribution.unknown {
+    background: var(--bg-deep);
+    border-color: var(--border);
+    color: var(--text-muted);
+}
+.kanban-card.status-dropped .kanban-card-attribution:not(.unknown) {
+    background: var(--danger-tint);
+    border-color: rgba(239, 68, 68, 0.3);
+    color: var(--danger);
+}
 .kanban-card-actions {
     display: flex;
     gap: 4px;

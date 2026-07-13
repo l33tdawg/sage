@@ -356,6 +356,16 @@ func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 			WHERE memory_type = 'task' AND task_status IN ('done','dropped')`); err != nil {
 			return fmt.Errorf("backfill terminal task handoff gates: %w", err)
 		}
+		if _, err := ps.db.Exec(ctx, `UPDATE memories SET assignee = CASE
+			  WHEN COALESCE(task_picked_up_by, '') != '' THEN task_picked_up_by
+			  WHEN EXISTS (SELECT 1 FROM agents a WHERE a.agent_id = memories.submitting_agent) THEN submitting_agent
+			  ELSE '' END
+			WHERE memory_type = 'task' AND task_status IN ('done','dropped')
+			  AND COALESCE(assignee, '') = ''
+			  AND (COALESCE(task_picked_up_by, '') != ''
+			       OR EXISTS (SELECT 1 FROM agents a WHERE a.agent_id = memories.submitting_agent))`); err != nil {
+			return fmt.Errorf("backfill terminal task attribution: %w", err)
+		}
 		if _, err := ps.db.Exec(ctx, `UPDATE memories SET task_status_updated_at = NOW()
 			WHERE memory_type = 'task' AND task_status IN ('done','dropped')
 			  AND task_status_updated_at IS NULL`); err != nil {
@@ -1722,16 +1732,21 @@ func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, t
 	}
 	query := `UPDATE memories SET
 		task_requires_handoff = CASE WHEN task_status IN ('done','dropped') THEN TRUE ELSE task_requires_handoff END,
+		assignee = CASE WHEN task_status IN ('done','dropped') AND $2 IN ('planned','in_progress') THEN '' ELSE assignee END,
 		task_board_position = CASE WHEN task_status != $2 THEN 0 ELSE task_board_position END,
 		task_status_updated_at = CASE WHEN task_status != $2 THEN NOW() ELSE task_status_updated_at END,
 		task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'
-		AND ($2 != 'in_progress' OR COALESCE(assignee, '') != '')`
+		AND ($2 != 'in_progress' OR (task_status NOT IN ('done','dropped') AND COALESCE(assignee, '') != ''))`
 	if terminal {
 		query = `UPDATE memories SET task_status = $2,
 			task_board_position = CASE WHEN task_status != $2 THEN 0 ELSE task_board_position END,
 			task_status_updated_at = CASE WHEN task_status != $2 THEN NOW() ELSE task_status_updated_at END,
 			task_assignment_version = task_assignment_version + CASE WHEN COALESCE(assignee, '') != '' THEN 1 ELSE 0 END,
-			assignee = '', task_requires_handoff = TRUE
+			assignee = CASE WHEN COALESCE(assignee, '') != '' THEN assignee
+			  WHEN COALESCE(task_picked_up_by, '') != '' THEN task_picked_up_by
+			  WHEN EXISTS (SELECT 1 FROM agents a WHERE a.agent_id = memories.submitting_agent) THEN submitting_agent
+			  ELSE '' END,
+			task_requires_handoff = TRUE
 			WHERE memory_id = $1 AND memory_type = 'task'`
 	}
 	result, err := s.db.Exec(ctx, query, memoryID, string(taskStatus))
@@ -1853,7 +1868,7 @@ func (s *PostgresStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agent
 		task_board_position = 0,
 		task_status_updated_at = NOW(),
 		task_assignment_version = task_assignment_version + 1,
-		assignee = '', task_requires_handoff = TRUE
+		task_requires_handoff = TRUE
 		FROM agents a
 		WHERE m.memory_id = $1 AND m.memory_type = 'task'
 		  AND m.task_status IN ('planned','in_progress') AND m.assignee = $2

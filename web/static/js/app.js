@@ -2595,7 +2595,14 @@ function TasksPage({ sse }) {
                                                 : html`<span title="Created from the dashboard" style="font-size:10px;color:var(--primary);">You</span>`}
                                             <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">${timeAgo(task.created_at)}</span>
                                         </div>
-                                        ${agentList.length > 0 && html`
+										${(task.task_status === 'done' || task.task_status === 'dropped') ? html`
+											<div class="kanban-card-attribution ${task.assignee || task.task_picked_up_by ? '' : 'unknown'}">
+												<span aria-hidden="true">${task.task_status === 'done' ? '✓' : '✕'}</span>
+												<span>${task.assignee || task.task_picked_up_by
+													? `${task.task_status === 'done' ? 'Completed' : 'Dropped'} by ${agentName(task.assignee || task.task_picked_up_by)}`
+													: 'No assignee was recorded'}</span>
+											</div>
+										` : agentList.length > 0 && html`
                                             <div class="kanban-card-assign" style="margin-top:6px;display:flex;align-items:center;gap:4px;">
                                                 <span style="font-size:10px;color:var(--text-muted);">${task.assignee ? '👤' : 'Assign:'}</span>
                                                 <select style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:4px;"
