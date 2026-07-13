@@ -226,6 +226,19 @@ type DashboardHandler struct {
 	// AppV18ActiveFn reports whether the next committed tx executes under the
 	// app-v18 global-admin domain-access override rules.
 	AppV18ActiveFn func() bool
+	// AppV19ActiveFn reports whether the app-v19 fork has activated (>= the
+	// activation height). app-v19 is behavior-empty on the consensus path; its
+	// sole effect is the OFF-consensus local-agents-default-READ flip below: once
+	// active (and StrictRBAC is off), a non-admin agent may READ the operator's
+	// UNCLASSIFIED domains it is not explicitly granted, instead of the fail-closed
+	// deny. Nil (unwired) or false leaves the pre-fork explicit-allowlist behavior,
+	// so a chain that has not activated app-v19 reads exactly as before.
+	AppV19ActiveFn func() bool
+	// StrictRBAC, when true, opts the operator out of the app-v19 default-read
+	// flip: even with app-v19 active, a non-admin agent is confined to its explicit
+	// DomainAccess allowlist. Sourced from cfg.RBAC.Strict; default false = local
+	// agents default-READ the operator's unclassified domains once app-v19 activates.
+	StrictRBAC bool
 	// SetNetworkMode persists the network-mode flag to config.yaml (the node
 	// then re-binds P2P to the LAN on the next restart). Wired in cmd/sage-gui.
 	SetNetworkMode func(enabled bool) error
@@ -2173,6 +2186,18 @@ func (h *DashboardHandler) agentDomainReadDecision(ctx context.Context, agentID,
 			if entry.Domain == domain {
 				return entry.Read, true
 			}
+		}
+		// app-v19 local-agents-default-READ: once the fork has activated and the
+		// operator has not opted into strict RBAC, a non-admin agent whose explicit
+		// allowlist simply OMITS this domain reads it by default instead of the
+		// fail-closed deny. An explicit `read:false` entry above is still honored
+		// (deliberate deny). This is the domain-level gate only; per-memory
+		// classification stays enforced one layer up in agentTaskReadDecision via
+		// HasAccessMultiOrg, so a classified memory in a defaulted-readable domain
+		// is still gated by clearance. Pre-fork / StrictRBAC keeps the deny below,
+		// so a chain that has not activated app-v19 reads exactly as before.
+		if h.AppV19ActiveFn != nil && h.AppV19ActiveFn() && !h.StrictRBAC {
+			return true, true
 		}
 		return false, true
 	}

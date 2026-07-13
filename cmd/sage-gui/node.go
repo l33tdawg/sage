@@ -788,6 +788,8 @@ func runServe() (rerr error) {
 	dashboard.QuorumEnabled = cfg.Quorum.Enabled
 	dashboard.ValidatorCountFn = app.ValidatorCount // authoritative single-validator check for agent ops
 	dashboard.AppV18ActiveFn = app.IsAppV18ActiveForNextTx
+	dashboard.AppV19ActiveFn = app.IsAppV19ActiveForNextTx // app-v19: local-agents-default-READ flip (off-consensus)
+	dashboard.StrictRBAC = cfg.RBAC.Strict                 // opt-out of the app-v19 default-read flip
 	// Embeddings setup: flip the config to the bundled Ollama + nomic-embed-text
 	// provider (the node re-reads it on restart). The embedder is locked to this.
 	dashboard.SetEmbeddingProvider = func(provider string) error {

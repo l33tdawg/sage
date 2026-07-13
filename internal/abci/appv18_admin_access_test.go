@@ -37,7 +37,7 @@ func TestAppV18ForkGateAndVersionLockstep(t *testing.T) {
 	assert.True(t, app.postAppV17Rules(11), "v18 subsumes lower additive rules")
 	assert.Equal(t, uint64(18), app.currentAppVersion())
 	assert.Equal(t, tx.CanonicalUpgradeName(18), appV18UpgradeName)
-	assert.Equal(t, uint64(18), MaxSupportedAppVersion())
+	assert.Equal(t, uint64(19), MaxSupportedAppVersion())
 	app.state.Height = 10
 	assert.True(t, app.IsAppV17ActiveForNextTx(), "v18 skip-ahead must enable v17 REST/CheckTx construction")
 
