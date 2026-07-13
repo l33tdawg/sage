@@ -131,12 +131,6 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// tokenIdentityRegisterWait bounds how long MCP token issuance blocks on the
-// on-chain registration of a freshly-minted per-token identity. A slow block
-// must not hang the issuing REST call, so past this the token is returned and a
-// background retry finishes the registration (autoRegister precedent).
-const tokenIdentityRegisterWait = 8 * time.Second
-
 // registerMintedAgentIdentity registers a freshly-minted per-token ed25519
 // identity on-chain by issuing a STANDARD TxTypeAgentRegister — identical in
 // shape to the one /v1/agent/register builds — with the agent proof signed by
@@ -146,7 +140,7 @@ const tokenIdentityRegisterWait = 8 * time.Second
 // old-binary replay stays byte-identical. Key generation happens OFF-consensus
 // in the caller; FinalizeBlock only re-verifies the embedded proof, never
 // generates a key.
-func (s *Server) registerMintedAgentIdentity(tokenPub ed25519.PublicKey, tokenPriv ed25519.PrivateKey, name, provider string) (string, int64, error) {
+func (s *Server) registerMintedAgentIdentity(ctx context.Context, tokenPub ed25519.PublicKey, tokenPriv ed25519.PrivateKey, name, provider string) (string, int64, error) {
 	agentID := hex.EncodeToString(tokenPub)
 	if name == "" {
 		name = "mcp-token-" + agentID[:8]
@@ -209,34 +203,7 @@ func (s *Server) registerMintedAgentIdentity(tokenPub ed25519.PublicKey, tokenPr
 	if err != nil {
 		return "", 0, fmt.Errorf("encode register tx: %w", err)
 	}
-	return s.broadcastTxCommitWithHeight(encoded)
-}
-
-// retryRegisterMintedIdentity finishes a token identity registration in the
-// background after the synchronous window elapsed or a transient failure. Each
-// attempt rebuilds a FRESH proof (new timestamp/nonce → new single-use app-v17
-// delegated-proof fingerprint) so a retry never collides with the proof-replay
-// gate, and processAgentRegister is idempotent if the first attempt actually
-// landed. Stops on success or a definitive rejection.
-func (s *Server) retryRegisterMintedIdentity(tokenPub ed25519.PublicKey, tokenPriv ed25519.PrivateKey, name, provider string) {
-	go func() {
-		shortID := hex.EncodeToString(tokenPub)
-		if len(shortID) > 16 {
-			shortID = shortID[:16]
-		}
-		for _, delay := range []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second} {
-			time.Sleep(delay)
-			if _, _, err := s.registerMintedAgentIdentity(tokenPub, tokenPriv, name, provider); err == nil {
-				s.logger.Info().Str("agent_id", shortID).Msg("mcp token identity registered on-chain (background retry)")
-				return
-			} else if isDefinitiveRegisterRejection(err) {
-				s.logger.Error().Err(err).Str("agent_id", shortID).
-					Msg("mcp token identity registration definitively rejected; keyed calls fail-closed until re-registered")
-				return
-			}
-		}
-		s.logger.Warn().Str("agent_id", shortID).Msg("mcp token identity registration still pending after background retries")
-	}()
+	return s.broadcastTxCommitWithHeightContext(ctx, encoded)
 }
 
 // handleAgentUpdate handles PUT /v1/agent/update.

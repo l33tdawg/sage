@@ -277,6 +277,12 @@ func (m *Manager) handleSyncDigest(w http.ResponseWriter, r *http.Request) {
 // non-owner relayer refuses backfill for them (docs §9.2 must-fix #12).
 func (m *Manager) handleSyncDigestGroup(w http.ResponseWriter, r *http.Request, ss *store.SQLiteStore, peer *peerIdentity, req *SyncDigestRequest, limit int) {
 	ctx := r.Context()
+	// Group membership/domain projections are effective serve policy. Hold a
+	// read lease from the first authorization read through the completed response
+	// write. A removal/narrowing takes the write side, so once it returns no
+	// response can still be emitted from the stale snapshot.
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
 	// Precondition: the requester must actively share req.Domain in this group.
 	shares, err := ss.MemberSharesGroupDomain(ctx, req.GroupID, peer.ChainID, req.Domain)
 	if err != nil {

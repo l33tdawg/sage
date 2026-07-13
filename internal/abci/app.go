@@ -1016,14 +1016,15 @@ func (app *SageApp) postAppV19Rules(height int64) bool {
 // IsAppV17ActiveForNextTx is the REST-side transaction-construction accessor.
 // After FinalizeBlock(H_activation), state.Height and appV17AppliedHeight both
 // equal H_activation; a transaction broadcast then can first execute at H+1,
-// where the strict consensus gate is active. This intentionally uses >= while
-// postAppV17Fork uses >.
+// where the strict consensus gate is active. Evaluate the canonical rule
+// predicate at that next executable height rather than duplicating its fork
+// list here: skip-ahead activations (including app-v19 without app-v17/v18)
+// must construct exactly the envelope FinalizeBlock will require.
 func (app *SageApp) IsAppV17ActiveForNextTx() bool {
 	if app.state == nil {
 		return false
 	}
-	return (app.appV17AppliedHeight > 0 && app.state.Height >= app.appV17AppliedHeight) ||
-		(app.appV18AppliedHeight > 0 && app.state.Height >= app.appV18AppliedHeight)
+	return app.postAppV17Rules(app.state.Height + 1)
 }
 
 // IsAppV18ActiveForNextTx is the dashboard-side readiness accessor for an

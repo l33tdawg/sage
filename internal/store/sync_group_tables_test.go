@@ -353,10 +353,10 @@ func TestGroupStep6ReadModels(t *testing.T) {
 		t.Fatalf("GroupSharedDomains = %v, want [studio]", got)
 	}
 
-	// Relay authorization binds RECEIVER + relayer + origin to ONE group (must-fix #6):
-	// chain-c receives chain-b's relay of chain-a's origin in studio — all g1 members.
-	if gid, ok, _ := s.ResolveGroupRelay(ctx, "chain-c", "chain-b", "chain-a", "studio"); !ok || gid != "g1" {
-		t.Fatalf("ResolveGroupRelay = (%q,%v), want (g1,true)", gid, ok)
+	// Membership alone is not consent: selective chain-c has no consent row and
+	// therefore cannot receive a relay merely because it is on the roster.
+	if gid, ok, _ := s.ResolveGroupRelay(ctx, "chain-c", "chain-b", "chain-a", "studio"); ok {
+		t.Fatalf("ResolveGroupRelay = (%q,%v), want fail-closed no-consent denial", gid, ok)
 	}
 	// A non-member ORIGIN is denied.
 	if _, ok, _ := s.ResolveGroupRelay(ctx, "chain-c", "chain-b", "chain-z", "studio"); ok {

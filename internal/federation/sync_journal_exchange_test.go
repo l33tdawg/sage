@@ -9,14 +9,47 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
 
+// blockingResponseWriter pauses the handler at the final body write. It lets
+// concurrency tests prove that the sync-policy lease covers response emission,
+// not merely the authorization queries that preceded it.
+type blockingResponseWriter struct {
+	header  http.Header
+	status  int
+	body    bytes.Buffer
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingResponseWriter() *blockingResponseWriter {
+	return &blockingResponseWriter{
+		header: make(http.Header), entered: make(chan struct{}), release: make(chan struct{}),
+	}
+}
+
+func (w *blockingResponseWriter) Header() http.Header { return w.header }
+
+func (w *blockingResponseWriter) WriteHeader(status int) { w.status = status }
+
+func (w *blockingResponseWriter) Write(p []byte) (int, error) {
+	w.once.Do(func() { close(w.entered) })
+	<-w.release
+	return w.body.Write(p)
+}
+
 // journalAs drives handleSyncJournal with an injected authenticated peer.
 func journalAs(t *testing.T, m *Manager, peerChain string, req SyncJournalRequest) (*httptest.ResponseRecorder, *SyncJournalResponse) {
 	t.Helper()
+	if req.Version == 0 {
+		req.Version = JournalWireVersion
+	}
 	body, _ := json.Marshal(req)
 	httpReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/journal", bytes.NewReader(body))
 	httpReq = httpReq.WithContext(context.WithValue(httpReq.Context(), peerCtxKey{}, &peerIdentity{ChainID: peerChain}))
@@ -73,11 +106,11 @@ func TestJournalSubchainAuthorization(t *testing.T) {
 		}
 	}
 	check("chain-full", RosterSubchain, true)
-	check("chain-nonmember", RosterSubchain, false)   // not a member
-	check("chain-invited", RosterSubchain, false)      // not active
-	check("chain-full", DomainSubchain("eurorack"), true)      // full-sync sees all shared domains
-	check("chain-sel", DomainSubchain("eurorack"), false)      // selective non-owner: safe-default deny (no leak)
-	check("chain-owner", DomainSubchain("eurorack"), true)     // domain owner
+	check("chain-nonmember", RosterSubchain, false)              // not a member
+	check("chain-invited", RosterSubchain, false)                // not active
+	check("chain-full", DomainSubchain("eurorack"), true)        // full-sync sees all shared domains
+	check("chain-sel", DomainSubchain("eurorack"), false)        // selective non-owner: safe-default deny (no leak)
+	check("chain-owner", DomainSubchain("eurorack"), true)       // domain owner
 	check("chain-full", DomainSubchain("does-not-exist"), false) // not a group domain
 	check("chain-full", "bogus-subchain", false)                 // malformed subchain
 }
@@ -88,15 +121,15 @@ func TestPullGroupJournalIngest(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
-	memPub, _, _ := ed25519.GenerateKey(nil)
+	memPub, memKey, _ := ed25519.GenerateKey(nil)
 	// chain-peer is NOT pre-seeded — the pulled member_invite CREATES it (apply).
 
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
 	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
-		memberInvitePayload("chain-peer", hex.EncodeToString(memPub), store.GroupRoleFullSync, "pinP"))
+		signedMemberInvitePayload(t, "g1", "chain-peer", memPub, memKey, store.GroupRoleFullSync, "pinP"))
 	peerChain := []store.SyncGroupLogEntry{e0, e1}
 	m.syncJournalFn = func(_ context.Context, _ string, req *SyncJournalRequest) (*SyncJournalResponse, error) {
-		resp := &SyncJournalResponse{NextCursor: req.AfterSeq, RosterHead: e1.EntryHash}
+		resp := &SyncJournalResponse{Version: JournalWireVersion, NextCursor: req.AfterSeq, RosterHead: e1.EntryHash}
 		for _, e := range peerChain {
 			if e.Seq > req.AfterSeq {
 				resp.Entries = append(resp.Entries, storeToWire(e))
@@ -128,6 +161,114 @@ func TestPullGroupJournalIngest(t *testing.T) {
 	// Convergence tracking recorded the peer's head without disturbing last_acked.
 	if mem.LastSeenJournalHead != e1.EntryHash || mem.LastAckedRosterRevision != 0 {
 		t.Fatalf("convergence not tracked cleanly: %+v", mem)
+	}
+}
+
+func TestJournalEntryWirePreservesControllerApproval(t *testing.T) {
+	ctlPub, ctlKey, _ := ed25519.GenerateKey(nil)
+	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
+	e := mustEntry(t, "g1", DomainSubchain("hr"), 0, "", "domain_add", "chain-owner", ownerPub, ownerKey,
+		domainAddPayload("hr", "chain-owner", 0))
+	attachControllerSignature(&e, "epoch-7", "chain-ctl", ctlPub, ctlKey)
+
+	got := wireToStore("g1", storeToWire(e))
+	if got.ControllerEpoch != e.ControllerEpoch || got.ControllerChainID != e.ControllerChainID ||
+		got.ControllerAgentPubkey != e.ControllerAgentPubkey || got.ControllerSig != e.ControllerSig {
+		t.Fatalf("controller approval lost in wire round trip: got=%+v want=%+v", got, e)
+	}
+}
+
+func TestJournalWireV2RejectsLegacyRequestsAndDoesNotOmitApprovalFields(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	seedGroup(t, ms, "g1", "chain-ctl")
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "g1", MemberChainID: "chain-peer", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive,
+	}); err != nil {
+		t.Fatalf("member: %v", err)
+	}
+	for _, version := range []int{0, 1} {
+		body, _ := json.Marshal(SyncJournalRequest{Version: version, GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
+		req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/journal", bytes.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: "chain-peer"}))
+		rr := httptest.NewRecorder()
+		m.handleSyncJournal(rr, req)
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("legacy v%d request status=%d want 400", version, rr.Code)
+		}
+	}
+	if rr, resp := journalAs(t, m, "chain-peer", SyncJournalRequest{Version: JournalWireVersion, GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1}); rr.Code != http.StatusOK || resp == nil || resp.Version != JournalWireVersion {
+		t.Fatalf("v%d request/response = code %d resp %+v; want 200/current", JournalWireVersion, rr.Code, resp)
+	}
+	encoded, err := json.Marshal(storeToWire(store.SyncGroupLogEntry{}))
+	if err != nil || !strings.Contains(string(encoded), `"controller_sig":""`) || !strings.Contains(string(encoded), `"controller_epoch":""`) {
+		t.Fatalf("v2 wire must carry empty controller-proof fields rather than omitting them: json=%s err=%v", encoded, err)
+	}
+	_ = ctx
+}
+
+func TestPullGroupJournalDomainAddRequiresAndPreservesControllerApproval(t *testing.T) {
+	ctx := context.Background()
+	ctlPub, ctlKey, _ := ed25519.GenerateKey(nil)
+	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
+	entry := mustEntry(t, "g1", DomainSubchain("hr"), 0, "", "domain_add", "chain-owner", ownerPub, ownerKey,
+		domainAddPayload("hr", "chain-owner", 0))
+	attachControllerSignature(&entry, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
+
+	newReceiver := func(t *testing.T) (*Manager, *store.SQLiteStore) {
+		m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+		if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{
+			GroupID: "g1", ControllerChainID: "chain-ctl", ControllerAgentPubkey: hex.EncodeToString(ctlPub),
+		}); err != nil {
+			t.Fatalf("group: %v", err)
+		}
+		if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+			GroupID: "g1", MemberChainID: "chain-owner", MemberAgentPubkey: hex.EncodeToString(ownerPub),
+			Role: store.GroupRoleSelectiveSync, MemberState: store.GroupMemberActive,
+		}); err != nil {
+			t.Fatalf("owner: %v", err)
+		}
+		return m, ms
+	}
+
+	m, ms := newReceiver(t)
+	m.syncJournalFn = func(context.Context, string, *SyncJournalRequest) (*SyncJournalResponse, error) {
+		return &SyncJournalResponse{Version: JournalWireVersion, Entries: []JournalEntryWire{storeToWire(entry)}, NextCursor: 0}, nil
+	}
+	if n, err := m.PullGroupJournal(ctx, "chain-peer", "g1", DomainSubchain("hr")); err != nil || n != 1 {
+		t.Fatalf("approved remote domain_add: n=%d err=%v", n, err)
+	}
+	if domains, err := ms.ListSyncGroupDomains(ctx, "g1", true); err != nil || len(domains) != 1 || domains[0].DomainTag != "hr" {
+		t.Fatalf("approved domain_add did not apply: domains=%+v err=%v", domains, err)
+	}
+
+	ownerOnly := entry
+	ownerOnly.ControllerEpoch = ""
+	ownerOnly.ControllerChainID = ""
+	ownerOnly.ControllerAgentPubkey = ""
+	ownerOnly.ControllerSig = ""
+	m2, _ := newReceiver(t)
+	m2.syncJournalFn = func(context.Context, string, *SyncJournalRequest) (*SyncJournalResponse, error) {
+		return &SyncJournalResponse{Version: JournalWireVersion, Entries: []JournalEntryWire{storeToWire(ownerOnly)}, NextCursor: 0}, nil
+	}
+	if n, err := m2.PullGroupJournal(ctx, "chain-peer", "g1", DomainSubchain("hr")); err == nil || n != 0 {
+		t.Fatalf("owner-only remote domain_add must fail closed: n=%d err=%v", n, err)
+	}
+}
+
+func TestPullGroupJournalRejectsLegacyResponseVersionBeforeIngest(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	e := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
+	m.syncJournalFn = func(context.Context, string, *SyncJournalRequest) (*SyncJournalResponse, error) {
+		return &SyncJournalResponse{Version: 1, Entries: []JournalEntryWire{storeToWire(e)}, NextCursor: 0}, nil
+	}
+	if n, err := m.PullGroupJournal(ctx, "chain-peer", "g1", RosterSubchain); err == nil || n != 0 || !strings.Contains(err.Error(), "response version") {
+		t.Fatalf("legacy response must reject before ingest: n=%d err=%v", n, err)
+	}
+	if head, _ := ms.GetSyncGroupSubchainHead(ctx, "g1", RosterSubchain); head != nil {
+		t.Fatalf("legacy response mutated local journal: %+v", head)
 	}
 }
 
@@ -178,8 +319,8 @@ func TestJournalIngestRejectsForgeryForkAndDisorder(t *testing.T) {
 func TestGroupAuthorResolver(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
-	ctlPub, _ := seedGroup(t, ms, "g1", "chain-ctl")
-	ownerPub, _, _ := ed25519.GenerateKey(nil)
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
 	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
 		GroupID: "g1", MemberChainID: "chain-owner", Role: store.GroupRoleSelectiveSync,
 		MemberState: store.GroupMemberActive, MemberAgentPubkey: hex.EncodeToString(ownerPub),
@@ -207,12 +348,18 @@ func TestGroupAuthorResolver(t *testing.T) {
 	if k := resolve(store.SyncGroupLogEntry{Subchain: RosterSubchain, EntryType: "member_leave", AuthorChainID: "chain-owner"}); !eq(k, ownerPub) {
 		t.Fatalf("member_leave should resolve to the member's key")
 	}
-	// Domain entry authored by the owner -> owner key.
-	if k := resolve(store.SyncGroupLogEntry{Subchain: DomainSubchain("eurorack"), EntryType: "domain_add", AuthorChainID: "chain-owner"}); !eq(k, ownerPub) {
+	// Domain entry authored by the owner AND exactly controller-approved -> owner key.
+	ownerAdd := mustEntry(t, "g1", DomainSubchain("eurorack"), 0, "", "domain_add", "chain-owner", ownerPub, ownerKey,
+		domainAddPayload("eurorack", "chain-owner", 0))
+	attachControllerSignature(&ownerAdd, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
+	if k := resolve(ownerAdd); !eq(k, ownerPub) {
 		t.Fatalf("domain_add by owner should resolve to owner key")
 	}
 	// Domain entry authored by a NON-owner -> nil.
-	if k := resolve(store.SyncGroupLogEntry{Subchain: DomainSubchain("eurorack"), EntryType: "domain_add", AuthorChainID: "chain-ctl"}); k != nil {
+	nonOwnerAdd := mustEntry(t, "g1", DomainSubchain("eurorack"), 0, "", "domain_add", "chain-ctl", ctlPub, ctlKey,
+		domainAddPayload("eurorack", "chain-ctl", 0))
+	attachControllerSignature(&nonOwnerAdd, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
+	if k := resolve(nonOwnerAdd); k != nil {
 		t.Fatalf("domain_add by non-owner must resolve to nil")
 	}
 	// Wrong entry_type on a domain sub-chain -> nil.
@@ -229,10 +376,10 @@ func TestPullGroupJournalRejectsReplaySpin(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
-	memPub, _, _ := ed25519.GenerateKey(nil)
+	memPub, memKey, _ := ed25519.GenerateKey(nil)
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
 	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
-		memberInvitePayload("chain-peer", hex.EncodeToString(memPub), store.GroupRoleFullSync, "pinP"))
+		signedMemberInvitePayload(t, "g1", "chain-peer", memPub, memKey, store.GroupRoleFullSync, "pinP"))
 
 	calls := 0
 	// ALWAYS returns [e0,e1] regardless of after_seq, with a cursor claiming
@@ -242,7 +389,7 @@ func TestPullGroupJournalRejectsReplaySpin(t *testing.T) {
 		if calls > 20 {
 			t.Fatalf("PullGroupJournal is spinning (%d calls) — loop control trusts the peer cursor", calls)
 		}
-		return &SyncJournalResponse{
+		return &SyncJournalResponse{Version: JournalWireVersion,
 			Entries:    []JournalEntryWire{storeToWire(e0), storeToWire(e1)},
 			NextCursor: req.AfterSeq + 1, // fabricated forward progress
 			RosterHead: e1.EntryHash,
@@ -342,5 +489,205 @@ func TestJournalAuthzRemovedDomainOwnerOnly(t *testing.T) {
 	}
 	if ok, _ := m.authorizeJournalSubchain(ctx, ms, "g1", "chain-owner", DomainSubchain("gone")); !ok {
 		t.Fatalf("the owner must still be served its removed domain (to converge on the removal)")
+	}
+}
+
+func TestRemovedDomainPriorEntitledMemberGetsOnlyTerminalSuffix(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	_, _ = seedGroup(t, ms, "g1", "chain-ctl")
+	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
+	for _, member := range []store.SyncGroupMember{
+		{GroupID: "g1", MemberChainID: "chain-owner", MemberAgentPubkey: hex.EncodeToString(ownerPub), Role: store.GroupRoleSelectiveSync, MemberState: store.GroupMemberActive},
+		{GroupID: "g1", MemberChainID: "chain-prior", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive},
+		{GroupID: "g1", MemberChainID: "chain-late", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberInvited},
+	} {
+		if err := ms.UpsertSyncGroupMember(ctx, member); err != nil {
+			t.Fatalf("member: %v", err)
+		}
+	}
+	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{GroupID: "g1", DomainTag: "hr", OwnerChainID: "chain-owner", AddedRevision: 3}); err != nil {
+		t.Fatalf("domain: %v", err)
+	}
+	if err := ms.SnapshotRemovedDomainEntitlements(ctx, "g1", "hr", 2); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	// chain-late was invited, not active, at removal, then activates afterwards.
+	if err := ms.SetSyncGroupMemberState(ctx, "g1", "chain-late", store.GroupMemberActive, 0); err != nil {
+		t.Fatalf("activate late: %v", err)
+	}
+	if err := ms.SetSyncGroupDomainRemoved(ctx, "g1", "hr", 2); err != nil {
+		t.Fatalf("remove domain: %v", err)
+	}
+	d1 := mustEntry(t, "g1", DomainSubchain("hr"), 1, "old-hash", "domain_remove", "chain-owner", ownerPub, ownerKey, domainRemovePayload("hr"))
+	if err := ms.AppendSyncGroupLog(ctx, d1); err != nil {
+		t.Fatalf("append removal: %v", err)
+	}
+
+	rr, resp := journalAs(t, m, "chain-prior", SyncJournalRequest{GroupID: "g1", Subchain: DomainSubchain("hr"), AfterSeq: -1})
+	if rr.Code != http.StatusOK || resp == nil || !resp.TerminalOnly || len(resp.Entries) != 1 || resp.Entries[0].EntryType != "domain_remove" {
+		t.Fatalf("prior member terminal serve: code=%d resp=%+v", rr.Code, resp)
+	}
+	if rr, _ := journalAs(t, m, "chain-late", SyncJournalRequest{GroupID: "g1", Subchain: DomainSubchain("hr"), AfterSeq: -1}); rr.Code != http.StatusForbidden {
+		t.Fatalf("post-removal member status=%d want 403", rr.Code)
+	}
+}
+
+func TestPullTerminalRemovalSuffixConvergesWithoutOldDomainJournal(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	_, _ = seedGroup(t, ms, "g1", "chain-ctl")
+	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
+	for _, member := range []store.SyncGroupMember{
+		{GroupID: "g1", MemberChainID: "chain-owner", MemberAgentPubkey: hex.EncodeToString(ownerPub), Role: store.GroupRoleSelectiveSync, MemberState: store.GroupMemberActive},
+		{GroupID: "g1", MemberChainID: "chain-local", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive},
+	} {
+		if err := ms.UpsertSyncGroupMember(ctx, member); err != nil {
+			t.Fatalf("member: %v", err)
+		}
+	}
+	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{GroupID: "g1", DomainTag: "hr", OwnerChainID: "chain-owner", AddedRevision: 3}); err != nil {
+		t.Fatalf("domain: %v", err)
+	}
+	if err := ms.SnapshotRemovedDomainEntitlements(ctx, "g1", "hr", 2); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if err := ms.SetSyncGroupDomainRemoved(ctx, "g1", "hr", 2); err != nil {
+		t.Fatalf("remove domain: %v", err)
+	}
+	// The predecessor (seq 0) deliberately is NOT present locally: a terminal
+	// v2 response must still let this prior sharer ingest the signed removal.
+	d1 := mustEntry(t, "g1", DomainSubchain("hr"), 1, "hidden-old-head", "domain_remove", "chain-owner", ownerPub, ownerKey, domainRemovePayload("hr"))
+	m.syncJournalFn = func(_ context.Context, _ string, req *SyncJournalRequest) (*SyncJournalResponse, error) {
+		if req.Version != JournalWireVersion {
+			t.Fatalf("pull version=%d want %d", req.Version, JournalWireVersion)
+		}
+		return &SyncJournalResponse{Version: JournalWireVersion, Entries: []JournalEntryWire{storeToWire(d1)}, NextCursor: 1, TerminalOnly: true}, nil
+	}
+	if n, err := m.PullGroupJournal(ctx, "chain-owner", "g1", DomainSubchain("hr")); err != nil || n != 1 {
+		t.Fatalf("pull terminal suffix: n=%d err=%v", n, err)
+	}
+	entries, err := ms.ListSyncGroupLog(ctx, "g1", DomainSubchain("hr"), -1, 10)
+	if err != nil || len(entries) != 1 || entries[0].Seq != 1 || entries[0].EntryType != "domain_remove" {
+		t.Fatalf("sparse terminal entry did not converge safely: entries=%+v err=%v", entries, err)
+	}
+	if got, _ := ms.GetSyncGroupSubchainHead(ctx, "g1", DomainSubchain("hr")); got == nil || got.EntryHash != d1.EntryHash {
+		t.Fatalf("terminal suffix did not advance local head: %+v", got)
+	}
+}
+
+func TestRemovedDomainGenerationPreventsStaleLifecycleServe(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
+	oldPub, _, _ := ed25519.GenerateKey(nil)
+	newPub, _, _ := ed25519.GenerateKey(nil)
+	for _, member := range []store.SyncGroupMember{
+		{GroupID: "g1", MemberChainID: "chain-owner", MemberAgentPubkey: hex.EncodeToString(ownerPub), Role: store.GroupRoleSelectiveSync, MemberState: store.GroupMemberActive},
+		{GroupID: "g1", MemberChainID: "chain-old", MemberAgentPubkey: hex.EncodeToString(oldPub), Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive},
+	} {
+		if err := ms.UpsertSyncGroupMember(ctx, member); err != nil {
+			t.Fatalf("member: %v", err)
+		}
+	}
+	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{GroupID: "g1", DomainTag: "hr", OwnerChainID: "chain-owner"}); err != nil {
+		t.Fatalf("initial domain: %v", err)
+	}
+	sub := DomainSubchain("hr")
+	d0 := mustEntry(t, "g1", sub, 0, "", "domain_remove", "chain-owner", ownerPub, ownerKey, domainRemovePayload("hr"))
+	if n, err := ingestRoster(t, m, ms, "g1", sub, d0); err != nil || n != 1 {
+		t.Fatalf("first removal: n=%d err=%v", n, err)
+	}
+	if ok, _ := ms.WasMemberEntitledAtDomainRemoval(ctx, "g1", "hr", "chain-old", 1); !ok {
+		t.Fatal("old full-sync member missing first lifecycle entitlement")
+	}
+	// This member remains in the group but no longer selects hr before the
+	// re-add. Its old snapshot must never authorize the later removal.
+	if err := ms.SetSyncGroupMemberRole(ctx, "g1", "chain-old", store.GroupRoleSelectiveSync); err != nil {
+		t.Fatalf("narrow old member: %v", err)
+	}
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{GroupID: "g1", MemberChainID: "chain-new", MemberAgentPubkey: hex.EncodeToString(newPub), Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive}); err != nil {
+		t.Fatalf("new member: %v", err)
+	}
+	d1 := mustEntry(t, "g1", sub, 1, d0.EntryHash, "domain_add", "chain-owner", ownerPub, ownerKey, domainAddPayload("hr", "chain-owner", 0))
+	attachControllerSignature(&d1, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
+	if n, err := ingestRoster(t, m, ms, "g1", sub, d1); err != nil || n != 1 {
+		t.Fatalf("re-add: n=%d err=%v", n, err)
+	}
+	d2 := mustEntry(t, "g1", sub, 2, d1.EntryHash, "domain_remove", "chain-owner", ownerPub, ownerKey, domainRemovePayload("hr"))
+	if n, err := ingestRoster(t, m, ms, "g1", sub, d2); err != nil || n != 1 {
+		t.Fatalf("second removal: n=%d err=%v", n, err)
+	}
+	if ok, _ := ms.WasMemberEntitledAtDomainRemoval(ctx, "g1", "hr", "chain-old", 3); ok {
+		t.Fatal("stale first-lifecycle entitlement authorized the second removal")
+	}
+	if ok, _ := ms.WasMemberEntitledAtDomainRemoval(ctx, "g1", "hr", "chain-new", 3); !ok {
+		t.Fatal("new full-sync member missing second lifecycle entitlement")
+	}
+	// A subsequent owner-signed remove is auditable but semantically a no-op: it
+	// must not overwrite generation 3 or produce another entitlement snapshot.
+	d3 := mustEntry(t, "g1", sub, 3, d2.EntryHash, "domain_remove", "chain-owner", ownerPub, ownerKey, domainRemovePayload("hr"))
+	if n, err := ingestRoster(t, m, ms, "g1", sub, d3); err != nil || n != 1 {
+		t.Fatalf("no-op removal should log but skip projection: n=%d err=%v", n, err)
+	}
+	domains, err := ms.ListSyncGroupDomains(ctx, "g1", false)
+	if err != nil || len(domains) != 1 || domains[0].RemovedRevision != 3 {
+		t.Fatalf("no-op removal overwrote current generation: domains=%+v err=%v", domains, err)
+	}
+	if rr, _ := journalAs(t, m, "chain-old", SyncJournalRequest{GroupID: "g1", Subchain: sub, AfterSeq: -1}); rr.Code != http.StatusForbidden {
+		t.Fatalf("stale prior member status=%d want 403", rr.Code)
+	}
+	rr, resp := journalAs(t, m, "chain-new", SyncJournalRequest{GroupID: "g1", Subchain: sub, AfterSeq: -1})
+	if rr.Code != http.StatusOK || resp == nil || !resp.TerminalOnly || len(resp.Entries) != 2 || resp.Entries[0].Seq != 2 || resp.Entries[1].Seq != 3 {
+		t.Fatalf("second lifecycle terminal suffix leaked/omitted entries: code=%d resp=%+v", rr.Code, resp)
+	}
+}
+
+func TestSyncJournalServeLeaseLinearizesMemberRemoval(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	seedGroup(t, ms, "g1", "chain-ctl")
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "g1", MemberChainID: "chain-peer", Role: store.GroupRoleFullSync,
+		MemberState: store.GroupMemberActive,
+	}); err != nil {
+		t.Fatalf("member: %v", err)
+	}
+
+	body, _ := json.Marshal(SyncJournalRequest{Version: JournalWireVersion, GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/journal", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: "chain-peer"}))
+	bw := newBlockingResponseWriter()
+	served := make(chan struct{})
+	go func() { m.handleSyncJournal(bw, req); close(served) }()
+	<-bw.entered
+
+	removalStarted := make(chan struct{})
+	removalDone := make(chan struct{})
+	go func() {
+		close(removalStarted)
+		unlock := ms.LockSyncPolicyWrite()
+		_ = ms.SetSyncGroupMemberState(ctx, "g1", "chain-peer", store.GroupMemberRemoved, 1)
+		unlock()
+		close(removalDone)
+	}()
+	<-removalStarted
+	select {
+	case <-removalDone:
+		t.Fatal("member removal returned while a stale-policy journal response was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(bw.release)
+	<-served
+	<-removalDone
+	if bw.status != http.StatusOK {
+		t.Fatalf("in-flight authorized response status=%d", bw.status)
+	}
+
+	rr, _ := journalAs(t, m, "chain-peer", SyncJournalRequest{GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("post-removal journal serve status=%d want 403", rr.Code)
 	}
 }

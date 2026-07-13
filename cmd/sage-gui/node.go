@@ -695,6 +695,22 @@ func runServe() (rerr error) {
 	operatorAgentID, operatorIDErr := readNodeOperatorKey(cfg.AgentKey)
 	if operatorIDErr == nil && operatorAgentID != "" {
 		restServer.SetNodeOperatorID(operatorAgentID)
+		// One registrar backs direct REST, OAuth, and wizard token issuance.
+		// Vault-backed bearers remain pending (and cannot authenticate) until
+		// their standard AgentRegister transaction is confirmed on-chain.
+		restServer.ConfigureMCPTokenIdentityRegistrar(sqliteStore)
+		// A canceled /broadcast_tx_commit response is ambiguous: the chain may
+		// already have accepted a token identity even though issuance retained its
+		// bearer fail-closed as pending. Re-run idempotent AgentRegister at startup
+		// to finalize those rows without ever treating an unknown result as absent.
+		startWorker(func() {
+			confirmed, reconcileErr := sqliteStore.ReconcilePendingMCPTokenIdentities(ctx)
+			if reconcileErr != nil {
+				logger.Warn().Err(reconcileErr).Msg("pending MCP token identity reconciliation incomplete")
+			} else if confirmed > 0 {
+				logger.Info().Int("count", confirmed).Msg("reconciled pending MCP token identities")
+			}
+		})
 		logger.Info().Str("operator_id", operatorAgentID[:16]+"...").Msg("node operator key registered for hook read-scope bypass")
 	} else if operatorIDErr != nil {
 		logger.Warn().Err(operatorIDErr).Msg("node operator key unavailable")
@@ -1444,6 +1460,12 @@ func runServe() (rerr error) {
 				logger.Debug().Int("purged", purged).Msg("pipeline boot sweep")
 			}
 		}
+		// OAuth bearer/code lifecycle recovery is also a boot-time invariant:
+		// pending cleanup rows must never wait for the first five-minute ticker.
+		_, _ = sqliteStore.PurgeExpiredAuthCodes(ctx)
+		if revoked, _ := sqliteStore.PurgeMCPTokenCleanup(ctx); revoked > 0 {
+			logger.Warn().Int64("revoked", revoked).Msg("boot reconciled fail-closed OAuth token cleanup")
+		}
 
 		// Pipeline TTL cleanup — expire and purge stale pipeline messages every 5 minutes
 		startWorker(func() {
@@ -1468,6 +1490,9 @@ func runServe() (rerr error) {
 					// connector setup doesn't accumulate state forever.
 					if removed, _ := sqliteStore.PurgeExpiredAuthCodes(ctx); removed > 0 {
 						logger.Debug().Int64("removed", removed).Msg("oauth auth-codes purged")
+					}
+					if revoked, _ := sqliteStore.PurgeMCPTokenCleanup(ctx); revoked > 0 {
+						logger.Warn().Int64("revoked", revoked).Msg("fail-closed OAuth token cleanup reconciled")
 					}
 					if removed, _ := sqliteStore.PurgeOldOAuthClients(ctx, 90*24*time.Hour); removed > 0 {
 						logger.Debug().Int64("removed", removed).Msg("oauth clients purged")

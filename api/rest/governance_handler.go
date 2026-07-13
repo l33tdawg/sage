@@ -310,7 +310,9 @@ func parseGovOp(s string) (tx.GovProposalOp, error) {
 		// JSON [{"memory_id","domain"}] array (like domain_reassign, this op is
 		// REST-only — the MCP tool exposes only the payload-less validator ops).
 		return tx.GovOpMemoryDomainRepair, nil
+	case "sync_group_action":
+		return tx.GovOpSyncGroupAction, nil
 	default:
-		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, domain_reassign, memory_domain_repair")
+		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, domain_reassign, memory_domain_repair, sync_group_action")
 	}
 }

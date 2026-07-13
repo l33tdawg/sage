@@ -1096,13 +1096,24 @@ func (h *DashboardHandler) handleAuthCheck(w http.ResponseWriter, r *http.Reques
 // endpoint (api/rest) to gate the consent screen with the existing
 // dashboard session — no separate auth implementation.
 //
-// Returns (true, "") when no auth is required (encryption off) or when the
-// session cookie is valid. Returns (false, redirectURL) otherwise; the
+// Encryption-off nodes require an exact node-operator Ed25519 signature.
+// Local/browser routing headers are not authority, and a tunnel/remote request
+// is never authorized merely because no vault password was configured.
+// Returns (false, redirectURL) otherwise; the
 // caller should 302 the user to redirectURL so the dashboard SPA can run
 // the login dance and round-trip back via `?next=...`.
 func (h *DashboardHandler) IsRequestAuthenticated(r *http.Request) (bool, string) {
 	if !h.Encrypted.Load() {
-		return true, ""
+		// No vault means there is no meaningful browser session. Locality,
+		// Origin, Sec-Fetch-Site, Host, and forwarded headers are routing hints,
+		// not operator proof: a loopback process can forge all of them. OAuth
+		// consent therefore requires the exact node key to sign this request.
+		operatorID := strings.TrimSpace(h.NodeOperatorAgentID)
+		if operatorID != "" && strings.TrimSpace(r.Header.Get("X-Agent-ID")) == operatorID && h.validAgentSignature(r) {
+			return true, ""
+		}
+		next := r.URL.RequestURI()
+		return false, "/ui/?next=" + url.QueryEscape(next)
 	}
 	if cookie, err := r.Cookie(sessionCookieName); err == nil && h.validSession(cookie.Value) {
 		return true, ""

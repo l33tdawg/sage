@@ -29,7 +29,7 @@ func TestMemberRemovalEnforcement(t *testing.T) {
 	comet := &scriptedComet{responses: []string{cometOK}}
 	m, ms := newSyncTestManager(t, comet) // localChainID == "chain-local"
 	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
-	bPub, _, _ := ed25519.GenerateKey(nil)
+	bPub, bKey, _ := ed25519.GenerateKey(nil)
 
 	anchors := 0
 	m.syncAnchorFn = func(_ context.Context, groupID, subchain, head string) error {
@@ -42,7 +42,7 @@ func TestMemberRemovalEnforcement(t *testing.T) {
 
 	// Bring chain-b to active via the real journal path (no anchor: not a removal).
 	authorRoster(t, m, "g1", "member_invite", "chain-ctl", ctlPub, ctlKey,
-		memberInvitePayload("chain-b", hex.EncodeToString(bPub), store.GroupRoleFullSync, "pinB"))
+		signedMemberInvitePayload(t, "g1", "chain-b", bPub, bKey, store.GroupRoleFullSync, "pinB"))
 	authorRoster(t, m, "g1", "member_activate", "chain-ctl", ctlPub, ctlKey, memberChainPayload("chain-b"))
 	require.Equal(t, 0, anchors, "invite/activate must not anchor")
 
@@ -95,7 +95,7 @@ func TestMemberLeaveEnforcement(t *testing.T) {
 	m.syncAnchorFn = func(_ context.Context, _, _, _ string) error { anchors++; return nil }
 
 	authorRoster(t, m, "g1", "member_invite", "chain-ctl", ctlPub, ctlKey,
-		memberInvitePayload("chain-b", hex.EncodeToString(bPub), store.GroupRoleFullSync, "pinB"))
+		signedMemberInvitePayload(t, "g1", "chain-b", bPub, bKey, store.GroupRoleFullSync, "pinB"))
 	authorRoster(t, m, "g1", "member_activate", "chain-ctl", ctlPub, ctlKey, memberChainPayload("chain-b"))
 
 	seedCommitted(t, ms, "m-studio", "studio", "group fan-out fact")
@@ -188,17 +188,20 @@ func TestDomainRemovalAnchored(t *testing.T) {
 
 	// Bring chain-owner to active (controller-authored roster; no anchor — not removals).
 	authorRoster(t, m, "g1", "member_invite", "chain-ctl", ctlPub, ctlKey,
-		memberInvitePayload("chain-owner", hex.EncodeToString(ownerPub), store.GroupRoleFullSync, "pinO"))
+		signedMemberInvitePayload(t, "g1", "chain-owner", ownerPub, ownerKey, store.GroupRoleFullSync, "pinO"))
 	authorRoster(t, m, "g1", "member_activate", "chain-ctl", ctlPub, ctlKey, memberChainPayload("chain-owner"))
 
 	// The owner establishes then removes "studio" on its per-domain sub-chain.
 	sub := DomainSubchain("studio")
-	_, err := m.AppendGroupJournalEntry(ctx, "g1", sub, "domain_add", "chain-owner", ownerPub, ownerKey,
+	d0 := mustEntry(t, "g1", sub, 0, "", "domain_add", "chain-owner", ownerPub, ownerKey,
 		domainAddPayload("studio", "chain-owner", 0))
-	require.NoError(t, err)
+	attachControllerSignature(&d0, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
+	if n, ingestErr := ingestRoster(t, m, ms, "g1", sub, d0); ingestErr != nil || n != 1 {
+		t.Fatalf("controller-approved domain_add: n=%d err=%v", n, ingestErr)
+	}
 	require.Empty(t, subchains, "domain_add must not anchor (not a removal)")
 
-	_, err = m.AppendGroupJournalEntry(ctx, "g1", sub, "domain_remove", "chain-owner", ownerPub, ownerKey,
+	_, err := m.AppendGroupJournalEntry(ctx, "g1", sub, "domain_remove", "chain-owner", ownerPub, ownerKey,
 		domainRemovePayload("studio"))
 	require.NoError(t, err)
 
@@ -215,7 +218,7 @@ func TestDomainRemovalAnchored(t *testing.T) {
 func TestDomainRemoveSubchainBindingIngest(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
-	seedGroup(t, ms, "g1", "chain-ctl")
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
 	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
 	require.NoError(t, ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
 		GroupID: "g1", MemberChainID: "chain-owner", Role: store.GroupRoleFullSync,
@@ -224,6 +227,7 @@ func TestDomainRemoveSubchainBindingIngest(t *testing.T) {
 	// chain-owner establishes domain "a" on its own sub-chain.
 	subA := DomainSubchain("a")
 	d0 := mustEntry(t, "g1", subA, 0, "", "domain_add", "chain-owner", ownerPub, ownerKey, domainAddPayload("a", "chain-owner", 0))
+	attachControllerSignature(&d0, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
 	if n, err := ingestRoster(t, m, ms, "g1", subA, d0); err != nil || n != 1 {
 		t.Fatalf("domain_add: n=%d err=%v", n, err)
 	}

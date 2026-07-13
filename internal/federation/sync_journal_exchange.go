@@ -44,10 +44,10 @@ const (
 	syncJournalMaxPages    = 4096
 )
 
-// JournalWireVersion is the /fed/v1/sync/journal protocol version. A request may
-// omit it (0 = treat as current for pre-freeze compatibility) or send this value;
-// any other value is rejected, so a future breaking change has a clean discriminator.
-const JournalWireVersion = 1
+// JournalWireVersion is the /fed/v1/sync/journal protocol version. Version 2 is
+// deliberately mandatory: v11.8 has not shipped, and v1 omitted the controller
+// approval fields required to authenticate owner-authored domain_add entries.
+const JournalWireVersion = 2
 
 // SyncJournalRequest asks for entries of one sub-chain after an exclusive cursor.
 type SyncJournalRequest struct {
@@ -61,23 +61,29 @@ type SyncJournalRequest struct {
 // JournalEntryWire is one signed journal entry on the wire (group_id is implied
 // by the request, so it is not transmitted).
 type JournalEntryWire struct {
-	Subchain          string `json:"subchain"`
-	Seq               int64  `json:"seq"`
-	PrevHash          string `json:"prev_hash"`
-	EntryHash         string `json:"entry_hash"`
-	EntryType         string `json:"entry_type"`
-	PayloadJSON       string `json:"payload_json"`
-	AuthorChainID     string `json:"author_chain_id"`
-	AuthorAgentPubkey string `json:"author_agent_pubkey"`
-	AuthorSig         string `json:"author_sig"`
+	Subchain              string `json:"subchain"`
+	Seq                   int64  `json:"seq"`
+	PrevHash              string `json:"prev_hash"`
+	EntryHash             string `json:"entry_hash"`
+	EntryType             string `json:"entry_type"`
+	PayloadJSON           string `json:"payload_json"`
+	AuthorChainID         string `json:"author_chain_id"`
+	AuthorAgentPubkey     string `json:"author_agent_pubkey"`
+	AuthorSig             string `json:"author_sig"`
+	ControllerEpoch       string `json:"controller_epoch"`
+	ControllerChainID     string `json:"controller_chain_id"`
+	ControllerAgentPubkey string `json:"controller_agent_pubkey"`
+	ControllerSig         string `json:"controller_sig"`
 }
 
 // SyncJournalResponse returns a page of entries plus the server's roster head
 // (for convergence tracking + operator-visible fork detection).
 type SyncJournalResponse struct {
-	Entries    []JournalEntryWire `json:"entries"`
-	NextCursor int64              `json:"next_cursor"`
-	RosterHead string             `json:"roster_head,omitempty"`
+	Version      int                `json:"version"`
+	Entries      []JournalEntryWire `json:"entries"`
+	NextCursor   int64              `json:"next_cursor"`
+	RosterHead   string             `json:"roster_head,omitempty"`
+	TerminalOnly bool               `json:"terminal_only,omitempty"`
 }
 
 func storeToWire(e store.SyncGroupLogEntry) JournalEntryWire {
@@ -85,6 +91,8 @@ func storeToWire(e store.SyncGroupLogEntry) JournalEntryWire {
 		Subchain: e.Subchain, Seq: e.Seq, PrevHash: e.PrevHash, EntryHash: e.EntryHash,
 		EntryType: e.EntryType, PayloadJSON: e.PayloadJSON, AuthorChainID: e.AuthorChainID,
 		AuthorAgentPubkey: e.AuthorAgentPubkey, AuthorSig: e.AuthorSig,
+		ControllerEpoch: e.ControllerEpoch, ControllerChainID: e.ControllerChainID,
+		ControllerAgentPubkey: e.ControllerAgentPubkey, ControllerSig: e.ControllerSig,
 	}
 }
 
@@ -93,6 +101,8 @@ func wireToStore(groupID string, w JournalEntryWire) store.SyncGroupLogEntry {
 		GroupID: groupID, Subchain: w.Subchain, Seq: w.Seq, PrevHash: w.PrevHash, EntryHash: w.EntryHash,
 		EntryType: w.EntryType, PayloadJSON: w.PayloadJSON, AuthorChainID: w.AuthorChainID,
 		AuthorAgentPubkey: w.AuthorAgentPubkey, AuthorSig: w.AuthorSig,
+		ControllerEpoch: w.ControllerEpoch, ControllerChainID: w.ControllerChainID,
+		ControllerAgentPubkey: w.ControllerAgentPubkey, ControllerSig: w.ControllerSig,
 	}
 }
 
@@ -105,6 +115,40 @@ var rosterControllerTypes = map[string]bool{
 
 var domainOwnerTypes = map[string]bool{
 	"domain_add": true, "domain_remove": true, "tombstone": true, "anchor": true,
+}
+
+// journalServeScope makes the removed-domain rule explicit. A prior non-owner
+// sharer may receive only the signed removal suffix, never the old journal body.
+type journalServeScope uint8
+
+const (
+	journalServeDeny journalServeScope = iota
+	journalServeFull
+	journalServeTerminalOnly
+)
+
+func isTerminalDomainEntryType(entryType string) bool {
+	return entryType == "domain_remove" || entryType == "tombstone" || entryType == "anchor"
+}
+
+// removedDomainTerminalFromSeq maps the current immutable removal generation
+// (journal seq + 1) back to the first terminal entry in this lifecycle. It is
+// called only after journalSubchainServeScope returned terminal-only.
+func removedDomainTerminalFromSeq(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string) (int64, error) {
+	tag, ok := strings.CutPrefix(subchain, "domain:")
+	if !ok || tag == "" {
+		return 0, fmt.Errorf("terminal journal response requires a domain sub-chain")
+	}
+	domains, err := ss.ListSyncGroupDomains(ctx, groupID, false)
+	if err != nil {
+		return 0, err
+	}
+	for _, d := range domains {
+		if d.DomainTag == tag && d.RemovedRevision > 0 {
+			return d.RemovedRevision - 1, nil
+		}
+	}
+	return 0, fmt.Errorf("removed domain generation is unavailable")
 }
 
 // groupAuthorResolver returns a SNAPSHOT AuthorKeyResolver = groupApplyState.resolve
@@ -138,19 +182,27 @@ func decodePub(hexKey string) (ed25519.PublicKey, error) {
 // subsets are refined in step 5 — UNDER-serving is safe (no leak); over-serving
 // would breach isolation, so the default fails closed.
 func (m *Manager) authorizeJournalSubchain(ctx context.Context, ss *store.SQLiteStore, groupID, memberChainID, subchain string) (bool, error) {
+	scope, err := m.journalSubchainServeScope(ctx, ss, groupID, memberChainID, subchain)
+	return scope != journalServeDeny, err
+}
+
+// journalSubchainServeScope is the metadata-isolation gate with an explicit
+// terminal-only result for a removed domain. The historical entitlement is read
+// from an immutable snapshot taken at removal, never from live consent rows.
+func (m *Manager) journalSubchainServeScope(ctx context.Context, ss *store.SQLiteStore, groupID, memberChainID, subchain string) (journalServeScope, error) {
 	member, err := ss.GetSyncGroupMember(ctx, groupID, memberChainID)
 	if err != nil {
-		return false, err
+		return journalServeDeny, err
 	}
 	if member == nil || (member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing) {
-		return false, nil
+		return journalServeDeny, nil
 	}
 	if subchain == RosterSubchain {
-		return true, nil
+		return journalServeFull, nil
 	}
 	tag, ok := strings.CutPrefix(subchain, "domain:")
 	if !ok || tag == "" {
-		return false, nil
+		return journalServeDeny, nil
 	}
 	// activeOnly=FALSE on purpose: a domain_remove/tombstone lands on the domain's
 	// OWN sub-chain, so a prior sharer must still be able to PULL that sub-chain
@@ -160,7 +212,7 @@ func (m *Manager) authorizeJournalSubchain(ctx context.Context, ss *store.SQLite
 	// removed domain.
 	domains, err := ss.ListSyncGroupDomains(ctx, groupID, false)
 	if err != nil {
-		return false, err
+		return journalServeDeny, err
 	}
 	for _, d := range domains {
 		if d.DomainTag != tag {
@@ -172,21 +224,31 @@ func (m *Manager) authorizeJournalSubchain(ctx context.Context, ss *store.SQLite
 			// covering the tag (exact or an ancestor) — fold-in F2. A selective member
 			// with no covering consent row fails closed (under-serve, no metadata leak).
 			if member.Role == store.GroupRoleFullSync || d.OwnerChainID == memberChainID {
-				return true, nil
+				return journalServeFull, nil
 			}
 			if member.Role == store.GroupRoleSelectiveSync {
-				return ss.MemberConsentsGroupDomain(ctx, groupID, memberChainID, tag)
+				ok, err := ss.MemberConsentsGroupDomain(ctx, groupID, memberChainID, tag)
+				if err != nil || !ok {
+					return journalServeDeny, err
+				}
+				return journalServeFull, nil
 			}
-			return false, nil
+			return journalServeDeny, nil
 		}
-		// REMOVED domain: restrict to the OWNER only. A full-sync member who
-		// joined AFTER the removal (or was never a sharer) must NOT learn the
-		// domain's NAME via its removal record (§5.2/I5). Broader convergence for
-		// full-sync members who ACTUALLY shared it pre-removal is deferred to
-		// step-5 per-member domain-consent tracking.
-		return d.OwnerChainID == memberChainID, nil
+		// REMOVED domain: the owner may read its full audit chain. A non-owner
+		// must have been captured in the immutable removal entitlement snapshot;
+		// even then it receives only terminal records, so it converges without
+		// learning any prior/live domain content.
+		if d.OwnerChainID == memberChainID {
+			return journalServeFull, nil
+		}
+		wasEntitled, err := ss.WasMemberEntitledAtDomainRemoval(ctx, groupID, tag, memberChainID, d.RemovedRevision)
+		if err != nil || !wasEntitled {
+			return journalServeDeny, err
+		}
+		return journalServeTerminalOnly, nil
 	}
-	return false, nil // not a group domain (active or removed)
+	return journalServeDeny, nil // not a group domain (active or removed)
 }
 
 // handleSyncJournal implements POST /fed/v1/sync/journal (behind peerAuth).
@@ -206,7 +268,7 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Version != 0 && req.Version != JournalWireVersion {
+	if req.Version != JournalWireVersion {
 		httpError(w, http.StatusBadRequest, "unsupported journal wire version")
 		return
 	}
@@ -214,12 +276,18 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "group_id and subchain are required")
 		return
 	}
-	ok, err := m.authorizeJournalSubchain(r.Context(), ss, req.GroupID, peer.ChainID, req.Subchain)
+	// Membership and domain projections are effective serve policy. Lease the
+	// snapshot from the authorization check through the final response write so a
+	// completed removal guarantees that no response can still escape under the
+	// old policy.
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
+	scope, err := m.journalSubchainServeScope(r.Context(), ss, req.GroupID, peer.ChainID, req.Subchain)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "authorization failed")
 		return
 	}
-	if !ok {
+	if scope == journalServeDeny {
 		// One generic 403 for "not a member" AND "sub-chain not shared", so the
 		// response is not an oracle for which groups/domains exist (I5).
 		httpError(w, http.StatusForbidden, "not authorized for this journal sub-chain")
@@ -229,12 +297,22 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > SyncJournalMaxEntries {
 		limit = SyncJournalMaxEntries
 	}
-	entries, err := ss.ListSyncGroupLog(r.Context(), req.GroupID, req.Subchain, req.AfterSeq, limit)
+	var entries []store.SyncGroupLogEntry
+	if scope == journalServeTerminalOnly {
+		fromSeq, genErr := removedDomainTerminalFromSeq(r.Context(), ss, req.GroupID, req.Subchain)
+		if genErr != nil {
+			httpError(w, http.StatusInternalServerError, "removed-domain generation lookup failed")
+			return
+		}
+		entries, err = ss.ListSyncGroupTerminalLog(r.Context(), req.GroupID, req.Subchain, fromSeq, req.AfterSeq, limit)
+	} else {
+		entries, err = ss.ListSyncGroupLog(r.Context(), req.GroupID, req.Subchain, req.AfterSeq, limit)
+	}
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "journal read failed")
 		return
 	}
-	resp := &SyncJournalResponse{Entries: make([]JournalEntryWire, 0, len(entries)), NextCursor: req.AfterSeq}
+	resp := &SyncJournalResponse{Version: JournalWireVersion, Entries: make([]JournalEntryWire, 0, len(entries)), NextCursor: req.AfterSeq, TerminalOnly: scope == journalServeTerminalOnly}
 	for _, e := range entries {
 		resp.Entries = append(resp.Entries, storeToWire(e))
 	}
@@ -314,6 +392,9 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		if e.PrevHash != wantPrev {
 			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry %s/%d prev_hash does not link to local head", subchain, e.Seq)
 		}
+		if err := m.authorizeReplicaGovernance(ctx, groupID, e); err != nil {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("replica governance rejected %s/%d: %w", subchain, e.Seq, err)
+		}
 		// Persist the canonical payload spelling (the signature binds the parsed map,
 		// so a peer's non-Go JSON spelling is accepted above but normalized here).
 		e.PayloadJSON = canonicalPayloadJSON(e.PayloadJSON)
@@ -332,6 +413,62 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 	return appended, gs.evictedChains, gs.removedDomains, nil
 }
 
+// ingestTerminalJournalEntriesLocked admits the deliberately sparse terminal
+// suffix served after a domain removal. It keeps every normal ingest invariant
+// except contiguous prev-link availability: a prior sharer is intentionally not
+// sent the old domain body, so it cannot possess the immediate predecessor hash.
+// Each entry remains independently signature-verified against the pinned roster
+// key, type-restricted, strictly ascending, and fork-checked before append.
+// CALLER MUST hold m.journalMu.
+func (m *Manager) ingestTerminalJournalEntriesLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry) (int, []string, []string, error) {
+	if _, ok := strings.CutPrefix(subchain, "domain:"); !ok {
+		return 0, nil, nil, fmt.Errorf("terminal journal response is valid only for a domain sub-chain")
+	}
+	gs, err := loadGroupApplyState(ctx, ss, groupID)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	var lastSeq int64 = -1
+	appended := 0
+	for i := range entries {
+		e := entries[i]
+		e.GroupID = groupID
+		if e.Subchain != subchain || !isTerminalDomainEntryType(e.EntryType) {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("terminal response contains non-terminal entry %s/%d (%s)", e.Subchain, e.Seq, e.EntryType)
+		}
+		if len(e.PayloadJSON) > SyncJournalMaxPayloadBytes {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry %s/%d payload %d bytes exceeds cap %d", subchain, e.Seq, len(e.PayloadJSON), SyncJournalMaxPayloadBytes)
+		}
+		if e.Seq <= lastSeq {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("terminal response is not strictly ascending at seq %d", e.Seq)
+		}
+		lastSeq = e.Seq
+		existing, err := ss.GetSyncGroupLogEntry(ctx, groupID, subchain, e.Seq)
+		if err != nil {
+			return appended, gs.evictedChains, gs.removedDomains, err
+		}
+		if existing != nil {
+			if existing.EntryHash != e.EntryHash {
+				return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("FORK at %s/%d: local entry diverges from peer (equivocation) — halting ingest", subchain, e.Seq)
+			}
+			continue
+		}
+		key := gs.resolve(e)
+		if key == nil {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry %s/%d: unauthorized terminal author", subchain, e.Seq)
+		}
+		if err := verifyJournalEntry(e, key); err != nil {
+			return appended, gs.evictedChains, gs.removedDomains, err
+		}
+		e.PayloadJSON = canonicalPayloadJSON(e.PayloadJSON)
+		if err := m.appendAndApply(ctx, ss, gs, e); err != nil {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("append+apply terminal %s/%d (%s): %w", subchain, e.Seq, e.EntryType, err)
+		}
+		appended++
+	}
+	return appended, gs.evictedChains, gs.removedDomains, nil
+}
+
 // PullGroupJournal fetches a peer's sub-chain from the local head onward,
 // verifies + ingests it, and (for the roster) records the peer's head for
 // per-member convergence (§9.3). Returns the number of entries appended.
@@ -346,9 +483,10 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 	}
 	// The cursor is driven by OUR OWN head, never by the peer's NextCursor: a
 	// hostile member could otherwise replay already-held entries with a fabricated
-	// cursor and spin us forever re-verifying signatures. Each page must begin at
-	// after+1 and be contiguous+ascending; we advance `after` to the last verified
-	// seq and stop when the page is short, empty, or the hard page cap is hit.
+	// cursor and spin us forever re-verifying signatures. Normal pages must begin
+	// at after+1 and be contiguous+ascending. A v2 terminal-only page is the sole
+	// exception: it is a type-restricted, signed sparse suffix for a domain already
+	// removed from the requester's entitlement.
 	m.journalMu.Lock()
 	head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, subchain)
 	m.journalMu.Unlock()
@@ -375,13 +513,16 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		// Fetch LOCK-FREE with a bounded per-page deadline, so a slow/hostile peer
 		// can never pin journalMu (and thus stall all local journal appends).
 		pctx, cancel := context.WithTimeout(ctx, syncJournalPullTimeout)
-		resp, pErr := pull(pctx, remoteChainID, &SyncJournalRequest{GroupID: groupID, Subchain: subchain, AfterSeq: after, Limit: SyncJournalMaxEntries})
+		resp, pErr := pull(pctx, remoteChainID, &SyncJournalRequest{Version: JournalWireVersion, GroupID: groupID, Subchain: subchain, AfterSeq: after, Limit: SyncJournalMaxEntries})
 		cancel()
 		if pErr != nil {
 			return appended, pErr
 		}
 		if resp == nil {
 			return appended, fmt.Errorf("peer %s returned a nil journal response", remoteChainID)
+		}
+		if resp.Version != JournalWireVersion {
+			return appended, fmt.Errorf("peer %s returned unsupported journal response version %d (want %d)", remoteChainID, resp.Version, JournalWireVersion)
 		}
 		if resp.RosterHead != "" {
 			peerRosterHead = resp.RosterHead
@@ -392,12 +533,19 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		if len(resp.Entries) > SyncJournalMaxEntries {
 			return appended, fmt.Errorf("peer %s returned %d entries (max %d)", remoteChainID, len(resp.Entries), SyncJournalMaxEntries)
 		}
+		if resp.TerminalOnly && !strings.HasPrefix(subchain, "domain:") {
+			return appended, fmt.Errorf("peer %s returned terminal-only roster response", remoteChainID)
+		}
 		// Contiguity/ascending check BEFORE any verification work — a peer cannot
-		// make us re-verify entries at or below our head.
+		// make us re-verify entries at or below our head. Terminal-only pages are
+		// verified by their dedicated sparse-ingest path below.
 		st := make([]store.SyncGroupLogEntry, 0, len(resp.Entries))
 		for i, wentry := range resp.Entries {
-			if wentry.Seq != after+1+int64(i) {
+			if !resp.TerminalOnly && wentry.Seq != after+1+int64(i) {
 				return appended, fmt.Errorf("peer %s: non-contiguous journal page at seq %d (want %d)", remoteChainID, wentry.Seq, after+1+int64(i))
+			}
+			if resp.TerminalOnly && (wentry.Seq <= after || !isTerminalDomainEntryType(wentry.EntryType)) {
+				return appended, fmt.Errorf("peer %s returned invalid terminal journal entry %s/%d (%s)", remoteChainID, wentry.Subchain, wentry.Seq, wentry.EntryType)
 			}
 			st = append(st, wireToStore(groupID, wentry))
 		}
@@ -405,7 +553,14 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		// Ingest this page under the lock (fetch was lock-free); re-reads the head
 		// each iteration so append-atomicity holds.
 		m.journalMu.Lock()
-		n, evicted, removed, iErr := m.ingestJournalEntriesLocked(ctx, ss, groupID, subchain, st)
+		var n int
+		var evicted, removed []string
+		var iErr error
+		if resp.TerminalOnly {
+			n, evicted, removed, iErr = m.ingestTerminalJournalEntriesLocked(ctx, ss, groupID, subchain, st)
+		} else {
+			n, evicted, removed, iErr = m.ingestJournalEntriesLocked(ctx, ss, groupID, subchain, st)
+		}
 		m.journalMu.Unlock()
 		appended += n
 		evictedChains = append(evictedChains, evicted...)

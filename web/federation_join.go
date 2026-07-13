@@ -109,6 +109,8 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/federation/groups/{group_id}/domains/remove", h.handleFedGroupDomainRemove)
 	r.Post("/v1/dashboard/federation/groups/{group_id}/self-role", h.handleFedGroupSelfRole)
 	r.Post("/v1/dashboard/federation/groups/{group_id}/roster", h.handleFedGroupRosterControl)
+	r.Post("/v1/dashboard/federation/groups/{group_id}/members/invite", h.handleFedGroupMemberInvite)
+	r.Post("/v1/dashboard/federation/groups/{group_id}/epoch-rotate", h.handleFedGroupEpochRotate)
 }
 
 // --- LAN endpoint suggestion (fix the localhost-in-join-code footgun) -------
@@ -865,11 +867,26 @@ type groupManagementDriver interface {
 	EmitDomainRemove(ctx context.Context, groupID, domainTag string) (store.SyncGroupLogEntry, error)
 	EmitSelfRoleChange(ctx context.Context, groupID, role string, selectedDomains []string) (store.SyncGroupLogEntry, error)
 	EmitRosterControl(ctx context.Context, groupID, entryType string, payload map[string]string) (store.SyncGroupLogEntry, error)
+	EmitMemberInvite(ctx context.Context, groupID, memberChain, memberPubkey, role string, selectedDomains, ownedDomains []string) (store.SyncGroupLogEntry, error)
+	EmitEpochRotate(ctx context.Context, groupID, newEpoch, incomingChain, incomingPubkey string) (store.SyncGroupLogEntry, error)
+}
+
+func (h *DashboardHandler) isSyncGroupOperatorRequest(r *http.Request) bool {
+	operatorID := strings.TrimSpace(h.NodeOperatorAgentID)
+	return operatorID != "" && verifiedDashboardAgentID(r.Context()) == operatorID
 }
 
 // groupDriver resolves the emit surface after the fedReady guard, or writes the
 // canonical 501/not-implemented envelope and returns false.
-func (h *DashboardHandler) groupDriver(w http.ResponseWriter) (groupManagementDriver, bool) {
+func (h *DashboardHandler) groupDriver(w http.ResponseWriter, r *http.Request) (groupManagementDriver, bool) {
+	// Group journal methods sign with the node operator key.  Dashboard auth also
+	// admits independently signed agents, so it is not by itself an operator
+	// boundary.  Never let an arbitrary agent turn its request into an
+	// operator-authored roster/domain mutation.
+	if !h.isSyncGroupOperatorRequest(r) {
+		fedWriteErr(w, http.StatusForbidden, "Sync-group management requires the local node operator.")
+		return nil, false
+	}
 	if !h.fedReady(w) {
 		return nil, false
 	}
@@ -896,6 +913,10 @@ func groupEmitResult(e store.SyncGroupLogEntry) map[string]any {
 // handleFedGroupList enumerates the local node's sync groups with their roster and
 // active owner-signed shared domains — the operator's read view of the group plane.
 func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Request) {
+	if !h.isSyncGroupOperatorRequest(r) {
+		fedWriteErr(w, http.StatusForbidden, "Sync-group metadata requires the local node operator.")
+		return
+	}
 	if !h.fedReady(w) {
 		return
 	}
@@ -970,7 +991,7 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 // handleFedGroupDomainAdd authors an owner-unilateral domain_add (EmitDomainAdd):
 // the local node must be an active member AND the on-chain owner/admin of the tag.
 func (h *DashboardHandler) handleFedGroupDomainAdd(w http.ResponseWriter, r *http.Request) {
-	d, ok := h.groupDriver(w)
+	d, ok := h.groupDriver(w, r)
 	if !ok {
 		return
 	}
@@ -1004,7 +1025,7 @@ func (h *DashboardHandler) handleFedGroupDomainAdd(w http.ResponseWriter, r *htt
 // handleFedGroupDomainRemove authors an owner-unilateral domain_remove
 // (EmitDomainRemove): the group must already record THIS node as the tag's owner.
 func (h *DashboardHandler) handleFedGroupDomainRemove(w http.ResponseWriter, r *http.Request) {
-	d, ok := h.groupDriver(w)
+	d, ok := h.groupDriver(w, r)
 	if !ok {
 		return
 	}
@@ -1035,7 +1056,7 @@ func (h *DashboardHandler) handleFedGroupDomainRemove(w http.ResponseWriter, r *
 // only ever changes THIS node's role; a controller changing ANOTHER member's role
 // goes through the roster-control surface below.
 func (h *DashboardHandler) handleFedGroupSelfRole(w http.ResponseWriter, r *http.Request) {
-	d, ok := h.groupDriver(w)
+	d, ok := h.groupDriver(w, r)
 	if !ok {
 		return
 	}
@@ -1071,7 +1092,7 @@ func (h *DashboardHandler) handleFedGroupSelfRole(w http.ResponseWriter, r *http
 // The emitter validates the entry_type and authority, so the operator supplies the
 // already-built payload (member/role/epoch fields as the journal apply expects).
 func (h *DashboardHandler) handleFedGroupRosterControl(w http.ResponseWriter, r *http.Request) {
-	d, ok := h.groupDriver(w)
+	d, ok := h.groupDriver(w, r)
 	if !ok {
 		return
 	}
@@ -1091,6 +1112,67 @@ func (h *DashboardHandler) handleFedGroupRosterControl(w http.ResponseWriter, r 
 	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
 	defer cancel()
 	entry, err := d.EmitRosterControl(ctx, groupID, body.EntryType, body.Payload)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, groupEmitResult(entry))
+}
+
+func (h *DashboardHandler) handleFedGroupMemberInvite(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		MemberChain  string   `json:"member_chain"`
+		MemberPubkey string   `json:"member_pubkey"`
+		Role         string   `json:"role"`
+		Selected     []string `json:"selected_domains"`
+		OwnedDomains []string `json:"owned_domains"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body) != nil || strings.TrimSpace(body.MemberChain) == "" || strings.TrimSpace(body.MemberPubkey) == "" {
+		fedWriteErr(w, http.StatusBadRequest, "member_chain, member_pubkey, and role are required.")
+		return
+	}
+	switch body.Role {
+	case store.GroupRoleFullSync, store.GroupRoleSelectiveSync, store.GroupRoleEnrolledNoSync:
+	default:
+		fedWriteErr(w, http.StatusBadRequest, "role must be full-sync, selective-sync, or enrolled-no-sync.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	entry, err := d.EmitMemberInvite(ctx, chi.URLParam(r, "group_id"), body.MemberChain, body.MemberPubkey, body.Role, body.Selected, body.OwnedDomains)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, groupEmitResult(entry))
+}
+
+// handleFedGroupEpochRotate runs the outgoing-controller/incoming-controller
+// two-party countersign ceremony. It is deliberately separate from the generic
+// roster payload endpoint so a caller cannot omit or synthesize the incoming
+// controller proof.
+func (h *DashboardHandler) handleFedGroupEpochRotate(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Epoch               string `json:"epoch"`
+		IncomingChain       string `json:"incoming_chain"`
+		IncomingAgentPubkey string `json:"incoming_agent_pubkey"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil ||
+		strings.TrimSpace(body.Epoch) == "" || strings.TrimSpace(body.IncomingChain) == "" || strings.TrimSpace(body.IncomingAgentPubkey) == "" {
+		fedWriteErr(w, http.StatusBadRequest, "epoch, incoming_chain, and incoming_agent_pubkey are required.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	entry, err := d.EmitEpochRotate(ctx, chi.URLParam(r, "group_id"), body.Epoch, body.IncomingChain, body.IncomingAgentPubkey)
 	if err != nil {
 		fedWriteErr(w, http.StatusConflict, err.Error())
 		return

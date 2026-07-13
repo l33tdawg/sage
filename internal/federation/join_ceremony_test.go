@@ -53,6 +53,9 @@ func newCeremonyNode(t *testing.T, chainID string) *ceremonyNode {
 	if err != nil {
 		t.Fatalf("open badger: %v", err)
 	}
+	if err := badger.SaveValidators(map[string]int64{"local-validator": 1}); err != nil {
+		t.Fatalf("seed validator set: %v", err)
+	}
 	t.Cleanup(func() { _ = badger.CloseBadger() })
 	sqlite, err := store.NewSQLiteStore(context.Background(), filepath.Join(dir, "sage.db"))
 	if err != nil {
@@ -216,6 +219,17 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 	}
 	if !host.mgr.seedEstablished("guest-bbbbbb") {
 		t.Fatal("host seed_established not set")
+	}
+	hostGroups, err := host.mgr.syncStore().ListSyncGroups(ctx)
+	if err != nil || len(hostGroups) != 1 {
+		t.Fatalf("host enrollment group=%v err=%v", hostGroups, err)
+	}
+	guestGroups, err := guest.mgr.syncStore().ListSyncGroups(ctx)
+	if err != nil || len(guestGroups) != 1 {
+		t.Fatalf("guest enrollment group=%v err=%v", guestGroups, err)
+	}
+	if hostGroups[0].GroupID != guestGroups[0].GroupID || guestGroups[0].ControllerChainID != "host-aaaaaa" {
+		t.Fatalf("enrollment roster did not converge host=%+v guest=%+v", hostGroups[0], guestGroups[0])
 	}
 	hostControl, err := host.mgr.syncStore().GetSyncControl(ctx, "guest-bbbbbb")
 	if err != nil || hostControl == nil || hostControl.Role != "host" || hostControl.BindingState != "active" || hostControl.Revision != 0 {

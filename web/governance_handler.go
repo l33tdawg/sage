@@ -312,8 +312,10 @@ func parseDashboardGovOp(s string) (tx.GovProposalOp, error) {
 		return tx.GovOpRemoveValidator, nil
 	case "update_power":
 		return tx.GovOpUpdatePower, nil
+	case "sync_group_action":
+		return tx.GovOpSyncGroupAction, nil
 	default:
-		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power")
+		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, sync_group_action")
 	}
 }
 

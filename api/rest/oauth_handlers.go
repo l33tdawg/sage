@@ -50,8 +50,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/l33tdawg/sage/internal/store"
 )
 
@@ -62,6 +60,10 @@ const AuthCodeTTL = 5 * time.Minute
 // csrfTTL bounds how long a rendered consent form can be submitted. Mirrors
 // AuthCodeTTL — anything older is treated as a stale tab.
 const csrfTTL = 5 * time.Minute
+
+// oauthCleanupTimeout bounds revocation/authorization-code cleanup after an
+// issuance failure. It must not inherit a canceled browser request.
+const oauthCleanupTimeout = 8 * time.Second
 
 // dcrRegisterPerIPLimit is the maximum number of /oauth/register calls
 // accepted from a single remote address per dcrRegisterWindow. Legitimate
@@ -77,13 +79,17 @@ const (
 type OAuthStore interface {
 	// Token table — to mint a bearer at /authorize approval and to list the
 	// operator's existing tokens for the consent screen dropdown.
-	InsertMCPToken(ctx context.Context, id, name, agentID, tokenSHA256 string) error
+	IssuePendingMCPToken(ctx context.Context, name, issuerID, legacyAgentID, provider string) (*store.MCPTokenIssue, error)
+	ActivatePendingMCPToken(ctx context.Context, id string) error
+	MarkMCPTokenCleanupPending(ctx context.Context, id string) error
+	RevokeMCPToken(ctx context.Context, id string) error
+	DeleteAuthCode(ctx context.Context, code string) error
 	ListMCPTokens(ctx context.Context) ([]*store.MCPToken, error)
 	// Auth-code table.
 	IssueAuthCode(ctx context.Context,
 		code, tokenID, codeChallenge, codeChallengeMethod, redirectURI, clientID, state, bearerPlaintext string,
 		ttl time.Duration) error
-	RedeemAuthCode(ctx context.Context, code, codeVerifier, redirectURI string) (string, error)
+	RedeemAuthCode(ctx context.Context, code, codeVerifier, redirectURI, clientID string) (string, error)
 	// OAuth client (DCR) table — persisted at /oauth/register, looked up at
 	// /oauth/authorize and /oauth/token to validate redirect_uri.
 	InsertOAuthClient(ctx context.Context, clientID string, redirectURIs []string, clientName string) error
@@ -440,7 +446,9 @@ type authorizeFormParams struct {
 // invalid.
 func parseAuthorizeParams(r *http.Request) (authorizeFormParams, string) {
 	// Parse form body for POST; FormValue auto-handles GET via r.URL.Query.
-	_ = r.ParseForm()
+	if err := r.ParseForm(); err != nil {
+		return authorizeFormParams{}, "invalid form body"
+	}
 	p := authorizeFormParams{
 		ClientID:            strings.TrimSpace(r.FormValue("client_id")),
 		RedirectURI:         strings.TrimSpace(r.FormValue("redirect_uri")),
@@ -517,21 +525,18 @@ func (h *OAuthHandler) resolveClient(ctx context.Context, clientID, redirectURI 
 // submission (POST). The user must be authenticated to the dashboard
 // (when encryption is on) — IsAuthed gates that.
 func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
-	params, problem := parseAuthorizeParams(r)
-	if problem != "" {
-		http.Error(w, problem, http.StatusBadRequest)
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// redirect_uri MUST belong to a DCR-registered client. We do this BEFORE
-	// the dashboard auth redirect so an attacker can't use the redirect to
-	// recover the validation error (i.e. probe whether a client_id exists).
-	if _, _, clientErr := h.resolveClient(r.Context(), params.ClientID, params.RedirectURI); clientErr != "" {
-		http.Error(w, clientErr, http.StatusBadRequest)
-		return
+	// Authenticate BEFORE parsing a POST form. On encryption-off nodes the
+	// production checker verifies an Ed25519 signature over the exact raw body;
+	// ParseForm consumes that body and would otherwise turn the check into a
+	// signature over empty bytes. The checker re-buffers signed bodies.
+	if r.Method == http.MethodPost {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	}
-
-	// Dashboard auth gate. If unauthenticated, redirect to the SPA with a
-	// `next` param so the SPA login flow round-trips back here on success.
 	if h.IsAuthed != nil {
 		ok, loginURL := h.IsAuthed(r)
 		if !ok {
@@ -545,14 +550,23 @@ func (h *OAuthHandler) HandleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	params, problem := parseAuthorizeParams(r)
+	if problem != "" {
+		http.Error(w, problem, http.StatusBadRequest)
+		return
+	}
+	// Only authenticated callers may learn whether a client_id is registered,
+	// and the final redirect sink performs this allowlist check again.
+	if _, _, clientErr := h.resolveClient(r.Context(), params.ClientID, params.RedirectURI); clientErr != "" {
+		http.Error(w, clientErr, http.StatusBadRequest)
+		return
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		h.renderConsent(w, r, params, "")
 	case http.MethodPost:
 		h.processConsent(w, r, params)
-	default:
-		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -771,11 +785,8 @@ func (h *OAuthHandler) consentNodeOperatorLabel(r *http.Request) string {
 // it to a fresh authorization code, and 302-redirect the user back to the
 // client's redirect_uri carrying the code (and original state).
 func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p authorizeFormParams) {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64KB cap on consent form bodies
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid form body", http.StatusBadRequest)
-		return
-	}
+	// HandleAuthorize already bounded and parsed the form, after authenticating
+	// against the original bytes.
 	if err := h.verifyCSRFNonce(p, r.FormValue("csrf_nonce")); err != nil {
 		h.renderConsent(w, r, p, "Consent request could not be verified — please try again. ("+err.Error()+")")
 		return
@@ -797,18 +808,25 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 		h.renderConsent(w, r, p, "node operator identity is not hex-encoded — server misconfiguration")
 		return
 	}
-
-	// 1. Mint a brand-new bearer via the same code path /v1/mcp/tokens uses.
-	bearerRaw := make([]byte, 32)
-	if _, err := rand.Read(bearerRaw); err != nil {
-		http.Error(w, "failed to generate token", http.StatusInternalServerError)
+	// Validate the redirect sink before creating either secret. The normal
+	// HandleAuthorize validation is intentionally repeated here because this is
+	// the issuance boundary, not merely a UI-render boundary.
+	_, registered, clientErr := h.resolveClient(r.Context(), p.ClientID, p.RedirectURI)
+	if clientErr != "" {
+		http.Error(w, clientErr, http.StatusBadRequest)
 		return
 	}
-	bearerPlaintext := base64.RawURLEncoding.EncodeToString(bearerRaw)
-	digest := sha256.Sum256([]byte(bearerPlaintext))
-	digestHex := hex.EncodeToString(digest[:])
-	tokenID := uuid.NewString()
-	if err := h.Store.InsertMCPToken(r.Context(), tokenID, tokenName, agentID, digestHex); err != nil {
+	redirectURL, err := url.Parse(registered)
+	if err != nil {
+		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
+		return
+	}
+
+	// 1. Mint via the exact shared issuer used by /v1/mcp/tokens and the
+	// wizard. On vault-active nodes this creates/registers a distinct keyed
+	// identity and records the operator as issuer/owner.
+	issued, err := h.Store.IssuePendingMCPToken(r.Context(), tokenName, agentID, agentID, "oauth-mcp-token")
+	if err != nil {
 		http.Error(w, "failed to persist token: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -816,14 +834,24 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 	// 2. Mint the auth code and bind it to the bearer plaintext.
 	codeRaw := make([]byte, 32)
 	if _, err := rand.Read(codeRaw); err != nil {
+		h.cleanupOAuthIssue(issued.ID, "")
 		http.Error(w, "failed to generate auth code", http.StatusInternalServerError)
 		return
 	}
 	code := base64.RawURLEncoding.EncodeToString(codeRaw)
 	if err := h.Store.IssueAuthCode(r.Context(),
-		code, tokenID, p.CodeChallenge, p.CodeChallengeMethod,
-		p.RedirectURI, p.ClientID, p.State, bearerPlaintext, AuthCodeTTL); err != nil {
+		code, issued.ID, p.CodeChallenge, p.CodeChallengeMethod,
+		p.RedirectURI, p.ClientID, p.State, issued.Token, AuthCodeTTL); err != nil {
+		h.cleanupOAuthIssue(issued.ID, code)
 		http.Error(w, "failed to issue auth code: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	// The code row is durable. Now (and only now) permit its bearer to
+	// authenticate. If this state flip cannot commit, cleanup remains pending
+	// and the code/token are never delivered as an active credential.
+	if err := h.activateOAuthIssue(issued.ID); err != nil {
+		h.cleanupOAuthIssue(issued.ID, code)
+		http.Error(w, "failed to activate token: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -836,13 +864,15 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 	// the allowlist check is co-located with the http.Redirect call.
 	// This closes go/unvalidated-url-redirection and makes the
 	// invariant obvious to future readers.
-	_, registered, clientErr := h.resolveClient(r.Context(), p.ClientID, p.RedirectURI)
+	_, registered, clientErr = h.resolveClient(r.Context(), p.ClientID, p.RedirectURI)
 	if clientErr != "" {
+		h.cleanupOAuthIssue(issued.ID, code)
 		http.Error(w, clientErr, http.StatusBadRequest)
 		return
 	}
-	redirectURL, err := url.Parse(registered)
+	redirectURL, err = url.Parse(registered)
 	if err != nil {
+		h.cleanupOAuthIssue(issued.ID, code)
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
 		return
 	}
@@ -853,6 +883,30 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 	}
 	redirectURL.RawQuery = q.Encode()
 	http.Redirect(w, r, redirectURL.String(), http.StatusFound)
+}
+
+// cleanupOAuthIssue revokes a just-issued bearer and erases any bound code
+// using a short independent context. The original browser request may be
+// canceled exactly when IssueAuthCode or sink validation fails; using that
+// context would strand a live bearer or its plaintext-bearing code row.
+func (h *OAuthHandler) cleanupOAuthIssue(tokenID, code string) {
+	ctx, cancel := context.WithTimeout(context.Background(), oauthCleanupTimeout)
+	defer cancel()
+	if err := h.Store.MarkMCPTokenCleanupPending(ctx, tokenID); err != nil {
+		log.Printf("oauth: durable cleanup marker failed: %v", err)
+	}
+	if err := h.Store.DeleteAuthCode(ctx, code); err != nil {
+		log.Printf("oauth: cleanup delete auth code failed: %v", err)
+	}
+	if err := h.Store.RevokeMCPToken(ctx, tokenID); err != nil {
+		log.Printf("oauth: cleanup revoke token failed: %v", err)
+	}
+}
+
+func (h *OAuthHandler) activateOAuthIssue(tokenID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), oauthCleanupTimeout)
+	defer cancel()
+	return h.Store.ActivatePendingMCPToken(ctx, tokenID)
 }
 
 // HandleToken implements POST /oauth/token. Form-encoded body per OAuth 2.0
@@ -899,7 +953,7 @@ func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	bearer, err := h.Store.RedeemAuthCode(r.Context(), code, codeVerifier, redirectURI)
+	bearer, err := h.Store.RedeemAuthCode(r.Context(), code, codeVerifier, redirectURI, clientID)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrAuthCodeNotFound),
@@ -909,6 +963,9 @@ func (h *OAuthHandler) HandleToken(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, store.ErrAuthCodeRedirectMismatch):
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant",
 				"redirect_uri does not match the authorization request")
+		case errors.Is(err, store.ErrAuthCodeClientMismatch):
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant",
+				"client_id does not match the authorization request")
 		case errors.Is(err, store.ErrAuthCodePKCEMismatch):
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant",
 				"PKCE code_verifier does not match code_challenge")

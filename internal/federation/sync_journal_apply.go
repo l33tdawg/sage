@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -44,6 +45,19 @@ const (
 	pkControllerPubkey = "controller_pubkey"
 	pkRosterRevision   = "roster_revision"
 	pkManifestHash     = "manifest_hash"
+	// A member_invite is a 2-of-2 statement: the controller authors the journal
+	// entry, while the invitee proves possession of the exact pinned operator key
+	// and accepts the exact role/CA/consent tuple.  Without this proof a controller
+	// could assign an arbitrary key to another chain id and then forge that
+	// member's origin signatures.
+	pkInviteeSig = "invitee_sig"
+	// pkOwnedDomains is the invitee's locally-authorized domain capability from
+	// the signed enrollment scope.  The invitee proof and controller-authored
+	// member_invite bind it into the roster.  A remote domain_add ceremony is
+	// available only inside this capability, so an arbitrary active member cannot
+	// probe heads or claim a domain it never offered during enrollment.
+	pkOwnedDomains = "owned_domains"
+	pkInviteHead   = "invite_head"
 	// pkSelectedDomains rides on a SELF-authored role_change to selective-sync: the
 	// JSON-encoded subset of the ALREADY-SHARED group domains this member consents to
 	// receive (docs §8, decision #4). It is the v11.8 consent-subset transport, so no
@@ -68,14 +82,18 @@ func validRole(r string) bool {
 func memberInvitePayload(memberChain, memberPubkeyHex, role, caPin string) map[string]string {
 	return map[string]string{pkMemberChain: memberChain, pkMemberPubkey: memberPubkeyHex, pkRole: role, pkCAPin: caPin}
 }
-func memberChainPayload(memberChain string) map[string]string { return map[string]string{pkMemberChain: memberChain} }
+func memberChainPayload(memberChain string) map[string]string {
+	return map[string]string{pkMemberChain: memberChain}
+}
 func roleChangePayload(memberChain, role string) map[string]string {
 	return map[string]string{pkMemberChain: memberChain, pkRole: role}
 }
 func domainAddPayload(domainTag, ownerChain string, maxClearance int) map[string]string {
 	return map[string]string{pkDomainTag: domainTag, pkOwnerChain: ownerChain, pkMaxClearance: strconv.Itoa(maxClearance)}
 }
-func domainRemovePayload(domainTag string) map[string]string { return map[string]string{pkDomainTag: domainTag} }
+func domainRemovePayload(domainTag string) map[string]string {
+	return map[string]string{pkDomainTag: domainTag}
+}
 func epochRotatePayload(epoch, controllerChain, controllerPubkeyHex string) map[string]string {
 	return map[string]string{pkEpoch: epoch, pkControllerChain: controllerChain, pkControllerPubkey: controllerPubkeyHex}
 }
@@ -106,12 +124,39 @@ func decodeSelectedDomains(enc string) []string {
 	return out
 }
 
+func decodeOwnedDomains(enc string) ([]string, error) {
+	if enc == "" {
+		return nil, nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(enc), &out); err != nil || len(out) > 100 {
+		return nil, fmt.Errorf("owned_domains must be a JSON array of at most 100 tags")
+	}
+	for _, tag := range out {
+		if tag == "" || len(tag) > 128 || strings.TrimSpace(tag) != tag {
+			return nil, fmt.Errorf("owned_domains contains an invalid tag")
+		}
+		for _, r := range tag {
+			if unicode.IsControl(r) {
+				return nil, fmt.Errorf("owned_domains contains a control character")
+			}
+		}
+	}
+	canonical, err := encodeSelectedDomains(out)
+	if err != nil || canonical != enc {
+		return nil, fmt.Errorf("owned_domains is not canonical")
+	}
+	return out, nil
+}
+
 // ---- groupApplyState: the growing roster view + canonical resolver ----
 
 type groupApplyState struct {
 	groupID             string
 	controllerChain     string
 	controllerKey       ed25519.PublicKey
+	controllerEpoch     string
+	controllerByEpoch   map[string]controllerIdentity
 	memberKey           map[string]ed25519.PublicKey
 	memberState         map[string]string
 	domainOwner         map[string]string // active AND removed (owner is needed to verify a domain_remove)
@@ -128,6 +173,11 @@ type groupApplyState struct {
 	removedDomains []string
 }
 
+type controllerIdentity struct {
+	chain string
+	key   ed25519.PublicKey
+}
+
 // loadGroupApplyState snapshots the current roster into a mutable state.
 func loadGroupApplyState(ctx context.Context, ss *store.SQLiteStore, groupID string) (*groupApplyState, error) {
 	g, err := ss.GetSyncGroup(ctx, groupID)
@@ -138,12 +188,45 @@ func loadGroupApplyState(ctx context.Context, ss *store.SQLiteStore, groupID str
 		return nil, fmt.Errorf("group %s not found", groupID)
 	}
 	gs := &groupApplyState{
-		groupID: groupID, controllerChain: g.ControllerChainID,
+		groupID: groupID, controllerChain: g.ControllerChainID, controllerEpoch: effectiveControllerEpoch(g.Epoch),
 		rosterRevision: g.RosterRevision, rosterRevisionFloor: g.RosterRevisionFloor,
 		memberKey: map[string]ed25519.PublicKey{}, memberState: map[string]string{}, domainOwner: map[string]string{},
+		controllerByEpoch: map[string]controllerIdentity{},
 	}
 	if k, e := decodePub(g.ControllerAgentPubkey); e == nil {
 		gs.controllerKey = k
+		gs.controllerByEpoch[gs.controllerEpoch] = controllerIdentity{chain: g.ControllerChainID, key: k}
+	}
+	// Preserve verification of domain approvals from earlier epochs after a
+	// controller rotation. These rows were admitted only through the verified
+	// roster ingest path; the incoming-controller countersignature is rechecked
+	// before adding a historical identity to the resolver map.
+	after := int64(-1)
+	for {
+		entries, listErr := ss.ListSyncGroupLog(ctx, groupID, RosterSubchain, after, 2000)
+		if listErr != nil {
+			return nil, listErr
+		}
+		if len(entries) == 0 {
+			break
+		}
+		for _, entry := range entries {
+			p := parseJournalPayload(entry.PayloadJSON)
+			switch entry.EntryType {
+			case "group_create":
+				key, keyErr := decodePub(p[pkControllerPubkey])
+				if keyErr == nil && p[pkControllerChain] != "" {
+					gs.controllerByEpoch[effectiveControllerEpoch(p[pkEpoch])] = controllerIdentity{chain: p[pkControllerChain], key: key}
+				}
+			case "epoch_rotate":
+				key, keyErr := decodePub(p[pkControllerPubkey])
+				epoch := effectiveControllerEpoch(p[pkEpoch])
+				if keyErr == nil && entry.ControllerEpoch == epoch && verifyControllerSignature(entry, p[pkControllerChain], key) == nil {
+					gs.controllerByEpoch[epoch] = controllerIdentity{chain: p[pkControllerChain], key: key}
+				}
+			}
+			after = entry.Seq
+		}
 	}
 	members, err := ss.ListSyncGroupMembers(ctx, groupID)
 	if err != nil {
@@ -198,6 +281,17 @@ func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey 
 				return gs.memberKey[e.AuthorChainID]
 			}
 		}
+		if e.EntryType == "epoch_rotate" {
+			p := parseJournalPayload(e.PayloadJSON)
+			incomingKey, err := decodePub(p[pkControllerPubkey])
+			pinnedIncoming := gs.memberKey[p[pkControllerChain]]
+			if err != nil || p[pkEpoch] == "" || effectiveControllerEpoch(p[pkEpoch]) == gs.controllerEpoch ||
+				!gs.memberActive(p[pkControllerChain]) || pinnedIncoming == nil || !pinnedIncoming.Equal(incomingKey) ||
+				e.ControllerEpoch != effectiveControllerEpoch(p[pkEpoch]) ||
+				verifyControllerSignature(e, p[pkControllerChain], incomingKey) != nil {
+				return nil
+			}
+		}
 		if rosterControllerTypes[e.EntryType] && e.AuthorChainID == gs.controllerChain {
 			return gs.controllerKey
 		}
@@ -206,6 +300,16 @@ func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey 
 	if tag, ok := strings.CutPrefix(e.Subchain, "domain:"); ok {
 		if !domainOwnerTypes[e.EntryType] {
 			return nil
+		}
+		// Controller admission is required for EVERY domain_add, including a
+		// re-add on an established owner's sub-chain.  Checking only the
+		// establishing case would let the owner widen the shared set again after a
+		// removal without controller approval.
+		if e.EntryType == "domain_add" {
+			controller, ok := gs.controllerByEpoch[e.ControllerEpoch]
+			if !ok || verifyControllerSignature(e, controller.chain, controller.key) != nil {
+				return nil
+			}
 		}
 		owner, known := gs.domainOwner[tag]
 		if !known {
@@ -245,8 +349,25 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 	case "member_invite":
 		mc, mp := p[pkMemberChain], p[pkMemberPubkey]
 		mk, err := decodePub(mp)
-		if mc == "" || err != nil || !validRole(p[pkRole]) {
+		ownedDomains, ownedErr := decodeOwnedDomains(p[pkOwnedDomains])
+		headValid := (p[pkInviteHead] != "" && p[pkInviteHead] == e.PrevHash) || (p[pkInviteHead] == "" && (e.Seq == 0 || e.Seq == 1 || e.Seq == 3))
+		if mc == "" || err != nil || ownedErr != nil || !headValid || !validRole(p[pkRole]) || verifyMemberInviteProof(e.GroupID, p) != nil {
 			return nil // SKIP a malformed invite
+		}
+		// The first invite pins the chain's signing identity.  A repeated invite
+		// may be an idempotent retry or a same-key rejoin, but it is never a key
+		// rotation ceremony: accepting a different key here would let the
+		// controller impersonate that member's origin signatures.  Rotation needs
+		// an explicit old+new-key co-signed protocol; until then fail closed.
+		if existing, getErr := ss.GetSyncGroupMember(ctx, gs.groupID, mc); getErr != nil {
+			return getErr
+		} else if existing != nil {
+			if existing.MemberAgentPubkey != mp {
+				return nil // SKIP identity replacement in every lifecycle state
+			}
+			if existing.MemberState == store.GroupMemberActive || existing.MemberState == store.GroupMemberResyncing {
+				return nil // SKIP replay/demotion of a live pinned member
+			}
 		}
 		if err := ss.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
 			GroupID: gs.groupID, MemberChainID: mc, MemberAgentPubkey: mp, Role: p[pkRole],
@@ -256,6 +377,19 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		}
 		gs.memberKey[mc] = mk
 		gs.memberState[mc] = store.GroupMemberInvited
+		// Initial selective consent is safe to fold directly from member_invite:
+		// unlike a controller-authored role_change, the exact selected_domains value
+		// is covered by the invitee's own signature above.
+		var selected []string
+		if p[pkRole] == store.GroupRoleSelectiveSync {
+			selected = decodeSelectedDomains(p[pkSelectedDomains])
+		}
+		if err := ss.ReplaceGroupMemberConsentDomains(ctx, gs.groupID, mc, selected, gs.rosterRevision); err != nil {
+			return err
+		}
+		if err := ss.ReplaceGroupMemberOwnerDomains(ctx, gs.groupID, mc, ownedDomains); err != nil {
+			return err
+		}
 
 	case "member_activate":
 		mc := p[pkMemberChain]
@@ -311,7 +445,11 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		// ReplaceGroupMemberConsentDomains is revision-guarded, so replaying this entry
 		// is idempotent. Consent is READ/SERVE-ONLY — never a write-authz vehicle.
 		var selected []string
-		if p[pkRole] == store.GroupRoleSelectiveSync {
+		// selected_domains is the member's own receive-consent assertion. A
+		// controller may assign another member's role, but may not forge that
+		// member's consent subset. Controller-authored selective transitions
+		// therefore clear/under-serve until the member self-signs its choices.
+		if p[pkRole] == store.GroupRoleSelectiveSync && e.AuthorChainID == mc {
 			selected = decodeSelectedDomains(p[pkSelectedDomains])
 		}
 		return ss.ReplaceGroupMemberConsentDomains(ctx, gs.groupID, mc, selected, gs.rosterRevision)
@@ -337,6 +475,9 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		}); err != nil {
 			return err
 		}
+		if err := ss.ActivatePendingGroupMemberConsentForDomain(ctx, gs.groupID, tag, gs.rosterRevision); err != nil {
+			return err
+		}
 		gs.domainOwner[tag] = owner
 
 	case "domain_remove":
@@ -350,17 +491,44 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 			// carried the removal (must-fix: the anchor/authz/tombstone tags now agree).
 			return nil
 		}
-		// removed_revision must be strictly positive (0 is the "active" sentinel).
-		removedRev := gs.rosterRevision
-		if removedRev < 1 {
-			removedRev = 1
+		// Each remove/re-add lifecycle needs a distinct positive generation. A
+		// roster revision can stay unchanged across domain-subchain mutations, so
+		// use the domain journal sequence instead; otherwise a later removal could
+		// reuse an old entitlement snapshot.
+		domains, listErr := ss.ListSyncGroupDomains(ctx, gs.groupID, false)
+		if listErr != nil {
+			return listErr
 		}
-		if err := ss.SetSyncGroupDomainRemoved(ctx, gs.groupID, tag, removedRev); err != nil {
+		active := false
+		for _, domain := range domains {
+			if domain.DomainTag == tag {
+				if domain.RemovedRevision != 0 {
+					return nil // idempotent replay of an already-retired lifecycle
+				}
+				active = true
+				break
+			}
+		}
+		if !active {
+			return nil
+		}
+		if e.Seq < 0 || e.Seq == int64(^uint64(0)>>1) {
+			return nil
+		}
+		removalGeneration := e.Seq + 1
+		// Preserve exactly who was entitled immediately before removal. The
+		// journal server uses this immutable snapshot only to deliver terminal
+		// domain_remove/tombstone/anchor evidence after live consent is gone; it
+		// never re-enables content or pre-removal history serving.
+		if err := ss.SnapshotRemovedDomainEntitlements(ctx, gs.groupID, tag, removalGeneration); err != nil {
+			return err
+		}
+		if err := ss.SetSyncGroupDomainRemoved(ctx, gs.groupID, tag, removalGeneration); err != nil {
 			return err
 		}
 		if err := ss.InsertSyncTombstone(ctx, store.SyncTombstone{
 			GroupID: gs.groupID, Scope: store.TombstoneScopeDomain, Enforcement: store.TombstoneEnforceAdvisory,
-			DomainTag: tag, Reason: "domain_remove", Revision: gs.rosterRevision, Subchain: e.Subchain,
+			DomainTag: tag, Reason: "domain_remove", Revision: removalGeneration, Subchain: e.Subchain,
 			JournalSeq: e.Seq, AuthorChainID: e.AuthorChainID, AuthorSig: e.AuthorSig,
 		}); err != nil {
 			return err
@@ -369,7 +537,7 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		// domain (or a domain nested beneath it) so a stale consent row can never keep a
 		// removed tag serving. Monotonic + idempotent (removed_revision guard), so a
 		// journal replay re-stamps nothing.
-		if err := ss.StampGroupMemberConsentDomainRemoved(ctx, gs.groupID, tag, removedRev); err != nil {
+		if err := ss.StampGroupMemberConsentDomainRemoved(ctx, gs.groupID, tag, removalGeneration); err != nil {
 			return err
 		}
 		// D2: record the domain removal so the POST-BATCH hook fires the anchor
@@ -388,6 +556,8 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		}
 		gs.controllerChain = cc
 		gs.controllerKey = ck
+		gs.controllerEpoch = effectiveControllerEpoch(p[pkEpoch])
+		gs.controllerByEpoch[gs.controllerEpoch] = controllerIdentity{chain: cc, key: ck}
 
 	case "manifest":
 		rev, err := strconv.ParseInt(p[pkRosterRevision], 10, 64)
@@ -423,6 +593,19 @@ func validateAuthoredEntry(e store.SyncGroupLogEntry) error {
 		if p[pkMemberChain] == "" || badPub(p[pkMemberPubkey]) || !validRole(p[pkRole]) {
 			return fmt.Errorf("member_invite: malformed payload")
 		}
+		if err := verifyMemberInviteProof(e.GroupID, p); err != nil {
+			return fmt.Errorf("member_invite: %w", err)
+		}
+		if head := p[pkInviteHead]; head != "" {
+			if head != e.PrevHash {
+				return fmt.Errorf("member_invite: invite proof is not bound to this roster head")
+			}
+		} else if e.Seq != 0 && e.Seq != 1 && e.Seq != 3 {
+			return fmt.Errorf("member_invite: arbitrary expansion requires an exact roster-head bind")
+		}
+		if _, err := decodeOwnedDomains(p[pkOwnedDomains]); err != nil {
+			return fmt.Errorf("member_invite: %w", err)
+		}
 	case "role_change":
 		if p[pkMemberChain] == "" || !validRole(p[pkRole]) {
 			return fmt.Errorf("role_change: malformed payload")
@@ -446,7 +629,7 @@ func validateAuthoredEntry(e store.SyncGroupLogEntry) error {
 			return fmt.Errorf("domain_remove: payload domain_tag must match the sub-chain")
 		}
 	case "epoch_rotate":
-		if p[pkControllerChain] == "" || badPub(p[pkControllerPubkey]) {
+		if p[pkEpoch] == "" || p[pkControllerChain] == "" || badPub(p[pkControllerPubkey]) {
 			return fmt.Errorf("epoch_rotate: malformed controller identity")
 		}
 	case "manifest":

@@ -18,10 +18,7 @@ package rest
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,8 +27,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
-
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -40,14 +35,19 @@ import (
 // Defined as an interface so handler tests can stub it without spinning up
 // a SQLite DB.
 type mcpTokenStore interface {
-	InsertMCPToken(ctx context.Context, id, name, agentID, tokenSHA256 string) error
-	InsertMCPTokenWithIdentity(ctx context.Context, id, name, agentID, tokenSHA256, tokenPubHex string, tokenPriv ed25519.PrivateKey) error
-	DeleteMCPToken(ctx context.Context, id string) error
+	IssueMCPToken(ctx context.Context, name, issuerID, legacyAgentID, provider string) (*store.MCPTokenIssue, error)
 	ListMCPTokens(ctx context.Context) ([]*store.MCPToken, error)
 	RevokeMCPToken(ctx context.Context, id string) error
-	// VaultActive reports whether the store can seal a per-token signing key. When
-	// false the endpoint issues a legacy keyless token (sign-as-operator).
-	VaultActive() bool
+}
+
+// ConfigureMCPTokenIdentityRegistrar wires the shared token issuer to the
+// standard AgentRegister broadcaster. OAuth and wizard issuance use the same
+// SQLiteStore, so configuring it once covers all three entry points.
+func (s *Server) ConfigureMCPTokenIdentityRegistrar(ts *store.SQLiteStore) {
+	ts.SetMCPTokenIdentityRegistrar(func(ctx context.Context, pub ed25519.PublicKey, priv ed25519.PrivateKey, name, provider string) error {
+		_, _, err := s.registerMintedAgentIdentity(ctx, pub, priv, name, provider)
+		return err
+	})
 }
 
 // MCPTokenIssueRequest is the JSON body for POST /v1/mcp/tokens.
@@ -110,138 +110,37 @@ func (s *Server) handleMCPTokenIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// KEYED issuance is possible only when the store can SEAL a per-token signing
-	// key. Without an active vault we fall back to the legacy keyless model, whose
-	// token can only run as the node operator.
-	keyed := ts.VaultActive()
-
-	// LEGACY keyless: the token signs as the node operator, so the requested
-	// identity must BE the operator or the bearer label would misreport who acted.
-	// Enforced up front (pre-v11.8 ordering) so keyless callers get this precise
-	// error before the ownership check below.
-	if !keyed && req.AgentID != s.nodeOperatorID {
+	// Token issuance is exact-node-operator-only. Allowing an arbitrary
+	// self-signed, not-yet-registered caller to mint creates an unlimited Sybil
+	// issuance oracle and bypasses the identity-keyed rate limiter.
+	callerID := middleware.ContextAgentID(r.Context())
+	if callerID == "" || callerID != s.nodeOperatorID {
+		writeJSONError(w, http.StatusForbidden, "MCP token issuance requires the exact node operator identity")
+		return
+	}
+	if req.AgentID != s.nodeOperatorID {
 		writeJSONError(w, http.StatusBadRequest, "HTTP MCP tokens run as the local node operator; agent_id must match the node operator identity")
 		return
 	}
 
-	// AuthZ: a bearer token grants the holder an on-chain identity on the MCP
-	// transport, so a caller may only mint a token for ITS OWN agent_id — unless
-	// it is the node operator or an admin. Without this gate any registered agent
-	// could mint a token impersonating any other agent.
-	callerID := middleware.ContextAgentID(r.Context())
-	if req.AgentID != callerID && !s.callerIsOperatorOrAdmin(r.Context(), callerID) {
-		writeJSONError(w, http.StatusForbidden, "may only mint a token for your own agent_id unless operator/admin")
-		return
-	}
-
-	// Generate 32 random bytes → base64url-encoded bearer secret. This is the
-	// transport credential, kept distinct from the per-token SIGNING identity
-	// below.
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to generate token")
-		return
-	}
-	tokenStr := base64.RawURLEncoding.EncodeToString(raw)
-
-	digest := sha256.Sum256([]byte(tokenStr))
-	digestHex := hex.EncodeToString(digest[:])
-
-	id := uuid.NewString()
-
-	// KEYED path: mint a per-token ed25519 signing key so the token acts as its
-	// OWN on-chain identity instead of collapsing to the node operator (the v11.8
-	// per-token identity model). Key generation happens HERE, off-consensus —
-	// never inside FinalizeBlock.
-	if keyed {
-		tokenPub, tokenPriv, genErr := ed25519.GenerateKey(rand.Reader)
-		if genErr != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to generate signing identity")
-			return
-		}
-		mintedID := hex.EncodeToString(tokenPub)
-		if insErr := ts.InsertMCPTokenWithIdentity(r.Context(), id, req.Name, mintedID, digestHex, mintedID, tokenPriv); insErr != nil {
-			writeJSONError(w, http.StatusInternalServerError, "failed to persist token: "+insErr.Error())
-			return
-		}
-
-		// Register the minted identity on-chain SYNCHRONOUSLY but bounded. A slow
-		// block must not hang issuance, so past the wait we return the token and a
-		// background retry finishes. Only a DEFINITIVE (non-timeout) rejection
-		// rolls back the freshly-inserted row so no half-provisioned keyed token
-		// lingers.
-		regCh := make(chan error, 1)
-		go func() {
-			_, _, rErr := s.registerMintedAgentIdentity(tokenPub, tokenPriv, req.Name, "mcp-token")
-			regCh <- rErr
-		}()
-		select {
-		case rErr := <-regCh:
-			if rErr != nil {
-				if isDefinitiveRegisterRejection(rErr) {
-					_ = ts.DeleteMCPToken(r.Context(), id)
-					writeJSONError(w, http.StatusBadGateway, "failed to register token identity on-chain: "+rErr.Error())
-					return
-				}
-				// Transient (timeout/transport) — keep the token, finish async.
-				s.retryRegisterMintedIdentity(tokenPub, tokenPriv, req.Name, "mcp-token")
-			}
-		case <-time.After(tokenIdentityRegisterWait):
-			// Still pending after the bounded wait: return the token now and let a
-			// background goroutine resolve the outstanding registration.
-			go func() {
-				if rErr := <-regCh; rErr != nil && !isDefinitiveRegisterRejection(rErr) {
-					s.retryRegisterMintedIdentity(tokenPub, tokenPriv, req.Name, "mcp-token")
-				}
-			}()
-		}
-
-		resp := MCPTokenIssueResponse{
-			ID:        id,
-			Name:      req.Name,
-			AgentID:   mintedID,
-			Token:     tokenStr,
-			CreatedAt: time.Now().UTC(),
-			UseHint:   "Set Authorization: Bearer <token> on requests to /v1/mcp/sse or /v1/mcp/streamable. This token signs as its own on-chain identity. SAVE THIS TOKEN NOW — it is never shown again.",
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(resp)
-		return
-	}
-
-	// LEGACY keyless path: no vault to seal a signing key, so the token runs as
-	// the node operator (identity already gated to the operator above).
-	if err := ts.InsertMCPToken(r.Context(), id, req.Name, req.AgentID, digestHex); err != nil {
+	issued, err := ts.IssueMCPToken(r.Context(), req.Name, callerID, s.nodeOperatorID, "mcp-token")
+	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to persist token: "+err.Error())
 		return
 	}
 
 	resp := MCPTokenIssueResponse{
-		ID:        id,
+		ID:        issued.ID,
 		Name:      req.Name,
-		AgentID:   req.AgentID,
-		Token:     tokenStr,
-		CreatedAt: time.Now().UTC(),
-		UseHint:   "Set Authorization: Bearer <token> on requests to /v1/mcp/sse or /v1/mcp/streamable. SAVE THIS TOKEN NOW — it is never shown again.",
+		AgentID:   issued.AgentID,
+		Token:     issued.Token,
+		CreatedAt: issued.CreatedAt,
+		UseHint:   "Set Authorization: Bearer <token> on requests to /v1/mcp/sse or /v1/mcp/streamable. Vault-backed tokens sign as their own on-chain identity. SAVE THIS TOKEN NOW — it is never shown again.",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(resp)
-}
-
-// isDefinitiveRegisterRejection reports whether a registration broadcast error
-// is a hard consensus/mempool rejection (roll back the token) versus a transient
-// timeout/transport failure (retry in the background). Only CheckTx /
-// FinalizeBlock rejections are treated as definitive, so a token is never
-// deleted on a mere slow block or connection blip.
-func isDefinitiveRegisterRejection(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "rejected in CheckTx") || strings.Contains(msg, "rejected in FinalizeBlock")
 }
 
 // handleMCPTokenList returns issued tokens as summaries (no token values).
@@ -265,17 +164,13 @@ func (s *Server) handleMCPTokenList(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]MCPTokenSummary, 0, len(rows))
 	for _, t := range rows {
-		effectiveAgentID := s.nodeOperatorID
-		if effectiveAgentID == "" {
-			effectiveAgentID = t.AgentID
-		}
-		if !privileged && effectiveAgentID != callerID {
+		if !privileged && t.IssuerID != callerID {
 			continue
 		}
 		out = append(out, MCPTokenSummary{
 			ID:         t.ID,
 			Name:       t.Name,
-			AgentID:    effectiveAgentID,
+			AgentID:    t.AgentID,
 			CreatedAt:  t.CreatedAt,
 			LastUsedAt: t.LastUsedAt,
 			RevokedAt:  t.RevokedAt,
@@ -310,11 +205,7 @@ func (s *Server) handleMCPTokenRevoke(w http.ResponseWriter, r *http.Request) {
 		}
 		owned := false
 		for _, t := range rows {
-			effectiveAgentID := s.nodeOperatorID
-			if effectiveAgentID == "" {
-				effectiveAgentID = t.AgentID
-			}
-			if t.ID == id && effectiveAgentID == callerID {
+			if t.ID == id && t.IssuerID == callerID {
 				owned = true
 				break
 			}

@@ -49,8 +49,8 @@ import (
 // Group member roles — the enrollment ceremony's three-way choice
 // (docs §6.1): Everything / Just some topics / Not yet.
 const (
-	GroupRoleFullSync      = "full-sync"        // all SHARED group domains (never the operator's unselected ones)
-	GroupRoleSelectiveSync = "selective-sync"   // an explicit subset of the shared set
+	GroupRoleFullSync       = "full-sync"        // all SHARED group domains (never the operator's unselected ones)
+	GroupRoleSelectiveSync  = "selective-sync"   // an explicit subset of the shared set
 	GroupRoleEnrolledNoSync = "enrolled-no-sync" // connectivity only, no domains
 )
 
@@ -71,7 +71,7 @@ const (
 	TombstoneScopeDomain = "domain"
 	TombstoneScopeMemory = "memory"
 
-	TombstoneEnforceAdvisory     = "advisory"      // signal to peers, never a delete command
+	TombstoneEnforceAdvisory      = "advisory"       // signal to peers, never a delete command
 	TombstoneEnforceLocalSuppress = "local_suppress" // THIS node will not re-admit the origin pair
 )
 
@@ -118,12 +118,12 @@ type SyncGroupMember struct {
 
 // SyncGroupDomain is one shared domain owned by a member.
 type SyncGroupDomain struct {
-	GroupID        string
-	DomainTag      string
-	OwnerChainID   string
-	OwnerSig       string // ed25519 by the owner's domain-owning agent over the domain_add payload (docs §7)
-	MaxClearance   int    // DISPLAY-ONLY; never an admission input (docs §9.2)
-	AddedRevision  int64
+	GroupID         string
+	DomainTag       string
+	OwnerChainID    string
+	OwnerSig        string // ed25519 by the owner's domain-owning agent over the domain_add payload (docs §7)
+	MaxClearance    int    // DISPLAY-ONLY; never an admission input (docs §9.2)
+	AddedRevision   int64
 	RemovedRevision int64 // 0 = active
 }
 
@@ -131,17 +131,21 @@ type SyncGroupDomain struct {
 // The federation layer computes PrevHash/EntryHash/AuthorSig over a canonical
 // payload (docs §5.3); the store persists what it is given.
 type SyncGroupLogEntry struct {
-	GroupID           string
-	Subchain          string // 'roster' or 'domain:<tag>'
-	Seq               int64
-	PrevHash          string
-	EntryHash         string
-	EntryType         string
-	PayloadJSON       string // canonical JSON; NEVER memory content
-	AuthorChainID     string
-	AuthorAgentPubkey string
-	AuthorSig         string
-	CreatedAt         time.Time
+	GroupID               string
+	Subchain              string // 'roster' or 'domain:<tag>'
+	Seq                   int64
+	PrevHash              string
+	EntryHash             string
+	EntryType             string
+	PayloadJSON           string // canonical JSON; NEVER memory content
+	AuthorChainID         string
+	AuthorAgentPubkey     string
+	AuthorSig             string
+	ControllerEpoch       string
+	ControllerChainID     string
+	ControllerAgentPubkey string
+	ControllerSig         string
+	CreatedAt             time.Time
 }
 
 // SyncTombstone is one removal record.
@@ -227,9 +231,26 @@ func (s *SQLiteStore) migrateSyncGroupTables(ctx context.Context) {
 		author_chain_id     TEXT NOT NULL DEFAULT '',
 		author_agent_pubkey TEXT NOT NULL DEFAULT '',
 		author_sig          TEXT NOT NULL DEFAULT '',
+		controller_epoch        TEXT NOT NULL DEFAULT '',
+		controller_chain_id     TEXT NOT NULL DEFAULT '',
+		controller_agent_pubkey TEXT NOT NULL DEFAULT '',
+		controller_sig          TEXT NOT NULL DEFAULT '',
 		created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 		PRIMARY KEY (group_id, subchain, seq)
 	)`)
+	// Additive migration for databases created before controller co-signatures
+	// were made explicit on the journal wire.
+	for _, col := range []struct{ name, ddl string }{
+		{"controller_epoch", `ALTER TABLE sync_group_log ADD COLUMN controller_epoch TEXT NOT NULL DEFAULT ''`},
+		{"controller_chain_id", `ALTER TABLE sync_group_log ADD COLUMN controller_chain_id TEXT NOT NULL DEFAULT ''`},
+		{"controller_agent_pubkey", `ALTER TABLE sync_group_log ADD COLUMN controller_agent_pubkey TEXT NOT NULL DEFAULT ''`},
+		{"controller_sig", `ALTER TABLE sync_group_log ADD COLUMN controller_sig TEXT NOT NULL DEFAULT ''`},
+	} {
+		var present int
+		if err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('sync_group_log') WHERE name=?`, col.name).Scan(&present); err == nil && present == 0 {
+			_, _ = s.writeExecContext(ctx, col.ddl)
+		}
+	}
 	_, _ = s.writeExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS sync_tombstone (
 		group_id         TEXT NOT NULL,
@@ -274,6 +295,43 @@ func (s *SQLiteStore) migrateSyncGroupTables(ctx context.Context) {
 		added_revision   INTEGER NOT NULL DEFAULT 0,
 		removed_revision INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (group_id, member_chain_id, domain_tag)
+	)`)
+	// Member-authenticated selectors that are not yet within the live shared set.
+	// They are deliberately separate from sync_group_member_domain because every
+	// entitlement getter reads only the latter. A matching domain_add promotes a
+	// selector transactionally; until then it grants nothing.
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS sync_group_member_pending_domain (
+		group_id        TEXT NOT NULL,
+		member_chain_id TEXT NOT NULL,
+		domain_tag      TEXT NOT NULL,
+		added_revision  INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (group_id, member_chain_id, domain_tag)
+	)`)
+	// Controller-acknowledged owner capabilities from the invitee-signed
+	// member_invite.  This is NOT a content entitlement table: it is consulted
+	// only by the remote domain-add ceremony to decide whether the authenticated
+	// member may learn/use the exact domain subchain head.
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS sync_group_member_owner_domain (
+		group_id        TEXT NOT NULL,
+		member_chain_id TEXT NOT NULL,
+		domain_tag      TEXT NOT NULL,
+		PRIMARY KEY (group_id, member_chain_id, domain_tag)
+	)`)
+
+	// sync_group_removed_domain_entitlement is an immutable snapshot of who was
+	// entitled to a domain immediately before a domain_remove took effect. It is
+	// deliberately separate from the live consent overlay: after removal, that
+	// overlay is retired, but prior sharers must still be able to receive the
+	// signed removal suffix without learning the old domain journal.
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS sync_group_removed_domain_entitlement (
+		group_id         TEXT NOT NULL,
+		domain_tag       TEXT NOT NULL,
+		member_chain_id  TEXT NOT NULL,
+		removed_revision INTEGER NOT NULL,
+		PRIMARY KEY (group_id, domain_tag, member_chain_id, removed_revision)
 	)`)
 
 	// sync_control.group_id — bind a pairwise control row to its group. Pragma-
@@ -605,12 +663,17 @@ func (s *SQLiteStore) SetSyncGroupManifest(ctx context.Context, groupID string, 
 	return nil
 }
 
-// SetSyncGroupDomainRemoved stamps a domain's removed_revision (a domain_remove
-// apply) without disturbing its owner/clearance.
-func (s *SQLiteStore) SetSyncGroupDomainRemoved(ctx context.Context, groupID, domainTag string, removedRevision int64) error {
+// SetSyncGroupDomainRemoved stamps the current domain lifecycle with its
+// monotonic removal generation (journal seq + 1), without disturbing
+// owner/clearance. The active-only predicate prevents a repeated domain_remove
+// from overwriting the generation that gates the terminal-only serve suffix.
+func (s *SQLiteStore) SetSyncGroupDomainRemoved(ctx context.Context, groupID, domainTag string, removedGeneration int64) error {
+	if removedGeneration < 1 {
+		return fmt.Errorf("removed domain generation must be positive")
+	}
 	_, err := s.writeExecContext(ctx,
-		`UPDATE sync_group_domain SET removed_revision=? WHERE group_id=? AND domain_tag=?`,
-		removedRevision, groupID, domainTag)
+		`UPDATE sync_group_domain SET removed_revision=? WHERE group_id=? AND domain_tag=? AND removed_revision=0`,
+		removedGeneration, groupID, domainTag)
 	if err != nil {
 		return fmt.Errorf("set sync group domain removed: %w", err)
 	}
@@ -715,13 +778,16 @@ func normalizeConsentSubtree(tags []string) []string {
 }
 
 // consentTagInSharedSet reports whether a requested consent tag is anchored to the
-// active shared set: it must be EQUAL to, a descendant of, or an ancestor of some
-// active shared domain. A tag with no such relationship (a domain the group does
+// active shared set: it must be EQUAL to or a descendant of an active shared
+// domain.  Ancestors are deliberately rejected: consenting to "hr" while the
+// group currently shares only "hr.public" would otherwise silently opt the
+// member into a future sibling such as "hr.secret".
+// A tag with no such relationship (a domain the group does
 // not share at all) is rejected — a member can never consent to a domain outside
 // the shared set, so the getters can never be tricked into over-serving.
 func consentTagInSharedSet(tag string, shared []SyncGroupDomain) bool {
 	for _, d := range shared {
-		if d.DomainTag == tag || isDomainDescendant(tag, d.DomainTag) || isDomainDescendant(d.DomainTag, tag) {
+		if d.DomainTag == tag || isDomainDescendant(tag, d.DomainTag) {
 			return true
 		}
 	}
@@ -751,15 +817,28 @@ func (s *SQLiteStore) ReplaceGroupMemberConsentDomains(ctx context.Context, grou
 		if !ok {
 			return fmt.Errorf("group member consent requires the SQLite store backend")
 		}
+		selectors := normalizeConsentSubtree(domainTags)
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_group_member_pending_domain WHERE group_id=? AND member_chain_id=?`, groupID, memberChainID); err != nil {
+			return fmt.Errorf("replace pending member consent: %w", err)
+		}
+		for _, tag := range selectors {
+			if _, err := tx.writeExecContext(ctx, `
+				INSERT INTO sync_group_member_pending_domain(group_id,member_chain_id,domain_tag,added_revision)
+				VALUES(?,?,?,?)`, groupID, memberChainID, tag, revision); err != nil {
+				return fmt.Errorf("store pending member consent: %w", err)
+			}
+		}
 		shared, err := tx.ListSyncGroupDomains(ctx, groupID, true)
 		if err != nil {
 			return err
 		}
-		// The validated, subtree-normalized desired set.
-		desired := make([]string, 0, len(domainTags))
-		for _, t := range normalizeConsentSubtree(domainTags) {
-			if consentTagInSharedSet(t, shared) {
-				desired = append(desired, t)
+		// Only selectors already inside a live shared root become active. An
+		// ancestor selector (hr) does NOT activate merely because hr.public is
+		// shared, preventing silent consent to a future sibling hr.secret.
+		desired := make([]string, 0, len(selectors))
+		for _, tag := range selectors {
+			if consentTagInSharedSet(tag, shared) {
+				desired = append(desired, tag)
 			}
 		}
 		// Step 1 — ensure each desired tag is present and ACTIVE (insert, or
@@ -799,6 +878,109 @@ func (s *SQLiteStore) ReplaceGroupMemberConsentDomains(ctx context.Context, grou
 	})
 }
 
+// ListPendingGroupMemberConsentDomains is an audit/status helper. Pending rows
+// are never consulted by entitlement getters or write authorization.
+func (s *SQLiteStore) ListPendingGroupMemberConsentDomains(ctx context.Context, groupID, memberChainID string) ([]string, error) {
+	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag FROM sync_group_member_pending_domain WHERE group_id=? AND member_chain_id=? ORDER BY domain_tag`, groupID, memberChainID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending member consent: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, err
+		}
+		out = append(out, tag)
+	}
+	return out, rows.Err()
+}
+
+// ReplaceGroupMemberOwnerDomains stores the immutable capability tuple carried
+// by an invitee+controller signed member_invite.  It never widens content reads
+// and is intentionally separate from both active and pending consent.
+func (s *SQLiteStore) ReplaceGroupMemberOwnerDomains(ctx context.Context, groupID, memberChainID string, domainTags []string) error {
+	if groupID == "" || memberChainID == "" {
+		return fmt.Errorf("group_id and member_chain_id are required")
+	}
+	if _, err := s.writeExecContext(ctx, `DELETE FROM sync_group_member_owner_domain WHERE group_id=? AND member_chain_id=?`, groupID, memberChainID); err != nil {
+		return fmt.Errorf("replace member owner domains: %w", err)
+	}
+	for _, tag := range normalizeConsentSubtree(domainTags) {
+		if _, err := s.writeExecContext(ctx, `INSERT INTO sync_group_member_owner_domain(group_id,member_chain_id,domain_tag) VALUES(?,?,?)`, groupID, memberChainID, tag); err != nil {
+			return fmt.Errorf("store member owner domain: %w", err)
+		}
+	}
+	return nil
+}
+
+// GroupMemberMayOwnDomain checks the exact capability that the invitee offered
+// and the controller acknowledged at enrollment.  Ancestor and wildcard scopes
+// cover descendants; descendants never cover an ancestor or sibling.
+func (s *SQLiteStore) GroupMemberMayOwnDomain(ctx context.Context, groupID, memberChainID, domainTag string) (bool, error) {
+	if groupID == "" || memberChainID == "" || domainTag == "" {
+		return false, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag FROM sync_group_member_owner_domain WHERE group_id=? AND member_chain_id=?`, groupID, memberChainID)
+	if err != nil {
+		return false, fmt.Errorf("read member owner domains: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var allowed string
+		if err := rows.Scan(&allowed); err != nil {
+			return false, err
+		}
+		if allowed == "*" || allowed == domainTag || isDomainDescendant(domainTag, allowed) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}
+
+// ActivatePendingGroupMemberConsentForDomain promotes only selectors that are
+// equal to, or descendants of, the newly live shared root. Ancestor selectors
+// remain pending, closing the sibling-widening case described above.
+func (s *SQLiteStore) ActivatePendingGroupMemberConsentForDomain(ctx context.Context, groupID, domainTag string, revision int64) error {
+	if groupID == "" || domainTag == "" {
+		return fmt.Errorf("group_id and domain_tag are required")
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT p.member_chain_id,p.domain_tag
+		  FROM sync_group_member_pending_domain p
+		  JOIN sync_group_member m ON m.group_id=p.group_id AND m.member_chain_id=p.member_chain_id
+		 WHERE p.group_id=? AND m.role='selective-sync' AND m.member_state IN ('active','resyncing','invited')`, groupID)
+	if err != nil {
+		return fmt.Errorf("scan pending member consent: %w", err)
+	}
+	type pending struct{ member, tag string }
+	var matches []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.member, &p.tag); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if p.tag == domainTag || isDomainDescendant(p.tag, domainTag) {
+			matches = append(matches, p)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, p := range matches {
+		if _, err := s.writeExecContext(ctx, `
+			INSERT INTO sync_group_member_domain(group_id,member_chain_id,domain_tag,added_revision,removed_revision)
+			VALUES(?,?,?,?,0)
+			ON CONFLICT(group_id,member_chain_id,domain_tag) DO UPDATE SET added_revision=excluded.added_revision,removed_revision=0`,
+			groupID, p.member, p.tag, revision); err != nil {
+			return fmt.Errorf("activate pending member consent: %w", err)
+		}
+	}
+	return nil
+}
+
 // StampGroupMemberConsentDomainRemoved retires the consent rows made stale by a
 // domain_remove: every ACTIVE consent row across all members that references the
 // removed tag OR a domain nested beneath it (the owner removed "hr", so consent to
@@ -822,6 +1004,57 @@ func (s *SQLiteStore) StampGroupMemberConsentDomainRemoved(ctx context.Context, 
 		return fmt.Errorf("stamp member consent domain removed: %w", err)
 	}
 	return nil
+}
+
+// SnapshotRemovedDomainEntitlements records the active members that were
+// entitled to domainTag immediately before its removal. This is called by the
+// domain_remove apply transaction BEFORE it retires the domain and live consent
+// rows. It is append-only/idempotent per removal revision, so a later re-add and
+// second removal cannot overwrite the history of the first lifecycle.
+func (s *SQLiteStore) SnapshotRemovedDomainEntitlements(ctx context.Context, groupID, domainTag string, removalGeneration int64) error {
+	if groupID == "" || domainTag == "" {
+		return fmt.Errorf("group_id and domain_tag are required")
+	}
+	if removalGeneration < 1 {
+		return fmt.Errorf("removal generation must be positive")
+	}
+	_, err := s.writeExecContext(ctx, `
+		INSERT OR IGNORE INTO sync_group_removed_domain_entitlement
+			(group_id, domain_tag, member_chain_id, removed_revision)
+		SELECT gd.group_id, gd.domain_tag, gm.member_chain_id, ?
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member gm ON gm.group_id = gd.group_id
+		 WHERE gd.group_id = ? AND gd.domain_tag = ? AND gd.removed_revision = 0
+		   AND gm.member_state IN ('active','resyncing')
+		   AND (gm.role = 'full-sync' OR gm.member_chain_id = gd.owner_chain_id
+		        OR (gm.role = 'selective-sync' AND EXISTS (
+		            SELECT 1 FROM sync_group_member_domain c
+		             WHERE c.group_id = gd.group_id AND c.member_chain_id = gm.member_chain_id
+		               AND c.removed_revision = 0
+		               AND (c.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		        )))`, removalGeneration, groupID, domainTag, domainTag, domainTag)
+	if err != nil {
+		return fmt.Errorf("snapshot removed domain entitlements: %w", err)
+	}
+	return nil
+}
+
+// WasMemberEntitledAtDomainRemoval answers from the immutable removal snapshot,
+// never the mutable live-consent overlay. It is a narrow journal-serve helper:
+// callers may reveal only the removal/tombstone/anchor suffix when it returns
+// true.
+func (s *SQLiteStore) WasMemberEntitledAtDomainRemoval(ctx context.Context, groupID, domainTag, memberChainID string, removalGeneration int64) (bool, error) {
+	if groupID == "" || domainTag == "" || memberChainID == "" || removalGeneration < 1 {
+		return false, nil
+	}
+	var n int
+	if err := s.conn.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sync_group_removed_domain_entitlement
+		 WHERE group_id=? AND domain_tag=? AND member_chain_id=? AND removed_revision=?`,
+		groupID, domainTag, memberChainID, removalGeneration).Scan(&n); err != nil {
+		return false, fmt.Errorf("check removed domain entitlement: %w", err)
+	}
+	return n > 0, nil
 }
 
 // ListGroupMemberConsentDomains returns a member's ACTIVE consent tags (a
@@ -883,10 +1116,12 @@ func (s *SQLiteStore) AppendSyncGroupLog(ctx context.Context, e SyncGroupLogEntr
 	_, err := s.writeExecContext(ctx, `
 		INSERT INTO sync_group_log
 			(group_id, subchain, seq, prev_hash, entry_hash, entry_type, payload_json,
-			 author_chain_id, author_agent_pubkey, author_sig)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 author_chain_id, author_agent_pubkey, author_sig, controller_epoch,
+			 controller_chain_id, controller_agent_pubkey, controller_sig)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.GroupID, e.Subchain, e.Seq, e.PrevHash, e.EntryHash, e.EntryType, e.PayloadJSON,
-		e.AuthorChainID, e.AuthorAgentPubkey, e.AuthorSig)
+		e.AuthorChainID, e.AuthorAgentPubkey, e.AuthorSig, e.ControllerEpoch,
+		e.ControllerChainID, e.ControllerAgentPubkey, e.ControllerSig)
 	if err != nil {
 		return fmt.Errorf("append sync group log: %w", err)
 	}
@@ -924,10 +1159,12 @@ func (s *SQLiteStore) GetSyncGroupLogEntry(ctx context.Context, groupID, subchai
 	var createdAt string
 	err := s.conn.QueryRowContext(ctx, `
 		SELECT group_id, subchain, seq, prev_hash, entry_hash, entry_type, payload_json,
-		       author_chain_id, author_agent_pubkey, author_sig, created_at
+		       author_chain_id, author_agent_pubkey, author_sig, controller_epoch,
+		       controller_chain_id, controller_agent_pubkey, controller_sig, created_at
 		  FROM sync_group_log WHERE group_id=? AND subchain=? AND seq=?`, groupID, subchain, seq).
 		Scan(&e.GroupID, &e.Subchain, &e.Seq, &e.PrevHash, &e.EntryHash, &e.EntryType, &e.PayloadJSON,
-			&e.AuthorChainID, &e.AuthorAgentPubkey, &e.AuthorSig, &createdAt)
+			&e.AuthorChainID, &e.AuthorAgentPubkey, &e.AuthorSig, &e.ControllerEpoch,
+			&e.ControllerChainID, &e.ControllerAgentPubkey, &e.ControllerSig, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -946,7 +1183,8 @@ func (s *SQLiteStore) ListSyncGroupLog(ctx context.Context, groupID, subchain st
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT group_id, subchain, seq, prev_hash, entry_hash, entry_type, payload_json,
-		       author_chain_id, author_agent_pubkey, author_sig, created_at
+		       author_chain_id, author_agent_pubkey, author_sig, controller_epoch,
+		       controller_chain_id, controller_agent_pubkey, controller_sig, created_at
 		  FROM sync_group_log
 		 WHERE group_id=? AND subchain=? AND seq>?
 		 ORDER BY seq ASC LIMIT ?`, groupID, subchain, afterSeq, limit)
@@ -959,8 +1197,44 @@ func (s *SQLiteStore) ListSyncGroupLog(ctx context.Context, groupID, subchain st
 		var e SyncGroupLogEntry
 		var createdAt string
 		if err := rows.Scan(&e.GroupID, &e.Subchain, &e.Seq, &e.PrevHash, &e.EntryHash, &e.EntryType,
-			&e.PayloadJSON, &e.AuthorChainID, &e.AuthorAgentPubkey, &e.AuthorSig, &createdAt); err != nil {
+			&e.PayloadJSON, &e.AuthorChainID, &e.AuthorAgentPubkey, &e.AuthorSig, &e.ControllerEpoch,
+			&e.ControllerChainID, &e.ControllerAgentPubkey, &e.ControllerSig, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan sync group log: %w", err)
+		}
+		e.CreatedAt = parseTime(createdAt)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// ListSyncGroupTerminalLog returns only the signed terminal suffix entries of a
+// removed domain sub-chain. It exists solely for prior-entitled non-owners: the
+// normal journal reader must never filter its chain because that would expose a
+// misleading partial history to a currently entitled member.
+func (s *SQLiteStore) ListSyncGroupTerminalLog(ctx context.Context, groupID, subchain string, fromSeq, afterSeq int64, limit int) ([]SyncGroupLogEntry, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 2000
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT group_id, subchain, seq, prev_hash, entry_hash, entry_type, payload_json,
+		       author_chain_id, author_agent_pubkey, author_sig, controller_epoch,
+		       controller_chain_id, controller_agent_pubkey, controller_sig, created_at
+		  FROM sync_group_log
+		 WHERE group_id=? AND subchain=? AND seq>=? AND seq>?
+		   AND entry_type IN ('domain_remove','tombstone','anchor')
+		 ORDER BY seq ASC LIMIT ?`, groupID, subchain, fromSeq, afterSeq, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list sync group terminal log: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SyncGroupLogEntry
+	for rows.Next() {
+		var e SyncGroupLogEntry
+		var createdAt string
+		if err := rows.Scan(&e.GroupID, &e.Subchain, &e.Seq, &e.PrevHash, &e.EntryHash, &e.EntryType,
+			&e.PayloadJSON, &e.AuthorChainID, &e.AuthorAgentPubkey, &e.AuthorSig, &e.ControllerEpoch,
+			&e.ControllerChainID, &e.ControllerAgentPubkey, &e.ControllerSig, &createdAt); err != nil {
+			return nil, fmt.Errorf("scan sync group terminal log: %w", err)
 		}
 		e.CreatedAt = parseTime(createdAt)
 		out = append(out, e)
@@ -1095,7 +1369,7 @@ func (s *SQLiteStore) ListGroupFanoutTargets(ctx context.Context, ownerChainID, 
 		            SELECT 1 FROM sync_group_member_domain c
 		             WHERE c.group_id = gd.group_id AND c.member_chain_id = gm.member_chain_id
 		               AND c.removed_revision = 0
-		               AND (c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))`, ownerChainID, domainTag, domainTag)
+		       AND (c.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))`, ownerChainID, domainTag, domainTag, domainTag, domainTag)
 	if err != nil {
 		return nil, fmt.Errorf("list group fanout targets: %w", err)
 	}
@@ -1141,18 +1415,24 @@ func (s *SQLiteStore) GroupDomainsForMember(ctx context.Context, groupID, member
 		return nil, nil
 	}
 	rows, err := s.conn.QueryContext(ctx, `
-		SELECT gd.domain_tag
+		SELECT DISTINCT CASE
+		       WHEN gm.role = 'selective-sync' AND gm.member_chain_id != gd.owner_chain_id
+		       THEN CASE WHEN c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'
+		                 THEN gd.domain_tag ELSE c.domain_tag END
+		       ELSE gd.domain_tag END AS effective_domain
 		  FROM sync_group_domain gd
 		  JOIN sync_group_member gm ON gm.group_id = gd.group_id
+		  LEFT JOIN sync_group_member_domain c
+		    ON c.group_id = gd.group_id AND c.member_chain_id = gm.member_chain_id
+		   AND c.removed_revision = 0
+		   AND (c.domain_tag = gd.domain_tag
+		        OR c.domain_tag LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'
+		        OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
 		 WHERE gd.group_id = ? AND gm.member_chain_id = ? AND gm.member_state = 'active'
 		   AND gd.removed_revision = 0
 		   AND (gm.role = 'full-sync' OR gm.member_chain_id = gd.owner_chain_id
-		        OR (gm.role = 'selective-sync' AND EXISTS (
-		            SELECT 1 FROM sync_group_member_domain c
-		             WHERE c.group_id = gd.group_id AND c.member_chain_id = gm.member_chain_id
-		               AND c.removed_revision = 0
-		               AND (c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
-		 ORDER BY gd.domain_tag`, groupID, memberChainID)
+		        OR (gm.role = 'selective-sync' AND c.domain_tag IS NOT NULL))
+		 ORDER BY effective_domain`, groupID, memberChainID)
 	if err != nil {
 		return nil, fmt.Errorf("group domains for member: %w", err)
 	}
@@ -1188,8 +1468,8 @@ func (s *SQLiteStore) MemberSharesGroupDomain(ctx context.Context, groupID, memb
 		            SELECT 1 FROM sync_group_member_domain c
 		             WHERE c.group_id = gd.group_id AND c.member_chain_id = gm.member_chain_id
 		               AND c.removed_revision = 0
-		               AND (c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))`,
-		groupID, memberChainID, domainTag, domainTag).Scan(&n); err != nil {
+		               AND (c.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))`,
+		groupID, memberChainID, domainTag, domainTag, domainTag, domainTag).Scan(&n); err != nil {
 		return false, fmt.Errorf("member shares group domain: %w", err)
 	}
 	return n > 0, nil
@@ -1204,38 +1484,19 @@ func (s *SQLiteStore) GroupSharedDomains(ctx context.Context, chainA, chainB str
 	if chainA == "" || chainB == "" {
 		return nil, nil
 	}
-	rows, err := s.conn.QueryContext(ctx, `
-		SELECT DISTINCT gd.domain_tag
-		  FROM sync_group_domain gd
-		  JOIN sync_group_member ma ON ma.group_id = gd.group_id AND ma.member_chain_id = ? AND ma.member_state = 'active'
-		  JOIN sync_group_member mb ON mb.group_id = gd.group_id AND mb.member_chain_id = ? AND mb.member_state = 'active'
-		 WHERE gd.removed_revision = 0
-		   AND (ma.role = 'full-sync' OR ma.member_chain_id = gd.owner_chain_id
-		        OR (ma.role = 'selective-sync' AND EXISTS (
-		            SELECT 1 FROM sync_group_member_domain c
-		             WHERE c.group_id = gd.group_id AND c.member_chain_id = ma.member_chain_id
-		               AND c.removed_revision = 0
-		               AND (c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
-		   AND (mb.role = 'full-sync' OR mb.member_chain_id = gd.owner_chain_id
-		        OR (mb.role = 'selective-sync' AND EXISTS (
-		            SELECT 1 FROM sync_group_member_domain c
-		             WHERE c.group_id = gd.group_id AND c.member_chain_id = mb.member_chain_id
-		               AND c.removed_revision = 0
-		               AND (c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
-		 ORDER BY gd.domain_tag`, chainA, chainB)
+	refs, err := s.groupSharedDomainRefs(ctx, chainA, chainB)
 	if err != nil {
-		return nil, fmt.Errorf("group shared domains: %w", err)
+		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var out []string
-	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err != nil {
-			return nil, fmt.Errorf("scan group shared domain: %w", err)
+	domains := make([]string, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if _, ok := seen[ref.DomainTag]; !ok {
+			seen[ref.DomainTag] = struct{}{}
+			domains = append(domains, ref.DomainTag)
 		}
-		out = append(out, d)
 	}
-	return out, rows.Err()
+	return domains, nil
 }
 
 // ResolveGroupRelay authorizes a relayed backfill item (docs §9.2 must-fix #1/#6):
@@ -1251,8 +1512,7 @@ func (s *SQLiteStore) ResolveGroupRelay(ctx context.Context, localChainID, relay
 	if localChainID == "" || relayerChainID == "" || originChainID == "" || domainTag == "" {
 		return "", false, nil
 	}
-	var groupID string
-	err := s.conn.QueryRowContext(ctx, `
+	rows, err := s.conn.QueryContext(ctx, `
 		SELECT gd.group_id
 		  FROM sync_group_domain gd
 		  JOIN sync_group_member relayer ON relayer.group_id = gd.group_id
@@ -1263,14 +1523,32 @@ func (s *SQLiteStore) ResolveGroupRelay(ctx context.Context, localChainID, relay
 		       AND receiver.member_chain_id = ? AND receiver.member_state = 'active'
 		 WHERE gd.removed_revision = 0
 		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
-		 LIMIT 1`, relayerChainID, originChainID, localChainID, domainTag, domainTag).Scan(&groupID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
-	}
+		 ORDER BY gd.group_id`, relayerChainID, originChainID, localChainID, domainTag, domainTag)
 	if err != nil {
 		return "", false, fmt.Errorf("resolve group relay: %w", err)
 	}
-	return groupID, true, nil
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var groupID string
+		if err := rows.Scan(&groupID); err != nil {
+			return "", false, err
+		}
+		allowed := true
+		for _, member := range []string{localChainID, relayerChainID, originChainID} {
+			ok, err := s.MemberSharesGroupDomain(ctx, groupID, member, domainTag)
+			if err != nil {
+				return "", false, err
+			}
+			if !ok {
+				allowed = false
+				break
+			}
+		}
+		if allowed {
+			return groupID, true, nil
+		}
+	}
+	return "", false, rows.Err()
 }
 
 // GetGroupMemberAgentPubkey resolves the pinned ed25519 pubkey (hex) that a
@@ -1311,6 +1589,7 @@ func (s *SQLiteStore) GetGroupMemberAgentPubkey(ctx context.Context, groupID, me
 //   - BOTH the requester and the responder are entitled to that most-specific covering
 //     domain (role-aware), so a member sharing only an ancestor is never served a nested
 //     domain's ids.
+//
 // Binding these to the row's most-specific covering domain (not the requester-supplied
 // umbrella tag) is what closes the classified-child-via-unclassified-parent oracle.
 // Paged by the composite (origin_memory_id, origin_chain_id) cursor.
@@ -1347,7 +1626,7 @@ func (s *SQLiteStore) ListGroupServableOriginIDs(ctx context.Context, groupID, r
 		                                  SELECT 1 FROM sync_group_member_domain c
 		                                   WHERE c.group_id = mc.group_id AND c.member_chain_id = rm.member_chain_id
 		                                     AND c.removed_revision = 0
-		                                     AND (c.domain_tag = mc.domain_tag OR mc.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')))))
+			                                     AND (c.domain_tag = so.domain_tag OR so.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')))))
 		          AND EXISTS (SELECT 1 FROM sync_group_member sm
 		                       WHERE sm.group_id = mc.group_id AND sm.member_chain_id = ? AND sm.member_state = 'active'
 		                         AND (sm.role = 'full-sync' OR sm.member_chain_id = mc.owner_chain_id
@@ -1355,7 +1634,7 @@ func (s *SQLiteStore) ListGroupServableOriginIDs(ctx context.Context, groupID, r
 		                                  SELECT 1 FROM sync_group_member_domain c
 		                                   WHERE c.group_id = mc.group_id AND c.member_chain_id = sm.member_chain_id
 		                                     AND c.removed_revision = 0
-		                                     AND (c.domain_tag = mc.domain_tag OR mc.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')))))
+			                                     AND (c.domain_tag = so.domain_tag OR so.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')))))
 		   )
 		   AND (so.origin_memory_id > ? OR (so.origin_memory_id = ? AND so.origin_chain_id > ?))
 		 ORDER BY so.origin_memory_id ASC, so.origin_chain_id ASC
@@ -1407,7 +1686,7 @@ type GroupRelayCandidate struct {
 // from the digest twin in four ways that make it a RELAY-ENQUEUE source rather
 // than a digest-serve source:
 //   - it returns the LOCAL copy id (so.local_memory_id) alongside the origin pair,
-//     and requires local_memory_id != '' — we can only relay a copy we actually hold
+//     and requires local_memory_id != ” — we can only relay a copy we actually hold
 //     as an immutable local memory (a same-domain-dup admission with an empty local
 //     id is NOT relayable — there is no distinct copy to serve);
 //   - it EXCLUDES origin_chain_id = requesterChainID — the requester IS the origin of
@@ -1457,7 +1736,7 @@ func (s *SQLiteStore) ListGroupRelayCandidates(ctx context.Context, groupID, req
 		                                  SELECT 1 FROM sync_group_member_domain c
 		                                   WHERE c.group_id = mc.group_id AND c.member_chain_id = rm.member_chain_id
 		                                     AND c.removed_revision = 0
-		                                     AND (c.domain_tag = mc.domain_tag OR mc.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')))))
+			                                     AND (c.domain_tag = so.domain_tag OR so.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')))))
 		          AND EXISTS (SELECT 1 FROM sync_group_member sm
 		                       WHERE sm.group_id = mc.group_id AND sm.member_chain_id = ? AND sm.member_state = 'active'
 		                         AND (sm.role = 'full-sync' OR sm.member_chain_id = mc.owner_chain_id
@@ -1465,7 +1744,7 @@ func (s *SQLiteStore) ListGroupRelayCandidates(ctx context.Context, groupID, req
 		                                  SELECT 1 FROM sync_group_member_domain c
 		                                   WHERE c.group_id = mc.group_id AND c.member_chain_id = sm.member_chain_id
 		                                     AND c.removed_revision = 0
-		                                     AND (c.domain_tag = mc.domain_tag OR mc.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')))))
+			                                     AND (c.domain_tag = so.domain_tag OR so.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')))))
 		   )
 		   AND (so.origin_memory_id > ? OR (so.origin_memory_id = ? AND so.origin_chain_id > ?))
 		 ORDER BY so.origin_memory_id ASC, so.origin_chain_id ASC
@@ -1508,31 +1787,48 @@ func (s *SQLiteStore) GroupOwnedDomainsForPeer(ctx context.Context, ownerChainID
 		return nil, nil
 	}
 	rows, err := s.conn.QueryContext(ctx, `
-		SELECT DISTINCT gd.domain_tag
+		SELECT DISTINCT gd.group_id, gd.domain_tag, peer.role
 		  FROM sync_group_domain gd
 		  JOIN sync_group_member peer ON peer.group_id = gd.group_id
 		       AND peer.member_chain_id = ? AND peer.member_state = 'active'
-		       AND (peer.role = 'full-sync'
-		            OR (peer.role = 'selective-sync' AND EXISTS (
-		                SELECT 1 FROM sync_group_member_domain c
-		                 WHERE c.group_id = gd.group_id AND c.member_chain_id = peer.member_chain_id
-		                   AND c.removed_revision = 0
-		                   AND (c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
 		 WHERE gd.owner_chain_id = ? AND gd.removed_revision = 0
-		 ORDER BY gd.domain_tag`, peerChainID, ownerChainID)
+		 ORDER BY gd.group_id, gd.domain_tag`, peerChainID, ownerChainID)
 	if err != nil {
 		return nil, fmt.Errorf("group owned domains for peer: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	var out []string
+	type owned struct{ groupID, domain, role string }
+	var candidates []owned
 	for rows.Next() {
-		var d string
-		if err := rows.Scan(&d); err != nil {
+		var d owned
+		if err := rows.Scan(&d.groupID, &d.domain, &d.role); err != nil {
 			return nil, fmt.Errorf("scan group owned domain: %w", err)
 		}
-		out = append(out, d)
+		candidates = append(candidates, d)
 	}
-	return out, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range candidates {
+		if d.role == GroupRoleFullSync {
+			out = append(out, d.domain)
+			continue
+		}
+		if d.role != GroupRoleSelectiveSync {
+			continue
+		}
+		consent, err := s.ListGroupMemberConsentDomains(ctx, d.groupID, peerChainID)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range consent {
+			if c == d.domain || isDomainDescendant(c, d.domain) {
+				out = append(out, c)
+			}
+		}
+	}
+	return normalizeConsentSubtree(out), nil
 }
 
 // GroupDomainRef is one (group, domain) pair both peers are entitled to.
@@ -1550,38 +1846,67 @@ func (s *SQLiteStore) GroupSharedDomainsWithGroup(ctx context.Context, chainA, c
 	if chainA == "" || chainB == "" {
 		return nil, nil
 	}
+	return s.groupSharedDomainRefs(ctx, chainA, chainB)
+}
+
+// groupSharedDomainRefs computes the exact intersection of each member's
+// effective scopes.  Returning the group root when one side selected only a
+// descendant would turn receiver consent into an ancestor wildcard and leak
+// siblings, so the narrower overlapping scope always wins.
+func (s *SQLiteStore) groupSharedDomainRefs(ctx context.Context, chainA, chainB string) ([]GroupDomainRef, error) {
 	rows, err := s.conn.QueryContext(ctx, `
-		SELECT DISTINCT gd.group_id, gd.domain_tag
-		  FROM sync_group_domain gd
-		  JOIN sync_group_member ma ON ma.group_id = gd.group_id AND ma.member_chain_id = ? AND ma.member_state = 'active'
-		  JOIN sync_group_member mb ON mb.group_id = gd.group_id AND mb.member_chain_id = ? AND mb.member_state = 'active'
-		 WHERE gd.removed_revision = 0
-		   AND (ma.role = 'full-sync' OR ma.member_chain_id = gd.owner_chain_id
-		        OR (ma.role = 'selective-sync' AND EXISTS (
-		            SELECT 1 FROM sync_group_member_domain c
-		             WHERE c.group_id = gd.group_id AND c.member_chain_id = ma.member_chain_id
-		               AND c.removed_revision = 0
-		               AND (c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
-		   AND (mb.role = 'full-sync' OR mb.member_chain_id = gd.owner_chain_id
-		        OR (mb.role = 'selective-sync' AND EXISTS (
-		            SELECT 1 FROM sync_group_member_domain c
-		             WHERE c.group_id = gd.group_id AND c.member_chain_id = mb.member_chain_id
-		               AND c.removed_revision = 0
-		               AND (c.domain_tag = gd.domain_tag OR gd.domain_tag LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
-		 ORDER BY gd.group_id, gd.domain_tag`, chainA, chainB)
+		SELECT DISTINCT ma.group_id
+		  FROM sync_group_member ma
+		  JOIN sync_group_member mb ON mb.group_id=ma.group_id
+		 WHERE ma.member_chain_id=? AND mb.member_chain_id=?
+		   AND ma.member_state='active' AND mb.member_state='active'
+		 ORDER BY ma.group_id`, chainA, chainB)
 	if err != nil {
 		return nil, fmt.Errorf("group shared domains with group: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-	var out []GroupDomainRef
+	var groups []string
 	for rows.Next() {
-		var g GroupDomainRef
-		if err := rows.Scan(&g.GroupID, &g.DomainTag); err != nil {
-			return nil, fmt.Errorf("scan group shared domain with group: %w", err)
+		var groupID string
+		if err := rows.Scan(&groupID); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan shared group: %w", err)
 		}
-		out = append(out, g)
+		groups = append(groups, groupID)
 	}
-	return out, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	var out []GroupDomainRef
+	for _, groupID := range groups {
+		a, err := s.GroupDomainsForMember(ctx, groupID, chainA)
+		if err != nil {
+			return nil, err
+		}
+		b, err := s.GroupDomainsForMember(ctx, groupID, chainB)
+		if err != nil {
+			return nil, err
+		}
+		var overlap []string
+		for _, da := range a {
+			for _, db := range b {
+				switch {
+				case da == db || isDomainDescendant(da, db):
+					overlap = append(overlap, da)
+				case isDomainDescendant(db, da):
+					overlap = append(overlap, db)
+				}
+			}
+		}
+		seen := map[string]struct{}{}
+		for _, domain := range overlap {
+			if _, dup := seen[domain]; dup {
+				continue
+			}
+			seen[domain] = struct{}{}
+			out = append(out, GroupDomainRef{GroupID: groupID, DomainTag: domain})
+		}
+	}
+	return out, nil
 }
 
 // origin cursor codec — the composite (origin_memory_id, origin_chain_id) page
@@ -1655,7 +1980,7 @@ func (s *SQLiteStore) SelfResyncingSharedWithPeer(ctx context.Context, localChai
 // is the authoritative send-time backstop that terminally rejects any straggler; this
 // purge is hygiene + an explicit backfill-stop on top.
 //
-// RELAYED rows (origin_chain_id != '') are ALWAYS purged on a group removal (docs §10
+// RELAYED rows (origin_chain_id != ”) are ALWAYS purged on a group removal (docs §10
 // R1): a pairwise relationship authorizes this node to originate its OWN memories to the
 // peer, but NEVER to relay a THIRD member's group copy — so a relayed row must not be
 // spared just because a pairwise domain coincidentally covers its tag (that was a

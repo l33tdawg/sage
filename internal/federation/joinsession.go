@@ -496,8 +496,14 @@ func (s *JoinStore) CheckConfirm(id string, certSPKI, guestSig, guestAckSig []by
 		GuestPeerID:   js.ExpectedGuestPeer,
 		GuestP2PAddrs: append([]string(nil), js.ExpectedGuestP2P...),
 		GuestAgentID:  append([]byte(nil), js.ApprovedGuestAgent...),
-		ApprovedE:     js.ApprovedE,
-		Seed:          append([]byte(nil), js.Seed...),
+		GuestScope: ScopeWire{
+			MaxClearance:   js.GuestScopeWire.MaxClearance,
+			AllowedDomains: append([]string(nil), js.GuestScopeWire.AllowedDomains...),
+			Mode:           js.GuestScopeWire.Mode,
+			Direction:      js.GuestScopeWire.Direction,
+		},
+		ApprovedE: js.ApprovedE,
+		Seed:      append([]byte(nil), js.Seed...),
 		HostGrant: HostGrant{
 			Clearance: js.HostGrantClearance,
 			Domains:   append([]string(nil), js.HostGrantDomains...),
@@ -528,6 +534,7 @@ type ConfirmContext struct {
 	GuestPeerID     string
 	GuestP2PAddrs   []string
 	GuestAgentID    []byte
+	GuestScope      ScopeWire
 	ApprovedE       [32]byte
 	Seed            []byte // the ceremony's own seed (NOT re-resolved by chain id)
 	HostGrant       HostGrant

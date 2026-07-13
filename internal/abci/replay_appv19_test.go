@@ -97,6 +97,79 @@ func TestReplayAppV19_SkipAheadSubsumption(t *testing.T) {
 	}
 }
 
+// TestAppV19_SkipAheadDelegatedProofEnvelopeParity pins the REST/CheckTx-to-
+// FinalizeBlock security boundary for a chain that activates app-v19 directly.
+// app-v19 subsumes app-v17's delegated-proof hardening even when the v17/v18
+// height fields are both zero. The off-consensus constructor therefore must
+// include AgentRequest at H_act, before the transaction can execute at H_act+1;
+// otherwise CheckTx and consensus disagree and every delegated write is dead.
+func TestAppV19_SkipAheadDelegatedProofEnvelopeParity(t *testing.T) {
+	const activationHeight int64 = 50
+	blockTime := time.Now().Truncate(time.Second)
+	request := []byte("POST /v1/domain/register\n{\"name\":\"v19-skip-ahead\"}")
+	agent := newAgentKey(t)
+	outer := newAgentKey(t)
+
+	newV19OnlyApp := func() *SageApp {
+		t.Helper()
+		app := setupTestApp(t)
+		app.appV19AppliedHeight = activationHeight
+		require.Zero(t, app.appV17AppliedHeight)
+		require.Zero(t, app.appV18AppliedHeight)
+		return app
+	}
+
+	app := newV19OnlyApp()
+	app.state.Height = activationHeight - 1
+	assert.False(t, app.IsAppV17ActiveForNextTx(), "before activation, REST must preserve the historical envelope")
+	app.state.Height = activationHeight
+	require.True(t, app.IsAppV17ActiveForNextTx(), "at activation commit, REST must construct the envelope required at H+1")
+
+	withEnvelope := makeDelegatedDomainRegisterTx(
+		t, agent, outer, request, blockTime, "v19-skip-ahead", "", true,
+	)
+	rawWithEnvelope, err := tx.EncodeTx(withEnvelope)
+	require.NoError(t, err)
+
+	check, err := app.CheckTx(context.Background(), &abcitypes.RequestCheckTx{Tx: rawWithEnvelope})
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), check.Code, check.Log)
+
+	finalized, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Height: activationHeight + 1,
+		Time:   blockTime,
+		Txs:    [][]byte{rawWithEnvelope},
+	})
+	require.NoError(t, err)
+	require.Len(t, finalized.TxResults, 1)
+	require.Equal(t, uint32(0), finalized.TxResults[0].Code, finalized.TxResults[0].Log)
+
+	// The same v19-only state must fail closed when a delegated constructor omits
+	// AgentRequest: both mempool admission and deterministic execution reject it.
+	missingEnvelopeApp := newV19OnlyApp()
+	missingEnvelopeApp.state.Height = activationHeight
+	missingEnvelope := makeDelegatedDomainRegisterTx(
+		t, agent, outer, request, blockTime, "v19-missing-envelope", "", false,
+	)
+	rawMissingEnvelope, err := tx.EncodeTx(missingEnvelope)
+	require.NoError(t, err)
+
+	check, err = missingEnvelopeApp.CheckTx(context.Background(), &abcitypes.RequestCheckTx{Tx: rawMissingEnvelope})
+	require.NoError(t, err)
+	assert.Equal(t, uint32(109), check.Code, check.Log)
+	assert.Contains(t, check.Log, "missing its signed request")
+
+	finalized, err = missingEnvelopeApp.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Height: activationHeight + 1,
+		Time:   blockTime,
+		Txs:    [][]byte{rawMissingEnvelope},
+	})
+	require.NoError(t, err)
+	require.Len(t, finalized.TxResults, 1)
+	assert.Equal(t, uint32(109), finalized.TxResults[0].Code, finalized.TxResults[0].Log)
+	assert.Contains(t, finalized.TxResults[0].Log, "missing its signed request")
+}
+
 // TestReplayAppV19_BootRefreshThroughConstructor: a node restarting on a
 // post-app-v19 chain restores the activation height through the REAL constructor
 // path (refreshAppV19Fork) and reports version 19.

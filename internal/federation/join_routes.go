@@ -124,16 +124,19 @@ type JoinStatusResp struct {
 // JoinConfirmWire is POST /fed/v1/join/confirm (guest -> host): the guest's
 // approval-#2 signatures over the frozen attestation E (§2.4).
 type JoinConfirmWire struct {
-	SessionID   string `json:"session_id"`
-	GuestSig    string `json:"guest_sig"`     // hex, ed25519 over E (tagEnrollSig)
-	GuestAckSig string `json:"guest_ack_sig"` // hex, ed25519 over E (tagEnrollAck)
+	SessionID        string `json:"session_id"`
+	GuestSig         string `json:"guest_sig"`          // hex, ed25519 over E (tagEnrollSig)
+	GuestAckSig      string `json:"guest_ack_sig"`      // hex, ed25519 over E (tagEnrollAck)
+	GroupInviteProof string `json:"group_invite_proof"` // invitee signature over exact group identity + signed scope
 }
 
 // JoinConfirmResp reports the host's activation.
 type JoinConfirmResp struct {
-	Status    string `json:"status"`
-	HostChain string `json:"host_chain"`
-	TxHash    string `json:"tx_hash,omitempty"`
+	Status        string                    `json:"status"`
+	HostChain     string                    `json:"host_chain"`
+	TxHash        string                    `json:"tx_hash,omitempty"`
+	SyncGroupID   string                    `json:"sync_group_id,omitempty"`
+	RosterEntries []store.SyncGroupLogEntry `json:"roster_entries,omitempty"`
 }
 
 // JoinCAResp serves the host's own CA PEM to a scanning guest. The guest
@@ -395,18 +398,25 @@ func (m *Manager) handleJoinConfirm(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid guest ack signature")
 		return
 	}
-	txHash, hostChain, err := m.hostConfirm(req.SessionID, joinCertSPKI(r.Context()), guestSig, guestAckSig)
+	txHash, hostChain, err := m.hostConfirm(req.SessionID, joinCertSPKI(r.Context()), guestSig, guestAckSig, req.GroupInviteProof)
 	if err != nil {
 		m.logger.Warn().Err(err).Str("session", shortID(req.SessionID)).Msg("join confirm rejected")
 		httpError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, &JoinConfirmResp{Status: "active", HostChain: hostChain, TxHash: txHash})
+	resp := &JoinConfirmResp{Status: "active", HostChain: hostChain, TxHash: txHash}
+	if js, ok := m.joins.Get(req.SessionID, time.Now()); ok && js.GuestChain != "" {
+		resp.SyncGroupID = pairwiseGroupID(hostChain, js.GuestChain, syncPolicyEpoch(js.ApprovedE))
+		if ss := m.syncStore(); ss != nil {
+			resp.RosterEntries, _ = ss.ListSyncGroupLog(r.Context(), resp.SyncGroupID, RosterSubchain, -1, 2000)
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // hostConfirm is the server-side confirm driver: verify frozen E, broadcast the
 // host tx-33, commit CA + seed, activate.
-func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig []byte) (string, string, error) {
+func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig []byte, groupInviteProof string) (string, string, error) {
 	// CheckConfirm verifies the guest's approval-#2 signatures over the frozen E
 	// under the store lock; on success it hands us exclusive ownership of the
 	// staged-CA closures and the session is in CONFIRMING.
@@ -497,7 +507,15 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	// on. Additive and non-fatal — a seed failure never affects the now-active
 	// agreement (mirrors rememberPeerName). No domains are shared until an explicit
 	// EmitDomainAdd, so an empty enrollment group has no sync effect.
-	if _, sgErr := m.seedEnrollmentGroup(context.Background(), ctx.GuestChain, ctx.GuestAgentID, epoch); sgErr != nil {
+	hostRole, hostSelected := enrollmentRole(ctx.GuestScope)
+	guestRole, guestSelected := enrollmentRole(ScopeWire{
+		MaxClearance: int(ctx.HostGrant.Clearance), AllowedDomains: ctx.HostGrant.Domains,
+		Mode: ctx.HostGrant.Mode, Direction: ctx.HostGrant.Direction,
+	})
+	ownPin, _ := m.ownPin()
+	if _, sgErr := m.seedEnrollmentGroup(context.Background(), ctx.GuestChain, ctx.GuestAgentID, epoch,
+		enrollmentGrant{Role: hostRole, Selected: hostSelected, Owned: ctx.HostGrant.Domains, CAPin: hex.EncodeToString(ownPin)},
+		enrollmentGrant{Role: guestRole, Selected: guestSelected, Owned: ctx.GuestScope.AllowedDomains, CAPin: hex.EncodeToString(ctx.GuestPin), InviteeProof: groupInviteProof}); sgErr != nil {
 		m.logger.Debug().Err(sgErr).Str("guest", ctx.GuestChain).Msg("could not seed enrollment sync group (non-fatal)")
 	}
 	m.rememberPeerName(ctx.GuestChain, ctx.GuestName)
@@ -1148,6 +1166,22 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 	guestSig := SignEnroll(m.agentKey, e, false)
 	guestAckSig := SignEnroll(m.agentKey, e, true)
 	epoch := syncPolicyEpoch(e)
+	guestRole, guestSelected := enrollmentRole(hostScope)
+	groupID := pairwiseGroupID(m.localChainID, d.hostChain, epoch)
+	invitePayload := memberInvitePayload(m.localChainID, hex.EncodeToString(m.agentPub), guestRole, hex.EncodeToString(ownPin))
+	if guestRole == store.GroupRoleSelectiveSync {
+		invitePayload[pkSelectedDomains], err = encodeSelectedDomains(guestSelected)
+		if err != nil {
+			return "", err
+		}
+	}
+	if len(d.scope.AllowedDomains) > 0 {
+		invitePayload[pkOwnedDomains], err = encodeSelectedDomains(d.scope.AllowedDomains)
+		if err != nil {
+			return "", err
+		}
+	}
+	attachMemberInviteProof(groupID, invitePayload, m.agentKey)
 	hooks := m.joinP2PHooks()
 	txHash := d.txHash
 	if !localActive {
@@ -1222,9 +1256,10 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 
 	// Tell the host to activate its side.
 	confirmBody := &JoinConfirmWire{
-		SessionID:   sessionID,
-		GuestSig:    hex.EncodeToString(guestSig),
-		GuestAckSig: hex.EncodeToString(guestAckSig),
+		SessionID:        sessionID,
+		GuestSig:         hex.EncodeToString(guestSig),
+		GuestAckSig:      hex.EncodeToString(guestAckSig),
+		GroupInviteProof: invitePayload[pkInviteeSig],
 	}
 	var confirmResp JoinConfirmResp
 	if err := m.guestCall(ctx, d, http.MethodPost, "/fed/v1/join/confirm", confirmBody, &confirmResp); err != nil {
@@ -1232,6 +1267,30 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 		// peerAuth rejects host->guest until the host's tx lands; retry confirm.
 		m.logger.Warn().Err(err).Str("host", d.hostChain).Msg("guest active but host confirm failed (one-sided window)")
 		return txHash, fmt.Errorf("your side is connected but the host has not confirmed yet: %w", err)
+	}
+	// The host returns its controller-signed roster so the guest discovers and
+	// converges the same deterministic group immediately.  This is additive on
+	// the join response; legacy peers omit it and remain pairwise-only.
+	if confirmResp.SyncGroupID != "" && len(confirmResp.RosterEntries) > 0 {
+		expectedGroupID := pairwiseGroupID(m.localChainID, d.hostChain, epoch)
+		if confirmResp.SyncGroupID != expectedGroupID {
+			return txHash, fmt.Errorf("host returned mismatched enrollment group id")
+		}
+		if ss := m.syncStore(); ss != nil {
+			if err := ss.UpsertSyncGroup(context.Background(), store.SyncGroup{
+				GroupID: expectedGroupID, ControllerChainID: d.hostChain,
+				ControllerAgentPubkey: hex.EncodeToString(d.hostAgentPub), Epoch: epoch,
+			}); err != nil {
+				return txHash, fmt.Errorf("seed guest enrollment group: %w", err)
+			}
+			m.journalMu.Lock()
+			_, evicted, removed, ingestErr := m.ingestJournalEntriesLocked(context.Background(), ss, expectedGroupID, RosterSubchain, confirmResp.RosterEntries)
+			m.journalMu.Unlock()
+			m.enforceRemovalBatch(ss, expectedGroupID, evicted, removed)
+			if ingestErr != nil {
+				return txHash, fmt.Errorf("verify host enrollment roster: %w", ingestErr)
+			}
+		}
 	}
 	confirmed = true
 	m.rememberPeerName(d.hostChain, d.hostName)

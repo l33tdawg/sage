@@ -120,6 +120,10 @@ type Manager struct {
 	// nil in production (m.SyncJournalPull), non-nil only in tests so the
 	// pull/verify/ingest logic is testable without a live TLS peer.
 	syncJournalFn func(ctx context.Context, remoteChainID string, req *SyncJournalRequest) (*SyncJournalResponse, error)
+	// Entitlement-safe domain-subchain discovery for production journal
+	// reconciliation. The peer returns only subchains this authenticated member
+	// may read; tests inject the seam without a TLS listener.
+	syncJournalSubchainsFn func(ctx context.Context, remoteChainID, groupID string) ([]string, error)
 
 	// controllerGovGate is the v11.8 §8 multi-validator authorization seam for a
 	// CONTROLLER-AFFECTING emit (create/dissolve group, add a domain to the shared
@@ -131,7 +135,7 @@ type Manager struct {
 	// groupID. nil (production default today) => fail-closed on multi-validator:
 	// authorizeControllerAffecting refuses rather than silently committing a
 	// group-affecting change without the quorum §8 requires. Tests inject it.
-	controllerGovGate func(ctx context.Context, groupID string) (bool, error)
+	controllerGovGate func(ctx context.Context, groupID, actionDigest string) (bool, error)
 
 	// syncStatusMu guards syncReconcile — per-peer anti-entropy bookkeeping
 	// (last run, the peer's advertised consent, unsupported flag) surfaced by
@@ -286,7 +290,7 @@ func (m *Manager) JoinStore() *JoinStore { return m.joins }
 // even when federation is unused — every entry point re-checks agreement state.
 func NewManager(cfg Config) *Manager {
 	pub, _ := cfg.AgentKey.Public().(ed25519.PublicKey)
-	return &Manager{
+	m := &Manager{
 		localChainID: cfg.LocalChainID,
 		networkName:  cfg.NetworkName,
 		certsDir:     cfg.CertsDir,
@@ -303,6 +307,10 @@ func NewManager(cfg Config) *Manager {
 		joins:        NewJoinStore(),
 		guestDrafts:  make(map[string]*guestDraft),
 	}
+	// Production governance proof is read from the durable consensus state. Tests
+	// may replace the seam, but production never defaults to a permissive stub.
+	m.controllerGovGate = m.passedControllerGovernance
+	return m
 }
 
 // cachedCA / putCA / invalidateCACache manage the parsed-CA cache. Keyed by

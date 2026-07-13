@@ -655,6 +655,7 @@ const (
 	syncReconcileMaxPages   = 50  // per (peer, domain) per cycle
 	syncReconcileMaxEnqueue = 500 // per peer per cycle; the remainder next cycle
 	syncDigestTimeout       = 4 * time.Second
+	syncReconcileMaxGroups  = 128
 )
 
 // SyncReconcileStatus is per-peer anti-entropy bookkeeping for the status
@@ -696,11 +697,68 @@ func (m *Manager) syncReconcileAll(ctx context.Context, ss *store.SQLiteStore) {
 		if aErr != nil {
 			continue
 		}
+		// Journal convergence is independent of current content consent. Pull the
+		// roster first (so removals/role changes land), then only domain subchains
+		// the authenticated peer says this member is entitled to. Errors are
+		// per-group/per-subchain and never stop unrelated peers.
+		m.reconcilePeerJournals(ctx, ss, chain)
 		consented, cErr := m.effectiveConsent(ctx, ss, chain)
 		if cErr != nil || len(consented) == 0 {
 			continue
 		}
 		m.reconcilePeer(ctx, ss, agreement, consented)
+	}
+}
+
+func activeGroupMember(member *store.SyncGroupMember) bool {
+	return member != nil && (member.MemberState == store.GroupMemberActive || member.MemberState == store.GroupMemberResyncing)
+}
+
+// reconcilePeerJournals is the production scheduler for PullGroupJournal.
+// It is deliberately bounded and error-tolerant: one stale/forked group is
+// surfaced in logs without starving every other active group.
+func (m *Manager) reconcilePeerJournals(ctx context.Context, ss *store.SQLiteStore, remoteChainID string) {
+	groups, err := ss.ListSyncGroups(ctx)
+	if err != nil {
+		m.logger.Debug().Err(err).Str("peer", remoteChainID).Msg("sync reconcile: list groups failed")
+		return
+	}
+	if len(groups) > syncReconcileMaxGroups {
+		groups = groups[:syncReconcileMaxGroups]
+	}
+	for _, group := range groups {
+		if ctx.Err() != nil {
+			return
+		}
+		local, lErr := ss.GetSyncGroupMember(ctx, group.GroupID, m.localChainID)
+		remote, rErr := ss.GetSyncGroupMember(ctx, group.GroupID, remoteChainID)
+		if lErr != nil || rErr != nil || !activeGroupMember(local) || !activeGroupMember(remote) {
+			continue
+		}
+		if _, pullErr := m.PullGroupJournal(ctx, remoteChainID, group.GroupID, RosterSubchain); pullErr != nil {
+			m.logger.Debug().Err(pullErr).Str("peer", remoteChainID).Str("group", group.GroupID).Msg("sync reconcile: roster journal pull failed")
+			continue
+		}
+		// A roster pull may have removed either side; re-check before revealing or
+		// requesting any domain metadata.
+		local, _ = ss.GetSyncGroupMember(ctx, group.GroupID, m.localChainID)
+		remote, _ = ss.GetSyncGroupMember(ctx, group.GroupID, remoteChainID)
+		if !activeGroupMember(local) || !activeGroupMember(remote) {
+			continue
+		}
+		subchains, subErr := m.remoteEntitledGroupSubchains(ctx, remoteChainID, group.GroupID)
+		if subErr != nil {
+			m.logger.Debug().Err(subErr).Str("peer", remoteChainID).Str("group", group.GroupID).Msg("sync reconcile: domain journal discovery failed")
+			continue
+		}
+		for _, subchain := range subchains {
+			if ctx.Err() != nil {
+				return
+			}
+			if _, pullErr := m.PullGroupJournal(ctx, remoteChainID, group.GroupID, subchain); pullErr != nil {
+				m.logger.Debug().Err(pullErr).Str("peer", remoteChainID).Str("group", group.GroupID).Str("subchain", subchain).Msg("sync reconcile: domain journal pull failed")
+			}
+		}
 	}
 }
 

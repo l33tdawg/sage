@@ -6,9 +6,14 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/store"
 )
 
@@ -22,6 +27,9 @@ func attachBadger(t *testing.T, m *Manager) *store.BadgerStore {
 	}
 	t.Cleanup(func() { _ = bs.CloseBadger() })
 	m.badger = bs
+	if err := bs.SaveValidators(map[string]int64{"local-validator": 1}); err != nil {
+		t.Fatalf("seed single validator: %v", err)
+	}
 	return bs
 }
 
@@ -35,6 +43,20 @@ func seedActiveMember(t *testing.T, ms *store.SQLiteStore, groupID, chain, role 
 	}); err != nil {
 		t.Fatalf("seed active member %s: %v", chain, err)
 	}
+}
+
+func seedOwnerCapability(t *testing.T, ms *store.SQLiteStore, groupID, chain string, domains ...string) {
+	t.Helper()
+	if err := ms.ReplaceGroupMemberOwnerDomains(context.Background(), groupID, chain, domains); err != nil {
+		t.Fatalf("seed owner capability %s: %v", chain, err)
+	}
+}
+
+func signedMemberInvitePayload(t *testing.T, groupID, chain string, pub ed25519.PublicKey, key ed25519.PrivateKey, role, caPin string) map[string]string {
+	t.Helper()
+	p := memberInvitePayload(chain, hex.EncodeToString(pub), role, caPin)
+	attachMemberInviteProof(groupID, p, key)
+	return p
 }
 
 // T1 (resolver): the self-role_change resolver acceptance is STRICTLY scoped to
@@ -98,10 +120,12 @@ func TestNonOwnerDomainAddRejectedAtSelfCheck(t *testing.T) {
 	seedActiveMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, m.agentPub)
 	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
 	seedActiveMember(t, ms, "g1", "chain-owner", store.GroupRoleFullSync, ownerPub)
+	seedOwnerCapability(t, ms, "g1", "chain-owner", "hr")
 
 	// Establish domain "eurorack" owned by chain-owner (owner-signed).
 	sub := DomainSubchain("eurorack")
 	d0 := mustEntry(t, "g1", sub, 0, "", "domain_add", "chain-owner", ownerPub, ownerKey, domainAddPayload("eurorack", "chain-owner", 0))
+	attachControllerSignature(&d0, effectiveControllerEpoch(""), "chain-local", m.agentPub, m.agentKey)
 	if n, err := ingestRoster(t, m, ms, "g1", sub, d0); err != nil || n != 1 {
 		t.Fatalf("establish domain: n=%d err=%v", n, err)
 	}
@@ -120,7 +144,8 @@ func TestEmitDomainAddOwnerOnly(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	bs := attachBadger(t, m)
-	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-ctl", ControllerAgentPubkey: "00"}); err != nil {
+	m.controllerGovGate = m.passedControllerGovernance // fixture bypasses NewManager
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-local", ControllerAgentPubkey: hex.EncodeToString(m.agentPub)}); err != nil {
 		t.Fatalf("seed group: %v", err)
 	}
 	seedActiveMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, m.agentPub)
@@ -154,11 +179,13 @@ func TestAppendPreSignedEntry(t *testing.T) {
 	ctx := context.Background()
 	// Controller node m appends an entry the OWNER (separate identity) co-signed.
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	attachBadger(t, m)
 	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-local", ControllerAgentPubkey: hex.EncodeToString(m.agentPub)}); err != nil {
 		t.Fatalf("seed group: %v", err)
 	}
 	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
 	seedActiveMember(t, ms, "g1", "chain-owner", store.GroupRoleFullSync, ownerPub)
+	seedOwnerCapability(t, ms, "g1", "chain-owner", "hr")
 	sub := DomainSubchain("hr")
 
 	// Valid owner-signed establishing entry (seq0/prev"").
@@ -176,10 +203,17 @@ func TestAppendPreSignedEntry(t *testing.T) {
 
 	// FORGED: the establishing entry's signature is tampered -> rejected (fresh group).
 	m2, ms2 := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	attachBadger(t, m2)
 	if err := ms2.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-local", ControllerAgentPubkey: hex.EncodeToString(m2.agentPub)}); err != nil {
 		t.Fatalf("seed group2: %v", err)
 	}
 	seedActiveMember(t, ms2, "g1", "chain-owner", store.GroupRoleFullSync, ownerPub)
+	seedOwnerCapability(t, ms2, "g1", "chain-owner", "hr")
+	// Remote/anti-entropy ingest must not accept an owner-only entry: controller
+	// admission is a distinct signature, not an implication of owner authorship.
+	if n, err := ingestRoster(t, m2, ms2, "g1", sub, good); err == nil || n != 0 {
+		t.Fatalf("owner-only remote domain_add admitted: n=%d err=%v", n, err)
+	}
 	forged := good
 	forged.AuthorSig = "00"
 	if err := m2.AppendPreSignedEntry(ctx, "g1", forged); err == nil {
@@ -195,6 +229,17 @@ func TestAppendPreSignedEntry(t *testing.T) {
 	malformed := mustEntry(t, "g1", sub, 0, "", "domain_add", "chain-owner", ownerPub, ownerKey, domainAddPayload("hr", "chain-else", 0))
 	if err := m2.AppendPreSignedEntry(ctx, "g1", malformed); err == nil {
 		t.Fatalf("a malformed pre-signed entry must be rejected up front")
+	}
+
+	// An established owner still needs fresh controller approval on a re-add.
+	remove, err := m.AppendGroupJournalEntry(ctx, "g1", sub, "domain_remove", "chain-owner", ownerPub, ownerKey, domainRemovePayload("hr"))
+	if err != nil {
+		t.Fatalf("owner remove: %v", err)
+	}
+	readd := mustEntry(t, "g1", sub, remove.Seq+1, remove.EntryHash, "domain_add", "chain-owner", ownerPub, ownerKey,
+		domainAddPayload("hr", "chain-owner", 0))
+	if n, err := ingestRoster(t, m, ms, "g1", sub, readd); err == nil || n != 0 {
+		t.Fatalf("established-owner re-add bypassed controller approval: n=%d err=%v", n, err)
 	}
 }
 
@@ -215,10 +260,12 @@ func TestCosignCeremonyEndToEnd(t *testing.T) {
 	}
 	// Controller node (separate) with its own view: the owner (chain-local) is a member.
 	ctlNode, ctlMS := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	attachBadger(t, ctlNode)
 	if err := ctlMS.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-local", ControllerAgentPubkey: hex.EncodeToString(ctlNode.agentPub)}); err != nil {
 		t.Fatalf("ctl seed group: %v", err)
 	}
 	seedActiveMember(t, ctlMS, "g1", "chain-local", store.GroupRoleFullSync, owner.agentPub)
+	seedOwnerCapability(t, ctlMS, "g1", "chain-local", "hr")
 
 	// Controller reports its sub-chain head; owner co-signs at (seq0, prev"").
 	e, err := owner.BuildOwnerDomainAddEntry(ctx, "g1", "hr", 0, 0, "")
@@ -233,16 +280,196 @@ func TestCosignCeremonyEndToEnd(t *testing.T) {
 	}
 }
 
-// T2(b''): seedEnrollmentGroup (B2, hostConfirm seed) forms the host-controlled
+func TestDomainAddCeremonyHidesHeadAndRejectsMemberHijack(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	attachBadger(t, m)
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: m.localChainID, ControllerAgentPubkey: hex.EncodeToString(m.agentPub)}); err != nil {
+		t.Fatal(err)
+	}
+	ownerPub, _, _ := ed25519.GenerateKey(nil)
+	evilPub, evilKey, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-owner", store.GroupRoleFullSync, ownerPub)
+	seedActiveMember(t, ms, "g1", "chain-evil", store.GroupRoleFullSync, evilPub)
+	seedOwnerCapability(t, ms, "g1", "chain-owner", "hr")
+
+	headCall := func(chain, tag string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(domainAddHeadRequest{GroupID: "g1", DomainTag: tag})
+		req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/domain-add/head", bytes.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: chain}))
+		rr := httptest.NewRecorder()
+		m.handleDomainAddHead(rr, req)
+		return rr
+	}
+	if got := headCall("chain-owner", "hr"); got.Code != http.StatusOK {
+		t.Fatalf("authorized owner head status=%d body=%s", got.Code, got.Body.String())
+	}
+	unknown := headCall("chain-evil", "finance")
+	hidden := headCall("chain-evil", "hr")
+	if unknown.Code != http.StatusNotFound || hidden.Code != unknown.Code || hidden.Body.String() != unknown.Body.String() {
+		t.Fatalf("hidden tag became an oracle: unknown=(%d,%q) hidden=(%d,%q)", unknown.Code, unknown.Body.String(), hidden.Code, hidden.Body.String())
+	}
+
+	hijack := mustEntry(t, "g1", DomainSubchain("hr"), 0, "", "domain_add", "chain-evil", evilPub, evilKey,
+		domainAddPayload("hr", "chain-evil", 0))
+	body, _ := json.Marshal(signedGroupEntryRequest{GroupID: "g1", Entry: hijack})
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/domain-add/admit", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: "chain-evil"}))
+	rr := httptest.NewRecorder()
+	m.handleDomainAddAdmit(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("member hijack status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if domains, err := ms.ListSyncGroupDomains(ctx, "g1", true); err != nil || len(domains) != 0 {
+		t.Fatalf("hijack changed shared set: domains=%v err=%v", domains, err)
+	}
+}
+
+func TestMultiValidatorReplicaRejectsForeignControllerMutationWithoutExactLocalGovernance(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	bs := attachBadger(t, m)
+	if err := bs.SaveValidators(map[string]int64{"v1": 1, "v2": 1}); err != nil {
+		t.Fatal(err)
+	}
+	m.controllerGovGate = m.passedControllerGovernance
+	controllerPub, controllerKey, _ := ed25519.GenerateKey(nil)
+	victimPub, _, _ := ed25519.GenerateKey(nil)
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-controller", ControllerAgentPubkey: hex.EncodeToString(controllerPub)}); err != nil {
+		t.Fatal(err)
+	}
+	seedActiveMember(t, ms, "g1", "chain-controller", store.GroupRoleFullSync, controllerPub)
+	seedActiveMember(t, ms, "g1", "chain-victim", store.GroupRoleFullSync, victimPub)
+	entry := mustEntry(t, "g1", RosterSubchain, 0, "", "role_change", "chain-controller", controllerPub, controllerKey,
+		roleChangePayload("chain-victim", store.GroupRoleEnrolledNoSync))
+
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, entry); err == nil || n != 0 {
+		t.Fatalf("foreign mutation without local governance admitted: n=%d err=%v", n, err)
+	}
+	wrong := governance.ProposalState{ProposalID: "wrong", Operation: governance.OpSyncGroupAction, TargetID: "not-the-entry", Status: governance.StatusExecuted}
+	raw, _ := json.Marshal(wrong)
+	if err := bs.SetState("gov:proposal:wrong", raw); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, entry); err == nil || n != 0 {
+		t.Fatalf("wrong-digest governance admitted mutation: n=%d err=%v", n, err)
+	}
+	exact := governance.ProposalState{ProposalID: "exact", Operation: governance.OpSyncGroupAction, TargetID: entry.EntryHash, Status: governance.StatusExecuted}
+	raw, _ = json.Marshal(exact)
+	if err := bs.SetState("gov:proposal:exact", raw); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, entry); err != nil || n != 1 {
+		t.Fatalf("exact locally governed mutation rejected: n=%d err=%v", n, err)
+	}
+}
+
+func TestMemberInviteAcceptBootstrapConvergesWithoutRosterDiscoveryEscape(t *testing.T) {
+	ctx := context.Background()
+	controller, controllerStore := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	attachBadger(t, controller)
+	invitee, inviteeStore := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	invitee.localChainID = "chain-invitee"
+	invitee.ownPinCache = bytes.Repeat([]byte{0x42}, 32)
+	inviteeBadger := attachBadger(t, invitee)
+	if err := inviteeBadger.RegisterDomain("hr", hex.EncodeToString(invitee.agentPub), "", 1); err != nil {
+		t.Fatal(err)
+	}
+	controllerPubHex := hex.EncodeToString(controller.agentPub)
+	if err := controllerStore.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g-expand", ControllerChainID: controller.localChainID, ControllerAgentPubkey: controllerPubHex, Epoch: "e1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "group_create", controller.localChainID, controller.agentPub, controller.agentKey,
+		map[string]string{pkEpoch: "e1", pkControllerChain: controller.localChainID, pkControllerPubkey: controllerPubHex}); err != nil {
+		t.Fatal(err)
+	}
+	selfInvite := memberInvitePayload(controller.localChainID, controllerPubHex, store.GroupRoleFullSync, "controller-ca")
+	attachMemberInviteProof("g-expand", selfInvite, controller.agentKey)
+	if _, err := controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "member_invite", controller.localChainID, controller.agentPub, controller.agentKey, selfInvite); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "member_activate", controller.localChainID, controller.agentPub, controller.agentKey, memberChainPayload(controller.localChainID)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before invitation, the active federation peer still cannot use the normal
+	// journal endpoint to discover this group's roster.
+	discoveryBody, _ := json.Marshal(SyncJournalRequest{Version: JournalWireVersion, GroupID: "g-expand", Subchain: RosterSubchain, AfterSeq: -1})
+	discoveryReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/journal", bytes.NewReader(discoveryBody))
+	discoveryReq = discoveryReq.WithContext(context.WithValue(discoveryReq.Context(), peerCtxKey{}, &peerIdentity{ChainID: invitee.localChainID}))
+	discoveryRR := httptest.NewRecorder()
+	controller.handleSyncJournal(discoveryRR, discoveryReq)
+	if discoveryRR.Code != http.StatusForbidden {
+		t.Fatalf("nonmember discovered roster before invitation: status=%d body=%s", discoveryRR.Code, discoveryRR.Body.String())
+	}
+
+	head, err := controllerStore.GetSyncGroupSubchainHead(ctx, "g-expand", RosterSubchain)
+	if err != nil || head == nil {
+		t.Fatalf("head: %v %v", head, err)
+	}
+	payload := memberInvitePayload(invitee.localChainID, hex.EncodeToString(invitee.agentPub), store.GroupRoleSelectiveSync, hex.EncodeToString(invitee.ownPinCache))
+	payload[pkSelectedDomains], _ = encodeSelectedDomains([]string{"hr"})
+	payload[pkOwnedDomains], _ = encodeSelectedDomains([]string{"hr"})
+	payload[pkInviteHead] = head.EntryHash
+	agreement := &store.CrossFedRecord{RemoteChainID: controller.localChainID, AllowedDomains: []string{"hr"}, Status: "active"}
+	acceptBody, _ := json.Marshal(memberInviteAcceptRequest{GroupID: "g-expand", ControllerPub: controllerPubHex, Payload: payload})
+	acceptReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/member-invite/accept", bytes.NewReader(acceptBody))
+	acceptReq = acceptReq.WithContext(context.WithValue(acceptReq.Context(), peerCtxKey{}, &peerIdentity{ChainID: controller.localChainID, AgentID: controllerPubHex, Agreement: agreement}))
+	acceptRR := httptest.NewRecorder()
+	invitee.handleMemberInviteAccept(acceptRR, acceptReq)
+	if acceptRR.Code != http.StatusOK {
+		t.Fatalf("accept status=%d body=%s", acceptRR.Code, acceptRR.Body.String())
+	}
+	var accepted memberInviteAcceptResponse
+	if err := json.NewDecoder(acceptRR.Body).Decode(&accepted); err != nil {
+		t.Fatal(err)
+	}
+	payload[pkInviteeSig] = accepted.InviteeSig
+	if _, err := controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "member_invite", controller.localChainID, controller.agentPub, controller.agentKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "member_activate", controller.localChainID, controller.agentPub, controller.agentKey, memberChainPayload(invitee.localChainID)); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := controllerStore.ListSyncGroupLog(ctx, "g-expand", RosterSubchain, -1, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire := make([]JournalEntryWire, len(entries))
+	for i := range entries {
+		wire[i] = storeToWire(entries[i])
+	}
+	bootstrapBody, _ := json.Marshal(memberBootstrapRequest{GroupID: "g-expand", Roster: wire})
+	bootstrapReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/member-invite/bootstrap", bytes.NewReader(bootstrapBody))
+	bootstrapReq = bootstrapReq.WithContext(context.WithValue(bootstrapReq.Context(), peerCtxKey{}, &peerIdentity{ChainID: controller.localChainID, AgentID: controllerPubHex, Agreement: agreement}))
+	bootstrapRR := httptest.NewRecorder()
+	invitee.handleMemberBootstrap(bootstrapRR, bootstrapReq)
+	if bootstrapRR.Code != http.StatusOK {
+		t.Fatalf("bootstrap status=%d body=%s", bootstrapRR.Code, bootstrapRR.Body.String())
+	}
+	member, err := inviteeStore.GetSyncGroupMember(ctx, "g-expand", invitee.localChainID)
+	if err != nil || member == nil || member.MemberState != store.GroupMemberActive || member.MemberAgentPubkey != hex.EncodeToString(invitee.agentPub) {
+		t.Fatalf("invitee did not converge: member=%+v err=%v", member, err)
+	}
+	if _, err := controller.EmitRosterControl(ctx, "g-expand", "member_invite", payload); err == nil {
+		t.Fatal("generic roster endpoint bypassed the invitee-accept ceremony")
+	}
+}
+
+// T2(b”): seedEnrollmentGroup (B2, hostConfirm seed) forms the host-controlled
 // 2-member roster: host is controller AND an active full-sync member, guest is
 // invited+activated. Idempotent — a repeat call for the same pair is a no-op.
 func TestSeedEnrollmentGroup(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	attachBadger(t, m) // single-validator: validatorCount()==1 -> controller commits directly
-	guestPub, _, _ := ed25519.GenerateKey(nil)
+	guestPub, guestKey, _ := ed25519.GenerateKey(nil)
+	groupID := pairwiseGroupID("chain-local", "chain-guest", "epoch-1")
+	guestInvite := signedMemberInvitePayload(t, groupID, "chain-guest", guestPub, guestKey, store.GroupRoleFullSync, "")
+	hostGrant := enrollmentGrant{Role: store.GroupRoleFullSync}
+	guestGrant := enrollmentGrant{Role: store.GroupRoleFullSync, InviteeProof: guestInvite[pkInviteeSig]}
 
-	groupID, err := m.seedEnrollmentGroup(ctx, "chain-guest", guestPub, "epoch-1")
+	groupID, err := m.seedEnrollmentGroup(ctx, "chain-guest", guestPub, "epoch-1", hostGrant, guestGrant)
 	if err != nil {
 		t.Fatalf("seed enrollment group: %v", err)
 	}
@@ -260,12 +487,134 @@ func TestSeedEnrollmentGroup(t *testing.T) {
 	}
 	// Idempotent: a repeat call does not double-seed (roster head unchanged).
 	head1, _ := ms.GetSyncGroupSubchainHead(ctx, groupID, RosterSubchain)
-	if id2, err := m.seedEnrollmentGroup(ctx, "chain-guest", guestPub, "epoch-1"); err != nil || id2 != groupID {
+	if id2, err := m.seedEnrollmentGroup(ctx, "chain-guest", guestPub, "epoch-1", hostGrant, guestGrant); err != nil || id2 != groupID {
 		t.Fatalf("idempotent re-seed: id=%q err=%v", id2, err)
 	}
 	head2, _ := ms.GetSyncGroupSubchainHead(ctx, groupID, RosterSubchain)
 	if head1 == nil || head2 == nil || head1.Seq != head2.Seq {
 		t.Fatalf("re-seed must not append: %v -> %v", head1, head2)
+	}
+}
+
+func TestSeedEnrollmentGroupInvalidInviteProofRollsBackAtomically(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	attachBadger(t, m)
+	guestPub, guestKey, _ := ed25519.GenerateKey(nil)
+	groupID := pairwiseGroupID("chain-local", "chain-guest", "epoch-atomic")
+	hostGrant := enrollmentGrant{Role: store.GroupRoleEnrolledNoSync}
+	badGuest := enrollmentGrant{Role: store.GroupRoleSelectiveSync, Selected: []string{"hr"}, InviteeProof: "00"}
+	if _, err := m.seedEnrollmentGroup(ctx, "chain-guest", guestPub, "epoch-atomic", hostGrant, badGuest); err == nil {
+		t.Fatal("invalid invitee proof must fail")
+	}
+	if g, _ := ms.GetSyncGroup(ctx, groupID); g != nil {
+		t.Fatalf("failed seed leaked a partial group row: %+v", g)
+	}
+	if rows, _ := ms.ListSyncGroupLog(ctx, groupID, RosterSubchain, -1, 20); len(rows) != 0 {
+		t.Fatalf("failed seed leaked partial roster entries: %+v", rows)
+	}
+
+	guestPayload := memberInvitePayload("chain-guest", hex.EncodeToString(guestPub), store.GroupRoleSelectiveSync, "")
+	guestPayload[pkSelectedDomains], _ = encodeSelectedDomains([]string{"hr"})
+	attachMemberInviteProof(groupID, guestPayload, guestKey)
+	goodGuest := enrollmentGrant{Role: store.GroupRoleSelectiveSync, Selected: []string{"hr"}, InviteeProof: guestPayload[pkInviteeSig]}
+	if _, err := m.seedEnrollmentGroup(ctx, "chain-guest", guestPub, "epoch-atomic", hostGrant, goodGuest); err != nil {
+		t.Fatalf("valid retry after rollback: %v", err)
+	}
+	consent, err := ms.ListGroupMemberConsentDomains(ctx, groupID, "chain-guest")
+	if err != nil || len(consent) != 0 {
+		t.Fatalf("pending selector became live before domain_add: %v err=%v", consent, err)
+	}
+	pending, err := ms.ListPendingGroupMemberConsentDomains(ctx, groupID, "chain-guest")
+	if err != nil || len(pending) != 1 || pending[0] != "hr" {
+		t.Fatalf("invitee-signed pending selector was discarded: %v err=%v", pending, err)
+	}
+}
+
+func TestMemberInviteProofBindsEveryIdentityAndPolicyField(t *testing.T) {
+	pub, key, _ := ed25519.GenerateKey(nil)
+	p := signedMemberInvitePayload(t, "g-proof", "chain-member", pub, key, store.GroupRoleSelectiveSync, "ca-pin")
+	p[pkSelectedDomains], _ = encodeSelectedDomains([]string{"hr"})
+	p[pkOwnedDomains], _ = encodeSelectedDomains([]string{"hr.public"})
+	p[pkInviteHead] = "roster-head"
+	// Re-sign the complete intended tuple once selected_domains is present.
+	attachMemberInviteProof("g-proof", p, key)
+	e := mustEntry(t, "g-proof", RosterSubchain, 4, "roster-head", "member_invite", "chain-controller", pub, key, p)
+	if err := validateAuthoredEntry(e); err != nil {
+		t.Fatalf("valid proof: %v", err)
+	}
+	for field, altered := range map[string]string{
+		pkMemberChain: "chain-victim", pkMemberPubkey: hex.EncodeToString(make([]byte, ed25519.PublicKeySize)),
+		pkRole: store.GroupRoleFullSync, pkCAPin: "other-pin", pkSelectedDomains: `["secret"]`,
+		pkOwnedDomains: `["finance"]`, pkInviteHead: "other-head",
+	} {
+		mut := map[string]string{}
+		for k, v := range p {
+			mut[k] = v
+		}
+		mut[field] = altered
+		bad := mustEntry(t, "g-proof", RosterSubchain, 4, "roster-head", "member_invite", "chain-controller", pub, key, mut)
+		if err := validateAuthoredEntry(bad); err == nil {
+			t.Fatalf("invitee proof did not bind %s", field)
+		}
+	}
+}
+
+func TestGovernanceApprovalBindsExactHeadAndIsDurablyOneShot(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	bs := attachBadger(t, m)
+	m.controllerGovGate = m.passedControllerGovernance // fixture bypasses NewManager
+	if err := bs.SaveValidators(map[string]int64{"v1": 1, "v2": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "g-gov", ControllerChainID: m.localChainID, ControllerAgentPubkey: hex.EncodeToString(m.agentPub),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	payload := manifestPayload(1, "manifest-1")
+	expected, err := buildJournalEntry("g-gov", RosterSubchain, 0, "", "manifest", m.localChainID, m.agentPub, m.agentKey, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal := governance.ProposalState{ProposalID: "p-sync", Operation: governance.OpSyncGroupAction, TargetID: expected.EntryHash, Status: governance.StatusExecuted}
+	raw, _ := json.Marshal(proposal)
+	if err := bs.SetState("gov:proposal:p-sync", raw); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, appendErr := m.EmitRosterControl(ctx, "g-gov", "manifest", payload)
+			errs <- appendErr
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	succeeded, denied := 0, 0
+	var denialMessages []string
+	for appendErr := range errs {
+		if appendErr == nil {
+			succeeded++
+		} else {
+			denied++
+			denialMessages = append(denialMessages, appendErr.Error())
+		}
+	}
+	if succeeded != 1 || denied != 1 {
+		t.Fatalf("one exact-head approval must append once: success=%d denied=%d errors=%v", succeeded, denied, denialMessages)
+	}
+	head, _ := ms.GetSyncGroupSubchainHead(ctx, "g-gov", RosterSubchain)
+	if head == nil || head.Seq != 0 || head.EntryHash != expected.EntryHash {
+		t.Fatalf("unexpected governed head: %+v", head)
 	}
 }
 
@@ -275,39 +624,86 @@ func TestSeedEnrollmentGroup(t *testing.T) {
 func TestAuthorizeControllerAffecting(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	bs := attachBadger(t, m)
 
 	// chain-local IS the controller (single-validator) -> allowed directly.
 	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-local", ControllerAgentPubkey: hex.EncodeToString(m.agentPub)}); err != nil {
 		t.Fatalf("seed group: %v", err)
 	}
-	if err := m.authorizeControllerAffecting(ctx, ms, "g1"); err != nil {
+	if err := m.authorizeControllerAffecting(ctx, ms, "g1", "action-single"); err != nil {
 		t.Fatalf("controller (single-validator) must be authorized: %v", err)
 	}
 	// A group controlled by someone else -> denied.
 	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g2", ControllerChainID: "chain-other", ControllerAgentPubkey: "00"}); err != nil {
 		t.Fatalf("seed group2: %v", err)
 	}
-	if err := m.authorizeControllerAffecting(ctx, ms, "g2"); err == nil {
+	if err := m.authorizeControllerAffecting(ctx, ms, "g2", "action-other"); err == nil {
 		t.Fatalf("a non-controller must be denied")
 	}
 
 	// Multi-validator: attach a 2-validator set. Without a gov gate -> fail-closed.
-	bs := attachBadger(t, m)
 	if err := bs.SaveValidators(map[string]int64{"v1": 1, "v2": 1}); err != nil {
 		t.Fatalf("save validators: %v", err)
 	}
-	if err := m.authorizeControllerAffecting(ctx, ms, "g1"); err == nil {
+	if err := m.authorizeControllerAffecting(ctx, ms, "g1", "action-multi-none"); err == nil {
 		t.Fatalf("multi-validator without a governance gate must be refused")
 	}
 	// With a gate that reports NO passage -> denied.
-	m.controllerGovGate = func(context.Context, string) (bool, error) { return false, nil }
-	if err := m.authorizeControllerAffecting(ctx, ms, "g1"); err == nil {
+	m.controllerGovGate = func(context.Context, string, string) (bool, error) { return false, nil }
+	if err := m.authorizeControllerAffecting(ctx, ms, "g1", "action-multi-no"); err == nil {
 		t.Fatalf("multi-validator without a passed proposal must be denied")
 	}
 	// With a passed tx-24/25 passage -> allowed.
-	m.controllerGovGate = func(context.Context, string) (bool, error) { return true, nil }
-	if err := m.authorizeControllerAffecting(ctx, ms, "g1"); err != nil {
+	m.controllerGovGate = func(context.Context, string, string) (bool, error) { return true, nil }
+	if err := m.authorizeControllerAffecting(ctx, ms, "g1", "action-multi-yes"); err != nil {
 		t.Fatalf("multi-validator with a passed proposal must be authorized: %v", err)
+	}
+}
+
+func TestEnrollmentRoleDerivesFromCeremonyScope(t *testing.T) {
+	if role, selected := enrollmentRole(ScopeWire{Mode: "exchange", Direction: "both"}); role != store.GroupRoleEnrolledNoSync || len(selected) != 0 {
+		t.Fatalf("empty ceremony scope=(%s,%v)", role, selected)
+	}
+	if role, selected := enrollmentRole(ScopeWire{Mode: "exchange", Direction: "both", AllowedDomains: []string{"*"}}); role != store.GroupRoleFullSync || len(selected) != 0 {
+		t.Fatalf("everything ceremony scope=(%s,%v)", role, selected)
+	}
+	if role, selected := enrollmentRole(ScopeWire{Mode: "exchange", Direction: "both", AllowedDomains: []string{"hr.public"}}); role != store.GroupRoleSelectiveSync || !bytes.Equal([]byte(selected[0]), []byte("hr.public")) {
+		t.Fatalf("selective ceremony scope=(%s,%v)", role, selected)
+	}
+	if role, _ := enrollmentRole(ScopeWire{Mode: "exchange", Direction: "receive", AllowedDomains: []string{"*"}}); role != store.GroupRoleEnrolledNoSync {
+		t.Fatalf("one-way enrollment must stay no-sync, got %s", role)
+	}
+}
+
+func TestGroupPolicyMutationWaitsForInflightSyncLease(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	otherPub, _, _ := ed25519.GenerateKey(nil)
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-other", ControllerAgentPubkey: hex.EncodeToString(otherPub)}); err != nil {
+		t.Fatal(err)
+	}
+	seedActiveMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, m.agentPub)
+
+	readUnlock := ms.LockSyncPolicyRead()
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.EmitSelfRoleChange(ctx, "g1", store.GroupRoleEnrolledNoSync, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		readUnlock()
+		t.Fatalf("policy mutation completed while an in-flight sync held the old snapshot: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	readUnlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("mutation after lease release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("policy mutation did not resume after in-flight sync completed")
 	}
 }
 
@@ -455,13 +851,13 @@ func TestAppendGroupJournalEntry(t *testing.T) {
 		t.Fatalf("UpsertSyncGroup: %v", err)
 	}
 
-	memberPub, _, _ := ed25519.GenerateKey(nil)
+	memberPub, memberKey, _ := ed25519.GenerateKey(nil)
 	e0, err := m.AppendGroupJournalEntry(ctx, "g1", RosterSubchain, "group_create", "c", pub, key, nil)
 	if err != nil {
 		t.Fatalf("append e0: %v", err)
 	}
 	e1, err := m.AppendGroupJournalEntry(ctx, "g1", RosterSubchain, "member_invite", "c", pub, key,
-		memberInvitePayload("chain-a", hex.EncodeToString(memberPub), store.GroupRoleFullSync, "pinA"))
+		signedMemberInvitePayload(t, "g1", "chain-a", memberPub, memberKey, store.GroupRoleFullSync, "pinA"))
 	if err != nil {
 		t.Fatalf("append e1: %v", err)
 	}

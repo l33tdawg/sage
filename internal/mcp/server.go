@@ -152,6 +152,16 @@ func (s *Server) SetVersion(v string) { s.version = v }
 // SetProject sets the project name for per-project agent identity.
 func (s *Server) SetProject(name string) { s.project = name }
 
+// effectiveAgentID is the principal that will sign REST calls for this tool
+// invocation. HTTP bearer requests may carry a per-token identity; stdio and
+// legacy bearer paths fall back to the server/operator identity.
+func (s *Server) effectiveAgentID(ctx context.Context) string {
+	if id := authmw.ContextAgentID(ctx); id != "" {
+		return id
+	}
+	return s.agentID
+}
+
 // Run starts the stdio MCP server loop.
 func (s *Server) Run(ctx context.Context) error {
 	reader := bufio.NewReaderSize(os.Stdin, 64<<10)

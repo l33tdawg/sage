@@ -102,8 +102,8 @@ func TestGroupMemberConsentSelectiveServe(t *testing.T) {
 		t.Fatalf("shared-with-group(own,sel) = %v; want [eng eng.backend]", tags)
 	}
 	// GroupOwnedDomainsForPeer — owner's domains the selective peer may receive.
-	if got, _ := s.GroupOwnedDomainsForPeer(ctx, "chain-own", "chain-sel"); !reflect.DeepEqual(got, []string{"eng", "eng.backend"}) {
-		t.Fatalf("owned-for-peer(sel) = %v; want [eng eng.backend]", got)
+	if got, _ := s.GroupOwnedDomainsForPeer(ctx, "chain-own", "chain-sel"); !reflect.DeepEqual(got, []string{"eng"}) {
+		t.Fatalf("owned-for-peer(sel) = %v; want normalized effective scope [eng]", got)
 	}
 
 	// ListGroupFanoutTargets for the owner's eng.backend includes the consenting
@@ -123,6 +123,66 @@ func TestGroupMemberConsentSelectiveServe(t *testing.T) {
 	}
 	if !fanoutHas(hr, "chain-full") {
 		t.Fatalf("full-sync member must still receive hr fan-out: %+v", hr)
+	}
+}
+
+func TestSelectiveConsentCannotWidenToFutureSiblingAndDescendantWorks(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	for _, m := range []SyncGroupMember{
+		{GroupID: "g1", MemberChainID: "owner", Role: GroupRoleFullSync, MemberState: GroupMemberActive, MemberAgentPubkey: "owner-key"},
+		{GroupID: "g1", MemberChainID: "member", Role: GroupRoleSelectiveSync, MemberState: GroupMemberActive, MemberAgentPubkey: "member-key"},
+	} {
+		if err := s.UpsertSyncGroupMember(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{GroupID: "g1", DomainTag: "hr.public", OwnerChainID: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// "hr" is broader than today's shared root and must be discarded. Adding a
+	// sibling later cannot retroactively turn that invalid choice into consent.
+	if err := s.ReplaceGroupMemberConsentDomains(ctx, "g1", "member", []string{"hr"}, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{GroupID: "g1", DomainTag: "hr.secret", OwnerChainID: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GroupDomainsForMember(ctx, "g1", "member"); len(got) != 0 {
+		t.Fatalf("ancestor consent silently widened to future sibling: %v", got)
+	}
+
+	// With an explicit shared root, selecting only one descendant produces that
+	// exact effective scope across the widened read models.
+	if err := s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{GroupID: "g1", DomainTag: "docs", OwnerChainID: "owner"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceGroupMemberConsentDomains(ctx, "g1", "member", []string{"docs.public"}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GroupDomainsForMember(ctx, "g1", "member"); !reflect.DeepEqual(got, []string{"docs.public"}) {
+		t.Fatalf("descendant-only effective scope=%v", got)
+	}
+	if ok, _ := s.MemberSharesGroupDomain(ctx, "g1", "member", "docs.public.note"); !ok {
+		t.Fatal("descendant consent under-served")
+	}
+	if ok, _ := s.MemberSharesGroupDomain(ctx, "g1", "member", "docs.secret"); ok {
+		t.Fatal("descendant consent over-served sibling")
+	}
+	if got, _ := s.GroupSharedDomains(ctx, "owner", "member"); !reflect.DeepEqual(got, []string{"docs.public"}) {
+		t.Fatalf("shared descendant scope=%v", got)
+	}
+	if got, _ := s.GroupOwnedDomainsForPeer(ctx, "owner", "member"); !reflect.DeepEqual(got, []string{"docs.public"}) {
+		t.Fatalf("owned descendant scope=%v", got)
+	}
+	targets, _ := s.ListGroupFanoutTargets(ctx, "owner", "docs.public.note")
+	if !fanoutHas(targets, "member") {
+		t.Fatal("descendant fanout under-served")
+	}
+	targets, _ = s.ListGroupFanoutTargets(ctx, "owner", "docs.secret")
+	if fanoutHas(targets, "member") {
+		t.Fatal("descendant fanout over-served sibling")
 	}
 }
 

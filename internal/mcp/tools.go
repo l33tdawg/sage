@@ -290,7 +290,7 @@ func (s *Server) registerTools() map[string]Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"operation":     map[string]any{"type": "string", "enum": []string{"add_validator", "remove_validator", "update_power"}, "description": "Type of validator change"},
+					"operation":     map[string]any{"type": "string", "enum": []string{"add_validator", "remove_validator", "update_power", "sync_group_action"}, "description": "Governance operation; sync_group_action attests one exact federation journal digest"},
 					"target_id":     map[string]any{"type": "string", "description": "Hex-encoded agent/validator ID"},
 					"target_pubkey": map[string]any{"type": "string", "description": "Hex-encoded Ed25519 public key (required for add_validator)"},
 					"target_power":  map[string]any{"type": "integer", "description": "Voting power (required for add_validator and update_power)"},
@@ -1153,7 +1153,7 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 				"My on-chain identity: agent_id=%s, name=%s, provider=%s, project=%s. "+
 					"This is my Ed25519 public key hash — it identifies me across all sessions. "+
 					"All my memories are attributed to this agent_id.",
-				s.agentID, regResp.Name, s.provider, s.project)
+				s.effectiveAgentID(ctx), regResp.Name, s.provider, s.project)
 			_, _ = s.storeMemory(ctx, identityContent, "self", "fact", 0.99)
 		}
 	}
@@ -1248,7 +1248,7 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 		resp := map[string]any{
 			"status":          "awakened",
 			"message":         "Welcome back. Your institutional memory is online.",
-			"agent_id":        s.agentID,
+			"agent_id":        s.effectiveAgentID(ctx),
 			"agent_name":      regResp.Name,
 			"registered_name": regResp.RegisteredName,
 			"stats":           statsResp,
@@ -1353,7 +1353,7 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 	return map[string]any{
 		"status":          "inception_complete",
 		"memories_seeded": seeded,
-		"agent_id":        s.agentID,
+		"agent_id":        s.effectiveAgentID(ctx),
 		"agent_name":      regResp.Name,
 		"registered_name": regResp.RegisteredName,
 		"registration":    registrationStatus,
@@ -1500,7 +1500,7 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 		}
 		result["memory_id"] = memoryID
 		result["task_status"] = status
-		result["assignee"] = s.agentID
+		result["assignee"] = s.effectiveAgentID(ctx)
 		result["domain"] = domain
 		result["action"] = "created"
 	} else {
@@ -1560,10 +1560,11 @@ func (s *Server) toolBacklog(ctx context.Context, params map[string]any) (any, e
 	// Group by domain
 	byDomain := map[string][]map[string]any{}
 	visibleTotal := 0
+	effectiveID := s.effectiveAgentID(ctx)
 	for _, t := range tasksResp.Tasks {
 		// Defense in depth for mixed-version deployments: the signed agent may
 		// only receive work explicitly assigned to its immutable agent ID.
-		if t.Assignee != s.agentID {
+		if t.Assignee != effectiveID {
 			continue
 		}
 		visibleTotal++
@@ -1638,13 +1639,14 @@ func (s *Server) toolRename(ctx context.Context, params map[string]any) (any, er
 	if _, ok := params["boot_bio"]; ok {
 		bootBio = stringParam(params, "boot_bio", "")
 	} else {
-		if s.agentID == "" {
+		effectiveID := s.effectiveAgentID(ctx)
+		if effectiveID == "" {
 			return nil, fmt.Errorf("rename aborted: cannot resolve own agent id to preserve the existing bio; pass boot_bio explicitly to set it")
 		}
 		var cur struct {
 			BootBio string `json:"boot_bio"`
 		}
-		if err := s.doSignedJSON(ctx, "GET", "/v1/agent/"+s.agentID, nil, &cur); err != nil {
+		if err := s.doSignedJSON(ctx, "GET", "/v1/agent/"+effectiveID, nil, &cur); err != nil {
 			return nil, fmt.Errorf("rename aborted: could not read current bio to preserve it (pass boot_bio explicitly to override): %w", err)
 		}
 		bootBio = cur.BootBio
@@ -2328,7 +2330,7 @@ func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
 func (s *Server) toolGovPropose(ctx context.Context, params map[string]any) (any, error) {
 	operation := stringParam(params, "operation", "")
 	if operation == "" {
-		return nil, fmt.Errorf("operation is required (add_validator, remove_validator, update_power)")
+		return nil, fmt.Errorf("operation is required (add_validator, remove_validator, update_power, sync_group_action)")
 	}
 	targetID := stringParam(params, "target_id", "")
 	if targetID == "" {

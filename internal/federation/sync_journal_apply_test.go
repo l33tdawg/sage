@@ -30,7 +30,7 @@ func TestJournalApplyGrowingResolver(t *testing.T) {
 
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
 	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
-		memberInvitePayload("chain-b", hex.EncodeToString(bPub), store.GroupRoleFullSync, "pinB"))
+		signedMemberInvitePayload(t, "g1", "chain-b", bPub, bKey, store.GroupRoleFullSync, "pinB"))
 	e2 := mustEntry(t, "g1", RosterSubchain, 2, e1.EntryHash, "member_activate", "chain-ctl", ctlPub, ctlKey,
 		memberChainPayload("chain-b"))
 	// SELF-signed by B (author == chain-b, signed with bKey) — resolvable ONLY
@@ -57,7 +57,7 @@ func TestJournalApplyGrowingResolver(t *testing.T) {
 func TestJournalApplyDomainLifecycle(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
-	seedGroup(t, ms, "g1", "chain-ctl")
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
 	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
 	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
 		GroupID: "g1", MemberChainID: "chain-owner", Role: store.GroupRoleSelectiveSync,
@@ -67,6 +67,7 @@ func TestJournalApplyDomainLifecycle(t *testing.T) {
 	}
 	sub := DomainSubchain("eurorack")
 	d0 := mustEntry(t, "g1", sub, 0, "", "domain_add", "chain-owner", ownerPub, ownerKey, domainAddPayload("eurorack", "chain-owner", 0))
+	attachControllerSignature(&d0, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
 	if n, err := ingestRoster(t, m, ms, "g1", sub, d0); err != nil || n != 1 {
 		t.Fatalf("domain_add: n=%d err=%v", n, err)
 	}
@@ -89,6 +90,32 @@ func TestJournalApplyDomainLifecycle(t *testing.T) {
 	bad := mustEntry(t, "g1", sub, 2, d1.EntryHash, "domain_remove", "chain-owner", otherPub, otherKey, domainRemovePayload("eurorack"))
 	if _, err := ingestRoster(t, m, ms, "g1", sub, bad); err == nil {
 		t.Fatalf("a domain entry signed by a non-owner key must be rejected")
+	}
+}
+
+func TestDomainRemoveSnapshotsPriorFullSyncEntitlement(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	seedGroup(t, ms, "g-snapshot", "chain-ctl")
+	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
+	fullPub, _, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g-snapshot", "chain-owner", store.GroupRoleSelectiveSync, ownerPub)
+	seedActiveMember(t, ms, "g-snapshot", "chain-full", store.GroupRoleFullSync, fullPub)
+	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
+		GroupID: "g-snapshot", DomainTag: "hr", OwnerChainID: "chain-owner", AddedRevision: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	remove := mustEntry(t, "g-snapshot", DomainSubchain("hr"), 0, "", "domain_remove", "chain-owner", ownerPub, ownerKey, domainRemovePayload("hr"))
+	m.journalMu.Lock()
+	_, _, _, err := m.ingestJournalEntriesLocked(ctx, ms, "g-snapshot", DomainSubchain("hr"), []store.SyncGroupLogEntry{remove})
+	m.journalMu.Unlock()
+	if err != nil {
+		t.Fatalf("ingest removal: %v", err)
+	}
+	wasEntitled, err := ms.WasMemberEntitledAtDomainRemoval(ctx, "g-snapshot", "hr", "chain-full", 1)
+	if err != nil || !wasEntitled {
+		t.Fatalf("full-sync prior entitlement not snapshotted: entitled=%v err=%v", wasEntitled, err)
 	}
 }
 
@@ -127,18 +154,35 @@ func TestJournalApplyEpochRotate(t *testing.T) {
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ctl1Pub, ctl1Key := seedGroup(t, ms, "g1", "chain-ctl1")
 	ctl2Pub, ctl2Key, _ := ed25519.GenerateKey(nil)
-	bPub, _, _ := ed25519.GenerateKey(nil)
+	bPub, bKey, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-ctl2", store.GroupRoleFullSync, ctl2Pub)
 
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl1", ctl1Pub, ctl1Key, nil)
 	// epoch_rotate is authored by the OUTGOING controller (ctl1).
 	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "epoch_rotate", "chain-ctl1", ctl1Pub, ctl1Key,
 		epochRotatePayload("e2", "chain-ctl2", hex.EncodeToString(ctl2Pub)))
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0); err != nil || n != 1 {
+		t.Fatalf("seed roster entry: n=%d err=%v", n, err)
+	}
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e1); err == nil || n != 0 {
+		t.Fatalf("unsigned incoming-controller rotation admitted: n=%d err=%v", n, err)
+	}
+	outsiderPub, outsiderKey, _ := ed25519.GenerateKey(nil)
+	outsider := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "epoch_rotate", "chain-ctl1", ctl1Pub, ctl1Key,
+		epochRotatePayload("e-outsider", "chain-outsider", hex.EncodeToString(outsiderPub)))
+	attachControllerSignature(&outsider, "e-outsider", "chain-outsider", outsiderPub, outsiderKey)
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, outsider); err == nil || n != 0 {
+		t.Fatalf("non-member incoming controller admitted: n=%d err=%v", n, err)
+	}
+	attachControllerSignature(&e1, "e2", "chain-ctl2", ctl2Pub, ctl2Key)
 	// member_invite authored by the NEW controller (ctl2) — only resolvable if the
 	// rotation was applied to the growing state.
-	e2 := mustEntry(t, "g1", RosterSubchain, 2, e1.EntryHash, "member_invite", "chain-ctl2", ctl2Pub, ctl2Key,
-		memberInvitePayload("chain-b", hex.EncodeToString(bPub), store.GroupRoleFullSync, "pinB"))
+	invitePayload := signedMemberInvitePayload(t, "g1", "chain-b", bPub, bKey, store.GroupRoleFullSync, "pinB")
+	invitePayload[pkInviteHead] = e1.EntryHash
+	attachMemberInviteProof("g1", invitePayload, bKey)
+	e2 := mustEntry(t, "g1", RosterSubchain, 2, e1.EntryHash, "member_invite", "chain-ctl2", ctl2Pub, ctl2Key, invitePayload)
 
-	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0, e1, e2); err != nil || n != 3 {
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e1, e2); err != nil || n != 2 {
 		t.Fatalf("epoch rotate batch: n=%d err=%v", n, err)
 	}
 	g, _ := ms.GetSyncGroup(ctx, "g1")
@@ -150,12 +194,55 @@ func TestJournalApplyEpochRotate(t *testing.T) {
 	}
 }
 
+func TestJournalApplyRepeatedInviteCannotReplacePinnedMemberKey(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	originalPub, _, _ := ed25519.GenerateKey(nil)
+	attackerPub, attackerKey, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-victim", store.GroupRoleFullSync, originalPub)
+
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "member_invite", "chain-ctl", ctlPub, ctlKey,
+		signedMemberInvitePayload(t, "g1", "chain-victim", attackerPub, attackerKey, store.GroupRoleFullSync, "new-pin"))
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0); err != nil || n != 1 {
+		t.Fatalf("ingest repeated invite: n=%d err=%v", n, err)
+	}
+	member, err := ms.GetSyncGroupMember(ctx, "g1", "chain-victim")
+	if err != nil || member == nil {
+		t.Fatalf("load victim: %v", err)
+	}
+	if member.MemberAgentPubkey != hex.EncodeToString(originalPub) || member.MemberState != store.GroupMemberActive {
+		t.Fatalf("repeated invite replaced pinned identity/state: %+v", member)
+	}
+}
+
+func TestControllerRoleChangeCannotForgeMemberConsent(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	memberPub, _, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-member", store.GroupRoleFullSync, memberPub)
+	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{GroupID: "g1", DomainTag: "secret", OwnerChainID: "chain-ctl"}); err != nil {
+		t.Fatal(err)
+	}
+	selected, _ := encodeSelectedDomains([]string{"secret"})
+	payload := roleChangePayload("chain-member", store.GroupRoleSelectiveSync)
+	payload[pkSelectedDomains] = selected
+	e := mustEntry(t, "g1", RosterSubchain, 0, "", "role_change", "chain-ctl", ctlPub, ctlKey, payload)
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e); err != nil || n != 1 {
+		t.Fatalf("controller role change: n=%d err=%v", n, err)
+	}
+	if consent, err := ms.ListGroupMemberConsentDomains(ctx, "g1", "chain-member"); err != nil || len(consent) != 0 {
+		t.Fatalf("controller forged member receive consent: %v err=%v", consent, err)
+	}
+}
+
 // TestJournalApplyEvictionRevokesAuthority: a removed member can no longer author
 // (resolve consults member_state), and an active member still can.
 func TestJournalApplyEvictionRevokesAuthority(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
-	seedGroup(t, ms, "g1", "chain-ctl")
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
 	evilPub, evilKey, _ := ed25519.GenerateKey(nil)
 	goodPub, goodKey, _ := ed25519.GenerateKey(nil)
 	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
@@ -177,6 +264,7 @@ func TestJournalApplyEvictionRevokesAuthority(t *testing.T) {
 	}
 	// An ACTIVE member still can.
 	good := mustEntry(t, "g1", DomainSubchain("ok"), 0, "", "domain_add", "chain-good", goodPub, goodKey, domainAddPayload("ok", "chain-good", 0))
+	attachControllerSignature(&good, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
 	if n, err := ingestRoster(t, m, ms, "g1", DomainSubchain("ok"), good); err != nil || n != 1 {
 		t.Fatalf("active member domain_add: n=%d err=%v", n, err)
 	}

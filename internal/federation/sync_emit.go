@@ -37,6 +37,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/store"
 )
 
@@ -62,6 +63,9 @@ func (m *Manager) EmitDomainAdd(ctx context.Context, groupID, domainTag string, 
 	// there is no stored owner yet; authority over the NEW scope (admin/owner) suffices.
 	if err := m.authorizeOwnerUnilateralDomain(domainTag, false, gs); err != nil {
 		return store.SyncGroupLogEntry{}, err
+	}
+	if gs.controllerChain != m.localChainID || !gs.controllerKey.Equal(m.agentPub) {
+		return m.emitRemoteOwnerDomainAdd(ctx, gs.controllerChain, groupID, domainTag, maxClearance)
 	}
 	return m.AppendGroupJournalEntry(ctx, groupID, DomainSubchain(domainTag), "domain_add",
 		m.localChainID, m.agentPub, m.agentKey, domainAddPayload(domainTag, m.localChainID, maxClearance))
@@ -128,8 +132,8 @@ func (m *Manager) EmitRosterControl(ctx context.Context, groupID, entryType stri
 	if !rosterControllerTypes[entryType] {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("%q is not a controller-authored roster entry type", entryType)
 	}
-	if err := m.authorizeControllerAffecting(ctx, ss, groupID); err != nil {
-		return store.SyncGroupLogEntry{}, err
+	if entryType == "member_invite" || entryType == "member_activate" {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("%s requires the invitee-accept/bootstrap ceremony", entryType)
 	}
 	return m.AppendGroupJournalEntry(ctx, groupID, RosterSubchain, entryType,
 		m.localChainID, m.agentPub, m.agentKey, payload)
@@ -144,7 +148,7 @@ func (m *Manager) EmitRosterControl(ctx context.Context, groupID, entryType stri
 // single-validator ownership-transfer primitive whose constraint does not apply to
 // declaring sharing scope); that passage is proven by controllerGovGate. When the
 // gate is unset on a multi-validator node the change is refused (fail-closed).
-func (m *Manager) authorizeControllerAffecting(ctx context.Context, ss *store.SQLiteStore, groupID string) error {
+func (m *Manager) authorizeControllerAffecting(ctx context.Context, ss *store.SQLiteStore, groupID, actionDigest string) error {
 	g, err := ss.GetSyncGroup(ctx, groupID)
 	if err != nil {
 		return err
@@ -155,36 +159,119 @@ func (m *Manager) authorizeControllerAffecting(ctx context.Context, ss *store.SQ
 	if g.ControllerChainID != m.localChainID || g.ControllerAgentPubkey != hex.EncodeToString(m.agentPub) {
 		return fmt.Errorf("local node is not the controller of group %s", groupID)
 	}
-	if m.validatorCount() <= 1 {
+	validatorCount, err := m.validatorCount()
+	if err != nil {
+		return fmt.Errorf("cannot establish validator governance requirements: %w", err)
+	}
+	if validatorCount <= 1 {
 		return nil // single-validator personal node: commit directly
+	}
+	if actionDigest == "" {
+		return fmt.Errorf("multi-validator controller mutation is missing its canonical action digest")
 	}
 	gate := m.controllerGovGate
 	if gate == nil {
 		return fmt.Errorf("multi-validator controller-affecting change requires validator governance (tx-24/25), which is not configured on this node")
 	}
-	ok, err := gate(ctx, groupID)
+	ok, err := gate(ctx, groupID, actionDigest)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return fmt.Errorf("no passed validator governance proposal (tx-24/25) authorizes this controller-affecting change")
+		return fmt.Errorf("no passed validator governance proposal (tx-24/25) authorizes this controller-affecting change; propose sync_group_action with target_id=%s", actionDigest)
 	}
 	return nil
+}
+
+func requiresReplicaGovernance(e store.SyncGroupLogEntry) bool {
+	return e.EntryType == "domain_add" || (e.Subchain == RosterSubchain && rosterControllerTypes[e.EntryType])
+}
+
+// authorizeReplicaGovernance is the fail-closed receive-side counterpart of
+// authorizeControllerAffecting.  tx-24/25 currently does not preserve a portable
+// threshold certificate: Badger holds proposal state and unsigned decision
+// strings, while federation enrollment pins no remote validator-set trust root.
+// Therefore a multi-validator replica MUST independently hold an executed exact-
+// digest approval (or reject).  A controller-signed claim is intentionally not
+// accepted as a faux quorum proof.  Single-validator personal nodes retain the
+// direct-commit behavior.
+func (m *Manager) authorizeReplicaGovernance(ctx context.Context, groupID string, e store.SyncGroupLogEntry) error {
+	if !requiresReplicaGovernance(e) || m.badger == nil {
+		return nil
+	}
+	count, err := m.validatorCount()
+	if err != nil {
+		return fmt.Errorf("cannot establish replica governance requirements: %w", err)
+	}
+	if count <= 1 {
+		return nil
+	}
+	gate := m.controllerGovGate
+	if gate == nil {
+		return fmt.Errorf("multi-validator replica refuses %s without an independently verifiable exact-digest governance gate", e.EntryType)
+	}
+	ok, err := gate(ctx, groupID, e.EntryHash)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("multi-validator replica has no executed tx-24/25 sync_group_action for exact entry %s", e.EntryHash)
+	}
+	return nil
+}
+
+// Operation 7 is intentionally an inert tx-24/25 governance attestation. The
+// existing governance engine already stores and 2/3-votes unknown operations,
+// and the ABCI apply layer gives them no state mutation. We consume only its
+// durable executed record, with TargetID equal to the exact journal entry hash.
+// This adds no new consensus branch and therefore preserves app-v19's
+// behavior-empty consensus contract.
+const syncGroupGovernanceAttestationOp = governance.OpSyncGroupAction
+
+func (m *Manager) passedControllerGovernance(_ context.Context, groupID, actionDigest string) (bool, error) {
+	if m.badger == nil {
+		return false, fmt.Errorf("governance store is unavailable")
+	}
+	keys, err := m.badger.PrefixKeys("gov:proposal:")
+	if err != nil {
+		return false, fmt.Errorf("list governance proposals: %w", err)
+	}
+	for _, key := range keys {
+		raw, getErr := m.badger.GetState(key)
+		if getErr != nil {
+			return false, fmt.Errorf("read governance proposal: %w", getErr)
+		}
+		var p governance.ProposalState
+		if json.Unmarshal(raw, &p) != nil {
+			continue
+		}
+		if p.Operation == syncGroupGovernanceAttestationOp && p.Status == governance.StatusExecuted && p.TargetID == actionDigest {
+			// The digest is domain-separated and includes groupID, subchain,
+			// sequence, previous hash, type, payload and author identity. Keep the
+			// explicit group argument non-empty so callers cannot accidentally
+			// authorize a context-free mutation.
+			return groupID != "", nil
+		}
+	}
+	return false, nil
 }
 
 // validatorCount reports the size of the on-chain validator set, defaulting to 1
 // (single-validator, commit-directly) when the on-chain store is unavailable or
 // empty — a personal node is single-validator, so the safe default never wrongly
 // demands a quorum that cannot be reached.
-func (m *Manager) validatorCount() int {
+func (m *Manager) validatorCount() (int, error) {
 	if m.badger == nil {
-		return 1
+		return 0, fmt.Errorf("validator store is unavailable")
 	}
 	vals, err := m.badger.LoadValidators()
-	if err != nil || len(vals) == 0 {
-		return 1
+	if err != nil {
+		return 0, fmt.Errorf("load validators: %w", err)
 	}
-	return len(vals)
+	if len(vals) == 0 {
+		return 0, fmt.Errorf("validator set is empty")
+	}
+	return len(vals), nil
 }
 
 // BuildOwnerDomainAddEntry is the OWNER side of the cross-node co-sign ceremony
@@ -223,7 +310,10 @@ func (m *Manager) BuildOwnerDomainAddEntry(ctx context.Context, groupID, domainT
 	// Self-check against the owner's OWN resolver at (seq,prev). Cannot use
 	// appendGroupJournalLocked's live-head self-check because the authoritative head
 	// lives on the CONTROLLER's node in a cross-node ceremony.
-	if key := gs.resolve(e); key == nil || verifyJournalEntry(e, key) != nil {
+	// This is the owner half of the ceremony, before controller approval exists,
+	// so the full resolver must (correctly) reject it.  Self-check only the owner
+	// role here; AppendPreSignedEntry adds and verifies the controller role.
+	if key := gs.memberKey[m.localChainID]; key == nil || !gs.memberActive(m.localChainID) || verifyJournalEntry(e, key) != nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("owner refuses to co-sign a domain_add that fails its own resolver (domain=%s)", domainTag)
 	}
 	return e, nil
@@ -239,30 +329,80 @@ func (m *Manager) BuildOwnerDomainAddEntry(ctx context.Context, groupID, domainT
 // bypass here would re-open the controller-exfiltration hole (admitting an entry the
 // resolver would reject). Idempotent: an already-held identical entry is a no-op.
 func (m *Manager) AppendPreSignedEntry(ctx context.Context, groupID string, e store.SyncGroupLogEntry) error {
+	_, err := m.AdmitOwnerDomainAdd(ctx, groupID, e)
+	return err
+}
+
+// AdmitOwnerDomainAdd is the controller half of the owner/controller ceremony.
+// It returns the fully controller-approved entry so the owner can immediately
+// ingest the same bytes rather than waiting for anti-entropy.
+func (m *Manager) AdmitOwnerDomainAdd(ctx context.Context, groupID string, e store.SyncGroupLogEntry) (store.SyncGroupLogEntry, error) {
 	ss := m.syncStore()
 	if ss == nil {
-		return fmt.Errorf("group journal requires the SQLite store backend")
+		return store.SyncGroupLogEntry{}, fmt.Errorf("group journal requires the SQLite store backend")
 	}
 	if e.GroupID == "" {
 		e.GroupID = groupID
 	}
 	if e.GroupID != groupID {
-		return fmt.Errorf("pre-signed entry group_id %q != requested %q", e.GroupID, groupID)
+		return store.SyncGroupLogEntry{}, fmt.Errorf("pre-signed entry group_id %q != requested %q", e.GroupID, groupID)
 	}
 	if e.Subchain == "" {
-		return fmt.Errorf("pre-signed entry is missing its subchain")
+		return store.SyncGroupLogEntry{}, fmt.Errorf("pre-signed entry is missing its subchain")
+	}
+	if e.EntryType != "domain_add" {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("AppendPreSignedEntry is restricted to owner-authored domain_add entries")
 	}
 	if err := validateAuthoredEntry(e); err != nil {
-		return fmt.Errorf("refusing to admit a malformed pre-signed %s entry: %w", e.EntryType, err)
+		return store.SyncGroupLogEntry{}, fmt.Errorf("refusing to admit a malformed pre-signed %s entry: %w", e.EntryType, err)
 	}
 	m.journalMu.Lock()
+	if held, getErr := ss.GetSyncGroupLogEntry(ctx, groupID, e.Subchain, e.Seq); getErr != nil {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, getErr
+	} else if held != nil && held.EntryHash == e.EntryHash {
+		m.journalMu.Unlock()
+		return *held, nil
+	}
+	gs, loadErr := loadGroupApplyState(ctx, ss, groupID)
+	if loadErr != nil {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, loadErr
+	}
+	if gs.controllerChain != m.localChainID || !gs.controllerKey.Equal(m.agentPub) {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, fmt.Errorf("only the active group controller may admit a pre-signed domain_add")
+	}
+	ownerKey := gs.memberKey[e.AuthorChainID]
+	if !gs.memberActive(e.AuthorChainID) || ownerKey == nil || verifyJournalEntry(e, ownerKey) != nil {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, fmt.Errorf("pre-signed domain_add does not verify under the active owner's pinned key")
+	}
+	payload := parseJournalPayload(e.PayloadJSON)
+	mayOwn, capabilityErr := ss.GroupMemberMayOwnDomain(ctx, groupID, e.AuthorChainID, payload[pkDomainTag])
+	if capabilityErr != nil {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, capabilityErr
+	}
+	if !mayOwn {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, fmt.Errorf("owner has no invitee-signed capability for domain %q", payload[pkDomainTag])
+	}
+	if authErr := m.authorizeControllerAffecting(ctx, ss, groupID, e.EntryHash); authErr != nil {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, authErr
+	}
+	attachControllerSignature(&e, gs.controllerEpoch, m.localChainID, m.agentPub, m.agentKey)
 	_, evicted, removed, err := m.ingestJournalEntriesLocked(ctx, ss, groupID, e.Subchain, []store.SyncGroupLogEntry{e})
 	m.journalMu.Unlock()
 	// POST-BATCH removal enforcement runs OUTSIDE journalMu, exactly as the pull /
 	// AppendGroupJournalEntry paths do (a no-op unless this entry evicted a member or
 	// removed a domain).
 	m.enforceRemovalBatch(ss, groupID, evicted, removed)
-	return err
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	return e, nil
 }
 
 // pairwiseGroupID derives the deterministic group id for the 2-of-2 enrollment
@@ -292,7 +432,15 @@ func pairwiseGroupID(chainA, chainB, epoch string) string {
 // domain-owner co-sign ceremony and anti-entropy build on. Idempotent: skips if the
 // group already exists. Returns the group id (guest-side discovery + the group
 // management REST surface are INT1). guestAgentPub is the guest node-operator key.
-func (m *Manager) seedEnrollmentGroup(ctx context.Context, guestChain string, guestAgentPub []byte, epoch string) (string, error) {
+type enrollmentGrant struct {
+	Role         string
+	Selected     []string
+	Owned        []string
+	CAPin        string
+	InviteeProof string
+}
+
+func (m *Manager) seedEnrollmentGroup(ctx context.Context, guestChain string, guestAgentPub []byte, epoch string, hostGrant, guestGrant enrollmentGrant) (string, error) {
 	ss := m.syncStore()
 	if ss == nil {
 		return "", fmt.Errorf("group journal requires the SQLite store backend")
@@ -300,38 +448,144 @@ func (m *Manager) seedEnrollmentGroup(ctx context.Context, guestChain string, gu
 	if len(guestAgentPub) == 0 {
 		return "", fmt.Errorf("guest agent pubkey is required to seed the enrollment group")
 	}
+	if !validRole(hostGrant.Role) || !validRole(guestGrant.Role) {
+		return "", fmt.Errorf("invalid enrollment roles host=%q guest=%q", hostGrant.Role, guestGrant.Role)
+	}
 	groupID := pairwiseGroupID(m.localChainID, guestChain, epoch)
-	if g, err := ss.GetSyncGroup(ctx, groupID); err != nil {
-		return groupID, err
-	} else if g != nil {
-		return groupID, nil // already seeded (retried / repeat session)
-	}
-	// The group row must pre-exist so the group_create self-check can resolve the
-	// controller key (loadGroupApplyState reads the row).
-	if err := ss.UpsertSyncGroup(ctx, store.SyncGroup{
-		GroupID: groupID, ControllerChainID: m.localChainID, ControllerAgentPubkey: hex.EncodeToString(m.agentPub),
-		Epoch: epoch,
-	}); err != nil {
-		return groupID, err
-	}
 	selfPubHex := hex.EncodeToString(m.agentPub)
 	guestPubHex := hex.EncodeToString(guestAgentPub)
+	hostInvite := memberInvitePayload(m.localChainID, selfPubHex, hostGrant.Role, hostGrant.CAPin)
+	if hostGrant.Role == store.GroupRoleSelectiveSync {
+		selected, encErr := encodeSelectedDomains(hostGrant.Selected)
+		if encErr != nil {
+			return groupID, encErr
+		}
+		hostInvite[pkSelectedDomains] = selected
+	}
+	if len(hostGrant.Owned) > 0 {
+		owned, encErr := encodeSelectedDomains(hostGrant.Owned)
+		if encErr != nil {
+			return groupID, encErr
+		}
+		hostInvite[pkOwnedDomains] = owned
+	}
+	attachMemberInviteProof(groupID, hostInvite, m.agentKey)
+	guestInvite := memberInvitePayload(guestChain, guestPubHex, guestGrant.Role, guestGrant.CAPin)
+	if guestGrant.Role == store.GroupRoleSelectiveSync {
+		selected, encErr := encodeSelectedDomains(guestGrant.Selected)
+		if encErr != nil {
+			return groupID, encErr
+		}
+		guestInvite[pkSelectedDomains] = selected
+	}
+	if len(guestGrant.Owned) > 0 {
+		owned, encErr := encodeSelectedDomains(guestGrant.Owned)
+		if encErr != nil {
+			return groupID, encErr
+		}
+		guestInvite[pkOwnedDomains] = owned
+	}
+	guestInvite[pkInviteeSig] = guestGrant.InviteeProof
 	steps := []struct {
 		etype   string
 		payload map[string]string
 	}{
 		{"group_create", map[string]string{pkEpoch: epoch, pkControllerChain: m.localChainID, pkControllerPubkey: selfPubHex}},
-		{"member_invite", memberInvitePayload(m.localChainID, selfPubHex, store.GroupRoleFullSync, "")},
+		{"member_invite", hostInvite},
 		{"member_activate", memberChainPayload(m.localChainID)},
-		{"member_invite", memberInvitePayload(guestChain, guestPubHex, store.GroupRoleFullSync, "")},
+		{"member_invite", guestInvite},
 		{"member_activate", memberChainPayload(guestChain)},
 	}
-	for _, s := range steps {
-		if _, err := m.EmitRosterControl(ctx, groupID, s.etype, s.payload); err != nil {
-			return groupID, fmt.Errorf("seed enrollment group %s (%s): %w", groupID, s.etype, err)
+
+	// Seed atomically. A legacy partial seed is resumed only when every existing
+	// prefix entry is byte-identical to the expected ceremony transcript; a
+	// conflicting partial row is surfaced for operator repair, never mistaken for
+	// a complete group merely because sync_group already exists.
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
+	policyUnlock := ss.LockSyncPolicyWrite()
+	defer policyUnlock()
+	err := ss.RunInTx(ctx, func(txStore store.OffchainStore) error {
+		txStoreSQL, ok := txStore.(*store.SQLiteStore)
+		if !ok {
+			return fmt.Errorf("group journal requires the SQLite store backend")
 		}
+		g, getErr := txStoreSQL.GetSyncGroup(ctx, groupID)
+		if getErr != nil {
+			return getErr
+		}
+		if g != nil && (g.ControllerChainID != m.localChainID || g.ControllerAgentPubkey != selfPubHex || effectiveControllerEpoch(g.Epoch) != effectiveControllerEpoch(epoch)) {
+			return fmt.Errorf("enrollment group %s exists with a conflicting controller or epoch", groupID)
+		}
+		if g == nil {
+			if upErr := txStoreSQL.UpsertSyncGroup(ctx, store.SyncGroup{
+				GroupID: groupID, ControllerChainID: m.localChainID,
+				ControllerAgentPubkey: selfPubHex, Epoch: epoch,
+			}); upErr != nil {
+				return upErr
+			}
+		}
+		gs, stateErr := loadGroupApplyState(ctx, txStoreSQL, groupID)
+		if stateErr != nil {
+			return stateErr
+		}
+		prev := ""
+		for seq, step := range steps {
+			entry, buildErr := buildJournalEntry(groupID, RosterSubchain, int64(seq), prev, step.etype,
+				m.localChainID, m.agentPub, m.agentKey, step.payload)
+			if buildErr != nil {
+				return buildErr
+			}
+			if validErr := validateAuthoredEntry(entry); validErr != nil {
+				return fmt.Errorf("seed enrollment group %s (%s): %w", groupID, step.etype, validErr)
+			}
+			held, heldErr := txStoreSQL.GetSyncGroupLogEntry(ctx, groupID, RosterSubchain, int64(seq))
+			if heldErr != nil {
+				return heldErr
+			}
+			if held != nil {
+				if held.EntryHash != entry.EntryHash || held.AuthorSig != entry.AuthorSig {
+					return fmt.Errorf("enrollment group %s has a conflicting partial roster at seq %d", groupID, seq)
+				}
+				prev = held.EntryHash
+				continue
+			}
+			if authErr := m.authorizeControllerAffecting(ctx, txStoreSQL, groupID, entry.EntryHash); authErr != nil {
+				return authErr
+			}
+			if key := gs.resolve(entry); key == nil || verifyJournalEntry(entry, key) != nil {
+				return fmt.Errorf("enrollment entry %s/%d fails the group resolver", RosterSubchain, seq)
+			}
+			if appendErr := txStoreSQL.AppendSyncGroupLog(ctx, entry); appendErr != nil {
+				return appendErr
+			}
+			if applyErr := gs.apply(ctx, txStoreSQL, entry); applyErr != nil {
+				return applyErr
+			}
+			prev = entry.EntryHash
+		}
+		return txStoreSQL.SetSyncGroupRosterJournalHead(ctx, groupID, prev)
+	})
+	if err != nil {
+		return groupID, err
 	}
 	return groupID, nil
+}
+
+func enrollmentRole(scope ScopeWire) (string, []string) {
+	// Only the explicitly bidirectional exchange ceremony seeds memory sync.
+	// Unknown/legacy modes and one-way directions remain connectivity-only; this
+	// deliberate under-service prevents an ambiguous one-way grant from silently
+	// becoming full-sync.
+	if scope.Mode != "exchange" || scope.Direction != "both" || len(scope.AllowedDomains) == 0 {
+		return store.GroupRoleEnrolledNoSync, nil
+	}
+	for _, domain := range scope.AllowedDomains {
+		if domain == "*" {
+			return store.GroupRoleFullSync, nil
+		}
+	}
+	return store.GroupRoleSelectiveSync, append([]string(nil), scope.AllowedDomains...)
 }
 
 // encodeSelectedDomains canonically JSON-encodes a selective-sync consent subset
