@@ -190,7 +190,7 @@ func defaultFederationConfig() FederationConfig {
 }
 
 // Verified against the live Natter startup banner on 2026-07-11. Use the
-// origin IP multiaddrs: natter.sage.delivery is Cloudflare-fronted and those
+// origin IP multiaddrs: natter.sage.delivery is edge-proxied and those
 // anycast DNS addresses do not forward raw libp2p QUIC/TCP. Operators can
 // replace or extend this list for fully sovereign/self-hosted connectivity.
 var defaultNatterRelayAddrs = []string{

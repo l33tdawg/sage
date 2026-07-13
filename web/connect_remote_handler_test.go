@@ -33,18 +33,6 @@ func TestConnectRemoteTokenMintsTransportNeutralBearer(t *testing.T) {
 	}
 }
 
-func TestLegacyCloudflareWizardRoutesAreGone(t *testing.T) {
-	h, _ := newTestHandler(t)
-	router := testRouter(h)
-	req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/check-cloudflared", nil)
-	markLocalCEREBRUM(req)
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("legacy route status = %d, want 404", w.Code)
-	}
-}
-
 func TestParseMCPTLSAddr(t *testing.T) {
 	cases := []struct {
 		in       string

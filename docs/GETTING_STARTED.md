@@ -146,7 +146,7 @@ For ChatGPT desktop **Codex mode**, Claude Code, Codex CLI, Cursor, Windsurf, or
 
 ### 2. Advanced remote access
 
-Remote access is optional and off by default. For tools on a different machine, deliberately expose the MCP TLS listener to a LAN/VPN or enter a trusted HTTPS MCP endpoint you operate. SAGE does not install Cloudflare, create domains, or register an autostart tunnel. ChatGPT Work remains a separate advanced compatibility path using OpenAI's plugin and **Secure MCP Tunnel**; Codex mode should use the local setup above. Bearer-only clients that run on the same machine can also connect directly to `https://localhost:8443`, though local stdio MCP is the more reliable default.
+Remote access is optional and off by default. For tools on a different machine, deliberately expose the MCP TLS listener to a LAN/VPN or enter a trusted HTTPS MCP endpoint you operate. SAGE does not install a public-tunnel vendor, create domains, or register an autostart tunnel. ChatGPT Work remains a separate advanced compatibility path using OpenAI's plugin and **Secure MCP Tunnel**; Codex mode should use the local setup above. Bearer-only clients that run on the same machine can also connect directly to `https://localhost:8443`, though local stdio MCP is the more reliable default.
 
 ### 3. LAN pairing (another computer on your network joins your SAGE)
 
