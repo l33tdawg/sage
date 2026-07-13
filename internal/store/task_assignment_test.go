@@ -432,7 +432,7 @@ func TestConcurrentAgentCompleteAndReassignHasValidLinearizedOutcome(t *testing.
 	if completion.completed {
 		require.Error(t, assignErr)
 		require.Equal(t, memory.TaskStatusDone, tasks[0].TaskStatus)
-		require.Empty(t, tasks[0].Assignee)
+		require.Equal(t, "agent-a", tasks[0].Assignee, "terminal card keeps the completing assignee as attribution")
 	} else {
 		require.NoError(t, assignErr)
 		require.Equal(t, memory.TaskStatusInProgress, tasks[0].TaskStatus)
@@ -440,7 +440,7 @@ func TestConcurrentAgentCompleteAndReassignHasValidLinearizedOutcome(t *testing.
 	}
 }
 
-func TestConcurrentAgentStartAndCompleteEndsTerminalUnassigned(t *testing.T) {
+func TestConcurrentAgentStartAndCompleteEndsTerminalAttributed(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
 	insertOpenTask(t, s, "complete-start-race", "codex")
@@ -468,7 +468,7 @@ func TestConcurrentAgentStartAndCompleteEndsTerminalUnassigned(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.Equal(t, memory.TaskStatusDone, tasks[0].TaskStatus)
-	require.Empty(t, tasks[0].Assignee)
+	require.Equal(t, "agent-a", tasks[0].Assignee)
 }
 
 func TestTerminalTaskSupersedesUnreadAssignmentNotice(t *testing.T) {
@@ -489,7 +489,7 @@ func TestTerminalTaskSupersedesUnreadAssignmentNotice(t *testing.T) {
 	require.NoError(t, s.conn.QueryRowContext(ctx, `
 		SELECT COALESCE(assignee, ''), COALESCE(task_picked_up_by, '')
 		FROM memories WHERE memory_id = 'task-terminal'`).Scan(&assignee, &pickedBy))
-	require.Empty(t, assignee, "terminal tasks must not retain a current owner")
+	require.Equal(t, "agent-a", assignee, "terminal tasks retain the last owner as attribution")
 	require.Equal(t, "agent-a", pickedBy, "terminal transition preserves pickup evidence")
 	claimed, err = s.ClaimTask(ctx, "task-terminal", "agent-a")
 	require.NoError(t, err)
@@ -500,6 +500,9 @@ func TestTerminalTaskSupersedesUnreadAssignmentNotice(t *testing.T) {
 	require.Equal(t, string(memory.TaskStatusDone), terminalStatus)
 
 	require.NoError(t, s.UpdateTaskStatus(ctx, "task-terminal", memory.TaskStatusPlanned))
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COALESCE(assignee, '') FROM memories WHERE memory_id = 'task-terminal'`).Scan(&assignee))
+	require.Empty(t, assignee, "reopening clears historical attribution and requires a fresh handoff")
 	notices, err = s.TakeAgentNotifications(ctx, "agent-a", 5)
 	require.NoError(t, err)
 	require.Empty(t, notices, "reopening is unassigned until the operator hands it off again")
@@ -512,6 +515,55 @@ func TestTerminalTaskSupersedesUnreadAssignmentNotice(t *testing.T) {
 	notices, err = s.TakeAgentNotifications(ctx, "agent-a", 5)
 	require.NoError(t, err)
 	require.Len(t, notices, 1)
+}
+
+func TestOperatorCompletionPreservesAssignedAgentWithoutPickup(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "operator-completed", "codex")
+	insertActiveTestAgent(t, s, "agent-a", "codex")
+	_, err := s.AssignTaskAndNotify(ctx, "operator-completed", "agent-a")
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateTaskStatus(ctx, "operator-completed", memory.TaskStatusDone))
+
+	var assignee, pickedBy string
+	require.NoError(t, s.conn.QueryRowContext(ctx, `SELECT COALESCE(assignee, ''), COALESCE(task_picked_up_by, '')
+		FROM memories WHERE memory_id = 'operator-completed'`).Scan(&assignee, &pickedBy))
+	require.Equal(t, "agent-a", assignee)
+	require.Empty(t, pickedBy, "operator completion must not fabricate pickup evidence")
+	require.ErrorContains(t, s.UpdateTaskStatus(ctx, "operator-completed", memory.TaskStatusInProgress), "requires an assignee")
+}
+
+func TestTerminalMigrationBackfillsAssigneeFromPickupEvidence(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "legacy-terminal-attribution", "codex")
+	_, err := s.conn.ExecContext(ctx, `UPDATE memories
+		SET task_status = 'done', assignee = '', task_picked_up_by = 'agent-a'
+		WHERE memory_id = 'legacy-terminal-attribution'`)
+	require.NoError(t, err)
+
+	require.NoError(t, s.migrateTaskAssignmentNotifications(ctx))
+	var assignee string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COALESCE(assignee, '') FROM memories WHERE memory_id = 'legacy-terminal-attribution'`).Scan(&assignee))
+	require.Equal(t, "agent-a", assignee)
+}
+
+func TestTerminalAttributionFallsBackToRegisteredSubmittingAgent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "agent-authored-terminal", "claude-code")
+	insertActiveTestAgent(t, s, "agent-author", "claude-code")
+	_, err := s.conn.ExecContext(ctx, `UPDATE memories SET submitting_agent = 'agent-author'
+		WHERE memory_id = 'agent-authored-terminal'`)
+	require.NoError(t, err)
+	require.NoError(t, s.UpdateTaskStatus(ctx, "agent-authored-terminal", memory.TaskStatusDone))
+
+	var assignee string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COALESCE(assignee, '') FROM memories WHERE memory_id = 'agent-authored-terminal'`).Scan(&assignee))
+	require.Equal(t, "agent-author", assignee)
 }
 
 func TestTaskStatusUpdatedAtTracksTransitionsNotTaskAge(t *testing.T) {
