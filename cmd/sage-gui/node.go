@@ -2438,21 +2438,27 @@ func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Co
 	// hand it to SQLite, return the agent_id. Translate the store's
 	// ErrTokenRevoked into the middleware-side sentinel so 401 vs 500 are
 	// distinguishable.
-	bearerLookup := func(ctx context.Context, tokenSHA256 string) (string, error) {
-		tok, err := sqliteStore.LookupMCPToken(ctx, tokenSHA256)
+	bearerLookup := func(ctx context.Context, tokenSHA256 string) (string, ed25519.PrivateKey, error) {
+		agentID, priv, err := sqliteStore.LookupMCPTokenSigner(ctx, tokenSHA256)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return "", err
+				return "", nil, err
 			}
 			if errors.Is(err, store.ErrTokenRevoked) {
-				return "", middleware.ErrMCPTokenRevoked
+				return "", nil, middleware.ErrMCPTokenRevoked
 			}
-			return "", err
+			// Fail closed on anything else (DB error, or a KEYED token whose vault
+			// is locked — LookupMCPTokenSigner never degrades a keyed token to the
+			// operator identity).
+			return "", nil, err
 		}
-		if tok == nil {
-			return "", sql.ErrNoRows
+		if priv == nil {
+			// Legacy keyless token: no per-token signer, so run as the node
+			// operator signed with the transport key (pre-v11.8 behavior).
+			return transportAgentID, nil, nil
 		}
-		return transportAgentID, nil
+		// KEYED token: act as the token's own on-chain identity.
+		return agentID, priv, nil
 	}
 
 	// IMPORTANT: register the transport endpoints as FLAT paths, not via

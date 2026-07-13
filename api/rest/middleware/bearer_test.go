@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -17,11 +18,11 @@ import (
 func stubLookup(plaintext, agentID string) MCPTokenLookupFn {
 	digest := sha256.Sum256([]byte(plaintext))
 	want := hex.EncodeToString(digest[:])
-	return func(_ context.Context, tokenSHA256 string) (string, error) {
+	return func(_ context.Context, tokenSHA256 string) (string, ed25519.PrivateKey, error) {
 		if tokenSHA256 == want {
-			return agentID, nil
+			return agentID, nil, nil
 		}
-		return "", sql.ErrNoRows
+		return "", nil, sql.ErrNoRows
 	}
 }
 
@@ -71,8 +72,8 @@ func TestBearerAuth_Rejects_BadToken(t *testing.T) {
 }
 
 func TestBearerAuth_Rejects_Revoked(t *testing.T) {
-	revokeLookup := func(_ context.Context, _ string) (string, error) {
-		return "", ErrMCPTokenRevoked
+	revokeLookup := func(_ context.Context, _ string) (string, ed25519.PrivateKey, error) {
+		return "", nil, ErrMCPTokenRevoked
 	}
 	h := bearerProtected(revokeLookup)
 
@@ -100,8 +101,8 @@ func TestBearerAuth_Accepts_ValidToken(t *testing.T) {
 }
 
 func TestBearerAuth_DBError_Fails500(t *testing.T) {
-	dbErr := func(_ context.Context, _ string) (string, error) {
-		return "", assertableError("transient db failure")
+	dbErr := func(_ context.Context, _ string) (string, ed25519.PrivateKey, error) {
+		return "", nil, assertableError("transient db failure")
 	}
 	h := bearerProtected(dbErr)
 

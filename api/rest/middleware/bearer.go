@@ -12,6 +12,7 @@ package middleware
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -36,12 +37,36 @@ type MCPTokenInfo struct {
 }
 
 // MCPTokenLookupFn is a function adapter so callers can wire the SQLite
-// store's method without forcing the interface above on it.
-type MCPTokenLookupFn func(ctx context.Context, tokenSHA256 string) (agentID string, err error)
+// store's method without forcing the interface above on it. It returns the
+// resolved agent ID and, for a KEYED token, the per-token ed25519 signing key so
+// downstream REST calls sign as the token's OWN on-chain identity. A nil signer
+// means a legacy keyless token — the caller falls back to the node operator key.
+type MCPTokenLookupFn func(ctx context.Context, tokenSHA256 string) (agentID string, signer ed25519.PrivateKey, err error)
 
 type mcpTokenFingerprintKeyType struct{}
 
 var mcpTokenFingerprintKey mcpTokenFingerprintKeyType
+
+type mcpSignerKeyType struct{}
+
+var mcpSignerKey mcpSignerKeyType
+
+// WithMCPSigner installs the per-token ed25519 signing key resolved by the
+// bearer middleware into ctx, so the MCP transport signs downstream REST calls
+// as the token's own on-chain identity instead of collapsing to the node
+// operator. A nil key (legacy keyless token / non-bearer path) is never
+// installed; readers then fall back to the operator key.
+func WithMCPSigner(ctx context.Context, signer ed25519.PrivateKey) context.Context {
+	return context.WithValue(ctx, mcpSignerKey, signer)
+}
+
+// ContextMCPSigner returns the per-token signing key installed by the bearer
+// middleware, or nil when the request is not keyed. Callers that see nil sign as
+// the node operator (the pre-v11.8 behavior).
+func ContextMCPSigner(ctx context.Context) ed25519.PrivateKey {
+	v, _ := ctx.Value(mcpSignerKey).(ed25519.PrivateKey)
+	return v
+}
 
 // MCPBearerAuthMiddleware returns a middleware that validates the
 // Authorization header against a bearer-token store. On success, the
@@ -104,7 +129,7 @@ func MCPBearerAuthMiddleware(lookup MCPTokenLookupFn) func(http.Handler) http.Ha
 			digest := sha256.Sum256([]byte(token))
 			digestHex := hex.EncodeToString(digest[:])
 
-			agentID, err := lookup(r.Context(), digestHex)
+			agentID, signer, err := lookup(r.Context(), digestHex)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
 					writeMCPUnauthorized(w, r, "Invalid bearer token",
@@ -133,6 +158,12 @@ func MCPBearerAuthMiddleware(lookup MCPTokenLookupFn) func(http.Handler) http.Ha
 			// the same agent ID, but must not be able to post into one another's SSE
 			// stream if a session UUID leaks.
 			ctx = context.WithValue(ctx, mcpTokenFingerprintKey, digestHex)
+			// KEYED token: thread the per-token signer so the transport signs
+			// downstream REST calls as the token's own identity. Legacy keyless
+			// tokens carry a nil signer and keep signing as the node operator.
+			if signer != nil {
+				ctx = WithMCPSigner(ctx, signer)
+			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

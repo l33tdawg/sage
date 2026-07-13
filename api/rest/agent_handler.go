@@ -2,6 +2,11 @@ package rest
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -9,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -123,6 +129,114 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		"tx_hash":         txHash,
 		"on_chain_height": height,
 	})
+}
+
+// tokenIdentityRegisterWait bounds how long MCP token issuance blocks on the
+// on-chain registration of a freshly-minted per-token identity. A slow block
+// must not hang the issuing REST call, so past this the token is returned and a
+// background retry finishes the registration (autoRegister precedent).
+const tokenIdentityRegisterWait = 8 * time.Second
+
+// registerMintedAgentIdentity registers a freshly-minted per-token ed25519
+// identity on-chain by issuing a STANDARD TxTypeAgentRegister — identical in
+// shape to the one /v1/agent/register builds — with the agent proof signed by
+// the minted key itself, so processAgentRegister's verifyAgentIdentity binds the
+// on-chain identity to hex(pub). No new tx field is introduced: the minted
+// pubkey plus its self-signed proof are the only new bytes on the wire, so
+// old-binary replay stays byte-identical. Key generation happens OFF-consensus
+// in the caller; FinalizeBlock only re-verifies the embedded proof, never
+// generates a key.
+func (s *Server) registerMintedAgentIdentity(tokenPub ed25519.PublicKey, tokenPriv ed25519.PrivateKey, name, provider string) (string, int64, error) {
+	agentID := hex.EncodeToString(tokenPub)
+	if name == "" {
+		name = "mcp-token-" + agentID[:8]
+	}
+
+	// The signed request body MUST reconstruct the exact AgentRegister payload
+	// consensus rebuilds under app-v17's delegated-proof binding
+	// (verifySignedAgentAction: name required, role defaults to "member"), or the
+	// tx is rejected once app-v17 is active.
+	regBody := struct {
+		Name       string `json:"name"`
+		Role       string `json:"role"`
+		BootBio    string `json:"boot_bio"`
+		Provider   string `json:"provider"`
+		P2PAddress string `json:"p2p_address"`
+	}{Name: name, Role: "member", Provider: provider}
+	body, err := json.Marshal(regBody)
+	if err != nil {
+		return "", 0, fmt.Errorf("marshal register body: %w", err)
+	}
+
+	const method, path = http.MethodPost, "/v1/agent/register"
+	timestamp := time.Now().Unix()
+	nonce := make([]byte, 8)
+	if _, rErr := rand.Read(nonce); rErr != nil {
+		return "", 0, fmt.Errorf("generate proof nonce: %w", rErr)
+	}
+	// Canonical request + body hash exactly as the REST auth middleware computes
+	// for a token-key-signed POST /v1/agent/register.
+	canonical := []byte(method + " " + path + "\n")
+	canonical = append(canonical, body...)
+	bodyHash := sha256.Sum256(canonical)
+	sig := auth.SignRequestWithNonce(tokenPriv, method, path, body, timestamp, nonce)
+
+	registerTx := &tx.ParsedTx{
+		Type:      tx.TxTypeAgentRegister,
+		Nonce:     tx.MonotonicNonce(s.signingKey),
+		Timestamp: time.Now(),
+		AgentRegister: &tx.AgentRegister{
+			AgentID:  agentID,
+			Name:     name,
+			Role:     "member",
+			Provider: provider,
+		},
+		AgentPubKey:    append([]byte(nil), tokenPub...),
+		AgentSig:       sig,
+		AgentTimestamp: timestamp,
+		AgentBodyHash:  bodyHash[:],
+		AgentNonce:     nonce,
+	}
+	// The delegated-proof envelope is only accepted (and required) post-app-v17;
+	// gate it exactly like embedAgentAuth so pre-fork bytes stay reproducible.
+	if s.isPostV17ForNextTx() {
+		registerTx.AgentRequest = append([]byte(nil), canonical...)
+	}
+	if signErr := tx.SignTx(registerTx, s.signingKey); signErr != nil {
+		return "", 0, fmt.Errorf("sign register tx: %w", signErr)
+	}
+	encoded, err := tx.EncodeTx(registerTx)
+	if err != nil {
+		return "", 0, fmt.Errorf("encode register tx: %w", err)
+	}
+	return s.broadcastTxCommitWithHeight(encoded)
+}
+
+// retryRegisterMintedIdentity finishes a token identity registration in the
+// background after the synchronous window elapsed or a transient failure. Each
+// attempt rebuilds a FRESH proof (new timestamp/nonce → new single-use app-v17
+// delegated-proof fingerprint) so a retry never collides with the proof-replay
+// gate, and processAgentRegister is idempotent if the first attempt actually
+// landed. Stops on success or a definitive rejection.
+func (s *Server) retryRegisterMintedIdentity(tokenPub ed25519.PublicKey, tokenPriv ed25519.PrivateKey, name, provider string) {
+	go func() {
+		shortID := hex.EncodeToString(tokenPub)
+		if len(shortID) > 16 {
+			shortID = shortID[:16]
+		}
+		for _, delay := range []time.Duration{2 * time.Second, 5 * time.Second, 15 * time.Second, 30 * time.Second} {
+			time.Sleep(delay)
+			if _, _, err := s.registerMintedAgentIdentity(tokenPub, tokenPriv, name, provider); err == nil {
+				s.logger.Info().Str("agent_id", shortID).Msg("mcp token identity registered on-chain (background retry)")
+				return
+			} else if isDefinitiveRegisterRejection(err) {
+				s.logger.Error().Err(err).Str("agent_id", shortID).
+					Msg("mcp token identity registration definitively rejected; keyed calls fail-closed until re-registered")
+				return
+			}
+		}
+		s.logger.Warn().Str("agent_id", shortID).Msg("mcp token identity registration still pending after background retries")
+	}()
 }
 
 // handleAgentUpdate handles PUT /v1/agent/update.
