@@ -144,9 +144,9 @@ The dashboard's **Connect an AI tool** flow (in the onboarding wizard, and on th
 
 For ChatGPT desktop **Codex mode**, Claude Code, Codex CLI, Cursor, Windsurf, or Claude Desktop running on the same computer as SAGE. Pick the tool, give a project folder if it is a per-project client (Claude Code, Codex CLI, Cursor), and click Connect. SAGE **writes the config file itself** and the agent registers its own on-chain identity on first connect. ChatGPT desktop Codex mode uses the app-wide `~/.codex/config.toml`; Work does not use this local stdio configuration. Restart the tool and it picks up its SAGE connection. You manage its identity and permissions afterward on the Agents page.
 
-### 2. ChatGPT Work or remote MCP on another computer
+### 2. Advanced remote access
 
-For ChatGPT Work on the web or in the desktop app, the dashboard uses an OpenAI plugin and **Secure MCP Tunnel**; ChatGPT cannot invoke SAGE's local stdio MCP server directly. CEREBRUM downloads the pinned `tunnel-client` release if needed, writes the local profile for the running SAGE app, and starts the tunnel daemon in the background. You only open the OpenAI Platform and ChatGPT tabs, paste the real tunnel ID/runtime key, and click **Set up and start tunnel**. SAGE does not store the runtime key. For other tools on a different machine, use the LAN/VPN flow or a reachable HTTPS endpoint you manage. Bearer-only clients that run on the same machine (Cursor, Cline, Claude Desktop) can also connect directly to `https://localhost:8443` without a tunnel.
+Remote access is optional and off by default. For tools on a different machine, deliberately expose the MCP TLS listener to a LAN/VPN or enter a trusted HTTPS MCP endpoint you operate. SAGE does not install Cloudflare, create domains, or register an autostart tunnel. ChatGPT Work remains a separate advanced compatibility path using OpenAI's plugin and **Secure MCP Tunnel**; Codex mode should use the local setup above. Bearer-only clients that run on the same machine can also connect directly to `https://localhost:8443`, though local stdio MCP is the more reliable default.
 
 ### 3. LAN pairing (another computer on your network joins your SAGE)
 
@@ -257,7 +257,7 @@ sage-gui mcp install
 This is safe to run on existing installs — it won't overwrite your `.mcp.json`, but it will add/update the hook scripts and permissions that make everything work reliably. Restart your Claude Code session after running this.
 
 **What the hooks do:**
-- **Boot hook** (`SessionStart`) — tells the AI to call `sage_inception` at the start of every session
+- **Boot hook** (`SessionStart`) — preloads recent committed memories directly; `sage_inception` is only the fallback when that context is absent
 - **Turn hook** (`PreCompact`, `Stop`, `PostToolUse`) — reminds the AI to call `sage_turn` so memories are flushed before context loss
 - **Permissions** — auto-allows all SAGE MCP tools so the AI doesn't need to ask permission each time
 
@@ -268,7 +268,7 @@ This is safe to run on existing installs — it won't overwrite your `.mcp.json`
 The new ChatGPT desktop app contains Chat, Work, and Codex, but the connection differs by mode:
 
 - **Codex mode on the same computer:** open **Connect an AI tool > On this computer > ChatGPT desktop — Codex**. SAGE merges its local MCP server into `~/.codex/config.toml`. Restart ChatGPT, select Codex, and start a new task.
-- **ChatGPT Work (web or desktop):** open **Connect an AI tool > ChatGPT Work**. SAGE manages OpenAI's `tunnel-client` in the background, then Work uses SAGE through the installed plugin. The advanced command block is only a fallback for operators who want to run the daemon by hand.
+- **ChatGPT Work (web or desktop, advanced):** open **Connect an AI tool > ChatGPT Work** only when you specifically need the hosted Work surface. It uses OpenAI's plugin and Secure MCP Tunnel; it is separate from the local Codex path.
 - **Regular Chat:** remains supported in ChatGPT and starts from the **Quick chat** button, but it is not the local Codex MCP runtime.
 
 

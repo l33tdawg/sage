@@ -1,10 +1,49 @@
 package web
 
 import (
-	"os"
-	"path/filepath"
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestConnectRemoteTokenMintsTransportNeutralBearer(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
+	router := testRouter(h)
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/connect/remote/token", bytes.NewBufferString(`{"token_name":"vpn-laptop"}`))
+	req.Header.Set("Content-Type", "application/json")
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201: %s", w.Code, w.Body.String())
+	}
+	var got struct {
+		Name  string `json:"name"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "vpn-laptop" || got.Token == "" {
+		t.Fatalf("unexpected token response: %#v", got)
+	}
+}
+
+func TestLegacyCloudflareWizardRoutesAreGone(t *testing.T) {
+	h, _ := newTestHandler(t)
+	router := testRouter(h)
+	req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/check-cloudflared", nil)
+	markLocalCEREBRUM(req)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("legacy route status = %d, want 404", w.Code)
+	}
+}
 
 func TestParseMCPTLSAddr(t *testing.T) {
 	cases := []struct {
@@ -87,46 +126,5 @@ func TestIsOverlayIface(t *testing.T) {
 		if isOverlayIface(n) {
 			t.Errorf("isOverlayIface(%q) = true, want false", n)
 		}
-	}
-}
-
-func TestTunnelHostnameFromConfig(t *testing.T) {
-	dir := t.TempDir()
-	// Point the in-package cloudflared home at our temp dir (test-only seam).
-	prev := cloudflaredHomeOverride
-	cloudflaredHomeOverride = dir
-	t.Cleanup(func() { cloudflaredHomeOverride = prev })
-
-	// No config file yet → empty.
-	if got := tunnelHostnameFromConfig(); got != "" {
-		t.Fatalf("no config: got %q, want empty", got)
-	}
-
-	// Config with a hostname (plus an inline comment to exercise stripping).
-	cfg := `tunnel: 328de5a1-00dd-4326-b38a-b0763781ccb6
-credentials-file: /home/x/.cloudflared/tunnel.json
-
-ingress:
-  - hostname: sage.example.com  # the MCP surface
-    path: ^/v1/mcp/.*$
-    service: https://localhost:8443
-  - hostname: sage.example.com
-    path: ^/oauth/.*$
-    service: https://localhost:8443
-  - service: http_status:404
-`
-	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := tunnelHostnameFromConfig(); got != "sage.example.com" {
-		t.Fatalf("got %q, want sage.example.com", got)
-	}
-
-	// A config with no ingress hostname → empty.
-	if err := os.WriteFile(filepath.Join(dir, "config.yml"), []byte("tunnel: x\ningress:\n  - service: http_status:404\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if got := tunnelHostnameFromConfig(); got != "" {
-		t.Fatalf("no-hostname config: got %q, want empty", got)
 	}
 }

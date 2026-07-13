@@ -1,14 +1,8 @@
 package web
 
 // Remote-connect discovery (Phase 5b-2) — the backing endpoint for the
-// "connect a tool on ANOTHER computer" flow. A tool on a different machine can
-// only reach this node two ways:
-//
-//   1. A public Cloudflare tunnel (the ChatGPT wizard sets this up). This is
-//      the clean path: a real TLS cert, a stable hostname, works for hosted
-//      chats (ChatGPT via OAuth) and remote IDE clients (Cursor/Windsurf via
-//      bearer) alike.
-//   2. A direct LAN hit on the MCP TLS port — but ONLY when the node actually
+// "connect a tool on ANOTHER computer" flow. This endpoint reports a direct
+// LAN/VPN path only when the node actually
 //      binds that port on a non-loopback interface. A personal-mode node binds
 //      127.0.0.1:8443 (localhost only), so there is NO direct remote path; a
 //      quorum-mode (or explicitly configured) node binds 0.0.0.0:8443 and is
@@ -16,29 +10,22 @@ package web
 //      is self-signed and its SANs are 127.0.0.1/localhost, so the client must
 //      accept an untrusted/mismatched cert.
 //
-// This handler reports both so the frontend can generate the right paste block
-// or, when neither path exists, tell the user honestly that the tool can't
-// reach this node yet (and offer to set up a tunnel).
+// Operators can instead enter any trusted HTTPS MCP endpoint they manage in
+// CEREBRUM. SAGE deliberately does not install or own a public-tunnel vendor.
 
 import (
+	"context"
+	"encoding/json"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // remoteURLResp is the JSON contract consumed by the Flow-2 RemoteConnectPanel.
 type remoteURLResp struct {
-	// Tunnel (public) path.
-	HasTunnel         bool   `json:"has_tunnel"`
-	TunnelHostname    string `json:"tunnel_hostname,omitempty"`
-	TunnelMCPURL      string `json:"tunnel_mcp_url,omitempty"`
-	OAuthAuthorizeURL string `json:"oauth_authorize_url,omitempty"`
-	OAuthTokenURL     string `json:"oauth_token_url,omitempty"`
-
 	// LAN (direct) path. LANExposed is true when the MCP TLS listener binds a
 	// non-loopback interface AND at least one usable address was found. Rather
 	// than guess a single "the LAN IP" (unwinnable on hosts with VM bridges,
@@ -69,16 +56,6 @@ type lanCandidate struct {
 func (h *DashboardHandler) handleConnectRemoteURL(w http.ResponseWriter, r *http.Request) {
 	resp := remoteURLResp{MCPPort: mcpDefaultPort}
 
-	// --- Tunnel path: read the hostname the wizard wrote into cloudflared's
-	// config.yml. Absent/unreadable config simply means "no tunnel".
-	if host := tunnelHostnameFromConfig(); host != "" {
-		resp.HasTunnel = true
-		resp.TunnelHostname = host
-		resp.TunnelMCPURL = "https://" + host + "/v1/mcp/sse"
-		resp.OAuthAuthorizeURL = "https://" + host + "/oauth/authorize"
-		resp.OAuthTokenURL = "https://" + host + "/oauth/token"
-	}
-
 	// --- LAN path: the node is only reachable directly when the MCP TLS
 	// listener binds a non-loopback interface. A truly unset/unparseable
 	// MCPTLSAddr (ok == false) is treated as unknown → local-only (safe).
@@ -97,40 +74,51 @@ func (h *DashboardHandler) handleConnectRemoteURL(w http.ResponseWriter, r *http
 	writeJSONResp(w, http.StatusOK, resp)
 }
 
-// mcpDefaultPort is the canonical MCP bearer TLS port used across the codebase
-// (cloudflared ingress → service https://localhost:8443, CursorSetupPanel).
+// mcpDefaultPort is the canonical MCP bearer TLS port used across the codebase.
 const mcpDefaultPort = 8443
 
-// tunnelHostnameFromConfig extracts the tunnel hostname from cloudflared's
-// config.yml (the file the ChatGPT wizard writes). The config lists the same
-// hostname on every ingress rule; we return the first valid one. Returns ""
-// when the file is missing/unreadable or has no usable hostname.
-func tunnelHostnameFromConfig() string {
-	configPath := filepath.Join(cloudflaredHome(), "config.yml")
-	data, err := os.ReadFile(configPath) //nolint:gosec // path is under the user's home dir, not request input
+// handleConnectRemoteToken issues a one-time bearer for a remote MCP client.
+// It is intentionally transport-neutral: the operator can use it over a
+// deliberate LAN/VPN bind or any trusted HTTPS endpoint they manage.
+func (h *DashboardHandler) handleConnectRemoteToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TokenName string `json:"token_name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	req.TokenName = strings.TrimSpace(req.TokenName)
+	if req.TokenName == "" {
+		req.TokenName = "remote"
+	}
+	operatorID := strings.TrimSpace(h.NodeOperatorAgentID)
+	if len(operatorID) != 64 {
+		writeError(w, http.StatusServiceUnavailable, "node operator identity unavailable — MCP tokens cannot be issued")
+		return
+	}
+	ts, ok := h.store.(remoteMCPTokenStore)
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "mcp tokens unsupported on this backend")
+		return
+	}
+	token, id, createdAt, err := mintRemoteMCPToken(r.Context(), ts, operatorID, req.TokenName)
 	if err != nil {
-		return ""
+		writeError(w, http.StatusInternalServerError, "mint token: "+err.Error())
+		return
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		trimmed := strings.TrimSpace(line)
-		// Ingress rules carry the hostname on a YAML list item ("- hostname: x"),
-		// so strip a leading list marker before matching the key.
-		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
-		if !strings.HasPrefix(trimmed, "hostname:") {
-			continue
-		}
-		val := strings.TrimSpace(strings.TrimPrefix(trimmed, "hostname:"))
-		// Strip an inline comment and any surrounding quotes.
-		if idx := strings.IndexByte(val, '#'); idx >= 0 {
-			val = strings.TrimSpace(val[:idx])
-		}
-		val = strings.Trim(val, `"'`)
-		val = strings.ToLower(val)
-		if validZoneRe.MatchString(val) {
-			return val
-		}
-	}
-	return ""
+	writeJSONResp(w, http.StatusCreated, map[string]any{
+		"id":         id,
+		"agent_id":   operatorID,
+		"name":       req.TokenName,
+		"token":      token,
+		"created_at": createdAt.Format(time.RFC3339),
+		"use_hint":   "Save this token now — it will never be shown again.",
+	})
+}
+
+type remoteMCPTokenStore interface {
+	InsertMCPToken(ctx context.Context, id, name, agentID, tokenSHA256 string) error
 }
 
 // parseMCPTLSAddr splits a "host:port" bind address into host and port. ok is

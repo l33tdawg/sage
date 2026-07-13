@@ -1,7 +1,7 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
-rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
+rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, mintRemoteMCPToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
@@ -8787,393 +8787,6 @@ ${runCommand}`;
     `;
 }
 
-// RemoteAccessWizard — guided flow that gives SAGE a public URL via cloudflared
-// so a tool on another computer (or a hosted chat like ChatGPT) can reach it.
-// Steps 1-6 are generic tunnel setup (install → login → hostname → create →
-// mint bearer); step 7 tailors the final instructions to `target`:
-//   'chatgpt' — ChatGPT connector OAuth fields + "Open ChatGPT Connectors"
-//   'tool'    — the public MCP URL + bearer, with per-client paste blocks
-//               (Cursor/Cline url+headers, Windsurf/Claude Desktop mcp-remote)
-//
-// Local-first philosophy: SAGE never proxies through anyone's cloud. The user
-// owns the cloudflared tunnel, the Cloudflare account, and the domain.
-function RemoteAccessWizard({ agents, onClose, target }) {
-    const forChatGPT = (target || 'chatgpt') === 'chatgpt';
-    const [step, setStep] = useState(1);
-    const [error, setError] = useState(null);
-
-    // Step 2: install
-    const [cloudflaredInstalled, setCloudflaredInstalled] = useState(null); // null | true | false
-    const [cloudflaredVersion, setCloudflaredVersion] = useState('');
-    const [installLog, setInstallLog] = useState('');
-    const [installing, setInstalling] = useState(false);
-    // Platform + per-OS hints come back from /check-cloudflared so the UI can
-    // show Windows-specific guidance (winget install, post-wizard service
-    // install) without baking platform detection into the frontend.
-    const [platform, setPlatform] = useState('');
-    const [installHint, setInstallHint] = useState('');
-    const [autostartHint, setAutostartHint] = useState('');
-
-    // Step 3: login
-    const [loginURL, setLoginURL] = useState('');
-    const [loginAuthenticated, setLoginAuthenticated] = useState(false);
-    const loginPollRef = useRef(null);
-
-    // Step 4: zone + subdomain
-    const [zone, setZone] = useState('');
-    const [subdomain, setSubdomain] = useState('sage');
-    // Populated from /login-status when cert.pem is decoded successfully
-    // and the Cloudflare API returns the user's zones. Empty list means we
-    // fall back to a free-text input. Each zone is {id, name}.
-    const [zoneOptions, setZoneOptions] = useState([]);
-
-    // Step 5: tunnel create progress
-    const [tunnelLog, setTunnelLog] = useState('');
-    const [tunnelHostname, setTunnelHostname] = useState('');
-    const [tunnelUUID, setTunnelUUID] = useState('');
-    const [creatingTunnel, setCreatingTunnel] = useState(false);
-
-    // Step 6: token mint
-    const [tokenName, setTokenName] = useState(forChatGPT ? 'chatgpt' : 'remote');
-    const [mintedToken, setMintedToken] = useState(null);
-    const [minting, setMinting] = useState(false);
-
-    // Auto-check cloudflared on entry to step 2.
-    useEffect(() => {
-        if (step !== 2) return;
-        wizardCheckCloudflared().then(d => {
-            setCloudflaredInstalled(!!d.installed);
-            setCloudflaredVersion(d.version || '');
-            setPlatform(d.platform || '');
-            setInstallHint(d.install_hint || '');
-            setAutostartHint(d.autostart_hint || '');
-        }).catch(() => setCloudflaredInstalled(false));
-    }, [step]);
-
-    // Auto-start polling for cert.pem on step 3.
-    useEffect(() => {
-        if (step !== 3 || loginAuthenticated) return;
-        loginPollRef.current = setInterval(async () => {
-            try {
-                const s = await wizardLoginStatus();
-                if (s.authenticated) {
-                    setLoginAuthenticated(true);
-                    if (Array.isArray(s.zones) && s.zones.length > 0) {
-                        setZoneOptions(s.zones);
-                        // If a zone hasn't been picked yet, pre-select the first
-                        // — keeps the dropdown's "current value" matching what the
-                        // user sees, and saves a click for single-zone accounts.
-                        setZone(prev => prev || s.zones[0].name);
-                    }
-                    clearInterval(loginPollRef.current);
-                    loginPollRef.current = null;
-                }
-            } catch (e) { /* ignore */ }
-        }, 2000);
-        return () => { if (loginPollRef.current) { clearInterval(loginPollRef.current); loginPollRef.current = null; } };
-    }, [step, loginAuthenticated]);
-
-    const startInstall = async () => {
-        setInstalling(true);
-        setInstallLog('');
-        try {
-            const res = await wizardInstallCloudflared();
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                // Decode each chunk ONCE, streaming, so a multi-byte UTF-8 char
-                // straddling a chunk boundary is not corrupted (the old code
-                // decoded every chunk twice through one stateful decoder).
-                const text = decoder.decode(value, { stream: true });
-                if (text) setInstallLog(prev => prev + text);
-            }
-            const tail = decoder.decode(); // flush any trailing partial sequence
-            if (tail) setInstallLog(prev => prev + tail);
-            // Re-check.
-            const d = await wizardCheckCloudflared();
-            setCloudflaredInstalled(!!d.installed);
-            setCloudflaredVersion(d.version || '');
-            setPlatform(d.platform || '');
-            setInstallHint(d.install_hint || '');
-            setAutostartHint(d.autostart_hint || '');
-        } catch (e) { setError('install failed: ' + e.message); }
-        setInstalling(false);
-    };
-
-    const startLogin = async () => {
-        setError(null);
-        try {
-            const r = await wizardStartLogin();
-            if (r.error) { setError(r.error); return; }
-            setLoginURL(r.url || '');
-        } catch (e) { setError('login failed: ' + e.message); }
-    };
-
-    const startCreateTunnel = async () => {
-        setCreatingTunnel(true);
-        setTunnelLog('');
-        setError(null);
-        try {
-            const res = await wizardCreateTunnel(subdomain, zone);
-            const reader = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buf = '';
-            while (true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value, { stream: true });
-                buf += chunk;
-                setTunnelLog(prev => prev + chunk);
-            }
-            // Parse final hostname/tunnel_uuid out of buffered output.
-            const hostMatch = buf.match(/hostname:\s+(\S+)/);
-            const uuidMatch = buf.match(/tunnel_uuid:\s+([0-9a-f-]+)/);
-            if (hostMatch) setTunnelHostname(hostMatch[1]);
-            if (uuidMatch) setTunnelUUID(uuidMatch[1]);
-            const errMatch = buf.match(/^error:\s+(.+)$/m);
-            if (errMatch && !hostMatch) setError(errMatch[1]);
-            else if (hostMatch) setStep(6);
-        } catch (e) { setError('tunnel create failed: ' + e.message); }
-        setCreatingTunnel(false);
-    };
-
-    const startMintToken = async () => {
-        setMinting(true);
-        setError(null);
-        try {
-            const r = await wizardMintToken('', tokenName);
-            if (r.error) { setError(r.error); }
-            else { setMintedToken(r); setStep(7); }
-        } catch (e) { setError('mint token failed: ' + e.message); }
-        setMinting(false);
-    };
-
-
-    return html`
-        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
-            <div class="wizard-modal" style="max-width:680px;max-height:85vh;display:flex;flex-direction:column;">
-                <div class="wizard-header">
-                    <h2>${forChatGPT ? 'Connect to ChatGPT' : 'Set up remote access'} — Step ${step} of 7</h2>
-                    <button class="detail-close" onClick=${onClose}>×</button>
-                </div>
-                <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;">
-                    ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
-
-                    ${step === 1 && html`
-                        <div style="line-height:1.55;color:var(--text);">
-                            <h3 style="margin-top:0;color:var(--accent);">SAGE is local-first by design</h3>
-                            ${forChatGPT
-                                ? html`<p>ChatGPT lives at <code>chatgpt.com</code>. SAGE lives on <strong>your machine</strong>. To bridge them, you'll set up a tunnel from a domain you own to your localhost.</p>`
-                                : html`<p>SAGE lives on <strong>your machine</strong>. To let a tool on another computer reach it, you'll give it a public URL — a tunnel from a domain you own to your localhost. The same URL works for a hosted chat like ChatGPT too.</p>`}
-                            <p><strong>SAGE doesn't proxy through our cloud, ever.</strong> You own the tunnel. We just collapse the 9 terminal commands it normally takes into 6 clicks.</p>
-                            <h4 style="color:var(--accent);">Prerequisites</h4>
-                            <ul>
-                                <li>A free <a href="https://dash.cloudflare.com/sign-up" target="_blank" rel="noopener" style="color:var(--accent);">Cloudflare account</a></li>
-                                <li>A domain on Cloudflare DNS (a <code>.xyz</code> is ~$1/year if you don't already own one)</li>
-                            </ul>
-                            ${forChatGPT ? html`
-                                <div class="warning-banner" style="margin-top:16px;">
-                                    <strong>ChatGPT itself always needs this tunnel.</strong> OpenAI's connectors only reach
-                                    public HTTPS URLs — they can't see your localhost — so there's no domain-free path for
-                                    ChatGPT. But if the tool you actually want to connect runs on <em>this</em> computer
-                                    (Claude Code, Codex, Cursor, Windsurf, Claude Desktop), cancel and use
-                                    <em>Connect an AI tool → On this computer</em> — those clients need no public URL at all.
-                                </div>
-                            ` : html`
-                                <div class="warning-banner" style="margin-top:16px;">
-                                    <strong>Don't want to own a domain?</strong> If the tool is on <em>this</em> computer, cancel and use the
-                                    <em>Connect an AI tool → On this computer</em> flow instead — those clients need no public URL at all.
-                                </div>
-                            `}
-                        </div>
-                    `}
-
-                    ${step === 2 && html`
-                        <div style="line-height:1.55;">
-                            <h3 style="margin-top:0;">cloudflared install check</h3>
-                            ${cloudflaredInstalled === null && html`<p style="color:var(--text-dim);">Checking...</p>`}
-                            ${cloudflaredInstalled === true && html`
-                                <p style="color:var(--accent-green);">✓ cloudflared is installed.</p>
-                                <pre style="background:var(--bg-elev);padding:8px;border-radius:4px;font-size:12px;color:var(--text-dim);">${cloudflaredVersion}</pre>
-                                ${platform === 'windows' && autostartHint && html`
-                                    <div class="warning-banner" style="margin-top:12px;">
-                                        <strong>Windows autostart note.</strong> ${autostartHint}
-                                    </div>
-                                `}
-                            `}
-                            ${cloudflaredInstalled === false && html`
-                                <p>
-                                    cloudflared isn't on your PATH. We'll install it now via
-                                    ${platform === 'darwin' ? ' Homebrew.' :
-                                      platform === 'linux' ? ' the static binary into ~/.local/bin.' :
-                                      platform === 'windows' ? ' winget (Cloudflare.cloudflared).' :
-                                      " your platform's package manager."}
-                                </p>
-                                ${platform === 'windows' && installHint && html`
-                                    <div class="warning-banner" style="margin-bottom:12px;">
-                                        <strong>Windows users.</strong> ${installHint}
-                                    </div>
-                                `}
-                                <button class="btn btn-primary" onClick=${startInstall} disabled=${installing}>
-                                    ${installing ? 'Installing…' : 'Install cloudflared'}
-                                </button>
-                                ${installLog && html`<pre style="background:var(--bg-elev);padding:8px;border-radius:4px;font-size:11px;max-height:200px;overflow:auto;margin-top:12px;color:var(--text-dim);white-space:pre-wrap;">${installLog}</pre>`}
-                                <p style="color:var(--text-muted);font-size:12px;margin-top:12px;">
-                                    Or install manually from <a href="https://github.com/cloudflare/cloudflared/releases" target="_blank" rel="noopener" style="color:var(--accent);">github.com/cloudflare/cloudflared/releases</a> and re-run this step.
-                                </p>
-                            `}
-                        </div>
-                    `}
-
-                    ${step === 3 && html`
-                        <div style="line-height:1.55;">
-                            <h3 style="margin-top:0;">Authorize cloudflared with your Cloudflare account</h3>
-                            <p>This is a one-time browser login. cloudflared will print a URL — we'll open it in your browser. After you click "Authorize", a certificate file is dropped at <code>~/.cloudflared/cert.pem</code>.</p>
-                            ${!loginURL && html`
-                                <button class="btn btn-primary" onClick=${startLogin}>Open Cloudflare login</button>
-                            `}
-                            ${loginURL && !loginAuthenticated && html`
-                                <div style="background:var(--bg-elev);padding:12px;border-radius:4px;margin:12px 0;">
-                                    <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">If your browser didn't open automatically:</div>
-                                    <a href=${loginURL} target="_blank" rel="noopener" style="color:var(--accent);word-break:break-all;font-size:12px;">${loginURL}</a>
-                                </div>
-                                <div style="display:flex;align-items:center;gap:8px;color:var(--text-dim);">
-                                    <span class="spinner" style="width:14px;height:14px;"></span>
-                                    Waiting for cert.pem... (poll every 2s)
-                                </div>
-                            `}
-                            ${loginAuthenticated && html`
-                                <p style="color:var(--accent-green);">✓ Authenticated. cert.pem detected.</p>
-                            `}
-                        </div>
-                    `}
-
-                    ${step === 4 && html`
-                        <div style="line-height:1.55;">
-                            <h3 style="margin-top:0;">Pick your hostname</h3>
-                            <p>This is the public URL your ${forChatGPT ? 'ChatGPT connector' : 'tool (or ChatGPT)'} will hit. SAGE will create a CNAME from
-                                <strong>${subdomain || '<sub>'}.${zone || '<your-domain>'}</strong>
-                                to your localhost via Cloudflare's tunnel.</p>
-                            <div class="wizard-field">
-                                <label>Subdomain</label>
-                                <input class="wizard-input" value=${subdomain} onInput=${e => setSubdomain(e.target.value)} placeholder="sage" />
-                            </div>
-                            <div class="wizard-field">
-                                <label>Domain (must be on your Cloudflare account)</label>
-                                ${zoneOptions.length > 0 ? html`
-                                    <select class="wizard-input" value=${zone} onChange=${e => setZone(e.target.value)}>
-                                        ${zoneOptions.map(z => html`<option value=${z.name}>${z.name}</option>`)}
-                                    </select>
-                                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
-                                        Showing ${zoneOptions.length} zone${zoneOptions.length === 1 ? '' : 's'} from your Cloudflare account.
-                                        Need another? Add a domain at
-                                        <a href="https://dash.cloudflare.com/?to=/:account/add-site" target="_blank" rel="noopener" style="color:var(--accent);">dash.cloudflare.com</a>.
-                                    </div>
-                                ` : html`
-                                    <input class="wizard-input" value=${zone} onInput=${e => setZone(e.target.value)} placeholder="example.com" />
-                                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
-                                        Couldn't auto-list your zones — type the domain name manually. Don't have one yet? Add a domain at
-                                        <a href="https://dash.cloudflare.com/?to=/:account/add-site" target="_blank" rel="noopener" style="color:var(--accent);">dash.cloudflare.com</a>.
-                                    </div>
-                                `}
-                            </div>
-                            <div style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:12px;color:var(--text);">
-                                Public URL preview: <strong style="color:var(--accent);">https://${subdomain || 'sage'}.${zone || 'example.com'}</strong>
-                            </div>
-                        </div>
-                    `}
-
-                    ${step === 5 && html`
-                        <div style="line-height:1.55;">
-                            <h3 style="margin-top:0;">Create tunnel + configure autostart</h3>
-                            <p>SAGE will now run the cloudflared dance for you:</p>
-                            <ol style="color:var(--text-dim);font-size:13px;">
-                                <li><code>cloudflared tunnel create sage</code></li>
-                                <li><code>cloudflared tunnel route dns sage ${subdomain}.${zone}</code></li>
-                                <li>Write <code>~/.cloudflared/config.yml</code> with path-restricted ingress (only <code>/v1/mcp/*</code>, <code>/oauth/*</code>, <code>/.well-known/oauth-authorization-server</code>, <code>/health</code> reach localhost; everything else is 404'd at Cloudflare's edge)</li>
-                                <li>Install autostart (launchd plist on macOS, systemd user unit on Linux)</li>
-                                <li>Verify <code>https://${subdomain}.${zone}/health</code> returns 200</li>
-                            </ol>
-                            ${!creatingTunnel && !tunnelHostname && html`
-                                <button class="btn btn-primary" onClick=${startCreateTunnel}>Create tunnel</button>
-                            `}
-                            ${creatingTunnel && html`
-                                <div style="display:flex;align-items:center;gap:8px;color:var(--accent);">
-                                    <span class="spinner" style="width:14px;height:14px;"></span>
-                                    Working...
-                                </div>
-                            `}
-                            ${tunnelLog && html`<pre style="background:var(--bg-elev);padding:8px;border-radius:4px;font-size:11px;max-height:240px;overflow:auto;margin-top:12px;color:var(--text-dim);white-space:pre-wrap;">${tunnelLog}</pre>`}
-                        </div>
-                    `}
-
-                    ${step === 6 && html`
-                        <div style="line-height:1.55;">
-                            <h3 style="margin-top:0;">Mint a bearer token</h3>
-                            <p>The bearer is an administrator credential for this SAGE node. Remote HTTP MCP currently runs as the local node operator, and CEREBRUM records that identity honestly in the audit trail.</p>
-                            <div class="wizard-field">
-                                <label>Token name</label>
-                                <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder=${forChatGPT ? 'chatgpt' : 'remote'} />
-                            </div>
-                            <button class="btn btn-primary" onClick=${startMintToken} disabled=${minting}>
-                                ${minting ? 'Minting…' : 'Mint bearer'}
-                            </button>
-                        </div>
-                    `}
-
-                    ${step === 7 && mintedToken && forChatGPT && html`
-                        <div style="line-height:1.55;">
-                            <h3 style="margin-top:0;color:var(--accent-green);">✓ Ready to paste into ChatGPT</h3>
-                            <div class="warning-banner" style="margin-bottom:14px;">
-                                Save the bearer token NOW — it's shown ONCE. ChatGPT will retrieve it via OAuth at consent time.
-                            </div>
-                            <${ChatGPTCopyField} label="App name" value="SAGE" />
-                            <${ChatGPTCopyField} label="MCP Server URL" value=${`https://${tunnelHostname || (subdomain + '.' + zone)}/v1/mcp/sse`} />
-                            <${ChatGPTCopyField} label="Authentication" value="OAuth" />
-                            <${ChatGPTCopyField} label="Auth URL" value=${`https://${tunnelHostname || (subdomain + '.' + zone)}/oauth/authorize`} />
-                            <${ChatGPTCopyField} label="Token URL" value=${`https://${tunnelHostname || (subdomain + '.' + zone)}/oauth/token`} />
-                            <${ChatGPTCopyField} label="OAuth Client ID" value="chatgpt" />
-                            <${ChatGPTCopyField} label="OAuth Client Secret" value="(leave empty)" />
-                            <${ChatGPTCopyField} label="Token endpoint auth method" value="none" />
-                            <${ChatGPTCopyField} label="Bearer token (save now!)" value=${mintedToken.token} sensitive=${true} />
-
-                            <div style="margin-top:18px;display:flex;gap:8px;">
-                                <a class="btn btn-primary" href="https://chatgpt.com/#settings/Connectors" target="_blank" rel="noopener">Open ChatGPT Connectors →</a>
-                            </div>
-                        </div>
-                    `}
-
-                    ${step === 7 && mintedToken && !forChatGPT && html`
-                        <div style="line-height:1.55;">
-                            <h3 style="margin-top:0;color:var(--accent-green);">✓ Your public URL is ready</h3>
-                            <div class="warning-banner" style="margin-bottom:14px;">
-                                Save the bearer token NOW — it's shown ONCE. It carries the agent's identity; treat it like a password.
-                            </div>
-                            <${ChatGPTCopyField} label="MCP Server URL" value=${`https://${tunnelHostname || (subdomain + '.' + zone)}/v1/mcp/sse`} />
-                            <${ChatGPTCopyField} label="Bearer token (save now!)" value=${mintedToken.token} sensitive=${true} />
-                            <p style="margin:16px 0 0;color:var(--text-dim);font-size:13px;">Paste the block that matches your tool on the other computer:</p>
-                            <${RemotePasteBlocks} url=${`https://${tunnelHostname || (subdomain + '.' + zone)}/v1/mcp/sse`} token=${mintedToken.token} selfSigned=${false} />
-                        </div>
-                    `}
-                </div>
-                <div class="wizard-footer">
-                    <button class="btn" onClick=${onClose}>${step === 7 ? 'Done' : 'Cancel'}</button>
-                    ${step > 1 && step < 7 && html`<button class="btn" onClick=${() => setStep(step - 1)}>Back</button>`}
-                    ${step === 1 && html`<button class="btn btn-primary" onClick=${() => setStep(2)}>Continue</button>`}
-                    ${step === 2 && cloudflaredInstalled === true && html`<button class="btn btn-primary" onClick=${() => setStep(3)}>Continue</button>`}
-                    ${step === 3 && loginAuthenticated && html`<button class="btn btn-primary" onClick=${() => setStep(4)}>Continue</button>`}
-                    ${step === 4 && html`<button class="btn btn-primary" onClick=${() => setStep(5)} disabled=${!zone || !subdomain}>Continue</button>`}
-                    ${step === 5 && tunnelHostname && html`<button class="btn btn-primary" onClick=${() => setStep(6)}>Continue</button>`}
-                </div>
-            </div>
-        </div>
-    `;
-}
-
-// ChatGPTCopyField — labeled value with one-click copy. Used in the final
-// "paste into ChatGPT" card.
 function ChatGPTCopyField({ label, value, sensitive, multiline }) {
     const [copied, setCopied] = useState(false);
     const [revealed, setRevealed] = useState(!sensitive);
@@ -9213,7 +8826,7 @@ function CursorSetupPanel({ agents, onClose }) {
         setMinting(true);
         setError(null);
         try {
-            const r = await wizardMintToken('', tokenName);
+            const r = await mintRemoteMCPToken(tokenName);
             if (r.error) setError(r.error);
             else setMintedToken(r);
         } catch (e) { setError('mint failed: ' + e.message); }
@@ -9364,8 +8977,9 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
     const [loading, setLoading] = useState(true);
     const [loadErr, setLoadErr] = useState(null);
     const [tool, setTool] = useState('');
-    const [base, setBase] = useState('');           // 'tunnel' | 'lan'
-    const [lanIdx, setLanIdx] = useState(0);        // which lan_candidates entry the operator picked
+    const [base, setBase] = useState('https');
+    const [httpsUrl, setHttpsUrl] = useState('');
+    const [lanIdx, setLanIdx] = useState(0);
     const [tokenName, setTokenName] = useState('remote');
     const [minting, setMinting] = useState(false);
     const [minted, setMinted] = useState(null);
@@ -9376,70 +8990,65 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
     useEffect(() => {
         let alive = true;
         connectRemoteUrl()
-            .then(d => { if (alive) { setInfo(d); setBase(d.has_tunnel ? 'tunnel' : (d.lan_exposed ? 'lan' : '')); } })
+            .then(d => { if (alive) { setInfo(d); setBase(d.lan_exposed ? 'lan' : 'https'); } })
             .catch(e => { if (alive) setLoadErr(e.message || 'could not read node reachability'); })
             .finally(() => { if (alive) setLoading(false); });
         return () => { alive = false; };
     }, []);
 
-    // Reset the per-tool wizard when switching tools.
     const pickTool = (key) => {
         setTool(key);
         setMinted(null);
         setMintErr(null);
-        if (info) setBase(info.has_tunnel ? 'tunnel' : (info.lan_exposed ? 'lan' : ''));
     };
+
+    const lanCands = (info && info.lan_candidates) || [];
+    const lanCand = lanCands[lanIdx] || lanCands[0] || null;
+    const lanUrl = lanCand ? `https://${lanCand.ip}:${(info && info.mcp_port) || 8443}/v1/mcp/sse` : '';
+    let trustedHttpsUrl = '';
+    let httpsError = '';
+    if (httpsUrl.trim()) {
+        try {
+            const parsed = new URL(httpsUrl.trim());
+            if (parsed.protocol !== 'https:') throw new Error('Use an https:// URL');
+            trustedHttpsUrl = parsed.toString();
+        } catch (e) {
+            httpsError = e.message || 'Enter a valid HTTPS URL';
+        }
+    }
+    const baseUrl = base === 'https' ? trustedHttpsUrl : lanUrl;
+    const isSelfSigned = base === 'lan' && !!(info && info.self_signed);
+    const urlSelfSignedDeadEnd = selected && selected.kind === 'url' && isSelfSigned;
 
     const onMint = async () => {
         setMinting(true);
         setMintErr(null);
         try {
-            const r = await wizardMintToken('', tokenName || 'remote');
+            const r = await mintRemoteMCPToken(tokenName || 'remote');
             if (r.error) setMintErr(r.error);
             else setMinted(r);
         } catch (e) { setMintErr('mint failed: ' + (e.message || e)); }
         setMinting(false);
     };
 
-    const lanCands = (info && info.lan_candidates) || [];
-    const lanCand = lanCands[lanIdx] || lanCands[0] || null;
-    const lanUrl = lanCand ? `https://${lanCand.ip}:${(info && info.mcp_port) || 8443}/v1/mcp/sse` : null;
-    const baseUrl = base === 'tunnel' ? (info && info.tunnel_mcp_url) : lanUrl;
-    const isSelfSigned = base === 'lan' && !!(info && info.self_signed);
-
-    // Cursor/Cline (url kind) can't be told to trust a self-signed cert, so a
-    // LAN URL simply won't work for them. This gates the mint form (below) so
-    // the dead-end is stated BEFORE the user mints a throwaway bearer.
-    const urlSelfSignedDeadEnd = selected && selected.kind === 'url' && isSelfSigned;
-
-    // Per-tool paste block, generated once a bearer is minted. url-kind never
-    // reaches here while self-signed (urlSelfSignedDeadEnd gates minting).
     const renderPasteBlock = () => {
         const token = minted.token;
         if (selected.kind === 'url') {
             return html`
                 <p style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">
-                    <strong>${selected.name}</strong> on the other computer — add this to its MCP servers config
-                    (Cursor: <code>~/.cursor/mcp.json</code> or Settings → MCP; Cline: its MCP settings JSON):
+                    Add this to ${selected.name}'s MCP servers config on the other computer:
                 </p>
                 <pre style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);">${remoteMcpJson('url', baseUrl, token, false)}</pre>
-                <p style="font-size:11px;color:var(--text-muted);margin-top:6px;">Save the file, then reload or restart ${selected.name} — SAGE shows up in its MCP servers list.</p>
             `;
         }
-        // mcp-remote: stdio-only clients bridge through the npx shim.
         const where = selected.key === 'claude-desktop'
             ? 'Claude Desktop → Settings → Developer → Edit Config'
             : 'Windsurf → its MCP config (~/.codeium/windsurf/mcp_config.json)';
         return html`
             <p style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">
-                <strong>${selected.name}</strong> talks over stdio, so it bridges through <code>mcp-remote</code>
-                (requires Node.js on the other machine). Add this in ${where}, then restart it:
+                Add this in ${where}, then restart it (Node.js is required on that computer):
             </p>
             <pre style="background:var(--bg-elev);padding:10px;border-radius:4px;font-size:11px;overflow:auto;color:var(--text);">${remoteMcpJson('mcp-remote', baseUrl, token, isSelfSigned)}</pre>
-            ${isSelfSigned && html`<div class="warning-banner" style="margin-top:8px;">
-                This LAN URL uses a self-signed certificate — the <code>NODE_TLS_REJECT_UNAUTHORIZED</code> line above tells
-                mcp-remote to accept it. A trusted HTTPS endpoint has a real certificate and doesn't need it.
-            </div>`}
         `;
     };
 
@@ -9447,7 +9056,8 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
     if (loadErr) return html`<div class="import-error">${loadErr}</div>`;
 
     return html`
-        <h3 style="margin-top:0;">Which tool on the other computer?</h3>
+        <h3 style="margin-top:0;">Which tool is on the other computer?</h3>
+        <p style="color:var(--text-dim);">Remote access is advanced and off by default. Prefer local SAGE MCP whenever the tool runs on this computer.</p>
         <div class="connect-cards" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-bottom:8px;">
             ${REMOTE_PROVIDERS.map(p => html`
                 <div class="connect-card ${tool === p.key ? 'selected' : ''}" role="button" tabIndex="0"
@@ -9455,119 +9065,91 @@ function RemoteConnectPanel({ agents, onOpenChatGPT }) {
                     onKeyDown=${e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickTool(p.key); } }}>
                     <div class="connect-card-icon">${p.icon}</div>
                     <h4>${p.name}</h4>
-                    <p>${p.kind === 'openai-tunnel' ? 'OpenAI tunnel' : (p.kind === 'url' ? 'URL + bearer' : 'stdio via mcp-remote')}</p>
+                    <p>${p.kind === 'openai-tunnel' ? 'Advanced OpenAI tunnel' : (p.kind === 'url' ? 'HTTPS + bearer' : 'stdio via mcp-remote')}</p>
                 </div>
             `)}
         </div>
 
         ${selected && selected.kind === 'openai-tunnel' && html`
             <div class="summary-card" style="padding:18px;margin-top:12px;">
-                <p style="margin-top:0;">ChatGPT uses <strong>OpenAI Secure MCP Tunnel</strong> to reach SAGE on this computer.
-                    SAGE runs its normal stdio MCP server; OpenAI's tunnel client carries the connection without a public SAGE URL.</p>
-                <button class="btn btn-primary" onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}>Open the ChatGPT setup wizard →</button>
+                <p style="margin-top:0;">ChatGPT Work is a separate hosted-app path. It uses OpenAI Secure MCP Tunnel; Codex mode should use local SAGE MCP instead.</p>
+                <button class="btn btn-primary" onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}>Open advanced ChatGPT Work setup →</button>
             </div>
         `}
 
-        ${selected && selected.kind !== 'openai-tunnel' && !info.has_tunnel && !info.lan_exposed && html`
-            <div class="summary-card" style="padding:18px;margin-top:12px;">
-                <h4 style="margin-top:0;">This node isn't reachable from another computer yet</h4>
-                <p style="color:var(--text-dim);">SAGE is listening on localhost only, so a tool on a different machine
-                    has no way in. Put the other tool on the same LAN/VPN, switch SAGE to listen on that network, or give SAGE
-                    an HTTPS endpoint you manage. ChatGPT has its own OpenAI Secure MCP Tunnel path.</p>
-                <button class="btn" onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}>Use the ChatGPT tunnel path →</button>
-            </div>
-        `}
-
-        ${selected && selected.kind !== 'openai-tunnel' && (info.has_tunnel || info.lan_exposed) && html`
-            <div style="margin-top:12px;">
-                ${(info.has_tunnel && info.lan_exposed) && html`
+        ${selected && selected.kind !== 'openai-tunnel' && html`
+            <div style="margin-top:14px;">
+                ${info.lan_exposed && html`
                     <div class="wizard-field">
-                        <label>How will the other computer reach this node?</label>
-                        <div style="display:flex;gap:16px;font-size:13px;margin-top:4px;">
+                        <label>How will the other computer reach SAGE?</label>
+                        <div style="display:flex;gap:16px;font-size:13px;margin-top:6px;flex-wrap:wrap;">
                             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-                                <input type="radio" name="rc-base" checked=${base === 'tunnel'} onChange=${() => setBase('tunnel')} />
-                                HTTPS endpoint <span style="color:var(--text-muted);">(${info.tunnel_hostname})</span>
+                                <input type="radio" name="rc-base" checked=${base === 'lan'} onChange=${() => { setBase('lan'); setMinted(null); }} />
+                                LAN / VPN address
                             </label>
                             <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-                                <input type="radio" name="rc-base" checked=${base === 'lan'} onChange=${() => setBase('lan')} />
-                                ${lanCand && lanCand.is_private ? 'Local network' : 'Direct address'}
+                                <input type="radio" name="rc-base" checked=${base === 'https'} onChange=${() => { setBase('https'); setMinted(null); }} />
+                                Trusted HTTPS endpoint I manage
                             </label>
                         </div>
+                    </div>
+                `}
+
+                ${base === 'https' && html`
+                    <div class="wizard-field">
+                        <label>Public MCP URL</label>
+                        <input class="wizard-input" value=${httpsUrl} onInput=${e => { setHttpsUrl(e.target.value); setMinted(null); }} placeholder="https://sage.example.com/v1/mcp/sse" />
+                        <div style="font-size:11px;color:var(--text-muted);margin-top:5px;">
+                            Bring your own reverse proxy, VPN gateway, or HTTPS endpoint. SAGE does not install or manage a tunnel vendor.
+                        </div>
+                        ${httpsError && html`<div class="import-error" style="margin-top:8px;">${httpsError}</div>`}
                     </div>
                 `}
 
                 ${base === 'lan' && lanCands.length > 1 && html`
                     <div class="wizard-field">
-                        <label>Which address can the other computer reach? <span style="color:var(--text-muted);font-weight:normal;">(pick the network you share with it)</span></label>
-                        <select class="wizard-select" value=${String(lanIdx)} onInput=${e => setLanIdx(parseInt(e.target.value, 10) || 0)}>
-                            ${lanCands.map((c, i) => html`<option value=${String(i)}>${c.iface} — ${c.ip} ${c.is_private ? '(local network)' : '(direct/overlay)'}</option>`)}
+                        <label>Which shared network address?</label>
+                        <select class="wizard-select" value=${String(lanIdx)} onInput=${e => { setLanIdx(parseInt(e.target.value, 10) || 0); setMinted(null); }}>
+                            ${lanCands.map((c, i) => html`<option value=${String(i)}>${c.iface} — ${c.ip} ${c.is_private ? '(local)' : '(direct/overlay)'}</option>`)}
                         </select>
                     </div>
                 `}
 
-                ${baseUrl && html`
-                    <div style="font-size:12px;color:var(--text-muted);margin:6px 0 10px;">
-                        Configured at <code>${baseUrl}</code>${base === 'tunnel'
-                            ? ''
-                            : (lanCand && lanCand.is_private
-                                ? ` — should be reachable from devices on the same network (if your firewall allows inbound TCP :${(info && info.mcp_port) || 8443})`
-                                : ' — reachable from devices that can route to this address')}.
+                ${base === 'lan' && !info.lan_exposed && html`
+                    <div class="summary-card" style="padding:16px;">
+                        SAGE is correctly listening on localhost only. Deliberately expose the MCP TLS listener to a LAN/VPN first, or use a trusted HTTPS endpoint you manage.
                     </div>
-                    ${base === 'tunnel' && html`
-                        <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 10px;">
-                            The configured tunnel or remote endpoint must be running on this machine for the tool to connect.
-                        </div>
-                    `}
-                    ${base === 'lan' && lanCand && !lanCand.is_private && html`
-                        <div class="warning-banner" style="margin:0 0 10px;">
-                            <strong>${lanCand.ip} is not a private LAN address.</strong> It may be reachable from the public internet — anyone with the bearer could connect, and mcp-remote is told to skip certificate checks. Prefer a trusted HTTPS endpoint unless you know this address is safe.
-                        </div>
-                    `}
                 `}
 
-                ${mintErr && html`<div class="import-error" style="margin-bottom:12px;">${mintErr}</div>`}
+                ${urlSelfSignedDeadEnd && html`
+                    <div class="warning-banner"><strong>${selected.name} cannot use this LAN URL.</strong> Its self-signed certificate is rejected by stock URL clients. Use a trusted HTTPS endpoint instead.</div>
+                `}
+                ${base === 'lan' && lanCand && !lanCand.is_private && html`
+                    <div class="warning-banner"><strong>${lanCand.ip} is not a private address.</strong> Prefer a trusted HTTPS endpoint unless you intend this exposure.</div>
+                `}
+                ${mintErr && html`<div class="import-error" style="margin:12px 0;">${mintErr}</div>`}
 
-                ${urlSelfSignedDeadEnd
-                    ? html`
-                        <div class="warning-banner" style="margin-top:8px;">
-                            <strong>${selected.name} can't use the local-network URL.</strong> It's served with a self-signed
-                            certificate and stock Cursor/Cline reject that with no override.
-                            ${info.has_tunnel
-                                ? html` Use the configured HTTPS endpoint — it has a real certificate.`
-                                : html` Use a LAN/VPN address with a trusted certificate, or a reachable HTTPS endpoint you manage.`}
-                        </div>
-                        ${info.has_tunnel
-                            ? html`<button class="btn btn-primary" style="margin-top:10px;" onClick=${() => setBase('tunnel')}>Use the HTTPS endpoint instead →</button>`
-                            : html`<button class="btn" style="margin-top:10px;" onClick=${() => onOpenChatGPT && onOpenChatGPT('chatgpt')}>Use the ChatGPT tunnel path →</button>`}
-                    `
-                    : html`
-                        ${!minted && html`
-                            <h4 style="margin:14px 0 8px;">Mint a bearer for the other computer</h4>
-                            <p style="font-size:12px;color:var(--text-muted);">Remote HTTP MCP bearers run as the local node operator. Treat this as an administrator credential.</p>
-                                    <div class="wizard-field">
-                                        <label>Token name</label>
-                                        <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="remote" />
-                                    </div>
-                                    <button class="btn btn-primary" onClick=${onMint} disabled=${minting}>
-                                        ${minting ? 'Minting…' : 'Mint bearer'}
-                                    </button>
-                        `}
+                ${baseUrl && !urlSelfSignedDeadEnd && !minted && html`
+                    <h4 style="margin:14px 0 8px;">Mint a bearer for the other computer</h4>
+                    <p style="font-size:12px;color:var(--text-muted);">The bearer runs as the local node operator. Treat it like an administrator password and revoke it when finished.</p>
+                    <div class="wizard-field">
+                        <label>Token name</label>
+                        <input class="wizard-input" value=${tokenName} onInput=${e => setTokenName(e.target.value)} placeholder="remote" />
+                    </div>
+                    <button class="btn btn-primary" onClick=${onMint} disabled=${minting}>${minting ? 'Minting…' : 'Mint bearer'}</button>
+                `}
 
-                        ${minted && html`
-                            <h4 style="margin:14px 0 8px;color:var(--accent-green);">✓ Token minted</h4>
-                            <div class="warning-banner" style="margin-bottom:14px;">
-                                Save the bearer NOW — it's shown ONCE. It carries node-operator access; treat it like an administrator password.
-                            </div>
-                            <${ChatGPTCopyField} label="MCP Server URL" value=${baseUrl} />
-                            <${ChatGPTCopyField} label="Bearer token (save now!)" value=${minted.token} sensitive=${true} />
-                            <div style="margin-top:16px;">${renderPasteBlock()}</div>
-                        `}
-                    `}
+                ${minted && html`
+                    <h4 style="margin:14px 0 8px;color:var(--accent-green);">✓ Token minted</h4>
+                    <div class="warning-banner" style="margin-bottom:14px;">Save the bearer now — it is shown once.</div>
+                    <${ChatGPTCopyField} label="MCP Server URL" value=${baseUrl} />
+                    <${ChatGPTCopyField} label="Bearer token" value=${minted.token} sensitive=${true} />
+                    <div style="margin-top:16px;">${renderPasteBlock()}</div>
+                `}
             </div>
         `}
     `;
 }
-
 // ConnectToolModal — Phase 5b entry point for wiring an AI tool to SAGE.
 // Step 0 branches on WHERE the tool lives. Flow 1 (same machine) is fully
 // implemented here: pick a provider, give a project folder for folder-scoped

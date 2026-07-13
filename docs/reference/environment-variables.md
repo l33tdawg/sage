@@ -155,7 +155,5 @@ These are read by the code but are **test-only or OS-provided** — don't rely o
 
 | Variable | Why it's excluded | Source |
 |----------|-------------------|--------|
-| `SAGE_CLOUDFLARED_BIN` | Honored **only under `go test`** (fake `cloudflared`). | `web/wizard_chatgpt.go:49` |
-| `SAGE_BROWSER_OPEN_BIN` | Honored **only under `go test`** (fake browser opener). | `web/wizard_chatgpt.go:60` |
 | `SAGE_TEST_POSTGRES_DSN`, `VALIDATOR_KEY_FILE`, `CI` | Test / CI harness internals. | various `*_test`-adjacent paths |
 | `PATH`, `HOME`, `APPDATA` | OS-provided; SAGE reads them only to locate binaries / the home directory. | various |

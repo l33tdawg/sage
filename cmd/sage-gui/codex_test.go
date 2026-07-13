@@ -24,8 +24,23 @@ func withCodexInstallEnv(t *testing.T) (projectDir, sageHome string) {
 	t.Cleanup(func() { _ = os.Chdir(orig) })
 
 	t.Setenv("SAGE_HOME", sageHome)
+	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("HOME", sageHome) // so any ~ expansion stays sandboxed
 	return projectDir, sageHome
+}
+
+func TestRunCodexInstallAvoidsDuplicateGlobalHooks(t *testing.T) {
+	projectDir, _ := withCodexInstallEnv(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	require.NoError(t, os.WriteFile(filepath.Join(codexHome, "hooks.json"), []byte(`{"hooks":{"SessionStart":[{"hooks":[{"command":"bash ~/.codex/hooks/sage-session-start.sh"}]}]}}`), 0600))
+
+	require.NoError(t, runCodexInstall())
+	hooksData, err := os.ReadFile(filepath.Join(projectDir, ".codex", "hooks.json"))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"hooks":{}}`, string(hooksData))
+	_, err = os.Stat(filepath.Join(projectDir, ".codex", "hooks", "sage-session-start.sh"))
+	assert.True(t, os.IsNotExist(err), "project hook must not duplicate an app-wide SAGE hook")
 }
 
 func TestRunCodexInstall_WritesAllArtifacts(t *testing.T) {
@@ -74,6 +89,8 @@ func TestRunCodexInstall_WritesAllArtifacts(t *testing.T) {
 	assert.Contains(t, md, "# AGENTS.md")
 	assert.Contains(t, md, sageClaudeMDMarker)
 	assert.Contains(t, md, ".codex/config.toml", "AGENTS.md should point to codex config")
+	assert.Contains(t, md, "SAGE is already booted", "direct-write SessionStart must not trigger duplicate inception")
+	assert.Contains(t, md, "always use the local MCP server", "Codex must prefer local MCP over connector apps")
 
 	// memory_mode flag created in SAGE_HOME.
 	_, err = os.Stat(filepath.Join(sageHome, "memory_mode"))

@@ -57,16 +57,20 @@ func runCodexInstall() error {
 		return cfgErr
 	}
 
-	hookDir := filepath.Join(projectDir, ".codex", "hooks")
 	fmt.Printf("  ✓ .codex/config.toml: written\n")
 	fmt.Printf("  ✓ .codex/hooks.json: written\n")
-	fmt.Printf("  ✓ .codex/hooks/: 5 scripts installed (%s)\n", hookDir)
+	if globalCodexSageHooksActive() {
+		fmt.Printf("  ✓ lifecycle hooks: using the app-wide SAGE hooks (project duplicates disabled)\n")
+	} else {
+		hookDir := filepath.Join(projectDir, ".codex", "hooks")
+		fmt.Printf("  ✓ .codex/hooks/: 5 scripts installed (%s)\n", hookDir)
+	}
 
 	projectName := filepath.Base(projectDir)
 	fmt.Printf("✓ SAGE Codex hooks installed for project: %s\n", projectName)
 	fmt.Println()
 	fmt.Println("  Next: restart your Codex session in this folder.")
-	fmt.Println("  The agent will boot SAGE via sage_inception on its first turn.")
+	fmt.Println("  The SessionStart hook loads SAGE context; sage_inception is only a fallback.")
 	return nil
 }
 
@@ -84,8 +88,13 @@ func installCodexConfig(projectDir, sageHome, execPath string) ([]web.ConnectFil
 
 	codexDir := filepath.Join(projectDir, ".codex")
 	hookDir := filepath.Join(codexDir, "hooks")
-	if err := os.MkdirAll(hookDir, 0755); err != nil {
-		return files, fmt.Errorf("create hooks dir: %w", err)
+	useProjectHooks := !globalCodexSageHooksActive()
+	createDir := codexDir
+	if useProjectHooks {
+		createDir = hookDir
+	}
+	if err := os.MkdirAll(createDir, 0755); err != nil {
+		return files, fmt.Errorf("create codex config dir: %w", err)
 	}
 
 	// 1. .codex/config.toml — MCP server registration. Merge so any other
@@ -101,7 +110,11 @@ func installCodexConfig(projectDir, sageHome, execPath string) ([]web.ConnectFil
 	// vars in hook commands, so we bake the absolute hook dir path in.
 	hooksPath := filepath.Join(codexDir, "hooks.json")
 	hooksAction := fileAction(hooksPath)
-	hooksConfig := map[string]any{"hooks": sageHooksConfig(hookDir)}
+	hooks := map[string]any{}
+	if useProjectHooks {
+		hooks = sageHooksConfig(hookDir)
+	}
+	hooksConfig := map[string]any{"hooks": hooks}
 	hooksData, _ := json.MarshalIndent(hooksConfig, "", "  ")
 	if writeErr := safeWriteFile(hooksPath, append(hooksData, '\n'), 0600); writeErr != nil {
 		return files, fmt.Errorf("write hooks.json: %w", writeErr)
@@ -109,11 +122,13 @@ func installCodexConfig(projectDir, sageHome, execPath string) ([]web.ConnectFil
 	files = append(files, web.ConnectFile{Path: hooksPath, Action: hooksAction})
 
 	// 3. .codex/hooks/sage-*.sh — same templates as Claude side.
-	for name, tpl := range hookScriptSet() {
-		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", execPath)
-		path := filepath.Join(hookDir, name)
-		if writeErr := safeWriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
-			return files, fmt.Errorf("write %s: %w", name, writeErr)
+	if useProjectHooks {
+		for name, tpl := range hookScriptSet() {
+			content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", execPath)
+			path := filepath.Join(hookDir, name)
+			if writeErr := safeWriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
+				return files, fmt.Errorf("write %s: %w", name, writeErr)
+			}
 		}
 	}
 
@@ -130,6 +145,26 @@ func installCodexConfig(projectDir, sageHome, execPath string) ([]web.ConnectFil
 	syncMemoryModeFlag(sageHome)
 
 	return files, nil
+}
+
+// globalCodexSageHooksActive reports whether Codex already runs SAGE lifecycle
+// hooks app-wide. Codex composes app-wide and project hook files, so installing
+// the same SessionStart hook in both places emits duplicate memory context and
+// can provoke a redundant sage_inception call.
+func globalCodexSageHooksActive() bool {
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return false
+		}
+		codexHome = filepath.Join(home, ".codex")
+	}
+	data, err := readBoundedConfig(filepath.Join(codexHome, "hooks.json"), 1<<20)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), "sage-session-start.sh")
 }
 
 // codexConfigTemplate is the TOML written to .codex/config.toml. Codex
@@ -376,9 +411,10 @@ const sageAgentsMDBlock = `## SAGE — Persistent Memory
 You have persistent institutional memory via SAGE MCP.
 
 ### Boot Sequence (IMPORTANT)
-1. Call ` + "`sage_inception`" + ` as your first action in every new conversation, before responding to the user
-2. This loads the context stored in previous sessions, so it must run first
-3. Follow the instructions returned by inception (they adapt to the user's settings)
+1. If the SessionStart hook supplied ` + "`SAGE: recent committed memories (direct-write SessionStart hook)`" + `, SAGE is already booted. Do not call inception again.
+2. Otherwise call the project-local ` + "`sage_inception`" + ` tool before responding to the user.
+3. If both local ` + "`sage`" + ` MCP tools and a connector-backed SAGE app are visible, always use the local MCP server for project memory.
+4. Follow the operating instructions returned by SAGE; lifecycle hooks complement MCP calls and must not duplicate them.
 
 ### If SAGE MCP is not connected
 Start the node: ` + "`sage-gui serve`" + `
@@ -460,8 +496,11 @@ func selfHealCodex(projectDir, sageHome string) {
 	hookDir := filepath.Join(codexDir, "hooks")
 	needsRewrite := false
 	hasBinRef := false
+	globalHooks := globalCodexSageHooksActive()
 
-	if _, statErr := os.Stat(hookDir); os.IsNotExist(statErr) {
+	if globalHooks {
+		hasBinRef = true
+	} else if _, statErr := os.Stat(hookDir); os.IsNotExist(statErr) {
 		needsRewrite = true
 	} else {
 		for name := range hookScriptSet() {
@@ -484,7 +523,9 @@ func selfHealCodex(projectDir, sageHome string) {
 	}
 
 	hooksJSONPath := filepath.Join(codexDir, "hooks.json")
-	if _, statErr := os.Stat(hooksJSONPath); os.IsNotExist(statErr) {
+	if hooksData, readErr := os.ReadFile(hooksJSONPath); os.IsNotExist(readErr) {
+		needsRewrite = true
+	} else if readErr == nil && globalHooks && strings.Contains(string(hooksData), "sage-session-start.sh") {
 		needsRewrite = true
 	}
 
@@ -492,17 +533,23 @@ func selfHealCodex(projectDir, sageHome string) {
 		return
 	}
 
-	if mkErr := os.MkdirAll(hookDir, 0755); mkErr != nil {
+	createDir := codexDir
+	if !globalHooks {
+		createDir = hookDir
+	}
+	if mkErr := os.MkdirAll(createDir, 0755); mkErr != nil {
 		fmt.Fprintf(os.Stderr, "SAGE: codex self-heal mkdir: %v\n", mkErr)
 		return
 	}
 
-	for name, tpl := range hookScriptSet() {
-		content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", binPath)
-		path := filepath.Join(hookDir, name)
-		if writeErr := os.WriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
-			fmt.Fprintf(os.Stderr, "SAGE: codex self-heal write %s: %v\n", name, writeErr)
-			return
+	if !globalHooks {
+		for name, tpl := range hookScriptSet() {
+			content := strings.ReplaceAll(tpl, "__SAGE_GUI_BIN__", binPath)
+			path := filepath.Join(hookDir, name)
+			if writeErr := os.WriteFile(path, []byte(content), 0755); writeErr != nil { //nolint:gosec // hook scripts must be executable
+				fmt.Fprintf(os.Stderr, "SAGE: codex self-heal write %s: %v\n", name, writeErr)
+				return
+			}
 		}
 	}
 
@@ -511,7 +558,11 @@ func selfHealCodex(projectDir, sageHome string) {
 		return
 	}
 
-	hooksConfig := map[string]any{"hooks": sageHooksConfig(hookDir)}
+	hooks := map[string]any{}
+	if !globalHooks {
+		hooks = sageHooksConfig(hookDir)
+	}
+	hooksConfig := map[string]any{"hooks": hooks}
 	hooksData, _ := json.MarshalIndent(hooksConfig, "", "  ")
 	if writeErr := os.WriteFile(hooksJSONPath, append(hooksData, '\n'), 0600); writeErr != nil {
 		fmt.Fprintf(os.Stderr, "SAGE: codex self-heal hooks.json: %v\n", writeErr)

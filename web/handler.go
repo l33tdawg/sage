@@ -516,14 +516,18 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Get("/v1/dashboard/settings/memory-mode", h.handleGetMemoryMode)
 			r.Post("/v1/dashboard/settings/memory-mode", h.handleSaveMemoryMode)
 
+			// Remote-connect (Flow 2) — reports whether this node deliberately
+			// exposes its MCP TLS listener to the LAN/VPN. Operators may also enter
+			// any trusted HTTPS MCP endpoint they manage in CEREBRUM; SAGE no longer
+			// installs or controls a vendor-specific public tunnel.
+			r.Get("/v1/dashboard/connect/remote-url", h.handleConnectRemoteURL)
+			r.Group(func(r chi.Router) {
+				r.Use(h.wizardSecurityGate)
+				r.Post("/v1/dashboard/connect/remote/token", h.handleConnectRemoteToken)
+			})
+
 			// Same-machine one-click connect — writes a provider's MCP config.
 			r.Post("/v1/dashboard/connect/{provider}", h.handleConnectProvider)
-
-			// Remote-connect (Flow 2) — reports how a tool on ANOTHER computer can
-			// reach this node (public tunnel and/or LAN bind), so the frontend can
-			// generate the right per-tool paste block or gate honestly when there is
-			// no remote path yet.
-			r.Get("/v1/dashboard/connect/remote-url", h.handleConnectRemoteURL)
 
 			// LAN node-join ceremony (Flow 3) — operator side. Same-origin gated
 			// on top of authMiddleware (like the wizard/federation routes) since
@@ -581,7 +585,8 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			// Governance routes
 			h.RegisterGovernanceRoutes(r)
 
-			// ChatGPT setup wizard — orchestrates the OpenAI tunnel-client setup
+			// Advanced ChatGPT Work setup — orchestrates the OpenAI tunnel-client
+			// setup
 			// from CEREBRUM so non-power-users can wire SAGE up to ChatGPT's
 			// MCP connector without leaving the browser or opening a terminal.
 			// Local-first orchestration only: SAGE installs/starts the local
@@ -592,7 +597,6 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Group(func(r chi.Router) {
 				r.Use(h.wizardSecurityGate)
 				h.RegisterChatGPTTunnelRoutes(r)
-				h.RegisterChatGPTWizardRoutes(r)
 			})
 
 			// v11 real-TOTP federation JOIN ceremony proxy. Same-origin gated on
@@ -701,7 +705,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 				w.Header().Set("Content-Type", "image/x-icon")
 			}
 
-			// Don't let Cloudflare or browsers cache the SPA assets — they ship
+			// Don't let reverse proxies or browsers cache the SPA assets — they ship
 			// with each release and any CDN cache (default max-age=14400) makes
 			// users miss bug fixes for hours after a deploy. The files are tiny;
 			// always-fresh is the right tradeoff.
@@ -856,12 +860,10 @@ func originIsLocal(origin string) bool {
 	return strings.EqualFold(host, "localhost") || host == "127.0.0.1" || host == "::1"
 }
 
-// wizardSecurityGate is a defence-in-depth layer specifically for the
-// /v1/wizard/chatgpt/* endpoints. The wizard orchestrates `cloudflared` and
-// platform autostart subprocesses, so even with authMiddleware in front of
-// it we add a strict same-origin check that rejects any browser request
-// whose Origin / Sec-Fetch-Site is not local — independent of cookie or
-// session state.
+// wizardSecurityGate is a defence-in-depth layer for local dashboard actions
+// that execute subprocesses, mint credentials, or reconfigure the node. Even
+// with authMiddleware in front of them, reject browser requests whose Origin /
+// Sec-Fetch-Site is not local — independent of cookie or session state.
 func (h *DashboardHandler) wizardSecurityGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isLocalRequest(r) {

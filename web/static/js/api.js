@@ -586,44 +586,12 @@ export async function submitGovVote(proposalId, decision) {
     return res.json();
 }
 
-// ─── Legacy remote tunnel API (v6.7.3) ───
-// Kept for existing local installs that already use the old remote-URL wizard.
-// ChatGPT setup now uses OpenAI Secure MCP Tunnel from the dashboard runbook.
-
-export async function wizardCheckCloudflared() {
-    const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/check-cloudflared`, { method: 'POST' });
-    return res.json();
-}
-
-// Returns the streaming Response object so the caller can read .body
-// progressively. Each line is `step: msg\n`; final line is `done: <code>`.
-export async function wizardInstallCloudflared() {
-    return fetch(`${API_BASE}/v1/wizard/chatgpt/install-cloudflared`, { method: 'POST' });
-}
-
-export async function wizardStartLogin() {
-    const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/login`, { method: 'POST' });
-    return res.json();
-}
-
-export async function wizardLoginStatus() {
-    const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/login-status`);
-    return res.json();
-}
-
-export async function wizardCreateTunnel(subdomain, zone) {
-    return fetch(`${API_BASE}/v1/wizard/chatgpt/create-tunnel`, {
+// Mint a one-time bearer for a transport-neutral remote MCP connection.
+export async function mintRemoteMCPToken(tokenName) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/connect/remote/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subdomain, zone }),
-    });
-}
-
-export async function wizardMintToken(agentId, tokenName) {
-    const res = await fetch(`${API_BASE}/v1/wizard/chatgpt/mint-token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent_id: agentId, token_name: tokenName || 'chatgpt' }),
+        body: JSON.stringify({ token_name: tokenName || 'remote' }),
     });
     return res.json();
 }
@@ -652,10 +620,9 @@ export async function connectProvider(provider, { path, token } = {}) {
 }
 
 // ─── Remote connect (Phase 5b-2) ───
-// Reports how a tool on ANOTHER computer can reach this node: an existing
-// operator-managed HTTPS endpoint (has_tunnel + tunnel_mcp_url + oauth urls)
-// and/or a direct LAN bind (lan_exposed + lan_mcp_url + self_signed). When
-// neither is present the tool cannot reach this node yet.
+// Reports whether a tool on ANOTHER computer can reach this node through a
+// deliberately exposed LAN/VPN bind. The operator can alternatively enter a
+// trusted HTTPS MCP URL they manage; SAGE does not install a tunnel vendor.
 export async function connectRemoteUrl() {
     const res = await fetch(`${API_BASE}/v1/dashboard/connect/remote-url`);
     if (!res.ok) {
