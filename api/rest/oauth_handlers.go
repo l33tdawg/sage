@@ -816,8 +816,7 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 		http.Error(w, clientErr, http.StatusBadRequest)
 		return
 	}
-	redirectURL, err := url.Parse(registered)
-	if err != nil {
+	if _, err := url.Parse(registered); err != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
 		return
 	}
@@ -833,13 +832,13 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 
 	// 2. Mint the auth code and bind it to the bearer plaintext.
 	codeRaw := make([]byte, 32)
-	if _, err := rand.Read(codeRaw); err != nil {
+	if _, err = rand.Read(codeRaw); err != nil {
 		h.cleanupOAuthIssue(issued.ID, "")
 		http.Error(w, "failed to generate auth code", http.StatusInternalServerError)
 		return
 	}
 	code := base64.RawURLEncoding.EncodeToString(codeRaw)
-	if err := h.Store.IssueAuthCode(r.Context(),
+	if err = h.Store.IssueAuthCode(r.Context(),
 		code, issued.ID, p.CodeChallenge, p.CodeChallengeMethod,
 		p.RedirectURI, p.ClientID, p.State, issued.Token, AuthCodeTTL); err != nil {
 		h.cleanupOAuthIssue(issued.ID, code)
@@ -849,7 +848,7 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 	// The code row is durable. Now (and only now) permit its bearer to
 	// authenticate. If this state flip cannot commit, cleanup remains pending
 	// and the code/token are never delivered as an active credential.
-	if err := h.activateOAuthIssue(issued.ID); err != nil {
+	if err = h.activateOAuthIssue(issued.ID); err != nil {
 		h.cleanupOAuthIssue(issued.ID, code)
 		http.Error(w, "failed to activate token: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -870,7 +869,7 @@ func (h *OAuthHandler) processConsent(w http.ResponseWriter, r *http.Request, p 
 		http.Error(w, clientErr, http.StatusBadRequest)
 		return
 	}
-	redirectURL, err = url.Parse(registered)
+	redirectURL, err := url.Parse(registered)
 	if err != nil {
 		h.cleanupOAuthIssue(issued.ID, code)
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)

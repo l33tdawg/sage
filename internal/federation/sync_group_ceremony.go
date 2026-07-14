@@ -248,7 +248,7 @@ func (m *Manager) emitRemoteOwnerDomainAdd(ctx context.Context, controllerChain,
 		return store.SyncGroupLogEntry{}, fmt.Errorf("controller %s refused domain head (%d): %s", controllerChain, status, truncate(body, 200))
 	}
 	var head domainAddHeadResponse
-	if err := json.Unmarshal(body, &head); err != nil || head.Seq < 0 {
+	if err = json.Unmarshal(body, &head); err != nil || head.Seq < 0 {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("controller returned an invalid domain head")
 	}
 	ownerEntry, err := m.BuildOwnerDomainAddEntry(ctx, groupID, domainTag, maxClearance, head.Seq, head.PrevHash)
@@ -344,7 +344,7 @@ func (m *Manager) EmitMemberInvite(ctx context.Context, groupID, memberChain, me
 		return store.SyncGroupLogEntry{}, fmt.Errorf("invitee returned an invalid acceptance")
 	}
 	payload[pkInviteeSig] = accepted.InviteeSig
-	if err := verifyMemberInviteProof(groupID, payload); err != nil {
+	if err = verifyMemberInviteProof(groupID, payload); err != nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("invitee acceptance: %w", err)
 	}
 	invite, err := m.AppendGroupJournalEntry(ctx, groupID, RosterSubchain, "member_invite", m.localChainID, m.agentPub, m.agentKey, payload)

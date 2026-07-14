@@ -94,7 +94,7 @@ func TestGroupMemberConsentSelectiveServe(t *testing.T) {
 	}
 	// GroupSharedDomainsWithGroup carries the group id but the same set.
 	refs, _ := s.GroupSharedDomainsWithGroup(ctx, "chain-own", "chain-sel")
-	var tags []string
+	tags := make([]string, 0, len(refs))
 	for _, r := range refs {
 		tags = append(tags, r.DomainTag)
 	}

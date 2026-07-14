@@ -296,7 +296,7 @@ func (m *Manager) BuildOwnerDomainAddEntry(ctx context.Context, groupID, domainT
 	if !gs.memberActive(m.localChainID) {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("local node is not an active member of group %s", groupID)
 	}
-	if err := m.authorizeOwnerUnilateralDomain(domainTag, false, gs); err != nil {
+	if err = m.authorizeOwnerUnilateralDomain(domainTag, false, gs); err != nil {
 		return store.SyncGroupLogEntry{}, err
 	}
 	e, err := buildJournalEntry(groupID, DomainSubchain(domainTag), seq, prevHash, "domain_add",

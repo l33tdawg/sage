@@ -421,14 +421,14 @@ func TestMemberInviteAcceptBootstrapConvergesWithoutRosterDiscoveryEscape(t *tes
 		t.Fatalf("accept status=%d body=%s", acceptRR.Code, acceptRR.Body.String())
 	}
 	var accepted memberInviteAcceptResponse
-	if err := json.NewDecoder(acceptRR.Body).Decode(&accepted); err != nil {
+	if err = json.NewDecoder(acceptRR.Body).Decode(&accepted); err != nil {
 		t.Fatal(err)
 	}
 	payload[pkInviteeSig] = accepted.InviteeSig
-	if _, err := controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "member_invite", controller.localChainID, controller.agentPub, controller.agentKey, payload); err != nil {
+	if _, err = controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "member_invite", controller.localChainID, controller.agentPub, controller.agentKey, payload); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "member_activate", controller.localChainID, controller.agentPub, controller.agentKey, memberChainPayload(invitee.localChainID)); err != nil {
+	if _, err = controller.AppendGroupJournalEntry(ctx, "g-expand", RosterSubchain, "member_activate", controller.localChainID, controller.agentPub, controller.agentKey, memberChainPayload(invitee.localChainID)); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := controllerStore.ListSyncGroupLog(ctx, "g-expand", RosterSubchain, -1, 2000)

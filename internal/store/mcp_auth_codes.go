@@ -268,7 +268,7 @@ func (s *SQLiteStore) PurgeExpiredAuthCodes(ctx context.Context) (int64, error) 
 	}
 	defer unlock()
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `UPDATE mcp_tokens
+	if _, err = tx.ExecContext(ctx, `UPDATE mcp_tokens
 		SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE id IN (
 			SELECT token_id FROM mcp_auth_codes

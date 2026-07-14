@@ -53,7 +53,7 @@ func newCeremonyNode(t *testing.T, chainID string) *ceremonyNode {
 	if err != nil {
 		t.Fatalf("open badger: %v", err)
 	}
-	if err := badger.SaveValidators(map[string]int64{"local-validator": 1}); err != nil {
+	if err = badger.SaveValidators(map[string]int64{"local-validator": 1}); err != nil {
 		t.Fatalf("seed validator set: %v", err)
 	}
 	t.Cleanup(func() { _ = badger.CloseBadger() })

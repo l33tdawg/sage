@@ -79,7 +79,8 @@ func TestReconcilePeerJournalsPropagatesDomainMutationAndRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	attachControllerSignature(&add, "epoch-1", "chain-peer", peerPub, peerKey)
-	remoteDomain := []store.SyncGroupLogEntry{add}
+	remoteDomain := make([]store.SyncGroupLogEntry, 0, 2)
+	remoteDomain = append(remoteDomain, add)
 	m.syncJournalSubchainsFn = func(context.Context, string, string) ([]string, error) {
 		return []string{DomainSubchain("hr")}, nil
 	}

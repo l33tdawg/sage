@@ -48,7 +48,7 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 	// Floor must never regress even if a stale roster_revision is written.
 	stale := g
 	stale.RosterRevision = 1
-	if err := s.UpsertSyncGroup(ctx, stale); err != nil {
+	if err = s.UpsertSyncGroup(ctx, stale); err != nil {
 		t.Fatalf("UpsertSyncGroup stale: %v", err)
 	}
 	got, _ = s.GetSyncGroup(ctx, "g1")
@@ -57,23 +57,23 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 	}
 
 	// Members: valid role, and the voting_power zero-pin.
-	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{
+	if err = s.UpsertSyncGroupMember(ctx, SyncGroupMember{
 		GroupID: "g1", MemberChainID: "chain-a", Role: GroupRoleFullSync, MemberState: GroupMemberActive,
 		MemberAgentPubkey: "apub", CAPin: "pinA",
 	}); err != nil {
 		t.Fatalf("UpsertSyncGroupMember A: %v", err)
 	}
-	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{
+	if err = s.UpsertSyncGroupMember(ctx, SyncGroupMember{
 		GroupID: "g1", MemberChainID: "chain-b", Role: GroupRoleSelectiveSync, MemberState: GroupMemberInvited,
 	}); err != nil {
 		t.Fatalf("UpsertSyncGroupMember B: %v", err)
 	}
-	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{
+	if err = s.UpsertSyncGroupMember(ctx, SyncGroupMember{
 		GroupID: "g1", MemberChainID: "chain-x", Role: "controller", // invalid role
 	}); err == nil {
 		t.Fatalf("expected invalid role rejection")
 	}
-	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{
+	if err = s.UpsertSyncGroupMember(ctx, SyncGroupMember{
 		GroupID: "g1", MemberChainID: "chain-x", Role: GroupRoleFullSync, VotingPower: 1.0,
 	}); err == nil {
 		t.Fatalf("expected voting_power zero-pin rejection")
@@ -87,12 +87,12 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 	}
 
 	// Shared domains.
-	if err := s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{
+	if err = s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{
 		GroupID: "g1", DomainTag: "eurorack", OwnerChainID: "chain-a", OwnerSig: "sigA", MaxClearance: 0, AddedRevision: 2,
 	}); err != nil {
 		t.Fatalf("UpsertSyncGroupDomain: %v", err)
 	}
-	if err := s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{
+	if err = s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{
 		GroupID: "g1", DomainTag: "removed-topic", OwnerChainID: "chain-a", AddedRevision: 1, RemovedRevision: 4,
 	}); err != nil {
 		t.Fatalf("UpsertSyncGroupDomain removed: %v", err)
@@ -104,23 +104,23 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 	}
 
 	// Partitioned journal: roster sub-chain + a per-domain sub-chain, with head tracking.
-	if err := s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
+	if err = s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
 		GroupID: "g1", Subchain: "roster", Seq: 0, EntryHash: "h0", EntryType: "group_create", AuthorChainID: "chain-ctl",
 	}); err != nil {
 		t.Fatalf("AppendSyncGroupLog roster0: %v", err)
 	}
-	if err := s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
+	if err = s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
 		GroupID: "g1", Subchain: "roster", Seq: 1, PrevHash: "h0", EntryHash: "h1", EntryType: "member_activate",
 	}); err != nil {
 		t.Fatalf("AppendSyncGroupLog roster1: %v", err)
 	}
-	if err := s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
+	if err = s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
 		GroupID: "g1", Subchain: "domain:eurorack", Seq: 0, EntryHash: "d0", EntryType: "domain_add", AuthorChainID: "chain-a",
 	}); err != nil {
 		t.Fatalf("AppendSyncGroupLog domain0: %v", err)
 	}
 	// Duplicate (group, subchain, seq) must fail the PK.
-	if err := s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
+	if err = s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
 		GroupID: "g1", Subchain: "roster", Seq: 1, EntryHash: "hX", EntryType: "manifest",
 	}); err == nil {
 		t.Fatalf("expected duplicate seq rejection")
@@ -138,20 +138,20 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 	}
 
 	// Tombstones + anti-resurrection lookup.
-	if err := s.InsertSyncTombstone(ctx, SyncTombstone{
+	if err = s.InsertSyncTombstone(ctx, SyncTombstone{
 		GroupID: "g1", Scope: TombstoneScopeMemory, Enforcement: TombstoneEnforceLocalSuppress,
 		OriginChainID: "chain-a", OriginMemoryID: "mem-1", Reason: "local delete",
 	}); err != nil {
 		t.Fatalf("InsertSyncTombstone: %v", err)
 	}
 	// Idempotent re-insert.
-	if err := s.InsertSyncTombstone(ctx, SyncTombstone{
+	if err = s.InsertSyncTombstone(ctx, SyncTombstone{
 		GroupID: "g1", Scope: TombstoneScopeMemory, Enforcement: TombstoneEnforceLocalSuppress,
 		OriginChainID: "chain-a", OriginMemoryID: "mem-1",
 	}); err != nil {
 		t.Fatalf("InsertSyncTombstone idempotent: %v", err)
 	}
-	if err := s.InsertSyncTombstone(ctx, SyncTombstone{
+	if err = s.InsertSyncTombstone(ctx, SyncTombstone{
 		GroupID: "g1", Scope: "bogus", Enforcement: TombstoneEnforceAdvisory,
 	}); err == nil {
 		t.Fatalf("expected invalid scope rejection")
@@ -367,15 +367,15 @@ func TestGroupStep6ReadModels(t *testing.T) {
 	if _, ok, _ := s.ResolveGroupRelay(ctx, "chain-outsider", "chain-b", "chain-a", "studio"); ok {
 		t.Fatalf("relay to a non-member receiver must be denied (cross-group laundering)")
 	}
-	if key, err := s.GetGroupMemberAgentPubkey(ctx, "g1", "chain-a"); err != nil || key != "aa" {
-		t.Fatalf("GetGroupMemberAgentPubkey = (%q,%v), want aa", key, err)
+	if key, kerr := s.GetGroupMemberAgentPubkey(ctx, "g1", "chain-a"); kerr != nil || key != "aa" {
+		t.Fatalf("GetGroupMemberAgentPubkey = (%q,%v), want aa", key, kerr)
 	}
 
 	// Group-scoped, leak-safe digest source (must-fix #1/#3/#12). Fixture:
 	//   chain-a/a1 in "studio"        — member origin, unclassified, owned by chain-a
 	//   chain-x/x1 in "studio.public" — NON-member origin (chain-x is not in g1)
 	//   chain-b/s1 in "studio.secret" — member origin, CLASSIFIED child owned by chain-b
-	if err := s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{GroupID: "g1", DomainTag: "studio.secret", OwnerChainID: "chain-b", MaxClearance: 1}); err != nil {
+	if err = s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{GroupID: "g1", DomainTag: "studio.secret", OwnerChainID: "chain-b", MaxClearance: 1}); err != nil {
 		t.Fatalf("UpsertSyncGroupDomain(secret): %v", err)
 	}
 	for _, o := range []SyncOrigin{
@@ -383,7 +383,7 @@ func TestGroupStep6ReadModels(t *testing.T) {
 		{OriginChainID: "chain-x", OriginMemoryID: "x1", DomainTag: "studio.public", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l2"},
 		{OriginChainID: "chain-b", OriginMemoryID: "s1", DomainTag: "studio.secret", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l3"},
 	} {
-		if err := s.RecordSyncOrigin(ctx, o); err != nil {
+		if err = s.RecordSyncOrigin(ctx, o); err != nil {
 			t.Fatalf("RecordSyncOrigin: %v", err)
 		}
 	}
