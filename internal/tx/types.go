@@ -132,9 +132,18 @@ const (
 
 // MemorySubmit proposes a new memory object for consensus validation.
 type MemorySubmit struct {
-	MemoryID        string
-	ContentHash     []byte
-	EmbeddingHash   []byte
+	MemoryID    string
+	ContentHash []byte
+	// EmbeddingHash is NODE-derived, lossy, UNVERIFIED per-node search-index metadata:
+	// the receiving node regenerates the embedding server-side (memory_handler.go) and
+	// stamps this hash. It is NOT agent-signed and NOT consensus-verified — the delegated
+	// agent proof deliberately copies it into the expected payload rather than
+	// reconstructing it (agent_proof.go verifySignedAgentAction, the v11.7.4 provider-cutover
+	// design). It is write-only on-chain (only presence guards read it) and legitimately
+	// drifts from the live vector after provider cutovers (store.UpdateMemoryEmbedding
+	// rewrites the vector without touching it). NEVER treat this field as an integrity
+	// commitment; the agent-bound integrity anchor is ContentHash.
+	EmbeddingHash []byte
 	MemoryType      MemoryType
 	DomainTag       string
 	ConfidenceScore float64

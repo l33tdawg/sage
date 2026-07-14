@@ -57,6 +57,21 @@ func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusT
 	if !agentProofTimestampFresh(parsedTx.AgentTimestamp, consensusTime) {
 		return fmt.Errorf("delegated agent proof timestamp is older than the 5-minute consensus window")
 	}
+	// Mempool hygiene ONLY (claim=false / CheckTx). Reject a delegated proof whose
+	// timestamp is far AHEAD of the local wall clock, so a raw-RPC client cannot inject
+	// far-future stockpiled proofs into an honest mempool; this mirrors the two-sided
+	// window the REST/MCP boundary already enforces (api/rest/middleware/auth.go).
+	// This upper bound MUST NEVER move to the consensus path (claim=true / FinalizeBlock,
+	// app.go's enforceDelegatedAgentProof(..., blockTime, true) call): a wall-clock upper
+	// bound there deterministically re-creates the v11.7.6 idle-chain rejection (block
+	// time lags the signing wall clock) and, applied to committed history, forks the
+	// AppHash — see the REPLAY-CRITICAL note on verifySignedAgentAction. CheckTx is not
+	// consensus (its result feeds neither AppHash nor LastResultsHash and never runs
+	// during replay), and the bound only LOOSENS as wall time advances, so a tx admitted
+	// once is never future-rejected on CheckTx recheck.
+	if !claim && parsedTx.AgentTimestamp > consensusTime.Unix()+int64(delegatedAgentProofSkew/time.Second) {
+		return fmt.Errorf("delegated agent proof timestamp is ahead of the local %s admission window", delegatedAgentProofSkew)
+	}
 
 	req, err := parseSignedAgentRequest(parsedTx.AgentRequest)
 	if err != nil {

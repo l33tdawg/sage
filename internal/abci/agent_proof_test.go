@@ -131,6 +131,38 @@ func TestAppV17DelegatedProofAcceptsWallClockAheadOfIdleConsensus(t *testing.T) 
 	assert.Equal(t, uint32(0), result.Code, result.Log)
 }
 
+// TestDelegatedProofMempoolFutureCapRejectsOnlyOnCheckTx pins the 11.8.2 mempool
+// hygiene bound: a delegated proof timestamped far AHEAD of the local wall clock is
+// rejected on the CheckTx (claim=false) path, while a proof within the 5-minute skew
+// (future or past) is accepted — and, critically, the CONSENSUS path (claim=true)
+// still ACCEPTS the far-future proof unchanged, so the cap never gates FinalizeBlock
+// (which would re-create the v11.7.6 idle-chain regression and fork committed history).
+func TestDelegatedProofMempoolFutureCapRejectsOnlyOnCheckTx(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV17AppliedHeight = 5
+	agent := newAgentKey(t)
+	outer := newAgentKey(t)
+	now := time.Now().Truncate(time.Second)
+	// The domain name in the tx must equal the "name" in the signed request body, else
+	// verifySignedAgentAction (correctly) rejects the payload before the timestamp cap
+	// matters; the freshness/cap logic under test is independent of the action content.
+	req := []byte("POST /v1/domain/register\n{\"name\":\"cap\",\"description\":\"safe\"}")
+
+	// CheckTx (claim=false): far-future is rejected as mempool hygiene...
+	far := makeDelegatedDomainRegisterTx(t, agent, outer, req, now.Add(10*time.Minute), "cap", "safe", true)
+	require.ErrorContains(t, app.enforceDelegatedAgentProof(far, now, false), "ahead of the local")
+	// ...but a proof within +/- the skew (either side) is accepted.
+	nearFuture := makeDelegatedDomainRegisterTx(t, agent, outer, req, now.Add(4*time.Minute), "cap", "safe", true)
+	require.NoError(t, app.enforceDelegatedAgentProof(nearFuture, now, false))
+	nearPast := makeDelegatedDomainRegisterTx(t, agent, outer, req, now.Add(-4*time.Minute), "cap", "safe", true)
+	require.NoError(t, app.enforceDelegatedAgentProof(nearPast, now, false))
+
+	// Consensus path (claim=true) is UNTOUCHED: a far-future proof must still be ACCEPTED —
+	// freezing that the cap is CheckTx-only and never re-strictifies consensus.
+	farConsensus := makeDelegatedDomainRegisterTx(t, agent, outer, req, now.Add(11*time.Minute), "cap", "safe", true)
+	require.NoError(t, app.enforceDelegatedAgentProof(farConsensus, now, true))
+}
+
 // TestReplayGuardDelegatedMemorySubmitAcceptedBelowAppV19 is the H-2 replay guard.
 // The v11.7.6 delegated-proof relaxation (node-authoritative EmbeddingHash +
 // lower-bound-only timestamp) shipped ungated and is baked into every v11.7.6/7
