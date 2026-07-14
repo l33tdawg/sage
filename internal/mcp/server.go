@@ -647,11 +647,17 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 
 	if resp.StatusCode >= 400 {
 		var problem struct {
+			Type   string `json:"type"`
 			Title  string `json:"title"`
 			Detail string `json:"detail"`
 		}
 		if json.Unmarshal(respBody, &problem) == nil && problem.Detail != "" {
-			return fmt.Errorf("%s: %s", problem.Title, problem.Detail)
+			return &apiProblemError{
+				Type:       problem.Type,
+				Title:      problem.Title,
+				Detail:     problem.Detail,
+				StatusCode: resp.StatusCode,
+			}
 		}
 		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
@@ -660,6 +666,21 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 		return json.Unmarshal(respBody, out)
 	}
 	return nil
+}
+
+// apiProblemError preserves the RFC 7807 type emitted by the REST API while
+// keeping the historical "title: detail" Error string shown to MCP callers.
+// Typed problem URIs let retry policy distinguish permanent application
+// denials from transient failures that happen to share an HTTP status.
+type apiProblemError struct {
+	Type       string
+	Title      string
+	Detail     string
+	StatusCode int
+}
+
+func (e *apiProblemError) Error() string {
+	return fmt.Sprintf("%s: %s", e.Title, e.Detail)
 }
 
 func isTransientMCPTransportErr(err error) bool {
@@ -706,6 +727,10 @@ func isStaleSessionErr(err error) bool {
 	if err == nil {
 		return false
 	}
+	var problem *apiProblemError
+	if errors.As(err, &problem) && problem.Type == domainWriteDeniedProblemTypeURI {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
 	for _, sig := range []string{
 		"access denied",
@@ -717,6 +742,8 @@ func isStaleSessionErr(err error) bool {
 	}
 	return false
 }
+
+const domainWriteDeniedProblemTypeURI = "https://sage.dev/errors/domain-write-denied"
 
 // submitMemoryResilient POSTs /v1/memory/submit and, on a stale-session failure,
 // auto-heals the way a manual /mcp reconnect used to: it re-registers this agent

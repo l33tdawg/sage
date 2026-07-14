@@ -119,3 +119,14 @@ test('MRI spreads long-lived memory histories through the brain volume', () => {
         'older memories should settle toward the lower inner brainstem');
     assert.match(mriSource, /mriDepthForAge\(age,hsh\(n\.id,3\)\)/);
 });
+
+test('guide describes token efficiency without promising lower usage', () => {
+    const useCases = appSource.slice(
+        appSource.indexOf("key: 'use-cases'"),
+        appSource.indexOf("key: 'network'"),
+    );
+    assert.match(useCases, /Spend context where it matters/);
+    assert.match(useCases, /does not promise that every session uses fewer tokens/);
+    assert.match(useCases, /relevant pieces when they are needed/);
+    assert.match(useCases, /instead of repeated explanations/);
+});

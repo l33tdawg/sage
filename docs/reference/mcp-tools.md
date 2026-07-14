@@ -1,4 +1,4 @@
-Reconciled against internal/mcp at SAGE v11.6.1.
+Reconciled against internal/mcp at SAGE v11.8.4.
 
 # SAGE MCP Tools Reference
 
@@ -139,6 +139,7 @@ most important operational tool.
   keyword-only (embedder down or a non-semantic hash node) — same meaning as on
   `sage_recall`.
 - Returns `vault_locked` error if the Synaptic Ledger is locked.
+- On SAGE v11.8.4+, a permanent domain ACL rejection returns `Domain write access denied` with the level-2/CEREBRUM remedy immediately; the MCP client does not re-register, retry the write, or suggest `/mcp`. Generic denials from older servers retain the bounded compatibility recovery path.
 
 **Recall path:** Uses hybrid BM25+vector (RRF) by default; falls back to FTS5
 full-text search if `/v1/memory/hybrid` is unavailable; falls back to semantic
@@ -210,6 +211,7 @@ confidence, domain, and tags.
   word overlap with an existing committed memory).
 - `status: "rejected"` with `votes` array if pre-validators reject the content.
 - Returns `vault_locked` error if the Synaptic Ledger is locked.
+- Uses the same v11.8.4 typed domain-write denial as `sage_turn`: permanent ACL denials return the level-2/CEREBRUM remedy immediately, without re-registration, retries, or `/mcp` advice.
 
 **REST:** `POST /v1/memory/pre-validate` (optional), `POST /v1/embed`,
 `POST /v1/memory/submit`

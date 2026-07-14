@@ -51,7 +51,20 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.8.3
+## What's New in v11.8.4
+
+**Domain write denials now say what is wrong and how to fix it.** When consensus rejects a memory because its authenticated agent lacks level-2 write access to an owned domain, the REST API now returns a distinct, sanitized RFC 7807 `domain-write-denied` problem instead of collapsing it into a generic 403. MCP preserves that machine-readable type, immediately points the agent to CEREBRUM Access Controls or the domain owner, and performs no pointless re-registration, retry loop, or `/mcp` reconnect suggestion. Older servers' generic denial remains on the bounded compatibility recovery path.
+
+The built-in CEREBRUM guide also explains SAGE's token-efficiency story without pretending every session necessarily uses fewer tokens: durable context lives outside any one model and only the relevant pieces are brought back, so token spend carries useful memory instead of repeated explanations and each tool rebuilding the same history.
+
+This patch changes no consensus rule, AppHash, transaction type, key encoding, fork, or authorization decision; existing chains replay byte-identically and app version 20 remains unallocated.
+
+SDK 11.8.4.
+
+## Older releases
+
+<details>
+<summary>v11.8.3 - anatomical MRI memory spacing</summary>
 
 **A memory brain that uses its full anatomy while keeping age meaningful.** CEREBRUM now spreads its 2,500-memory representative sample through a substantially broader portion of the MRI mesh instead of crowding long-lived histories into the centre. Fresh memories remain nearest the outer cortex; memories move progressively inward as they age, and the oldest cohort settles toward the lower inner brainstem. A one-year age window replaces the old 90-day clamp, while a small deterministic radial offset separates same-age memories without turning the stable layout into a force simulation.
 
@@ -59,7 +72,7 @@ The placement calculation now lives in a pure, directly tested module with bound
 
 SDK 11.8.3.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.8.2 - synchronization groups and a denser MRI</summary>

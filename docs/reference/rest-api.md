@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.7.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.8.4. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -87,6 +87,8 @@ without accepting the caller's possibly mismatched vector and the response adds
 provider is healthy and the vault is unlocked.
 
 **Auth:** Ed25519 required. Agent must have write access to `domain_tag` if per-domain access control is configured (`memory_handler.go:425-428`). Observer-role agents are rejected.
+
+**Domain write denial (v11.8.4+):** A consensus rejection whose reason is specifically that the authenticated agent has no write access to the requested domain returns HTTP 403 with RFC 7807 type `https://sage.dev/errors/domain-write-denied`. Its sanitized detail directs the caller to grant level 2 (read + write) in CEREBRUM Access Controls or ask the domain owner; it exposes neither the agent ID nor domain-owner ID. MCP clients use the type to avoid treating a permanent ACL denial as a stale session and do not re-register or retry the write (`memory_handler.go`, `internal/mcp/server.go`).
 
 **curl example:**
 

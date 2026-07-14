@@ -553,6 +553,11 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 			writeProblemTyped(w, status, mempoolFullProblemType, "Mempool full", publicMsg)
 			return
 		}
+		if isDomainWriteDeniedErr(err) {
+			writeProblemTyped(w, status, domainWriteDeniedProblemType, "Domain write access denied",
+				"This agent does not have write access to the requested domain. Grant level 2 (read + write) in CEREBRUM Access Controls, or ask the domain owner.")
+			return
+		}
 		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
@@ -1804,12 +1809,26 @@ func broadcastErrorPublic(err error) (int, string) {
 // ("everyone slow down") from a per-agent quota breach ("you slow down").
 const mempoolFullProblemType = "https://sage.dev/errors/mempool-full"
 
+// domainWriteDeniedProblemType distinguishes a permanent, domain-scoped ACL
+// rejection from the generic 403 that an MCP client may see while a restarted
+// node is rebuilding session identity. The response remains sanitized: it
+// exposes neither the caller's ID nor the domain owner's ID.
+const domainWriteDeniedProblemType = "https://sage.dev/errors/domain-write-denied"
+
 // isMempoolFullErr reports whether a broadcast error is CometBFT's
 // mempool-is-full rejection. The detail arrives in the JSON-RPC error.data
 // field ("mempool is full: number of txs N (max: M)"), which
 // broadcastTxCommitWithHeight folds into the wrapped error string.
 func isMempoolFullErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "mempool is full")
+}
+
+// isDomainWriteDeniedErr matches the consensus rejection emitted specifically
+// by processMemorySubmit when an authenticated agent lacks level-2 authority.
+// Other access-denied errors retain their opaque response and compatibility
+// retry path because they may describe a stale session after a node restart.
+func isDomainWriteDeniedErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "has no write access to domain")
 }
 
 func memoryTypeToTx(mt string) tx.MemoryType {

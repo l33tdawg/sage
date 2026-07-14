@@ -23,7 +23,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.8.3';
+const SAGE_VERSION = 'v11.8.4';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -6736,6 +6736,10 @@ function HelpOverlay({ onClose, initialSection }) {
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Working together from different places</div>
                         <div class="guide-detail-desc">Two people in different cities, each with their own memory, link up and share just the project topics. Now both of their AIs can pull up the same project knowledge - no emailing context back and forth to get each other's assistant up to speed.</div>
+                    </div>
+                    <div class="guide-detail-item">
+                        <div class="guide-detail-label">Spend context where it matters</div>
+                        <div class="guide-detail-desc">SAGE does not promise that every session uses fewer tokens. It keeps durable context outside any one AI and brings back the relevant pieces when they are needed, so the tokens you do spend carry useful memory instead of repeated explanations and each tool rebuilding the same history.</div>
                     </div>
                 </div>
             `,

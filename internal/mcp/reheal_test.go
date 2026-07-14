@@ -28,6 +28,10 @@ func TestIsStaleSessionErr(t *testing.T) {
 	}{
 		{"nil", nil, false},
 		{"broadcast access denied", errString("Broadcast error: access denied"), true},
+		{"typed domain write denial", &apiProblemError{
+			Type: domainWriteDeniedProblemTypeURI, Title: "Domain write access denied",
+			Detail: "Grant level 2 (read + write) in CEREBRUM Access Controls.", StatusCode: http.StatusForbidden,
+		}, false},
 		{"identity verification", errString("agent identity verification failed"), true},
 		{"connection refused", errString("API error (HTTP 502): dial tcp: connection refused"), false},
 		{"connection reset", errString("Post: read: connection reset by peer"), false},
@@ -49,6 +53,36 @@ func TestIsStaleSessionErr(t *testing.T) {
 			assert.Equal(t, c.want, isStaleSessionErr(c.err))
 		})
 	}
+}
+
+func TestSubmitMemoryResilient_DomainWriteDeniedDoesNotReheal(t *testing.T) {
+	withFastBackoffs(t)
+
+	var submits, registers atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, _ *http.Request) {
+		registers.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "registered"})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, _ *http.Request) {
+		submits.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": domainWriteDeniedProblemTypeURI, "title": "Domain write access denied",
+			"detail": "This agent does not have write access to the requested domain. Grant level 2 (read + write) in CEREBRUM Access Controls, or ask the domain owner.",
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	err := s.submitMemoryResilient(context.Background(), []byte(`{"content":"x"}`), &map[string]any{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CEREBRUM Access Controls")
+	assert.NotContains(t, err.Error(), "/mcp")
+	assert.EqualValues(t, 1, submits.Load(), "a permanent ACL denial must not be retried")
+	assert.EqualValues(t, 0, registers.Load(), "a permanent ACL denial must not re-register")
 }
 
 func TestSubmitMemoryResilient_DoesNotRepeatAmbiguousRetry(t *testing.T) {
