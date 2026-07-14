@@ -623,7 +623,7 @@ func (m *Manager) handleEpochRotateCosign(w http.ResponseWriter, r *http.Request
 	// (nor silently drop) a tag in the set the new controller vouches for. That set is
 	// the authority under which later stale-epoch domain_adds may still admit.
 	wantCarried, carriedErr := activeCarriedDomains(r.Context(), ss, req.GroupID)
-	gotCarried, gotErr := encodeSelectedDomains(decodeSelectedDomains(p[pkCarriedDomains]))
+	gotCarried, gotErr := encodeCarriedDomains(carriedDomainHeads(p[pkCarriedDomains]))
 	if carriedErr != nil || gotErr != nil || gotCarried != wantCarried {
 		httpError(w, http.StatusForbidden, "epoch rotation carried domain set does not match the active shared set")
 		return

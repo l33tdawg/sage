@@ -135,35 +135,58 @@ func decodeSelectedDomains(enc string) []string {
 	return out
 }
 
-// carriedDomainSet decodes the pkCarriedDomains JSON array (encodeSelectedDomains
-// on the emit side) into a set. A missing/malformed value yields an EMPTY set —
-// fail-closed: a rotation that re-attested nothing admits nothing under an old
-// epoch, so a domain_add must then bear the CURRENT epoch to be resolvable.
-func carriedDomainSet(enc string) map[string]struct{} {
-	set := map[string]struct{}{}
-	for _, tag := range decodeSelectedDomains(enc) {
-		if tag != "" {
-			set[tag] = struct{}{}
-		}
+// carriedDomainHeads decodes the pkCarriedDomains map {domain tag -> the sub-chain
+// HEAD seq the current controller re-attested for it}. A missing/malformed value
+// yields an EMPTY map — fail-closed: a rotation that re-attested nothing admits
+// nothing under an old epoch, so a domain_add must then bear the CURRENT epoch.
+func carriedDomainHeads(enc string) map[string]int64 {
+	heads := map[string]int64{}
+	if enc == "" {
+		return heads
 	}
-	return set
+	if json.Unmarshal([]byte(enc), &heads) != nil {
+		return map[string]int64{}
+	}
+	return heads
 }
 
-// activeCarriedDomains returns the canonical (sorted, deduped) JSON encoding of a
-// group's currently-active shared domain tags — the pkCarriedDomains re-attestation
-// an epoch_rotate carries (H-1). The outgoing controller (author) and the incoming
-// controller (cosigner) each compute it from their OWN active projection and must
-// agree, so neither side can inject or silently drop a tag.
+// encodeCarriedDomains canonically encodes the carried {tag -> head seq} map. Go's
+// json.Marshal sorts object keys, so the encoding is deterministic across nodes
+// (both controllers and every ingesting peer produce byte-identical bytes).
+func encodeCarriedDomains(heads map[string]int64) (string, error) {
+	b, err := json.Marshal(heads)
+	if err != nil {
+		return "", fmt.Errorf("encode carried domains: %w", err)
+	}
+	return string(b), nil
+}
+
+// activeCarriedDomains returns the canonical JSON encoding of {active shared domain
+// tag -> its current sub-chain head seq} — the pkCarriedDomains re-attestation an
+// epoch_rotate carries (H-1). The head seq is the boundary the current controller
+// vouches for: a stale-epoch domain_add at or below it is a legitimate back-fill of
+// pre-rotation history; a fresh entry above it (a re-add / re-widen / resurrect)
+// must bear the current epoch. The outgoing controller (author) and the incoming
+// controller (cosigner) each compute it from their OWN state and must agree, so
+// neither can inject a tag NOR INFLATE a head to pre-authorize future stale entries.
 func activeCarriedDomains(ctx context.Context, ss *store.SQLiteStore, groupID string) (string, error) {
 	active, err := ss.ListSyncGroupDomains(ctx, groupID, true)
 	if err != nil {
 		return "", err
 	}
-	tags := make([]string, 0, len(active))
+	heads := make(map[string]int64, len(active))
 	for _, d := range active {
-		tags = append(tags, d.DomainTag)
+		head, headErr := ss.GetSyncGroupSubchainHead(ctx, groupID, DomainSubchain(d.DomainTag))
+		if headErr != nil {
+			return "", headErr
+		}
+		seq := int64(-1)
+		if head != nil {
+			seq = head.Seq
+		}
+		heads[d.DomainTag] = seq
 	}
-	return encodeSelectedDomains(tags)
+	return encodeCarriedDomains(heads)
 }
 
 func decodeOwnedDomains(enc string) ([]string, error) {
@@ -202,12 +225,15 @@ type groupApplyState struct {
 	memberKey           map[string]ed25519.PublicKey
 	memberState         map[string]string
 	domainOwner         map[string]string // active AND removed (owner is needed to verify a domain_remove)
-	// domainAttested is the set of shared domain tags the CURRENT controller
-	// re-attested at the most recent epoch_rotate (pkCarriedDomains). A domain_add
-	// carrying an OLD-epoch controller countersignature is admissible ONLY for a tag
-	// in this set (see resolve()) — this is what makes an epoch rotation actually
-	// REVOKE a rotated-out controller's domain-admission authority (H-1).
-	domainAttested      map[string]struct{}
+	// domainAttested maps each shared domain tag the CURRENT controller re-attested
+	// at the most recent epoch_rotate to the sub-chain HEAD seq it vouched for
+	// (pkCarriedDomains). A domain_add carrying an OLD-epoch controller
+	// countersignature is admissible ONLY for a carried tag AND only at/below that
+	// head seq (a legitimate back-fill of pre-rotation history); a fresh entry above
+	// the head (re-add / re-widen / resurrect) must bear the current epoch. This is
+	// what makes an epoch rotation actually REVOKE a rotated-out controller's
+	// domain-admission authority (H-1) without breaking cross-epoch back-fill.
+	domainAttested      map[string]int64
 	rosterRevision      int64
 	rosterRevisionFloor int64
 	// evictedChains / removedDomains accumulate the members and domains that
@@ -239,7 +265,7 @@ func loadGroupApplyState(ctx context.Context, ss *store.SQLiteStore, groupID str
 		groupID: groupID, controllerChain: g.ControllerChainID, controllerEpoch: effectiveControllerEpoch(g.Epoch),
 		rosterRevision: g.RosterRevision, rosterRevisionFloor: g.RosterRevisionFloor,
 		memberKey: map[string]ed25519.PublicKey{}, memberState: map[string]string{}, domainOwner: map[string]string{},
-		controllerByEpoch: map[string]controllerIdentity{}, domainAttested: map[string]struct{}{},
+		controllerByEpoch: map[string]controllerIdentity{}, domainAttested: map[string]int64{},
 	}
 	if k, e := decodePub(g.ControllerAgentPubkey); e == nil {
 		gs.controllerKey = k
@@ -273,8 +299,8 @@ func loadGroupApplyState(ctx context.Context, ss *store.SQLiteStore, groupID str
 					gs.controllerByEpoch[epoch] = controllerIdentity{chain: p[pkControllerChain], key: key}
 					if epoch == gs.controllerEpoch {
 						// The rotation that installed the CURRENT controller carries the
-						// authoritative re-attested domain set for stale-epoch admission.
-						gs.domainAttested = carriedDomainSet(p[pkCarriedDomains])
+						// authoritative re-attested {tag -> head seq} for stale-epoch admission.
+						gs.domainAttested = carriedDomainHeads(p[pkCarriedDomains])
 					}
 				}
 			}
@@ -366,14 +392,17 @@ func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey 
 			// H-1: a valid countersignature from a PAST controller epoch is NOT
 			// sufficient — an epoch rotation must revoke a rotated-out controller's
 			// domain-admission authority. A domain_add is admissible under an OLD
-			// epoch ONLY for a tag the CURRENT controller re-attested across the
-			// rotation (gs.domainAttested, from the epoch_rotate carried set);
-			// anything else MUST bear the current epoch. This blocks a rotated-out
-			// controller from minting or re-widening shared domains with its retained
-			// stale-epoch key, while a legitimately-carried domain still back-fills to
-			// a lagging member whose establishing entry bears the old epoch.
+			// epoch ONLY as a back-fill of pre-rotation history: the tag must be in
+			// the current controller's re-attested carried set AND the entry seq must
+			// be at/below the head the current controller vouched for at the rotation
+			// (gs.domainAttested[tag]). A fresh entry ABOVE that head — a re-add,
+			// re-widen, or resurrect of a carried domain — is NOT covered by the
+			// re-attestation and MUST bear the current epoch, so a rotated-out
+			// controller cannot keep admitting shared-set changes with its retained
+			// stale-epoch key, while a lagging member's genuine back-fill still passes.
 			if e.ControllerEpoch != gs.controllerEpoch {
-				if _, attested := gs.domainAttested[tag]; !attested {
+				attestedHead, attested := gs.domainAttested[tag]
+				if !attested || e.Seq > attestedHead {
 					return nil
 				}
 			}
@@ -649,10 +678,11 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		gs.controllerKey = ck
 		gs.controllerEpoch = effectiveControllerEpoch(p[pkEpoch])
 		gs.controllerByEpoch[gs.controllerEpoch] = controllerIdentity{chain: cc, key: ck}
-		// The incoming controller's re-attested domain set becomes the authoritative
-		// stale-epoch admission anchor (H-1). It was verified == the incoming
-		// controller's own active projection at cosign time (handleEpochRotateCosign).
-		gs.domainAttested = carriedDomainSet(p[pkCarriedDomains])
+		// The incoming controller's re-attested {tag -> head seq} becomes the
+		// authoritative stale-epoch admission anchor (H-1). It was verified == the
+		// incoming controller's own active projection + sub-chain heads at cosign time
+		// (handleEpochRotateCosign).
+		gs.domainAttested = carriedDomainHeads(p[pkCarriedDomains])
 
 	case "manifest":
 		rev, err := strconv.ParseInt(p[pkRosterRevision], 10, 64)
@@ -728,9 +758,9 @@ func validateAuthoredEntry(e store.SyncGroupLogEntry) error {
 			return fmt.Errorf("epoch_rotate: malformed controller identity")
 		}
 		// The carried-domain re-attestation (H-1) is mandatory and must be a
-		// well-formed JSON array (possibly empty "[]" for a group with no shared
-		// domains); a missing/garbled set would silently re-attest nothing.
-		var carried []string
+		// well-formed JSON object {tag -> head seq} (possibly empty "{}" for a group
+		// with no shared domains); a missing/garbled map would silently re-attest nothing.
+		var carried map[string]int64
 		if p[pkCarriedDomains] == "" || json.Unmarshal([]byte(p[pkCarriedDomains]), &carried) != nil {
 			return fmt.Errorf("epoch_rotate: malformed carried_domains re-attestation")
 		}
