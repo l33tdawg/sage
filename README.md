@@ -51,7 +51,18 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.8.4
+## What's New in v11.8.5
+
+**MRI memories now remain inside the anatomical cranium at every zoom and rotation.** The memory cloud previously used a vertically symmetric ellipsoid even though the bundled anatomical mesh has a much shallower lower cranial boundary outside its narrow, off-centre brainstem. Lower-hemisphere nodes could therefore protrude through the mesh, especially after the v11.8.3 spread increase. CEREBRUM now uses an asymmetric vertical envelope with explicit clearance for each rendered sphere and bloom halo. The upper cortex keeps its full spread, and the newest-to-outer / oldest-to-inner age ordering is unchanged.
+
+The placement contract is directly regression-tested across the full age, radial-jitter, and elevation range, including a fixed lower-cranium safety threshold. This patch changes no consensus rule, AppHash, transaction type, key encoding, fork, graph API limit, or server workload; existing chains replay byte-identically and app version 20 remains unallocated.
+
+SDK 11.8.5.
+
+## Older releases
+
+<details>
+<summary>v11.8.4 - actionable domain write denials</summary>
 
 **Domain write denials now say what is wrong and how to fix it.** When consensus rejects a memory because its authenticated agent lacks level-2 write access to an owned domain, the REST API now returns a distinct, sanitized RFC 7807 `domain-write-denied` problem instead of collapsing it into a generic 403. MCP preserves that machine-readable type, immediately points the agent to CEREBRUM Access Controls or the domain owner, and performs no pointless re-registration, retry loop, or `/mcp` reconnect suggestion. Older servers' generic denial remains on the bounded compatibility recovery path.
 
@@ -61,7 +72,7 @@ This patch changes no consensus rule, AppHash, transaction type, key encoding, f
 
 SDK 11.8.4.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.8.3 - anatomical MRI memory spacing</summary>

@@ -16,7 +16,7 @@
 // server-side and the graph respects the same RBAC isolation as every read.
 
 import { THREE, ForceGraph3D, UnrealBloomPass } from '/ui/js/vendor/sage-graph.bundle.js';
-import { MRI_LAYOUT, mriBrainstemBias, mriDepthForAge } from '/ui/js/mri-layout.js';
+import { MRI_LAYOUT, mriDepthForAge, mriVerticalPosition } from '/ui/js/mri-layout.js';
 
 const LINK_TYPES = {
   supports:    { color: '#5ee2a0', label: 'supports',    typed: true },
@@ -420,7 +420,7 @@ export function mountMriBrain(container, opts = {}) {
   // made thousands of dots crowd the centre. The wider window plus deterministic radial
   // jitter spreads historical memories through the interior while keeping age legible:
   // fresh memories remain near the cortex and the oldest remain closest to the core.
-  const EX=MRI_LAYOUT.halfExtentX, EY=MRI_LAYOUT.halfExtentY, EZ=MRI_LAYOUT.halfExtentZ;
+  const EX=MRI_LAYOUT.halfExtentX, EZ=MRI_LAYOUT.halfExtentZ;
   const DAY=86400000, AGE_WINDOW=MRI_LAYOUT.ageWindowDays*DAY;
   const hsh=(s,seed)=>{ s=s||''; let h=(seed>>>0)||1; for(let i=0;i<s.length;i++) h=Math.imul(h^s.charCodeAt(i),16777619); return ((h>>>0)%10000)/10000; };
   function placeNodes(nodes){
@@ -448,7 +448,7 @@ export function mountMriBrain(container, opts = {}) {
       // Age also bends the trajectory toward the lower inner brainstem: fresh memories
       // retain the full cortical spread, while the oldest cohort settles visibly below
       // the centre instead of forming an undifferentiated ball around the origin.
-      n.fy=n.y=EY*depth*Math.sin(el) + mriBrainstemBias(age);
+      n.fy=n.y=mriVerticalPosition(depth,Math.sin(el),age);
       n.fz=n.z=EZ*depth*ce*Math.sin(az);
     });
   }

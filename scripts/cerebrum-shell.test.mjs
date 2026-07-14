@@ -7,7 +7,7 @@ const cssSource = await readFile(new URL('../web/static/css/sage.css', import.me
 const mriSource = await readFile(new URL('../web/static/js/mri-brain.js', import.meta.url), 'utf8');
 const mriPageSource = await readFile(new URL('../web/static/mri.html', import.meta.url), 'utf8');
 const traySource = await readFile(new URL('../cmd/sage-tray/main.swift', import.meta.url), 'utf8');
-const { MRI_LAYOUT, mriBrainstemBias, mriDepthForAge } = await import('../web/static/js/mri-layout.js');
+const { MRI_LAYOUT, mriBrainstemBias, mriDepthForAge, mriVerticalPosition } = await import('../web/static/js/mri-layout.js');
 
 test('Access Controls is a first-class sidebar route', () => {
     assert.match(appSource, /hash === '\/access'\) setPage\('access'\)/);
@@ -118,6 +118,23 @@ test('MRI spreads long-lived memory histories through the brain volume', () => {
     assert.ok(mriBrainstemBias(1) < mriBrainstemBias(0),
         'older memories should settle toward the lower inner brainstem');
     assert.match(mriSource, /mriDepthForAge\(age,hsh\(n\.id,3\)\)/);
+    assert.equal(mriVerticalPosition(0.89, 1, 0), MRI_LAYOUT.halfExtentY * 0.89,
+        'the upper cortex should retain the full vertical spread');
+    const lowestNodeCenter = MRI_LAYOUT.lowerCraniumY + MRI_LAYOUT.nodeClearance;
+    assert.ok(lowestNodeCenter >= -93,
+        'the bundled anatomical mesh needs node centres at or above -93 for lower-cranium clearance');
+    assert.ok(MRI_LAYOUT.nodeClearance >= 10,
+        'the cranium envelope must reserve space for node spheres, not only their centres');
+    for (let age = 0; age <= 1; age += 0.01) {
+        for (const jitter of [0, 0.5, 1]) {
+            const depth = mriDepthForAge(age, jitter);
+            assert.ok(mriVerticalPosition(depth, -1, age) >= lowestNodeCenter,
+                'lower memories must retain sphere clearance inside the cranium');
+        }
+    }
+    assert.ok(MRI_LAYOUT.lowerHalfExtentY < MRI_LAYOUT.halfExtentY,
+        'the lower anatomical envelope must be shallower than the upper cortex');
+    assert.match(mriSource, /mriVerticalPosition\(depth,Math\.sin\(el\),age\)/);
 });
 
 test('guide describes token efficiency without promising lower usage', () => {

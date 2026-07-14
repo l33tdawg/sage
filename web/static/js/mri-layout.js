@@ -4,6 +4,14 @@
 export const MRI_LAYOUT = Object.freeze({
   halfExtentX: 155,
   halfExtentY: 135,
+  // The anatomical cranium is not vertically symmetric. Its broad lower edge
+  // sits well above the tip of the narrow brainstem, so using halfExtentY for
+  // the lower hemisphere lets otherwise-valid ellipsoid points escape the
+  // mesh. Keep node centres above this conservative interior floor, including
+  // clearance for the rendered spheres and their bloom halo.
+  lowerHalfExtentY: 96,
+  lowerCraniumY: -105,
+  nodeClearance: 12,
   halfExtentZ: 215,
   ageWindowDays: 365,
   innerDepth: 0.25,
@@ -30,4 +38,17 @@ export function mriDepthForAge(age, jitterUnit = 0.5) {
 // Negative Y points toward the lower inner brainstem in the bundled anatomical mesh.
 export function mriBrainstemBias(age) {
   return -Math.pow(clamp01(age), 1.35) * MRI_LAYOUT.halfExtentY * 0.12;
+}
+
+// Convert an elevation into the anatomical mesh's asymmetric vertical space.
+// The upper hemisphere keeps the full cortical spread. The lower hemisphere
+// is shallower because only the narrow, off-centre brainstem extends below the
+// cranium; a final floor guarantees that future tuning cannot put a node centre
+// (or its sphere) through the visible mesh boundary.
+export function mriVerticalPosition(depth, elevationSin, age) {
+  const d = clamp01(depth);
+  const s = Math.max(-1, Math.min(1, Number.isFinite(elevationSin) ? elevationSin : 0));
+  const extent = s < 0 ? MRI_LAYOUT.lowerHalfExtentY : MRI_LAYOUT.halfExtentY;
+  const y = extent * d * s + mriBrainstemBias(age);
+  return Math.max(MRI_LAYOUT.lowerCraniumY + MRI_LAYOUT.nodeClearance, y);
 }
