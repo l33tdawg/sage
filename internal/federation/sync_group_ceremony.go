@@ -666,6 +666,24 @@ func (m *Manager) admitEpochRotate(ctx context.Context, groupID string, entry st
 		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, authErr
 	}
+	// H-1 race close: the carried {tag -> head seq} was snapshotted before the
+	// (unlocked) cosign round-trip. Domain admission is controller-only and takes
+	// journalMu, so if this controller admitted a domain_add/remove during that
+	// window the sub-chain head advanced ABOVE the snapshot — and that legitimate
+	// old-epoch entry would become un-backfillable to every other node once this
+	// rotation applies with a stale attested head. Re-derive under the lock and abort
+	// (the caller retries with a fresh snapshot) rather than commit a stale carried
+	// set. Re-snapshotting in place is impossible — it would break the incoming
+	// controller's already-produced countersignature.
+	freshCarried, freshErr := activeCarriedDomains(ctx, ss, groupID)
+	if freshErr != nil {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, freshErr
+	}
+	if signedCarried, _ := encodeCarriedDomains(carriedDomainHeads(p[pkCarriedDomains])); signedCarried != freshCarried {
+		m.journalMu.Unlock()
+		return store.SyncGroupLogEntry{}, fmt.Errorf("epoch rotation carried set went stale during cosign (a shared domain changed) — retry the rotation")
+	}
 	if key := gs.resolve(entry); key == nil || verifyJournalEntry(entry, key) != nil {
 		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, fmt.Errorf("epoch rotation fails the group resolver")

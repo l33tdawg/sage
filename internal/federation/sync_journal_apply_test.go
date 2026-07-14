@@ -399,6 +399,50 @@ func TestDomainAddCarriedBackfillAllowsHistoricalReadd(t *testing.T) {
 	}
 }
 
+// TestEmitEpochRotateReattestsCarriedHeadsAndDoesNotFalseAbort drives a real
+// rotation ceremony end-to-end (EmitEpochRotate -> admitEpochRotate) with an active
+// shared domain, exercising the admit-time carried-head re-derivation. With no
+// concurrent domain change the re-check must NOT abort, and the resulting attested
+// head must box a later stale-epoch re-widen (seq above head) out.
+func TestEmitEpochRotateReattestsCarriedHeadsAndDoesNotFalseAbort(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	attachBadger(t, m)
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: m.localChainID, ControllerAgentPubkey: hex.EncodeToString(m.agentPub)}); err != nil {
+		t.Fatalf("seed group: %v", err)
+	}
+	// The local node is the controller AND an active member (it rotates the epoch,
+	// co-signing as the incoming controller itself — no network round-trip needed).
+	seedActiveMember(t, ms, "g1", m.localChainID, store.GroupRoleFullSync, m.agentPub)
+	ownerPub, ownerKey, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-owner", store.GroupRoleFullSync, ownerPub)
+
+	xaSub := DomainSubchain("x/a")
+	xa := mustEntry(t, "g1", xaSub, 0, "", "domain_add", "chain-owner", ownerPub, ownerKey, domainAddPayload("x/a", "chain-owner", 0))
+	attachControllerSignature(&xa, effectiveControllerEpoch(""), m.localChainID, m.agentPub, m.agentKey)
+	if n, err := ingestRoster(t, m, ms, "g1", xaSub, xa); err != nil || n != 1 {
+		t.Fatalf("establish x/a: n=%d err=%v", n, err)
+	}
+
+	entry, err := m.EmitEpochRotate(ctx, "g1", "e2", m.localChainID, hex.EncodeToString(m.agentPub))
+	if err != nil {
+		t.Fatalf("self epoch rotation with a carried domain failed (false stale-abort?): %v", err)
+	}
+	if entry.EntryType != "epoch_rotate" {
+		t.Fatalf("unexpected entry: %+v", entry)
+	}
+	if g, _ := ms.GetSyncGroup(ctx, "g1"); g == nil || g.Epoch != "e2" {
+		t.Fatalf("epoch not rotated: %+v", g)
+	}
+	// The carried head (x/a -> 0) was re-attested: a stale epoch-0 re-widen at seq 1
+	// (above head 0) is rejected, while nothing below the head was disturbed.
+	rewiden := mustEntry(t, "g1", xaSub, 1, xa.EntryHash, "domain_add", "chain-owner", ownerPub, ownerKey, domainAddPayload("x/a", "chain-owner", 4))
+	attachControllerSignature(&rewiden, effectiveControllerEpoch(""), m.localChainID, m.agentPub, m.agentKey)
+	if n, err := ingestRoster(t, m, ms, "g1", xaSub, rewiden); err == nil || n != 0 {
+		t.Fatalf("stale-epoch re-widen above the attested head admitted after rotation: n=%d err=%v", n, err)
+	}
+}
+
 // TestMemberActivateCannotResurrectRemovedMember: a controller-authored
 // member_activate must NOT flip a removed/left member back to Active reusing its
 // stale role/consent — re-entry requires a fresh, invitee-co-signed member_invite.
