@@ -51,7 +51,18 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.8.2
+## What's New in v11.8.3
+
+**A memory brain that uses its full anatomy while keeping age meaningful.** CEREBRUM now spreads its 2,500-memory representative sample through a substantially broader portion of the MRI mesh instead of crowding long-lived histories into the centre. Fresh memories remain nearest the outer cortex; memories move progressively inward as they age, and the oldest cohort settles toward the lower inner brainstem. A one-year age window replaces the old 90-day clamp, while a small deterministic radial offset separates same-age memories without turning the stable layout into a force simulation.
+
+The placement calculation now lives in a pure, directly tested module with bounded mesh extents and monotonic age-to-depth checks. This patch changes no consensus rule, AppHash, transaction type, key encoding, fork, graph API limit, or server workload; existing chains replay byte-identically and app version 20 remains unallocated.
+
+SDK 11.8.3.
+
+## Older releases
+
+<details>
+<summary>v11.8.2 - synchronization groups and a denser MRI</summary>
 
 **Synchronization groups — human-verified, signed memory sharing between separate SAGE brains.** A synchronization group coordinates memory sharing off-consensus through a partitioned, hash-chained, ed25519-signed audit journal: a roster sub-chain replicated to every member and independent per-domain sub-chains replicated only to the members who share that domain, so a node never learns of a domain it does not share. Group items are origin-signed, so a relaying peer can back-fill the mesh without being able to forge or mis-attribute them. Adding a shared domain is a two-party action — the owning member and the group controller both sign — members express selective-sync consent over the subset of domains they receive, and controller epoch rotation, member removal, and rejoin are all explicit signed roster events reconciled between peers by anti-entropy exchange.
 
@@ -63,7 +74,7 @@ v11.8.2 is the first published build of the v11.8 line. It also clears the relea
 
 SDK 11.8.2.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.7.7 - one CEREBRUM tab in Firefox</summary>

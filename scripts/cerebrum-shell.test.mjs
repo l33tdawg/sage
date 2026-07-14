@@ -7,6 +7,7 @@ const cssSource = await readFile(new URL('../web/static/css/sage.css', import.me
 const mriSource = await readFile(new URL('../web/static/js/mri-brain.js', import.meta.url), 'utf8');
 const mriPageSource = await readFile(new URL('../web/static/mri.html', import.meta.url), 'utf8');
 const traySource = await readFile(new URL('../cmd/sage-tray/main.swift', import.meta.url), 'utf8');
+const { MRI_LAYOUT, mriBrainstemBias, mriDepthForAge } = await import('../web/static/js/mri-layout.js');
 
 test('Access Controls is a first-class sidebar route', () => {
     assert.match(appSource, /hash === '\/access'\) setPage\('access'\)/);
@@ -101,4 +102,20 @@ test('MRI uses one dense shared memory sample limit', () => {
     assert.match(mriPageSource, /String\(DEFAULT_MRI_NODE_LIMIT\)/);
     const mriView = appSource.slice(appSource.indexOf('function MriView('), appSource.indexOf('// Global tooltips state'));
     assert.doesNotMatch(mriView, /limit=500/);
+});
+
+test('MRI spreads long-lived memory histories through the brain volume', () => {
+    assert.equal(MRI_LAYOUT.ageWindowDays, 365,
+        'older memories should not all collapse onto a 90-day inner shell');
+    const ageBands = [0, 90 / 365, 180 / 365, 270 / 365, 1]
+        .map(age => mriDepthForAge(age, 0.5));
+    for (let i = 1; i < ageBands.length; i++) {
+        assert.ok(ageBands[i - 1] > ageBands[i], 'depth must move strictly inward with age');
+    }
+    assert.ok(mriDepthForAge(0, 1) <= 0.89, 'fresh memories must stay inside the cortex');
+    assert.ok(mriDepthForAge(1, 0) >= 0.20, 'old memories retain enough separation around the core');
+    assert.ok(Math.abs(mriBrainstemBias(0)) === 0);
+    assert.ok(mriBrainstemBias(1) < mriBrainstemBias(0),
+        'older memories should settle toward the lower inner brainstem');
+    assert.match(mriSource, /mriDepthForAge\(age,hsh\(n\.id,3\)\)/);
 });

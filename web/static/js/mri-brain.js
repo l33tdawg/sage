@@ -16,6 +16,7 @@
 // server-side and the graph respects the same RBAC isolation as every read.
 
 import { THREE, ForceGraph3D, UnrealBloomPass } from '/ui/js/vendor/sage-graph.bundle.js';
+import { MRI_LAYOUT, mriBrainstemBias, mriDepthForAge } from '/ui/js/mri-layout.js';
 
 const LINK_TYPES = {
   supports:    { color: '#5ee2a0', label: 'supports',    typed: true },
@@ -405,16 +406,22 @@ export function mountMriBrain(container, opts = {}) {
   // topic is a radial stream), AGE -> radial depth: the NEWEST memories ("fresh
   // ideas") sit on the outer cortex surface (large, easy to click, glowing) and
   // memories settle INWARD toward the stem/core as they age; memories from the same
-  // period share a shell regardless of topic. Positions are pinned (fx/fy/fz), so the
-  // layout is a pure formula, stable across reloads, with zero per-tick cost.
-  // Node placement ellipsoid, sized to sit INSIDE the procedural brain hull. The hull
-  // (mesh scale 185, proportions x0.86/y0.80/z1.20) has smooth half-extents ~159/148/222,
-  // but cortical folding + the flattened underside make the REAL inner surface tighter,
-  // and the old EY(158) was TALLER than the hull's y-extent (148) so the age-driven
-  // downward sink pushed the oldest dots clean through the base. EX/EY/EZ are now scaled
-  // to ~90% of the hull proportions, and the max depth + sink are reduced, so
-  // EX/EY/EZ * maxDepth(0.74) ≈ 111/93/152 sits comfortably inside even the folds.
-  const EX=150, EY=126, EZ=205, DAY=86400000, AGE_WINDOW=90*DAY;
+  // period share a narrow depth band regardless of topic. Positions are pinned
+  // (fx/fy/fz), so the layout is a pure formula, stable across reloads, with zero
+  // per-tick cost.
+  // Node placement ellipsoid, sized to use the brain's interior without crossing its
+  // folded surface. The hull (mesh scale 185, proportions x0.86/y0.80/z1.20) has smooth
+  // half-extents ~159/148/222. At max depth 0.89 these extents produce ~138/120/191,
+  // leaving clearance for cortical folds and the flattened underside while occupying
+  // substantially more of the visible brain than the old ~111/93/152 cloud.
+  //
+  // A one-year age window is deliberate. The previous 90-day clamp collapsed every
+  // older memory onto the same tiny inner shell; on a long-lived 10k-memory brain that
+  // made thousands of dots crowd the centre. The wider window plus deterministic radial
+  // jitter spreads historical memories through the interior while keeping age legible:
+  // fresh memories remain near the cortex and the oldest remain closest to the core.
+  const EX=MRI_LAYOUT.halfExtentX, EY=MRI_LAYOUT.halfExtentY, EZ=MRI_LAYOUT.halfExtentZ;
+  const DAY=86400000, AGE_WINDOW=MRI_LAYOUT.ageWindowDays*DAY;
   const hsh=(s,seed)=>{ s=s||''; let h=(seed>>>0)||1; for(let i=0;i<s.length;i++) h=Math.imul(h^s.charCodeAt(i),16777619); return ((h>>>0)%10000)/10000; };
   function placeNodes(nodes){
     const ds=[...new Set(nodes.map(n=>n.domain))], nd=Math.max(1,ds.length), di={};
@@ -422,8 +429,8 @@ export function mountMriBrain(container, opts = {}) {
     const now=Date.now();
     nodes.forEach(n=>{
       const t=Date.parse(n.created_at);
-      // AGE over a fixed recency WINDOW (last 90 days): today -> 0 (fresh, outer
-      // surface), anything 90+ days old -> 1 (clamped to the inner stem/core). A fixed
+      // AGE over a fixed recency WINDOW (last year): today -> 0 (fresh, outer
+      // surface), anything 365+ days old -> 1 (clamped to the inner stem/core). A fixed
       // window (not min/max of ALL history) spreads the relevant-recent memories across
       // the full radius instead of crushing them into a thin outer band.
       const age=isNaN(t)?1:Math.max(0, Math.min(1, (now-t)/AGE_WINDOW));
@@ -432,15 +439,16 @@ export function mountMriBrain(container, opts = {}) {
       const recency=1-age;
       const az=((di[n.domain]||0)/nd)*Math.PI*2 + (hsh(n.id,1)-0.5)*(Math.PI*2/nd)*0.82;
       const el=(hsh(n.id,2)-0.5)*Math.PI*0.96;
-      // radius grows with RECENCY: newest fill the outer shell (spread out, easy to
-      // click); oldest converge toward the inner stem/core. Capped at 0.80 so dots stay
-      // inside the folded cortical surface.
-      const depth=Math.max(0.12, Math.min(0.74, 0.15 + Math.pow(recency, 0.6)*0.60));
+      // Radius grows with RECENCY, with a small stable per-memory offset so thousands of
+      // same-age memories occupy a volume instead of one overlapping shell. The final
+      // 0.20..0.89 range stays inside the folded cortical surface.
+      const depth=mriDepthForAge(age,hsh(n.id,3));
       const ce=Math.cos(el);
       n.fx=n.x=EX*depth*ce*Math.cos(az);
-      // oldest sink DOWN toward the brainstem; newest keep the full vertical spread of
-      // the outer shell.
-      n.fy=n.y=EY*depth*Math.sin(el) - age*EY*0.05;
+      // Age also bends the trajectory toward the lower inner brainstem: fresh memories
+      // retain the full cortical spread, while the oldest cohort settles visibly below
+      // the centre instead of forming an undifferentiated ball around the origin.
+      n.fy=n.y=EY*depth*Math.sin(el) + mriBrainstemBias(age);
       n.fz=n.z=EZ*depth*ce*Math.sin(az);
     });
   }
