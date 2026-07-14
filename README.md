@@ -51,13 +51,42 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.7.5
+## What's New in v11.8.0
+
+**Synchronization groups — human-verified, signed memory sharing between separate SAGE brains.** A synchronization group coordinates memory sharing off-consensus through a partitioned, hash-chained, ed25519-signed audit journal: a roster sub-chain replicated to every member and independent per-domain sub-chains replicated only to the members who share that domain, so a node never learns of a domain it does not share. Group items are origin-signed, so a relaying peer can back-fill the mesh without being able to forge or mis-attribute them. Adding a shared domain is a two-party action — the owning member and the group controller both sign — members express selective-sync consent over the subset of domains they receive, and controller epoch rotation, member removal, and rejoin are all explicit signed roster events reconciled between peers by anti-entropy exchange.
+
+Each MCP bearer token now mints and registers its own signing identity, so a delegated agent action is attributable to exactly one token and one token can never act as another. This release also hardens group authorization: a controller epoch rotation now re-attests the shared domain set under the incoming controller, so rotating control away from a node revokes that node's ability to admit or re-widen shared domains with its old key; and a removed or departed member cannot be silently re-activated with stale entitlements — re-entry requires a fresh, co-signed invitation. The v11.8 consensus fork gate is present but dormant.
+
+SDK 11.8.0.
+
+## Older releases
+
+<details>
+<summary>v11.7.7 - one CEREBRUM tab on Firefox</summary>
+
+**One CEREBRUM tab on Firefox.** The macOS dock app now focuses an existing Firefox CEREBRUM tab before opening a new one, matching the single-tab behavior already used for other browsers, with bounded browser automation and a safe fallback. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+
+SDK 11.7.7.
+
+</details>
+
+<details>
+<summary>v11.7.6 - reliable delegated MCP turns</summary>
+
+**Reliable delegated MCP turns.** Restores delegated agent writes that a prior release began rejecting: the delegated agent-proof enforcement and its timestamp-freshness check were corrected so MCP clients acting on behalf of a delegated agent can store observations again, with direct (REST) and consensus-path verification kept aligned.
+
+SDK 11.7.6.
+
+</details>
+
+<details>
+<summary>v11.7.5 - readable contextual help</summary>
 
 **Readable contextual help at every CEREBRUM boundary.** Help tooltips now account for the nearest scroll-clipping container as well as the browser viewport, so hints near the top of Settings and other bounded panels flip downward instead of opening behind the fixed application chrome. The positioning check runs after the tooltip is rendered and keeps keyboard/focus behavior intact. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
 
 SDK 11.7.5.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.7.4 - provider-safe Smart Memory and CEREBRUM launch</summary>
