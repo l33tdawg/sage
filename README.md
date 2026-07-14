@@ -51,13 +51,15 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.8.0
+## What's New in v11.8.1
 
 **Synchronization groups — human-verified, signed memory sharing between separate SAGE brains.** A synchronization group coordinates memory sharing off-consensus through a partitioned, hash-chained, ed25519-signed audit journal: a roster sub-chain replicated to every member and independent per-domain sub-chains replicated only to the members who share that domain, so a node never learns of a domain it does not share. Group items are origin-signed, so a relaying peer can back-fill the mesh without being able to forge or mis-attribute them. Adding a shared domain is a two-party action — the owning member and the group controller both sign — members express selective-sync consent over the subset of domains they receive, and controller epoch rotation, member removal, and rejoin are all explicit signed roster events reconciled between peers by anti-entropy exchange.
 
 Each MCP bearer token now mints and registers its own signing identity, so a delegated agent action is attributable to exactly one token and one token can never act as another. This release also hardens group authorization: a controller epoch rotation now re-attests the shared domain set under the incoming controller, so rotating control away from a node revokes that node's ability to admit or re-widen shared domains with its old key; and a removed or departed member cannot be silently re-activated with stale entitlements — re-entry requires a fresh, co-signed invitation. The v11.8 consensus fork gate is present but dormant.
 
-SDK 11.8.0.
+v11.8.1 is the first published build of the v11.8 line. It also clears the release lint gate and adds a replay-safety regression guard for the delegated-proof rules already committed by v11.7.6 and v11.7.7 chains. The recovery changes no production behavior beyond the reviewed v11.8 source tree.
+
+SDK 11.8.1.
 
 ## Older releases
 
