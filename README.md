@@ -62,16 +62,18 @@ SDK 11.8.0.
 ## Older releases
 
 <details>
-<summary>v11.7.7 - one CEREBRUM tab on Firefox</summary>
+<summary>v11.7.7 - one CEREBRUM tab in Firefox</summary>
 
-**One CEREBRUM tab on Firefox.** The macOS dock app now focuses an existing Firefox CEREBRUM tab before opening a new one, matching the single-tab behavior already used for other browsers, with bounded browser automation and a safe fallback. This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
+**One CEREBRUM tab in Firefox, including across app restarts.** v11.7.7 fixes the remaining macOS launch path that could create duplicate CEREBRUM tabs. The earlier tab-focus implementation could inspect Safari and Chromium-family tabs, but Firefox exposes no equivalent AppleScript tab API; the native app also incorrectly assumed a newly started tray process could not inherit a browser tab left open by the previous process. SAGE now checks a loopback-only live-dashboard presence signal before opening a URL and activates the default browser when CEREBRUM is already connected. Initial app launch, post-update restart, dock reopen, and the **Open CEREBRUM** menu all use the same reuse path.
+
+This patch changes no consensus rule, AppHash, transaction type, key encoding, or fork; existing chains replay byte-identically.
 
 SDK 11.7.7.
 
 </details>
 
 <details>
-<summary>v11.7.6 - reliable MCP turns and expandable task cards</summary>
+<summary>v11.7.6 - reliable MCP turns and complete task cards</summary>
 
 **Reliable MCP turn writes and task cards that show the whole job.** v11.7.6 fixes two post-app-v17 delegated-proof failures that v11.7.4 exposed after making the node authoritative for embeddings. Consensus now keeps every agent-controlled memory field bound to the exact signed request while accepting the validator-signed node's derived embedding hash, so provider cutovers no longer turn valid `sage_turn` observations into opaque CheckTx rejections. Fresh requests also survive the first block after a long idle period even when deterministic chain time trails the already wall-clock-validated MCP request; captured old proofs remain rejected. Public REST/MCP errors now distinguish proof mismatch and expiry from a generic `request rejected`.
 
