@@ -160,7 +160,7 @@ func TestJournalApplyEpochRotate(t *testing.T) {
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl1", ctl1Pub, ctl1Key, nil)
 	// epoch_rotate is authored by the OUTGOING controller (ctl1).
 	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "epoch_rotate", "chain-ctl1", ctl1Pub, ctl1Key,
-		epochRotatePayload("e2", "chain-ctl2", hex.EncodeToString(ctl2Pub)))
+		epochRotatePayload("e2", "chain-ctl2", hex.EncodeToString(ctl2Pub), "[]"))
 	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0); err != nil || n != 1 {
 		t.Fatalf("seed roster entry: n=%d err=%v", n, err)
 	}
@@ -169,7 +169,7 @@ func TestJournalApplyEpochRotate(t *testing.T) {
 	}
 	outsiderPub, outsiderKey, _ := ed25519.GenerateKey(nil)
 	outsider := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "epoch_rotate", "chain-ctl1", ctl1Pub, ctl1Key,
-		epochRotatePayload("e-outsider", "chain-outsider", hex.EncodeToString(outsiderPub)))
+		epochRotatePayload("e-outsider", "chain-outsider", hex.EncodeToString(outsiderPub), "[]"))
 	attachControllerSignature(&outsider, "e-outsider", "chain-outsider", outsiderPub, outsiderKey)
 	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, outsider); err == nil || n != 0 {
 		t.Fatalf("non-member incoming controller admitted: n=%d err=%v", n, err)
@@ -191,6 +191,216 @@ func TestJournalApplyEpochRotate(t *testing.T) {
 	}
 	if mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-b"); mem == nil {
 		t.Fatalf("new controller's member_invite did not apply")
+	}
+}
+
+func domainActive(domains []store.SyncGroupDomain, tag string) bool {
+	for _, d := range domains {
+		if d.DomainTag == tag {
+			return true
+		}
+	}
+	return false
+}
+
+// genesisCreatePayload builds a group_create payload that seeds the genesis
+// controller into controllerByEpoch (epoch-0), so a later stale-epoch forgery test
+// exercises the H-1 carried-set gate rather than being rejected merely because the
+// old controller key was never retained.
+func genesisCreatePayload(controllerChain string, controllerPub ed25519.PublicKey) map[string]string {
+	return map[string]string{
+		pkControllerChain:  controllerChain,
+		pkControllerPubkey: hex.EncodeToString(controllerPub),
+		pkEpoch:            "",
+	}
+}
+
+// TestDomainAddStaleEpochForgeryRevokedByRotation is the H-1 property: after control
+// rotates away from ctl1, ctl1's RETAINED epoch-0 key can no longer admit a
+// brand-new domain — even though ctl1 remains cryptographically able to produce a
+// valid epoch-0 countersignature and the owner (chain-a) is still an active member.
+// A fresh domain co-signed by the CURRENT controller is still accepted.
+func TestDomainAddStaleEpochForgeryRevokedByRotation(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctl1Pub, ctl1Key := seedGroup(t, ms, "g1", "chain-ctl1") // genesis controller, epoch-0
+	ctl2Pub, ctl2Key, _ := ed25519.GenerateKey(nil)
+	aPub, aKey, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-ctl2", store.GroupRoleFullSync, ctl2Pub)
+	seedActiveMember(t, ms, "g1", "chain-a", store.GroupRoleFullSync, aPub)
+
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl1", ctl1Pub, ctl1Key,
+		genesisCreatePayload("chain-ctl1", ctl1Pub))
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0); err != nil || n != 1 {
+		t.Fatalf("group_create: n=%d err=%v", n, err)
+	}
+
+	// chain-a establishes a/notes at the CURRENT epoch (epoch-0), ctl1 co-signs.
+	notesSub := DomainSubchain("a/notes")
+	notes := mustEntry(t, "g1", notesSub, 0, "", "domain_add", "chain-a", aPub, aKey, domainAddPayload("a/notes", "chain-a", 0))
+	attachControllerSignature(&notes, effectiveControllerEpoch(""), "chain-ctl1", ctl1Pub, ctl1Key)
+	if n, err := ingestRoster(t, m, ms, "g1", notesSub, notes); err != nil || n != 1 {
+		t.Fatalf("establish a/notes at current epoch: n=%d err=%v", n, err)
+	}
+
+	// Rotate control ctl1 -> ctl2 (epoch e2), re-attesting the active set {a/notes}.
+	carried, _ := encodeSelectedDomains([]string{"a/notes"})
+	rot := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "epoch_rotate", "chain-ctl1", ctl1Pub, ctl1Key,
+		epochRotatePayload("e2", "chain-ctl2", hex.EncodeToString(ctl2Pub), carried))
+	attachControllerSignature(&rot, "e2", "chain-ctl2", ctl2Pub, ctl2Key)
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, rot); err != nil || n != 1 {
+		t.Fatalf("epoch_rotate: n=%d err=%v", n, err)
+	}
+	if g, _ := ms.GetSyncGroup(ctx, "g1"); g == nil || g.Epoch != "e2" {
+		t.Fatalf("controller not rotated to e2: %+v", g)
+	}
+
+	// FORGERY: rotated-out ctl1 self-co-signs a BRAND-NEW domain a/exfil with its
+	// retained epoch-0 key. Must be REJECTED: old epoch + tag not in the carried set.
+	exfilSub := DomainSubchain("a/exfil")
+	exfil := mustEntry(t, "g1", exfilSub, 0, "", "domain_add", "chain-a", aPub, aKey, domainAddPayload("a/exfil", "chain-a", 0))
+	attachControllerSignature(&exfil, effectiveControllerEpoch(""), "chain-ctl1", ctl1Pub, ctl1Key)
+	if n, err := ingestRoster(t, m, ms, "g1", exfilSub, exfil); err == nil || n != 0 {
+		t.Fatalf("stale-epoch forgery of a NEW domain admitted (n=%d err=%v) — rotation failed to revoke ctl1", n, err)
+	}
+	if active, _ := ms.ListSyncGroupDomains(ctx, "g1", true); domainActive(active, "a/exfil") {
+		t.Fatalf("forged domain a/exfil entered the shared set")
+	}
+
+	// A fresh domain co-signed by the CURRENT controller (ctl2 @ e2) is still admitted.
+	newSub := DomainSubchain("a/new")
+	fresh := mustEntry(t, "g1", newSub, 0, "", "domain_add", "chain-a", aPub, aKey, domainAddPayload("a/new", "chain-a", 0))
+	attachControllerSignature(&fresh, "e2", "chain-ctl2", ctl2Pub, ctl2Key)
+	if n, err := ingestRoster(t, m, ms, "g1", newSub, fresh); err != nil || n != 1 {
+		t.Fatalf("fresh domain co-signed by the current controller rejected: n=%d err=%v", n, err)
+	}
+	if active, _ := ms.ListSyncGroupDomains(ctx, "g1", true); !domainActive(active, "a/new") {
+		t.Fatalf("current-epoch domain a/new was not established")
+	}
+}
+
+// TestDomainAddCarriedBackfillsToLaggingMember is the H-1 CORRECTNESS guard: the fix
+// must NOT break legitimate cross-epoch propagation. A member that only ever sees
+// the roster (group_create + a rotation re-attesting {a/notes}) and then back-fills
+// the a/notes sub-chain — whose establishing entry legitimately bears the OLD epoch —
+// must still accept it, while a non-carried old-epoch domain is rejected.
+func TestDomainAddCarriedBackfillsToLaggingMember(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctl1Pub, ctl1Key := seedGroup(t, ms, "g1", "chain-ctl1")
+	ctl2Pub, ctl2Key, _ := ed25519.GenerateKey(nil)
+	aPub, aKey, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-ctl2", store.GroupRoleFullSync, ctl2Pub)
+	seedActiveMember(t, ms, "g1", "chain-a", store.GroupRoleFullSync, aPub)
+
+	// Roster only: genesis, then a rotation to ctl2 that re-attests {a/notes} — the
+	// lagging member has NOT yet pulled the a/notes domain sub-chain.
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl1", ctl1Pub, ctl1Key,
+		genesisCreatePayload("chain-ctl1", ctl1Pub))
+	carried, _ := encodeSelectedDomains([]string{"a/notes"})
+	rot := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "epoch_rotate", "chain-ctl1", ctl1Pub, ctl1Key,
+		epochRotatePayload("e2", "chain-ctl2", hex.EncodeToString(ctl2Pub), carried))
+	attachControllerSignature(&rot, "e2", "chain-ctl2", ctl2Pub, ctl2Key)
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0, rot); err != nil || n != 2 {
+		t.Fatalf("seed roster (genesis + rotation): n=%d err=%v", n, err)
+	}
+
+	// Back-fill a/notes: establishing entry bears the OLD epoch (epoch-0) but the tag
+	// was re-attested by the current controller, so it MUST be accepted.
+	notesSub := DomainSubchain("a/notes")
+	notes := mustEntry(t, "g1", notesSub, 0, "", "domain_add", "chain-a", aPub, aKey, domainAddPayload("a/notes", "chain-a", 0))
+	attachControllerSignature(&notes, effectiveControllerEpoch(""), "chain-ctl1", ctl1Pub, ctl1Key)
+	if n, err := ingestRoster(t, m, ms, "g1", notesSub, notes); err != nil || n != 1 {
+		t.Fatalf("carried domain back-fill rejected (H-1 fix broke legitimate propagation): n=%d err=%v", n, err)
+	}
+	if active, _ := ms.ListSyncGroupDomains(ctx, "g1", true); !domainActive(active, "a/notes") {
+		t.Fatalf("carried domain a/notes did not back-fill")
+	}
+
+	// A NON-carried old-epoch domain on the same lagging member is still rejected.
+	evilSub := DomainSubchain("a/evil")
+	evil := mustEntry(t, "g1", evilSub, 0, "", "domain_add", "chain-a", aPub, aKey, domainAddPayload("a/evil", "chain-a", 0))
+	attachControllerSignature(&evil, effectiveControllerEpoch(""), "chain-ctl1", ctl1Pub, ctl1Key)
+	if n, err := ingestRoster(t, m, ms, "g1", evilSub, evil); err == nil || n != 0 {
+		t.Fatalf("non-carried stale-epoch domain admitted on lagging member: n=%d err=%v", n, err)
+	}
+}
+
+// TestMemberActivateCannotResurrectRemovedMember: a controller-authored
+// member_activate must NOT flip a removed/left member back to Active reusing its
+// stale role/consent — re-entry requires a fresh, invitee-co-signed member_invite.
+func TestMemberActivateCannotResurrectRemovedMember(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	bPub, bKey, _ := ed25519.GenerateKey(nil)
+
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
+	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
+		signedMemberInvitePayload(t, "g1", "chain-b", bPub, bKey, store.GroupRoleFullSync, "pinB"))
+	e2 := mustEntry(t, "g1", RosterSubchain, 2, e1.EntryHash, "member_activate", "chain-ctl", ctlPub, ctlKey,
+		memberChainPayload("chain-b"))
+	e3 := mustEntry(t, "g1", RosterSubchain, 3, e2.EntryHash, "member_leave", "chain-b", bPub, bKey,
+		memberChainPayload("chain-b"))
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0, e1, e2, e3); err != nil || n != 4 {
+		t.Fatalf("invite+activate+leave: n=%d err=%v", n, err)
+	}
+	if mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-b"); mem == nil || mem.MemberState != store.GroupMemberLeft {
+		t.Fatalf("B should be left before the resurrection attempt: %+v", mem)
+	}
+
+	// A bare controller-authored member_activate(B) is a LOGGED no-op — B stays left.
+	e4 := mustEntry(t, "g1", RosterSubchain, 4, e3.EntryHash, "member_activate", "chain-ctl", ctlPub, ctlKey,
+		memberChainPayload("chain-b"))
+	if _, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e4); err != nil {
+		t.Fatalf("resurrect attempt should be a logged no-op, not an error: %v", err)
+	}
+	if mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-b"); mem == nil || mem.MemberState != store.GroupMemberLeft {
+		t.Fatalf("member_activate resurrected a left member (state=%v) — lifecycle guard missing", mem.MemberState)
+	}
+}
+
+// TestMemberRemoveRetiresConsentRows: removing a member retires its active
+// receive-consent rows so no stale entitlement can keep serving to it (and a later
+// re-enrollment cannot silently inherit pre-removal consent).
+func TestMemberRemoveRetiresConsentRows(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	aPub, aKey, _ := ed25519.GenerateKey(nil)
+	bPub, _, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-a", store.GroupRoleFullSync, aPub)
+	seedActiveMember(t, ms, "g1", "chain-b", store.GroupRoleSelectiveSync, bPub)
+
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0); err != nil || n != 1 {
+		t.Fatalf("group_create: n=%d err=%v", n, err)
+	}
+	// Establish a shared domain x/a (owned by A, co-signed by the current controller)
+	// so B's consent to it becomes an ACTIVE entitlement row.
+	xaSub := DomainSubchain("x/a")
+	xa := mustEntry(t, "g1", xaSub, 0, "", "domain_add", "chain-a", aPub, aKey, domainAddPayload("x/a", "chain-a", 0))
+	attachControllerSignature(&xa, effectiveControllerEpoch(""), "chain-ctl", ctlPub, ctlKey)
+	if n, err := ingestRoster(t, m, ms, "g1", xaSub, xa); err != nil || n != 1 {
+		t.Fatalf("establish x/a: n=%d err=%v", n, err)
+	}
+	if err := ms.ReplaceGroupMemberConsentDomains(ctx, "g1", "chain-b", []string{"x/a"}, 1); err != nil {
+		t.Fatalf("seed B consent: %v", err)
+	}
+	if got, _ := ms.ListGroupMemberConsentDomains(ctx, "g1", "chain-b"); len(got) != 1 {
+		t.Fatalf("B should hold an active consent row for x/a before removal: %+v", got)
+	}
+
+	rm := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_remove", "chain-ctl", ctlPub, ctlKey,
+		memberChainPayload("chain-b"))
+	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, rm); err != nil || n != 1 {
+		t.Fatalf("member_remove: n=%d err=%v", n, err)
+	}
+	if mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-b"); mem == nil || mem.MemberState != store.GroupMemberRemoved {
+		t.Fatalf("B should be removed: %+v", mem)
+	}
+	if got, _ := ms.ListGroupMemberConsentDomains(ctx, "g1", "chain-b"); len(got) != 0 {
+		t.Fatalf("member_remove did not retire B's active consent rows: %+v", got)
 	}
 }
 

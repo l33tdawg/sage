@@ -534,6 +534,16 @@ func (m *Manager) EmitEpochRotate(ctx context.Context, groupID, newEpoch, incomi
 	if newEpoch == "" || effectiveControllerEpoch(newEpoch) == gs.controllerEpoch {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("new epoch must differ from the current epoch")
 	}
+	// H-1: the outgoing controller re-attests the currently-active shared domain set
+	// into the rotation. The incoming controller independently re-derives and
+	// verifies this set before countersigning (handleEpochRotateCosign), and it
+	// becomes the authority under which a post-rotation domain_add bearing an old
+	// epoch may still admit (carried) — a rotated-out controller cannot mint new
+	// shared domains with its retained stale-epoch key.
+	carriedEnc, carriedErr := activeCarriedDomains(ctx, ss, groupID)
+	if carriedErr != nil {
+		return store.SyncGroupLogEntry{}, carriedErr
+	}
 	m.journalMu.Lock()
 	head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, RosterSubchain)
 	seq, prev := int64(0), ""
@@ -541,7 +551,7 @@ func (m *Manager) EmitEpochRotate(ctx context.Context, groupID, newEpoch, incomi
 		seq, prev = head.Seq+1, head.EntryHash
 	}
 	entry, buildErr := buildJournalEntry(groupID, RosterSubchain, seq, prev, "epoch_rotate", m.localChainID, m.agentPub, m.agentKey,
-		epochRotatePayload(newEpoch, incomingChain, incomingPubHex))
+		epochRotatePayload(newEpoch, incomingChain, incomingPubHex, carriedEnc))
 	m.journalMu.Unlock()
 	if err != nil {
 		return store.SyncGroupLogEntry{}, err
@@ -605,6 +615,17 @@ func (m *Manager) handleEpochRotateCosign(w http.ResponseWriter, r *http.Request
 	}
 	if err != nil || req.Entry.Seq != wantSeq || req.Entry.PrevHash != wantPrev {
 		httpError(w, http.StatusConflict, "epoch rotation is not based on the current roster head")
+		return
+	}
+	// H-1: the incoming controller INDEPENDENTLY re-derives the active shared domain
+	// set and refuses to countersign unless the outgoing controller's carried_domains
+	// re-attestation matches it exactly — so a rotated-out controller cannot pre-seed
+	// (nor silently drop) a tag in the set the new controller vouches for. That set is
+	// the authority under which later stale-epoch domain_adds may still admit.
+	wantCarried, carriedErr := activeCarriedDomains(r.Context(), ss, req.GroupID)
+	gotCarried, gotErr := encodeSelectedDomains(decodeSelectedDomains(p[pkCarriedDomains]))
+	if carriedErr != nil || gotErr != nil || gotCarried != wantCarried {
+		httpError(w, http.StatusForbidden, "epoch rotation carried domain set does not match the active shared set")
 		return
 	}
 	attachControllerSignature(&req.Entry, effectiveControllerEpoch(p[pkEpoch]), m.localChainID, m.agentPub, m.agentKey)

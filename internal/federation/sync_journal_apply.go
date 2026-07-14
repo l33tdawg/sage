@@ -66,6 +66,17 @@ const (
 	// resolve() only widens WHO may author the role_change (the member itself), never
 	// what it grants — consent is read/serve-only and never a write-authz vehicle.
 	pkSelectedDomains = "selected_domains"
+	// pkCarriedDomains rides on an epoch_rotate: the JSON-encoded, sorted set of
+	// currently-active shared domain tags that the INCOMING controller re-attests
+	// across the rotation. It is the anti-forgery anchor for stale-epoch domain
+	// admission (H-1): a domain_add whose controller countersignature is at an OLD
+	// (rotated-out) epoch is admissible ONLY for a tag in this current-controller
+	// attested set, so a rotated-out controller cannot mint or re-widen shared
+	// domains with its retained stale-epoch key, while a legitimately-carried domain
+	// still back-fills to lagging members. The incoming controller verifies this set
+	// == its own active projection at cosign time (handleEpochRotateCosign), so the
+	// outgoing controller cannot pre-attest a tag it will later establish.
+	pkCarriedDomains = "carried_domains"
 )
 
 // syncJournalMaxRevisionJump bounds how far a single manifest may advance
@@ -94,8 +105,8 @@ func domainAddPayload(domainTag, ownerChain string, maxClearance int) map[string
 func domainRemovePayload(domainTag string) map[string]string {
 	return map[string]string{pkDomainTag: domainTag}
 }
-func epochRotatePayload(epoch, controllerChain, controllerPubkeyHex string) map[string]string {
-	return map[string]string{pkEpoch: epoch, pkControllerChain: controllerChain, pkControllerPubkey: controllerPubkeyHex}
+func epochRotatePayload(epoch, controllerChain, controllerPubkeyHex, carriedDomainsEnc string) map[string]string {
+	return map[string]string{pkEpoch: epoch, pkControllerChain: controllerChain, pkControllerPubkey: controllerPubkeyHex, pkCarriedDomains: carriedDomainsEnc}
 }
 func manifestPayload(rosterRevision int64, manifestHash string) map[string]string {
 	return map[string]string{pkRosterRevision: strconv.FormatInt(rosterRevision, 10), pkManifestHash: manifestHash}
@@ -122,6 +133,37 @@ func decodeSelectedDomains(enc string) []string {
 		return nil
 	}
 	return out
+}
+
+// carriedDomainSet decodes the pkCarriedDomains JSON array (encodeSelectedDomains
+// on the emit side) into a set. A missing/malformed value yields an EMPTY set —
+// fail-closed: a rotation that re-attested nothing admits nothing under an old
+// epoch, so a domain_add must then bear the CURRENT epoch to be resolvable.
+func carriedDomainSet(enc string) map[string]struct{} {
+	set := map[string]struct{}{}
+	for _, tag := range decodeSelectedDomains(enc) {
+		if tag != "" {
+			set[tag] = struct{}{}
+		}
+	}
+	return set
+}
+
+// activeCarriedDomains returns the canonical (sorted, deduped) JSON encoding of a
+// group's currently-active shared domain tags — the pkCarriedDomains re-attestation
+// an epoch_rotate carries (H-1). The outgoing controller (author) and the incoming
+// controller (cosigner) each compute it from their OWN active projection and must
+// agree, so neither side can inject or silently drop a tag.
+func activeCarriedDomains(ctx context.Context, ss *store.SQLiteStore, groupID string) (string, error) {
+	active, err := ss.ListSyncGroupDomains(ctx, groupID, true)
+	if err != nil {
+		return "", err
+	}
+	tags := make([]string, 0, len(active))
+	for _, d := range active {
+		tags = append(tags, d.DomainTag)
+	}
+	return encodeSelectedDomains(tags)
 }
 
 func decodeOwnedDomains(enc string) ([]string, error) {
@@ -160,6 +202,12 @@ type groupApplyState struct {
 	memberKey           map[string]ed25519.PublicKey
 	memberState         map[string]string
 	domainOwner         map[string]string // active AND removed (owner is needed to verify a domain_remove)
+	// domainAttested is the set of shared domain tags the CURRENT controller
+	// re-attested at the most recent epoch_rotate (pkCarriedDomains). A domain_add
+	// carrying an OLD-epoch controller countersignature is admissible ONLY for a tag
+	// in this set (see resolve()) — this is what makes an epoch rotation actually
+	// REVOKE a rotated-out controller's domain-admission authority (H-1).
+	domainAttested      map[string]struct{}
 	rosterRevision      int64
 	rosterRevisionFloor int64
 	// evictedChains / removedDomains accumulate the members and domains that
@@ -191,7 +239,7 @@ func loadGroupApplyState(ctx context.Context, ss *store.SQLiteStore, groupID str
 		groupID: groupID, controllerChain: g.ControllerChainID, controllerEpoch: effectiveControllerEpoch(g.Epoch),
 		rosterRevision: g.RosterRevision, rosterRevisionFloor: g.RosterRevisionFloor,
 		memberKey: map[string]ed25519.PublicKey{}, memberState: map[string]string{}, domainOwner: map[string]string{},
-		controllerByEpoch: map[string]controllerIdentity{},
+		controllerByEpoch: map[string]controllerIdentity{}, domainAttested: map[string]struct{}{},
 	}
 	if k, e := decodePub(g.ControllerAgentPubkey); e == nil {
 		gs.controllerKey = k
@@ -223,6 +271,11 @@ func loadGroupApplyState(ctx context.Context, ss *store.SQLiteStore, groupID str
 				epoch := effectiveControllerEpoch(p[pkEpoch])
 				if keyErr == nil && entry.ControllerEpoch == epoch && verifyControllerSignature(entry, p[pkControllerChain], key) == nil {
 					gs.controllerByEpoch[epoch] = controllerIdentity{chain: p[pkControllerChain], key: key}
+					if epoch == gs.controllerEpoch {
+						// The rotation that installed the CURRENT controller carries the
+						// authoritative re-attested domain set for stale-epoch admission.
+						gs.domainAttested = carriedDomainSet(p[pkCarriedDomains])
+					}
 				}
 			}
 			after = entry.Seq
@@ -310,6 +363,20 @@ func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey 
 			if !ok || verifyControllerSignature(e, controller.chain, controller.key) != nil {
 				return nil
 			}
+			// H-1: a valid countersignature from a PAST controller epoch is NOT
+			// sufficient — an epoch rotation must revoke a rotated-out controller's
+			// domain-admission authority. A domain_add is admissible under an OLD
+			// epoch ONLY for a tag the CURRENT controller re-attested across the
+			// rotation (gs.domainAttested, from the epoch_rotate carried set);
+			// anything else MUST bear the current epoch. This blocks a rotated-out
+			// controller from minting or re-widening shared domains with its retained
+			// stale-epoch key, while a legitimately-carried domain still back-fills to
+			// a lagging member whose establishing entry bears the old epoch.
+			if e.ControllerEpoch != gs.controllerEpoch {
+				if _, attested := gs.domainAttested[tag]; !attested {
+					return nil
+				}
+			}
 		}
 		owner, known := gs.domainOwner[tag]
 		if !known {
@@ -396,6 +463,19 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		if _, known := gs.memberKey[mc]; !known {
 			return nil // SKIP: unknown member (its invite was skipped)
 		}
+		// A member_activate only COMPLETES a pending enrollment (invited/resyncing) or
+		// is an idempotent replay on a live member. It must NEVER resurrect a
+		// removed/left member: re-entry requires a fresh, invitee-co-signed
+		// member_invite (which re-checks the CA pin + treaty domains and re-establishes
+		// consent). Without this guard a controller could flip a removed/left member
+		// back to active reusing its STALE role + consent, bypassing consent-reset-on-
+		// rejoin. Allow-list the valid pre-states so an unexpected state fails closed.
+		switch gs.memberState[mc] {
+		case store.GroupMemberInvited, store.GroupMemberResyncing, store.GroupMemberActive:
+			// ok: complete enrollment / resync, or idempotent replay
+		default:
+			return nil // SKIP: cannot activate a removed/left (or unknown-state) member
+		}
 		if err := ss.SetSyncGroupMemberState(ctx, gs.groupID, mc, store.GroupMemberActive, 0); err != nil {
 			return err
 		}
@@ -421,6 +501,17 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 			MemberChainID: mc, Reason: e.EntryType, Revision: gs.rosterRevision, Subchain: e.Subchain,
 			JournalSeq: e.Seq, AuthorChainID: e.AuthorChainID, AuthorSig: e.AuthorSig,
 		}); err != nil {
+			return err
+		}
+		// Retire the departed member's receive-consent and owned-domain rows so a
+		// stale entitlement snapshot can never keep content serving to it, and a later
+		// re-enrollment cannot silently inherit pre-removal consent (revocation
+		// completeness — pairs with the member_activate lifecycle guard above). Both
+		// are revision-guarded / idempotent, so a journal replay re-stamps nothing.
+		if err := ss.ReplaceGroupMemberConsentDomains(ctx, gs.groupID, mc, nil, gs.rosterRevision); err != nil {
+			return err
+		}
+		if err := ss.ReplaceGroupMemberOwnerDomains(ctx, gs.groupID, mc, nil); err != nil {
 			return err
 		}
 		gs.memberState[mc] = state
@@ -558,6 +649,10 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		gs.controllerKey = ck
 		gs.controllerEpoch = effectiveControllerEpoch(p[pkEpoch])
 		gs.controllerByEpoch[gs.controllerEpoch] = controllerIdentity{chain: cc, key: ck}
+		// The incoming controller's re-attested domain set becomes the authoritative
+		// stale-epoch admission anchor (H-1). It was verified == the incoming
+		// controller's own active projection at cosign time (handleEpochRotateCosign).
+		gs.domainAttested = carriedDomainSet(p[pkCarriedDomains])
 
 	case "manifest":
 		rev, err := strconv.ParseInt(p[pkRosterRevision], 10, 64)
@@ -631,6 +726,13 @@ func validateAuthoredEntry(e store.SyncGroupLogEntry) error {
 	case "epoch_rotate":
 		if p[pkEpoch] == "" || p[pkControllerChain] == "" || badPub(p[pkControllerPubkey]) {
 			return fmt.Errorf("epoch_rotate: malformed controller identity")
+		}
+		// The carried-domain re-attestation (H-1) is mandatory and must be a
+		// well-formed JSON array (possibly empty "[]" for a group with no shared
+		// domains); a missing/garbled set would silently re-attest nothing.
+		var carried []string
+		if p[pkCarriedDomains] == "" || json.Unmarshal([]byte(p[pkCarriedDomains]), &carried) != nil {
+			return fmt.Errorf("epoch_rotate: malformed carried_domains re-attestation")
 		}
 	case "manifest":
 		if _, err := strconv.ParseInt(p[pkRosterRevision], 10, 64); err != nil {
