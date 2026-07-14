@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -72,6 +73,55 @@ func TestSyncDigestPagingAndConsent(t *testing.T) {
 	// Missing domain -> 400.
 	rr, _ := digestAs(t, m, peer, SyncDigestRequest{})
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
+}
+
+func TestGroupDigestServeLeaseLinearizesMemberRemoval(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	seedGroup(t, ms, "g1", "chain-ctl")
+	for _, chain := range []string{"chain-local", "chain-peer"} {
+		require.NoError(t, ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+			GroupID: "g1", MemberChainID: chain, Role: store.GroupRoleFullSync,
+			MemberState: store.GroupMemberActive,
+		}))
+	}
+	require.NoError(t, ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
+		GroupID: "g1", DomainTag: "hr", OwnerChainID: "chain-local", AddedRevision: 1,
+	}))
+
+	body, err := json.Marshal(SyncDigestRequest{GroupID: "g1", Domain: "hr"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/digest", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: "chain-peer"}))
+	bw := newBlockingResponseWriter()
+	served := make(chan struct{})
+	go func() { m.handleSyncDigest(bw, req); close(served) }()
+	<-bw.entered
+
+	removalStarted := make(chan struct{})
+	removalDone := make(chan struct{})
+	go func() {
+		close(removalStarted)
+		unlock := ms.LockSyncPolicyWrite()
+		_ = ms.SetSyncGroupMemberState(ctx, "g1", "chain-peer", store.GroupMemberRemoved, 1)
+		unlock()
+		close(removalDone)
+	}()
+	<-removalStarted
+	select {
+	case <-removalDone:
+		t.Fatal("member removal returned while a stale-policy group digest response was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(bw.release)
+	<-served
+	<-removalDone
+	assert.Equal(t, http.StatusOK, bw.status)
+
+	rr, resp := digestAs(t, m, &peerIdentity{ChainID: "chain-peer"}, SyncDigestRequest{GroupID: "g1", Domain: "hr"})
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Nil(t, resp, "no post-removal group digest may be served")
 }
 
 func TestSyncReconcileBackfillsAndSettles(t *testing.T) {

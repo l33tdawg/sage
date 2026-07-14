@@ -30,6 +30,7 @@ type Config struct {
 	Embedding  EmbeddingConfig  `yaml:"embedding"`
 	Encryption EncryptionConfig `yaml:"encryption"`
 	Quorum     QuorumConfig     `yaml:"quorum"`
+	RBAC       RBACConfig       `yaml:"rbac,omitempty"`
 	// NOT omitempty: the default is enabled=true, so a zero FederationConfig
 	// (enabled=false, the operator's explicit "off") must be written as
 	// `federation: {enabled: false}`. With omitempty the off-state would be
@@ -136,6 +137,18 @@ type QuorumConfig struct {
 	Peers   []string `yaml:"peers,omitempty"`    // Persistent peers (nodeID@host:port)
 	P2PAddr string   `yaml:"p2p_addr,omitempty"` // P2P listen address (default: tcp://0.0.0.0:26656)
 	TLSAddr string   `yaml:"tls_addr,omitempty"` // TLS REST listen address (default: 0.0.0.0:8443)
+}
+
+// RBACConfig controls local-agent domain-access policy for this node. It is a
+// per-node operator preference (never consensus state).
+type RBACConfig struct {
+	// Strict opts the operator OUT of the app-v19 local-agents-default-READ flip.
+	// Default false: once the app-v19 fork activates, a non-admin local agent may
+	// READ the operator's unclassified domains it is not explicitly granted (WRITE
+	// stays own-domain-scoped; classified domains keep clearance gates). Setting it
+	// true confines every non-admin agent to its explicit DomainAccess allowlist
+	// even after app-v19 activates. Has no effect before activation.
+	Strict bool `yaml:"strict,omitempty"`
 }
 
 // EncryptionConfig controls AES-256-GCM encryption of memory content at rest.

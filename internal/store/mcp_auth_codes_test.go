@@ -40,7 +40,7 @@ func TestAuthCode_IssueRedeem_Happy(t *testing.T) {
 		"https://chat.openai.com/cb", "chatgpt", "state-abc",
 		"BEARER-PLAINTEXT-1", 5*time.Minute))
 
-	bearer, err := s.RedeemAuthCode(ctx, "code-1", verifier, "https://chat.openai.com/cb")
+	bearer, err := s.RedeemAuthCode(ctx, "code-1", verifier, "https://chat.openai.com/cb", "chatgpt")
 	require.NoError(t, err)
 	assert.Equal(t, "BEARER-PLAINTEXT-1", bearer)
 }
@@ -55,11 +55,11 @@ func TestAuthCode_Redeem_SingleUse(t *testing.T) {
 		"https://chat.openai.com/cb", "chatgpt", "", "BEARER-2", time.Minute))
 
 	// First redeem succeeds.
-	_, err := s.RedeemAuthCode(ctx, "code-2", verifier, "https://chat.openai.com/cb")
+	_, err := s.RedeemAuthCode(ctx, "code-2", verifier, "https://chat.openai.com/cb", "chatgpt")
 	require.NoError(t, err)
 
 	// Second redeem fails with ErrAuthCodeUsed.
-	_, err = s.RedeemAuthCode(ctx, "code-2", verifier, "https://chat.openai.com/cb")
+	_, err = s.RedeemAuthCode(ctx, "code-2", verifier, "https://chat.openai.com/cb", "chatgpt")
 	assert.True(t, errors.Is(err, ErrAuthCodeUsed), "expected ErrAuthCodeUsed, got %v", err)
 }
 
@@ -72,7 +72,7 @@ func TestAuthCode_Redeem_PKCEMismatch(t *testing.T) {
 		"code-3", "tok-3", challenge, "S256",
 		"https://chat.openai.com/cb", "chatgpt", "", "BEARER-3", time.Minute))
 
-	_, err := s.RedeemAuthCode(ctx, "code-3", "wrong-verifier-wrong-verifier-12345", "https://chat.openai.com/cb")
+	_, err := s.RedeemAuthCode(ctx, "code-3", "wrong-verifier-wrong-verifier-12345", "https://chat.openai.com/cb", "chatgpt")
 	assert.True(t, errors.Is(err, ErrAuthCodePKCEMismatch), "expected PKCE mismatch, got %v", err)
 }
 
@@ -85,8 +85,25 @@ func TestAuthCode_Redeem_RedirectMismatch(t *testing.T) {
 		"code-4", "tok-4", challenge, "S256",
 		"https://chat.openai.com/cb", "chatgpt", "", "BEARER-4", time.Minute))
 
-	_, err := s.RedeemAuthCode(ctx, "code-4", verifier, "https://evil.example.com/cb")
+	_, err := s.RedeemAuthCode(ctx, "code-4", verifier, "https://evil.example.com/cb", "chatgpt")
 	assert.True(t, errors.Is(err, ErrAuthCodeRedirectMismatch), "expected redirect mismatch, got %v", err)
+}
+
+func TestAuthCode_Redeem_ClientMismatchPreservesCodeForBoundClient(t *testing.T) {
+	s := newAuthCodeStore(t)
+	ctx := context.Background()
+	verifier := "verifier-for-client-binding-regression-12345"
+	require.NoError(t, s.IssueAuthCode(ctx,
+		"code-client", "tok-client", pkceChallenge(verifier), "S256",
+		"https://chat.openai.com/cb", "client-a", "", "BEARER-CLIENT", time.Minute))
+
+	_, err := s.RedeemAuthCode(ctx, "code-client", verifier, "https://chat.openai.com/cb", "client-b")
+	require.ErrorIs(t, err, ErrAuthCodeClientMismatch)
+	// A mismatch is not a claim: the client the code was issued to can still
+	// redeem it, proving same-redirect public clients cannot steal each other.
+	bearer, err := s.RedeemAuthCode(ctx, "code-client", verifier, "https://chat.openai.com/cb", "client-a")
+	require.NoError(t, err)
+	require.Equal(t, "BEARER-CLIENT", bearer)
 }
 
 func TestAuthCode_Redeem_Expired(t *testing.T) {
@@ -102,13 +119,13 @@ func TestAuthCode_Redeem_Expired(t *testing.T) {
 
 	time.Sleep(2 * time.Millisecond)
 
-	_, err := s.RedeemAuthCode(ctx, "code-5", verifier, "https://chat.openai.com/cb")
+	_, err := s.RedeemAuthCode(ctx, "code-5", verifier, "https://chat.openai.com/cb", "chatgpt")
 	assert.True(t, errors.Is(err, ErrAuthCodeExpired), "expected expired, got %v", err)
 }
 
 func TestAuthCode_Redeem_NotFound(t *testing.T) {
 	s := newAuthCodeStore(t)
-	_, err := s.RedeemAuthCode(context.Background(), "ghost", "v", "https://x/cb")
+	_, err := s.RedeemAuthCode(context.Background(), "ghost", "v", "https://x/cb", "chatgpt")
 	assert.True(t, errors.Is(err, ErrAuthCodeNotFound), "expected not-found, got %v", err)
 }
 
@@ -147,6 +164,9 @@ func TestAuthCode_Purge(t *testing.T) {
 	s := newAuthCodeStore(t)
 	ctx := context.Background()
 
+	// The OAuth issuer's token is active before the code expires; purge must
+	// retire it atomically with the abandoned authorization code.
+	require.NoError(t, s.InsertMCPToken(ctx, "tok-p", "purge", "operator", mkDigest("BEARER-P")))
 	require.NoError(t, s.IssueAuthCode(ctx,
 		"code-purge", "tok-p", pkceChallenge("v"), "S256",
 		"https://x/cb", "chatgpt", "", "BEARER-P", time.Nanosecond))
@@ -157,8 +177,10 @@ func TestAuthCode_Purge(t *testing.T) {
 	assert.Equal(t, int64(1), n)
 
 	// Purged → not found.
-	_, err = s.RedeemAuthCode(ctx, "code-purge", "v", "https://x/cb")
+	_, err = s.RedeemAuthCode(ctx, "code-purge", "v", "https://x/cb", "chatgpt")
 	assert.True(t, errors.Is(err, ErrAuthCodeNotFound))
+	_, err = s.LookupMCPToken(ctx, mkDigest("BEARER-P"))
+	assert.True(t, errors.Is(err, ErrTokenRevoked), "expired unredeemed code must revoke its bearer")
 }
 
 func TestAuthCode_BearerWipedAfterRedeem(t *testing.T) {
@@ -170,7 +192,7 @@ func TestAuthCode_BearerWipedAfterRedeem(t *testing.T) {
 		"code-w", "tok-w", challenge, "S256",
 		"https://chat.openai.com/cb", "chatgpt", "", "BEARER-W", time.Minute))
 
-	_, err := s.RedeemAuthCode(ctx, "code-w", verifier, "https://chat.openai.com/cb")
+	_, err := s.RedeemAuthCode(ctx, "code-w", verifier, "https://chat.openai.com/cb", "chatgpt")
 	require.NoError(t, err)
 
 	// Inspect the row directly — bearer_plaintext should be NULL after redeem.

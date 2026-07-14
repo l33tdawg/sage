@@ -39,6 +39,8 @@ import (
 	"testing"
 	"text/template"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/store"
 )
 
 // cloudflaredBin returns the path/name of the cloudflared binary to invoke.
@@ -1119,6 +1121,17 @@ func (h *DashboardHandler) handleWizardMintToken(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusServiceUnavailable, "node operator identity unavailable — MCP tokens cannot be issued")
 		return
 	}
+	// Token issuance is stronger than the wizard's general local-process gate.
+	// Require either the exact verified operator signing principal installed by
+	// authMiddleware, or a genuine encrypted-dashboard session. Unsigned
+	// loopback/no-Origin callers and arbitrary signed agents must never cause an
+	// operator-owned bearer to be minted.
+	verifiedOperator := verifiedDashboardAgentID(r.Context()) == operatorID
+	operatorSession := h.Encrypted.Load() && h.HasValidSessionCookie(r)
+	if !verifiedOperator && !operatorSession {
+		writeError(w, http.StatusForbidden, "node operator authorization required to mint MCP tokens")
+		return
+	}
 	if req.AgentID != "" && req.AgentID != operatorID {
 		writeError(w, http.StatusBadRequest, "remote MCP connections run as the local node operator; choose the operator identity")
 		return
@@ -1131,7 +1144,7 @@ func (h *DashboardHandler) handleWizardMintToken(w http.ResponseWriter, r *http.
 	}
 
 	// Mint the token using the same primitives as the api/rest handler.
-	token, id, createdAt, err := mintMCPTokenForWizard(r.Context(), ts, operatorID, req.TokenName)
+	token, id, actingAgentID, createdAt, err := mintMCPTokenForWizard(r.Context(), ts, operatorID, req.TokenName)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "mint token: "+err.Error())
 		return
@@ -1139,7 +1152,7 @@ func (h *DashboardHandler) handleWizardMintToken(w http.ResponseWriter, r *http.
 
 	writeJSONResp(w, http.StatusCreated, map[string]any{
 		"id":         id,
-		"agent_id":   operatorID,
+		"agent_id":   actingAgentID,
 		"name":       req.TokenName,
 		"token":      token,
 		"created_at": createdAt.Format(time.RFC3339),
@@ -1152,5 +1165,5 @@ func (h *DashboardHandler) handleWizardMintToken(w http.ResponseWriter, r *http.
 // stays decoupled from the api/rest sibling package while still issuing
 // real, audit-equivalent MCP tokens.
 type mcpWizardTokenStore interface {
-	InsertMCPToken(ctx context.Context, id, name, agentID, tokenSHA256 string) error
+	IssueMCPToken(ctx context.Context, name, issuerID, legacyAgentID, provider string) (*store.MCPTokenIssue, error)
 }

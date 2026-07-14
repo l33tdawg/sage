@@ -192,6 +192,25 @@ const (
 	// receiver a full consensus round per attempt, so the sender treats it as a
 	// #14-class dead-end (attempts-capped), not an infinite cheap retry.
 	SyncOutcomeRejectedWriteAccess = "rejected_write_access"
+	// SyncOutcomeRejectedOriginSig: the item carried an origin signature that
+	// did not verify against the origin agent's key — a forged / corrupted /
+	// mis-attributed item (v11.8 mesh-backfill anti-forgery, docs §4.4).
+	// Content-derived and terminal: it will never verify, so the sender must
+	// not retry it forever.
+	SyncOutcomeRejectedOriginSig = "rejected_origin_sig"
+	// SyncOutcomeSuppressed: the receiver locally deleted this origin memory and
+	// holds a memory-scope local_suppress tombstone for it (docs §10 Gate 6.5).
+	// TERMINAL and anti-resurrection: the item is NOT recorded to sync_origin and
+	// NEVER broadcast, and the sender must never redeliver it (a local delete on
+	// the receiver is durable and sovereign). This is the RECEIVER-INTERNAL value;
+	// handleSyncPush COLLAPSES it to the generic SyncOutcomeRejectedNotAdmitted on the
+	// wire so the sender learns "not admitted", never that a tombstone exists (I5).
+	SyncOutcomeSuppressed = "suppressed"
+	// SyncOutcomeRejectedNotAdmitted is the generic terminal wire reason a suppressed
+	// item is reported as (I5): indistinguishable from an ordinary durable reject, so a
+	// pushing peer cannot learn that the receiver sovereignly deleted the item. Terminal
+	// on the sender (never retried) — it is ONLY ever emitted for a local_suppress hit.
+	SyncOutcomeRejectedNotAdmitted = "rejected_not_admitted"
 	SyncOutcomeRetry               = "retry"
 )
 
@@ -211,6 +230,15 @@ type SyncItem struct {
 	Content         string   `json:"content"`
 	ContentHash     string   `json:"content_hash"`
 	Tags            []string `json:"tags,omitempty"`
+	// OriginSig is the ORIGIN agent's ed25519 signature over the canonical
+	// provenance+content+classification bytes (originSigMessage). It is produced
+	// at the origin's native commit and carried VERBATIM by every relayer, so a
+	// v11.8 group mesh-backfill relayer provably cannot forge, mis-attribute, or
+	// re-classify an item — it can only delay/withhold. OPTIONAL on the wire for
+	// rolling compatibility with pre-v11.8 2-node pairs (an empty sig skips
+	// verification); when present it is verified at admission BEFORE the
+	// idempotency step. Base64 on the wire (the ReceiptPush.ValSig convention).
+	OriginSig []byte `json:"origin_sig,omitempty"`
 }
 
 // SyncPushRequest is the body of POST /fed/v1/sync/push.
@@ -239,6 +267,11 @@ type SyncDigestRequest struct {
 	Domain string `json:"domain"`
 	After  string `json:"after,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
+	// GroupID selects the v11.8 multi-node backfill path (docs §9.2). When set,
+	// handleSyncDigest applies the membership+domain hard-gate and serves ANY
+	// origin chain's admitted ids for the shared domain (not just the requester's).
+	// Empty preserves the pairwise 2-node behaviour (origin_chain_id = requester).
+	GroupID string `json:"group_id,omitempty"`
 }
 
 // SyncDigestMaxIDs caps one digest page (~140KB of 64-char ids — well under

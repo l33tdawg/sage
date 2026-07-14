@@ -1,0 +1,501 @@
+package federation
+
+// v11.8 group journal engine (build step 3, docs/v11.8-PLAN.md §5).
+//
+// A synchronization group is coordinated OFF-CONSENSUS by a partitioned,
+// hash-chained, ed25519-signed audit JOURNAL (sync_group_log). This file is the
+// journal PRIMITIVE: a deterministic canonical encoding, per-entry hash-chaining
+// + signing, whole-sub-chain fold/verification with a per-entry author-key
+// resolver, and a serialized append. It deliberately does NOT interpret entry
+// semantics (apply a member_invite to the roster, compute the manifest over
+// reconstructed state, exchange sub-chains with peers) — that is steps 4-5.
+//
+// PARTITIONING (docs §5.2, the metadata-isolation fix): the journal is split into
+// a 'roster' sub-chain (replicated to all members) and independent per-domain
+// sub-chains 'domain:<tag>' (replicated only to members sharing that domain), so
+// a member never learns of a domain it does not share. Each sub-chain is an
+// independent hash chain keyed (group_id, subchain, seq).
+//
+// SOURCE OF TRUTH: the sync_group_log rows. sync_group.roster_journal_head /
+// roster_revision are a best-effort CACHE re-derivable by folding the log, so a
+// crash between an append and the cache advance is harmless (no TOCTOU window
+// that can corrupt state — the (group_id,subchain,seq) PK is the backstop and the
+// fold is authoritative).
+
+import (
+	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"sort"
+	"unicode/utf8"
+
+	"github.com/l33tdawg/sage/internal/store"
+)
+
+const (
+	// journalDomainSep domain-separates journal signatures from every other
+	// ed25519 signature in the system (federation requests, receipts, origin_sig).
+	journalDomainSep            = "sage-sync-journal-v1\x00"
+	controllerApprovalDomainSep = "sage-sync-controller-approval-v1\x00"
+	memberInviteProofDomainSep  = "sage-sync-member-invite-proof-v1\x00"
+	// RosterSubchain names the membership sub-chain (all members converge on it).
+	RosterSubchain = "roster"
+	// SyncJournalMaxPayloadBytes bounds one entry's canonical payload_json. Enforced
+	// fail-closed at BUILD and at INGEST (before any signature work), so a full
+	// SyncJournalMaxEntries page stays far under the transport's 16MB read limit and
+	// no over-limit entry can ever be authored or admitted — an over-limit entry
+	// embedded at seq N would otherwise wedge every peer's replication at N with no
+	// non-breaking cure once the wire format is frozen.
+	SyncJournalMaxPayloadBytes = 16 * 1024
+)
+
+// memberInviteProofBytes is the invitee half of a member_invite.  It binds the
+// group and every identity/policy field that the controller subsequently places
+// in the journal.  The invited public key verifies the proof; the controller's
+// journal signature is the independent second signature.
+func memberInviteProofBytes(groupID string, payload map[string]string) []byte {
+	b := []byte(memberInviteProofDomainSep)
+	b = lpAppend(b, groupID)
+	b = lpAppend(b, payload[pkMemberChain])
+	b = lpAppend(b, payload[pkMemberPubkey])
+	b = lpAppend(b, payload[pkRole])
+	b = lpAppend(b, payload[pkCAPin])
+	b = lpAppend(b, payload[pkSelectedDomains])
+	b = lpAppend(b, payload[pkOwnedDomains])
+	b = lpAppend(b, payload[pkInviteHead])
+	return b
+}
+
+func attachMemberInviteProof(groupID string, payload map[string]string, key ed25519.PrivateKey) {
+	payload[pkInviteeSig] = hex.EncodeToString(ed25519.Sign(key, memberInviteProofBytes(groupID, payload)))
+}
+
+func verifyMemberInviteProof(groupID string, payload map[string]string) error {
+	pub, err := decodePub(payload[pkMemberPubkey])
+	if err != nil {
+		return fmt.Errorf("invalid invitee public key")
+	}
+	sig, err := hex.DecodeString(payload[pkInviteeSig])
+	if err != nil || len(sig) != ed25519.SignatureSize || !ed25519.Verify(pub, memberInviteProofBytes(groupID, payload), sig) {
+		return fmt.Errorf("invitee proof is missing or invalid")
+	}
+	return nil
+}
+
+// controllerApprovalBytes binds the controller's distinct authorization role
+// to the exact immutable owner/outgoing-controller entry hash and epoch.  It is
+// deliberately outside the author's canonical bytes so the controller can
+// countersign an already-authored entry without invalidating that signature.
+func controllerApprovalBytes(e store.SyncGroupLogEntry) []byte {
+	b := []byte(controllerApprovalDomainSep)
+	b = lpAppend(b, e.GroupID)
+	b = lpAppend(b, e.Subchain)
+	b = lpAppend(b, e.EntryHash)
+	b = lpAppend(b, e.ControllerEpoch)
+	b = lpAppend(b, e.ControllerChainID)
+	b = lpAppend(b, e.ControllerAgentPubkey)
+	return b
+}
+
+func attachControllerSignature(e *store.SyncGroupLogEntry, epoch, chainID string, pub ed25519.PublicKey, key ed25519.PrivateKey) {
+	e.ControllerEpoch = epoch
+	e.ControllerChainID = chainID
+	e.ControllerAgentPubkey = hex.EncodeToString(pub)
+	e.ControllerSig = hex.EncodeToString(ed25519.Sign(key, controllerApprovalBytes(*e)))
+}
+
+func verifyControllerSignature(e store.SyncGroupLogEntry, expectedChain string, expectedPub ed25519.PublicKey) error {
+	if e.ControllerChainID != expectedChain || e.ControllerAgentPubkey != hex.EncodeToString(expectedPub) || e.ControllerEpoch == "" {
+		return fmt.Errorf("entry %s/%d: controller approval identity mismatch", e.Subchain, e.Seq)
+	}
+	sig, err := hex.DecodeString(e.ControllerSig)
+	if err != nil || !ed25519.Verify(expectedPub, controllerApprovalBytes(e), sig) {
+		return fmt.Errorf("entry %s/%d: controller approval signature invalid", e.Subchain, e.Seq)
+	}
+	return nil
+}
+
+// DomainSubchain names the per-domain audit sub-chain for a shared domain. Only
+// members whose group consent includes the domain ever receive it (docs §5.2).
+func DomainSubchain(domainTag string) string { return "domain:" + domainTag }
+
+func effectiveControllerEpoch(epoch string) string {
+	if epoch == "" {
+		return "epoch-0"
+	}
+	return epoch
+}
+
+// lpAppend appends a 4-byte big-endian length prefix followed by s — the
+// injective framing shared by every canonical encoder here.
+func lpAppend(b []byte, s string) []byte {
+	var n [4]byte
+	binary.BigEndian.PutUint32(n[:], uint32(len(s))) // #nosec G115 -- bounded inputs
+	b = append(b, n[:]...)
+	return append(b, []byte(s)...)
+}
+
+// canonicalPayloadBytes deterministically encodes a journal entry's payload: a
+// 4-byte key count, then each (key, value) pair in ascending key order, both
+// length-prefixed. Order-independent and injective, so two implementations
+// derive identical bytes for identical semantic content (docs §5.3).
+func canonicalPayloadBytes(payload map[string]string) []byte {
+	keys := make([]string, 0, len(payload))
+	for k := range payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, uint32(len(keys))) // #nosec G115 -- bounded
+	for _, k := range keys {
+		b = lpAppend(b, k)
+		b = lpAppend(b, payload[k])
+	}
+	return b
+}
+
+// entryCanonicalBytes builds the exact bytes hashed AND signed for one entry.
+// prev_hash is included, so entry_hash chains to its predecessor; every field an
+// author attests (group, subchain, seq, type, author identity, payload) is bound.
+func entryCanonicalBytes(groupID, subchain string, seq int64, prevHash, entryType, authorChainID, authorPubHex string, payload map[string]string) []byte {
+	b := make([]byte, 0, 128)
+	b = append(b, []byte(journalDomainSep)...)
+	b = lpAppend(b, groupID)
+	b = lpAppend(b, subchain)
+	var s8 [8]byte
+	binary.BigEndian.PutUint64(s8[:], uint64(seq)) // #nosec G115 -- seq non-negative
+	b = append(b, s8[:]...)
+	b = lpAppend(b, prevHash)
+	b = lpAppend(b, entryType)
+	b = lpAppend(b, authorChainID)
+	b = lpAppend(b, authorPubHex)
+	return append(b, canonicalPayloadBytes(payload)...)
+}
+
+// buildJournalEntry constructs a hash-chained, signed entry. prevHash is the
+// current sub-chain head ("" at genesis) and seq is head+1 (0 at genesis). The
+// payload map is stored as canonical JSON (readable for audit/dashboard) but the
+// hash+signature are over the length-prefixed form, so the digest is codec-robust
+// and independent of JSON escaping.
+func buildJournalEntry(groupID, subchain string, seq int64, prevHash, entryType, authorChainID string, authorPub ed25519.PublicKey, authorKey ed25519.PrivateKey, payload map[string]string) (store.SyncGroupLogEntry, error) {
+	if len(authorPub) != ed25519.PublicKeySize {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("invalid author pubkey")
+	}
+	if payload == nil {
+		payload = map[string]string{}
+	}
+	// Keys/values MUST be valid UTF-8 so json.Marshal->Unmarshal round-trips the map
+	// losslessly (0xFF would be coerced to U+FFFD, making the entry unverifiable).
+	for k, v := range payload {
+		if !utf8.ValidString(k) || !utf8.ValidString(v) {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("journal payload key/value must be valid UTF-8")
+		}
+	}
+	pj, err := json.Marshal(payload)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("marshal payload: %w", err)
+	}
+	if len(pj) > SyncJournalMaxPayloadBytes {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("journal payload %d bytes exceeds cap %d", len(pj), SyncJournalMaxPayloadBytes)
+	}
+	authorPubHex := hex.EncodeToString(authorPub)
+	cb := entryCanonicalBytes(groupID, subchain, seq, prevHash, entryType, authorChainID, authorPubHex, payload)
+	sum := sha256.Sum256(cb)
+	return store.SyncGroupLogEntry{
+		GroupID:           groupID,
+		Subchain:          subchain,
+		Seq:               seq,
+		PrevHash:          prevHash,
+		EntryHash:         hex.EncodeToString(sum[:]),
+		EntryType:         entryType,
+		PayloadJSON:       string(pj),
+		AuthorChainID:     authorChainID,
+		AuthorAgentPubkey: authorPubHex,
+		AuthorSig:         hex.EncodeToString(ed25519.Sign(authorKey, cb)),
+	}, nil
+}
+
+// verifyJournalEntry recomputes an entry's hash from its stored fields and
+// verifies its signature against expectedAuthorPub. It rejects (fail-closed): an
+// entry whose stored author key != expectedAuthorPub (a valid signature from the
+// WRONG author is caught), an undecodable payload, a recomputed hash != stored
+// EntryHash, or an invalid signature.
+func verifyJournalEntry(e store.SyncGroupLogEntry, expectedAuthorPub ed25519.PublicKey) error {
+	if len(expectedAuthorPub) != ed25519.PublicKeySize {
+		return fmt.Errorf("invalid expected author pubkey")
+	}
+	if e.AuthorAgentPubkey != hex.EncodeToString(expectedAuthorPub) {
+		return fmt.Errorf("entry %s/%d: author key does not match expected author", e.Subchain, e.Seq)
+	}
+	var payload map[string]string
+	if e.PayloadJSON != "" {
+		if err := json.Unmarshal([]byte(e.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("entry %s/%d: undecodable payload: %w", e.Subchain, e.Seq, err)
+		}
+	}
+	if payload == nil {
+		payload = map[string]string{}
+	}
+	// The signature binds the parsed MAP via the length-prefixed canonical encoding
+	// (§5.3), independent of JSON escaping — so a conformant peer using a different
+	// (RFC-equal) JSON spelling still verifies. payload_json is NOT byte-authenticated
+	// here; ingest normalizes it to the canonical Go form before storage/display, so
+	// what is stored + shown is always canonical without false-rejecting a peer.
+	cb := entryCanonicalBytes(e.GroupID, e.Subchain, e.Seq, e.PrevHash, e.EntryType, e.AuthorChainID, e.AuthorAgentPubkey, payload)
+	sum := sha256.Sum256(cb)
+	if hex.EncodeToString(sum[:]) != e.EntryHash {
+		return fmt.Errorf("entry %s/%d: hash mismatch", e.Subchain, e.Seq)
+	}
+	sig, err := hex.DecodeString(e.AuthorSig)
+	if err != nil || !ed25519.Verify(expectedAuthorPub, cb, sig) {
+		return fmt.Errorf("entry %s/%d: signature invalid", e.Subchain, e.Seq)
+	}
+	return nil
+}
+
+// canonicalPayloadJSON re-marshals a received payload_json into the canonical Go
+// form (sorted keys), so what is persisted + displayed is always canonical
+// regardless of a peer's JSON spelling. Unparseable input is returned unchanged
+// (verifyJournalEntry will have rejected it on the hash), empty -> "{}".
+func canonicalPayloadJSON(payloadJSON string) string {
+	var m map[string]string
+	if payloadJSON != "" {
+		if err := json.Unmarshal([]byte(payloadJSON), &m); err != nil {
+			return payloadJSON
+		}
+	}
+	if m == nil {
+		m = map[string]string{}
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return payloadJSON
+	}
+	return string(b)
+}
+
+// AuthorKeyResolver returns the ed25519 public key an entry MUST be signed by —
+// the controller for most roster entries, the leaving member for a self-signed
+// member_leave, the domain owner for a domain sub-chain entry — or nil to reject
+// the entry as having no legitimate author.
+//
+// SECURITY CONTRACT — the fold delegates ALL author-authorization to this
+// resolver, so a wrong resolver silently admits forgeries. An implementation MUST:
+//  1. Return the key from SIGNATURE-VERIFIED authoritative state ONLY — the
+//     group's controller_agent_pubkey, a member's member_agent_pubkey, or a
+//     domain owner (IsDomainOwnerOrAncestor). It MUST NEVER derive the key from
+//     the entry itself (e.g. `decodeHex(e.AuthorAgentPubkey)` or keyed solely on
+//     e.AuthorChainID) — that trusts the forger and defeats the whole journal.
+//  2. Gate ENTRY_TYPE vs AUTHORITY: e.g. member_remove/domain_add must be
+//     controller/owner-authored; a self-signed member_leave is valid only for
+//     the leaving member's own key. Return nil for any entry_type the claimed
+//     author is not authorized to write.
+//
+// verifyJournalEntry pins e.AuthorAgentPubkey to the returned key, so a valid
+// signature from the WRONG key is caught — but only if the resolver returns the
+// RIGHT key. TestFoldRejectsForgedAuthor locks this contract.
+type AuthorKeyResolver func(e store.SyncGroupLogEntry) ed25519.PublicKey
+
+// FoldResult is the verified tip of a sub-chain.
+type FoldResult struct {
+	HeadHash string
+	HeadSeq  int64 // -1 for an empty sub-chain
+	Count    int
+}
+
+// foldSubchain verifies an ordered sub-chain end to end: seq continuity from 0,
+// prev_hash linkage (genesis prev_hash == ""), and each entry's signature against
+// the key the resolver returns. It returns the verified head or an error at the
+// first break. An empty chain is valid (genesis-empty). It proves INTEGRITY of a
+// single LINEAR input only; two caller concerns are deliberately NOT handled here
+// and MUST be enforced at the step-4 exchange/apply layer:
+//   - ANTI-ROLLBACK (§5.5): a clean fold to a valid PREFIX is still valid, so a
+//     controller-signed truncation that un-removes a member folds fine. The
+//     caller MUST reject a head whose derived roster_revision < SyncGroup
+//     .RosterRevisionFloor and confirm it reaches the on-chain anchored_head.
+//   - FORK DETECTION (§5.4): a fork from concurrent legitimate authors is NOT
+//     equivocation, but this function reports it with the same error as a genuine
+//     tamper. The caller (peer exchange) owns detecting competing signature-valid
+//     entries at the same seq and distinguishing them from an integrity break.
+func foldSubchain(entries []store.SyncGroupLogEntry, resolve AuthorKeyResolver) (FoldResult, error) {
+	prev := ""
+	for i, e := range entries {
+		if e.Seq != int64(i) {
+			return FoldResult{}, fmt.Errorf("seq gap at index %d: got seq %d", i, e.Seq)
+		}
+		if e.PrevHash != prev {
+			return FoldResult{}, fmt.Errorf("chain break at seq %d: prev_hash does not link to predecessor", e.Seq)
+		}
+		key := resolve(e)
+		if key == nil {
+			return FoldResult{}, fmt.Errorf("entry %s/%d: no authorized author", e.Subchain, e.Seq)
+		}
+		if err := verifyJournalEntry(e, key); err != nil {
+			return FoldResult{}, err
+		}
+		prev = e.EntryHash
+	}
+	if len(entries) == 0 {
+		return FoldResult{HeadSeq: -1}, nil
+	}
+	return FoldResult{HeadHash: prev, HeadSeq: int64(len(entries) - 1), Count: len(entries)}, nil
+}
+
+// appendAndApply atomically appends an entry to the log AND applies it to the
+// projection tables in ONE store transaction: a store-write failure inside apply
+// rolls the append back, so the log and projection can never diverge on a partial
+// write, and the idempotent-skip path can never re-encounter a logged-but-unapplied
+// entry. Semantic-fault SKIPs inside apply commit normally (the entry is logged
+// with no effect). gs is mutated by apply only after each write succeeds; on a
+// rollback the caller discards gs.
+func (m *Manager) appendAndApply(ctx context.Context, ss *store.SQLiteStore, gs *groupApplyState, e store.SyncGroupLogEntry) error {
+	// Group membership, role, and domain projections are effective sync policy.
+	// Serialize their transition with handleSyncPush/the outbox final read lease:
+	// once a removal or consent narrowing returns, no request can still admit or
+	// send under the prior snapshot.
+	policyUnlock := ss.LockSyncPolicyWrite()
+	defer policyUnlock()
+	return ss.RunInTx(ctx, func(txStore store.OffchainStore) error {
+		tx, ok := txStore.(*store.SQLiteStore)
+		if !ok {
+			return fmt.Errorf("group journal requires the SQLite store backend")
+		}
+		if err := tx.AppendSyncGroupLog(ctx, e); err != nil {
+			return err
+		}
+		return gs.apply(ctx, tx, e)
+	})
+}
+
+// AppendGroupJournalEntry builds, signs, and appends the next entry to a group
+// sub-chain under journalMu (so read-head -> build -> append is atomic against
+// concurrent appenders), then best-effort advances the roster head cache. The
+// (group_id,subchain,seq) PK is the correctness backstop; journalMu only avoids
+// the retryable-loser churn of a naive check-then-act. Returns the appended entry.
+func (m *Manager) AppendGroupJournalEntry(ctx context.Context, groupID, subchain, entryType, authorChainID string, authorPub ed25519.PublicKey, authorKey ed25519.PrivateKey, payload map[string]string) (store.SyncGroupLogEntry, error) {
+	ss := m.syncStore()
+	if ss == nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("group journal requires the SQLite store backend")
+	}
+	entry, evictedChains, removedDomains, err := m.appendGroupJournalLocked(ctx, ss, groupID, subchain, entryType, authorChainID, authorPub, authorKey, payload)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	// POST-BATCH removal enforcement, AFTER journalMu is released (the group-scoped
+	// purge opens its own tx+locks and the anchor is a consensus broadcast, neither
+	// of which may run while holding journalMu). A no-op unless this entry evicted a
+	// member or removed a domain. Identical to the pulled-entry path (PullGroupJournal).
+	m.enforceRemovalBatch(ss, groupID, evictedChains, removedDomains)
+	return entry, nil
+}
+
+// appendGroupJournalLocked holds journalMu for the read-head -> build+sign ->
+// self-check -> append+apply sequence and returns the appended entry plus the
+// members/domains that transitioned to removed/left (for the caller's POST-BATCH
+// hook). Split out so the hook runs OUTSIDE the lock.
+func (m *Manager) appendGroupJournalLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain, entryType, authorChainID string, authorPub ed25519.PublicKey, authorKey ed25519.PrivateKey, payload map[string]string) (store.SyncGroupLogEntry, []string, []string, error) {
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
+
+	head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, subchain)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("read sub-chain head: %w", err)
+	}
+	seq := int64(0)
+	prev := ""
+	if head != nil {
+		seq = head.Seq + 1
+		prev = head.EntryHash
+	}
+	entry, err := buildJournalEntry(groupID, subchain, seq, prev, entryType, authorChainID, authorPub, authorKey, payload)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, nil, nil, err
+	}
+	// SELF-CHECK: the entry MUST verify under the group's OWN author resolver, so a
+	// node never authors an entry it (or a peer) will later reject on ingest/fold —
+	// which would permanently wedge the sub-chain at this seq (no delete/rewrite
+	// path). Then APPLY it to our own projection tables, exactly as a peer would on
+	// ingest, so the author's roster stays consistent with the log.
+	// A node must never AUTHOR a malformed entry that its own (and every peer's)
+	// apply would silently skip — reject it before signing/appending.
+	if err := validateAuthoredEntry(entry); err != nil {
+		return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("refusing to author a malformed %s entry: %w", entry.EntryType, err)
+	}
+	gs, rErr := loadGroupApplyState(ctx, ss, groupID)
+	if rErr != nil {
+		return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("author self-check: %w", rErr)
+	}
+	if entry.EntryType == "domain_add" {
+		if gs.controllerChain != m.localChainID || !gs.controllerKey.Equal(m.agentPub) {
+			return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("domain_add requires exact controller admission; build the owner entry and submit it to the group controller")
+		}
+		if err := m.authorizeControllerAffecting(ctx, ss, groupID, entry.EntryHash); err != nil {
+			return store.SyncGroupLogEntry{}, nil, nil, err
+		}
+		attachControllerSignature(&entry, gs.controllerEpoch, m.localChainID, m.agentPub, m.agentKey)
+	}
+	if entry.Subchain == RosterSubchain && rosterControllerTypes[entry.EntryType] &&
+		entry.AuthorChainID == m.localChainID && entry.AuthorChainID == gs.controllerChain &&
+		entry.AuthorAgentPubkey == hex.EncodeToString(m.agentPub) {
+		// Bind governance to the entry ACTUALLY about to append, after reading the
+		// head and building it under journalMu. A concurrent head advance therefore
+		// changes EntryHash and cannot reuse an approval for the old head.
+		if err := m.authorizeControllerAffecting(ctx, ss, groupID, entry.EntryHash); err != nil {
+			return store.SyncGroupLogEntry{}, nil, nil, err
+		}
+	}
+	if entry.EntryType == "epoch_rotate" {
+		p := parseJournalPayload(entry.PayloadJSON)
+		// A real succession needs the incoming controller's private key.  The
+		// outgoing controller may not synthesize that proof, so the direct emit
+		// surface only permits a same-identity epoch re-key and otherwise refuses
+		// until the explicit two-party co-sign ceremony supplies it.
+		if p[pkControllerChain] != m.localChainID || p[pkControllerPubkey] != hex.EncodeToString(m.agentPub) {
+			return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("epoch_rotate changing controller requires an incoming-controller countersignature ceremony")
+		}
+		attachControllerSignature(&entry, effectiveControllerEpoch(p[pkEpoch]), m.localChainID, m.agentPub, m.agentKey)
+	}
+	if key := gs.resolve(entry); key == nil || verifyJournalEntry(entry, key) != nil {
+		return store.SyncGroupLogEntry{}, nil, nil, fmt.Errorf("refusing to author an entry that fails the group's own resolver (author=%s type=%s subchain=%s)", entry.AuthorChainID, entry.EntryType, entry.Subchain)
+	}
+	if err := m.appendAndApply(ctx, ss, gs, entry); err != nil {
+		return store.SyncGroupLogEntry{}, nil, nil, err
+	}
+	// Best-effort head-cache advance for the roster sub-chain (a projection; the
+	// log is authoritative, so a failure here is non-fatal — the fold re-derives).
+	if subchain == RosterSubchain {
+		_ = ss.SetSyncGroupRosterJournalHead(ctx, groupID, entry.EntryHash)
+	}
+	return entry, gs.evictedChains, gs.removedDomains, nil
+}
+
+// LoadAndFoldSubchain reads a whole sub-chain from the store (paging) and folds
+// it, returning the verified head. Used on rebuild/rejoin to re-establish the
+// authoritative head from the log before any cache is trusted.
+func (m *Manager) LoadAndFoldSubchain(ctx context.Context, groupID, subchain string, resolve AuthorKeyResolver) (FoldResult, error) {
+	ss := m.syncStore()
+	if ss == nil {
+		return FoldResult{}, fmt.Errorf("group journal requires the SQLite store backend")
+	}
+	var all []store.SyncGroupLogEntry
+	after := int64(-1)
+	for {
+		page, err := ss.ListSyncGroupLog(ctx, groupID, subchain, after, 2000)
+		if err != nil {
+			return FoldResult{}, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		all = append(all, page...)
+		after = page[len(page)-1].Seq
+		if len(page) < 2000 {
+			break
+		}
+	}
+	return foldSubchain(all, resolve)
+}

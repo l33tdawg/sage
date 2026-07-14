@@ -97,6 +97,7 @@ const (
 	// legacy memories' on-chain domain records; the proposal Payload is the JSON
 	// []MemoryDomainRepairEntry. Numerically matches governance.OpMemoryDomainRepair=6.
 	GovOpMemoryDomainRepair GovProposalOp = 6
+	GovOpSyncGroupAction    GovProposalOp = 7
 )
 
 // VoteDecision represents a validator's vote on a proposed memory.

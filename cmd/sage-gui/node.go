@@ -695,6 +695,22 @@ func runServe() (rerr error) {
 	operatorAgentID, operatorIDErr := readNodeOperatorKey(cfg.AgentKey)
 	if operatorIDErr == nil && operatorAgentID != "" {
 		restServer.SetNodeOperatorID(operatorAgentID)
+		// One registrar backs direct REST, OAuth, and wizard token issuance.
+		// Vault-backed bearers remain pending (and cannot authenticate) until
+		// their standard AgentRegister transaction is confirmed on-chain.
+		restServer.ConfigureMCPTokenIdentityRegistrar(sqliteStore)
+		// A canceled /broadcast_tx_commit response is ambiguous: the chain may
+		// already have accepted a token identity even though issuance retained its
+		// bearer fail-closed as pending. Re-run idempotent AgentRegister at startup
+		// to finalize those rows without ever treating an unknown result as absent.
+		startWorker(func() {
+			confirmed, reconcileErr := sqliteStore.ReconcilePendingMCPTokenIdentities(ctx)
+			if reconcileErr != nil {
+				logger.Warn().Err(reconcileErr).Msg("pending MCP token identity reconciliation incomplete")
+			} else if confirmed > 0 {
+				logger.Info().Int("count", confirmed).Msg("reconciled pending MCP token identities")
+			}
+		})
 		logger.Info().Str("operator_id", operatorAgentID[:16]+"...").Msg("node operator key registered for hook read-scope bypass")
 	} else if operatorIDErr != nil {
 		logger.Warn().Err(operatorIDErr).Msg("node operator key unavailable")
@@ -788,6 +804,8 @@ func runServe() (rerr error) {
 	dashboard.QuorumEnabled = cfg.Quorum.Enabled
 	dashboard.ValidatorCountFn = app.ValidatorCount // authoritative single-validator check for agent ops
 	dashboard.AppV18ActiveFn = app.IsAppV18ActiveForNextTx
+	dashboard.AppV19ActiveFn = app.IsAppV19ActiveForNextTx // app-v19: local-agents-default-READ flip (off-consensus)
+	dashboard.StrictRBAC = cfg.RBAC.Strict                 // opt-out of the app-v19 default-read flip
 	// Embeddings setup: flip the config to the bundled Ollama + nomic-embed-text
 	// provider (the node re-reads it on restart). The embedder is locked to this.
 	dashboard.SetEmbeddingProvider = func(provider string) error {
@@ -1442,6 +1460,12 @@ func runServe() (rerr error) {
 				logger.Debug().Int("purged", purged).Msg("pipeline boot sweep")
 			}
 		}
+		// OAuth bearer/code lifecycle recovery is also a boot-time invariant:
+		// pending cleanup rows must never wait for the first five-minute ticker.
+		_, _ = sqliteStore.PurgeExpiredAuthCodes(ctx)
+		if revoked, _ := sqliteStore.PurgeMCPTokenCleanup(ctx); revoked > 0 {
+			logger.Warn().Int64("revoked", revoked).Msg("boot reconciled fail-closed OAuth token cleanup")
+		}
 
 		// Pipeline TTL cleanup — expire and purge stale pipeline messages every 5 minutes
 		startWorker(func() {
@@ -1466,6 +1490,9 @@ func runServe() (rerr error) {
 					// connector setup doesn't accumulate state forever.
 					if removed, _ := sqliteStore.PurgeExpiredAuthCodes(ctx); removed > 0 {
 						logger.Debug().Int64("removed", removed).Msg("oauth auth-codes purged")
+					}
+					if revoked, _ := sqliteStore.PurgeMCPTokenCleanup(ctx); revoked > 0 {
+						logger.Warn().Int64("revoked", revoked).Msg("fail-closed OAuth token cleanup reconciled")
 					}
 					if removed, _ := sqliteStore.PurgeOldOAuthClients(ctx, 90*24*time.Hour); removed > 0 {
 						logger.Debug().Int64("removed", removed).Msg("oauth clients purged")
@@ -2438,21 +2465,27 @@ func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Co
 	// hand it to SQLite, return the agent_id. Translate the store's
 	// ErrTokenRevoked into the middleware-side sentinel so 401 vs 500 are
 	// distinguishable.
-	bearerLookup := func(ctx context.Context, tokenSHA256 string) (string, error) {
-		tok, err := sqliteStore.LookupMCPToken(ctx, tokenSHA256)
+	bearerLookup := func(ctx context.Context, tokenSHA256 string) (string, ed25519.PrivateKey, error) {
+		agentID, priv, err := sqliteStore.LookupMCPTokenSigner(ctx, tokenSHA256)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return "", err
+				return "", nil, err
 			}
 			if errors.Is(err, store.ErrTokenRevoked) {
-				return "", middleware.ErrMCPTokenRevoked
+				return "", nil, middleware.ErrMCPTokenRevoked
 			}
-			return "", err
+			// Fail closed on anything else (DB error, or a KEYED token whose vault
+			// is locked — LookupMCPTokenSigner never degrades a keyed token to the
+			// operator identity).
+			return "", nil, err
 		}
-		if tok == nil {
-			return "", sql.ErrNoRows
+		if priv == nil {
+			// Legacy keyless token: no per-token signer, so run as the node
+			// operator signed with the transport key (pre-v11.8 behavior).
+			return transportAgentID, nil, nil
 		}
-		return transportAgentID, nil
+		// KEYED token: act as the token's own on-chain identity.
+		return agentID, priv, nil
 	}
 
 	// IMPORTANT: register the transport endpoints as FLAT paths, not via

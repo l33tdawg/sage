@@ -464,6 +464,20 @@ type SageApp struct {
 	// {Name:"app-v18", TargetAppVersion:18}.
 	appV18AppliedHeight int64 // 0 => fork dormant
 
+	// appV19AppliedHeight gates the app-v19 fork (v11.8): an EMPTY next-free
+	// scaffolding gate, structurally identical to app-v15. It wires NO new
+	// consensus behavior — no new tx types, no new AppHash rule, and no
+	// processTx/FinalizeBlock branch keys off it. Unlike app-v18 (which carries a
+	// LIVE admin RBAC override), app-v19 is deliberately behavior-empty on the
+	// consensus path; its sole effect is an OFF-consensus read-default flip in
+	// web/handler.go gated on IsAppV19ActiveForNextTx. INDEPENDENT/additive gate,
+	// strict >, 0 by default, so every existing chain replays byte-identically.
+	// postAppV19Fork is OR'd into the lower postAppV<k>Rules helpers purely for
+	// skip-ahead subsumption — it is NOT OR'd into postAppV18Rules, so activating
+	// app-v19 never lights up app-v18's admin override. Activated via
+	// {Name:"app-v19", TargetAppVersion:19}.
+	appV19AppliedHeight int64 // 0 => fork dormant
+
 	// retainBlocks, when > 0, is the number of most-recent blocks Commit asks
 	// CometBFT to keep: ResponseCommit.RetainHeight = height - retainBlocks
 	// (clamped at 0 = keep everything). Pruning is LOCAL and advisory — it never
@@ -587,6 +601,18 @@ const appV17UpgradeName = "app-v17"
 // CEREBRUM for explicit local-agent assignments. Ownership and authorship are
 // unchanged; only grant/revoke authorization gains an admin path.
 const appV18UpgradeName = "app-v18"
+
+// appV19UpgradeName is the canonical activation-record name for the app-v19
+// fork (v11.8: EMPTY next-free scaffolding gate — wires no new consensus
+// behavior). Like app-v15, this is an INDEPENDENT feature gate, NOT part of the
+// v8.x PoE monotonic chain. Governance-activated via {Name:"app-v19",
+// TargetAppVersion:19}; validated purely as CanonicalUpgradeName(19) ==
+// "app-v19" — no allowlist. On personal nodes the auto-advance ladder reaches
+// it once the binary supports it — harmless because the gate is empty (a
+// governance activation with zero consensus behavior/AppHash change). Its only
+// effect is off-consensus: the local-agents-default-READ flip in
+// web/handler.go, gated on IsAppV19ActiveForNextTx.
+const appV19UpgradeName = "app-v19"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -945,6 +971,19 @@ func (app *SageApp) postAppV18Fork(height int64) bool {
 	return app.appV18AppliedHeight > 0 && height > app.appV18AppliedHeight
 }
 
+// postAppV19Fork is the consensus-side fork-gate predicate for app-v19 (v11.8:
+// EMPTY next-free scaffolding gate). Strict greater-than mirrors the other
+// additive gates so the activation block itself commits under pre-fork rules and
+// replay is boundary-safe. app-v19 wires no AppHash rule and no processTx branch
+// keys off this directly; it is OR'd into the lower postAppV<k>Rules helpers
+// purely for skip-ahead subsumption safety (but NOT into postAppV18Rules, so it
+// never enables app-v18's admin override). Every existing chain (none has
+// activated app-v19) returns false, so historical blocks replay byte-identically.
+// (Template: postAppV15Fork — the empty scaffolding gate, NOT postAppV18Fork.)
+func (app *SageApp) postAppV19Fork(height int64) bool {
+	return app.appV19AppliedHeight > 0 && height > app.appV19AppliedHeight
+}
+
 // postAppV17Rules reports whether app-v17's consensus rules are in force at
 // this height. app-v18 subsumes those additive rules on a skip-ahead chain;
 // historical blocks still collapse to exactly their original gate.
@@ -954,30 +993,55 @@ func (app *SageApp) postAppV18Fork(height int64) bool {
 //
 //nolint:unused // C1 mints the empty gate; the first callsites land with C2/C3
 func (app *SageApp) postAppV17Rules(height int64) bool {
-	return app.postAppV17Fork(height) || app.postAppV18Fork(height)
+	return app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
 }
 
 func (app *SageApp) postAppV18Rules(height int64) bool {
 	return app.postAppV18Fork(height)
 }
 
+// postAppV19Rules reports whether app-v19's consensus rules are in force at this
+// height. app-v19 is behavior-EMPTY on the consensus path (like app-v15's empty
+// gate), so this is exactly postAppV19Fork today; it exists as a named helper so
+// the NEXT independent fork can OR itself in here without touching every callsite,
+// mirroring postAppV15Rules/postAppV18Rules. NOTE: app-v19 is deliberately NOT
+// OR'd into postAppV18Rules — activating app-v19 must never enable app-v18's live
+// admin RBAC override; the subsumption chain runs v19 -> v8..v17/v15/v16 only.
+//
+//nolint:unused // behavior-empty gate; no consensus callsite reads it (D adds zero processTx branch)
+func (app *SageApp) postAppV19Rules(height int64) bool {
+	return app.postAppV19Fork(height)
+}
+
 // IsAppV17ActiveForNextTx is the REST-side transaction-construction accessor.
 // After FinalizeBlock(H_activation), state.Height and appV17AppliedHeight both
 // equal H_activation; a transaction broadcast then can first execute at H+1,
-// where the strict consensus gate is active. This intentionally uses >= while
-// postAppV17Fork uses >.
+// where the strict consensus gate is active. Evaluate the canonical rule
+// predicate at that next executable height rather than duplicating its fork
+// list here: skip-ahead activations (including app-v19 without app-v17/v18)
+// must construct exactly the envelope FinalizeBlock will require.
 func (app *SageApp) IsAppV17ActiveForNextTx() bool {
 	if app.state == nil {
 		return false
 	}
-	return (app.appV17AppliedHeight > 0 && app.state.Height >= app.appV17AppliedHeight) ||
-		(app.appV18AppliedHeight > 0 && app.state.Height >= app.appV18AppliedHeight)
+	return app.postAppV17Rules(app.state.Height + 1)
 }
 
 // IsAppV18ActiveForNextTx is the dashboard-side readiness accessor for an
 // explicit administrator access override broadcast after the activation block.
 func (app *SageApp) IsAppV18ActiveForNextTx() bool {
 	return app.appV18AppliedHeight > 0 && app.state != nil && app.state.Height >= app.appV18AppliedHeight
+}
+
+// IsAppV19ActiveForNextTx is the off-consensus readiness accessor for the
+// app-v19 fork. After FinalizeBlock(H_activation), state.Height and
+// appV19AppliedHeight both equal H_activation, so this reports true immediately
+// at the activation block (>=), whereas the strict consensus gate postAppV19Fork
+// (>) only turns true at H+1. app-v19 has no consensus behavior, so the only
+// consumer is web/handler.go's local-agents-default-READ flip (DashboardHandler
+// .AppV19ActiveFn).
+func (app *SageApp) IsAppV19ActiveForNextTx() bool {
+	return app.appV19AppliedHeight > 0 && app.state != nil && app.state.Height >= app.appV19AppliedHeight
 }
 
 // postAppV16Rules reports whether app-v16's consensus rules are in force at this
@@ -987,7 +1051,7 @@ func (app *SageApp) IsAppV18ActiveForNextTx() bool {
 // Collapses to exactly postAppV16Fork on every existing chain
 // (appV17AppliedHeight==0), so historical blocks replay byte-identically.
 func (app *SageApp) postAppV16Rules(height int64) bool {
-	return app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
+	return app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
 }
 
 // shouldRecordMemoryDomain reports whether a successful submit must persist its
@@ -1016,7 +1080,7 @@ func (app *SageApp) shouldRecordMemoryDomain(height int64) bool {
 // higher gates are 0, so this collapses to exactly postAppV8Fork and historical
 // blocks replay byte-identically.
 func (app *SageApp) postAppV8Rules(height int64) bool {
-	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
+	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
 }
 
 // postAppV9Rules reports whether app-v9's consensus rules (consensus-path
@@ -1027,7 +1091,7 @@ func (app *SageApp) postAppV8Rules(height int64) bool {
 // postAppV9Fork on every existing chain (appV10/appV11AppliedHeight==0), so replay
 // is byte-identical.
 func (app *SageApp) postAppV9Rules(height int64) bool {
-	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
+	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
 }
 
 // postAppV10Rules reports whether app-v10's consensus rules (corroboration
@@ -1039,7 +1103,7 @@ func (app *SageApp) postAppV9Rules(height int64) bool {
 // when app-v11 landed — app-v10 was the highest fork until then and needed no
 // subsumption helper.
 func (app *SageApp) postAppV10Rules(height int64) bool {
-	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
+	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
 }
 
 // postAppV11Rules reports whether app-v11's consensus rules (the per-node
@@ -1050,7 +1114,7 @@ func (app *SageApp) postAppV10Rules(height int64) bool {
 // postAppV11Fork on every existing chain (appV12AppliedHeight==0), so
 // historical blocks replay byte-identically.
 func (app *SageApp) postAppV11Rules(height int64) bool {
-	return app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
+	return app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
 }
 
 // postAppV12Rules reports whether app-v12's consensus rule (the FLAWED
@@ -1088,7 +1152,7 @@ func (app *SageApp) postAppV13Rules(height int64) bool {
 // postAppV12Rules/postAppV13Rules — those are mutually-exclusive
 // AppHash-REPLACEMENT rules, deliberately non-subsumed.
 func (app *SageApp) postAppV15Rules(height int64) bool {
-	return app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height)
+	return app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
 }
 
 // refreshAppV9Fork populates appV9AppliedHeight from the persisted upgrade
@@ -1269,6 +1333,20 @@ func (app *SageApp) refreshAppV18Fork() {
 	}
 	if rec != nil {
 		app.appV18AppliedHeight = rec.AppliedHeight
+	}
+}
+
+// refreshAppV19Fork populates appV19AppliedHeight from the persisted upgrade
+// record on construction. Returns a nil-record on every chain that has not
+// activated app-v19, so the gate stays dormant and replay is unaffected.
+func (app *SageApp) refreshAppV19Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV19UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV19UpgradeName).Msg("read app-v19 applied-upgrade record")
+		return
+	}
+	if rec != nil {
+		app.appV19AppliedHeight = rec.AppliedHeight
 	}
 }
 
@@ -1681,6 +1759,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshAppV16Fork()
 	app.refreshAppV17Fork()
 	app.refreshAppV18Fork()
+	app.refreshAppV19Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -1741,6 +1820,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshAppV16Fork()
 	app.refreshAppV17Fork()
 	app.refreshAppV18Fork()
+	app.refreshAppV19Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1806,8 +1886,10 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV19AppliedHeight > 0:
+		return 19 // app-v19 (empty scaffolding gate, v11.8 — off-consensus default-read flip only) — highest gate
 	case app.appV18AppliedHeight > 0:
-		return 18 // app-v18 (explicit global-admin RBAC override) — highest gate
+		return 18 // app-v18 (explicit global-admin RBAC override) — independent gate, ranks below app-v19 (19 > 18)
 	case app.appV17AppliedHeight > 0:
 		return 17 // app-v17 (reinstate + quorum challenge + delegated-proof hardening, v11.5)
 	case app.appV16AppliedHeight > 0:
@@ -1846,13 +1928,13 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v18). It is the readiness ceiling for upgrade
+// fork gate for (currently app-v19). It is the readiness ceiling for upgrade
 // auto-voting: a validator must never vote to activate an upgrade it cannot
 // execute — doing so would commit consensus version.app=N while the binary
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 18
+const maxSupportedAppVersion uint64 = 19
 
 // MaxSupportedAppVersion returns the highest app version this binary has a
 // compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
@@ -2424,6 +2506,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		}
 		if plan.Name == appV18UpgradeName {
 			app.appV18AppliedHeight = req.Height
+		}
+		if plan.Name == appV19UpgradeName {
+			app.appV19AppliedHeight = req.Height
 		}
 		if plan.Name == appV12UpgradeName {
 			app.appV12AppliedHeight = req.Height

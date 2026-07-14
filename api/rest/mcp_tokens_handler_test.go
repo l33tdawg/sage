@@ -178,8 +178,26 @@ func TestMCPToken_NonOperatorSelfMintDenied(t *testing.T) {
 	body := []byte(`{"agent_id":"` + self + `","name":"mine"}`)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body)))
-	assert.Equal(t, http.StatusBadRequest, rr.Code, "non-operator identity must not be mislabeled; body=%s", rr.Body.String())
-	assert.Contains(t, rr.Body.String(), "node operator")
+	assert.Equal(t, http.StatusForbidden, rr.Code, "unregistered/non-operator callers must not mint; body=%s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "exact node operator")
+}
+
+func TestMCPToken_AdminCannotMintOperatorBearer(t *testing.T) {
+	s, _ := newTokenServer(t)
+	adminID := strings.Repeat("c", 64)
+	require.NoError(t, s.agentStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: adminID, Name: "admin", RegisteredName: "admin", Role: "admin", Status: "active",
+	}))
+	require.True(t, s.callerIsOperatorOrAdmin(context.Background(), adminID), "test setup must exercise the old admin bypass")
+
+	body := []byte(`{"agent_id":"` + tokenOperatorID + `","name":"admin-bypass"}`)
+	rr := httptest.NewRecorder()
+	tokenRouterAs(s, adminID).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body)))
+	require.Equal(t, http.StatusForbidden, rr.Code, "an admin is not possession of the local node key")
+
+	rows, err := s.store.(mcpTokenStore).ListMCPTokens(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, rows)
 }
 
 // TestMCPToken_MintForOtherDenied: a non-operator agent may NOT mint a token
@@ -193,7 +211,7 @@ func TestMCPToken_MintForOtherDenied(t *testing.T) {
 	body := []byte(`{"agent_id":"` + other + `","name":"impersonation"}`)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/mcp/tokens", bytes.NewReader(body)))
-	assert.Equal(t, http.StatusBadRequest, rr.Code, "minting for another agent_id must be denied")
+	assert.Equal(t, http.StatusForbidden, rr.Code, "minting for another agent_id must be denied")
 }
 
 // TestMCPToken_ListScopedToCaller: a non-operator agent sees only its own

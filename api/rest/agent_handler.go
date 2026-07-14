@@ -2,6 +2,11 @@ package rest
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -9,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -123,6 +129,81 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 		"tx_hash":         txHash,
 		"on_chain_height": height,
 	})
+}
+
+// registerMintedAgentIdentity registers a freshly-minted per-token ed25519
+// identity on-chain by issuing a STANDARD TxTypeAgentRegister — identical in
+// shape to the one /v1/agent/register builds — with the agent proof signed by
+// the minted key itself, so processAgentRegister's verifyAgentIdentity binds the
+// on-chain identity to hex(pub). No new tx field is introduced: the minted
+// pubkey plus its self-signed proof are the only new bytes on the wire, so
+// old-binary replay stays byte-identical. Key generation happens OFF-consensus
+// in the caller; FinalizeBlock only re-verifies the embedded proof, never
+// generates a key.
+func (s *Server) registerMintedAgentIdentity(ctx context.Context, tokenPub ed25519.PublicKey, tokenPriv ed25519.PrivateKey, name, provider string) (string, int64, error) {
+	agentID := hex.EncodeToString(tokenPub)
+	if name == "" {
+		name = "mcp-token-" + agentID[:8]
+	}
+
+	// The signed request body MUST reconstruct the exact AgentRegister payload
+	// consensus rebuilds under app-v17's delegated-proof binding
+	// (verifySignedAgentAction: name required, role defaults to "member"), or the
+	// tx is rejected once app-v17 is active.
+	regBody := struct {
+		Name       string `json:"name"`
+		Role       string `json:"role"`
+		BootBio    string `json:"boot_bio"`
+		Provider   string `json:"provider"`
+		P2PAddress string `json:"p2p_address"`
+	}{Name: name, Role: "member", Provider: provider}
+	body, err := json.Marshal(regBody)
+	if err != nil {
+		return "", 0, fmt.Errorf("marshal register body: %w", err)
+	}
+
+	const method, path = http.MethodPost, "/v1/agent/register"
+	timestamp := time.Now().Unix()
+	nonce := make([]byte, 8)
+	if _, rErr := rand.Read(nonce); rErr != nil {
+		return "", 0, fmt.Errorf("generate proof nonce: %w", rErr)
+	}
+	// Canonical request + body hash exactly as the REST auth middleware computes
+	// for a token-key-signed POST /v1/agent/register.
+	canonical := []byte(method + " " + path + "\n")
+	canonical = append(canonical, body...)
+	bodyHash := sha256.Sum256(canonical)
+	sig := auth.SignRequestWithNonce(tokenPriv, method, path, body, timestamp, nonce)
+
+	registerTx := &tx.ParsedTx{
+		Type:      tx.TxTypeAgentRegister,
+		Nonce:     tx.MonotonicNonce(s.signingKey),
+		Timestamp: time.Now(),
+		AgentRegister: &tx.AgentRegister{
+			AgentID:  agentID,
+			Name:     name,
+			Role:     "member",
+			Provider: provider,
+		},
+		AgentPubKey:    append([]byte(nil), tokenPub...),
+		AgentSig:       sig,
+		AgentTimestamp: timestamp,
+		AgentBodyHash:  bodyHash[:],
+		AgentNonce:     nonce,
+	}
+	// The delegated-proof envelope is only accepted (and required) post-app-v17;
+	// gate it exactly like embedAgentAuth so pre-fork bytes stay reproducible.
+	if s.isPostV17ForNextTx() {
+		registerTx.AgentRequest = append([]byte(nil), canonical...)
+	}
+	if signErr := tx.SignTx(registerTx, s.signingKey); signErr != nil {
+		return "", 0, fmt.Errorf("sign register tx: %w", signErr)
+	}
+	encoded, err := tx.EncodeTx(registerTx)
+	if err != nil {
+		return "", 0, fmt.Errorf("encode register tx: %w", err)
+	}
+	return s.broadcastTxCommitWithHeightContext(ctx, encoded)
 }
 
 // handleAgentUpdate handles PUT /v1/agent/update.

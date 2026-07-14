@@ -116,11 +116,54 @@ type Manager struct {
 	// nil in production (m.SyncDigest), non-nil only in tests.
 	syncDigestFn func(ctx context.Context, remoteChainID string, req *SyncDigestRequest) (*SyncDigestResponse, error)
 
+	// syncJournalFn is the v11.8 group-journal exchange seam (same pattern):
+	// nil in production (m.SyncJournalPull), non-nil only in tests so the
+	// pull/verify/ingest logic is testable without a live TLS peer.
+	syncJournalFn func(ctx context.Context, remoteChainID string, req *SyncJournalRequest) (*SyncJournalResponse, error)
+	// Entitlement-safe domain-subchain discovery for production journal
+	// reconciliation. The peer returns only subchains this authenticated member
+	// may read; tests inject the seam without a TLS listener.
+	syncJournalSubchainsFn func(ctx context.Context, remoteChainID, groupID string) ([]string, error)
+
+	// controllerGovGate is the v11.8 §8 multi-validator authorization seam for a
+	// CONTROLLER-AFFECTING emit (create/dissolve group, add a domain to the shared
+	// set, remove/role-change ANOTHER member). On a single-validator personal node
+	// the controller commits directly (validatorCount()<=1) and this is never
+	// consulted; on a multi-validator deployment a controller-affecting change
+	// SHOULD additionally carry a passed tx-24/25 GovPropose/Vote (NOT tx-30
+	// DomainReassign). It returns whether such a passage authorizes the change for
+	// groupID. nil (production default today) => fail-closed on multi-validator:
+	// authorizeControllerAffecting refuses rather than silently committing a
+	// group-affecting change without the quorum §8 requires. Tests inject it.
+	controllerGovGate func(ctx context.Context, groupID, actionDigest string) (bool, error)
+
 	// syncStatusMu guards syncReconcile — per-peer anti-entropy bookkeeping
 	// (last run, the peer's advertised consent, unsupported flag) surfaced by
 	// the sync status endpoint. Node-local observability only.
 	syncStatusMu  sync.Mutex
 	syncReconcile map[string]SyncReconcileStatus
+
+	// syncAnchorFn is the D1 removal-anchor seam (same test-seam pattern as
+	// syncPushFn): nil in production (anchorSubchain broadcasts a locally-signed
+	// MemorySubmit of the affected sub-chain head into sage-syncaudit-<group>),
+	// non-nil only in tests so enforceRemovalBatch is testable without consensus.
+	// The subchain arg distinguishes the roster head (member removals) from a
+	// per-domain sub-chain head (domain removals — which never advance the roster head).
+	syncAnchorFn func(ctx context.Context, groupID, subchain, head string) error
+	// syncAnchorMu guards syncAnchoredHead — the last head this node anchored on-chain
+	// per (group|subchain), so a removal-enforcement batch never re-anchors an unchanged
+	// head (docs §5.6 rate-limit: at most once per distinct sub-chain head).
+	syncAnchorMu     sync.Mutex
+	syncAnchoredHead map[string]string
+
+	// journalMu serializes v11.8 group-journal appends within this node so a
+	// read-head -> build+sign -> append sequence is atomic against concurrent
+	// appenders (the (group_id,subchain,seq) PK is the backstop; this avoids the
+	// retryable-loser churn). The append advances sync_group's head/revision
+	// cache best-effort — the sync_group_log rows are the source of truth and the
+	// fold re-derives the head, so a crash between append and cache-advance is
+	// harmless.
+	journalMu sync.Mutex
 
 	// seedMu guards seedCache — per-agreement TOTP seeds (v11 join ceremony),
 	// keyed by remote chain id → the candidate seeds (current + previous epoch
@@ -247,7 +290,7 @@ func (m *Manager) JoinStore() *JoinStore { return m.joins }
 // even when federation is unused — every entry point re-checks agreement state.
 func NewManager(cfg Config) *Manager {
 	pub, _ := cfg.AgentKey.Public().(ed25519.PublicKey)
-	return &Manager{
+	m := &Manager{
 		localChainID: cfg.LocalChainID,
 		networkName:  cfg.NetworkName,
 		certsDir:     cfg.CertsDir,
@@ -264,6 +307,10 @@ func NewManager(cfg Config) *Manager {
 		joins:        NewJoinStore(),
 		guestDrafts:  make(map[string]*guestDraft),
 	}
+	// Production governance proof is read from the durable consensus state. Tests
+	// may replace the seam, but production never defaults to a permissive stub.
+	m.controllerGovGate = m.passedControllerGovernance
+	return m
 }
 
 // cachedCA / putCA / invalidateCACache manage the parsed-CA cache. Keyed by

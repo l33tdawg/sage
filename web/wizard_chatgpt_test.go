@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	stdb64 "encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -311,7 +312,9 @@ func TestWizard_CreateTunnel_DoesNotClobberExistingConfig(t *testing.T) {
 
 func TestWizard_MintToken_Success(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.NodeOperatorAgentID = strings.Repeat("a", 64)
+	_, operatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	h.NodeOperatorAgentID = fmt.Sprintf("%x", operatorKey.Public().(ed25519.PublicKey))
 	r := testRouter(h)
 
 	body, _ := json.Marshal(map[string]string{
@@ -320,6 +323,7 @@ func TestWizard_MintToken_Success(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/mint-token", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	signAgentRequest(t, req, operatorKey, body)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -333,7 +337,9 @@ func TestWizard_MintToken_Success(t *testing.T) {
 
 func TestWizard_MintToken_RejectsBadAgentID(t *testing.T) {
 	h, _ := newTestHandler(t)
-	h.NodeOperatorAgentID = strings.Repeat("a", 64)
+	_, operatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	h.NodeOperatorAgentID = fmt.Sprintf("%x", operatorKey.Public().(ed25519.PublicKey))
 	r := testRouter(h)
 
 	body, _ := json.Marshal(map[string]string{
@@ -342,9 +348,43 @@ func TestWizard_MintToken_RejectsBadAgentID(t *testing.T) {
 	})
 	req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/mint-token", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	signAgentRequest(t, req, operatorKey, body)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestWizard_MintTokenRequiresExactOperatorPrincipal(t *testing.T) {
+	h, tokenStore := newTestHandler(t)
+	_, operatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, otherKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	h.NodeOperatorAgentID = fmt.Sprintf("%x", operatorKey.Public().(ed25519.PublicKey))
+	r := testRouter(h)
+	body := []byte(`{"token_name":"blocked"}`)
+
+	for _, tc := range []struct {
+		name string
+		key  ed25519.PrivateKey
+	}{
+		{name: "unsigned no-Origin loopback"},
+		{name: "arbitrary verified agent", key: otherKey},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/mint-token", bytes.NewReader(body))
+			req.RemoteAddr = "127.0.0.1:43210"
+			if tc.key != nil {
+				signAgentRequest(t, req, tc.key, body)
+			}
+			rr := httptest.NewRecorder()
+			r.ServeHTTP(rr, req)
+			require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+		})
+	}
+	rows, err := tokenStore.ListMCPTokens(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, rows, "unauthorized wizard calls must not mint any bearer")
 }
 
 // TestWizard_HappyPath_E2E threads through every step of the wizard
@@ -363,7 +403,9 @@ func TestWizard_HappyPath_E2E(t *testing.T) {
 	t.Setenv("PATH", filepath.Dir(cfPath)+":"+os.Getenv("PATH"))
 
 	h, _ := newTestHandler(t)
-	h.NodeOperatorAgentID = strings.Repeat("c", 64)
+	_, operatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	h.NodeOperatorAgentID = fmt.Sprintf("%x", operatorKey.Public().(ed25519.PublicKey))
 	r := testRouter(h)
 
 	// 1. check-cloudflared → installed
@@ -413,6 +455,7 @@ func TestWizard_HappyPath_E2E(t *testing.T) {
 	w = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/v1/wizard/chatgpt/mint-token", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	signAgentRequest(t, req, operatorKey, body)
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusCreated, w.Code)
 	var mintResp map[string]any

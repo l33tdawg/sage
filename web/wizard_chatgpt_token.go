@@ -9,29 +9,16 @@ package web
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 // mintMCPTokenForWizard issues a fresh bearer for the given agent. Returns
-// (plainTextToken, tokenID, createdAt, err). plainTextToken is shown ONCE
+// (plainTextToken, tokenID, actingAgentID, createdAt, err). plainTextToken is shown ONCE
 // to the wizard UI and never again.
-func mintMCPTokenForWizard(ctx context.Context, ts mcpWizardTokenStore, agentID, name string) (string, string, time.Time, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", "", time.Time{}, err
+func mintMCPTokenForWizard(ctx context.Context, ts mcpWizardTokenStore, agentID, name string) (string, string, string, time.Time, error) {
+	issued, err := ts.IssueMCPToken(ctx, name, agentID, agentID, "wizard-mcp-token")
+	if err != nil {
+		return "", "", "", time.Time{}, err
 	}
-	tokenStr := base64.RawURLEncoding.EncodeToString(raw)
-	digest := sha256.Sum256([]byte(tokenStr))
-	digestHex := hex.EncodeToString(digest[:])
-	id := uuid.NewString()
-	if err := ts.InsertMCPToken(ctx, id, name, agentID, digestHex); err != nil {
-		return "", "", time.Time{}, err
-	}
-	return tokenStr, id, time.Now().UTC(), nil
+	return issued.Token, issued.ID, issued.AgentID, issued.CreatedAt, nil
 }

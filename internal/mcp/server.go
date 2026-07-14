@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	authmw "github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/tlsca"
 )
@@ -150,6 +151,16 @@ func (s *Server) SetVersion(v string) { s.version = v }
 
 // SetProject sets the project name for per-project agent identity.
 func (s *Server) SetProject(name string) { s.project = name }
+
+// effectiveAgentID is the principal that will sign REST calls for this tool
+// invocation. HTTP bearer requests may carry a per-token identity; stdio and
+// legacy bearer paths fall back to the server/operator identity.
+func (s *Server) effectiveAgentID(ctx context.Context) string {
+	if id := authmw.ContextAgentID(ctx); id != "" {
+		return id
+	}
+	return s.agentID
+}
 
 // Run starts the stdio MCP server loop.
 func (s *Server) Run(ctx context.Context) error {
@@ -547,20 +558,34 @@ func (s *Server) autoRegister(ctx context.Context) {
 // signedRequest makes an authenticated HTTP request to the SAGE REST API.
 // Signs method + path + body + timestamp as per auth protocol v2.
 func (s *Server) signedRequest(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+	// A bearer-authed HTTP MCP request may carry a per-token signing identity
+	// (installed by MCPBearerAuthMiddleware). When present, sign AS that identity
+	// so on-chain RBAC/audit is honest instead of collapsing every token to the
+	// node operator. Absent (stdio transport, or a legacy keyless token) we fall
+	// back to the operator key.
+	signKey := s.agentKey
+	signID := s.agentID
+	if tokenKey := authmw.ContextMCPSigner(ctx); tokenKey != nil {
+		signKey = tokenKey
+		if pub, ok := tokenKey.Public().(ed25519.PublicKey); ok {
+			signID = hex.EncodeToString(pub)
+		}
+	}
+
 	timestamp := time.Now().Unix()
 
 	nonce := make([]byte, 8)
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generate request nonce: %w", err)
 	}
-	sig := auth.SignRequestWithNonce(s.agentKey, method, path, body, timestamp, nonce)
+	sig := auth.SignRequestWithNonce(signKey, method, path, body, timestamp, nonce)
 
 	req, err := http.NewRequestWithContext(ctx, method, s.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Agent-ID", s.agentID)
+	req.Header.Set("X-Agent-ID", signID)
 	req.Header.Set("X-Signature", hex.EncodeToString(sig))
 	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
 	req.Header.Set("X-Nonce", hex.EncodeToString(nonce))

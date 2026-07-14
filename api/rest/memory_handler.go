@@ -1688,10 +1688,18 @@ func broadcastTxCommitTimeout() time.Duration {
 // agent registration telemetry) use this variant; everything else stays
 // on the simpler (hash, error) signature via broadcastTxCommit.
 func (s *Server) broadcastTxCommitWithHeight(txBytes []byte) (string, int64, error) {
+	return s.broadcastTxCommitWithHeightContext(context.Background(), txBytes)
+}
+
+// broadcastTxCommitWithHeightContext is the cancellation-aware form used by
+// issuance workflows that must not leave a broadcast running after the caller
+// has rolled back local state. Ordinary REST handlers retain the historical
+// background+timeout behavior through broadcastTxCommitWithHeight.
+func (s *Server) broadcastTxCommitWithHeightContext(parent context.Context, txBytes []byte) (string, int64, error) {
 	txHex := hex.EncodeToString(txBytes)
 	url := fmt.Sprintf("%s/broadcast_tx_commit?tx=0x%s", s.cometbftRPC, txHex)
 
-	ctx, cancel := context.WithTimeout(context.Background(), broadcastTxCommitTimeout())
+	ctx, cancel := context.WithTimeout(parent, broadcastTxCommitTimeout())
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) // #nosec G107 -- internal CometBFT RPC

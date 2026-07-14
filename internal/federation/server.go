@@ -52,10 +52,17 @@ func (m *Manager) Router() http.Handler {
 		r.Get("/fed/v1/status", m.handleStatus)
 		r.Post("/fed/v1/query", m.handleQuery)
 		r.Post("/fed/v1/receipt", m.handleReceipt)
-		r.Post("/fed/v1/sync/push", m.handleSyncPush)     // v11.5 domain sync
-		r.Post("/fed/v1/sync/digest", m.handleSyncDigest) // v11.5 anti-entropy
-		r.Put("/fed/v1/sync/policy", m.handleSyncPolicy)  // v11.6 host-controlled sync
-		r.Post("/fed/v1/p2p/routes", m.handleP2PRoutes)   // v11.6 authenticated LAN roaming upgrade
+		r.Post("/fed/v1/sync/push", m.handleSyncPush)       // v11.5 domain sync
+		r.Post("/fed/v1/sync/digest", m.handleSyncDigest)   // v11.5 anti-entropy
+		r.Post("/fed/v1/sync/journal", m.handleSyncJournal) // v11.8 group journal exchange
+		r.Post("/fed/v1/sync/group/domain-add/head", m.handleDomainAddHead)
+		r.Post("/fed/v1/sync/group/domain-add/admit", m.handleDomainAddAdmit)
+		r.Post("/fed/v1/sync/group/epoch-rotate/cosign", m.handleEpochRotateCosign)
+		r.Post("/fed/v1/sync/group/subchains", m.handleGroupSubchains)
+		r.Post("/fed/v1/sync/group/member-invite/accept", m.handleMemberInviteAccept)
+		r.Post("/fed/v1/sync/group/member-invite/bootstrap", m.handleMemberBootstrap)
+		r.Put("/fed/v1/sync/policy", m.handleSyncPolicy) // v11.6 host-controlled sync
+		r.Post("/fed/v1/p2p/routes", m.handleP2PRoutes)  // v11.6 authenticated LAN roaming upgrade
 	})
 	// The pre-agreement JOIN ceremony routes sit behind joinAuth, NOT peerAuth
 	// (no active agreement exists yet during a join).

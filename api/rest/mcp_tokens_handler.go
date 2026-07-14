@@ -17,10 +17,8 @@ package rest
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
+	"crypto/ed25519"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,8 +27,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
-
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -39,9 +35,19 @@ import (
 // Defined as an interface so handler tests can stub it without spinning up
 // a SQLite DB.
 type mcpTokenStore interface {
-	InsertMCPToken(ctx context.Context, id, name, agentID, tokenSHA256 string) error
+	IssueMCPToken(ctx context.Context, name, issuerID, legacyAgentID, provider string) (*store.MCPTokenIssue, error)
 	ListMCPTokens(ctx context.Context) ([]*store.MCPToken, error)
 	RevokeMCPToken(ctx context.Context, id string) error
+}
+
+// ConfigureMCPTokenIdentityRegistrar wires the shared token issuer to the
+// standard AgentRegister broadcaster. OAuth and wizard issuance use the same
+// SQLiteStore, so configuring it once covers all three entry points.
+func (s *Server) ConfigureMCPTokenIdentityRegistrar(ts *store.SQLiteStore) {
+	ts.SetMCPTokenIdentityRegistrar(func(ctx context.Context, pub ed25519.PublicKey, priv ed25519.PrivateKey, name, provider string) error {
+		_, _, err := s.registerMintedAgentIdentity(ctx, pub, priv, name, provider)
+		return err
+	})
 }
 
 // MCPTokenIssueRequest is the JSON body for POST /v1/mcp/tokens.
@@ -99,13 +105,17 @@ func (s *Server) handleMCPTokenIssue(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "agent_id must be hex-encoded")
 		return
 	}
-	// HTTP MCP currently signs every underlying REST call with the node's
-	// private operator key. Storing an arbitrary selected agent here only
-	// changed the bearer label; it did not grant that private identity and made
-	// audit/RBAC output dishonest. Until tokens carry their own signing key,
-	// bind them explicitly to the identity they truly execute as.
 	if s.nodeOperatorID == "" {
 		writeJSONError(w, http.StatusServiceUnavailable, "node operator identity unavailable — MCP tokens cannot be issued")
+		return
+	}
+
+	// Token issuance is exact-node-operator-only. Allowing an arbitrary
+	// self-signed, not-yet-registered caller to mint creates an unlimited Sybil
+	// issuance oracle and bypasses the identity-keyed rate limiter.
+	callerID := middleware.ContextAgentID(r.Context())
+	if callerID == "" || callerID != s.nodeOperatorID {
+		writeJSONError(w, http.StatusForbidden, "MCP token issuance requires the exact node operator identity")
 		return
 	}
 	if req.AgentID != s.nodeOperatorID {
@@ -113,40 +123,19 @@ func (s *Server) handleMCPTokenIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// AuthZ: a bearer token grants the holder the target agent's identity on the
-	// MCP transport, so a caller may only mint a token for ITS OWN agent_id —
-	// unless it is the node operator or an admin. Without this gate any
-	// registered agent could mint a token impersonating any other agent.
-	callerID := middleware.ContextAgentID(r.Context())
-	if req.AgentID != callerID && !s.callerIsOperatorOrAdmin(r.Context(), callerID) {
-		writeJSONError(w, http.StatusForbidden, "may only mint a token for your own agent_id unless operator/admin")
-		return
-	}
-
-	// Generate 32 random bytes → base64url-encoded token.
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "failed to generate token")
-		return
-	}
-	tokenStr := base64.RawURLEncoding.EncodeToString(raw)
-
-	digest := sha256.Sum256([]byte(tokenStr))
-	digestHex := hex.EncodeToString(digest[:])
-
-	id := uuid.NewString()
-	if err := ts.InsertMCPToken(r.Context(), id, req.Name, req.AgentID, digestHex); err != nil {
+	issued, err := ts.IssueMCPToken(r.Context(), req.Name, callerID, s.nodeOperatorID, "mcp-token")
+	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to persist token: "+err.Error())
 		return
 	}
 
 	resp := MCPTokenIssueResponse{
-		ID:        id,
+		ID:        issued.ID,
 		Name:      req.Name,
-		AgentID:   req.AgentID,
-		Token:     tokenStr,
-		CreatedAt: time.Now().UTC(),
-		UseHint:   "Set Authorization: Bearer <token> on requests to /v1/mcp/sse or /v1/mcp/streamable. SAVE THIS TOKEN NOW — it is never shown again.",
+		AgentID:   issued.AgentID,
+		Token:     issued.Token,
+		CreatedAt: issued.CreatedAt,
+		UseHint:   "Set Authorization: Bearer <token> on requests to /v1/mcp/sse or /v1/mcp/streamable. Vault-backed tokens sign as their own on-chain identity. SAVE THIS TOKEN NOW — it is never shown again.",
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -175,17 +164,13 @@ func (s *Server) handleMCPTokenList(w http.ResponseWriter, r *http.Request) {
 
 	out := make([]MCPTokenSummary, 0, len(rows))
 	for _, t := range rows {
-		effectiveAgentID := s.nodeOperatorID
-		if effectiveAgentID == "" {
-			effectiveAgentID = t.AgentID
-		}
-		if !privileged && effectiveAgentID != callerID {
+		if !privileged && t.IssuerID != callerID {
 			continue
 		}
 		out = append(out, MCPTokenSummary{
 			ID:         t.ID,
 			Name:       t.Name,
-			AgentID:    effectiveAgentID,
+			AgentID:    t.AgentID,
 			CreatedAt:  t.CreatedAt,
 			LastUsedAt: t.LastUsedAt,
 			RevokedAt:  t.RevokedAt,
@@ -220,11 +205,7 @@ func (s *Server) handleMCPTokenRevoke(w http.ResponseWriter, r *http.Request) {
 		}
 		owned := false
 		for _, t := range rows {
-			effectiveAgentID := s.nodeOperatorID
-			if effectiveAgentID == "" {
-				effectiveAgentID = t.AgentID
-			}
-			if t.ID == id && effectiveAgentID == callerID {
+			if t.ID == id && t.IssuerID == callerID {
 				owned = true
 				break
 			}

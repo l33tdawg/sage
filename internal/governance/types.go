@@ -45,6 +45,11 @@ const (
 	// Applied directly at proposal execution (like OpUpgrade), fork-gated to app-v16,
 	// idempotent, and skips unknown, already-domained, or unregistered-target IDs.
 	OpMemoryDomainRepair ProposalOp = 6
+	// OpSyncGroupAction is an inert quorum attestation whose TargetID is the
+	// domain-separated hash of one exact off-consensus sync-group journal entry.
+	// The governance engine records/votes it durably; it has no consensus-state
+	// apply effect and is consumed only by the federation controller gate.
+	OpSyncGroupAction ProposalOp = 7
 )
 
 // ProposalStatus represents the current state of a governance proposal.

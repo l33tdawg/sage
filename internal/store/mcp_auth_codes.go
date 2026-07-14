@@ -68,6 +68,9 @@ var (
 	ErrAuthCodeUsed = errors.New("oauth auth code already used")
 	// ErrAuthCodeExpired — past expires_at.
 	ErrAuthCodeExpired = errors.New("oauth auth code expired")
+	// ErrAuthCodeClientMismatch — client_id at /token differs from the one
+	// bound at /authorize. Same-redirect sibling public clients cannot redeem.
+	ErrAuthCodeClientMismatch = errors.New("oauth client_id mismatch")
 	// ErrAuthCodeRedirectMismatch — redirect_uri at /token differs from
 	// what was bound at /authorize. Required by RFC 6749 §4.1.3.
 	ErrAuthCodeRedirectMismatch = errors.New("oauth redirect_uri mismatch")
@@ -147,6 +150,19 @@ func (s *SQLiteStore) IssueAuthCode(
 	return nil
 }
 
+// DeleteAuthCode removes an unredeemed authorization code during an issuance
+// rollback. It lets the OAuth handler erase the bearer plaintext when a later
+// redirect-sink validation cannot complete. Missing rows are a harmless no-op.
+func (s *SQLiteStore) DeleteAuthCode(ctx context.Context, code string) error {
+	if code == "" {
+		return nil
+	}
+	if _, err := s.writeExecContext(ctx, `DELETE FROM mcp_auth_codes WHERE code = ?`, code); err != nil {
+		return fmt.Errorf("delete auth code: %w", err)
+	}
+	return nil
+}
+
 // RedeemAuthCode performs the OAuth /token half of the flow:
 //  1. Look up the code (must exist, not used, not expired).
 //  2. Confirm the redirect_uri provided at /token matches the one bound at /authorize.
@@ -156,21 +172,21 @@ func (s *SQLiteStore) IssueAuthCode(
 // Returns the bearer plaintext on success.
 func (s *SQLiteStore) RedeemAuthCode(
 	ctx context.Context,
-	code, codeVerifier, redirectURI string,
+	code, codeVerifier, redirectURI, clientID string,
 ) (string, error) {
-	if code == "" || codeVerifier == "" || redirectURI == "" {
-		return "", fmt.Errorf("code, code_verifier, redirect_uri are required")
+	if code == "" || codeVerifier == "" || redirectURI == "" || clientID == "" {
+		return "", fmt.Errorf("code, code_verifier, redirect_uri, client_id are required")
 	}
 
 	// 1. Load the row.
 	row := s.conn.QueryRowContext(ctx, `
-		SELECT code_challenge, code_challenge_method, redirect_uri,
+		SELECT code_challenge, code_challenge_method, redirect_uri, client_id,
 		       expires_at, COALESCE(used_at, ''), COALESCE(bearer_plaintext, '')
 		  FROM mcp_auth_codes
 		 WHERE code = ?`, code)
 
-	var codeChallenge, method, storedRedirect, expiresAtStr, usedAtStr, bearer string
-	if scanErr := row.Scan(&codeChallenge, &method, &storedRedirect, &expiresAtStr, &usedAtStr, &bearer); scanErr != nil {
+	var codeChallenge, method, storedRedirect, storedClientID, expiresAtStr, usedAtStr, bearer string
+	if scanErr := row.Scan(&codeChallenge, &method, &storedRedirect, &storedClientID, &expiresAtStr, &usedAtStr, &bearer); scanErr != nil {
 		if errors.Is(scanErr, sql.ErrNoRows) {
 			return "", ErrAuthCodeNotFound
 		}
@@ -185,6 +201,9 @@ func (s *SQLiteStore) RedeemAuthCode(
 	}
 	if storedRedirect != redirectURI {
 		return "", ErrAuthCodeRedirectMismatch
+	}
+	if storedClientID != clientID {
+		return "", ErrAuthCodeClientMismatch
 	}
 
 	// 2. PKCE verify: SHA-256(code_verifier) base64url-no-pad must equal stored.
@@ -203,13 +222,30 @@ func (s *SQLiteStore) RedeemAuthCode(
 		UPDATE mcp_auth_codes
 		   SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
 		       bearer_plaintext = NULL
-		 WHERE code = ? AND used_at IS NULL`, code)
+		 WHERE code = ? AND client_id = ? AND redirect_uri = ?
+		   AND used_at IS NULL
+		   AND julianday(expires_at) > julianday('now')`, code, clientID, redirectURI)
 	if execErr != nil {
 		return "", fmt.Errorf("mark auth code used: %w", execErr)
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		// Lost a race with another redeem. Treat as already-used.
+		// The UPDATE is the authority. This follow-up only distinguishes an
+		// expiry-boundary loss from a concurrent successful claimant.
+		var usedAt, expiresAt string
+		checkErr := s.conn.QueryRowContext(ctx, `SELECT COALESCE(used_at, ''), expires_at FROM mcp_auth_codes WHERE code = ?`, code).Scan(&usedAt, &expiresAt)
+		if errors.Is(checkErr, sql.ErrNoRows) {
+			return "", ErrAuthCodeNotFound
+		}
+		if checkErr != nil {
+			return "", fmt.Errorf("classify auth code claim: %w", checkErr)
+		}
+		if usedAt != "" {
+			return "", ErrAuthCodeUsed
+		}
+		if expiry := parseTime(expiresAt); expiry.IsZero() || !expiry.After(time.Now().UTC()) {
+			return "", ErrAuthCodeExpired
+		}
 		return "", ErrAuthCodeUsed
 	}
 
@@ -221,13 +257,31 @@ func (s *SQLiteStore) RedeemAuthCode(
 	return bearer, nil
 }
 
-// PurgeExpiredAuthCodes deletes rows past expires_at. Caller is welcome to
-// schedule it from a periodic loop; v6.7.2 does not (table stays small).
+// PurgeExpiredAuthCodes atomically revokes the active bearer bound to every
+// unredeemed expired code, then deletes expired code rows. The authorization
+// code is the only delivery path for a freshly minted OAuth bearer, so expiry
+// retires both sides rather than merely erasing the code.
 func (s *SQLiteStore) PurgeExpiredAuthCodes(ctx context.Context) (int64, error) {
-	res, err := s.writeExecContext(ctx,
-		`DELETE FROM mcp_auth_codes WHERE expires_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`)
+	tx, unlock, err := s.beginTxLocked(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("purge auth codes: %w", err)
+		return 0, fmt.Errorf("begin purge auth codes: %w", err)
+	}
+	defer unlock()
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `UPDATE mcp_tokens
+		SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE id IN (
+			SELECT token_id FROM mcp_auth_codes
+			WHERE used_at IS NULL AND julianday(expires_at) <= julianday('now')
+		) AND revoked_at IS NULL`); err != nil {
+		return 0, fmt.Errorf("revoke expired auth-code tokens: %w", err)
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM mcp_auth_codes WHERE julianday(expires_at) <= julianday('now')`)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired auth codes: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit purge auth codes: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil

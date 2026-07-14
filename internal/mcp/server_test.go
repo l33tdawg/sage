@@ -7,11 +7,22 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	authmw "github.com/l33tdawg/sage/api/rest/middleware"
 )
+
+func TestEffectiveAgentIDUsesBearerPrincipal(t *testing.T) {
+	s, _ := testServer(t)
+	keyedID := strings.Repeat("b", 64)
+	ctx := authmw.WithAgentID(context.Background(), keyedID)
+	require.Equal(t, keyedID, s.effectiveAgentID(ctx))
+	require.Equal(t, s.agentID, s.effectiveAgentID(context.Background()))
+}
 
 func TestReadMCPFrameOversizeDoesNotPoisonFollowingRequest(t *testing.T) {
 	oversized := bytes.Repeat([]byte{'x'}, maxMCPFrameBytes+1)
