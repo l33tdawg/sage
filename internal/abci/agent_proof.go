@@ -127,6 +127,12 @@ func txUsesAgentIdentity(txType tx.TxType) bool {
 	}
 }
 
+// agentProofTimestampFresh keeps only a LOWER bound (reject captured-old proofs);
+// the upper bound was dropped in v11.7.6 so a future-dated proof from a node whose
+// deterministic block time lags its wall clock (idle single-validator chains) is
+// still accepted. Like the embedding relaxation above, this is an UNGATED v11.7.6
+// consensus rule baked into committed history and MUST NOT be fork-gated below its
+// real activation — see the REPLAY-CRITICAL note on verifySignedAgentAction.
 func agentProofTimestampFresh(timestamp int64, consensusTime time.Time) bool {
 	now := consensusTime.Unix()
 	skew := int64(delegatedAgentProofSkew / time.Second)
@@ -273,6 +279,24 @@ func compareAgentPayload(actual, expected *tx.ParsedTx) error {
 	return nil
 }
 
+// REPLAY-CRITICAL (H-2) — DO NOT FORK-GATE THE RELAXATION BELOW.
+// The delegated MemorySubmit binding here uses the NODE-derived EmbeddingHash
+// (expected.EmbeddingHash = actual.MemorySubmit.EmbeddingHash), and the sibling
+// agentProofTimestampFresh keeps only a lower time bound. Both relaxations shipped
+// UNGATED in the v11.7.6 release ("restore reliable MCP turns", commit 534b6fd) and
+// are therefore the consensus rule from that height onward. They form a strict
+// SUPERSET of the prior v11.7.5 rule (everything the old rule accepted, the new rule
+// still accepts), so all already-committed history replays byte-identically under the
+// current binary. Do NOT wrap this — or the enforceDelegatedAgentProof call at
+// app.go's FinalizeBlock path — in an old-below/new-above fork such as
+// postAppV19Rules(height): app-v19 activates strictly ABOVE all v11.7.6/7 history
+// (personal nodes auto-advance it only after the v11.8 binary boots; multi-validator
+// needs a v11.8 quorum), so such a gate would replay committed delegated sage_turn
+// writes under the stricter OLD rule, Code-109-reject them, and diverge on
+// AppHash/LastResultsHash — crashing every chain that upgraded through v11.7.6. If the
+// embedding/timestamp posture must be tightened, it has to be a NEW forward-only fork
+// that changes behaviour only ABOVE its own activation height, never a retroactive
+// re-strictification. Guarded by TestReplayGuardDelegatedMemorySubmitAcceptedBelowAppV19.
 func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string, req signedAgentRequest) error { //nolint:gocyclo,maintidx // exhaustive protocol routing is intentionally centralized
 	expected := &tx.ParsedTx{Type: actual.Type}
 
