@@ -247,6 +247,8 @@ function injectStyleOnce() {
   document.head.appendChild(s);
 }
 
+export const DEFAULT_MRI_NODE_LIMIT = 2500;
+
 async function loadGraph(fetchUrl) {
   try {
     const r = await fetch(fetchUrl, { credentials: 'same-origin' });
@@ -273,7 +275,7 @@ async function loadGraph(fetchUrl) {
 
 export function mountMriBrain(container, opts = {}) {
   injectStyleOnce();
-  const fetchUrl = opts.fetchUrl || '/v1/dashboard/memory/graph?status=all&limit=500';
+  const fetchUrl = opts.fetchUrl || `/v1/dashboard/memory/graph?status=all&limit=${DEFAULT_MRI_NODE_LIMIT}`;
   const showScan = opts.showScan !== false;
 
   const root = document.createElement('div');

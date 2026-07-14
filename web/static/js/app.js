@@ -23,7 +23,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.7.7';
+const SAGE_VERSION = 'v11.8.2';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -184,7 +184,6 @@ function MriView({ sse }) {
     useEffect(() => {
         if (!ref.current) return;
         const cleanup = mountMriBrain(ref.current, {
-            fetchUrl: '/v1/dashboard/memory/graph?status=all&limit=500',
             showScan: false,
             sse,
         });

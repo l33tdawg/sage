@@ -1418,9 +1418,17 @@ type graphCacheEntry struct {
 }
 
 const (
-	graphCacheFresh = 25 * time.Second // serve from cache without refreshing if younger than this
-	graphCacheTTL   = 10 * time.Minute // hard cap — older than this, recompute synchronously
+	defaultGraphMaxNodes = 2500             // dense enough to fill the instanced MRI without overwhelming weaker GPUs
+	graphCacheFresh      = 25 * time.Second // serve from cache without refreshing if younger than this
+	graphCacheTTL        = 10 * time.Minute // hard cap — older than this, recompute synchronously
 )
+
+func graphMaxNodes() int {
+	if v, _ := strconv.Atoi(os.Getenv("SAGE_GRAPH_MAX_NODES")); v > 0 {
+		return v
+	}
+	return defaultGraphMaxNodes
+}
 
 // handleGraph returns all memories with edges for force-directed layout. The
 // graph is expensive to compute on large brains (per-domain sampling + stats),
@@ -1429,12 +1437,10 @@ const (
 // keeps the entry warm. The actual build lives in computeGraphJSON.
 func (h *DashboardHandler) handleGraph(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	// Node cap: default 500 (bounded client load). Operators can raise it for
-	// stress-testing / big-brain views via SAGE_GRAPH_MAX_NODES.
-	maxNodes := 500
-	if v, _ := strconv.Atoi(os.Getenv("SAGE_GRAPH_MAX_NODES")); v > 0 {
-		maxNodes = v
-	}
+	// Node cap: the MRI renderer uses one instanced draw call and comfortably
+	// handles a few thousand memories. Operators can still tune the bound for
+	// unusually weak or strong hardware via SAGE_GRAPH_MAX_NODES.
+	maxNodes := graphMaxNodes()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 || limit > maxNodes {
 		limit = maxNodes

@@ -740,6 +740,14 @@ func TestHandleGraph(t *testing.T) {
 	assert.GreaterOrEqual(t, len(edges), 1)
 }
 
+func TestGraphMaxNodesDefaultsToDenseMRISample(t *testing.T) {
+	t.Setenv("SAGE_GRAPH_MAX_NODES", "")
+	assert.Equal(t, 2500, graphMaxNodes())
+
+	t.Setenv("SAGE_GRAPH_MAX_NODES", "8000")
+	assert.Equal(t, 8000, graphMaxNodes())
+}
+
 func TestHandleAuthCheck_NoAuth(t *testing.T) {
 	h, _ := newTestHandler(t)
 	r := testRouter(h)

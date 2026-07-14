@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.2.1. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
+<!-- Reconciled through SAGE v11.8.2. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
 
 # SAGE Reference — Environment Variables
 
@@ -39,7 +39,7 @@ notes which.
 | `SAGE_FED_RECALL_TIMEOUT_MS` | Timeout (ms) for federated recall fanout. | `4000` (4s) | REST | `api/rest/memory_handler.go:786-791` |
 | `SAGE_FED_RECEIPT_TIMEOUT_MS` | Timeout (ms) for federation receipt fetches. | `20000` (20s) | federation | `internal/federation/client.go:21-28` |
 | `SAGE_UI_DIR` | Filesystem directory for serving web UI assets instead of the embedded bundle. | embedded assets | web | `web/handler.go:522-526` |
-| `SAGE_GRAPH_MAX_NODES` | Maximum graph nodes returned by the web graph endpoint. | `500` | web | `web/handler.go:1238-1241` |
+| `SAGE_GRAPH_MAX_NODES` | Maximum graph nodes returned by the web graph endpoint. | `2500` | web | `web/handler.go` (`graphMaxNodes`) |
 
 ---
 

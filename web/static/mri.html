@@ -22,10 +22,10 @@
 <div id="mount"></div>
 <a class="back" href="/ui/">← back to dashboard</a>
 <script type="module">
-  import { mountMriBrain } from '/ui/js/mri-brain.js';
+  import { DEFAULT_MRI_NODE_LIMIT, mountMriBrain } from '/ui/js/mri-brain.js';
   // limit/status are URL-overridable for stress-testing: /ui/mri.html?limit=8000
   const qp = new URLSearchParams(location.search);
-  const limit = qp.get('limit') || '500';
+  const limit = qp.get('limit') || String(DEFAULT_MRI_NODE_LIMIT);
   const status = qp.get('status') || 'all';
   mountMriBrain(document.getElementById('mount'), {
     fetchUrl: `/v1/dashboard/memory/graph?status=${encodeURIComponent(status)}&limit=${encodeURIComponent(limit)}`,

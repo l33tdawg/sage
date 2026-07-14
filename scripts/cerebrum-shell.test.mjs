@@ -4,6 +4,8 @@ import test from 'node:test';
 
 const appSource = await readFile(new URL('../web/static/js/app.js', import.meta.url), 'utf8');
 const cssSource = await readFile(new URL('../web/static/css/sage.css', import.meta.url), 'utf8');
+const mriSource = await readFile(new URL('../web/static/js/mri-brain.js', import.meta.url), 'utf8');
+const mriPageSource = await readFile(new URL('../web/static/mri.html', import.meta.url), 'utf8');
 const traySource = await readFile(new URL('../cmd/sage-tray/main.swift', import.meta.url), 'utf8');
 
 test('Access Controls is a first-class sidebar route', () => {
@@ -91,4 +93,12 @@ test('macOS tray focuses an existing CEREBRUM tab before opening a new one', () 
     assert.ok(open.indexOf('hasActiveDashboard()') < open.indexOf('NSWorkspace.shared.open'));
     assert.match(traySource, /finished\.wait\(timeout: \.now\(\) \+ 5\)/,
         'browser automation must be time-bounded so dock clicks cannot freeze the app');
+});
+
+test('MRI uses one dense shared memory sample limit', () => {
+    assert.match(mriSource, /export const DEFAULT_MRI_NODE_LIMIT = 2500/);
+    assert.match(mriSource, /limit=\$\{DEFAULT_MRI_NODE_LIMIT\}/);
+    assert.match(mriPageSource, /String\(DEFAULT_MRI_NODE_LIMIT\)/);
+    const mriView = appSource.slice(appSource.indexOf('function MriView('), appSource.indexOf('// Global tooltips state'));
+    assert.doesNotMatch(mriView, /limit=500/);
 });
