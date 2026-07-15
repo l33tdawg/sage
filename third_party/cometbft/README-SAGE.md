@@ -60,6 +60,20 @@ Regression coverage is split accordingly:
   exact durable marker; the same tests prove `Query` and `CheckTx` remain
   fail-fast throughout every unsealed phase.
 
+CodeQL still compiles and scans this complete local module. Its reviewed SARIF
+upload separates only the exact inherited findings recorded in
+`scripts/codeql-cometbft-baseline.json`: each result is bound to the CodeQL CLI,
+query-pack, rule/fingerprint/correlation identity, complete source region, and
+the byte-exact upstream digest of every file observed in its trace. The six
+production overlays are protected by full-file hashes, line counts,
+unchanged-line digests, and changed-line intervals; every `*_sage_test.go` file
+is always SAGE-owned.
+A new dependency finding, a trace through an unbound or SAGE-owned line, an
+unknown or malformed source-location carrier, or any bound source/tool drift
+remains in the upload. The exact unfiltered document is retained as a workflow
+artifact for 30 days; the baseline is an audited provenance boundary, not a
+claim that inherited findings are harmless.
+
 Run the local dependency gate with:
 
 ```sh

@@ -39,29 +39,167 @@ COMPOSE=(docker compose -p "${PROJECT}"
 RPC_PORTS=(37657 37757 37857 37957)
 REBUILD=${V119_CHAOS_REBUILD:-1}
 KEEP=${V119_CHAOS_KEEP:-0}
-CHAOS_WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/sage-v119-chaos.XXXXXX")
-CHAOS_WORKDIR=$(cd "${CHAOS_WORKDIR}" && pwd -P)
-CHAOS_WORKDIR_MARKER="${CHAOS_WORKDIR}/.sage-testnet-genesis-owner"
-touch "${CHAOS_WORKDIR_MARKER}"
-export V119_CHAOS_GENESIS_DIR="${CHAOS_WORKDIR}/genesis"
-export V119_CHAOS_DATA_DIR="${CHAOS_WORKDIR}/data"
-mkdir -p "${V119_CHAOS_DATA_DIR}/postgres"
-for index in 0 1 2 3; do
-  mkdir -p "${V119_CHAOS_DATA_DIR}/abci${index}"
-  # The temp parent is mode 0700. World-writable child directories let the
-  # fixed non-root ABCI UID write through Docker bind mounts on Linux/macOS
-  # without granting access through the host parent.
-  chmod 0777 "${V119_CHAOS_DATA_DIR}/abci${index}"
-done
+CHAOS_TMP_ROOT=$(cd "${TMPDIR:-/tmp}" && pwd -P)
+CHAOS_WORKDIR=
+CHAOS_WORKDIR_MARKER=
+CHAOS_WORKDIR_READY=0
+V119_CHAOS_GENESIS_DIR=
+V119_CHAOS_DATA_DIR=
 
 dump_diagnostics() {
   "${COMPOSE[@]}" ps -a || true
   "${COMPOSE[@]}" logs --tail=120 postgres cometbft0 cometbft1 cometbft2 cometbft3 abci0 abci1 abci2 abci3 || true
 }
 
+validate_chaos_workdir() {
+  local parent name marker_value
+
+  if [ -z "${CHAOS_WORKDIR:-}" ] || [ "${CHAOS_WORKDIR}" = "/" ] ||
+     [ ! -d "${CHAOS_WORKDIR}" ] || [ -L "${CHAOS_WORKDIR}" ]; then
+    echo "ERROR: refusing invalid chaos work directory ${CHAOS_WORKDIR:-<unset>}" >&2
+    return 1
+  fi
+
+  parent=$(cd "$(dirname "${CHAOS_WORKDIR}")" && pwd -P) || return 1
+  name=$(basename "${CHAOS_WORKDIR}")
+  case "${name}" in
+    sage-v119-chaos.*) ;;
+    *)
+      echo "ERROR: refusing unexpected chaos work directory name ${CHAOS_WORKDIR}" >&2
+      return 1
+      ;;
+  esac
+  if [ "${parent}" != "${CHAOS_TMP_ROOT}" ]; then
+    echo "ERROR: refusing chaos work directory outside ${CHAOS_TMP_ROOT}: ${CHAOS_WORKDIR}" >&2
+    return 1
+  fi
+
+  if [ ! -f "${CHAOS_WORKDIR_MARKER}" ] || [ -L "${CHAOS_WORKDIR_MARKER}" ]; then
+    echo "ERROR: refusing unowned chaos work directory ${CHAOS_WORKDIR}" >&2
+    return 1
+  fi
+  marker_value=$(cat "${CHAOS_WORKDIR_MARKER}") || return 1
+  if [ "${marker_value}" != "${CHAOS_WORKDIR}" ]; then
+    echo "ERROR: chaos work directory marker does not match ${CHAOS_WORKDIR}" >&2
+    return 1
+  fi
+}
+
+clear_chaos_workdir_contents() {
+  local cleanup_image=sage-v119-chaos-node:local
+  local residue
+
+  validate_chaos_workdir || return 1
+
+  if docker image inspect "${cleanup_image}" >/dev/null 2>&1; then
+    # CometBFT and PostgreSQL deliberately write their bind-mounted state as
+    # container UIDs (root and postgres respectively). A host rm cannot descend
+    # through that state on Linux. Reuse the already-built, pinned Alpine image
+    # as a tightly confined cleanup helper: no network, read-only rootfs, and
+    # only this run's validated temp directory mounted writable.
+    if ! docker run --rm --pull never --network none --read-only \
+      --cap-drop ALL --cap-add DAC_OVERRIDE --cap-add FOWNER \
+      --security-opt no-new-privileges=true \
+      --user 0:0 \
+      --mount "type=bind,source=${CHAOS_WORKDIR},target=/sage-chaos-cleanup" \
+      --env "CHAOS_EXPECTED_WORKDIR=${CHAOS_WORKDIR}" \
+      --entrypoint /bin/sh "${cleanup_image}" -euc '
+        root=/sage-chaos-cleanup
+        marker=${root}/.sage-testnet-genesis-owner
+        test -d "${root}"
+        test -f "${marker}"
+        test ! -L "${marker}"
+        test "$(cat "${marker}")" = "${CHAOS_EXPECTED_WORKDIR}"
+        find "${root}" -mindepth 1 -maxdepth 1 \
+          ! -name .sage-testnet-genesis-owner -exec rm -rf -- {} \;
+        test -z "$(find "${root}" -mindepth 1 -maxdepth 1 \
+          ! -name .sage-testnet-genesis-owner -print -quit)"
+        rm -f -- "${marker}"
+        test -z "$(find "${root}" -mindepth 1 -maxdepth 1 -print -quit)"
+      '; then
+      echo "ERROR: container cleanup failed for ${CHAOS_WORKDIR}" >&2
+      return 1
+    fi
+  else
+    # Before the validator image exists, no container has written into this
+    # directory. Keep an early-failure path that does not pull an image.
+    find "${CHAOS_WORKDIR}" -mindepth 1 -maxdepth 1 \
+      ! -name .sage-testnet-genesis-owner -exec rm -rf -- {} \;
+    residue=$(find "${CHAOS_WORKDIR}" -mindepth 1 -maxdepth 1 \
+      ! -name .sage-testnet-genesis-owner -print -quit) || return 1
+    if [ -n "${residue}" ]; then
+      echo "ERROR: host cleanup left residue in ${CHAOS_WORKDIR}: ${residue}" >&2
+      return 1
+    fi
+    rm -f -- "${CHAOS_WORKDIR_MARKER}" || return 1
+  fi
+
+  residue=$(find "${CHAOS_WORKDIR}" -mindepth 1 -maxdepth 1 -print -quit) || return 1
+  if [ -n "${residue}" ]; then
+    echo "ERROR: cleanup left residue in ${CHAOS_WORKDIR}: ${residue}" >&2
+    return 1
+  fi
+  if ! rmdir -- "${CHAOS_WORKDIR}"; then
+    echo "ERROR: failed to remove empty chaos work directory ${CHAOS_WORKDIR}" >&2
+    return 1
+  fi
+  if [ -e "${CHAOS_WORKDIR}" ] || [ -L "${CHAOS_WORKDIR}" ]; then
+    echo "ERROR: chaos work directory still exists after cleanup: ${CHAOS_WORKDIR}" >&2
+    return 1
+  fi
+}
+
+cleanup_unready_workdir() {
+  local parent name marker marker_value
+
+  [ -n "${CHAOS_WORKDIR:-}" ] || return 0
+  if [ "${CHAOS_WORKDIR}" = "/" ] || [ ! -d "${CHAOS_WORKDIR}" ] ||
+     [ -L "${CHAOS_WORKDIR}" ]; then
+    echo "ERROR: refusing invalid unready chaos work directory ${CHAOS_WORKDIR}" >&2
+    return 1
+  fi
+  parent=$(cd "$(dirname "${CHAOS_WORKDIR}")" && pwd -P) || return 1
+  name=$(basename "${CHAOS_WORKDIR}")
+  case "${name}" in
+    sage-v119-chaos.*) ;;
+    *)
+      echo "ERROR: refusing unexpected unready chaos work directory ${CHAOS_WORKDIR}" >&2
+      return 1
+      ;;
+  esac
+  if [ "${parent}" != "${CHAOS_TMP_ROOT}" ]; then
+    echo "ERROR: refusing unready chaos work directory outside ${CHAOS_TMP_ROOT}: ${CHAOS_WORKDIR}" >&2
+    return 1
+  fi
+
+  marker=${CHAOS_WORKDIR_MARKER:-${CHAOS_WORKDIR}/.sage-testnet-genesis-owner}
+  if [ -e "${marker}" ] || [ -L "${marker}" ]; then
+    if [ ! -f "${marker}" ] || [ -L "${marker}" ]; then
+      echo "ERROR: refusing unexpected unready owner marker ${marker}" >&2
+      return 1
+    fi
+    marker_value=$(cat "${marker}") || return 1
+    if [ "${marker_value}" != "${CHAOS_WORKDIR}" ]; then
+      echo "ERROR: unready owner marker does not match ${CHAOS_WORKDIR}" >&2
+      return 1
+    fi
+    rm -f -- "${marker}" || return 1
+  fi
+  if ! rmdir -- "${CHAOS_WORKDIR}"; then
+    echo "ERROR: unready chaos work directory is not empty: ${CHAOS_WORKDIR}" >&2
+    return 1
+  fi
+}
+
 cleanup() {
   rc=$?
   trap - EXIT INT TERM
+  if [ "${CHAOS_WORKDIR_READY:-0}" != "1" ]; then
+    if ! cleanup_unready_workdir && [ "${rc}" -eq 0 ]; then
+      rc=1
+    fi
+    exit "${rc}"
+  fi
   if [ "${rc}" -ne 0 ]; then
     echo "--- v11.9 chaos gate failed; diagnostics follow ---"
     dump_diagnostics
@@ -87,14 +225,8 @@ cleanup() {
       fi
     fi
 
-    if [ "${cleanup_failed}" = "0" ]; then
-      if [ ! -f "${CHAOS_WORKDIR_MARKER}" ] || [ -L "${CHAOS_WORKDIR_MARKER}" ]; then
-        echo "ERROR: refusing to remove unowned chaos work directory ${CHAOS_WORKDIR}" >&2
-        cleanup_failed=1
-      elif ! rm -rf -- "${CHAOS_WORKDIR}"; then
-        echo "ERROR: failed to remove chaos work directory ${CHAOS_WORKDIR}" >&2
-        cleanup_failed=1
-      fi
+    if [ "${cleanup_failed}" = "0" ] && ! clear_chaos_workdir_contents; then
+      cleanup_failed=1
     fi
 
     if [ "${cleanup_failed}" != "0" ]; then
@@ -106,7 +238,26 @@ cleanup() {
   fi
   exit "${rc}"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+CHAOS_WORKDIR=$(mktemp -d "${CHAOS_TMP_ROOT}/sage-v119-chaos.XXXXXX")
+canonical_workdir=$(cd "${CHAOS_WORKDIR}" && pwd -P)
+CHAOS_WORKDIR=${canonical_workdir}
+CHAOS_WORKDIR_MARKER="${CHAOS_WORKDIR}/.sage-testnet-genesis-owner"
+export V119_CHAOS_GENESIS_DIR="${CHAOS_WORKDIR}/genesis"
+export V119_CHAOS_DATA_DIR="${CHAOS_WORKDIR}/data"
+printf '%s\n' "${CHAOS_WORKDIR}" > "${CHAOS_WORKDIR_MARKER}"
+CHAOS_WORKDIR_READY=1
+mkdir -p "${V119_CHAOS_DATA_DIR}/postgres"
+for index in 0 1 2 3; do
+  mkdir -p "${V119_CHAOS_DATA_DIR}/abci${index}"
+  # The temp parent is mode 0700. World-writable child directories let the
+  # fixed non-root ABCI UID write through Docker bind mounts on Linux/macOS
+  # without granting access through the host parent.
+  chmod 0777 "${V119_CHAOS_DATA_DIR}/abci${index}"
+done
 
 rpc_json() {
   port=$1

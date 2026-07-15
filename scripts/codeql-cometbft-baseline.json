@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "module": "github.com/cometbft/cometbft",
+    "version": "v0.38.23",
+    "sourceCommit": "feb2aea4dc271d612129afc958cb844713ec792b",
+    "source": "https://github.com/cometbft/cometbft",
+    "audit": "Every upstream file in the audited traces is byte-identical to v0.38.23; full overlay hashes, unchanged-line digests, and current-line ranges bind the six reviewed SAGE production patches."
+  },
+  "codeql": {
+    "driverName": "CodeQL",
+    "semanticVersion": "2.26.0",
+    "automationId": "/language:go/",
+    "extensions": {
+      "codeql/go-queries": "1.6.5+e4a7b4ff515d6f23af5a4b8a837652348657e84b",
+      "codeql/go-all": "7.2.0+e4a7b4ff515d6f23af5a4b8a837652348657e84b",
+      "codeql/threat-models": "1.0.52+e4a7b4ff515d6f23af5a4b8a837652348657e84b"
+    }
+  },
+  "vendorPrefix": "third_party/cometbft/",
+  "protectedTestSuffix": "_sage_test.go",
+  "counts": {
+    "sinkFiles": 11,
+    "evidenceFiles": 8,
+    "overlays": 6,
+    "findings": 29
+  },
+  "sinkFiles": {
+    "third_party/cometbft/blocksync/pool.go": "0024ac9da7d724b1191afbcb309225b0185941677900ec3cfe471817a57f5167",
+    "third_party/cometbft/consensus/state.go": "9f6d54fb6f1e6722b523947710e6de6879d543d5f71025f332bde28ab5f159e0",
+    "third_party/cometbft/libs/os/os.go": "2f1cbf97921015250ef1d852f0f9e75fed796fc528293e7fc5b47ad46a14d8ec",
+    "third_party/cometbft/light/client.go": "342ab3f43e19e2595da2f434db34cb399cf16c4011c3de03b795f0de3add146e",
+    "third_party/cometbft/p2p/pex/pex_reactor.go": "43c563ba397318872905e010f080173ee8d0480ace9b19e9f8be9e44b0a09f23",
+    "third_party/cometbft/p2p/switch.go": "3c285b36faef93aa5687934e2f4448febd65c5f7688118c7b89d1ad22caedd78",
+    "third_party/cometbft/rpc/jsonrpc/client/ws_client.go": "44530a6aa0aff5b34e72d693c06961a2b0b72bd79b1582a76ca9b2bf0071fdb0",
+    "third_party/cometbft/rpc/jsonrpc/server/http_json_handler.go": "ee8e8b64b023c80087e59b178a0cf07cc48d89452f16d8cb72db0c6c4812821a",
+    "third_party/cometbft/rpc/jsonrpc/server/http_server.go": "81b2a29bbbaba0b234f0ad4708397ae0b86c20833bdb29e40cd28e7f8accbec5",
+    "third_party/cometbft/rpc/jsonrpc/server/http_uri_handler.go": "e1deb0271ad6bc28b56fee944fc9d16c2ad1383c4f14eb2edb7c7f791a11c1ad",
+    "third_party/cometbft/rpc/jsonrpc/server/ws_handler.go": "ca1672196e81621a679cfe54d696fa6a48cda0bd367f7e282be124a228494ae6"
+  },
+  "evidenceFiles": {
+    "third_party/cometbft/consensus/replay_file.go": "da753360279e83b8f4a615980074cff3f93e39ae42011de65b391c2a4ab7f5d1",
+    "third_party/cometbft/libs/service/service.go": "f12c172b48f03e95c3a69c2d71174c56e563d9e09ce6cc8d014560f407166a27",
+    "third_party/cometbft/light/provider/http/http.go": "17c16bf51511d94a6c1691938956e37f80ec42d4d8928b018fa6ebddb5d16600",
+    "third_party/cometbft/light/setup.go": "82018e2ec51514c82f92c0a77b7134762a3d4b35aee8d8bd29fb343d5beeba0d",
+    "third_party/cometbft/rpc/client/http/http.go": "11fcfcad19ac5bab0d87fae5ccf9b3a21defa77226b454f76401719a76f700a6",
+    "third_party/cometbft/rpc/jsonrpc/client/decode.go": "6e656661b5e513e23dcaeb2eb9454b0c8f31d9edfe7bddb44a37ba592707939d",
+    "third_party/cometbft/rpc/jsonrpc/client/http_json_client.go": "b5d2f0c1e0d79ed7f762e1c89f9398fdb3afee2b05d0947fc6f826d635523971",
+    "third_party/cometbft/statesync/stateprovider.go": "48ea511445a32a3525314e41b17ddb9346d98c00ed0071020f158cdbf9e89f8b"
+  },
+  "overlays": {
+    "third_party/cometbft/blocksync/reactor.go": {
+      "sha256": "32bbcf2487ed03259c339b185af90c189257b5eb59fe7bf337b76fb92bceb03d",
+      "unchangedLineSha256": "0ba372720a53d774a4ab4265df9cbc055c548ce3edc88a7aa4ffff2b00fc80cb",
+      "lineCount": 635,
+      "modifiedLineRanges": [[4, 4], [19, 29], [575, 581]]
+    },
+    "third_party/cometbft/node/node.go": {
+      "sha256": "248a617a020ab2ea5f801b26ed03b9cef2712a5ca9d453d65af6e4834ff4b77e",
+      "unchangedLineSha256": "e9fe3ee1bdd4033ac15a06dc06b5c30348324db3a2090f6d8b003dfeea009cef",
+      "lineCount": 989,
+      "modifiedLineRanges": [[396, 398], [411, 415], [514, 528]]
+    },
+    "third_party/cometbft/node/setup.go": {
+      "sha256": "2fb463deca23f9ddc567d24b426bb9697523b5c3b3f66832a47e2fab6b224da7",
+      "unchangedLineSha256": "e6a7a2571f1aca0fb141b769a8355e611cb4594214d9931a7b8f6da035a7a4e1",
+      "lineCount": 779,
+      "modifiedLineRanges": [[529, 533], [535, 535], [542, 590], [656, 729]]
+    },
+    "third_party/cometbft/state/store.go": {
+      "sha256": "dc86950dd1250ec22ab453d31124fde769490e1b13343828db5f5e2867ae7201",
+      "unchangedLineSha256": "276a56ab58ef9217eafe8c2a31058f494ab3b182985534798839db678d9c69cc",
+      "lineCount": 838,
+      "modifiedLineRanges": [[261, 271]]
+    },
+    "third_party/cometbft/statesync/reactor.go": {
+      "sha256": "5faa288f2273f8ea9efabcc456273bd892e6d95b56d4d8ed7d46106dc3032975",
+      "unchangedLineSha256": "2bebd1c790609df9239b29cd6ef7466f82ccf3db4c56b0fbd745b74314280612",
+      "lineCount": 308,
+      "modifiedLineRanges": [[115, 115], [231, 242]]
+    },
+    "third_party/cometbft/store/store.go": {
+      "sha256": "426514d395bec95bc27b32483205203f0998fb827a31360b36666e399a5a8215",
+      "unchangedLineSha256": "84d5880b3dbae25fa80c7b056f230aa6cdd679da360e3a70257958e39e427cbd",
+      "lineCount": 940,
+      "modifiedLineRanges": [[4, 6], [30, 36], [626, 629], [636, 797]]
+    }
+  },
+  "findings": [
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/blocksync/pool.go","region":{"startLine":536,"startColumn":57,"endLine":536,"endColumn":60},"primaryLocationLineHash":"5ba0a77e08648920:1","correlationGuid":"99bd8463-eb48-44aa-b2d1-64788b8fd118"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/consensus/state.go","region":{"startLine":412,"startColumn":60,"endLine":412,"endColumn":63},"primaryLocationLineHash":"27fa957316bcd61e:1","correlationGuid":"b6879611-17a8-432a-9e77-7ec9e1ecd1f7"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/consensus/state.go","region":{"startLine":423,"startColumn":54,"endLine":423,"endColumn":57},"primaryLocationLineHash":"8b89c2c19f85552b:1","correlationGuid":"60870248-badf-419d-91bd-2b8b657c03c5"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/consensus/state.go","region":{"startLine":462,"startColumn":49,"endLine":462,"endColumn":52},"primaryLocationLineHash":"2a0e55dccdd01fd0:1","correlationGuid":"1823136f-f82d-4139-bcd0-9e751c7ffca5"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/libs/os/os.go","region":{"startLine":44,"startColumn":14,"endLine":44,"endColumn":15},"primaryLocationLineHash":"ae1fb0295110320:1","correlationGuid":"ca192e66-1561-474c-b933-c7b3e4853fb1"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/light/client.go","region":{"startLine":1006,"startColumn":47,"endLine":1006,"endColumn":56},"primaryLocationLineHash":"3ed0b4eeb6a4627e:1","correlationGuid":"92a24cc8-de2b-416d-8959-7d3ec565c602"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/light/client.go","region":{"startLine":1013,"startColumn":47,"endLine":1013,"endColumn":56},"primaryLocationLineHash":"5c453c9d85b2a768:1","correlationGuid":"1892d397-081a-4a94-8007-ea4a155711be"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/light/client.go","region":{"startLine":1090,"startColumn":51,"endLine":1090,"endColumn":85},"primaryLocationLineHash":"f1f0479a76d8e283:1","correlationGuid":"32544fba-255a-49d6-9a02-0c3d825489c4"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/light/client.go","region":{"startLine":1109,"startColumn":39,"endLine":1109,"endColumn":73},"primaryLocationLineHash":"6c6b161e124b51f4:1","correlationGuid":"d0568611-6c04-4681-9689-a2ecc36ddb49"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/light/client.go","region":{"startLine":1116,"startColumn":39,"endLine":1116,"endColumn":73},"primaryLocationLineHash":"8f4fcc981c4dccbc:1","correlationGuid":"02e3aaa9-51d8-4169-9575-4014655a9d7a"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/light/client.go","region":{"startLine":1159,"startColumn":16,"endLine":1159,"endColumn":43},"primaryLocationLineHash":"ec4279f44ff37f08:1","correlationGuid":"feb45474-c089-4b0f-8614-0bf6cab9d2a7"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/light/client.go","region":{"startLine":1164,"startColumn":16,"endLine":1164,"endColumn":43},"primaryLocationLineHash":"697ccd2e20464619:1","correlationGuid":"d6c7e31d-1462-4c55-8919-596d8119cd6f"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/light/client.go","region":{"startLine":1170,"startColumn":16,"endLine":1170,"endColumn":43},"primaryLocationLineHash":"ba651dbdbd97887a:1","correlationGuid":"187b4564-2290-4fee-b328-ab74064ce28f"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/p2p/pex/pex_reactor.go","region":{"startLine":622,"startColumn":54,"endLine":622,"endColumn":57},"primaryLocationLineHash":"e24599fbed8fb756:1","correlationGuid":"7ee7ffbf-bca9-4f92-bc31-991cd91fb4de"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/p2p/switch.go","region":{"startLine":422,"startColumn":81,"endLine":422,"endColumn":84},"primaryLocationLineHash":"986d949353e11211:1","correlationGuid":"58e663f9-5bbe-4c06-812f-b73fad8600d1"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/p2p/switch.go","region":{"startLine":445,"startColumn":81,"endLine":445,"endColumn":84},"primaryLocationLineHash":"4c9dd134adf4a75c:1","correlationGuid":"44be65e4-02b0-4baf-bbf4-18ab66a3cf21"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/p2p/switch.go","region":{"startLine":541,"startColumn":51,"endLine":541,"endColumn":54},"primaryLocationLineHash":"dde0fe284b86b73a:1","correlationGuid":"acef52b3-a918-42b5-b5b5-e5e4cefced11"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/p2p/switch.go","region":{"startLine":543,"startColumn":51,"endLine":543,"endColumn":54},"primaryLocationLineHash":"b38f44b7663534ba:1","correlationGuid":"3d151f8a-372c-41c2-a556-d1f5260729b0"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/p2p/switch.go","region":{"startLine":719,"startColumn":12,"endLine":719,"endColumn":15},"primaryLocationLineHash":"d3486b4d08ebb0ac:1","correlationGuid":"dc929dbc-723b-4231-b5bb-995693b44580"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/p2p/switch.go","region":{"startLine":840,"startColumn":49,"endLine":840,"endColumn":52},"primaryLocationLineHash":"42e0f83a77d002a0:1","correlationGuid":"57303e95-cf12-4f2a-812b-7d576199c764"},
+    {"ruleId":"go/clear-text-logging","path":"third_party/cometbft/rpc/jsonrpc/server/ws_handler.go","region":{"startLine":93,"startColumn":56,"endLine":93,"endColumn":59},"primaryLocationLineHash":"44342c82c522b168:1","correlationGuid":"f0ce476c-6d95-4ba4-9af0-5172622bc271"},
+    {"ruleId":"go/log-injection","path":"third_party/cometbft/rpc/jsonrpc/client/ws_client.go","region":{"startLine":512,"startColumn":67,"endLine":512,"endColumn":79},"primaryLocationLineHash":"39730ea1f0c043b9:1","correlationGuid":"2c7f0eff-a3ea-4fe8-ba16-4ed46fd44f22"},
+    {"ruleId":"go/log-injection","path":"third_party/cometbft/rpc/jsonrpc/client/ws_client.go","region":{"startLine":517,"startColumn":49,"endLine":517,"endColumn":60},"primaryLocationLineHash":"eef868e82db4cb19:1","correlationGuid":"dc1bc9c3-463c-4fbe-84d6-01fd1c0c175f"},
+    {"ruleId":"go/log-injection","path":"third_party/cometbft/rpc/jsonrpc/client/ws_client.go","region":{"startLine":517,"startColumn":69,"endLine":517,"endColumn":72},"primaryLocationLineHash":"eef868e82db4cb19:1","correlationGuid":"98dc5736-3c08-4fd0-a102-2f5e5f86c8c3"},
+    {"ruleId":"go/log-injection","path":"third_party/cometbft/rpc/jsonrpc/client/ws_client.go","region":{"startLine":538,"startColumn":39,"endLine":538,"endColumn":50},"primaryLocationLineHash":"ff92d0d7b149a535:1","correlationGuid":"f2abb74d-b4f8-4fd6-8f18-4576cc71fd54"},
+    {"ruleId":"go/log-injection","path":"third_party/cometbft/rpc/jsonrpc/server/http_json_handler.go","region":{"startLine":70,"startColumn":13,"endLine":70,"endColumn":20},"primaryLocationLineHash":"6fe1e5953713b536:1","correlationGuid":"ac8cd45f-8a5f-48bb-93f5-0070321fcafd"},
+    {"ruleId":"go/log-injection","path":"third_party/cometbft/rpc/jsonrpc/server/http_server.go","region":{"startLine":227,"startColumn":12,"endLine":227,"endColumn":17},"primaryLocationLineHash":"430388db74e41b72:1","correlationGuid":"0a65dd77-1d14-488d-a7e1-111db5e6141f"},
+    {"ruleId":"go/log-injection","path":"third_party/cometbft/rpc/jsonrpc/server/http_uri_handler.go","region":{"startLine":56,"startColumn":41,"endLine":56,"endColumn":51},"primaryLocationLineHash":"16c45b34fde828a7:1","correlationGuid":"ca709889-4e50-4b4b-ad13-b20dd21e9366"},
+    {"ruleId":"go/log-injection","path":"third_party/cometbft/rpc/jsonrpc/server/http_uri_handler.go","region":{"startLine":56,"startColumn":61,"endLine":56,"endColumn":65},"primaryLocationLineHash":"16c45b34fde828a7:1","correlationGuid":"530e471a-18da-4396-9a57-49f5cd400d63"}
+  ]
+}
