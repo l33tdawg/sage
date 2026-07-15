@@ -63,16 +63,19 @@ Regression coverage is split accordingly:
 CodeQL still compiles and scans this complete local module. Its reviewed SARIF
 upload separates only the exact inherited findings recorded in
 `scripts/codeql-cometbft-baseline.json`: each result is bound to the CodeQL CLI,
-query-pack, rule/fingerprint/correlation identity, complete source region, and
-the byte-exact upstream digest of every file observed in its trace. The six
+query-pack, rule, pre-upload line fingerprint, complete source region, and the
+byte-exact upstream digest of every file observed in its trace. GitHub's
+server-added correlation GUID is also checked when present, but it is not part
+of the pre-upload identity because the CodeQL action does not emit it. The six
 production overlays are protected by full-file hashes, line counts,
 unchanged-line digests, and changed-line intervals; every `*_sage_test.go` file
 is always SAGE-owned.
 A new dependency finding, a trace through an unbound or SAGE-owned line, an
 unknown or malformed source-location carrier, or any bound source/tool drift
-remains in the upload. The exact unfiltered document is retained as a workflow
-artifact for 30 days; the baseline is an audited provenance boundary, not a
-claim that inherited findings are harmless.
+remains in the upload. An audited Go run missing any of the 29 expected
+identities fails before a filtered document is published. The exact unfiltered
+document is retained as a workflow artifact for 30 days; the baseline is an
+audited provenance boundary, not a claim that inherited findings are harmless.
 
 Run the local dependency gate with:
 

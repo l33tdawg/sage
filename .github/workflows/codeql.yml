@@ -87,6 +87,7 @@ jobs:
         run: |
           node scripts/filter-codeql-sarif.mjs \
             --manifest scripts/codeql-cometbft-baseline.json \
+            --expected-automation-id "/language:${{ matrix.language }}/" \
             "$RUNNER_TEMP/codeql-unfiltered/upload.sarif" \
             "$RUNNER_TEMP/codeql-filtered/upload.sarif"
 

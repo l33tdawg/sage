@@ -38,9 +38,8 @@ function location(uri, locationRegion = region()) {
 }
 
 function auditedResult(finding, overrides = {}) {
-  return {
+  const result = {
     ruleId: overrides.ruleId ?? finding.ruleId,
-    correlationGuid: overrides.correlationGuid ?? finding.correlationGuid,
     partialFingerprints: {
       primaryLocationLineHash: overrides.primaryLocationLineHash
         ?? finding.primaryLocationLineHash,
@@ -51,6 +50,10 @@ function auditedResult(finding, overrides = {}) {
     )],
     ...(overrides.extra ?? {}),
   };
+  if (overrides.omitCorrelationGuid !== true) {
+    result.correlationGuid = overrides.correlationGuid ?? finding.correlationGuid;
+  }
+  return result;
 }
 
 function sarif(results, run = {}) {
@@ -139,6 +142,18 @@ test('manifest rejects duplicate identities and overlapping overlay ranges', () 
 
 test('suppresses all and only the 29 exact audited upstream findings', () => {
   const results = baseline.findings.map((finding) => auditedResult(finding));
+  const filtered = filterSarifDocument(sarif(results), baseline);
+
+  assert.deepEqual(filtered.document.runs[0].results, []);
+  assert.deepEqual(filtered.stats, { total: 29, suppressed: 29, retained: 0 });
+});
+
+test('suppresses exact pre-upload CodeQL findings before GitHub adds correlation GUIDs', () => {
+  const results = baseline.findings.map((finding) => {
+    const result = auditedResult(finding, { omitCorrelationGuid: true });
+    delete result.locations[0].physicalLocation.region.endLine;
+    return result;
+  });
   const filtered = filterSarifDocument(sarif(results), baseline);
 
   assert.deepEqual(filtered.document.runs[0].results, []);
@@ -234,6 +249,19 @@ test('allows unchanged regions in hash-bound overlay files to remain upstream ev
   ));
 
   assert.deepEqual(filteredResults(sarif(results)), []);
+});
+
+test('normalizes the pre-upload single-line shorthand in unchanged overlays', () => {
+  const [path] = baseline.overlays.keys();
+  const shorthand = region(1, 1, 1, 2);
+  delete shorthand.endLine;
+  const result = auditedResult(baseline.findings[0], {
+    omitCorrelationGuid: true,
+    extra: { relatedLocations: [location(path, shorthand)] },
+  });
+  delete result.locations[0].physicalLocation.region.endLine;
+
+  assert.deepEqual(filteredResults(sarif([result])), []);
 });
 
 test('matches real unchanged node/setup flow spans without protecting whole overlay files', () => {
@@ -861,6 +889,46 @@ test('directory mode validates every SARIF input before creating output', async 
   await assert.rejects(
     filterSarifPath(input, output, manifestPath, { sourceRoot: repoRoot }),
     /cannot read valid JSON/u,
+  );
+  await assert.rejects(readFile(output), /ENOENT/u);
+});
+
+test('CLI coverage gate rejects an audited run missing a baseline finding', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sage-sarif-filter-'));
+  const input = join(root, 'input.sarif');
+  const output = join(root, 'output.sarif');
+  await writeFile(input, JSON.stringify(sarif(
+    baseline.findings.slice(0, -1).map((finding) => auditedResult(finding, {
+      omitCorrelationGuid: true,
+    })),
+  )));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    filterSarifPath(input, output, manifestPath, {
+      sourceRoot: repoRoot,
+      expectedAutomationId: baseline.automationId,
+    }),
+    /missing 1 expected CometBFT baseline finding/u,
+  );
+  await assert.rejects(readFile(output), /ENOENT/u);
+});
+
+test('CLI coverage gate rejects Go tool drift even with no baseline results', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sage-sarif-filter-'));
+  const input = join(root, 'input.sarif');
+  const output = join(root, 'output.sarif');
+  const drifted = sarif([]);
+  drifted.runs[0].tool.extensions[0].semanticVersion = 'next-query-pack';
+  await writeFile(input, JSON.stringify(drifted));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    filterSarifPath(input, output, manifestPath, {
+      sourceRoot: repoRoot,
+      expectedAutomationId: baseline.automationId,
+    }),
+    /metadata does not match the pinned Go baseline/u,
   );
   await assert.rejects(readFile(output), /ENOENT/u);
 });

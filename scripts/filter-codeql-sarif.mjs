@@ -149,7 +149,6 @@ function findingKey(finding) {
     finding.region.endLine,
     finding.region.endColumn,
     finding.primaryLocationLineHash,
-    finding.correlationGuid,
   ]);
 }
 
@@ -606,6 +605,20 @@ function validEvidenceRegion(region) {
   return true;
 }
 
+function normalizeSarifLineRegion(region) {
+  if (
+    isRecord(region)
+    && Number.isSafeInteger(region.startLine)
+    && !('endLine' in region)
+  ) {
+    // SARIF defines an omitted endLine as the same line as startLine. The
+    // CodeQL action emits this compact form before upload; GitHub expands it
+    // while ingesting the same result.
+    return { ...region, endLine: region.startLine };
+  }
+  return region;
+}
+
 function regionWithinVerifiedFile(region, facts) {
   if (region === undefined) {
     return true;
@@ -638,6 +651,7 @@ function classifyArtifactEvidence(artifactLocation, evidenceRegion, run, baselin
   if (evidenceRegion !== undefined && !validEvidenceRegion(evidenceRegion)) {
     return 'unknown';
   }
+  const normalizedEvidenceRegion = normalizeSarifLineRegion(evidenceRegion);
   const path = resolveArtifactPath(artifactLocation, run);
   if (path === undefined) {
     return 'unknown';
@@ -663,7 +677,7 @@ function classifyArtifactEvidence(artifactLocation, evidenceRegion, run, baselin
   if (
     !baseline.verifiedPaths.has(path)
     || facts === undefined
-    || !regionWithinVerifiedFile(evidenceRegion, facts)
+    || !regionWithinVerifiedFile(normalizedEvidenceRegion, facts)
   ) {
     return 'unknown';
   }
@@ -671,14 +685,15 @@ function classifyArtifactEvidence(artifactLocation, evidenceRegion, run, baselin
     const coordinateKeys = ['endColumn', 'endLine', 'startColumn', 'startLine'];
     if (
       !isRecord(evidenceRegion)
-      || Object.keys(evidenceRegion).length !== coordinateKeys.length
-      || !coordinateKeys.every((key) => key in evidenceRegion)
+      || !isRecord(normalizedEvidenceRegion)
+      || Object.keys(normalizedEvidenceRegion).length !== coordinateKeys.length
+      || !coordinateKeys.every((key) => key in normalizedEvidenceRegion)
     ) {
       // Overlay ownership is line-based. Mixed line/char/byte representations
       // are ambiguous even when each coordinate is independently in bounds.
       return 'unknown';
     }
-    const span = regionLineSpan(evidenceRegion);
+    const span = regionLineSpan(normalizedEvidenceRegion);
     if (span === undefined) {
       return 'unknown';
     }
@@ -1145,7 +1160,6 @@ function resultFindingKey(result, run, context) {
     : undefined;
   if (
     path === undefined
-    || typeof result.correlationGuid !== 'string'
     || typeof partialFingerprints?.primaryLocationLineHash !== 'string'
   ) {
     return undefined;
@@ -1153,7 +1167,7 @@ function resultFindingKey(result, run, context) {
   const fields = [
     physical.region.startLine,
     physical.region.startColumn,
-    physical.region.endLine,
+    physical.region.endLine ?? physical.region.startLine,
     physical.region.endColumn,
   ];
   if (!fields.every((field) => Number.isSafeInteger(field) && field > 0)) {
@@ -1169,7 +1183,6 @@ function resultFindingKey(result, run, context) {
       endColumn: fields[3],
     },
     primaryLocationLineHash: partialFingerprints.primaryLocationLineHash,
-    correlationGuid: result.correlationGuid,
   });
 }
 
@@ -1211,9 +1224,63 @@ function remainingFindingMultiset(baseline) {
       continue;
     }
     const key = findingKey(finding);
-    findings.set(key, (findings.get(key) ?? 0) + 1);
+    const entry = findings.get(key);
+    if (entry === undefined) {
+      findings.set(key, { finding, remaining: 1 });
+    } else {
+      entry.remaining += 1;
+    }
   }
   return findings;
+}
+
+function baselineAuditState(baseline, expectedAutomationId) {
+  return {
+    expectedAutomationId,
+    expectedAutomationRuns: 0,
+    auditedRuns: 0,
+    expectedFindingKeys: new Set(
+      baseline.findings
+        .filter((finding) => baseline.verifiedPaths.has(finding.path))
+        .map((finding) => findingKey(finding)),
+    ),
+    observedFindingKeys: new Set(),
+  };
+}
+
+function observeAuditedFinding(result, run, context, baseline, auditState) {
+  if (!auditedToolRun(run, baseline)) {
+    return;
+  }
+  const key = resultFindingKey(result, run, context);
+  if (key !== undefined && auditState.expectedFindingKeys.has(key)) {
+    auditState.observedFindingKeys.add(key);
+  }
+}
+
+function assertExpectedAuditCoverage(auditState, baseline) {
+  if (auditState.expectedAutomationId === undefined) {
+    return;
+  }
+  if (auditState.expectedAutomationRuns === 0) {
+    throw new Error(
+      `SARIF contains no run for expected automation ID ${auditState.expectedAutomationId}`,
+    );
+  }
+  if (auditState.expectedAutomationId !== baseline.automationId) {
+    return;
+  }
+  if (auditState.auditedRuns !== auditState.expectedAutomationRuns) {
+    throw new Error('audited CodeQL run metadata does not match the pinned Go baseline');
+  }
+  const missing = [...auditState.expectedFindingKeys]
+    .filter((key) => !auditState.observedFindingKeys.has(key));
+  if (missing.length === 0) {
+    return;
+  }
+  throw new Error(
+    `audited CodeQL run is missing ${missing.length} expected CometBFT baseline finding(s)`,
+  );
 }
 
 function shouldSuppressResult(result, run, context, baseline, remainingFindings) {
@@ -1238,15 +1305,25 @@ function shouldSuppressResult(result, run, context, baseline, remainingFindings)
     return false;
   }
   const key = resultFindingKey(result, run, context);
-  const remaining = key === undefined ? 0 : (remainingFindings.get(key) ?? 0);
-  if (remaining === 0) {
+  const entry = key === undefined ? undefined : remainingFindings.get(key);
+  if (entry === undefined || entry.remaining === 0) {
     return false;
   }
-  remainingFindings.set(key, remaining - 1);
+  // GitHub adds correlationGuid while ingesting SARIF, so it is absent from
+  // the pinned CodeQL action's pre-upload document that this filter consumes.
+  // When a producer does provide it, retain any result that disagrees with the
+  // server-audited GUID recorded in the manifest.
+  if (
+    'correlationGuid' in result
+    && result.correlationGuid !== entry.finding.correlationGuid
+  ) {
+    return false;
+  }
+  entry.remaining -= 1;
   return true;
 }
 
-function filterSarifDocumentWithState(value, baseline, remainingFindings) {
+function filterSarifDocumentWithState(value, baseline, remainingFindings, auditState) {
   const document = requireRecord(value, 'SARIF document');
   if (document.version !== SARIF_VERSION) {
     throw new TypeError(`SARIF document.version must be ${SARIF_VERSION}`);
@@ -1259,6 +1336,15 @@ function filterSarifDocumentWithState(value, baseline, remainingFindings) {
   let suppressed = 0;
   const runs = document.runs.map((runValue, runIndex) => {
     const run = requireRecord(runValue, `SARIF document.runs[${runIndex}]`);
+    if (
+      isRecord(run.automationDetails)
+      && run.automationDetails.id === auditState.expectedAutomationId
+    ) {
+      auditState.expectedAutomationRuns += 1;
+    }
+    if (auditedToolRun(run, baseline)) {
+      auditState.auditedRuns += 1;
+    }
     const results = optionalArray(run, 'results', `SARIF document.runs[${runIndex}]`);
     if (results === undefined) {
       return run;
@@ -1268,6 +1354,7 @@ function filterSarifDocumentWithState(value, baseline, remainingFindings) {
       const context = `SARIF document.runs[${runIndex}].results[${resultIndex}]`;
       const result = requireRecord(resultValue, context);
       total += 1;
+      observeAuditedFinding(result, run, context, baseline, auditState);
       if (shouldSuppressResult(result, run, context, baseline, remainingFindings)) {
         suppressed += 1;
       } else {
@@ -1290,7 +1377,12 @@ export function filterSarifDocument(value, baseline) {
   ) {
     throw new TypeError('filterSarifDocument requires a loaded baseline manifest');
   }
-  return filterSarifDocumentWithState(value, baseline, remainingFindingMultiset(baseline));
+  return filterSarifDocumentWithState(
+    value,
+    baseline,
+    remainingFindingMultiset(baseline),
+    baselineAuditState(baseline, undefined),
+  );
 }
 
 async function pathExists(path) {
@@ -1319,14 +1411,14 @@ async function findSarifFiles(inputDirectory, currentDirectory = inputDirectory)
   return files;
 }
 
-async function loadAndFilter(inputPath, baseline, remainingFindings) {
+async function loadAndFilter(inputPath, baseline, remainingFindings, auditState) {
   let value;
   try {
     value = JSON.parse(await readFile(inputPath, 'utf8'));
   } catch (error) {
     throw new Error(`cannot read valid JSON from ${inputPath}: ${error.message}`, { cause: error });
   }
-  return filterSarifDocumentWithState(value, baseline, remainingFindings);
+  return filterSarifDocumentWithState(value, baseline, remainingFindings, auditState);
 }
 
 function assertHashBindings(baseline) {
@@ -1367,11 +1459,12 @@ export async function filterSarifPath(
   input,
   output,
   manifestPath,
-  { sourceRoot = process.cwd() } = {},
+  { sourceRoot = process.cwd(), expectedAutomationId } = {},
 ) {
   const baseline = await loadBaselineManifest(manifestPath, sourceRoot);
   assertHashBindings(baseline);
   const remainingFindings = remainingFindingMultiset(baseline);
+  const auditState = baselineAuditState(baseline, expectedAutomationId);
   const inputPath = resolve(input);
   const outputPath = resolve(output);
   if (inputPath === outputPath) {
@@ -1383,7 +1476,8 @@ export async function filterSarifPath(
 
   const inputStat = await stat(inputPath);
   if (inputStat.isFile()) {
-    const filtered = await loadAndFilter(inputPath, baseline, remainingFindings);
+    const filtered = await loadAndFilter(inputPath, baseline, remainingFindings, auditState);
+    assertExpectedAuditCoverage(auditState, baseline);
     await writeAtomicFile(
       outputPath,
       `${JSON.stringify(filtered.document, null, 2)}\n`,
@@ -1405,9 +1499,16 @@ export async function filterSarifPath(
   for (const file of files) {
     filteredFiles.push({
       file,
-      filtered: await loadAndFilter(join(inputPath, file), baseline, remainingFindings),
+      filtered: await loadAndFilter(
+        join(inputPath, file),
+        baseline,
+        remainingFindings,
+        auditState,
+      ),
     });
   }
+
+  assertExpectedAuditCoverage(auditState, baseline);
 
   await mkdir(dirname(outputPath), { recursive: true });
   const stagingDirectory = stagingPathFor(outputPath);
@@ -1433,12 +1534,22 @@ export async function filterSarifPath(
 }
 
 async function main(args) {
-  if (args.length !== 4 || args[0] !== '--manifest') {
+  if (
+    args.length !== 6
+    || args[0] !== '--manifest'
+    || args[2] !== '--expected-automation-id'
+  ) {
     throw new Error(
-      'usage: node scripts/filter-codeql-sarif.mjs --manifest MANIFEST INPUT OUTPUT',
+      'usage: node scripts/filter-codeql-sarif.mjs --manifest MANIFEST '
+        + '--expected-automation-id ID INPUT OUTPUT',
     );
   }
-  const summary = await filterSarifPath(args[2], args[3], args[1]);
+  const summary = await filterSarifPath(
+    args[4],
+    args[5],
+    args[1],
+    { expectedAutomationId: args[3] },
+  );
   console.log(
     `Filtered ${summary.files} SARIF file(s): ${summary.suppressed} audited upstream result(s) `
       + `suppressed, ${summary.retained} retained (${summary.total} total).`,
