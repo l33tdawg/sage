@@ -1,9 +1,10 @@
-# CometBFT v0.38.15 validator node
+# CometBFT v0.38.23 validator node with SAGE's state-sync hardening
 # Multi-stage build: compile from source, copy binary to minimal Alpine
 #
 # Note: runs as root because CometBFT needs write access to bind-mounted
 # host directories (genesis config/data). The ABCI container (Dockerfile.abci)
-# runs as non-root since it only uses named volumes.
+# runs as non-root; the chaos harness prepares its owned bind directories with
+# permissions for that fixed container user.
 
 # -- Builder -------------------------------------------
 FROM golang:1.22-alpine AS builder
@@ -11,16 +12,40 @@ FROM golang:1.22-alpine AS builder
 RUN apk add --no-cache git make
 
 WORKDIR /src
-RUN git clone --branch v0.38.15 --depth 1 https://github.com/cometbft/cometbft.git .
-RUN CGO_ENABLED=0 go build -o /usr/local/bin/cometbft ./cmd/cometbft
+ARG COMETBFT_VERSION=0.38.23
+ARG COMETBFT_SOURCE_COMMIT=feb2aea4dc271d612129afc958cb844713ec792b
+RUN git clone --branch "v${COMETBFT_VERSION}" --depth 1 https://github.com/cometbft/cometbft.git . \
+    && test "$(git rev-parse HEAD)" = "${COMETBFT_SOURCE_COMMIT}"
+
+# Keep the standalone validator image on the same six documented state-sync
+# overlays as the in-process sage-gui binary: inactive-syncer rejection,
+# graceful seal-failure abort, a durable effective-height bridge across repeated
+# empty-blockstore restarts, commit-first atomic bootstrap persistence, and the
+# durable post-switch completion marker. See
+# third_party/cometbft/README-SAGE.md.
+COPY third_party/cometbft/statesync/reactor.go /src/statesync/reactor.go
+COPY third_party/cometbft/blocksync/reactor.go /src/blocksync/reactor.go
+COPY third_party/cometbft/node/node.go /src/node/node.go
+COPY third_party/cometbft/node/setup.go /src/node/setup.go
+COPY third_party/cometbft/state/store.go /src/state/store.go
+COPY third_party/cometbft/store/store.go /src/store/store.go
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-X github.com/cometbft/cometbft/version.TMGitCommitHash=${COMETBFT_SOURCE_COMMIT}" \
+    -o /usr/local/bin/cometbft ./cmd/cometbft
 
 # -- Final ---------------------------------------------
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates
+ARG COMETBFT_VERSION=0.38.23
+ARG COMETBFT_SOURCE_COMMIT=feb2aea4dc271d612129afc958cb844713ec792b
+
+RUN apk add --no-cache ca-certificates iptables
 
 COPY --from=builder /usr/local/bin/cometbft /usr/local/bin/cometbft
 
 EXPOSE 26656 26657 26660
+
+LABEL org.opencontainers.image.version="${COMETBFT_VERSION}" \
+      org.opencontainers.image.revision="${COMETBFT_SOURCE_COMMIT}"
 
 CMD ["cometbft", "node", "--home", "/cometbft"]

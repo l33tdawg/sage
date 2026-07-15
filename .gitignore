@@ -119,6 +119,7 @@ docs/*
 !docs/BRAIN.md
 !docs/FEDERATION.md
 !docs/ROADMAP.md
+!docs/v11.9-multiprocess-fault-harness.md
 # Agent-facing code reference (public)
 !docs/reference/
 # Architecture diagram (rendered PNG embedded in ARCHITECTURE.md; .mmd source kept local/untracked)

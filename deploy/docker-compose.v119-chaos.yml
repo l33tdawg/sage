@@ -1,0 +1,135 @@
+# Isolated v11.9 multi-process fault gate.
+# Layer on docker-compose.yml + docker-compose.test.yml and always use the
+# project name `sage-v119-chaos`; deploy/scripts/run-v11.9-chaos.sh owns the
+# lifecycle. Ports are deliberately separate from the dev/determinism stacks.
+
+services:
+  abci0:
+    image: sage-v119-chaos-abci:local
+    build: !reset null
+    ports: !override
+      - "127.0.0.1:18190:8080"
+      - "127.0.0.1:13112:2112"
+    volumes: !override
+      - "${V119_CHAOS_DATA_DIR:?required}/abci0:/data"
+      - "${V119_CHAOS_GENESIS_DIR:?required}/node0/config:/validator:ro"
+    environment:
+      COMET_RPC: "http://cometbft0-local:26657"
+    networks:
+      validator0:
+        aliases: [abci0-local]
+  abci1:
+    image: sage-v119-chaos-abci:local
+    build: !reset null
+    ports: !override
+      - "127.0.0.1:18191:8080"
+      - "127.0.0.1:13113:2112"
+    volumes: !override
+      - "${V119_CHAOS_DATA_DIR:?required}/abci1:/data"
+      - "${V119_CHAOS_GENESIS_DIR:?required}/node1/config:/validator:ro"
+    environment:
+      COMET_RPC: "http://cometbft1-local:26657"
+    networks:
+      validator1:
+        aliases: [abci1-local]
+  abci2:
+    image: sage-v119-chaos-abci:local
+    build: !reset null
+    ports: !override
+      - "127.0.0.1:18192:8080"
+      - "127.0.0.1:13114:2112"
+    volumes: !override
+      - "${V119_CHAOS_DATA_DIR:?required}/abci2:/data"
+      - "${V119_CHAOS_GENESIS_DIR:?required}/node2/config:/validator:ro"
+    environment:
+      COMET_RPC: "http://cometbft2-local:26657"
+    networks:
+      validator2:
+        aliases: [abci2-local]
+  abci3:
+    image: sage-v119-chaos-abci:local
+    build: !reset null
+    ports: !override
+      - "127.0.0.1:18193:8080"
+      - "127.0.0.1:13115:2112"
+    volumes: !override
+      - "${V119_CHAOS_DATA_DIR:?required}/abci3:/data"
+      - "${V119_CHAOS_GENESIS_DIR:?required}/node3/config:/validator:ro"
+    environment:
+      COMET_RPC: "http://cometbft3-local:26657"
+    networks:
+      validator3:
+        aliases: [abci3-local]
+
+  cometbft0:
+    image: sage-v119-chaos-node:local
+    build: !reset null
+    cap_add: [NET_ADMIN]
+    # Docker Desktop's LinuxKit kernel does not enable INET_DIAG_DESTROY, so
+    # `ss -K` cannot evict an established Comet peer after a firewall is
+    # inserted. Bound retransmission expiry makes the kernel close only the
+    # P2P sockets whose packets the chaos firewall rejects.
+    sysctls:
+      net.ipv4.tcp_retries2: "3"
+    ports: !override
+      - "127.0.0.1:37657:26657"
+    volumes: !override
+      - "${V119_CHAOS_GENESIS_DIR:?required}/node0:/cometbft"
+    networks:
+      validator0:
+        aliases: [cometbft0-local]
+  cometbft1:
+    image: sage-v119-chaos-node:local
+    build: !reset null
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.tcp_retries2: "3"
+    ports: !override
+      - "127.0.0.1:37757:26657"
+    volumes: !override
+      - "${V119_CHAOS_GENESIS_DIR:?required}/node1:/cometbft"
+    networks:
+      validator1:
+        aliases: [cometbft1-local]
+  cometbft2:
+    image: sage-v119-chaos-node:local
+    build: !reset null
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.tcp_retries2: "3"
+    ports: !override
+      - "127.0.0.1:37857:26657"
+    volumes: !override
+      - "${V119_CHAOS_GENESIS_DIR:?required}/node2:/cometbft"
+    networks:
+      validator2:
+        aliases: [cometbft2-local]
+  cometbft3:
+    image: sage-v119-chaos-node:local
+    build: !reset null
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.tcp_retries2: "3"
+    ports: !override
+      - "127.0.0.1:37957:26657"
+    volumes: !override
+      - "${V119_CHAOS_GENESIS_DIR:?required}/node3:/cometbft"
+    networks:
+      validator3:
+        aliases: [cometbft3-local]
+
+  postgres:
+    ports: !reset null
+    volumes: !override
+      - "${V119_CHAOS_DATA_DIR:?required}/postgres:/var/lib/postgresql/data"
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+networks:
+  validator0:
+    internal: true
+  validator1:
+    internal: true
+  validator2:
+    internal: true
+  validator3:
+    internal: true

@@ -56,6 +56,31 @@ func TestNewSQLiteStore(t *testing.T) {
 	require.NoError(t, s.InsertMemory(context.Background(), rec))
 }
 
+func TestRequirePristineStateSyncProjectionAcceptsOnlyCanonicalSchemaSeeds(t *testing.T) {
+	ctx := context.Background()
+	t.Run("fresh", func(t *testing.T) {
+		s := newTestStore(t)
+		require.NoError(t, s.RequirePristineStateSyncProjection(ctx))
+	})
+	t.Run("application row", func(t *testing.T) {
+		s := newTestStore(t)
+		require.NoError(t, s.InsertMemory(ctx, testMemory("stale", "agent", "stale", "crypto")))
+		require.ErrorContains(t, s.RequirePristineStateSyncProjection(ctx), `table "memories" is populated`)
+	})
+	t.Run("modified default domain", func(t *testing.T) {
+		s := newTestStore(t)
+		_, err := s.conn.ExecContext(ctx, `UPDATE domains SET decay_rate = 0.5 WHERE domain_tag = 'crypto'`)
+		require.NoError(t, err)
+		require.ErrorContains(t, s.RequirePristineStateSyncProjection(ctx), "exact canonical default domains")
+	})
+	t.Run("extra domain", func(t *testing.T) {
+		s := newTestStore(t)
+		_, err := s.conn.ExecContext(ctx, `INSERT INTO domains(domain_tag, decay_rate) VALUES ('local-only', 0.1)`)
+		require.NoError(t, err)
+		require.ErrorContains(t, s.RequirePristineStateSyncProjection(ctx), "exact canonical default domains")
+	})
+}
+
 func TestInsertAndGetMemory(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

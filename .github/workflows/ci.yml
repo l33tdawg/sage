@@ -41,10 +41,17 @@ jobs:
           cache: true
       - name: Run tests
         run: go test ./... -v -count=1 -race
+      - name: Test local CometBFT hardening
+        run: make test-cometbft-patch
       - name: Run natter tests
         run: |
           cd natter
           go test ./... -v -count=1 -race
+
+  v119-fault-gates:
+    name: v11.9 Multi-Process Fault Gates
+    needs: test
+    uses: ./.github/workflows/v11.9-fault-gates.yml
 
   frontend-static:
     name: Frontend Static Checks
@@ -59,7 +66,7 @@ jobs:
   build:
     name: Build
     runs-on: ubuntu-latest
-    needs: [lint, test, frontend-static]
+    needs: [lint, test, frontend-static, v119-fault-gates]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0

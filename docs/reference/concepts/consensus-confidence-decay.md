@@ -1,12 +1,36 @@
-<!-- Reconciled through SAGE v11.2.1. -->
+<!-- Core reconciled through SAGE v11.2.1; Comet dependency note updated for the 2026-07 v11.9 implementation. -->
 
 # Consensus, Confidence, and Decay
 
-Verified against code at SAGE v11.2.1. The PoE weight system below is fork-gated for replay safety: legacy equal-weight or stubbed branches are retained only so old blocks replay byte-identical. Current live chains use PoE-weighted quorum, verdict-correctness accuracy, corroboration, and domain-aware weighting.
+Verified against code at SAGE v11.2.1; the Comet dependency note is verified
+against the 2026-07 v11.9 implementation. The PoE weight system below is
+fork-gated for replay safety: legacy equal-weight or stubbed branches are
+retained only so old blocks replay byte-identical. Current live chains use
+PoE-weighted quorum, verdict-correctness accuracy, corroboration, and
+domain-aware weighting.
 
 ## Overview
 
-SAGE uses CometBFT v0.38.15 (ABCI 2.0) for Byzantine Fault Tolerant ordering. A memory transaction is not "committed" in the SAGE sense until it has survived BFT consensus **and** validator vote quorum. These are separate stages: CometBFT provides ordered, non-equivocal block inclusion; validator votes provide application-level semantic acceptance. Both are required before a memory becomes queryable with `status=committed`.
+The in-process `sage-gui` node uses CometBFT v0.38.23 (ABCI 2.0) for Byzantine
+Fault Tolerant ordering. The root module's local replacement carries six
+state-sync hardenings documented in `third_party/cometbft/README-SAGE.md`: an
+inactive-syncer reactor guard; a narrowly scoped block-sync seal-abort sentinel;
+effective-height supply and retention across consecutive empty-blockstore
+restarts; ordered `seen commit -> positive state ->
+successful block-sync switch -> durable completion marker`; atomic state plus
+effective-height-marker bootstrap; and synchronous commit/marker persistence
+with raw exact-lone-residue recovery. The standalone Docker node copies the
+same six source files from exact v0.38.23 source commit
+`feb2aea4dc271d612129afc958cb844713ec792b`. The source still declares core
+semver `0.38.22`, so its commit-stamped runtime reports
+`0.38.22+feb2aea4dc271d612129afc958cb844713ec792b`. Its current topology
+harness does not yet perform the authorized state-sync transfer. A memory
+transaction is not
+"committed" in the SAGE sense until it has survived BFT
+consensus **and** validator vote quorum. These are separate stages: CometBFT
+provides ordered, non-equivocal block inclusion; validator votes provide
+application-level semantic acceptance. Both are required before a memory
+becomes queryable with `status=committed`.
 
 ---
 

@@ -133,10 +133,11 @@ type VoterConfig struct {
 
 // QuorumConfig controls multi-validator consensus mode.
 type QuorumConfig struct {
-	Enabled bool     `yaml:"enabled"`            // Enable quorum mode (multi-validator)
-	Peers   []string `yaml:"peers,omitempty"`    // Persistent peers (nodeID@host:port)
-	P2PAddr string   `yaml:"p2p_addr,omitempty"` // P2P listen address (default: tcp://0.0.0.0:26656)
-	TLSAddr string   `yaml:"tls_addr,omitempty"` // TLS REST listen address (default: 0.0.0.0:8443)
+	Enabled   bool                  `yaml:"enabled"`            // Enable quorum mode (multi-validator)
+	Peers     []string              `yaml:"peers,omitempty"`    // Persistent peers (nodeID@host:port)
+	P2PAddr   string                `yaml:"p2p_addr,omitempty"` // P2P listen address (default: tcp://0.0.0.0:26656)
+	TLSAddr   string                `yaml:"tls_addr,omitempty"` // TLS REST listen address (default: 0.0.0.0:8443)
+	StateSync QuorumStateSyncConfig `yaml:"state_sync,omitempty"`
 }
 
 // RBACConfig controls local-agent domain-access policy for this node. It is a
@@ -285,6 +286,9 @@ func LoadConfig() (*Config, error) {
 func (cfg *Config) validate() error {
 	if cfg.Voter.Required && !cfg.Voter.Enabled {
 		return fmt.Errorf("invalid config: voter.required=true but voter.enabled=false — a required voter cannot be disabled (fix the voter block in config.yaml or SAGE_VOTER_ENABLED/SAGE_VOTER_REQUIRED)")
+	}
+	if err := cfg.Quorum.StateSync.validate(cfg.Quorum.Enabled); err != nil {
+		return err
 	}
 	return nil
 }

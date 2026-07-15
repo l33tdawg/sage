@@ -18,7 +18,7 @@ import (
 
 func narrowAppHashVerifier(t *testing.T) BackupVerifier {
 	t.Helper()
-	return func(_ context.Context, backupPath string) ([]byte, error) {
+	return func(ctx context.Context, backupPath string) ([]byte, error) {
 		restoredPath := filepath.Join(t.TempDir(), "verify-badger")
 		db, err := badger.Open(badger.DefaultOptions(restoredPath).WithLogger(nil))
 		if err != nil {
@@ -29,7 +29,7 @@ func narrowAppHashVerifier(t *testing.T) BackupVerifier {
 			_ = db.Close()
 			return nil, err
 		}
-		if loadErr := db.Load(file, 16); loadErr != nil {
+		if loadErr := RestoreCanonicalState(ctx, file, db); loadErr != nil {
 			_ = file.Close()
 			_ = db.Close()
 			return nil, loadErr
@@ -75,8 +75,9 @@ func TestExportCatalogAndLoadChunkContainOnlyConsensusState(t *testing.T) {
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
-	assert.ElementsMatch(t, []string{metadataFilename, chunksDirname}, names,
+	assert.ElementsMatch(t, []string{metadataFilename, chunksDirname, snapshotOwnerFilename}, names,
 		"network export must contain no SQLite, CometBFT db/config, keys, vault, or binary")
+	require.NoError(t, requireSnapshotOwnerMarker(filepath.Join(exported.Dir, snapshotOwnerFilename)))
 
 	opened, err := OpenSnapshot(exported.Dir)
 	require.NoError(t, err)
@@ -144,4 +145,152 @@ func TestOpenSnapshotRejectsSymlinkChunk(t *testing.T) {
 	}
 	_, err := OpenSnapshot(dir)
 	require.ErrorContains(t, err, "not a regular file")
+}
+
+func TestProviderSnapshotMaintenanceSweepsOnlyOwnedStagingDirectories(t *testing.T) {
+	live, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "live-badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = live.CloseBadger() })
+	require.NoError(t, live.SetState("scope:export", []byte("bounded provider storage")))
+	appHash, err := live.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+
+	root := filepath.Join(t.TempDir(), "network-snapshots")
+	require.NoError(t, os.Mkdir(root, 0o700))
+	owned := filepath.Join(root, ".staging-7-12345")
+	require.NoError(t, os.Mkdir(owned, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(owned, snapshotOwnerFilename), []byte(snapshotOwnerContents), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(owned, canonicalStateFilename), []byte("partial canonical image"), 0o600))
+
+	legacyOwned := filepath.Join(root, ".staging-8-23456")
+	require.NoError(t, os.Mkdir(legacyOwned, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyOwned, canonicalStateFilename), []byte("legacy partial canonical image"), 0o600))
+	unmarked := filepath.Join(root, ".staging-14-89012")
+	require.NoError(t, os.Mkdir(unmarked, 0o700))
+	markedWithUnexpectedEntry := filepath.Join(root, ".staging-9-34567")
+	require.NoError(t, os.Mkdir(markedWithUnexpectedEntry, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(markedWithUnexpectedEntry, snapshotOwnerFilename), []byte(snapshotOwnerContents), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(markedWithUnexpectedEntry, "operator-note"), []byte("preserve"), 0o600))
+	misnamed := filepath.Join(root, ".staging-010-45678")
+	require.NoError(t, os.Mkdir(misnamed, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(misnamed, snapshotOwnerFilename), []byte(snapshotOwnerContents), 0o600))
+	unrelatedFile := filepath.Join(root, ".staging-11-56789")
+	require.NoError(t, os.WriteFile(unrelatedFile, []byte("not a directory"), 0o600))
+
+	var externalSentinel string
+	var stagingSymlink string
+	var markerSymlinkDir string
+	if runtime.GOOS != "windows" {
+		external := t.TempDir()
+		externalSentinel = filepath.Join(external, "sentinel")
+		require.NoError(t, os.WriteFile(externalSentinel, []byte("outside"), 0o600))
+		stagingSymlink = filepath.Join(root, ".staging-12-67890")
+		require.NoError(t, os.Symlink(external, stagingSymlink))
+		markerSymlinkDir = filepath.Join(root, ".staging-13-78901")
+		require.NoError(t, os.Mkdir(markerSymlinkDir, 0o700))
+		require.NoError(t, os.Symlink(externalSentinel, filepath.Join(markerSymlinkDir, snapshotOwnerFilename)))
+	}
+
+	require.NoError(t, MaintainProviderSnapshotRoot(root))
+	_, err = os.Lstat(owned)
+	assert.ErrorIs(t, err, os.ErrNotExist, "the strictly named, marked, safe staging directory is swept")
+	_, err = os.Lstat(legacyOwned)
+	assert.ErrorIs(t, err, os.ErrNotExist, "structurally exact pre-marker staging is swept during upgrade")
+	for _, path := range []string{unmarked, markedWithUnexpectedEntry, misnamed, unrelatedFile} {
+		_, statErr := os.Lstat(path)
+		require.NoError(t, statErr, "unrelated entry %q must be preserved", filepath.Base(path))
+	}
+	if runtime.GOOS != "windows" {
+		for _, path := range []string{stagingSymlink, markerSymlinkDir} {
+			_, statErr := os.Lstat(path)
+			require.NoError(t, statErr, "adversarial symlink entry must be preserved")
+		}
+		contents, readErr := os.ReadFile(externalSentinel) //nolint:gosec // test-owned path
+		require.NoError(t, readErr)
+		assert.Equal(t, "outside", string(contents), "cleanup must never follow a symlink outside the root")
+	}
+	_, err = Export(context.Background(), live.DB(), root, 50, appHash, MinChunkSize, narrowAppHashVerifier(t))
+	require.NoError(t, err, "export repeats maintenance without touching preserved entries")
+}
+
+func TestExportRetainsEightNewestOwnedSnapshotsAndPreservesAdversarialEntries(t *testing.T) {
+	live, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "live-badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = live.CloseBadger() })
+	require.NoError(t, live.SetState("scope:export", []byte("deterministic retention")))
+	appHash, err := live.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+
+	root := filepath.Join(t.TempDir(), "network-snapshots")
+	require.NoError(t, os.Mkdir(root, 0o700))
+	unrelatedDir := filepath.Join(root, "operator-data")
+	require.NoError(t, os.Mkdir(unrelatedDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(unrelatedDir, "keep"), []byte("operator"), 0o600))
+	malformedOwnedName := filepath.Join(root, "00000000000000000999-aaaaaaaaaaaaaaaa")
+	require.NoError(t, os.Mkdir(malformedOwnedName, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(malformedOwnedName, "keep"), []byte("malformed"), 0o600))
+
+	var externalSentinel string
+	var publishedSymlink string
+	if runtime.GOOS != "windows" {
+		external := t.TempDir()
+		externalSentinel = filepath.Join(external, "sentinel")
+		require.NoError(t, os.WriteFile(externalSentinel, []byte("outside"), 0o600))
+		publishedSymlink = filepath.Join(root, "00000000000000001000-bbbbbbbbbbbbbbbb")
+		require.NoError(t, os.Symlink(external, publishedSymlink))
+	}
+
+	total := providerSnapshotRetention + 3
+	for height := 1; height <= total; height++ {
+		_, exportErr := Export(context.Background(), live.DB(), root, uint64(height), appHash, MinChunkSize, narrowAppHashVerifier(t))
+		require.NoError(t, exportErr)
+	}
+	owned, err := listOwnedPublishedSnapshots(root)
+	require.NoError(t, err)
+	require.Len(t, owned, providerSnapshotRetention)
+	for index, snapshot := range owned {
+		assert.Equal(t, uint64(total-index), snapshot.Metadata.Height)
+		require.NoError(t, requireSnapshotOwnerMarker(filepath.Join(snapshot.Dir, snapshotOwnerFilename)))
+	}
+	assert.Equal(t, uint64(total-2), owned[2].Metadata.Height,
+		"after the newest two H+2-ineligible candidates, an eligible fallback remains")
+	assert.Equal(t, uint64(total-providerSnapshotRetention+1), owned[len(owned)-1].Metadata.Height)
+
+	for _, path := range []string{unrelatedDir, malformedOwnedName} {
+		_, statErr := os.Lstat(path)
+		require.NoError(t, statErr, "retention must preserve unrelated or malformed directories")
+	}
+	if runtime.GOOS != "windows" {
+		_, statErr := os.Lstat(publishedSymlink)
+		require.NoError(t, statErr, "retention must preserve snapshot-shaped symlinks")
+		contents, readErr := os.ReadFile(externalSentinel) //nolint:gosec // test-owned path
+		require.NoError(t, readErr)
+		assert.Equal(t, "outside", string(contents))
+	}
+}
+
+func TestExportRejectsSymlinkProviderRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink semantics differ on Windows")
+	}
+	live, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "live-badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = live.CloseBadger() })
+	require.NoError(t, live.SetState("scope:export", []byte("root symlink")))
+	appHash, err := live.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+
+	external := t.TempDir()
+	sentinel := filepath.Join(external, "sentinel")
+	require.NoError(t, os.WriteFile(sentinel, []byte("outside"), 0o600))
+	root := filepath.Join(t.TempDir(), "snapshot-root-link")
+	require.NoError(t, os.Symlink(external, root))
+	_, err = Export(context.Background(), live.DB(), root, 1, appHash, MinChunkSize, narrowAppHashVerifier(t))
+	require.ErrorContains(t, err, "real directory")
+	contents, err := os.ReadFile(sentinel) //nolint:gosec // test-owned path
+	require.NoError(t, err)
+	assert.Equal(t, "outside", string(contents))
+	entries, err := os.ReadDir(external)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "a rejected symlink root must not receive staging or snapshots")
 }

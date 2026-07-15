@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -166,6 +167,52 @@ func TestRecoverActivationDirectoriesSealsCommittedState(t *testing.T) {
 	assert.NoFileExists(t, journalPath)
 }
 
+func TestSealActivatedDirectoryUsesAlreadyVerifiedLiveState(t *testing.T) {
+	root, journalPath, journal, _, newHash := setupActivationDirectories(t)
+	reopenCalls := 0
+	require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, func(path string, height uint64, appHash []byte) error {
+		reopenCalls++
+		return verifyActivationTestState(path, height, appHash)
+	}))
+	require.Equal(t, 1, reopenCalls)
+
+	require.NoError(t, SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, newHash))
+	assert.Equal(t, 1, reopenCalls, "runtime seal must not reopen the live database")
+	assert.DirExists(t, filepath.Join(root, journal.LiveName))
+	assert.NoDirExists(t, filepath.Join(root, journal.QuarantineName))
+	assert.NoFileExists(t, journalPath)
+}
+
+func TestSealActivatedDirectoryRejectsUnverifiedOrAmbiguousState(t *testing.T) {
+	t.Run("active and Comet differ", func(t *testing.T) {
+		root, journalPath, journal, _, newHash := setupActivationDirectories(t)
+		require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
+		wrongHash := sha256.Sum256([]byte("active differs"))
+		err := SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, wrongHash[:])
+		assert.ErrorContains(t, err, "does not match")
+		assert.DirExists(t, filepath.Join(root, journal.QuarantineName))
+		assert.FileExists(t, journalPath)
+	})
+
+	t.Run("Comet below pending activation", func(t *testing.T) {
+		root, journalPath, journal, oldHash, _ := setupActivationDirectories(t)
+		require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
+		err := SealActivatedDirectory(root, journalPath, 40, oldHash, 40, oldHash)
+		assert.ErrorContains(t, err, "below pending activation")
+		assert.DirExists(t, filepath.Join(root, journal.QuarantineName))
+		assert.FileExists(t, journalPath)
+	})
+
+	t.Run("layout lost quarantine", func(t *testing.T) {
+		root, journalPath, journal, _, newHash := setupActivationDirectories(t)
+		require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
+		require.NoError(t, os.RemoveAll(filepath.Join(root, journal.QuarantineName)))
+		err := SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, newHash)
+		assert.ErrorContains(t, err, "layout is ambiguous")
+		assert.FileExists(t, journalPath)
+	})
+}
+
 func TestRecoverActivationDirectoriesFinishesInterruptedRecovery(t *testing.T) {
 	t.Run("quarantine restored before prepared cleanup", func(t *testing.T) {
 		root, journalPath, journal, oldHash, _ := setupActivationDirectories(t)
@@ -207,6 +254,29 @@ func TestActivatePreparedDirectoryVerificationFailureRollsBack(t *testing.T) {
 	assert.NoDirExists(t, filepath.Join(root, journal.PreparedName))
 	assert.NoDirExists(t, filepath.Join(root, journal.QuarantineName))
 	assert.NoFileExists(t, journalPath)
+}
+
+func TestActivatePreparedDirectoryAuthorizationExpiryRestoresOldLiveState(t *testing.T) {
+	for failAt := 1; failAt <= 5; failAt++ {
+		t.Run(fmt.Sprintf("boundary-%d", failAt), func(t *testing.T) {
+			root, journalPath, journal, oldHash, _ := setupActivationDirectories(t)
+			calls := 0
+			err := ActivatePreparedDirectoryAuthorized(root, journalPath, journal, verifyActivationTestState, func() error {
+				calls++
+				if calls == failAt {
+					return errors.New("authorization expired")
+				}
+				return nil
+			})
+			require.ErrorContains(t, err, "authorization expired")
+			height, appHash, inspectErr := inspectActivationTestState(filepath.Join(root, journal.LiveName))
+			require.NoError(t, inspectErr)
+			assert.Equal(t, uint64(40), height)
+			assert.Equal(t, oldHash, appHash)
+			assert.NoDirExists(t, filepath.Join(root, journal.QuarantineName))
+			assert.NoFileExists(t, journalPath)
+		})
+	}
 }
 
 func TestActivationDirectoriesRejectUnsafeOrAmbiguousLayouts(t *testing.T) {

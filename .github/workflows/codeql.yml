@@ -11,8 +11,10 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Weekly Sunday 06:00 UTC — catches new advisories landing on
-    # third-party deps even when nobody pushes for a while.
+    # Weekly Sunday 06:00 UTC — scans the complete compiled graph even when
+    # nobody pushes. Exact, reviewed upstream CometBFT findings are separated
+    # from the reviewed upload below; every new dependency finding still lands
+    # in Code Scanning, and the unfiltered upload document remains an artifact.
     - cron: '0 6 * * 0'
 
 permissions:
@@ -46,6 +48,10 @@ jobs:
           go-version: '1.25'
           cache: true
 
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '24'
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
@@ -57,6 +63,37 @@ jobs:
           queries: security-extended
 
       - name: Perform CodeQL Analysis
+        id: analyze
         uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
           category: '/language:${{ matrix.language }}'
+          # Analyze everything, but do not let this action upload before the
+          # exact inherited CometBFT baseline has been separated. A malformed
+          # or drifting baseline fails before any filtered result is uploaded.
+          upload: never
+          output: '${{ runner.temp }}/codeql-raw'
+          post-processed-sarif-path: '${{ runner.temp }}/codeql-unfiltered'
+
+      - name: Preserve unfiltered CodeQL SARIF
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-unfiltered-${{ matrix.language }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: '${{ runner.temp }}/codeql-unfiltered/upload.sarif'
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+      - name: Separate audited CometBFT baseline findings
+        run: |
+          node scripts/filter-codeql-sarif.mjs \
+            --manifest scripts/codeql-cometbft-baseline.json \
+            --expected-automation-id "/language:${{ matrix.language }}/" \
+            "$RUNNER_TEMP/codeql-unfiltered/upload.sarif" \
+            "$RUNNER_TEMP/codeql-filtered/upload.sarif"
+
+      - name: Upload filtered CodeQL SARIF
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
+        with:
+          sarif_file: '${{ runner.temp }}/codeql-filtered/upload.sarif'
+          category: '/language:${{ matrix.language }}'
+          wait-for-processing: 'true'

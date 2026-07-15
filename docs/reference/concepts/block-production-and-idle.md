@@ -115,8 +115,14 @@ is `false` for both. Differences:
 Old blocks are pruned according to `retain_blocks` (`resolveRetainBlocks` in
 `cmd/sage-gui/node.go`): personal mode keeps a rolling window (default ~100,000
 blocks), quorum keeps everything unless an operator opts into a window, and `-1` keeps
-everything. Pruning old blocks is **safe**: your memories live in SQLite/BadgerDB, not
-in the historical block log, so a pruned block store never loses a memory.
+everything. Pruning does not delete canonical memory state: memories live in
+SQLite/BadgerDB rather than only in the historical block log. A v11.9 network
+state-sync **provider** is the deliberate exception to enabling a pruning
+window: it requires effective retention zero (`retain_blocks: 0` in normal
+quorum configuration) until rolling snapshots are block-base aware, so the H+2
+light-verification and catch-up blocks remain available. Provider startup
+rejects any positive effective window; receivers and non-provider nodes retain
+their normal policy.
 
 ## FAQ
 
