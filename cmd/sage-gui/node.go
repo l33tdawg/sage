@@ -646,8 +646,20 @@ func runServe() (rerr error) {
 		}
 	}
 
-	// Create the node controller — manages CometBFT lifecycle for redeployment
-	nodeCtrl := NewSageNodeController(cometCfg, app, pv, nodeKey, cmtLogger, logger, cfg.DataDir)
+	// CometBFT receives only the boot runtime, never a raw SageApp pointer. The
+	// runtime is dormant for now: normal ABCI calls delegate to this complete
+	// bundle while network state-sync endpoints remain empty/reject/abort.
+	consensusBundle, err := sageabci.NewConsensusBundle(ctx, app)
+	if err != nil {
+		return fmt.Errorf("create consensus bundle: %w", err)
+	}
+	bootRuntime, err := sageabci.NewBootStateSyncRuntime(consensusBundle)
+	if err != nil {
+		return fmt.Errorf("create boot state-sync runtime: %w", err)
+	}
+
+	// Create the node controller — manages CometBFT lifecycle for redeployment.
+	nodeCtrl := NewSageNodeController(cometCfg, bootRuntime, pv, nodeKey, cmtLogger, logger, cfg.DataDir)
 
 	if err := nodeCtrl.StartChain(); err != nil {
 		return fmt.Errorf("start CometBFT: %w", err)

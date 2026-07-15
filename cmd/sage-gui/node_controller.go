@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/config"
 	cmtcrypto "github.com/cometbft/cometbft/crypto/ed25519"
 	cmtlog "github.com/cometbft/cometbft/libs/log"
@@ -18,7 +19,6 @@ import (
 	cmttime "github.com/cometbft/cometbft/types/time"
 	"github.com/rs/zerolog"
 
-	sageabci "github.com/l33tdawg/sage/internal/abci"
 	"github.com/l33tdawg/sage/internal/orchestrator"
 )
 
@@ -29,7 +29,7 @@ type SageNodeController struct {
 	mu        sync.Mutex
 	cometNode *node.Node
 	cometCfg  *config.Config
-	app       *sageabci.SageApp
+	app       abcitypes.Application
 	pv        *privval.FilePV
 	nodeKey   *p2p.NodeKey
 	cmtLogger cmtlog.Logger
@@ -44,7 +44,7 @@ var _ orchestrator.NodeController = (*SageNodeController)(nil)
 // NewSageNodeController creates a new node controller.
 func NewSageNodeController(
 	cometCfg *config.Config,
-	app *sageabci.SageApp,
+	app abcitypes.Application,
 	pv *privval.FilePV,
 	nodeKey *p2p.NodeKey,
 	cmtLogger cmtlog.Logger,

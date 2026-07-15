@@ -286,10 +286,11 @@ configuration, and a binary, so it must never be sent over ABCI/P2P
 bundle, deletes SQLite, recomputes AppHash, reloads app-v20, and rebuilds scoped
 content plus classification from Badger
 (`internal/abci/appv20_recovery_integration_test.go:152-285`). Network state sync
-is not yet implemented: the ABCI app advertises no snapshots, rejects offers,
-returns no chunks, and aborts apply (`internal/abci/app.go:6547-6566`). A future
-enabled network path must therefore use the separate dormant consensus-only,
-key-free format described below.
+is not yet enabled: CometBFT receives a dormant boot runtime that advertises no
+snapshots, rejects offers, returns no chunks, and aborts apply
+(`internal/abci/boot_state_sync_runtime.go:163-182`,
+`cmd/sage-gui/node.go:649-662`). A future enabled network path must therefore use
+the separate consensus-only, key-free format described below.
 
 Crash replay is height-bound rather than a nonce bypass. Scoped votes store the
 immutable first decision and its FinalizeBlock height atomically; only an exact
@@ -323,21 +324,25 @@ mutate consensus state, requires exact persisted height plus active app-v20,
 recomputes the narrow AppHash, validates all canonical scoped state, and removes
 the stage on failure (`internal/store/badger.go`,
 `internal/abci/scoped_state_sync.go:19-139`,
-`internal/abci/scoped_recovery.go:73-114`). No code swaps that directory into a
-live application yet, so `ListSnapshots` still advertises none.
+`internal/abci/scoped_recovery.go:73-114`). A guarded boot-only executor can now
+journal and rename a prepared directory while verifying restart decisions
+against persisted Comet state (`internal/statesync/activation_directories.go`),
+but no endpoint invokes it or publishes its result into a serving process, so
+`ListSnapshots` still advertises none.
 
 The accepted activation design deliberately avoids changing `BadgerStore.db`
 inside a serving process. It replaces the whole ABCI application bundle during
 boot, journals the filesystem/Comet persistence crash window, delays REST,
 dashboard, projection, snapshot-scheduler, and worker construction until the
 runtime is sealed, and requires an authenticated validator-only P2P allowlist.
-This is design work, not enabled behavior; the detailed gates are in
+This remains disabled behavior; the detailed gates are in
 [`../../v11.9-state-sync-activation.md`](../../v11.9-state-sync-activation.md).
-The first non-activating pieces are code: a bounded canonical/fsynced journal
-and pure Comet-vs-live recovery decision (`internal/statesync/activation.go`),
-plus a writable no-migration opener that preserves the already verified
-AppHash (`internal/store/badger.go:105-128`). No function performs the live
-directory rename yet.
+Delivered foundations include the canonical/fsynced journal and recovery
+decision (`internal/statesync/activation.go`), guarded directory executor,
+writable no-migration opener (`internal/store/badger.go:105-128`), and dormant
+complete-bundle runtime with read/write leases
+(`internal/abci/boot_state_sync_runtime.go`). Ordinary services are not yet
+delayed behind runtime sealing, and no network receiver is armed.
 
 Scope proposals no longer require operators or agents to hand-encode that
 binary record. REST/dashboard accept a structured `scope` template, MCP exposes
