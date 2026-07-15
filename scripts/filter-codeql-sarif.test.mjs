@@ -50,6 +50,11 @@ function auditedResult(finding, overrides = {}) {
     )],
     ...(overrides.extra ?? {}),
   };
+  if (overrides.omitStartColumnFingerprint !== true) {
+    result.partialFingerprints.primaryLocationStartColumnFingerprint =
+      overrides.primaryLocationStartColumnFingerprint
+      ?? finding.primaryLocationStartColumnFingerprint;
+  }
   if (overrides.omitCorrelationGuid !== true) {
     result.correlationGuid = overrides.correlationGuid ?? finding.correlationGuid;
   }
@@ -95,6 +100,12 @@ test('manifest binds the exact audited tool, files, overlays, and 29 findings', 
     [635, 989, 779, 838, 308, 940],
   );
   assert.equal(baseline.findings.length, 29);
+  assert.equal(
+    baseline.findings.every(({ primaryLocationStartColumnFingerprint }) => (
+      /^[1-9][0-9]*$/u.test(primaryLocationStartColumnFingerprint)
+    )),
+    true,
+  );
   assert.equal(baseline.verifiedPaths.size, 25);
   assert.deepEqual(baseline.hashMismatches, []);
   assert.equal(new Set(baseline.findings.map(({ correlationGuid }) => correlationGuid)).size, 29);
@@ -160,6 +171,16 @@ test('suppresses exact pre-upload CodeQL findings before GitHub adds correlation
   assert.deepEqual(filtered.stats, { total: 29, suppressed: 29, retained: 0 });
 });
 
+test('suppresses server-processed findings with exact correlation GUIDs', () => {
+  const results = baseline.findings.map((finding) => auditedResult(finding, {
+    omitStartColumnFingerprint: true,
+  }));
+  const filtered = filterSarifDocument(sarif(results), baseline);
+
+  assert.deepEqual(filtered.document.runs[0].results, []);
+  assert.deepEqual(filtered.stats, { total: 29, suppressed: 29, retained: 0 });
+});
+
 test('retains a future vendor finding when any identity component changes', () => {
   const finding = baseline.findings[0];
   const variants = [
@@ -169,10 +190,35 @@ test('retains a future vendor finding when any identity component changes', () =
       region: { ...finding.region, startColumn: finding.region.startColumn + 1 },
     }),
     auditedResult(finding, { primaryLocationLineHash: '0000000000000000:1' }),
+    auditedResult(finding, { primaryLocationStartColumnFingerprint: '999999' }),
     auditedResult(finding, { correlationGuid: '00000000-0000-4000-8000-000000000000' }),
   ];
 
   assert.equal(filteredResults(sarif(variants)).length, variants.length);
+});
+
+test('retains unbound SARIF stable-identity carriers', () => {
+  const finding = baseline.findings[0];
+  const withGuid = auditedResult(finding, { extra: { guid: finding.correlationGuid } });
+  const withFingerprints = auditedResult(finding, {
+    extra: { fingerprints: { stable: 'new-identity' } },
+  });
+  const withExtraPartial = auditedResult(finding);
+  withExtraPartial.partialFingerprints.newStableIdentity = 'new-identity';
+  const withoutEitherStageIdentity = auditedResult(finding, {
+    omitCorrelationGuid: true,
+    omitStartColumnFingerprint: true,
+  });
+
+  assert.deepEqual(
+    filteredResults(sarif([
+      withGuid,
+      withFingerprints,
+      withExtraPartial,
+      withoutEitherStageIdentity,
+    ])),
+    [withGuid, withFingerprints, withExtraPartial, withoutEitherStageIdentity],
+  );
 });
 
 test('retains duplicate occurrences beyond the audited multiset count', () => {
@@ -902,6 +948,27 @@ test('CLI coverage gate rejects an audited run missing a baseline finding', asyn
       omitCorrelationGuid: true,
     })),
   )));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    filterSarifPath(input, output, manifestPath, {
+      sourceRoot: repoRoot,
+      expectedAutomationId: baseline.automationId,
+    }),
+    /missing 1 expected CometBFT baseline finding/u,
+  );
+  await assert.rejects(readFile(output), /ENOENT/u);
+});
+
+test('CLI coverage gate rejects a changed pre-upload stable fingerprint', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sage-sarif-filter-'));
+  const input = join(root, 'input.sarif');
+  const output = join(root, 'output.sarif');
+  const results = baseline.findings.map((finding) => auditedResult(finding, {
+    omitCorrelationGuid: true,
+  }));
+  results[0].partialFingerprints.primaryLocationStartColumnFingerprint = '999999';
+  await writeFile(input, JSON.stringify(sarif(results)));
   t.after(() => rm(root, { recursive: true, force: true }));
 
   await assert.rejects(

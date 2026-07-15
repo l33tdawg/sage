@@ -63,10 +63,11 @@ Regression coverage is split accordingly:
 CodeQL still compiles and scans this complete local module. Its reviewed SARIF
 upload separates only the exact inherited findings recorded in
 `scripts/codeql-cometbft-baseline.json`: each result is bound to the CodeQL CLI,
-query-pack, rule, pre-upload line fingerprint, complete source region, and the
-byte-exact upstream digest of every file observed in its trace. GitHub's
-server-added correlation GUID is also checked when present, but it is not part
-of the pre-upload identity because the CodeQL action does not emit it. The six
+query-pack, rule, complete pre-upload partial-fingerprint map, complete source
+region, and the byte-exact upstream digest of every file observed in its trace.
+GitHub's server-added correlation GUID is checked in the server-processed form,
+which strips the pre-upload start-column fingerprint. Unbound stable-identity
+carriers are never suppressed. The six
 production overlays are protected by full-file hashes, line counts,
 unchanged-line digests, and changed-line intervals; every `*_sage_test.go` file
 is always SAGE-owned.

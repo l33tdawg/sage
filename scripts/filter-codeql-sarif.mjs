@@ -31,6 +31,7 @@ const EXPECTED_TEST_SUFFIX = '_sage_test.go';
 const EXPECTED_SOURCE_COMMIT = 'feb2aea4dc271d612129afc958cb844713ec792b';
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const LINE_HASH_PATTERN = /^[0-9a-f]{1,64}:[1-9][0-9]*$/u;
+const START_COLUMN_FINGERPRINT_PATTERN = /^[1-9][0-9]*$/u;
 const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function isRecord(value) {
@@ -318,6 +319,15 @@ export function validateBaselineManifest(value) {
     if (!LINE_HASH_PATTERN.test(primaryLocationLineHash)) {
       throw new TypeError(`${context}.primaryLocationLineHash has an invalid format`);
     }
+    const primaryLocationStartColumnFingerprint = requireNonEmptyString(
+      finding.primaryLocationStartColumnFingerprint,
+      `${context}.primaryLocationStartColumnFingerprint`,
+    );
+    if (!START_COLUMN_FINGERPRINT_PATTERN.test(primaryLocationStartColumnFingerprint)) {
+      throw new TypeError(
+        `${context}.primaryLocationStartColumnFingerprint has an invalid format`,
+      );
+    }
     const correlationGuid = requireNonEmptyString(
       finding.correlationGuid,
       `${context}.correlationGuid`,
@@ -334,6 +344,7 @@ export function validateBaselineManifest(value) {
       path,
       region: validateRegion(finding.region, `${context}.region`),
       primaryLocationLineHash,
+      primaryLocationStartColumnFingerprint,
       correlationGuid,
     });
     const key = findingKey(normalized);
@@ -1141,9 +1152,15 @@ function collectResultLocations(result, run, context, baseline) {
   };
 }
 
-function resultFindingKey(result, run, context) {
+function resultFindingIdentity(result, run, context) {
   const locations = optionalArray(result, 'locations', context);
-  if (locations === undefined || locations.length !== 1 || typeof result.ruleId !== 'string') {
+  if (
+    locations === undefined
+    || locations.length !== 1
+    || typeof result.ruleId !== 'string'
+    || 'guid' in result
+    || 'fingerprints' in result
+  ) {
     return undefined;
   }
   const location = requireRecord(locations[0], `${context}.locations[0]`);
@@ -1155,12 +1172,24 @@ function resultFindingKey(result, run, context) {
     return undefined;
   }
   const path = resolveArtifactPath(physical.artifactLocation, run);
-  const partialFingerprints = isRecord(result.partialFingerprints)
-    ? result.partialFingerprints
-    : undefined;
+  const partialFingerprints = result.partialFingerprints;
+  if (!isRecord(partialFingerprints)) {
+    return undefined;
+  }
+  const fingerprintKeys = Object.keys(partialFingerprints).sort();
+  const lineHashOnly = fingerprintKeys.length === 1
+    && fingerprintKeys[0] === 'primaryLocationLineHash';
+  const preUploadFingerprints = fingerprintKeys.length === 2
+    && fingerprintKeys[0] === 'primaryLocationLineHash'
+    && fingerprintKeys[1] === 'primaryLocationStartColumnFingerprint';
   if (
     path === undefined
-    || typeof partialFingerprints?.primaryLocationLineHash !== 'string'
+    || (!lineHashOnly && !preUploadFingerprints)
+    || typeof partialFingerprints.primaryLocationLineHash !== 'string'
+    || (
+      preUploadFingerprints
+      && typeof partialFingerprints.primaryLocationStartColumnFingerprint !== 'string'
+    )
   ) {
     return undefined;
   }
@@ -1173,17 +1202,38 @@ function resultFindingKey(result, run, context) {
   if (!fields.every((field) => Number.isSafeInteger(field) && field > 0)) {
     return undefined;
   }
-  return findingKey({
-    ruleId: result.ruleId,
-    path,
-    region: {
-      startLine: fields[0],
-      startColumn: fields[1],
-      endLine: fields[2],
-      endColumn: fields[3],
-    },
-    primaryLocationLineHash: partialFingerprints.primaryLocationLineHash,
-  });
+  return {
+    key: findingKey({
+      ruleId: result.ruleId,
+      path,
+      region: {
+        startLine: fields[0],
+        startColumn: fields[1],
+        endLine: fields[2],
+        endColumn: fields[3],
+      },
+      primaryLocationLineHash: partialFingerprints.primaryLocationLineHash,
+    }),
+    primaryLocationStartColumnFingerprint:
+      partialFingerprints.primaryLocationStartColumnFingerprint,
+  };
+}
+
+function stableIdentityMatches(result, identity, finding) {
+  const hasStartColumnFingerprint =
+    identity.primaryLocationStartColumnFingerprint !== undefined;
+  const hasCorrelationGUID = 'correlationGuid' in result;
+  if (
+    hasStartColumnFingerprint
+    && identity.primaryLocationStartColumnFingerprint
+      !== finding.primaryLocationStartColumnFingerprint
+  ) {
+    return false;
+  }
+  if (hasCorrelationGUID && result.correlationGuid !== finding.correlationGuid) {
+    return false;
+  }
+  return hasStartColumnFingerprint || hasCorrelationGUID;
 }
 
 function auditedToolRun(run, baseline) {
@@ -1244,6 +1294,11 @@ function baselineAuditState(baseline, expectedAutomationId) {
         .filter((finding) => baseline.verifiedPaths.has(finding.path))
         .map((finding) => findingKey(finding)),
     ),
+    expectedFindings: new Map(
+      baseline.findings
+        .filter((finding) => baseline.verifiedPaths.has(finding.path))
+        .map((finding) => [findingKey(finding), finding]),
+    ),
     observedFindingKeys: new Set(),
   };
 }
@@ -1252,9 +1307,16 @@ function observeAuditedFinding(result, run, context, baseline, auditState) {
   if (!auditedToolRun(run, baseline)) {
     return;
   }
-  const key = resultFindingKey(result, run, context);
-  if (key !== undefined && auditState.expectedFindingKeys.has(key)) {
-    auditState.observedFindingKeys.add(key);
+  const identity = resultFindingIdentity(result, run, context);
+  const finding = identity === undefined
+    ? undefined
+    : auditState.expectedFindings.get(identity.key);
+  if (
+    identity !== undefined
+    && finding !== undefined
+    && stableIdentityMatches(result, identity, finding)
+  ) {
+    auditState.observedFindingKeys.add(identity.key);
   }
 }
 
@@ -1304,19 +1366,16 @@ function shouldSuppressResult(result, run, context, baseline, remainingFindings)
   ) {
     return false;
   }
-  const key = resultFindingKey(result, run, context);
-  const entry = key === undefined ? undefined : remainingFindings.get(key);
+  const identity = resultFindingIdentity(result, run, context);
+  const entry = identity === undefined ? undefined : remainingFindings.get(identity.key);
   if (entry === undefined || entry.remaining === 0) {
     return false;
   }
-  // GitHub adds correlationGuid while ingesting SARIF, so it is absent from
-  // the pinned CodeQL action's pre-upload document that this filter consumes.
-  // When a producer does provide it, retain any result that disagrees with the
-  // server-audited GUID recorded in the manifest.
-  if (
-    'correlationGuid' in result
-    && result.correlationGuid !== entry.finding.correlationGuid
-  ) {
+  // The pinned action emits both audited partial fingerprints before upload;
+  // GitHub later strips the start-column fingerprint and adds correlationGuid.
+  // Accept only those two exact representations. Unbound guid/fingerprints or
+  // any additional partial-fingerprint carrier stays visible.
+  if (!stableIdentityMatches(result, identity, entry.finding)) {
     return false;
   }
   entry.remaining -= 1;
