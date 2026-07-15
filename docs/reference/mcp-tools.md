@@ -2,7 +2,7 @@ Reconciled against internal/mcp at SAGE v11.8.5.
 
 # SAGE MCP Tools Reference
 
-SAGE exposes 23 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
+SAGE exposes 25 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
 the local Ed25519 identity; SSE and Streamable-HTTP use the MCP bearer-token/OAuth
 flow. Only consensus-committed memories are returned to callers.
 
@@ -666,20 +666,29 @@ otherwise.
 
 ### sage_gov_propose
 
-**Purpose:** Submit a governance proposal to add, remove, or update a validator.
-Requires admin role.
+**Purpose:** Submit a governance proposal, including validator operations,
+Synchronization Group decisions, and app-v20 canonical scope actions. Requires
+admin role.
 
-**Source:** `tools.go:258-273` (definition), `tools.go:1860-1908` (handler)
+**Source:** `tools.go:287-328` (definition), `tools.go:2377-2444` (handler)
 
 **Parameters:**
 
 | Name            | Type   | Required | Description |
 |-----------------|--------|----------|-------------|
-| `operation`     | string | yes      | `add_validator`, `remove_validator`, or `update_power`. |
-| `target_id`     | string | yes      | Hex-encoded agent/validator ID. |
+| `operation`     | string | yes      | `add_validator`, `remove_validator`, `update_power`, `sync_group_action`, or `scope_action`. |
+| `target_id`     | string | conditional | Validator ID for validator ops; optional for `scope_action` when `scope.scope_id` is present. |
 | `reason`        | string | yes      | Human-readable justification. |
 | `target_pubkey` | string | no       | Hex-encoded Ed25519 public key. Required for `add_validator`. |
 | `target_power`  | int    | no       | Voting power. Required for `add_validator` and `update_power`. |
+| `payload`       | string | no       | Legacy base64 operation payload; mutually exclusive with `scope`. |
+| `scope`         | object | no       | Preferred guided `scope_action` template: scope ID/revision/state/controller, exact domains, and weighted members. The node canonicalizes it into `ScopeRecordV1`. |
+
+For revision 1, `joined_revision` may be omitted and each omitted `active`
+defaults to true. Later revisions must preserve each existing member's exact
+historical `joined_revision`. The node rejects duplicate domains/members,
+invalid lifecycle states, inactive controllers, zero weights, scope IDs that
+contain `/`, ambiguous `payload` + `scope`, and target/scope ID mismatches.
 
 **Returns:**
 - `proposal_id`, `tx_hash`, `status`, `operation`, `target_id`, `reason`.
@@ -742,6 +751,30 @@ rejected.
 
 ---
 
+### sage_scope_list
+
+**Purpose:** List canonical app-v20 quorum scopes with exact selected domains,
+pinned integer weights, lifecycle state, and immutable current-revision hash.
+Node-operator/admin only.
+
+**Parameters:** none.
+
+**REST:** `GET /v1/scopes`
+
+---
+
+### sage_scope_get
+
+**Purpose:** Read one canonical app-v20 quorum scope. Node-operator/admin only.
+
+| Name       | Type   | Required | Description |
+|------------|--------|----------|-------------|
+| `scope_id` | string | yes      | Exact canonical scope ID. |
+
+**REST:** `GET /v1/scopes/{scope_id}`
+
+---
+
 ## Discrepancies
 
 ### Boot sequence vs tool list
@@ -765,9 +798,10 @@ None. All tools mentioned in CLAUDE.md, MEMORY.md, and the MCP server
 but not part of the boot sequence. They are used only when a caller needs to
 strengthen/connect memories or resolve an open challenge.
 
-`sage_gov_propose`, `sage_gov_vote`, `sage_gov_status` — governance tools —
-are not part of the boot sequence. This is correct: they are admin/validator
-operations, not agent memory operations.
+`sage_gov_propose`, `sage_gov_vote`, `sage_gov_status`, `sage_scope_list`, and
+`sage_scope_get` — governance/scope tools — are not part of the boot sequence.
+This is correct: they are operator/admin/validator operations, not agent memory
+operations.
 
 `sage_pipe`, `sage_inbox`, `sage_pipe_result` — pipeline tools — are also not
 part of the boot sequence. Also correct: pipeline is checked automatically
@@ -785,7 +819,7 @@ registration name from `sage_register` is untouched.
 
 ## Summary
 
-**23 tools documented:**
+**25 tools documented:**
 
 | Category     | Tools |
 |--------------|-------|
@@ -795,4 +829,4 @@ registration name from `sage_register` is untouched.
 | Tasks        | `sage_task`, `sage_backlog` |
 | Identity     | `sage_register`, `sage_rename` |
 | Pipeline     | `sage_pipe`, `sage_inbox`, `sage_pipe_result` |
-| Governance   | `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status` |
+| Governance   | `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status`, `sage_scope_list`, `sage_scope_get` |

@@ -50,6 +50,12 @@ const (
 	// The governance engine records/votes it durably; it has no consensus-state
 	// apply effect and is consumed only by the federation controller gate.
 	OpSyncGroupAction ProposalOp = 7
+	// OpScopeAction (app-v20) carries one canonical scope.Record template in
+	// Payload. A 2/3 governance quorum directly materializes its system-owned
+	// heights and installs the record in AppHash-covered Badger state. Creation,
+	// revision, pause/resume, and permanent retirement all use this exact-record
+	// operation; there is no controller-only mutation path.
+	OpScopeAction ProposalOp = 8
 )
 
 // ProposalStatus represents the current state of a governance proposal.

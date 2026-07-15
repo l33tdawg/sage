@@ -238,3 +238,84 @@ def test_context_manager(agent_identity, mock_api):
     )
     with SageClient(base_url=BASE_URL, identity=agent_identity) as client:
         pass  # Just verify context manager works
+
+
+def test_scope_read_surface(client, mock_api):
+    record = {
+        "scope_id": "scope-a",
+        "revision": 2,
+        "revision_hash": "ab" * 32,
+        "state": "active",
+        "controller_validator_id": "validator-a",
+        "created_height": 10,
+        "updated_height": 20,
+        "domains": [{"name": "research", "subtree": False}],
+        "members": [{
+            "validator_id": "validator-a",
+            "assigned_weight": 7,
+            "joined_revision": 1,
+            "active": True,
+        }],
+    }
+    mock_api.get("/v1/scopes").mock(
+        return_value=httpx.Response(200, json={"scopes": [record], "count": 1})
+    )
+    mock_api.get("/v1/scopes/scope-a").mock(
+        return_value=httpx.Response(200, json=record)
+    )
+    # The client must keep a valid scope ID within one URL path segment.
+    escaped = mock_api.get("/v1/scopes/scope%20a").mock(
+        return_value=httpx.Response(200, json={**record, "scope_id": "scope a"})
+    )
+
+    listed = client.list_scopes()
+    assert listed.count == 1
+    assert listed.scopes[0].members[0].assigned_weight == 7
+    assert client.get_scope("scope-a").revision_hash == "ab" * 32
+    assert client.get_scope("scope a").scope_id == "scope a"
+    assert escaped.called
+
+
+def test_governance_propose_scope_uses_guided_template(client, mock_api):
+    import json
+
+    route = mock_api.post("/v1/governance/propose").mock(
+        return_value=httpx.Response(200, json={
+            "proposal_id": "proposal-1", "tx_hash": "tx-1", "status": "voting",
+        })
+    )
+    result = client.governance_propose_scope(
+        scope={
+            "scope_id": "scope-a",
+            "revision": 1,
+            "state": "active",
+            "controller_validator_id": "validator-a",
+            "domains": ["research"],
+            "members": [{"validator_id": "validator-a", "assigned_weight": 1}],
+        },
+        reason="form research quorum",
+    )
+    body = json.loads(route.calls.last.request.read())
+    assert result.proposal_id == "proposal-1"
+    assert body["operation"] == "scope_action"
+    assert body["target_id"] == "scope-a"
+    assert body["scope"]["members"][0]["active"] is True
+    assert "payload" not in body
+
+
+def test_governance_propose_rejects_scope_and_payload(client):
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        client.governance_propose(
+            operation="scope_action",
+            target_id="scope-a",
+            reason="ambiguous",
+            payload=b"raw",
+            scope={
+                "scope_id": "scope-a",
+                "revision": 1,
+                "state": "active",
+                "controller_validator_id": "validator-a",
+                "domains": ["research"],
+                "members": [{"validator_id": "validator-a", "assigned_weight": 1}],
+            },
+        )

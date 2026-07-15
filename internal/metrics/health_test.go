@@ -155,3 +155,36 @@ func TestReadiness_EmbedderUnchecked_Ready(t *testing.T) {
 		t.Errorf("embedder block should report checked=false, got %v", body["embedder"])
 	}
 }
+
+func TestReadiness_ScopedProjectionRequiredFailsClosed(t *testing.T) {
+	h := NewHealthChecker()
+	h.SetPostgresHealth(true)
+	h.SetCometBFTHealth(true)
+
+	// Empty/pre-v20 nodes have no scoped serving dependency.
+	h.SetScopedProjectionStatus(ScopedProjectionStatus{Required: false, OK: true})
+	code, body := readiness(t, h, "")
+	if code != http.StatusOK || body["status"] != "ready" {
+		t.Fatalf("empty scoped projection must stay ready, got %d %v", code, body["status"])
+	}
+
+	// Once canonical envelopes exist, a locked or failed SQL projection is a
+	// hard readiness failure: serving an empty selected domain is not healthy.
+	h.SetScopedProjectionStatus(ScopedProjectionStatus{
+		Required: true, OK: false, Records: 4, Detail: "vault locked",
+	})
+	code, body = readiness(t, h, "")
+	if code != http.StatusServiceUnavailable || body["status"] != "not_ready" {
+		t.Fatalf("missing scoped projection must be 503, got %d %v", code, body["status"])
+	}
+	scoped, _ := body["scoped_projection"].(map[string]any)
+	if scoped == nil || scoped["checked"] != true || scoped["required"] != true || scoped["records"] != float64(4) {
+		t.Fatalf("scoped projection status missing or wrong: %v", body["scoped_projection"])
+	}
+
+	h.SetScopedProjectionStatus(ScopedProjectionStatus{Required: true, OK: true, Records: 4, Rebuilt: 4})
+	code, body = readiness(t, h, "")
+	if code != http.StatusOK || body["status"] != "ready" {
+		t.Fatalf("verified scoped projection must recover readiness, got %d %v", code, body["status"])
+	}
+}

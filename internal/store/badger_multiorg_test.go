@@ -2,6 +2,8 @@ package store
 
 import (
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -349,4 +351,45 @@ func TestNewBadgerStore_RunsOrgNameBackfill(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, orgs, 1, "store open must auto-backfill the org_name index")
 	assert.Equal(t, orgID, orgs[0].OrgID)
+}
+
+func TestOpenBadgerStoreWithoutMigrationsPreservesVerifiedBytes(t *testing.T) {
+	dir := t.TempDir()
+	const orgID = "0aaa11111111111111111111111111aa"
+	const admin = "admin0000000000000000000000000000000000000000000000000000000adm"
+
+	initial, err := NewBadgerStore(dir)
+	require.NoError(t, err)
+	require.NoError(t, writeLegacyOrg(initial, orgID, "levelup", "", admin, 9))
+	before, err := initial.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+	require.NoError(t, initial.CloseBadger())
+
+	reopened, err := OpenBadgerStoreWithoutMigrations(dir)
+	require.NoError(t, err)
+	after, err := reopened.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "verified AppHash must not change merely because the activation handle opened writable")
+	orgs, err := reopened.ListOrgsByName("levelup")
+	require.NoError(t, err)
+	assert.Empty(t, orgs, "migration-free activation must not add a historical reverse index")
+	require.NoError(t, reopened.CloseBadger())
+
+	migrated, err := NewBadgerStore(dir)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = migrated.CloseBadger() })
+	orgs, err = migrated.ListOrgsByName("levelup")
+	require.NoError(t, err)
+	require.Len(t, orgs, 1, "ordinary boot must retain its historical backfill behavior")
+}
+
+func TestOpenBadgerStoreWithoutMigrationsRequiresExistingRealDirectory(t *testing.T) {
+	_, err := OpenBadgerStoreWithoutMigrations(filepath.Join(t.TempDir(), "missing"))
+	assert.Error(t, err)
+
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "badger-link")
+	require.NoError(t, os.Symlink(target, link))
+	_, err = OpenBadgerStoreWithoutMigrations(link)
+	assert.ErrorContains(t, err, "real directory")
 }

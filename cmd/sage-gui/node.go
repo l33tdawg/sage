@@ -249,6 +249,12 @@ func runServe() (rerr error) {
 		_ = sqliteStore.Close()
 	}()
 
+	// Created before the ABCI app so canonical scoped-projection recovery can
+	// publish a fail-closed readiness state during construction.
+	health := metrics.NewHealthChecker()
+	health.Version = version
+	health.SetPostgresHealth(true) // SQLite is always "healthy"
+
 	// Optional cross-encoder reranker on the hybrid recall path. Off by
 	// default; operator turns it on with SAGE_RERANK_ENABLED=1 and
 	// SAGE_RERANK_URL=<tei-endpoint>. v7.1 ships this as additive polish
@@ -406,6 +412,46 @@ func runServe() (rerr error) {
 		_ = app.Close()
 	}()
 
+	// v11.9 recovery: Badger is the canonical scoped-content source after
+	// snapshot/state sync; SQLite is only the serving projection. Verify and
+	// rebuild it before advertising readiness. A locked vault is allowed to boot
+	// consensus, but /ready remains fail-closed until the operator unlocks and
+	// this callback succeeds.
+	rebuildScopedProjection := func(rebuildCtx context.Context) (int, error) {
+		contents, listErr := badgerStore.ListScopedContents()
+		if listErr != nil {
+			health.SetScopedProjectionStatus(metrics.ScopedProjectionStatus{Required: true, Detail: listErr.Error()})
+			return 0, listErr
+		}
+		status := metrics.ScopedProjectionStatus{Required: len(contents) > 0, Records: len(contents)}
+		if len(contents) == 0 {
+			status.OK = true
+			health.SetScopedProjectionStatus(status)
+			return 0, nil
+		}
+		if sqliteStore.VaultLocked() {
+			status.Detail = "vault locked; scoped serving projection rebuild deferred"
+			health.SetScopedProjectionStatus(status)
+			return 0, fmt.Errorf("%s", status.Detail)
+		}
+		rebuilt, rebuildErr := app.RebuildScopedProjection(rebuildCtx)
+		status.Rebuilt = rebuilt
+		status.OK = rebuildErr == nil && rebuilt == len(contents)
+		if rebuildErr != nil {
+			status.Detail = rebuildErr.Error()
+		} else if !status.OK {
+			status.Detail = fmt.Sprintf("rebuilt %d of %d scoped records", rebuilt, len(contents))
+			rebuildErr = fmt.Errorf("%s", status.Detail)
+		}
+		health.SetScopedProjectionStatus(status)
+		return rebuilt, rebuildErr
+	}
+	if rebuilt, rebuildErr := rebuildScopedProjection(ctx); rebuildErr != nil {
+		logger.Warn().Err(rebuildErr).Msg("scoped serving projection is not ready")
+	} else if rebuilt > 0 {
+		logger.Info().Int("records", rebuilt).Msg("scoped serving projection verified from canonical state")
+	}
+
 	// Block-retention window (issue #40): bound blockstore growth by telling
 	// CometBFT it may prune blocks older than the window. Local node policy —
 	// never consensus state — so modes can default differently: personal nodes
@@ -506,11 +552,6 @@ func runServe() (rerr error) {
 
 	// Create embedding provider
 	embedProvider := createEmbeddingProvider(cfg, logger)
-
-	// Health checker
-	health := metrics.NewHealthChecker()
-	health.Version = version
-	health.SetPostgresHealth(true) // SQLite is always "healthy"
 
 	// Embedder health watchdog: keeps /ready's semantic-recall signal current so a
 	// down embedding provider surfaces as "degraded" instead of a silently
@@ -686,6 +727,7 @@ func runServe() (rerr error) {
 	// height. Advisory only — the consensus path uses app.postV8Fork(height).
 	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
 	restServer.SetPostV17ForNextTxAccessor(app.IsAppV17ActiveForNextTx)
+	restServer.SetPostV20ForNextTxAccessor(app.IsAppV20ActiveForNextTx)
 
 	// v7.1: tell the REST layer which ed25519 public key identifies the local
 	// node operator. Requests signed with this key bypass the cross-agent
@@ -737,6 +779,15 @@ func runServe() (rerr error) {
 	dashboard.TunnelClient = tunnelClientMgr  // managed OpenAI tunnel-client for ChatGPT/Codex
 	dashboard.BadgerStore = badgerStore       // Wire on-chain RBAC for agent isolation
 	dashboard.PostV8ForkFn = app.IsPostV8Fork // v8.0: ancestor-walk grants on post-fork dashboards
+	dashboard.ScopedProjectionRebuildFn = func(rebuildCtx context.Context) (int, error) {
+		rebuilt, rebuildErr := rebuildScopedProjection(rebuildCtx)
+		if rebuildErr != nil {
+			logger.Warn().Err(rebuildErr).Msg("scoped serving projection rebuild incomplete")
+		} else if rebuilt > 0 {
+			logger.Info().Int("records", rebuilt).Msg("scoped serving projection ready after vault unlock")
+		}
+		return rebuilt, rebuildErr
+	}
 
 	// Bridge REST API events to dashboard SSE for the chain activity log
 	restServer.OnEvent = func(eventType, memoryID, domain, content string, data any) {
@@ -805,7 +856,8 @@ func runServe() (rerr error) {
 	dashboard.ValidatorCountFn = app.ValidatorCount // authoritative single-validator check for agent ops
 	dashboard.AppV18ActiveFn = app.IsAppV18ActiveForNextTx
 	dashboard.AppV19ActiveFn = app.IsAppV19ActiveForNextTx // app-v19: local-agents-default-READ flip (off-consensus)
-	dashboard.StrictRBAC = cfg.RBAC.Strict                 // opt-out of the app-v19 default-read flip
+	dashboard.AppV20ActiveFn = app.IsAppV20ActiveForNextTx
+	dashboard.StrictRBAC = cfg.RBAC.Strict // opt-out of the app-v19 default-read flip
 	// Embeddings setup: flip the config to the bundled Ollama + nomic-embed-text
 	// provider (the node re-reads it on restart). The embedder is locked to this.
 	dashboard.SetEmbeddingProvider = func(provider string) error {

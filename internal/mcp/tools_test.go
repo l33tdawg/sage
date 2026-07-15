@@ -315,6 +315,43 @@ func TestSageCorroborate_MissingID(t *testing.T) {
 	assert.Contains(t, err.Error(), "memory_id is required")
 }
 
+func TestSageGovProposePassesGuidedScopeTemplate(t *testing.T) {
+	var requestBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/governance/propose", r.URL.Path)
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&requestBody))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"proposal_id": "proposal-1", "tx_hash": "tx-1", "status": "voting",
+		})
+	}))
+	defer ts.Close()
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, priv)
+	scopeTemplate := map[string]any{
+		"scope_id": "scope-a", "revision": 1, "state": "active",
+		"controller_validator_id": "validator-a",
+		"domains":                 []any{"research"},
+		"members": []any{map[string]any{
+			"validator_id": "validator-a", "assigned_weight": 1,
+		}},
+	}
+	result, err := s.toolGovPropose(context.Background(), map[string]any{
+		"operation": "scope_action", "reason": "form research quorum", "scope": scopeTemplate,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "scope-a", requestBody["target_id"])
+	forwardedScope, ok := requestBody["scope"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "scope-a", forwardedScope["scope_id"])
+	assert.Equal(t, "validator-a", forwardedScope["controller_validator_id"])
+	assert.Equal(t, float64(1), forwardedScope["revision"])
+	assert.NotContains(t, requestBody, "payload")
+	assert.Equal(t, "scope-a", result.(map[string]any)["target_id"])
+}
+
 func TestSageLink(t *testing.T) {
 	var linkBody map[string]string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

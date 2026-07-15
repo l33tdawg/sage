@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/internal/governance"
+	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -134,12 +136,14 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 	}
 
 	var req struct {
-		Operation    string `json:"operation"`
-		TargetID     string `json:"target_id"`
-		TargetPubkey string `json:"target_pubkey,omitempty"`
-		TargetPower  int64  `json:"target_power,omitempty"`
-		ExpiryBlocks int64  `json:"expiry_blocks,omitempty"`
-		Reason       string `json:"reason"`
+		Operation    string                  `json:"operation"`
+		TargetID     string                  `json:"target_id"`
+		TargetPubkey string                  `json:"target_pubkey,omitempty"`
+		TargetPower  int64                   `json:"target_power,omitempty"`
+		ExpiryBlocks int64                   `json:"expiry_blocks,omitempty"`
+		Reason       string                  `json:"reason"`
+		Payload      string                  `json:"payload,omitempty"`
+		Scope        *scope.ProposalTemplate `json:"scope,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := decodeJSONBody(r, &req); err != nil {
@@ -148,11 +152,7 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 	}
 
 	if req.Operation == "" {
-		writeError(w, http.StatusBadRequest, "operation is required (add_validator, remove_validator, update_power)")
-		return
-	}
-	if req.TargetID == "" {
-		writeError(w, http.StatusBadRequest, "target_id is required")
+		writeError(w, http.StatusBadRequest, "operation is required (add_validator, remove_validator, update_power, sync_group_action, scope_action)")
 		return
 	}
 	if req.Reason == "" {
@@ -165,6 +165,10 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if op == tx.GovOpScopeAction && (h.AppV20ActiveFn == nil || !h.AppV20ActiveFn()) {
+		writeError(w, http.StatusConflict, "scope_action requires app-v20 activation")
+		return
+	}
 
 	var pubKeyBytes []byte
 	if req.TargetPubkey != "" {
@@ -173,6 +177,12 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 			writeError(w, http.StatusBadRequest, "target_pubkey must be valid hex")
 			return
 		}
+	}
+	var payloadBytes []byte
+	req.TargetID, payloadBytes, err = resolveDashboardGovProposalPayload(op, req.TargetID, req.Payload, req.Scope)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	proposeTx := &tx.ParsedTx{
@@ -186,6 +196,7 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 			TargetPower:  req.TargetPower,
 			ExpiryBlocks: req.ExpiryBlocks,
 			Reason:       req.Reason,
+			Payload:      payloadBytes,
 		},
 	}
 
@@ -222,6 +233,43 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 		"status":  "submitted",
 		"message": "Governance proposal submitted for consensus.",
 	})
+}
+
+func resolveDashboardGovProposalPayload(op tx.GovProposalOp, targetID, rawPayload string, template *scope.ProposalTemplate) (string, []byte, error) {
+	if template != nil {
+		if op != tx.GovOpScopeAction {
+			return "", nil, fmt.Errorf("scope is only valid for scope_action")
+		}
+		if rawPayload != "" {
+			return "", nil, fmt.Errorf("payload and scope are mutually exclusive")
+		}
+		encoded, err := scope.EncodeProposalTemplate(*template)
+		if err != nil {
+			return "", nil, fmt.Errorf("scope: %w", err)
+		}
+		if targetID == "" {
+			targetID = template.ScopeID
+		} else if targetID != template.ScopeID {
+			return "", nil, fmt.Errorf("target_id %q does not match scope_id %q", targetID, template.ScopeID)
+		}
+		return targetID, encoded, nil
+	}
+
+	var payload []byte
+	if rawPayload != "" {
+		decoded, err := base64.StdEncoding.DecodeString(rawPayload)
+		if err != nil {
+			return "", nil, fmt.Errorf("payload must be valid base64")
+		}
+		payload = decoded
+	}
+	if targetID == "" {
+		return "", nil, fmt.Errorf("target_id is required")
+	}
+	if op == tx.GovOpScopeAction && len(payload) == 0 {
+		return "", nil, fmt.Errorf("scope_action requires either payload or scope")
+	}
+	return targetID, payload, nil
 }
 
 // handleDashboardGovVote handles POST /v1/dashboard/governance/vote.
@@ -314,8 +362,10 @@ func parseDashboardGovOp(s string) (tx.GovProposalOp, error) {
 		return tx.GovOpUpdatePower, nil
 	case "sync_group_action":
 		return tx.GovOpSyncGroupAction, nil
+	case "scope_action":
+		return tx.GovOpScopeAction, nil
 	default:
-		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, sync_group_action")
+		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, sync_group_action, scope_action")
 	}
 }
 

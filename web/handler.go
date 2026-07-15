@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -102,6 +103,10 @@ type DashboardHandler struct {
 	// production node cancels and joins these before closing stores; nil keeps
 	// the lightweight test/embed behavior.
 	RunBackground func(func(context.Context))
+	// ScopedProjectionRebuildFn replays AppHash-covered v11.9 content into the
+	// local serving projection after a locked vault becomes writable. nil keeps
+	// pre-v11.9 embeddings/tests unchanged.
+	ScopedProjectionRebuildFn func(context.Context) (int, error)
 
 	// graphCache memoises the expensive /memory/graph response with a
 	// stale-while-revalidate policy: the first load computes synchronously, every
@@ -234,6 +239,9 @@ type DashboardHandler struct {
 	// deny. Nil (unwired) or false leaves the pre-fork explicit-allowlist behavior,
 	// so a chain that has not activated app-v19 reads exactly as before.
 	AppV19ActiveFn func() bool
+	// AppV20ActiveFn reports whether a newly broadcast scope_action can execute
+	// under app-v20. nil/false keeps the dashboard construction path disabled.
+	AppV20ActiveFn func() bool
 	// StrictRBAC, when true, opts the operator out of the app-v19 default-read
 	// flip: even with app-v19 active, a non-admin agent is confined to its explicit
 	// DomainAccess allowlist. Sourced from cfg.RBAC.Strict; default false = local
@@ -365,6 +373,15 @@ func (h *DashboardHandler) runBackground(fn func(context.Context)) {
 		return
 	}
 	go fn(context.Background()) //nolint:gosec // embedded/test handler has no lifecycle owner
+}
+
+func (h *DashboardHandler) startPostUnlockRepairs() {
+	h.runBackground(func(ctx context.Context) {
+		if h.ScopedProjectionRebuildFn != nil {
+			_, _ = h.ScopedProjectionRebuildFn(ctx)
+		}
+		_, _ = h.StartEmbeddingRepairIfNeeded(ctx)
+	})
 }
 
 // handlePreValidate runs the per-node validation checks (dedup, quality,
@@ -1026,7 +1043,7 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// A transient MCP embed failure may have preserved observations without
 	// vectors while the vault was locked. Repair them now that plaintext is
 	// available instead of leaving a manual setup banner behind.
-	h.runBackground(func(ctx context.Context) { _, _ = h.StartEmbeddingRepairIfNeeded(ctx) })
+	h.startPostUnlockRepairs()
 
 	// Create session
 	token := generateToken()
@@ -2753,7 +2770,11 @@ func (h *DashboardHandler) handleChainValidators(w http.ResponseWriter, r *http.
 
 	cometClient := &http.Client{Timeout: 2 * time.Second}
 	type cometVal struct {
-		Address          string `json:"address"`
+		Address string `json:"address"`
+		PubKey  struct {
+			Type  string `json:"type"`
+			Value string `json:"value"`
+		} `json:"pub_key"`
 		VotingPower      string `json:"voting_power"`
 		ProposerPriority string `json:"proposer_priority"`
 	}
@@ -2805,11 +2826,21 @@ func (h *DashboardHandler) handleChainValidators(w http.ResponseWriter, r *http.
 	var totalVP int64
 	validators := make([]map[string]any, 0, len(collected))
 	for _, v := range collected {
+		pubKeyBytes, decodeErr := base64.StdEncoding.DecodeString(v.PubKey.Value)
+		if decodeErr != nil || len(pubKeyBytes) != ed25519.PublicKeySize {
+			fail("validator set contains an invalid Ed25519 public key")
+			return
+		}
 		if vp, perr := strconv.ParseInt(v.VotingPower, 10, 64); perr == nil {
 			totalVP += vp
 		}
 		validators = append(validators, map[string]any{
-			"address":           v.Address,
+			"address": v.Address,
+			// Scope governance and vote transactions identify a validator by
+			// lowercase hex(Ed25519 public key), not by CometBFT's 20-byte
+			// address and not necessarily by the local dashboard agent ID.
+			"agent_id":          auth.PublicKeyToAgentID(ed25519.PublicKey(pubKeyBytes)),
+			"pub_key":           v.PubKey,
 			"voting_power":      v.VotingPower,
 			"proposer_priority": v.ProposerPriority,
 		})

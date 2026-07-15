@@ -426,8 +426,28 @@ class DeptMemberInfo(BaseModel):
 
 # --- Governance Models ---
 
+class ScopeActionMember(BaseModel):
+    """One member in a guided app-v20 scope governance template."""
+
+    validator_id: str
+    assigned_weight: int
+    joined_revision: int | None = None
+    active: bool = True
+
+
+class ScopeActionTemplate(BaseModel):
+    """Human-facing scope template; the server creates canonical wire bytes."""
+
+    scope_id: str
+    revision: int
+    state: str
+    controller_validator_id: str
+    domains: list[str]
+    members: list[ScopeActionMember]
+
+
 class GovProposeRequest(BaseModel):
-    operation: str  # "add_validator", "remove_validator", "update_power", "domain_reassign"
+    operation: str  # validator ops, "domain_reassign", "memory_domain_repair", or "scope_action"
     target_id: str
     target_pubkey: str | None = None
     target_power: int | None = None
@@ -436,6 +456,9 @@ class GovProposeRequest(BaseModel):
     # structured body (e.g. ``domain_reassign`` carries the JSON-encoded
     # DomainReassignRequest). None omits the field from the on-wire request.
     payload: str | None = None
+    # Guided scope_action input. Mutually exclusive with payload; the server
+    # sorts it canonically and materializes consensus-owned heights later.
+    scope: ScopeActionTemplate | None = None
 
 
 class GovProposeResponse(BaseModel):
@@ -456,6 +479,35 @@ class GovVoteResponse(BaseModel):
 
 class GovCancelRequest(BaseModel):
     proposal_id: str
+
+
+class ScopeDomain(BaseModel):
+    name: str
+    subtree: bool = False
+
+
+class ScopeMember(BaseModel):
+    validator_id: str
+    assigned_weight: int
+    joined_revision: int
+    active: bool
+
+
+class ScopeRecord(BaseModel):
+    scope_id: str
+    revision: int
+    revision_hash: str
+    state: str
+    controller_validator_id: str
+    created_height: int
+    updated_height: int
+    domains: list[ScopeDomain]
+    members: list[ScopeMember]
+
+
+class ScopeListResponse(BaseModel):
+    scopes: list[ScopeRecord]
+    count: int
 
 
 class GovCancelResponse(BaseModel):

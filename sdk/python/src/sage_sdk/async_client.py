@@ -42,6 +42,9 @@ from sage_sdk.models import (
     PipeSendResponse,
     PreValidateResponse,
     ReinstateRequest,
+    ScopeActionTemplate,
+    ScopeListResponse,
+    ScopeRecord,
     TaskListResponse,
     TimelineResponse,
     VoteRequest,
@@ -804,13 +807,17 @@ class AsyncSageClient:
         target_pubkey: str | None = None,
         target_power: int | None = None,
         payload: dict | bytes | None = None,
+        scope: ScopeActionTemplate | dict[str, Any] | None = None,
     ) -> GovProposeResponse:
         """Submit a governance proposal.
 
         See :meth:`SageClient.governance_propose` for the full ``payload``
         contract — same encoding rules apply here (dict → JSON+base64,
-        bytes → base64, ``None`` → omitted).
+        bytes → base64, ``None`` → omitted). Guided app-v20 scope templates
+        use ``scope`` instead and are canonicalized by the server.
         """
+        if payload is not None and scope is not None:
+            raise ValueError("payload and scope are mutually exclusive")
         req = GovProposeRequest(
             operation=operation,
             target_id=target_id,
@@ -818,9 +825,24 @@ class AsyncSageClient:
             target_power=target_power,
             reason=reason,
             payload=_encode_gov_payload(payload),
+            scope=scope,
         )
         resp = await self._request("POST", "/v1/governance/propose", json=req.model_dump(exclude_none=True))
         return GovProposeResponse.model_validate(resp.json())
+
+    async def governance_propose_scope(
+        self,
+        scope: ScopeActionTemplate | dict[str, Any],
+        reason: str,
+    ) -> GovProposeResponse:
+        """Submit a guided canonical app-v20 scope_action proposal."""
+        template = ScopeActionTemplate.model_validate(scope)
+        return await self.governance_propose(
+            operation="scope_action",
+            target_id=template.scope_id,
+            reason=reason,
+            scope=template,
+        )
 
     async def governance_vote(self, proposal_id: str, decision: str) -> GovVoteResponse:
         """Vote on an active governance proposal."""
@@ -833,6 +855,18 @@ class AsyncSageClient:
         req = GovCancelRequest(proposal_id=proposal_id)
         resp = await self._request("POST", "/v1/governance/cancel", json=req.model_dump())
         return GovCancelResponse.model_validate(resp.json())
+
+    async def list_scopes(self) -> ScopeListResponse:
+        """List canonical v11.9 quorum scopes (operator/admin only)."""
+        resp = await self._request("GET", "/v1/scopes")
+        return ScopeListResponse.model_validate(resp.json())
+
+    async def get_scope(self, scope_id: str) -> ScopeRecord:
+        """Read one canonical v11.9 quorum scope (operator/admin only)."""
+        from urllib.parse import quote
+
+        resp = await self._request("GET", f"/v1/scopes/{quote(scope_id, safe='')}")
+        return ScopeRecord.model_validate(resp.json())
 
     async def governance_proposals(self, status: str | None = None) -> GovProposalListResponse:
         """List governance proposals, optionally filtered by status."""

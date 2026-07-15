@@ -7340,6 +7340,12 @@ function NetworkPage({ sse, accessMode = false }) {
     const [govNewTarget, setGovNewTarget] = useState('');
     const [govNewPower, setGovNewPower] = useState('10');
     const [govNewReason, setGovNewReason] = useState('');
+    const [govScopeRevision, setGovScopeRevision] = useState('1');
+    const [govScopeState, setGovScopeState] = useState('active');
+    const [govScopeController, setGovScopeController] = useState('');
+    const [govScopeDomains, setGovScopeDomains] = useState('');
+    const [govScopeMembers, setGovScopeMembers] = useState({});
+    const [govScopeValidators, setGovScopeValidators] = useState([]);
     const [currentHeight, setCurrentHeight] = useState(0);
     const govPollRef = useRef(null);
 
@@ -7349,6 +7355,15 @@ function NetworkPage({ sse, accessMode = false }) {
             setAgents(data.agents || []);
         } catch (e) { console.error(e); }
         finally { setLoading(false); }
+    }, []);
+
+    const loadScopeValidators = useCallback(async () => {
+        try {
+            const data = await fetchValidators();
+            setGovScopeValidators(Array.isArray(data?.validators) ? data.validators.filter(v => v.agent_id) : []);
+        } catch (e) {
+            setGovScopeValidators([]);
+        }
     }, []);
 
     const loadUnregistered = useCallback(async () => {
@@ -7370,6 +7385,7 @@ function NetworkPage({ sse, accessMode = false }) {
 
     useEffect(() => {
         loadAgents();
+        loadScopeValidators();
         loadUnregistered();
         loadGovProposals();
         fetchStats().then(data => {
@@ -7415,25 +7431,27 @@ function NetworkPage({ sse, accessMode = false }) {
                     // If proposal is no longer voting, refresh the full list
                     if (base.status !== 'voting') {
                         loadGovProposals();
+                        loadScopeValidators();
                     }
                 }
                 if (health?.chain?.block_height) setCurrentHeight(Number(health.chain.block_height));
             } catch (e) { /* ignore polling errors */ }
         }, 3000);
         return () => { if (govPollRef.current) { clearInterval(govPollRef.current); govPollRef.current = null; } };
-    }, [activeProposal?.proposal_id, loadGovProposals]);
+    }, [activeProposal?.proposal_id, loadGovProposals, loadScopeValidators]);
 
     // SSE governance events — auto-refresh on governance activity
     useEffect(() => {
         if (!sse) return;
         const unsub = sse.on('governance', () => {
             loadGovProposals();
+            loadScopeValidators();
             fetchHealth().then(h => {
                 if (h?.chain?.block_height) setCurrentHeight(Number(h.chain.block_height));
             }).catch(() => {});
         });
         return unsub;
-    }, [sse, loadGovProposals]);
+    }, [sse, loadGovProposals, loadScopeValidators]);
 
     // Redeploy polling
     const startRedeployPoll = useCallback(() => {
@@ -7653,6 +7671,25 @@ function NetworkPage({ sse, accessMode = false }) {
             if (govNewOp === 'add_validator' || govNewOp === 'update_power') {
                 proposal.target_power = parseInt(govNewPower, 10) || 10;
             }
+            if (govNewOp === 'scope_action') {
+                const revision = parseInt(govScopeRevision, 10);
+                proposal.target_id = govNewTarget.trim();
+                proposal.scope = {
+                    scope_id: govNewTarget.trim(),
+                    revision,
+                    state: govScopeState,
+                    controller_validator_id: govScopeController,
+                    domains: govScopeDomains.split(/[\n,]/).map(v => v.trim()).filter(Boolean),
+                    members: Object.entries(govScopeMembers)
+                        .filter(([, member]) => member.selected)
+                        .map(([validatorId, member]) => ({
+                            validator_id: validatorId,
+                            assigned_weight: parseInt(member.weight, 10),
+                            joined_revision: parseInt(member.joinedRevision, 10),
+                            active: member.active !== false,
+                        })),
+                };
+            }
             const res = await submitGovProposal(proposal);
             if (res.error) { showToast(res.error, 'error'); }
             else {
@@ -7662,19 +7699,38 @@ function NetworkPage({ sse, accessMode = false }) {
                 setGovNewTarget('');
                 setGovNewPower('10');
                 setGovNewReason('');
+                setGovScopeRevision('1');
+                setGovScopeState('active');
+                setGovScopeController('');
+                setGovScopeDomains('');
+                setGovScopeMembers({});
             }
             loadGovProposals();
         } catch (e) { showToast('Proposal failed: ' + e.message, 'error'); }
         setGovSubmitting(false);
-    }, [govNewOp, govNewTarget, govNewPower, govNewReason, loadGovProposals]);
+    }, [govNewOp, govNewTarget, govNewPower, govNewReason, govScopeRevision, govScopeState, govScopeController, govScopeDomains, govScopeMembers, loadGovProposals]);
+
+    const updateGovScopeMember = useCallback((validatorId, patch) => {
+        setGovScopeMembers(current => ({
+            ...current,
+            [validatorId]: {
+                selected: false,
+                weight: '1',
+                joinedRevision: govScopeRevision || '1',
+                active: true,
+                ...(current[validatorId] || {}),
+                ...patch,
+            },
+        }));
+    }, [govScopeRevision]);
 
     // Governance helpers
     const govOpLabel = (op) => {
-        const labels = { add_validator: 'Add Validator', remove_validator: 'Remove Validator', update_power: 'Update Power' };
+        const labels = { add_validator: 'Add Validator', remove_validator: 'Remove Validator', update_power: 'Update Power', scope_action: 'Quorum Scope' };
         return labels[op] || op;
     };
     const govOpIcon = (op) => {
-        const icons = { add_validator: '+', remove_validator: '-', update_power: '~' };
+        const icons = { add_validator: '+', remove_validator: '-', update_power: '~', scope_action: 'Q' };
         return icons[op] || '?';
     };
     const resolveAgentName = (agentId) => {
@@ -7686,6 +7742,43 @@ function NetworkPage({ sse, accessMode = false }) {
         return html`<span class="gov-status-badge gov-status-${status}">${status.charAt(0).toUpperCase() + status.slice(1)}</span>`;
     };
     const pastProposals = govProposals.filter(p => p.status !== 'voting');
+    const canonicalValidatorPubkeyID = (raw) => {
+        const value = String(raw || '').trim();
+        if (/^[0-9a-fA-F]{64}$/.test(value)) return value.toLowerCase();
+        try {
+            const decoded = atob(value);
+            if (decoded.length !== 32) return '';
+            return Array.from(decoded, ch => ch.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+        } catch (_) {
+            return '';
+        }
+    };
+    const govScopeValidatorOptions = govScopeValidators.map(validator => {
+        const validatorID = validator.agent_id;
+        const agent = agents.find(candidate =>
+            candidate.agent_id === validatorID || canonicalValidatorPubkeyID(candidate.validator_pubkey) === validatorID
+        );
+        return {
+            validatorID,
+            name: agent?.name || validatorID.slice(0, 16) + '...',
+            role: agent?.role || 'validator',
+            votingPower: validator.voting_power,
+        };
+    });
+    const govScopeDomainList = govScopeDomains.split(/[\n,]/).map(v => v.trim()).filter(Boolean);
+    const govScopeSelectedMembers = Object.entries(govScopeMembers).filter(([, member]) => member.selected);
+    const govScopeControllerMember = govScopeSelectedMembers.find(([validatorId, member]) => validatorId === govScopeController && member.active !== false);
+    const govScopeRevisionNumber = Number(govScopeRevision);
+    const govScopeValid = govNewOp !== 'scope_action' || (
+        Number.isSafeInteger(govScopeRevisionNumber) && govScopeRevisionNumber > 0 &&
+        (govScopeRevisionNumber !== 1 || govScopeState === 'active') &&
+        !!govScopeController && govScopeDomainList.length > 0 && govScopeSelectedMembers.length > 0 && !!govScopeControllerMember &&
+        govScopeSelectedMembers.every(([, member]) => {
+            const weight = Number(member.weight);
+            const joinedRevision = Number(member.joinedRevision);
+            return Number.isSafeInteger(weight) && weight > 0 && Number.isSafeInteger(joinedRevision) && joinedRevision > 0 && joinedRevision <= govScopeRevisionNumber;
+        })
+    );
 
     if (loading) return html`<div class="network-page"><p style="color:var(--text-muted);text-align:center;padding:40px;">Loading agents...</p></div>`;
 
@@ -7789,7 +7882,7 @@ function NetworkPage({ sse, accessMode = false }) {
 
             ${showGovModal && html`
                 <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) setShowGovModal(false); }}>
-                    <div class="wizard-modal" style="max-width:520px;">
+                    <div class="wizard-modal" style=${`max-width:${govNewOp === 'scope_action' ? '760px' : '520px'};`}>
                         <div class="wizard-header">
                             <h2>New Governance Proposal</h2>
                             <button class="detail-close" onClick=${() => setShowGovModal(false)}>×</button>
@@ -7801,17 +7894,74 @@ function NetworkPage({ sse, accessMode = false }) {
                                     <option value="add_validator">Add Validator</option>
                                     <option value="remove_validator">Remove Validator</option>
                                     <option value="update_power">Update Power</option>
+                                    <option value="scope_action">Form or Revise Quorum Scope</option>
                                 </select>
                             </div>
-                            <div class="wizard-field">
-                                <label>Target Agent</label>
-                                <select class="wizard-select" value=${govNewTarget} onChange=${e => setGovNewTarget(e.target.value)}>
-                                    <option value="">Select agent...</option>
-                                    ${agents.filter(a => a.status !== 'removed').map(a => html`
-                                        <option value=${a.agent_id}>${a.name} (${a.role})</option>
-                                    `)}
-                                </select>
-                            </div>
+                            ${govNewOp === 'scope_action' ? html`
+                                <div class="wizard-field">
+                                    <label>Scope ID</label>
+                                    <input class="wizard-input" placeholder="research-quorum" value=${govNewTarget} onInput=${e => setGovNewTarget(e.target.value)} />
+                                </div>
+                                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                                    <div class="wizard-field">
+                                        <label>Revision</label>
+                                        <input class="wizard-input" type="number" min="1" value=${govScopeRevision} onInput=${e => setGovScopeRevision(e.target.value)} />
+                                    </div>
+                                    <div class="wizard-field">
+                                        <label>Lifecycle</label>
+                                        <select class="wizard-select" value=${govScopeState} onChange=${e => setGovScopeState(e.target.value)}>
+                                            <option value="active">Active</option>
+                                            <option value="paused">Paused</option>
+                                            <option value="retired">Retired</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="wizard-field">
+                                    <label>Controller Validator</label>
+                                    <select class="wizard-select" value=${govScopeController} onChange=${e => setGovScopeController(e.target.value)}>
+                                        <option value="">Select controller...</option>
+                                        ${govScopeValidatorOptions.map(validator => html`
+                                            <option value=${validator.validatorID}>${validator.name} (${validator.role}, power ${validator.votingPower})</option>
+                                        `)}
+                                    </select>
+                                </div>
+                                <div class="wizard-field">
+                                    <label>Exact Domains</label>
+                                    <textarea class="wizard-textarea" placeholder=${allDomains.length ? `Comma-separated, e.g. ${allDomains.slice(0, 2).join(', ')}` : 'Comma-separated registered domains'} value=${govScopeDomains} onInput=${e => setGovScopeDomains(e.target.value)} />
+                                    <div style="font-size:11px;color:var(--text-muted);margin-top:5px;">Only existing on-chain domains are accepted. V1 does not include future subdomains automatically.</div>
+                                </div>
+                                <div class="wizard-field">
+                                    <label>Weighted Validator Roster</label>
+                                    <div style="border:1px solid var(--border);border-radius:10px;max-height:220px;overflow:auto;padding:8px;">
+                                        ${govScopeValidatorOptions.map(validator => {
+                                            const member = govScopeMembers[validator.validatorID] || { selected: false, weight: '1', joinedRevision: govScopeRevision || '1', active: true };
+                                            return html`<div style="padding:8px;border-bottom:1px solid var(--border);">
+                                                <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                                    <input type="checkbox" checked=${member.selected} onChange=${e => updateGovScopeMember(validator.validatorID, { selected: e.target.checked })} />
+                                                    <span style="flex:1;min-width:0;">${validator.name}<div class="mono" style="font-size:10px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;">${validator.validatorID}</div></span>
+                                                </label>
+                                                ${member.selected && html`<div style="display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end;margin-top:8px;padding-left:24px;">
+                                                    <label style="font-size:11px;color:var(--text-muted);">Weight<input class="wizard-input" type="number" min="1" value=${member.weight} onInput=${e => updateGovScopeMember(validator.validatorID, { weight: e.target.value })} /></label>
+                                                    <label style="font-size:11px;color:var(--text-muted);">Joined revision<input class="wizard-input" type="number" min="1" max=${govScopeRevision || '1'} value=${member.joinedRevision} onInput=${e => updateGovScopeMember(validator.validatorID, { joinedRevision: e.target.value })} /></label>
+                                                    <label style="font-size:11px;color:var(--text-muted);padding-bottom:10px;"><input type="checkbox" checked=${member.active !== false} onChange=${e => updateGovScopeMember(validator.validatorID, { active: e.target.checked })} /> Active</label>
+                                                </div>`}
+                                            </div>`;
+                                        })}
+                                        ${govScopeValidatorOptions.length === 0 && html`<div style="padding:12px;color:var(--text-muted);font-size:12px;">No active validators are available from the chain.</div>`}
+                                    </div>
+                                    <div style="font-size:11px;color:var(--text-muted);margin-top:5px;">The controller must be selected and active. A memory commits only above two-thirds of this pinned integer weight.</div>
+                                </div>
+                            ` : html`
+                                <div class="wizard-field">
+                                    <label>Target Agent</label>
+                                    <select class="wizard-select" value=${govNewTarget} onChange=${e => setGovNewTarget(e.target.value)}>
+                                        <option value="">Select agent...</option>
+                                        ${agents.filter(a => a.status !== 'removed').map(a => html`
+                                            <option value=${a.agent_id}>${a.name} (${a.role})</option>
+                                        `)}
+                                    </select>
+                                </div>
+                            `}
                             ${(govNewOp === 'add_validator' || govNewOp === 'update_power') && html`
                                 <div class="wizard-field">
                                     <label>Voting Power</label>
@@ -7825,7 +7975,7 @@ function NetworkPage({ sse, accessMode = false }) {
                         </div>
                         <div class="wizard-footer">
                             <button class="btn" onClick=${() => setShowGovModal(false)}>Cancel</button>
-                            <button class="btn btn-primary" onClick=${handleGovSubmit} disabled=${govSubmitting || !govNewTarget || !govNewReason.trim()}>
+                            <button class="btn btn-primary" onClick=${handleGovSubmit} disabled=${govSubmitting || !govNewTarget.trim() || !govNewReason.trim() || !govScopeValid}>
                                 ${govSubmitting ? 'Submitting...' : 'Submit Proposal'}
                             </button>
                         </div>

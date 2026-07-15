@@ -1011,12 +1011,15 @@ governance_propose(
     target_pubkey: str | None = None,
     target_power: int | None = None,
     payload: dict | bytes | None = None,
+    scope: ScopeActionTemplate | dict[str, Any] | None = None,
 ) -> GovProposeResponse
 ```
 
 `POST /v1/governance/propose`
 
-Known `operation` values: `"add_validator"`, `"remove_validator"`, `"update_power"`, `"domain_reassign"` (v8.0+).
+Known `operation` values include `"add_validator"`, `"remove_validator"`,
+`"update_power"`, `"domain_reassign"`, `"memory_domain_repair"`,
+`"sync_group_action"`, and `"scope_action"` (app-v20).
 
 `payload` encoding (source: `client.py:64`):
 - `dict` → JSON-encoded (compact) then base64-encoded onto the wire.
@@ -1024,8 +1027,27 @@ Known `operation` values: `"add_validator"`, `"remove_validator"`, `"update_powe
 - `None` → field omitted entirely.
 
 `domain_reassign` expects a payload dict with keys `domain`, `new_owner_id`, `parent_domain`, `open_to_shared`.
+`scope_action` should use `scope`; the server canonicalizes the guided template
+and owns the zero proposal heights. `scope` and `payload` are mutually
+exclusive. Legacy callers may still supply pre-encoded canonical bytes.
 
 Returns `GovProposeResponse(proposal_id, tx_hash, status)`.
+
+---
+
+#### `governance_propose_scope()`
+
+```python
+governance_propose_scope(
+    scope: ScopeActionTemplate | dict[str, Any],
+    reason: str,
+) -> GovProposeResponse
+```
+
+Convenience wrapper for `operation="scope_action"`; derives `target_id` from
+`scope_id` and sends structured JSON (`client.py:968-980`). For revision 1,
+member `active` defaults to true and `joined_revision` may be omitted. Later
+revisions must preserve historical join revisions.
 
 ---
 
@@ -1052,6 +1074,28 @@ governance_cancel(proposal_id: str) -> GovCancelResponse
 `POST /v1/governance/cancel`
 
 Proposer only. Returns `GovCancelResponse(tx_hash, status)`.
+
+---
+
+#### `list_scopes()`
+
+```python
+list_scopes() -> ScopeListResponse
+```
+
+`GET /v1/scopes`. Node-operator/admin only. Returns canonical v11.9 scope
+heads, exact domain allowlists, assigned integer weights, and revision anchors.
+
+---
+
+#### `get_scope()`
+
+```python
+get_scope(scope_id: str) -> ScopeRecord
+```
+
+`GET /v1/scopes/{scope_id}`. Node-operator/admin only. The clients URL-escape
+the canonical single-segment scope ID.
 
 ---
 
@@ -1231,11 +1275,11 @@ except SageAPIError as e:
 
 ## Method Count Summary
 
-**`SageClient`**: 63 public methods
-**`AsyncSageClient`**: 63 public methods (`reassign_domain` is sync-only; `close` is async-only)
+**`SageClient`**: 65 public methods
+**`AsyncSageClient`**: 65 public methods (`reassign_domain` is sync-only; `close` is async-only)
 
 Groups: Health (2), Memory (8), Embeddings (1), Tasks (2), Voting/Validation
 (5), Agents (6), Validator (2), Pipeline (6), Access Control (4), Domains (3
 shared + sync-only `reassign_domain`), Organizations (7), Departments (6),
-Federation (5), Governance (5), and async lifecycle (1) = 64 distinct methods
-across both clients (counting the 62 shared methods once).
+Federation (5), Governance and scope visibility (7), and async lifecycle (1) =
+66 distinct methods across both clients (counting the 64 shared methods once).

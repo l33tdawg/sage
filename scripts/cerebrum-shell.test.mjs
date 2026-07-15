@@ -16,6 +16,25 @@ test('Access Controls is a first-class sidebar route', () => {
     assert.match(appSource, /accessMode \? 'access' : 'overview'/);
 });
 
+test('governance wizard builds structured canonical quorum scopes', () => {
+    const networkPage = appSource.slice(appSource.indexOf('function NetworkPage('), appSource.indexOf('function AddAgentWizard('));
+    assert.match(networkPage, /<option value="scope_action">Form or Revise Quorum Scope<\/option>/);
+    assert.match(networkPage, /proposal\.scope = \{/);
+    assert.match(networkPage, /controller_validator_id: govScopeController/);
+    assert.match(networkPage, /govScopeDomains\.split\(\/\[\\n,\]\//);
+    assert.match(networkPage, /assigned_weight: parseInt\(member\.weight, 10\)/);
+    assert.match(networkPage, /joined_revision: parseInt\(member\.joinedRevision, 10\)/);
+    assert.match(networkPage, /govScopeControllerMember/,
+        'the selected controller must also be an active selected roster member');
+    assert.match(networkPage, /govScopeValidatorOptions = govScopeValidators/,
+        'scope authority must come from the live CometBFT validator set, not ordinary agent rows');
+    assert.match(networkPage, /Number\.isSafeInteger\(weight\)/,
+        'the browser must not round canonical uint64 weights before submission');
+    assert.match(networkPage, /above two-thirds of this pinned integer weight/);
+    assert.doesNotMatch(networkPage, /btoa\(|payload.*scope_action/s,
+        'the dashboard must submit structured scope JSON, not recreate the binary codec');
+});
+
 test('task board scrolls as one page instead of trapping wheel input in columns', () => {
     const tasksPage = cssSource.match(/\.tasks-page\s*\{([^}]*)\}/)?.[1] || '';
     const cards = cssSource.match(/\.kanban-cards\s*\{([^}]*)\}/)?.[1] || '';

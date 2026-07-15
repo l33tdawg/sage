@@ -41,6 +41,9 @@ from sage_sdk.models import (
     PipeSendResponse,
     PreValidateResponse,
     ReinstateRequest,
+    ScopeActionTemplate,
+    ScopeListResponse,
+    ScopeRecord,
     TaskListResponse,
     TimelineResponse,
     VoteRequest,
@@ -926,12 +929,14 @@ class SageClient:
         target_pubkey: str | None = None,
         target_power: int | None = None,
         payload: dict | bytes | None = None,
+        scope: ScopeActionTemplate | dict[str, Any] | None = None,
     ) -> GovProposeResponse:
         """Submit a governance proposal.
 
         Supports validator-set operations (``add_validator``,
         ``remove_validator``, ``update_power``) and access-control recovery
-        (``domain_reassign``, v8.0+).
+        (``domain_reassign``, v8.0+) plus canonical app-v20 scope decisions
+        (``scope_action`` with a guided ``scope`` template).
 
         ``payload`` carries an optional structured body for operations that
         need one — e.g. ``domain_reassign`` expects a JSON-encoded
@@ -941,7 +946,13 @@ class SageClient:
             wire as ``payload``.
           - ``bytes``: base64-encoded directly.
           - ``None``: the ``payload`` field is omitted from the request.
+
+        ``scope`` is the preferred app-v20 surface. The server converts it to
+        canonical ScopeRecordV1 bytes; it is mutually exclusive with
+        ``payload``.
         """
+        if payload is not None and scope is not None:
+            raise ValueError("payload and scope are mutually exclusive")
         req = GovProposeRequest(
             operation=operation,
             target_id=target_id,
@@ -949,9 +960,24 @@ class SageClient:
             target_power=target_power,
             reason=reason,
             payload=_encode_gov_payload(payload),
+            scope=scope,
         )
         resp = self._request("POST", "/v1/governance/propose", json=req.model_dump(exclude_none=True))
         return GovProposeResponse.model_validate(resp.json())
+
+    def governance_propose_scope(
+        self,
+        scope: ScopeActionTemplate | dict[str, Any],
+        reason: str,
+    ) -> GovProposeResponse:
+        """Submit a guided canonical app-v20 scope_action proposal."""
+        template = ScopeActionTemplate.model_validate(scope)
+        return self.governance_propose(
+            operation="scope_action",
+            target_id=template.scope_id,
+            reason=reason,
+            scope=template,
+        )
 
     def governance_vote(self, proposal_id: str, decision: str) -> GovVoteResponse:
         """Vote on an active governance proposal."""
@@ -964,6 +990,18 @@ class SageClient:
         req = GovCancelRequest(proposal_id=proposal_id)
         resp = self._request("POST", "/v1/governance/cancel", json=req.model_dump())
         return GovCancelResponse.model_validate(resp.json())
+
+    def list_scopes(self) -> ScopeListResponse:
+        """List canonical v11.9 quorum scopes (operator/admin only)."""
+        resp = self._request("GET", "/v1/scopes")
+        return ScopeListResponse.model_validate(resp.json())
+
+    def get_scope(self, scope_id: str) -> ScopeRecord:
+        """Read one canonical v11.9 quorum scope (operator/admin only)."""
+        from urllib.parse import quote
+
+        resp = self._request("GET", f"/v1/scopes/{quote(scope_id, safe='')}")
+        return ScopeRecord.model_validate(resp.json())
 
     def governance_proposals(self, status: str | None = None) -> GovProposalListResponse:
         """List governance proposals, optionally filtered by status."""

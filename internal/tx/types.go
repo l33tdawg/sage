@@ -98,6 +98,10 @@ const (
 	// []MemoryDomainRepairEntry. Numerically matches governance.OpMemoryDomainRepair=6.
 	GovOpMemoryDomainRepair GovProposalOp = 6
 	GovOpSyncGroupAction    GovProposalOp = 7
+	// GovOpScopeAction (app-v20) numerically matches governance.OpScopeAction.
+	// GovPropose.Payload is the canonical versioned scope record template and
+	// TargetID must equal its ScopeID.
+	GovOpScopeAction GovProposalOp = 8
 )
 
 // VoteDecision represents a validator's vote on a proposed memory.
@@ -320,7 +324,8 @@ type MemoryReassign struct {
 	TargetAgentID string // agent receiving the memories
 }
 
-// GovPropose proposes a validator governance action (add, remove, update power).
+// GovPropose proposes a governance action. Legacy validator-set operations use
+// the scalar target fields; newer operations bind their exact body in Payload.
 type GovPropose struct {
 	Operation    GovProposalOp
 	TargetID     string // hex-encoded validator/agent ID
@@ -332,8 +337,9 @@ type GovPropose struct {
 	// legacy ops (1/2/3 — validator-set changes infer parameters from the
 	// existing scalar fields). For OpDomainReassign (4), Payload is the
 	// JSON-encoded DomainReassign body: {Domain, NewOwnerID, ParentDomain,
-	// OpenToShared}. The decoder treats the trailing length-prefix as
-	// optional so legacy bytes (no Payload) still round-trip cleanly.
+	// OpenToShared}. App-v20 OpScopeAction carries a canonical binary scope
+	// record template. The decoder treats the trailing length-prefix as optional
+	// so legacy bytes (no Payload) still round-trip cleanly.
 	Payload []byte
 }
 
