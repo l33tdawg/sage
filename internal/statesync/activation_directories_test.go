@@ -109,6 +109,48 @@ func TestActivationDirectoryCrashRecoveryRestoresPersistedCometState(t *testing.
 	}
 }
 
+func TestActivationDirectoryCrashRecoveryRestoresFreshCometState(t *testing.T) {
+	steps := []activationDirectoryStep{
+		activationStepJournalPrepared,
+		activationStepLiveQuarantined,
+		activationStepPreparedLive,
+		activationStepVerified,
+		activationStepPendingComet,
+	}
+	for _, step := range steps {
+		t.Run(string(step), func(t *testing.T) {
+			root := t.TempDir()
+			journal := activationTestJournal()
+			journal.Phase = ActivationPrepared
+			journalPath := filepath.Join(root, "activation.journal")
+			writeActivationTestState(t, filepath.Join(root, journal.LiveName), 0, nil)
+			writeActivationTestState(t, filepath.Join(root, journal.PreparedName), journal.Height, journal.AppHash)
+
+			err := activatePreparedDirectory(root, journalPath, journal, verifyActivationTestState, func(current activationDirectoryStep) error {
+				if current == step {
+					return errSimulatedActivationCrash
+				}
+				return nil
+			})
+			require.ErrorIs(t, err, errSimulatedActivationCrash)
+			action, err := RecoverActivationDirectories(root, journalPath, 0, nil, inspectActivationTestState)
+			require.NoError(t, err)
+			if step == activationStepJournalPrepared {
+				assert.Equal(t, RecoveryDiscardPrepared, action)
+			} else {
+				assert.Equal(t, RecoveryRestoreQuarantine, action)
+			}
+			height, appHash, err := inspectActivationTestState(filepath.Join(root, journal.LiveName))
+			require.NoError(t, err)
+			assert.Zero(t, height)
+			assert.Empty(t, appHash)
+			assert.NoDirExists(t, filepath.Join(root, journal.PreparedName))
+			assert.NoDirExists(t, filepath.Join(root, journal.QuarantineName))
+			assert.NoFileExists(t, journalPath)
+		})
+	}
+}
+
 func TestRecoverActivationDirectoriesSealsCommittedState(t *testing.T) {
 	root, journalPath, journal, _, newHash := setupActivationDirectories(t)
 	require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))

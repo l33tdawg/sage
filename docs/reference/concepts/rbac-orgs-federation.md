@@ -1,8 +1,9 @@
-<!-- Reconciled through SAGE v11.7.0. -->
+<!-- Core document reconciled through SAGE v11.7.0; the v11.9 quorum/state-sync section is code-verified through the 2026-07 foundation branch. -->
 
 # RBAC, Organizations, and Federation
 
-Verified against code at SAGE v11.7.0.
+Verified against code at SAGE v11.7.0, with the v11.9 quorum/state-sync section
+updated against the 2026-07 foundation implementation.
 
 ## Overview
 
@@ -288,8 +289,8 @@ content plus classification from Badger
 (`internal/abci/appv20_recovery_integration_test.go:152-285`). Network state sync
 is not yet enabled: CometBFT receives a dormant boot runtime that advertises no
 snapshots, rejects offers, returns no chunks, and aborts apply
-(`internal/abci/boot_state_sync_runtime.go:163-182`,
-`cmd/sage-gui/node.go:649-662`). A future enabled network path must therefore use
+(`internal/abci/boot_state_sync_runtime.go`, `cmd/sage-gui/node.go`). A future
+enabled network path must therefore use
 the separate consensus-only, key-free format described below.
 
 Crash replay is height-bound rather than a nonce bypass. Scoped votes store the
@@ -314,7 +315,7 @@ encodings, wrong trusted hashes, interrupted/incomplete assembly, and a real
 Badger backup/load with an identical AppHash (`internal/statesync/format_test.go`).
 The ABCI endpoints stay disabled even though these format proofs pass.
 
-The producer and receiver foundations are also dormant. Export makes a bounded
+The network producer and receiver endpoints are also dormant. Export makes a bounded
 live Badger backup, requires an app-v20 reload verifier to match the committed
 AppHash, atomically publishes only metadata/chunks, rejects extra files and
 symlinks, and hashes a chunk again immediately before read
@@ -341,8 +342,11 @@ Delivered foundations include the canonical/fsynced journal and recovery
 decision (`internal/statesync/activation.go`), guarded directory executor,
 writable no-migration opener (`internal/store/badger.go:105-128`), and dormant
 complete-bundle runtime with read/write leases
-(`internal/abci/boot_state_sync_runtime.go`). Ordinary services are not yet
-delayed behind runtime sealing, and no network receiver is armed.
+(`internal/abci/boot_state_sync_runtime.go`). Startup now resolves any durable
+activation journal against persisted Comet state before creating/opening the
+canonical Badger directory (`cmd/sage-gui/state_sync_boot.go`). Ordinary
+services are not yet delayed behind runtime sealing, and no network receiver is
+armed.
 
 Scope proposals no longer require operators or agents to hand-encode that
 binary record. REST/dashboard accept a structured `scope` template, MCP exposes

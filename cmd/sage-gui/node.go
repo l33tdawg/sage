@@ -49,6 +49,7 @@ import (
 	sagep2p "github.com/l33tdawg/sage/internal/p2p"
 	"github.com/l33tdawg/sage/internal/rerankd"
 	"github.com/l33tdawg/sage/internal/snapshot"
+	"github.com/l33tdawg/sage/internal/statesync"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
 	"github.com/l33tdawg/sage/internal/tunnelclientd"
@@ -103,10 +104,20 @@ func runServe() (rerr error) {
 	badgerPath := filepath.Join(cfg.DataDir, "badger")
 	sqlitePath := filepath.Join(cfg.DataDir, "sage.db")
 
-	for _, dir := range []string{cfg.DataDir, cometHome, badgerPath} {
+	// Do not create the canonical Badger directory until activation recovery has
+	// inspected the crash layout. A missing live directory can be intentional.
+	for _, dir := range []string{cfg.DataDir, cometHome} {
 		if mkErr := os.MkdirAll(dir, 0700); mkErr != nil {
 			return fmt.Errorf("create dir %s: %w", dir, mkErr)
 		}
+	}
+	if action, found, recoveryErr := recoverPendingStateSyncActivation(context.Background(), cfg.DataDir, cometHome, badgerPath); recoveryErr != nil {
+		return fmt.Errorf("recover state sync activation before ABCI handshake: %w", recoveryErr)
+	} else if found {
+		logger.Warn().Str("action", stateSyncRecoveryActionName(action)).Msg("recovered interrupted state sync activation before opening Badger")
+	}
+	if mkErr := os.MkdirAll(badgerPath, 0700); mkErr != nil {
+		return fmt.Errorf("create dir %s: %w", badgerPath, mkErr)
 	}
 	pidPath := filepath.Join(SageHome(), "sage.pid")
 	pidValue := strconv.Itoa(os.Getpid())
@@ -380,9 +391,12 @@ func runServe() (rerr error) {
 	if err != nil {
 		return fmt.Errorf("open BadgerDB: %w", err)
 	}
+	badgerOwnedByRuntime := false
 	defer func() {
 		stopWorkers()
-		_ = badgerStore.CloseBadger()
+		if !badgerOwnedByRuntime {
+			_ = badgerStore.CloseBadger()
+		}
 	}()
 
 	// Seed the replay-nonce allocator from the chain's committed nonces. The
@@ -407,10 +421,6 @@ func runServe() (rerr error) {
 		return fmt.Errorf("create SAGE app: %w", err)
 	}
 	app.Version = version
-	defer func() {
-		stopWorkers()
-		_ = app.Close()
-	}()
 
 	// v11.9 recovery: Badger is the canonical scoped-content source after
 	// snapshot/state sync; SQLite is only the serving projection. Verify and
@@ -649,7 +659,7 @@ func runServe() (rerr error) {
 	// CometBFT receives only the boot runtime, never a raw SageApp pointer. The
 	// runtime is dormant for now: normal ABCI calls delegate to this complete
 	// bundle while network state-sync endpoints remain empty/reject/abort.
-	consensusBundle, err := sageabci.NewConsensusBundle(ctx, app)
+	consensusBundle, err := sageabci.NewConsensusBundleWithCleanup(ctx, app, app.CloseConsensusState)
 	if err != nil {
 		return fmt.Errorf("create consensus bundle: %w", err)
 	}
@@ -657,6 +667,13 @@ func runServe() (rerr error) {
 	if err != nil {
 		return fmt.Errorf("create boot state-sync runtime: %w", err)
 	}
+	badgerOwnedByRuntime = true
+	defer func() {
+		stopWorkers()
+		if closeErr := bootRuntime.Close(); closeErr != nil {
+			logger.Error().Err(closeErr).Msg("close active consensus bundle")
+		}
+	}()
 
 	// Create the node controller — manages CometBFT lifecycle for redeployment.
 	nodeCtrl := NewSageNodeController(cometCfg, bootRuntime, pv, nodeKey, cmtLogger, logger, cfg.DataDir)
@@ -1699,6 +1716,19 @@ func runServe() (rerr error) {
 		return errCoordinatedRestart
 	}
 	return nil
+}
+
+func stateSyncRecoveryActionName(action statesync.RecoveryAction) string {
+	switch action {
+	case statesync.RecoveryDiscardPrepared:
+		return "discard_prepared"
+	case statesync.RecoveryRestoreQuarantine:
+		return "restore_quarantine"
+	case statesync.RecoveryKeepActivated:
+		return "keep_activated"
+	default:
+		return "unknown"
+	}
 }
 
 func confirmPendingUpdateAfterReady(ctx context.Context, baseURL, bootID, execPath string) error {
