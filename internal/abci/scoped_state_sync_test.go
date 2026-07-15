@@ -3,6 +3,7 @@ package abci
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"os"
 	"path/filepath"
 	"sort"
@@ -84,6 +85,13 @@ func TestPrepareAppV20StateSyncBackupValidatesWithoutActivating(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, appHash, preparedHash)
 	require.NoError(t, prepared.CloseBadger())
+	inspectedHeight, inspectedHash, err := InspectAppV20StateSyncDirectory(context.Background(), target)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5), inspectedHeight)
+	assert.Equal(t, appHash, inspectedHash)
+	require.NoError(t, VerifyActivatedAppV20StateSyncDirectory(context.Background(), target, 5, appHash))
+	wrongActivatedHash := bytes.Repeat([]byte{0xee}, len(appHash))
+	require.ErrorContains(t, VerifyActivatedAppV20StateSyncDirectory(context.Background(), target, 5, wrongActivatedHash), "trusted state")
 
 	verifierHash, err := AppV20StateSyncBackupVerifier(5)(context.Background(), backupPath)
 	require.NoError(t, err)
@@ -125,4 +133,54 @@ func TestPrepareAppV20StateSyncBackupRejectsMalformedCanonicalScope(t *testing.T
 
 	err = PrepareAppV20StateSyncBackup(context.Background(), backupPath, filepath.Join(root, "prepared"), 2, hash)
 	require.ErrorContains(t, err, "verify staged scoped state")
+}
+
+func TestInspectStateSyncRecoveryDirectoryAcceptsCanonicalFreshStore(t *testing.T) {
+	root := t.TempDir()
+	freshPath := filepath.Join(root, "fresh")
+	fresh, err := store.NewBadgerStore(freshPath)
+	require.NoError(t, err)
+	require.NoError(t, fresh.CloseBadger())
+	height, appHash, err := InspectStateSyncRecoveryDirectory(context.Background(), freshPath)
+	require.NoError(t, err)
+	assert.Zero(t, height)
+	assert.Empty(t, appHash)
+
+	tamperedPath := filepath.Join(root, "tampered")
+	tampered, err := store.NewBadgerStore(tamperedPath)
+	require.NoError(t, err)
+	tamperedHash := bytes.Repeat([]byte{0xaa}, sha256.Size)
+	require.NoError(t, SaveState(tampered, &AppState{Height: 0, AppHash: tamperedHash}))
+	require.NoError(t, tampered.CloseBadger())
+	_, _, err = InspectStateSyncRecoveryDirectory(context.Background(), tamperedPath)
+	require.ErrorContains(t, err, "non-empty AppHash")
+
+	hiddenPath := filepath.Join(root, "hidden-fresh-state")
+	hidden, err := store.NewBadgerStore(hiddenPath)
+	require.NoError(t, err)
+	require.NoError(t, hidden.DB().Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte("memory:hidden"), []byte("unexpected consensus bytes"))
+	}))
+	require.NoError(t, hidden.CloseBadger())
+	_, _, err = InspectStateSyncRecoveryDirectory(context.Background(), hiddenPath)
+	require.ErrorContains(t, err, "contains consensus state")
+
+	corruptHeightPath := filepath.Join(root, "corrupt-fresh-height")
+	corruptHeight, err := store.NewBadgerStore(corruptHeightPath)
+	require.NoError(t, err)
+	require.NoError(t, corruptHeight.SetState(stateHeightKey, []byte{1}))
+	require.NoError(t, corruptHeight.CloseBadger())
+	_, _, err = InspectStateSyncRecoveryDirectory(context.Background(), corruptHeightPath)
+	require.ErrorContains(t, err, "invalid height bookkeeping")
+
+	legacyPath := filepath.Join(root, "pre-app-v20")
+	legacy, err := store.NewBadgerStore(legacyPath)
+	require.NoError(t, err)
+	legacyHash := bytes.Repeat([]byte{0xbb}, sha256.Size)
+	require.NoError(t, SaveState(legacy, &AppState{Height: 9, AppHash: legacyHash}))
+	require.NoError(t, legacy.CloseBadger())
+	height, appHash, err = InspectStateSyncRecoveryDirectory(context.Background(), legacyPath)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(9), height)
+	assert.Equal(t, legacyHash, appHash, "pre-app-v20 quarantine is anchored by exact persisted Comet state")
 }

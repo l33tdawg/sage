@@ -6628,10 +6628,17 @@ func (app *SageApp) VerifyVoteExtension(_ context.Context, req *abcitypes.Reques
 
 // Close cleans up resources.
 func (app *SageApp) Close() error {
-	if err := app.badgerStore.CloseBadger(); err != nil {
+	if err := app.CloseConsensusState(); err != nil {
 		return err
 	}
 	return app.offchainStore.Close()
+}
+
+// CloseConsensusState closes only bundle-owned consensus storage. Boot state
+// sync uses this while replacing a complete SageApp graph; the off-chain
+// projection is process-owned and must remain open for the replacement bundle.
+func (app *SageApp) CloseConsensusState() error {
+	return app.badgerStore.CloseBadger()
 }
 
 // GetOffchainStore returns the off-chain store for REST handlers.

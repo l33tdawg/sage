@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -46,6 +47,153 @@ func PrepareAppV20StateSyncBackup(ctx context.Context, backupPath, targetDir str
 	if !bytes.Equal(computed, expectedAppHash) {
 		_ = os.RemoveAll(targetDir)
 		return errors.New("prepared state sync AppHash does not match trusted AppHash")
+	}
+	return nil
+}
+
+// InspectAppV20StateSyncDirectory opens an existing closed Badger directory
+// read-only and returns its verified persisted height and narrow AppHash. Boot
+// recovery uses this before any live store is opened or ABCI handshake begins.
+func InspectAppV20StateSyncDirectory(ctx context.Context, path string) (uint64, []byte, error) {
+	if path == "" {
+		return 0, nil, errors.New("state sync directory path is required")
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return 0, nil, contextErr
+	}
+	readOnly, err := store.OpenBadgerStoreReadOnly(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	height, appHash, inspectErr := inspectAppV20StateSyncStore(ctx, readOnly, "state sync")
+	closeErr := readOnly.CloseBadger()
+	if inspectErr != nil {
+		return 0, nil, inspectErr
+	}
+	if closeErr != nil {
+		return 0, nil, closeErr
+	}
+	return height, appHash, nil
+}
+
+// InspectStateSyncRecoveryDirectory accepts either a canonical fresh pre-chain
+// store (height 0, empty AppHash) or a fully verified positive-height app-v20
+// store. Fresh joining nodes have no trusted application hash yet, but their
+// quarantined pre-activation directory must still be recoverable after a crash.
+func InspectStateSyncRecoveryDirectory(ctx context.Context, path string) (uint64, []byte, error) {
+	if path == "" {
+		return 0, nil, errors.New("state sync recovery directory path is required")
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return 0, nil, contextErr
+	}
+	readOnly, err := store.OpenBadgerStoreReadOnly(path)
+	if err != nil {
+		return 0, nil, err
+	}
+	state, stateErr := LoadState(readOnly)
+	if stateErr != nil {
+		_ = readOnly.CloseBadger()
+		return 0, nil, fmt.Errorf("load state sync recovery app state: %w", stateErr)
+	}
+	if state.Height == 0 {
+		heightBytes, heightErr := readOnly.GetState(stateHeightKey)
+		if heightErr != nil || (heightBytes != nil && (len(heightBytes) != 8 || binary.BigEndian.Uint64(heightBytes) != 0)) {
+			_ = readOnly.CloseBadger()
+			return 0, nil, errors.New("fresh state sync recovery directory has invalid height bookkeeping")
+		}
+		storedAppHash, appHashErr := readOnly.GetState(stateAppHashKey)
+		if appHashErr != nil || len(storedAppHash) != 0 {
+			_ = readOnly.CloseBadger()
+			return 0, nil, errors.New("fresh state sync recovery directory has a non-empty AppHash")
+		}
+		epochBytes, epochErr := readOnly.GetState(stateEpochKey)
+		if epochErr != nil || (epochBytes != nil && (len(epochBytes) != 8 || binary.BigEndian.Uint64(epochBytes) != 0)) {
+			_ = readOnly.CloseBadger()
+			return 0, nil, errors.New("fresh state sync recovery directory has invalid epoch bookkeeping")
+		}
+		if len(state.AppHash) != 0 {
+			_ = readOnly.CloseBadger()
+			return 0, nil, errors.New("fresh state sync recovery directory has a non-empty AppHash")
+		}
+		computed, computeErr := readOnly.ComputeAppHashExcludingBookkeeping()
+		if computeErr != nil {
+			_ = readOnly.CloseBadger()
+			return 0, nil, computeErr
+		}
+		emptyHash := sha256.Sum256(nil)
+		if !bytes.Equal(computed, emptyHash[:]) {
+			_ = readOnly.CloseBadger()
+			return 0, nil, errors.New("fresh state sync recovery directory contains consensus state")
+		}
+		closeErr := readOnly.CloseBadger()
+		if closeErr != nil {
+			return 0, nil, closeErr
+		}
+		return 0, nil, nil
+	}
+	if state.Height < 0 {
+		_ = readOnly.CloseBadger()
+		return 0, nil, errors.New("state sync recovery directory has a negative height")
+	}
+	if len(state.AppHash) != sha256.Size {
+		_ = readOnly.CloseBadger()
+		return 0, nil, errors.New("positive-height state sync recovery directory has an invalid AppHash")
+	}
+	appV20, upgradeErr := readOnly.GetAppliedUpgrade(appV20UpgradeName)
+	if upgradeErr != nil {
+		_ = readOnly.CloseBadger()
+		return 0, nil, upgradeErr
+	}
+	// A quarantine may legitimately be from any older supported app version.
+	// Pre-app-v12 AppHashes include bookkeeping that SaveState changes after
+	// FinalizeBlock, so they cannot be recomputed from the closed post-Commit DB.
+	// The persisted height/AppHash are still compared exactly with Comet by the
+	// recovery executor. Once app-v20 is active, apply its stronger narrow-hash
+	// and scoped-state checks as well.
+	if appV20 == nil || appV20.TargetAppVersion != 20 || appV20.AppliedHeight <= 0 || state.Height <= appV20.AppliedHeight {
+		closeErr := readOnly.CloseBadger()
+		if closeErr != nil {
+			return 0, nil, closeErr
+		}
+		return uint64(state.Height), append([]byte(nil), state.AppHash...), nil // #nosec G115 -- positive int64 checked above
+	}
+	height, appHash, inspectErr := inspectAppV20StateSyncStore(ctx, readOnly, "state sync recovery")
+	closeErr := readOnly.CloseBadger()
+	if inspectErr != nil {
+		return 0, nil, inspectErr
+	}
+	if closeErr != nil {
+		return 0, nil, closeErr
+	}
+	return height, appHash, nil
+}
+
+// VerifyActivatedAppV20StateSyncDirectory reopens the promoted directory with
+// the writable no-migration constructor, re-verifies its exact trusted state,
+// and closes it. The runtime constructs the replacement SageApp only after this
+// succeeds.
+func VerifyActivatedAppV20StateSyncDirectory(ctx context.Context, path string, expectedHeight uint64, expectedAppHash []byte) error {
+	if path == "" || expectedHeight == 0 || expectedHeight > math.MaxInt64 || len(expectedAppHash) != sha256.Size {
+		return errors.New("activated state sync path, positive int64 height, and SHA-256 AppHash are required")
+	}
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	writable, err := store.OpenBadgerStoreWithoutMigrations(path)
+	if err != nil {
+		return err
+	}
+	height, appHash, inspectErr := inspectAppV20StateSyncStore(ctx, writable, "activated")
+	closeErr := writable.CloseBadger()
+	if inspectErr != nil {
+		return inspectErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if height != expectedHeight || !bytes.Equal(appHash, expectedAppHash) {
+		return errors.New("activated state sync directory does not match trusted state")
 	}
 	return nil
 }
@@ -108,32 +256,49 @@ func inspectAppV20StateSyncBackup(ctx context.Context, backupPath, targetDir str
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = readOnly.CloseBadger() }()
-	state, err := LoadState(readOnly)
-	if err != nil {
-		return nil, fmt.Errorf("load staged app state: %w", err)
+	actualHeight, computed, inspectErr := inspectAppV20StateSyncStore(ctx, readOnly, "staged")
+	closeReadOnlyErr := readOnly.CloseBadger()
+	if inspectErr != nil {
+		return nil, inspectErr
 	}
-	if state.Height != int64(height) { // #nosec G115 -- bounded above by MaxInt64
-		return nil, fmt.Errorf("staged app height %d does not match snapshot height %d", state.Height, height)
+	if closeReadOnlyErr != nil {
+		return nil, closeReadOnlyErr
 	}
-	applied, err := readOnly.GetAppliedUpgrade(appV20UpgradeName)
-	if err != nil {
-		return nil, err
-	}
-	if applied == nil || applied.TargetAppVersion != 20 || applied.AppliedHeight <= 0 || int64(height) <= applied.AppliedHeight { // #nosec G115 -- bounded above by MaxInt64
-		return nil, errors.New("state sync backup is not from an active post-app-v20 height")
-	}
-	computed, err := readOnly.ComputeAppHashExcludingBookkeeping()
-	if err != nil {
-		return nil, err
-	}
-	if len(state.AppHash) != sha256.Size || !bytes.Equal(state.AppHash, computed) {
-		return nil, errors.New("staged persisted AppHash does not match staged Badger state")
-	}
-	probe := &SageApp{badgerStore: readOnly}
-	if _, err := probe.VerifyScopedCanonicalState(); err != nil {
-		return nil, fmt.Errorf("verify staged scoped state: %w", err)
+	if actualHeight != height {
+		return nil, fmt.Errorf("staged app height %d does not match snapshot height %d", actualHeight, height)
 	}
 	keep = true
 	return computed, nil
+}
+
+func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerStore, label string) (uint64, []byte, error) {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return 0, nil, contextErr
+	}
+	state, err := LoadState(badgerStore)
+	if err != nil {
+		return 0, nil, fmt.Errorf("load %s app state: %w", label, err)
+	}
+	if state.Height <= 0 {
+		return 0, nil, fmt.Errorf("%s app height must be positive", label)
+	}
+	applied, err := badgerStore.GetAppliedUpgrade(appV20UpgradeName)
+	if err != nil {
+		return 0, nil, err
+	}
+	if applied == nil || applied.TargetAppVersion != 20 || applied.AppliedHeight <= 0 || state.Height <= applied.AppliedHeight {
+		return 0, nil, errors.New("state sync state is not from an active post-app-v20 height")
+	}
+	computed, err := badgerStore.ComputeAppHashExcludingBookkeeping()
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(state.AppHash) != sha256.Size || !bytes.Equal(state.AppHash, computed) {
+		return 0, nil, fmt.Errorf("%s persisted AppHash does not match Badger state", label)
+	}
+	probe := &SageApp{badgerStore: badgerStore}
+	if _, err := probe.VerifyScopedCanonicalState(); err != nil {
+		return 0, nil, fmt.Errorf("verify %s scoped state: %w", label, err)
+	}
+	return uint64(state.Height), computed, nil // #nosec G115 -- positive int64 checked above
 }
