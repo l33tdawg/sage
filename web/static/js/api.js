@@ -83,6 +83,12 @@ export async function fetchValidators() {
     return res.json();
 }
 
+export async function fetchScopes() {
+	const res = await fetch(`${API_BASE}/v1/scopes`);
+	if (!res.ok) throw new Error('scopes fetch failed');
+	return res.json();
+}
+
 export async function fetchMcpConfig() {
     const res = await fetch(`${API_BASE}/v1/mcp-config`);
     if (!res.ok) throw new Error('mcp-config fetch failed');

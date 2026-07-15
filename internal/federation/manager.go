@@ -48,20 +48,25 @@ type Config struct {
 	Badger *store.BadgerStore
 	// MemStore serves the actual memory content for peer queries.
 	MemStore store.MemoryStore
-	Logger   zerolog.Logger
+	// PostV20ForNextTx gates the backward-compatible MemorySubmit tag extension.
+	// It must remain absent before activation because older validators reproduce
+	// the historical payload without that extension when checking signatures.
+	PostV20ForNextTx func() bool
+	Logger           zerolog.Logger
 }
 
 // Manager is the off-consensus federation transport: trust resolution,
 // the mTLS listener's handlers, the outbound client, and receipt exchange.
 type Manager struct {
-	localChainID string
-	certsDir     string
-	cometRPC     string
-	agentKey     ed25519.PrivateKey
-	agentPub     ed25519.PublicKey
-	badger       *store.BadgerStore
-	memStore     store.MemoryStore
-	logger       zerolog.Logger
+	localChainID     string
+	certsDir         string
+	cometRPC         string
+	agentKey         ed25519.PrivateKey
+	agentPub         ed25519.PublicKey
+	badger           *store.BadgerStore
+	memStore         store.MemoryStore
+	postV20ForNextTx func() bool
+	logger           zerolog.Logger
 
 	// peerDialFn is the optional v11.6 connectivity seam. It may handle a
 	// remote chain via a libp2p stream; handled=false preserves the original
@@ -291,21 +296,22 @@ func (m *Manager) JoinStore() *JoinStore { return m.joins }
 func NewManager(cfg Config) *Manager {
 	pub, _ := cfg.AgentKey.Public().(ed25519.PublicKey)
 	m := &Manager{
-		localChainID: cfg.LocalChainID,
-		networkName:  cfg.NetworkName,
-		certsDir:     cfg.CertsDir,
-		cometRPC:     cfg.CometRPC,
-		agentKey:     cfg.AgentKey,
-		agentPub:     pub,
-		badger:       cfg.Badger,
-		memStore:     cfg.MemStore,
-		logger:       cfg.Logger.With().Str("component", "federation").Logger(),
-		seenSigs:     make(map[string]map[string]int64),
-		caCache:      make(map[string]*x509.Certificate),
-		broadcastSem: make(chan struct{}, maxConcurrentReceiptBroadcasts),
-		seedCache:    make(map[string][][]byte),
-		joins:        NewJoinStore(),
-		guestDrafts:  make(map[string]*guestDraft),
+		localChainID:     cfg.LocalChainID,
+		networkName:      cfg.NetworkName,
+		certsDir:         cfg.CertsDir,
+		cometRPC:         cfg.CometRPC,
+		agentKey:         cfg.AgentKey,
+		agentPub:         pub,
+		badger:           cfg.Badger,
+		memStore:         cfg.MemStore,
+		postV20ForNextTx: cfg.PostV20ForNextTx,
+		logger:           cfg.Logger.With().Str("component", "federation").Logger(),
+		seenSigs:         make(map[string]map[string]int64),
+		caCache:          make(map[string]*x509.Certificate),
+		broadcastSem:     make(chan struct{}, maxConcurrentReceiptBroadcasts),
+		seedCache:        make(map[string][][]byte),
+		joins:            NewJoinStore(),
+		guestDrafts:      make(map[string]*guestDraft),
 	}
 	// Production governance proof is read from the durable consensus state. Tests
 	// may replace the seam, but production never defaults to a permissive stub.

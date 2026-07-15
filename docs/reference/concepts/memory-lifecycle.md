@@ -125,7 +125,7 @@ In that one-strike path there is no separate voting round: the challenged memory
 | Access grants / domain owners  | BadgerDB (on-chain) | Keys `grant:<domain>:<agentID>`, `domain:<name>`. Written via tx, not REST-only.             |
 | Full content, embedding vector  | PostgreSQL (off-chain) | Written in `Commit`; node-local until replicated by PostgreSQL shared service.              |
 | Corroborations                  | PostgreSQL (off-chain) | Written in `Commit`. Count read at query time for confidence computation.                    |
-| **Tags**                        | **SQLite only (node-local)** | `SetTags`/`GetTags` are **no-ops on PostgresStore** (`store/postgres.go:1383-1395`). Tags exist only in personal (SQLite) mode deployments and are never on-chain. The `QueryOptions.Tags` field is explicitly noted: "any-match filter on user-defined tags (SQLite-only)" (`store/store.go:89`). |
+| **Tags**                        | SQLite/Postgres serving projection; app-v20 scoped copy in BadgerDB | Both SQL backends implement `SetTags`/`GetTags` and OR-filtered recall. Above app-v20 tags are bounded, sorted, and deduplicated in the signed `MemorySubmit`; for a scoped domain they are also stored in the AppHash-covered canonical envelope and restored with the projection. Ordinary-domain tags remain node-local serving metadata. |
 | Embedding vector (supplementary) | Process-local SupplementaryCache → PostgreSQL | Staged in-process pre-broadcast; only the receiving node has it in cache. |
 | Knowledge triples               | PostgreSQL (off-chain) | Staged via SupplementaryCache, flushed in Commit.                                            |
 

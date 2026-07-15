@@ -185,7 +185,7 @@ func TestReplayGuardDelegatedMemorySubmitAcceptedBelowAppV19(t *testing.T) {
 	require.NoError(t, tx.SignTx(parsed, node.priv))
 
 	// Consensus-path enforcement (claim=true), app-v19 dormant, MUST accept.
-	require.NoError(t, app.enforceDelegatedAgentProof(parsed, blockTime, true),
+	require.NoError(t, app.enforceDelegatedAgentProof(parsed, blockTime, true, false),
 		"delegated memory-submit with a node-regenerated embedding + future-dated proof must stay ACCEPTED below app-v19; gating the relaxation would replay-fork every v11.7.6/7 chain")
 }
 

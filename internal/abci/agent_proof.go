@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/l33tdawg/sage/internal/store"
+	memorytags "github.com/l33tdawg/sage/internal/tags"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -35,7 +36,7 @@ type signedAgentRequest struct {
 // agent, consensus must independently prove that the signed HTTP request maps
 // to this exact type-specific payload. Same-key node-originated transactions
 // are already bound by the outer transaction signature and nonce.
-func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusTime time.Time, claim bool) error {
+func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusTime time.Time, claim bool, bindMemoryTags bool) error {
 	if !txUsesAgentIdentity(parsedTx.Type) || bytes.Equal(parsedTx.PublicKey, parsedTx.AgentPubKey) {
 		return nil
 	}
@@ -62,7 +63,7 @@ func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusT
 	if err != nil {
 		return err
 	}
-	if bindErr := app.verifySignedAgentAction(parsedTx, agentID, req); bindErr != nil {
+	if bindErr := app.verifySignedAgentAction(parsedTx, agentID, req, bindMemoryTags); bindErr != nil {
 		return fmt.Errorf("delegated agent action mismatch: %w", bindErr)
 	}
 
@@ -297,7 +298,7 @@ func compareAgentPayload(actual, expected *tx.ParsedTx) error {
 // embedding/timestamp posture must be tightened, it has to be a NEW forward-only fork
 // that changes behaviour only ABOVE its own activation height, never a retroactive
 // re-strictification. Guarded by TestReplayGuardDelegatedMemorySubmitAcceptedBelowAppV19.
-func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string, req signedAgentRequest) error { //nolint:gocyclo,maintidx // exhaustive protocol routing is intentionally centralized
+func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string, req signedAgentRequest, bindMemoryTags bool) error { //nolint:gocyclo,maintidx // exhaustive protocol routing is intentionally centralized
 	expected := &tx.ParsedTx{Type: actual.Type}
 
 	switch actual.Type {
@@ -314,6 +315,7 @@ func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string,
 			Embedding       []float32 `json:"embedding,omitempty"`
 			ParentHash      string    `json:"parent_hash,omitempty"`
 			TaskStatus      string    `json:"task_status,omitempty"`
+			Tags            []string  `json:"tags,omitempty"`
 		}
 		if err := decodeSignedJSON(req.body, &body, false); err != nil {
 			return err
@@ -332,6 +334,13 @@ func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string,
 			return fmt.Errorf("memory submit has an invalid node-generated embedding hash")
 		}
 		contentHash := sha256.Sum256([]byte(body.Content))
+		var canonicalTags []string
+		if bindMemoryTags {
+			canonicalTags, err = memorytags.Normalize(body.Tags)
+			if err != nil {
+				return fmt.Errorf("signed memory tags fail the REST contract: %w", err)
+			}
+		}
 		expected.MemorySubmit = &tx.MemorySubmit{
 			MemoryID:    actual.MemorySubmit.MemoryID,
 			ContentHash: contentHash[:],
@@ -350,6 +359,7 @@ func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string,
 			ParentHash:      body.ParentHash,
 			Classification:  tx.ClearanceLevel(body.Classification), // #nosec G115 -- range checked above
 			TaskStatus:      body.TaskStatus,
+			Tags:            canonicalTags,
 		}
 
 	case tx.TxTypeMemoryChallenge:

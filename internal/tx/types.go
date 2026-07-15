@@ -146,6 +146,13 @@ type MemorySubmit struct {
 	ParentHash      string
 	Classification  ClearanceLevel // Defaults to ClearanceInternal (1)
 	TaskStatus      string         // For task memories: planned, in_progress, done, dropped
+	// Tags is a canonical (sorted, unique, bounded) app-v20 extension. It is
+	// encoded only when non-empty, so every historical MemorySubmit retains its
+	// exact bytes. DecodeTx keeps the extension dormant until the caller knows
+	// the deterministic fork height and calls ActivateMemorySubmitTags.
+	Tags []string
+
+	tagExtension []byte
 }
 
 // MemoryVote records a validator's vote on a proposed memory.

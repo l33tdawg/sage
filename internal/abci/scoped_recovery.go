@@ -52,9 +52,16 @@ func (app *SageApp) RebuildScopedProjection(ctx context.Context) (int, error) {
 			if err := projection.UpdateMemoryClassification(ctx, content.MemoryID, store.ClearanceLevel(content.Classification)); err != nil {
 				return fmt.Errorf("classification projection: %w", err)
 			}
+			if err := projection.SetTags(ctx, content.MemoryID, content.Tags); err != nil {
+				return fmt.Errorf("tag projection: %w", err)
+			}
 			projected, err := projection.GetMemory(ctx, content.MemoryID)
 			if err != nil || !recoveredProjectionMatches(projected, record) {
 				return errors.New("projection verification failed")
+			}
+			projectedTags, err := projection.GetTags(ctx, content.MemoryID)
+			if err != nil || !equalStrings(projectedTags, content.Tags) {
+				return errors.New("tag projection verification failed")
 			}
 			return nil
 		}); err != nil {

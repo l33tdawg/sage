@@ -83,6 +83,7 @@ func testContent() Content {
 
 func TestContentCodecRoundTripAndRejectsInvalidValues(t *testing.T) {
 	content := testContent()
+	content.Tags = []string{"alpha", "zeta"}
 	encoded, err := EncodeContent(content)
 	require.NoError(t, err)
 	decoded, err := DecodeContent(encoded)
@@ -99,6 +100,21 @@ func TestContentCodecRoundTripAndRejectsInvalidValues(t *testing.T) {
 	require.ErrorContains(t, err, "finite")
 	_, err = DecodeContent(append(encoded, 0))
 	require.ErrorContains(t, err, "trailing")
+
+	nonCanonicalTags := content
+	nonCanonicalTags.Tags = []string{"zeta", "alpha"}
+	_, err = EncodeContent(nonCanonicalTags)
+	require.ErrorContains(t, err, "canonical")
+
+	legacyUntagged := testContent()
+	legacyBytes, err := EncodeContent(legacyUntagged)
+	require.NoError(t, err)
+	legacyRoundTrip, err := DecodeContent(legacyBytes)
+	require.NoError(t, err)
+	assert.Empty(t, legacyRoundTrip.Tags)
+	reencodedLegacy, err := EncodeContent(legacyRoundTrip)
+	require.NoError(t, err)
+	assert.Equal(t, legacyBytes, reencodedLegacy)
 }
 
 func FuzzDecodeBallot(f *testing.F) {

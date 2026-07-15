@@ -16,6 +16,21 @@ var (
 	ErrScopeVoteExists     = errors.New("scoped vote already exists")
 )
 
+// ScopeValidatorDrain is the deterministic set of canonical dependencies that
+// must be cleared before a CometBFT validator can be removed. ActiveScopeIDs
+// includes active members of active or paused scopes. PendingMemoryIDs includes
+// every still-pending pinned ballot that names the validator, even if it has
+// already voted; v11.9 requires the ballot itself to reach a terminal state.
+type ScopeValidatorDrain struct {
+	ValidatorID      string
+	ActiveScopeIDs   []string
+	PendingMemoryIDs []string
+}
+
+func (d ScopeValidatorDrain) Ready() bool {
+	return len(d.ActiveScopeIDs) == 0 && len(d.PendingMemoryIDs) == 0
+}
+
 func scopeBallotKey(memoryID string) []byte   { return []byte("state:scope-proposal:" + memoryID) }
 func scopedContentKey(memoryID string) []byte { return []byte("state:scope-content:" + memoryID) }
 func scopedVoteHeightKey(memoryID, validatorID string) []byte {
@@ -209,6 +224,123 @@ func (s *BadgerStore) ListScopedContents() ([]scope.Content, error) {
 		return nil, fmt.Errorf("list scoped contents: %w", err)
 	}
 	return contents, nil
+}
+
+// ListPendingScopeBallots returns all pending ballots in bytewise memory-ID
+// order for operator drain visibility. Terminal ballots are deliberately
+// omitted: they no longer depend on the live Comet validator set.
+func (s *BadgerStore) ListPendingScopeBallots() ([]scope.Ballot, error) {
+	prefix := []byte("state:scope-proposal:")
+	ballots := make([]scope.Ballot, 0)
+	err := s.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			memoryID := string(item.Key()[len(prefix):])
+			if err := item.Value(func(value []byte) error {
+				ballot, err := scope.DecodeBallot(value)
+				if err != nil {
+					return err
+				}
+				if ballot.MemoryID != memoryID {
+					return fmt.Errorf("scope ballot key %q disagrees with ballot %q", memoryID, ballot.MemoryID)
+				}
+				if ballot.State == scope.BallotPending {
+					ballots = append(ballots, ballot)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pending scope ballots: %w", err)
+	}
+	return ballots, nil
+}
+
+// GetScopeValidatorDrain atomically scans current scope heads and pending
+// pinned ballots. Governance calls it at both proposal admission and execution
+// so a scope created, resumed, or submitted into during the voting window
+// cannot race a validator out of the Comet set.
+func (s *BadgerStore) GetScopeValidatorDrain(validatorID string) (ScopeValidatorDrain, error) {
+	drain := ScopeValidatorDrain{ValidatorID: validatorID}
+	if validatorID == "" {
+		return drain, errors.New("validator id is required for scope drain")
+	}
+	err := s.db.View(func(txn *badger.Txn) error {
+		scopePrefix := []byte("state:scope:")
+		scopeOpts := badger.DefaultIteratorOptions
+		scopeOpts.Prefix = scopePrefix
+		scopeIt := txn.NewIterator(scopeOpts)
+		defer scopeIt.Close()
+		for scopeIt.Seek(scopePrefix); scopeIt.ValidForPrefix(scopePrefix); scopeIt.Next() {
+			item := scopeIt.Item()
+			scopeID := string(item.Key()[len(scopePrefix):])
+			if err := item.Value(func(value []byte) error {
+				record, err := scope.Decode(value)
+				if err != nil {
+					return err
+				}
+				if record.ScopeID != scopeID {
+					return fmt.Errorf("scope key %q disagrees with record %q", scopeID, record.ScopeID)
+				}
+				if record.State == scope.StateRetired {
+					return nil
+				}
+				for _, member := range record.Members {
+					if member.ValidatorID == validatorID && member.Active {
+						drain.ActiveScopeIDs = append(drain.ActiveScopeIDs, scopeID)
+						break
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+
+		ballotPrefix := []byte("state:scope-proposal:")
+		ballotOpts := badger.DefaultIteratorOptions
+		ballotOpts.Prefix = ballotPrefix
+		ballotIt := txn.NewIterator(ballotOpts)
+		defer ballotIt.Close()
+		for ballotIt.Seek(ballotPrefix); ballotIt.ValidForPrefix(ballotPrefix); ballotIt.Next() {
+			item := ballotIt.Item()
+			memoryID := string(item.Key()[len(ballotPrefix):])
+			if err := item.Value(func(value []byte) error {
+				ballot, err := scope.DecodeBallot(value)
+				if err != nil {
+					return err
+				}
+				if ballot.MemoryID != memoryID {
+					return fmt.Errorf("scope ballot key %q disagrees with ballot %q", memoryID, ballot.MemoryID)
+				}
+				if ballot.State != scope.BallotPending {
+					return nil
+				}
+				for _, member := range ballot.Members {
+					if member.ValidatorID == validatorID {
+						drain.PendingMemoryIDs = append(drain.PendingMemoryIDs, memoryID)
+						break
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return drain, fmt.Errorf("scope drain for validator %q: %w", validatorID, err)
+	}
+	return drain, nil
 }
 
 // SetScopedVote records one terminal member decision. Scoped votes are

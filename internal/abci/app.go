@@ -26,6 +26,7 @@ import (
 	"github.com/l33tdawg/sage/internal/poe"
 	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/store"
+	memorytags "github.com/l33tdawg/sage/internal/tags"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/validator"
 
@@ -34,8 +35,13 @@ import (
 
 // pendingWrite represents a PostgreSQL write buffered until Commit.
 type pendingWrite struct {
-	writeType string // "memory", "triples", "challenge", "vote", "corroborate", "epoch_score", "validator_score", "status_update", "access_grant", "access_request", "access_revoke", "access_log", "domain_register", "access_request_status", "org_register", "org_member", "org_member_remove", "org_member_clearance", "federation", "federation_approve", "federation_revoke", "mem_classification", "dept_register", "dept_member", "dept_member_remove", "agent_register", "agent_update", "agent_permission"
+	writeType string // "memory", "memory_tags", "triples", "challenge", "vote", "corroborate", "epoch_score", "validator_score", "status_update", "access_grant", "access_request", "access_revoke", "access_log", "domain_register", "access_request_status", "org_register", "org_member", "org_member_remove", "org_member_clearance", "federation", "federation_approve", "federation_revoke", "mem_classification", "dept_register", "dept_member", "dept_member_remove", "agent_register", "agent_update", "agent_permission"
 	data      interface{}
+}
+
+type memoryTagsData struct {
+	MemoryID string
+	Tags     []string
 }
 
 // statusUpdate carries the fields needed to update a memory's status in PostgreSQL.
@@ -2303,6 +2309,12 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 	if err != nil {
 		return &abcitypes.ResponseCheckTx{Code: 1, Log: fmt.Sprintf("decode error: %v", err)}, nil
 	}
+	postAppV20 := app.IsAppV20ActiveForNextTx()
+	if postAppV20 {
+		if tagErr := tx.ActivateMemorySubmitTags(parsedTx); tagErr != nil {
+			return &abcitypes.ResponseCheckTx{Code: 1, Log: fmt.Sprintf("decode app-v20 extension: %v", tagErr)}, nil
+		}
+	}
 
 	// Verify Ed25519 signature
 	valid, err := tx.VerifyTx(parsedTx)
@@ -2377,7 +2389,7 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 	// time is acceptable in CheckTx (which is not consensus); FinalizeBlock
 	// repeats the check against req.Time and atomically consumes the proof.
 	if app.IsAppV17ActiveForNextTx() {
-		if proofErr := app.enforceDelegatedAgentProof(parsedTx, time.Now(), false); proofErr != nil {
+		if proofErr := app.enforceDelegatedAgentProof(parsedTx, time.Now(), false, postAppV20); proofErr != nil {
 			metrics.TxRejectedTotal.WithLabelValues("agent_proof_binding").Inc()
 			return &abcitypes.ResponseCheckTx{Code: 109, Log: fmt.Sprintf("agent proof rejected: %v", proofErr)}, nil
 		}
@@ -2403,6 +2415,13 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if err != nil {
 			txResults[i] = &abcitypes.ExecTxResult{Code: 1, Log: err.Error()}
 			continue
+		}
+		postAppV20 := app.postAppV20Fork(req.Height)
+		if postAppV20 {
+			if err := tx.ActivateMemorySubmitTags(parsedTx); err != nil {
+				txResults[i] = &abcitypes.ExecTxResult{Code: 1, Log: "invalid app-v20 transaction extension"}
+				continue
+			}
 		}
 
 		// app-v15 (v11): reject non-canonical tx encodings. DecodeTx tolerates
@@ -2760,7 +2779,7 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 	// state. Same-key node-originated transactions are already action-bound by
 	// the outer signature and app-v9 nonce and bypass this delegated-only gate.
 	if app.postAppV17Rules(height) {
-		if proofErr := app.enforceDelegatedAgentProof(parsedTx, blockTime, true); proofErr != nil {
+		if proofErr := app.enforceDelegatedAgentProof(parsedTx, blockTime, true, app.postAppV20Fork(height)); proofErr != nil {
 			metrics.TxRejectedTotal.WithLabelValues("agent_proof_binding_consensus").Inc()
 			return &abcitypes.ExecTxResult{Code: 109, Log: fmt.Sprintf("agent proof rejected: %v", proofErr)}
 		}
@@ -2982,6 +3001,11 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	submit := parsedTx.MemorySubmit
 	if submit == nil {
 		return &abcitypes.ExecTxResult{Code: 11, Log: "missing memory submit payload"}
+	}
+	if app.postAppV20Fork(height) {
+		if err := memorytags.ValidateCanonical(submit.Tags); err != nil {
+			return &abcitypes.ExecTxResult{Code: 19, Log: "memory tags are not canonical: " + err.Error()}
+		}
 	}
 
 	// Verify agent identity on-chain via embedded Ed25519 proof.
@@ -3229,6 +3253,12 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 
 	// Memory must be inserted before triples (FK constraint: knowledge_triples.memory_id → memories).
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "memory", data: record})
+	if scopedSubmission && len(submit.Tags) > 0 {
+		app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "memory_tags", data: &memoryTagsData{
+			MemoryID: memoryID,
+			Tags:     append([]string(nil), submit.Tags...),
+		}})
+	}
 
 	if len(suppTriples) > 0 {
 		app.pendingWrites = append(app.pendingWrites, pendingWrite{
@@ -6312,6 +6342,10 @@ func (app *SageApp) flushPendingWrites(ctx context.Context, s store.OffchainStor
 			if record, ok := pw.data.(*memory.MemoryRecord); ok {
 				err = s.InsertMemory(ctx, record)
 			}
+		case "memory_tags":
+			if tags, ok := pw.data.(*memoryTagsData); ok {
+				err = s.SetTags(ctx, tags.MemoryID, tags.Tags)
+			}
 		case "triples":
 			if td, ok := pw.data.(*triplesData); ok {
 				err = s.InsertTriples(ctx, td.MemoryID, td.Triples)
@@ -6682,6 +6716,11 @@ func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ tim
 	if app.postAppV20Fork(height) && op == governance.OpScopeAction {
 		if _, scopeErr := app.prepareScopeProposal(gp.TargetID, gp.TargetPubKey, gp.TargetPower, gp.Payload, proposerID, height, false); scopeErr != nil {
 			return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: invalid OpScopeAction: " + scopeErr.Error()}
+		}
+	}
+	if app.postAppV20Fork(height) && op == governance.OpRemoveValidator {
+		if drainErr := app.requireScopeValidatorRemovalReady(gp.TargetID); drainErr != nil {
+			return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: validator removal blocked: " + drainErr.Error()}
 		}
 	}
 
@@ -7539,6 +7578,11 @@ func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, 
 		return &abcitypes.ValidatorUpdate{PubKey: protoKey, Power: proposal.TargetPower}, nil
 
 	case governance.OpRemoveValidator:
+		if app.postAppV20Fork(height) {
+			if err := app.requireScopeValidatorRemovalReady(proposal.TargetID); err != nil {
+				return nil, fmt.Errorf("validator removal blocked at execution: %w", err)
+			}
+		}
 		if err := app.validators.RemoveValidator(proposal.TargetID); err != nil {
 			return nil, fmt.Errorf("remove validator: %w", err)
 		}
@@ -7579,6 +7623,24 @@ func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, 
 	default:
 		return nil, fmt.Errorf("unknown governance operation: %d", proposal.Operation)
 	}
+}
+
+func (app *SageApp) requireScopeValidatorRemovalReady(validatorID string) error {
+	drain, err := app.badgerStore.GetScopeValidatorDrain(validatorID)
+	if err != nil {
+		return err
+	}
+	if drain.Ready() {
+		return nil
+	}
+	parts := make([]string, 0, 2)
+	if len(drain.ActiveScopeIDs) > 0 {
+		parts = append(parts, "active scope memberships ["+strings.Join(drain.ActiveScopeIDs, ",")+"]")
+	}
+	if len(drain.PendingMemoryIDs) > 0 {
+		parts = append(parts, "pending scoped ballots ["+strings.Join(drain.PendingMemoryIDs, ",")+"]")
+	}
+	return fmt.Errorf("validator %q still has %s; update or retire its scopes and resolve every pinned ballot before removal", validatorID, strings.Join(parts, " and "))
 }
 
 // applyMemoryDomainRepair executes an OpMemoryDomainRepair (app-v16) proposal: it

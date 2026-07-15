@@ -1086,14 +1086,15 @@ func runServe() (rerr error) {
 		logger.Warn().Msg("no chain_id in genesis/config — federation transport disabled")
 	} else {
 		fedMgr = federation.NewManager(federation.Config{
-			LocalChainID: cfg.ChainID,
-			NetworkName:  sanitizeNetworkName(cfg.NetworkName),
-			CertsDir:     certsDir,
-			CometRPC:     cometRPC,
-			AgentKey:     fedAgentKey,
-			Badger:       badgerStore,
-			MemStore:     sqliteStore,
-			Logger:       logger,
+			LocalChainID:     cfg.ChainID,
+			NetworkName:      sanitizeNetworkName(cfg.NetworkName),
+			CertsDir:         certsDir,
+			CometRPC:         cometRPC,
+			AgentKey:         fedAgentKey,
+			Badger:           badgerStore,
+			MemStore:         sqliteStore,
+			PostV20ForNextTx: app.IsAppV20ActiveForNextTx,
+			Logger:           logger,
 		})
 		restServer.SetFederation(fedMgr)
 		// The dashboard drives the guided JOIN wizards (cookie-authed) by calling

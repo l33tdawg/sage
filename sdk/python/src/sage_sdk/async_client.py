@@ -132,9 +132,11 @@ class AsyncSageClient:
     ) -> MemorySubmitResponse:
         """Submit a new memory proposal.
 
-        tags: optional user-defined labels attached after consensus commit.
-        Stored as node-local metadata (not part of the on-chain tx) and
-        queryable via the `tags` argument on :meth:`query`.
+        tags: optional user-defined labels queryable via the `tags` argument
+        on :meth:`query`. Above app-v20 they are normalized into the signed
+        transaction; scoped-domain tags are also AppHash-covered and restored
+        with the canonical scoped projection. Ordinary-domain tags remain
+        node-local serving metadata.
 
         classification: per-record clearance level 0-4 (PUBLIC, INTERNAL,
         CONFIDENTIAL, SECRET, TOP SECRET). When omitted the server stores

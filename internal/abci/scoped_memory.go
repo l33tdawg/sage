@@ -85,6 +85,7 @@ func (app *SageApp) setScopedMemorySubmission(submit *tx.MemorySubmit, memoryID,
 		ParentHash:        submit.ParentHash,
 		Classification:    byte(submit.Classification),
 		TaskStatus:        submit.TaskStatus,
+		Tags:              append([]string(nil), submit.Tags...),
 		SubmittedHeight:   height,
 		SubmittedUnix:     blockTime.Unix(),
 	}
@@ -135,6 +136,7 @@ func (app *SageApp) replayScopedFinalizeTx(parsedTx *tx.ParsedTx, height int64, 
 			content.MemoryType != byte(submit.MemoryType) ||
 			content.Classification != byte(submit.Classification) ||
 			content.TaskStatus != submit.TaskStatus ||
+			!equalStrings(content.Tags, submit.Tags) ||
 			math.Float64bits(content.ConfidenceScore) != math.Float64bits(submit.ConfidenceScore) ||
 			!bytes.Equal(content.ContentHash, effectiveHash) ||
 			content.ParentHash != submit.ParentHash {
@@ -168,6 +170,11 @@ func (app *SageApp) replayScopedFinalizeTx(parsedTx *tx.ParsedTx, height int64, 
 				MemoryID: memoryID, Classification: store.ClearanceLevel(content.Classification),
 			}},
 		)
+		if len(content.Tags) > 0 {
+			app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "memory_tags", data: &memoryTagsData{
+				MemoryID: memoryID, Tags: append([]string(nil), content.Tags...),
+			}})
+		}
 		return &abcitypes.ExecTxResult{
 			Code: 0, Data: []byte(memoryID), Log: fmt.Sprintf("memory %s submitted", memoryID),
 		}, true
@@ -204,6 +211,18 @@ func (app *SageApp) replayScopedFinalizeTx(parsedTx *tx.ParsedTx, height int64, 
 	}
 
 	return nil, false
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func scopeBallotHasMember(ballot scope.Ballot, validatorID string) bool {

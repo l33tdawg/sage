@@ -22,6 +22,7 @@ import (
 
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 // scriptedComet serves the CometBFT broadcast_tx_commit JSON shape. Each call pops
@@ -118,6 +119,29 @@ func syncItem(originID, domain, content string) SyncItem {
 		Content:        content,
 		ContentHash:    hex.EncodeToString(sum[:]),
 	}
+}
+
+func TestBuildSyncSubmitTxCarriesTagsOnlyAfterAppV20(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	m := &Manager{agentKey: priv, agentPub: pub}
+	item := syncItem("tagged", "research", "federated scoped content")
+	item.Tags = []string{"alpha", "zeta"}
+
+	preFork, err := m.buildSyncSubmitTx("00000000-0000-4000-8000-000000000000", &item)
+	require.NoError(t, err)
+	parsed, err := tx.DecodeTx(preFork)
+	require.NoError(t, err)
+	require.NoError(t, tx.ActivateMemorySubmitTags(parsed))
+	assert.Empty(t, parsed.MemorySubmit.Tags)
+
+	m.postV20ForNextTx = func() bool { return true }
+	postFork, err := m.buildSyncSubmitTx("00000000-0000-4000-8000-000000000000", &item)
+	require.NoError(t, err)
+	parsed, err = tx.DecodeTx(postFork)
+	require.NoError(t, err)
+	require.NoError(t, tx.ActivateMemorySubmitTags(parsed))
+	assert.Equal(t, item.Tags, parsed.MemorySubmit.Tags)
 }
 
 func TestSyncPushGateOrder(t *testing.T) {

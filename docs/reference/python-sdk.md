@@ -154,7 +154,7 @@ Submits a BFT memory proposal. The proposal enters consensus; status transitions
 - `confidence`: `0.0–1.0`
 - `embedding`: precomputed vector (768-dim for nomic-embed-text). Omit to let the server embed on-chain (requires Ollama on the node).
 - `knowledge_triples`: structured subject/predicate/object triples; `object_` field has alias `object` on the wire (source: `models.py:47`).
-- `tags`: node-local labels, not part of the on-chain tx. Queryable via `query(tags=...)`.
+- `tags`: up to 32 labels of 128 UTF-8 bytes each, queryable via `query(tags=...)`. Above app-v20 they are normalized into the signed transaction; scoped-domain tags are also AppHash-covered and restored during projection rebuild. Ordinary-domain tags remain node-local.
 - `classification`: per-record clearance level. When omitted, the field is excluded from the wire payload via `model_dump(exclude_none=True)` and the server stores the memory as PUBLIC (0) (source: `client.py:192`, `models.py:81`).
 
 **Classification levels:**
@@ -1084,7 +1084,8 @@ list_scopes() -> ScopeListResponse
 ```
 
 `GET /v1/scopes`. Node-operator/admin only. Returns canonical v11.9 scope
-heads, exact domain allowlists, assigned integer weights, and revision anchors.
+heads, exact domain allowlists, assigned integer weights, revision anchors,
+pending-ballot drains, and validator-removal blockers.
 
 ---
 
@@ -1095,7 +1096,8 @@ get_scope(scope_id: str) -> ScopeRecord
 ```
 
 `GET /v1/scopes/{scope_id}`. Node-operator/admin only. The clients URL-escape
-the canonical single-segment scope ID.
+the canonical single-segment scope ID. `ScopeRecord.drain` lists pending memory
+IDs and every validator that must not yet be removed from CometBFT.
 
 ---
 

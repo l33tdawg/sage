@@ -55,7 +55,7 @@ Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (F
 | `knowledge_triples` | []KnowledgeTriple | no | `{subject, predicate, object}` triples |
 | `parent_hash` | string | no | SHA-256 hex of parent memory for lineage |
 | `task_status` | string | no | For `task` type: `planned`, `in_progress`, `done`, `dropped` |
-| `tags` | []string | no | Node-local labels attached post-commit; OR-filter on query/search |
+| `tags` | []string | no | Up to 32 labels of 128 UTF-8 bytes each. Above app-v20 they are sorted/deduplicated into the signed tx; scoped-domain tags are also AppHash-covered and projection-recoverable. Ordinary-domain tags remain node-local. OR-filter on query/search. |
 | `provider` | string | no | Stored off-chain only; not on-chain |
 
 **Classification values** (`internal/tx/types.go:84-90`):
@@ -124,7 +124,7 @@ Vector similarity search. Requires a precomputed embedding.
 | `status_filter` | string | no | `proposed`, `validated`, `committed`, `challenged`, `deprecated` |
 | `top_k` | int | no | Max results; default 10 |
 | `cursor` | string | no | Opaque pagination cursor from previous response |
-| `tags` | []string | no | OR-filter by tag; SQLite only, ignored on Postgres |
+| `tags` | []string | no | OR-filter by tag on both SQLite and Postgres |
 
 **Response** (HTTP 200):
 
@@ -992,7 +992,10 @@ List canonical v11.9 scope heads in bytewise scope-ID order. Read-only and
 restricted to the node operator or an administrator because the response
 contains validator topology. Each record includes its current domain-separated
 SHA-256 `revision_hash`, exact domain allowlist, pinned integer weights, state,
-and materialized consensus heights.
+materialized consensus heights, pending scoped ballots, and validator-removal
+blockers. `drain.blocking_validator_ids` is the operator's fail-closed checklist:
+a validator cannot be removed from CometBFT until it has left every non-retired
+scope and every ballot whose pinned roster contains it is terminal.
 
 **Response** (HTTP 200): `{"scopes": [...], "count": 1}`
 

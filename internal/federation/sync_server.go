@@ -740,6 +740,9 @@ func (m *Manager) buildSyncSubmitTx(localID string, item *SyncItem) ([]byte, err
 		AgentBodyHash:  bodyHash[:],
 		AgentTimestamp: ts,
 	}
+	if m.postV20ForNextTx != nil && m.postV20ForNextTx() {
+		ptx.MemorySubmit.Tags = append([]string(nil), item.Tags...)
+	}
 	if err := tx.SignTx(ptx, m.agentKey); err != nil {
 		return nil, fmt.Errorf("sign sync submit tx: %w", err)
 	}

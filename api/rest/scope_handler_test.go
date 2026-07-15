@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,16 @@ func TestScopeReadSurfaceIsCanonicalAndOperatorOnly(t *testing.T) {
 		Members: []scope.Member{{ValidatorID: "validator-a", AssignedWeight: 7, JoinedRevision: 1, Active: true}},
 	}
 	require.NoError(t, bs.SetScopeRecord(record))
+	contentHash := sha256.Sum256([]byte("pending scoped memory"))
+	require.NoError(t, bs.SetScopedMemorySubmission(scope.Ballot{
+		MemoryID: "memory-a", ScopeID: "scope-a", ScopeRevision: 1, SubmittedHeight: 11,
+		State:   scope.BallotPending,
+		Members: []scope.BallotMember{{ValidatorID: "validator-a", EffectiveWeight: 7}}, TotalWeight: 7,
+	}, scope.Content{
+		MemoryID: "memory-a", ScopeID: "scope-a", ScopeRevision: 1, SubmittingAgentID: "agent-a",
+		ContentHash: contentHash[:], MemoryType: 1, Domain: "research", ConfidenceScore: 0.9,
+		Content: "pending scoped memory", SubmittedHeight: 11, SubmittedUnix: 100,
+	}))
 	server := &Server{badgerStore: bs, nodeOperatorID: "operator", logger: zerolog.Nop()}
 
 	rr := httptest.NewRecorder()
@@ -55,6 +66,11 @@ func TestScopeReadSurfaceIsCanonicalAndOperatorOnly(t *testing.T) {
 	assert.Equal(t, "active", listed.Scopes[0].State)
 	assert.Len(t, listed.Scopes[0].RevisionHash, 64)
 	assert.Equal(t, uint64(7), listed.Scopes[0].Members[0].AssignedWeight)
+	assert.True(t, listed.Scopes[0].Members[0].ValidatorRemovalBlocked)
+	assert.Equal(t, 1, listed.Scopes[0].Members[0].PendingBallotCount)
+	assert.Equal(t, 1, listed.Scopes[0].Drain.PendingBallotCount)
+	assert.Equal(t, []string{"memory-a"}, listed.Scopes[0].Drain.PendingMemoryIDs)
+	assert.Equal(t, []string{"validator-a"}, listed.Scopes[0].Drain.BlockingValidatorIDs)
 
 	rr = httptest.NewRecorder()
 	scopeReadRouter(server, "operator").ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/scopes/scope-a", nil))

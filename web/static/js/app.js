@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
+import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchScopes, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
 rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
@@ -7345,7 +7345,8 @@ function NetworkPage({ sse, accessMode = false }) {
     const [govScopeController, setGovScopeController] = useState('');
     const [govScopeDomains, setGovScopeDomains] = useState('');
     const [govScopeMembers, setGovScopeMembers] = useState({});
-    const [govScopeValidators, setGovScopeValidators] = useState([]);
+	const [govScopeValidators, setGovScopeValidators] = useState([]);
+	const [govScopes, setGovScopes] = useState([]);
     const [currentHeight, setCurrentHeight] = useState(0);
     const govPollRef = useRef(null);
 
@@ -7357,14 +7358,23 @@ function NetworkPage({ sse, accessMode = false }) {
         finally { setLoading(false); }
     }, []);
 
-    const loadScopeValidators = useCallback(async () => {
+	const loadScopeValidators = useCallback(async () => {
         try {
             const data = await fetchValidators();
             setGovScopeValidators(Array.isArray(data?.validators) ? data.validators.filter(v => v.agent_id) : []);
         } catch (e) {
             setGovScopeValidators([]);
         }
-    }, []);
+	}, []);
+
+	const loadGovScopes = useCallback(async () => {
+		try {
+			const data = await fetchScopes();
+			setGovScopes(Array.isArray(data?.scopes) ? data.scopes : []);
+		} catch (e) {
+			setGovScopes([]);
+		}
+	}, []);
 
     const loadUnregistered = useCallback(async () => {
         try {
@@ -7385,7 +7395,8 @@ function NetworkPage({ sse, accessMode = false }) {
 
     useEffect(() => {
         loadAgents();
-        loadScopeValidators();
+		loadScopeValidators();
+		loadGovScopes();
         loadUnregistered();
         loadGovProposals();
         fetchStats().then(data => {
@@ -7395,7 +7406,7 @@ function NetworkPage({ sse, accessMode = false }) {
         fetchHealth().then(h => {
             if (h?.chain?.block_height) setCurrentHeight(Number(h.chain.block_height));
         }).catch(() => {});
-    }, []);
+	}, []);
 
     // Poll active proposal detail + block height every 3s while one is active
     useEffect(() => {
@@ -7431,27 +7442,29 @@ function NetworkPage({ sse, accessMode = false }) {
                     // If proposal is no longer voting, refresh the full list
                     if (base.status !== 'voting') {
                         loadGovProposals();
-                        loadScopeValidators();
+						loadScopeValidators();
+						loadGovScopes();
                     }
                 }
                 if (health?.chain?.block_height) setCurrentHeight(Number(health.chain.block_height));
             } catch (e) { /* ignore polling errors */ }
         }, 3000);
         return () => { if (govPollRef.current) { clearInterval(govPollRef.current); govPollRef.current = null; } };
-    }, [activeProposal?.proposal_id, loadGovProposals, loadScopeValidators]);
+	}, [activeProposal?.proposal_id, loadGovProposals, loadScopeValidators, loadGovScopes]);
 
     // SSE governance events — auto-refresh on governance activity
     useEffect(() => {
         if (!sse) return;
         const unsub = sse.on('governance', () => {
             loadGovProposals();
-            loadScopeValidators();
+			loadScopeValidators();
+			loadGovScopes();
             fetchHealth().then(h => {
                 if (h?.chain?.block_height) setCurrentHeight(Number(h.chain.block_height));
             }).catch(() => {});
         });
         return unsub;
-    }, [sse, loadGovProposals, loadScopeValidators]);
+	}, [sse, loadGovProposals, loadScopeValidators, loadGovScopes]);
 
     // Redeploy polling
     const startRedeployPoll = useCallback(() => {
@@ -7769,7 +7782,7 @@ function NetworkPage({ sse, accessMode = false }) {
     const govScopeSelectedMembers = Object.entries(govScopeMembers).filter(([, member]) => member.selected);
     const govScopeControllerMember = govScopeSelectedMembers.find(([validatorId, member]) => validatorId === govScopeController && member.active !== false);
     const govScopeRevisionNumber = Number(govScopeRevision);
-    const govScopeValid = govNewOp !== 'scope_action' || (
+	const govScopeValid = govNewOp !== 'scope_action' || (
         Number.isSafeInteger(govScopeRevisionNumber) && govScopeRevisionNumber > 0 &&
         (govScopeRevisionNumber !== 1 || govScopeState === 'active') &&
         !!govScopeController && govScopeDomainList.length > 0 && govScopeSelectedMembers.length > 0 && !!govScopeControllerMember &&
@@ -7778,7 +7791,11 @@ function NetworkPage({ sse, accessMode = false }) {
             const joinedRevision = Number(member.joinedRevision);
             return Number.isSafeInteger(weight) && weight > 0 && Number.isSafeInteger(joinedRevision) && joinedRevision > 0 && joinedRevision <= govScopeRevisionNumber;
         })
-    );
+	);
+	const govRemovalBlockingScopes = govNewOp === 'remove_validator' && govNewTarget
+		? govScopes.filter(scope => (scope?.drain?.blocking_validator_ids || []).includes(govNewTarget))
+		: [];
+	const govRemovalValid = govNewOp !== 'remove_validator' || govRemovalBlockingScopes.length === 0;
 
     if (loading) return html`<div class="network-page"><p style="color:var(--text-muted);text-align:center;padding:40px;">Loading agents...</p></div>`;
 
@@ -7793,11 +7810,27 @@ function NetworkPage({ sse, accessMode = false }) {
                     : html`<div><h2>Agents <${HelpTip} text="Manage the agents on your own SAGE node. Each agent is a separate participant in BFT consensus with its own permissions. Click any agent to expand its details and access. (To connect your whole node to ANOTHER SAGE, use Federation.)" /><${PageHelp} section="network" label="Agents guide" /></h2><div class="network-header-sub">${agents.length} agent${agents.length !== 1 ? 's' : ''} on this node</div></div>`}
             </div>
 
-            <div class="gov-section">
+			<div class="gov-section">
                 <div class="gov-section-header">
                     <h3>Governance <${HelpTip} text="Validator governance allows network participants to propose and vote on changes to the validator set. Proposals require 2/3 quorum to pass." /></h3>
                     ${!activeProposal && html`<button class="gov-new-btn" onClick=${() => setShowGovModal(true)}>+ New Proposal</button>`}
-                </div>
+				</div>
+
+				${govScopes.length > 0 && html`
+					<div style="display:grid;gap:8px;margin:10px 0 14px;">
+						${govScopes.map(scope => html`
+							<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;background:var(--surface);">
+								<div style="display:flex;justify-content:space-between;gap:12px;align-items:center;">
+									<div><strong>${scope.scope_id}</strong> <span style="color:var(--text-muted);font-size:11px;">rev ${scope.revision} · ${scope.state}</span></div>
+									${scope.drain?.pending_ballot_count > 0
+										? html`<span style="color:var(--warning);font-size:11px;font-weight:600;">Draining ${scope.drain.pending_ballot_count} ballot${scope.drain.pending_ballot_count === 1 ? '' : 's'}</span>`
+										: html`<span style="color:var(--text-muted);font-size:11px;">No pending ballots</span>`}
+								</div>
+								<div style="color:var(--text-muted);font-size:11px;margin-top:5px;">${(scope.domains || []).map(domain => domain.name).join(', ')} · ${(scope.drain?.blocking_validator_ids || []).length} validator removal blocker${(scope.drain?.blocking_validator_ids || []).length === 1 ? '' : 's'}</div>
+							</div>
+						`)}
+					</div>
+				`}
 
                 ${activeProposal ? html`
                     <div class="gov-proposal-card active">
@@ -7962,12 +7995,17 @@ function NetworkPage({ sse, accessMode = false }) {
                                     </select>
                                 </div>
                             `}
-                            ${(govNewOp === 'add_validator' || govNewOp === 'update_power') && html`
+							${(govNewOp === 'add_validator' || govNewOp === 'update_power') && html`
                                 <div class="wizard-field">
                                     <label>Voting Power</label>
                                     <input class="wizard-input" type="number" min="1" max="100" value=${govNewPower} onInput=${e => setGovNewPower(e.target.value)} />
                                 </div>
-                            `}
+							`}
+							${govNewOp === 'remove_validator' && govRemovalBlockingScopes.length > 0 && html`
+								<div style="border:1px solid var(--danger);border-radius:10px;padding:10px 12px;color:var(--danger);font-size:12px;margin-bottom:12px;">
+									Removal is blocked by ${govRemovalBlockingScopes.map(scope => scope.scope_id).join(', ')}. Revise or retire those scopes and let every pending scoped ballot finish first.
+								</div>
+							`}
                             <div class="wizard-field">
                                 <label>Reason</label>
                                 <textarea class="wizard-textarea" placeholder="Why is this change needed?" value=${govNewReason} onInput=${e => setGovNewReason(e.target.value)} />
@@ -7975,7 +8013,7 @@ function NetworkPage({ sse, accessMode = false }) {
                         </div>
                         <div class="wizard-footer">
                             <button class="btn" onClick=${() => setShowGovModal(false)}>Cancel</button>
-                            <button class="btn btn-primary" onClick=${handleGovSubmit} disabled=${govSubmitting || !govNewTarget.trim() || !govNewReason.trim() || !govScopeValid}>
+							<button class="btn btn-primary" onClick=${handleGovSubmit} disabled=${govSubmitting || !govNewTarget.trim() || !govNewReason.trim() || !govScopeValid || !govRemovalValid}>
                                 ${govSubmitting ? 'Submitting...' : 'Submit Proposal'}
                             </button>
                         </div>
