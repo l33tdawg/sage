@@ -10674,8 +10674,10 @@ function OverviewPage({ sse }) {
     const appVerNum = parseInt(appVer, 10);
     // "0"/empty/unparseable -> neutral: a fresh or un-upgraded chain may not
     // report a consensus app version yet, so do not cry "behind" (amber) on it.
-    // Only a real version below 15 is genuinely behind.
-    const appVerTone = appVer === '15' ? 'healthy' : (appVerNum > 0 && appVerNum < 15 ? 'degraded' : 'neutral');
+    // Only a real version below the v11 baseline is genuinely behind. During a
+    // rolling app-v20 activation the intermediate fork rungs remain neutral;
+    // the current protocol turns green only once the v11.9 gate is active.
+    const appVerTone = appVer === '20' ? 'healthy' : (appVerNum > 0 && appVerNum < 15 ? 'degraded' : 'neutral');
     const appVerShown = (appVer && appVer !== '0') ? ('v' + appVer) : '--';
     const mempoolTxs = (chain && chain.mempool_txs != null) ? Number(chain.mempool_txs) : null;
     const mempoolHot = mempoolTxs != null && !isNaN(mempoolTxs) && mempoolTxs > 50;
@@ -10700,7 +10702,7 @@ function OverviewPage({ sse }) {
         tile(chain ? Number(chain.block_height || 0).toLocaleString() : '--', 'Block height', { color: '#10b981', title: 'Total blocks committed to the chain.' }),
         tile(fmtAge(blockElapsed), 'Last block age', { title: 'Time since the last committed block.', sub: chainIdle ? 'idle - not a stall' : '' }),
         tile(chain ? (chain.catching_up ? 'Catching up' : 'In sync') : '--', 'Sync state', { small: true, color: chain ? (chain.catching_up ? '#f59e0b' : '#10b981') : undefined }),
-        tile(appVerShown, 'App version', { small: true, color: appVerTone === 'healthy' ? '#10b981' : (appVerTone === 'degraded' ? '#f59e0b' : undefined), title: 'CometBFT app protocol version. Green when current (15).' }),
+        tile(appVerShown, 'App version', { small: true, color: appVerTone === 'healthy' ? '#10b981' : (appVerTone === 'degraded' ? '#f59e0b' : undefined), title: 'CometBFT app protocol version. Green when current (20).' }),
         tile(chainIdle ? 'Idle' : (blockRate ? blockRate.toFixed(1) + 's' : '--'), 'Block rate', { small: chainIdle, title: 'Seconds per block, derived client-side from height deltas.' }),
         tile(uptimeDisplay, 'Node uptime', { small: true, title: 'Time since this node process started.' }),
         tile(chain && chain.mempool_txs != null ? chain.mempool_txs : '--', 'Pending transactions', { color: mempoolHot ? '#f59e0b' : undefined, title: 'Unconfirmed transactions waiting in the mempool. Amber above 50 signals a backlog.' }),
