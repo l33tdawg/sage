@@ -1,0 +1,3 @@
+# Preserve the audited upstream CometBFT source subset byte-for-byte. Upstream
+# carries a few historical trailing spaces; they are not SAGE-authored drift.
+third_party/cometbft/** -whitespace

@@ -1,7 +1,8 @@
 // Package statesync defines SAGE's network-safe consensus snapshot substrate.
 //
-// This format contains only a chunked Badger backup plus canonical public
-// metadata. It is intentionally unrelated to internal/snapshot, whose local
+// This format contains only a chunked deterministic latest-visible key/value
+// image plus canonical public metadata. It is intentionally unrelated to
+// internal/snapshot, whose local
 // rollback bundle can contain SQLite, CometBFT databases, validator/node keys,
 // vault material, configuration, and binaries and must never cross the network.
 package statesync
@@ -17,7 +18,7 @@ import (
 
 const (
 	// Format is the CometBFT Snapshot.Format value for the first SAGE
-	// consensus-only snapshot format.
+// consensus-only canonical latest-visible state format.
 	Format uint32 = 1
 
 	metadataVersion byte = 1
@@ -32,8 +33,8 @@ const (
 
 var metadataMagic = [12]byte{'S', 'A', 'G', 'E', '-', 'S', 'T', 'S', 'Y', 'N', 'C', 0}
 
-// Metadata binds the trusted application height/hash to the exact Badger
-// backup byte stream and each independently verifiable transport chunk.
+// Metadata binds the trusted application height/hash to the exact canonical
+// state byte stream and each independently verifiable transport chunk.
 type Metadata struct {
 	Height      uint64
 	AppHash     []byte
@@ -43,9 +44,10 @@ type Metadata struct {
 	ChunkHashes [][]byte
 }
 
-// BuildMetadata derives canonical metadata from an already chunked Badger
-// backup. Exporters should stream the live Badger backup to disk and pass its
-// bounded chunks here; this helper never accepts local rollback-bundle files.
+// BuildMetadata derives canonical metadata from an already chunked canonical
+// state image. Exporters should stream the live latest-visible key/value set to
+// disk and pass its bounded chunks here; this helper never accepts local
+// rollback-bundle files.
 // chunkSize is the declared transport size, so a one-chunk backup may be
 // smaller than it while still using the standard minimum chunk size.
 func BuildMetadata(height uint64, appHash []byte, chunkSize uint32, chunks [][]byte) (Metadata, []byte, []byte, error) {

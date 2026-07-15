@@ -2,6 +2,7 @@ package statesync
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"os"
 	"path/filepath"
@@ -114,7 +115,22 @@ func TestAssemblerRejectsIncompleteWrongSizeAndExistingStage(t *testing.T) {
 	require.ErrorContains(t, assembler.Assemble(filepath.Join(parent, "out")), "incomplete")
 }
 
-func TestConsensusOnlyFormatRoundTripsRealBadgerBackupAndAppHash(t *testing.T) {
+func TestAssemblerContextCancellationLeavesNoPublishedImage(t *testing.T) {
+	metadata, _, _, chunks, _ := stateSyncFixture(t)
+	assembler, err := NewAssembler(filepath.Join(t.TempDir(), "assembly"), metadata)
+	require.NoError(t, err)
+	for index, chunk := range chunks {
+		require.NoError(t, assembler.AddChunk(uint32(index), chunk)) // #nosec G115 -- bounded fixture
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	output := filepath.Join(t.TempDir(), "canonical.state")
+	err = assembler.AssembleContext(ctx, output)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NoFileExists(t, output)
+}
+
+func TestConsensusOnlyFormatRoundTripsCanonicalBadgerStateAndAppHash(t *testing.T) {
 	sourcePath := filepath.Join(t.TempDir(), "source-badger")
 	source, err := store.NewBadgerStore(sourcePath)
 	require.NoError(t, err)
@@ -123,8 +139,7 @@ func TestConsensusOnlyFormatRoundTripsRealBadgerBackupAndAppHash(t *testing.T) {
 	appHash, err := source.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
 	var backup bytes.Buffer
-	_, err = source.DB().Backup(&backup, 0)
-	require.NoError(t, err)
+	require.NoError(t, WriteCanonicalState(context.Background(), source.DB(), &backup))
 	require.NoError(t, source.CloseBadger())
 
 	payload := backup.Bytes()
@@ -154,7 +169,7 @@ func TestConsensusOnlyFormatRoundTripsRealBadgerBackupAndAppHash(t *testing.T) {
 	require.NoError(t, err)
 	backupFile, err := os.Open(assembledPath) //nolint:gosec // test-owned path
 	require.NoError(t, err)
-	require.NoError(t, db.Load(backupFile, 16))
+	require.NoError(t, RestoreCanonicalState(context.Background(), backupFile, db))
 	require.NoError(t, backupFile.Close())
 	require.NoError(t, db.Close())
 	restored, err := store.NewBadgerStore(restoredPath)

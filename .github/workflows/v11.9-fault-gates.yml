@@ -1,0 +1,86 @@
+name: v11.9 Fault Gates
+
+on:
+  workflow_call:
+    inputs:
+      require_scoped_reconfiguration:
+        description: Fail unless the real app-v20 scoped reconfiguration phase runs
+        required: false
+        default: false
+        type: boolean
+      require_authorized_state_sync:
+        description: Fail unless a real authorized provider-to-receiver state-sync transfer runs
+        required: false
+        default: false
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      require_scoped_reconfiguration:
+        description: Require the still-open real app-v20 scoped reconfiguration phase
+        required: false
+        default: false
+        type: boolean
+      require_authorized_state_sync:
+        description: Require the still-open authorized provider-to-receiver state-sync phase
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  app-multiprocess:
+    name: App-v20 subprocess fault oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Run race-enabled multi-process replay/reconfiguration oracle
+        run: bash deploy/scripts/run-v11.9-multiprocess.sh
+      - name: Test local CometBFT state-sync hardening
+        run: make test-cometbft-patch
+
+  real-comet-chaos:
+    name: Real Comet/ABCI crash and partition gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: app-multiprocess
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build cached ABCI image from this commit
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: deploy/Dockerfile.abci
+          load: true
+          push: false
+          tags: sage-v119-chaos-abci:local
+          cache-from: type=gha,scope=v119-chaos-abci
+          cache-to: type=gha,mode=max,scope=v119-chaos-abci
+      - name: Build cached CometBFT image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: deploy/Dockerfile.node
+          load: true
+          push: false
+          tags: sage-v119-chaos-node:local
+          cache-from: type=gha,scope=v119-chaos-node
+          cache-to: type=gha,mode=max,scope=v119-chaos-node
+      - name: Run bounded real process fault gate
+        env:
+          V119_CHAOS_REBUILD: '0'
+          V119_REQUIRE_SCOPED_RECONFIG: ${{ inputs.require_scoped_reconfiguration && '1' || '0' }}
+          V119_REQUIRE_AUTHORIZED_STATE_SYNC: ${{ inputs.require_authorized_state_sync && '1' || '0' }}
+        run: bash deploy/scripts/run-v11.9-chaos.sh

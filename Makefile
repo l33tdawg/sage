@@ -1,4 +1,4 @@
-.PHONY: build build-all test lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism benchmark benchmark-k6 sdk-test clean help
+.PHONY: build build-all test test-cometbft-patch lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism v119-chaos v119-multiprocess-app benchmark benchmark-k6 sdk-test clean help
 
 BINARY=bin/amid
 COMPOSE_FILE=deploy/docker-compose.yml
@@ -21,6 +21,9 @@ build-all: ## Build all binaries (amid, sage-gui, sage-cli)
 
 test: ## Run unit tests
 	go test ./... -v -count=1 -race
+
+test-cometbft-patch: ## Run the local CometBFT state-sync hardening regression
+	cd third_party/cometbft && go test ./statesync ./blocksync ./node ./state ./store -run '^(TestReceiveOversizedSnapshotWithoutActiveSyncDoesNotPanic|TestStateSyncSealAbort.*|TestStateSyncBootstrapRestart.*|TestOfflineStateSyncHeight.*|TestPersistStateSyncBootstrap.*|TestCompleteStateSyncBootstrap.*|TestBootstrapAtomicallyPersistsEffectiveStateSyncHeight|TestStateSyncBootstrapComplete.*|TestRecoverIncompleteStateSyncBootstrap.*)$$' -count=1 -race
 
 lint: ## Run linter
 	golangci-lint run ./...
@@ -69,6 +72,12 @@ byzantine: ## Run Byzantine fault tolerance tests (requires running network)
 
 determinism: ## Stand up an isolated 4-node devnet and assert byte-identical AppHash across nodes (audit residual #6; ~15-20 min, cold build)
 	bash deploy/scripts/run-determinism.sh
+
+v119-chaos: ## Run isolated real Comet/ABCI SIGKILL and P2P-firewall fault gates
+	bash deploy/scripts/run-v11.9-chaos.sh
+
+v119-multiprocess-app: ## Run the bounded app-v20 subprocess replay/reconfiguration oracle
+	bash deploy/scripts/run-v11.9-multiprocess.sh
 
 benchmark: ## Run authenticated load test (Python, Ed25519 signed)
 	cd test/benchmark && pip install -q httpx pynacl && python load_test.py

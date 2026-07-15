@@ -13,6 +13,11 @@ import (
 // executor never publishes a database handle or starts ordinary services.
 type ActivationDirectoryVerifier func(path string, height uint64, appHash []byte) error
 
+// ActivationAuthorizationGuard revalidates the one-shot join authorization at
+// a durable activation boundary. Once it fails, callers must latch that failure
+// and never permit clock rollback to re-enable the session.
+type ActivationAuthorizationGuard func() error
+
 // ActivationDirectoryInspector returns the consensus height and AppHash held
 // by one closed, real directory. Recovery verifies this result against the
 // already persisted CometBFT state before it renames or removes anything.
@@ -54,6 +59,32 @@ func ActivatePreparedDirectory(root, journalPath string, journal ActivationJourn
 }
 
 func activatePreparedDirectory(root, journalPath string, journal ActivationJournal, verify ActivationDirectoryVerifier, hook activationDirectoryHook) error {
+	return activatePreparedDirectoryAuthorized(root, journalPath, journal, verify, nil, hook)
+}
+
+// ActivatePreparedDirectoryAuthorized performs the same crash-safe directory
+// transaction while rechecking authorization before each journal or rename.
+// An authorization failure rolls the directory layout back to the old live
+// state whenever any durable step has already occurred.
+func ActivatePreparedDirectoryAuthorized(
+	root, journalPath string,
+	journal ActivationJournal,
+	verify ActivationDirectoryVerifier,
+	authorize ActivationAuthorizationGuard,
+) error {
+	if authorize == nil {
+		return errors.New("activation authorization guard is required")
+	}
+	return activatePreparedDirectoryAuthorized(root, journalPath, journal, verify, authorize, nil)
+}
+
+func activatePreparedDirectoryAuthorized(
+	root, journalPath string,
+	journal ActivationJournal,
+	verify ActivationDirectoryVerifier,
+	authorize ActivationAuthorizationGuard,
+	hook activationDirectoryHook,
+) error {
 	if verify == nil {
 		return errors.New("activation directory verifier is required")
 	}
@@ -74,12 +105,18 @@ func activatePreparedDirectory(root, journalPath string, journal ActivationJourn
 	if !layout.live || !layout.prepared || layout.quarantine {
 		return errors.New("activation requires live and prepared directories with no quarantine")
 	}
+	if err := runActivationAuthorizationGuard(authorize); err != nil {
+		return err
+	}
 
 	if err := WriteActivationJournal(paths.journal, journal); err != nil {
 		return fmt.Errorf("write prepared activation journal: %w", err)
 	}
 	if err := runActivationDirectoryHook(hook, activationStepJournalPrepared); err != nil {
 		return err
+	}
+	if err := runActivationAuthorizationGuard(authorize); err != nil {
+		return rollbackActivationAuthorizationFailure(paths, err)
 	}
 	if err := os.Rename(paths.live, paths.quarantine); err != nil {
 		return fmt.Errorf("quarantine live activation directory: %w", err)
@@ -90,6 +127,9 @@ func activatePreparedDirectory(root, journalPath string, journal ActivationJourn
 	if err := runActivationDirectoryHook(hook, activationStepLiveQuarantined); err != nil {
 		return err
 	}
+	if err := runActivationAuthorizationGuard(authorize); err != nil {
+		return rollbackActivationAuthorizationFailure(paths, err)
+	}
 	if err := os.Rename(paths.prepared, paths.live); err != nil {
 		return fmt.Errorf("promote prepared activation directory: %w", err)
 	}
@@ -98,6 +138,9 @@ func activatePreparedDirectory(root, journalPath string, journal ActivationJourn
 	}
 	if err := runActivationDirectoryHook(hook, activationStepPreparedLive); err != nil {
 		return err
+	}
+	if err := runActivationAuthorizationGuard(authorize); err != nil {
+		return rollbackActivationAuthorizationFailure(paths, err)
 	}
 
 	if err := verify(paths.live, journal.Height, append([]byte(nil), journal.AppHash...)); err != nil {
@@ -112,6 +155,9 @@ func activatePreparedDirectory(root, journalPath string, journal ActivationJourn
 	}
 	if err := runActivationDirectoryHook(hook, activationStepVerified); err != nil {
 		return err
+	}
+	if err := runActivationAuthorizationGuard(authorize); err != nil {
+		return rollbackActivationAuthorizationFailure(paths, err)
 	}
 
 	journal.Phase = ActivationPendingComet
@@ -157,6 +203,52 @@ func RecoverActivationDirectories(root, journalPath string, cometHeight uint64, 
 	default:
 		return 0, errors.New("activation journal phase is invalid")
 	}
+}
+
+// SealActivatedDirectory completes an activation while the promoted live
+// database is already open. It deliberately does not inspect or reopen live:
+// callers must first verify that persisted CometBFT and the active application
+// report activeHeight/activeAppHash exactly. The durable PendingComet journal
+// and directory layout remain the independent evidence that quarantine can be
+// removed. A crash after the sealed write is resolved by boot recovery.
+func SealActivatedDirectory(
+	root, journalPath string,
+	cometHeight uint64,
+	cometAppHash []byte,
+	activeHeight uint64,
+	activeAppHash []byte,
+) error {
+	if !validPersistedState(cometHeight, cometAppHash) || !validPersistedState(activeHeight, activeAppHash) {
+		return errors.New("activation seal state hash is invalid")
+	}
+	if cometHeight != activeHeight || !bytes.Equal(cometAppHash, activeAppHash) {
+		return errors.New("active application state does not match persisted CometBFT state")
+	}
+	j, err := LoadActivationJournal(journalPath)
+	if err != nil {
+		return fmt.Errorf("load pending-Comet activation journal: %w", err)
+	}
+	if j.Phase != ActivationPendingComet {
+		return errors.New("live activation seal requires pending-Comet journal phase")
+	}
+	paths, err := resolveActivationDirectoryPaths(root, journalPath, j)
+	if err != nil {
+		return err
+	}
+	layout, err := inspectActivationDirectoryLayout(paths)
+	if err != nil {
+		return err
+	}
+	if !layout.live || layout.prepared || !layout.quarantine {
+		return errors.New("pending activation seal layout is ambiguous")
+	}
+	if cometHeight < j.Height {
+		return errors.New("persisted CometBFT state is below pending activation")
+	}
+	if cometHeight == j.Height && !bytes.Equal(cometAppHash, j.AppHash) {
+		return errors.New("persisted CometBFT state conflicts with pending activation")
+	}
+	return sealActivationDirectory(paths, j, true)
 }
 
 func recoverPreparedActivation(paths activationDirectoryPaths, layout activationDirectoryLayout, cometHeight uint64, cometAppHash []byte, inspect ActivationDirectoryInspector) (RecoveryAction, error) {
@@ -491,4 +583,35 @@ func runActivationDirectoryHook(hook activationDirectoryHook, step activationDir
 		return fmt.Errorf("activation interrupted after %s: %w", step, err)
 	}
 	return nil
+}
+
+func runActivationAuthorizationGuard(authorize ActivationAuthorizationGuard) error {
+	if authorize == nil {
+		return nil
+	}
+	if err := authorize(); err != nil {
+		return fmt.Errorf("state sync activation authorization failed: %w", err)
+	}
+	return nil
+}
+
+func rollbackActivationAuthorizationFailure(paths activationDirectoryPaths, cause error) error {
+	layout, err := inspectActivationDirectoryLayout(paths)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("inspect authorization rollback layout: %w", err))
+	}
+	switch {
+	case layout.live && layout.prepared && !layout.quarantine:
+		err = removeActivationJournal(paths.journal)
+	case !layout.live && layout.prepared && layout.quarantine:
+		err = restoreQuarantineAndDiscardPrepared(paths, false)
+	case layout.live && !layout.prepared && layout.quarantine:
+		err = rollbackActivatedDirectory(paths)
+	default:
+		err = errors.New("authorization rollback activation directory layout is ambiguous")
+	}
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("rollback expired state sync activation: %w", err))
+	}
+	return cause
 }

@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/config"
 	cmtlog "github.com/cometbft/cometbft/libs/log"
 	"github.com/cometbft/cometbft/node"
@@ -111,11 +112,16 @@ func runServe() (rerr error) {
 			return fmt.Errorf("create dir %s: %w", dir, mkErr)
 		}
 	}
-	if action, found, recoveryErr := recoverPendingStateSyncActivation(context.Background(), cfg.DataDir, cometHome, badgerPath); recoveryErr != nil {
+	recoveryAction, recoveryFound, recoveryErr := recoverPendingStateSyncActivation(context.Background(), cfg.DataDir, cometHome, badgerPath)
+	if recoveryErr != nil {
 		return fmt.Errorf("recover state sync activation before ABCI handshake: %w", recoveryErr)
-	} else if found {
-		logger.Warn().Str("action", stateSyncRecoveryActionName(action)).Msg("recovered interrupted state sync activation before opening Badger")
+	} else if recoveryFound {
+		logger.Warn().Str("action", stateSyncRecoveryActionName(recoveryAction)).Msg("recovered interrupted state sync activation before opening Badger")
 	}
+	if finishRecoveredStateSyncRole(cfg, recoveryFound, recoveryAction) {
+		logger.Info().Msg("completed recovered one-shot state sync as an ordinary synchronized node")
+	}
+	stateSyncRecoveryComplete := true
 	if mkErr := os.MkdirAll(badgerPath, 0700); mkErr != nil {
 		return fmt.Errorf("create dir %s: %w", badgerPath, mkErr)
 	}
@@ -294,6 +300,8 @@ func runServe() (rerr error) {
 	// Persisted reranker intent (Settings > Engine toggle) overrides the env
 	// config so an operator's dashboard on/off choice survives restart without
 	// needing SAGE_RERANK_* env vars. A stored "0" explicitly turns it off.
+	managedReranker := false
+	managedOllama := false
 	if prefs, perr := sqliteStore.GetAllPreferences(context.Background()); perr == nil {
 		if v, ok := prefs["reranker_enabled"]; ok {
 			cfg := embedding.ResolveRerankerConfig()
@@ -310,27 +318,8 @@ func runServe() (rerr error) {
 			sqliteStore.SetReranker(embedding.BuildReranker(cfg), cfg.Oversample)
 			logger.Info().Bool("enabled", cfg.Enabled).Str("url", cfg.URL).Msg("reranker applied from saved preferences")
 		}
-		// Managed sidecar: re-establish the llama.cpp reranker this operator
-		// enabled through the guided setup. Adopt-or-spawn runs in the
-		// background - recalls degrade gracefully (RRF ordering) until the
-		// sidecar answers, so boot is never blocked on it.
-		if prefs["reranker_managed"] == "1" {
-			startWorker(func() {
-				startCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-				defer cancel()
-				rerankURL, startErr := rerankdMgr.Start(startCtx)
-				if startErr != nil {
-					logger.Warn().Err(startErr).Msg("managed reranker sidecar did not start; recall continues without reranking")
-					return
-				}
-				logger.Info().Str("url", rerankURL).Msg("managed reranker sidecar ready")
-			})
-		}
-		if prefs["ollama_managed"] == "1" {
-			startWorker(func() {
-				superviseManagedOllama(ctx, ollamaMgr, 30*time.Second, logger)
-			})
-		}
+		managedReranker = prefs["reranker_managed"] == "1"
+		managedOllama = prefs["ollama_managed"] == "1"
 	}
 
 	// Unlock encryption vault if enabled
@@ -399,180 +388,17 @@ func runServe() (rerr error) {
 		}
 	}()
 
-	// Seed the replay-nonce allocator from the chain's committed nonces. The
-	// app-v9 consensus gate rejects any tx whose nonce <= the signer's highest
-	// committed nonce, so on a fresh process / post-restart every in-process
-	// producer (REST, web, watchdog, validator txs — all on the shared node key)
-	// must resume ABOVE the chain instead of trusting the wall clock to exceed it.
-	// Local badger read, keyed exactly like the consensus path
-	// (auth.PublicKeyToAgentID), consulted at most once per key. Liveness-only,
-	// never in the AppHash. GetNonce returns 0 for an unseen key -> no-op seed.
-	tx.SetNonceFloorFunc(func(pub ed25519.PublicKey) (uint64, bool) {
-		n, gerr := badgerStore.GetNonce(auth.PublicKeyToAgentID(pub))
-		if gerr != nil || n == 0 {
-			return 0, false
-		}
-		return n, true
-	})
-
 	// Create SAGE ABCI app with SQLite backend
 	app, err := sageabci.NewSageAppWithStores(badgerStore, sqliteStore, logger)
 	if err != nil {
 		return fmt.Errorf("create SAGE app: %w", err)
 	}
 	app.Version = version
-
-	// v11.9 recovery: Badger is the canonical scoped-content source after
-	// snapshot/state sync; SQLite is only the serving projection. Verify and
-	// rebuild it before advertising readiness. A locked vault is allowed to boot
-	// consensus, but /ready remains fail-closed until the operator unlocks and
-	// this callback succeeds.
-	rebuildScopedProjection := func(rebuildCtx context.Context) (int, error) {
-		contents, listErr := badgerStore.ListScopedContents()
-		if listErr != nil {
-			health.SetScopedProjectionStatus(metrics.ScopedProjectionStatus{Required: true, Detail: listErr.Error()})
-			return 0, listErr
-		}
-		status := metrics.ScopedProjectionStatus{Required: len(contents) > 0, Records: len(contents)}
-		if len(contents) == 0 {
-			status.OK = true
-			health.SetScopedProjectionStatus(status)
-			return 0, nil
-		}
-		if sqliteStore.VaultLocked() {
-			status.Detail = "vault locked; scoped serving projection rebuild deferred"
-			health.SetScopedProjectionStatus(status)
-			return 0, fmt.Errorf("%s", status.Detail)
-		}
-		rebuilt, rebuildErr := app.RebuildScopedProjection(rebuildCtx)
-		status.Rebuilt = rebuilt
-		status.OK = rebuildErr == nil && rebuilt == len(contents)
-		if rebuildErr != nil {
-			status.Detail = rebuildErr.Error()
-		} else if !status.OK {
-			status.Detail = fmt.Sprintf("rebuilt %d of %d scoped records", rebuilt, len(contents))
-			rebuildErr = fmt.Errorf("%s", status.Detail)
-		}
-		health.SetScopedProjectionStatus(status)
-		return rebuilt, rebuildErr
-	}
-	if rebuilt, rebuildErr := rebuildScopedProjection(ctx); rebuildErr != nil {
-		logger.Warn().Err(rebuildErr).Msg("scoped serving projection is not ready")
-	} else if rebuilt > 0 {
-		logger.Info().Int("records", rebuilt).Msg("scoped serving projection verified from canonical state")
-	}
-
-	// Block-retention window (issue #40): bound blockstore growth by telling
-	// CometBFT it may prune blocks older than the window. Local node policy —
-	// never consensus state — so modes can default differently: personal nodes
-	// (single validator, no peers ever sync from them) prune by default;
-	// quorum nodes keep everything unless the operator opts in, because a
-	// fresh peer block-syncs history from the existing validators.
-	if retainBlocks := resolveRetainBlocks(cfg.RetainBlocks, cfg.Quorum.Enabled); retainBlocks > 0 {
+	retainBlocks := resolveRetainBlocks(cfg.RetainBlocks, cfg.Quorum.Enabled)
+	if retainBlocks > 0 {
 		app.SetRetainBlocks(retainBlocks)
 		logger.Info().Int64("retain_blocks", retainBlocks).Msg("block retention armed — CometBFT will prune blocks older than the window")
 	}
-
-	// Content-validation enforcement advisory (non-fatal): warn when the app-v7
-	// fork is active on this chain but this binary has no validator registry
-	// compiled in, so this node won't enforce the Layer-2 gate. Bootable by
-	// design — a generic-only fleet is valid — but a MIXED fleet (some nodes
-	// wired, some not) would diverge the AppHash, so surface it loudly.
-	if warn := app.ContentValidationEnforcementWarning(); warn != "" {
-		logger.Warn().Msg(warn)
-	}
-
-	// v7.5 snapshot scheduler: anchor every 10k blocks and every 6h
-	// of wall time. Snapshots include the live binary so a rollback
-	// can re-exec without operator intervention. Encryption posture
-	// inherits the vault state. nil when intervals are zero (e.g.
-	// in tests/single-shot CLIs) — SageApp.Tick is nil-safe.
-	// Snapshot encryption inherits the vault posture: encrypt at rest
-	// when the vault is unlocked AND we know the passphrase. Without
-	// the passphrase (no-terminal boot path) we ship plaintext snapshots
-	// — better than skipping snapshots entirely, since rollback is
-	// only possible if anchors exist on disk.
-	snapEncrypted := vaultUnlocked && vaultPassphrase != ""
-	// Snapshot retention: keep the N newest snapshots (plus one anchor per
-	// binary version, which is never pruned). Override with SAGE_SNAPSHOT_KEEP
-	// (must be >=1); default 5. Before v9.2.2 retention was never wired, so
-	// long-lived nodes accumulated snapshots unbounded.
-	snapKeep := 5
-	if v := os.Getenv("SAGE_SNAPSHOT_KEEP"); v != "" {
-		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
-			snapKeep = n
-		} else {
-			logger.Warn().Str("value", v).Int("using", snapKeep).Msg("ignoring invalid SAGE_SNAPSHOT_KEEP (want integer >= 1)")
-		}
-	}
-	if sched := sageabci.NewSnapshotScheduler(sageabci.SnapshotSchedulerConfig{
-		DataDir:         cfg.DataDir,
-		BinaryVersion:   version,
-		VaultKeyPath:    vaultKeyPath,
-		VaultEncrypted:  snapEncrypted,
-		VaultPassphrase: vaultPassphrase,
-		HeightInterval:  10_000,
-		TimeInterval:    6 * time.Hour,
-		KeepLast:        snapKeep,
-		LiveBadger:      badgerStore.DB(),
-	}, logger); sched != nil {
-		app.SetSnapshotScheduler(sched)
-		logger.Info().Msg("v7.5 snapshot scheduler armed")
-	}
-
-	// Snapshot housekeeping (off the consensus path — touches only
-	// DataDir/snapshots/). Runs ASYNC so a large backlog doesn't delay boot:
-	// reap .staging-* dirs left by crashed Takes, then prune all but the
-	// newest snapshots (plus per-version anchors). This is what clears the
-	// unbounded accumulation that existed before v9.2.2 wired retention; the
-	// scheduler keeps it bounded thereafter by pruning after each Take.
-	// Snapshot pruning is crash-safe/idempotent and touches no live store. Do
-	// not put it in the shutdown join set: a huge stale directory must never
-	// hold an otherwise-clean restart indefinitely, and an interrupted sweep is
-	// simply resumed on the next boot.
-	go func() { //nolint:gosec
-		if swept, sErr := snapshot.SweepStaging(cfg.DataDir); sErr != nil {
-			logger.Warn().Err(sErr).Msg("snapshot staging sweep hit an error")
-		} else if swept > 0 {
-			logger.Info().Int("removed", swept).Msg("reaped crashed snapshot staging dirs")
-		}
-		if pruned, pErr := snapshot.KeepLast(cfg.DataDir, snapKeep); pErr != nil {
-			logger.Warn().Err(pErr).Int("keep_last", snapKeep).Msg("snapshot retention (KeepLast) hit an error at boot")
-		} else if pruned > 0 {
-			logger.Info().Int("removed", pruned).Int("keep_last", snapKeep).Msg("snapshot retention pruned old snapshots at boot")
-		}
-	}()
-
-	// Backfill the FTS5 text-search index for any pre-existing memories that
-	// predate incremental indexing. Runs ASYNC: on a large chain the initial build
-	// is a CPU-bound SQLite sort, and running it synchronously here wedged startup
-	// before the first block was ever produced (health dead, no consensus).
-	// BackfillFTS self-gates with a cheap count check, so this is a fast no-op once
-	// the index is current; a genuinely-needed build proceeds in the background
-	// (off the consensus path — it only touches the off-chain SQLite mirror) while
-	// the node boots and produces blocks. No-op when the vault is active.
-	startWorker(func() {
-		start := time.Now()
-		if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
-			logger.Warn().Err(ftsErr).Msg("FTS5 backfill failed — text search may be incomplete")
-			return
-		}
-		logger.Info().Dur("elapsed", time.Since(start)).Msg("FTS5 backfill complete (or already current)")
-	})
-
-	// Create embedding provider
-	embedProvider := createEmbeddingProvider(cfg, logger)
-
-	// Embedder health watchdog: keeps /ready's semantic-recall signal current so a
-	// down embedding provider surfaces as "degraded" instead of a silently
-	// keyword-only recall. Non-blocking (probes in its own goroutine).
-	embedderReady := make(chan struct{}, 1)
-	trackDone(startEmbedderWatchdog(ctx, embedProvider, health, logger, func() {
-		select {
-		case embedderReady <- struct{}{}:
-		default:
-		}
-	}))
 
 	// Start CometBFT in-process
 	cometCfg := config.DefaultConfig()
@@ -609,31 +435,16 @@ func runServe() (rerr error) {
 		cometCfg.PrivValidatorStateFile(),
 	)
 
-	// Detect and fix height regression: if the validator signing state is ahead
-	// of the block store (e.g. after chain reset, upgrade, or crash), CometBFT
-	// refuses to sign at the lower height.  Auto-reset to prevent a stuck chain.
-	pvStatePath := cometCfg.PrivValidatorStateFile()
-	blockStoreDBPath := filepath.Join(cometCfg.RootDir, "data", "blockstore.db")
-	if _, statErr := os.Stat(blockStoreDBPath); os.IsNotExist(statErr) {
-		// Block store is gone (upgrade or reset) — clean up stale state that
-		// would otherwise hang or confuse CometBFT on fresh start.
-		if signedHeight := pv.LastSignState.Height; signedHeight > 0 {
-			logger.Warn().
-				Int64("signed_height", signedHeight).
-				Msg("validator signed ahead of missing block store — resetting signing state to prevent height regression")
-			resetState := []byte(`{"height":"0","round":0,"step":0}`)
-			if wErr := os.WriteFile(pvStatePath, resetState, 0600); wErr != nil {
-				return fmt.Errorf("reset validator state: %w", wErr)
-			}
-			pv = privval.LoadFilePV(cometCfg.PrivValidatorKeyFile(), pvStatePath)
-		}
-		// Remove stale consensus WAL — replaying old WAL against empty databases
-		// causes CometBFT to hang during startup (60s timeout then failure).
-		csWalDir := filepath.Join(cometCfg.RootDir, "data", "cs.wal")
-		if _, walErr := os.Stat(csWalDir); walErr == nil {
-			logger.Warn().Msg("removing stale consensus WAL (block store missing)")
-			_ = os.RemoveAll(csWalDir)
-		}
+	// Legacy missing-blockstore repair is unsafe for a state-sync receiver: its
+	// signing state and WAL are freshness/double-sign evidence. Preserve them
+	// until the receiver gate rejects the boot. A just-recovered activation is
+	// preserved for the same reason even though its one-shot role is disabled in
+	// memory above.
+	preserveStateSyncEvidence := cfg.Quorum.StateSync.Receiving ||
+		(recoveryFound && recoveryAction == statesync.RecoveryKeepActivated)
+	pv, err = repairMissingBlockStoreArtifacts(cometCfg, pv, preserveStateSyncEvidence, logger)
+	if err != nil {
+		return err
 	}
 
 	nodeKey, err := p2p.LoadNodeKey(cometCfg.NodeKeyFile())
@@ -667,6 +478,17 @@ func runServe() (rerr error) {
 	if err != nil {
 		return fmt.Errorf("create boot state-sync runtime: %w", err)
 	}
+	if err := bootRuntime.ConfigureApplicationBundles(func(application abcitypes.Application) error {
+		configuredApp, ok := application.(*sageabci.SageApp)
+		if !ok {
+			return fmt.Errorf("expected *abci.SageApp, got %T", application)
+		}
+		configuredApp.Version = version
+		configuredApp.SetRetainBlocks(retainBlocks)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("configure state-sync application bundles: %w", err)
+	}
 	badgerOwnedByRuntime = true
 	defer func() {
 		stopWorkers()
@@ -674,6 +496,13 @@ func runServe() (rerr error) {
 			logger.Error().Err(closeErr).Msg("close active consensus bundle")
 		}
 	}()
+	// State-sync is opt-in and must be completely authorized, configured, and
+	// armed before node.NewNode can expose the P2P reactor. Providers publish a
+	// verified app-v20 snapshot here; receivers install their one-shot finalizer
+	// and Comet light-client trust before the asynchronous bootstrap begins.
+	if armErr := armConfiguredStateSync(ctx, cfg, cometCfg, pv, nodeKey, app, sqliteStore, bootRuntime, logger); armErr != nil {
+		return fmt.Errorf("arm configured validator state sync: %w", armErr)
+	}
 
 	// Create the node controller — manages CometBFT lifecycle for redeployment.
 	nodeCtrl := NewSageNodeController(cometCfg, bootRuntime, pv, nodeKey, cmtLogger, logger, cfg.DataDir)
@@ -687,9 +516,191 @@ func runServe() (rerr error) {
 			logger.Error().Err(stopErr).Msg("error stopping CometBFT")
 		}
 	}()
+	cometNode := nodeCtrl.GetCometNode()
+	if cometNode == nil {
+		return errors.New("CometBFT reported successful startup without a live node")
+	}
+	stateSyncStartupTimeout, timeoutErr := cfg.Quorum.StateSync.effectiveStartupTimeout()
+	if timeoutErr != nil {
+		return fmt.Errorf("resolve state-sync startup timeout: %w", timeoutErr)
+	}
+	cometStateReader, readerErr := newRunningCometStateReader(cometNode)
+	if readerErr != nil {
+		return fmt.Errorf("prepare running CometBFT state reader: %w", readerErr)
+	}
+	sealCtx, cancelSeal := context.WithTimeout(ctx, stateSyncStartupTimeout)
+	sealResult, sealErr := waitForBootStateSyncSeal(sealCtx, bootRuntime, cometStateReader)
+	cancelSeal()
+	if sealErr != nil {
+		// A post-switch block-sync call may be waiting behind the PendingComet
+		// barrier. Close marks the runtime failed and releases that call before
+		// the deferred Comet StopChain waits for its reactor goroutines.
+		if closeErr := bootRuntime.Close(); closeErr != nil {
+			return errors.Join(
+				fmt.Errorf("seal boot state sync before normal serving: %w", sealErr),
+				fmt.Errorf("close failed boot state-sync runtime: %w", closeErr),
+			)
+		}
+		return fmt.Errorf("seal boot state sync before normal serving: %w", sealErr)
+	}
+	if sealResult.activated {
+		if sealResult.height <= 0 {
+			return errors.New("sealed state-sync activation has a non-positive height")
+		}
+		sealedHeight := uint64(sealResult.height) // #nosec G115 -- positive height checked above
+		if sealErr := statesync.SealActivatedDirectory(
+			cfg.DataDir,
+			filepath.Join(cfg.DataDir, stateSyncActivationJournalName),
+			sealedHeight,
+			sealResult.appHash,
+			sealedHeight,
+			sealResult.appHash,
+		); sealErr != nil {
+			return fmt.Errorf("seal state-sync activation directories: %w", sealErr)
+		}
+	}
+	servingApplication, gateErr := acquireNormalServingAfterStateSyncRecovery(stateSyncRecoveryComplete, bootRuntime)
+	if gateErr != nil {
+		return fmt.Errorf("normal serving blocked by state sync startup gate: %w", gateErr)
+	}
+	servingApp, ok := servingApplication.(*sageabci.SageApp)
+	if !ok {
+		return fmt.Errorf("normal serving requires *abci.SageApp, got %T", servingApplication)
+	}
+	app = servingApp
+	badgerStore = app.GetBadgerStore()
+	if badgerStore == nil {
+		return errors.New("normal-serving SAGE app has no Badger store")
+	}
+
+	// Everything below may capture concrete app/store references because the
+	// acquire above permanently freezes boot bundle replacement.
+	if managedReranker {
+		startWorker(func() {
+			startCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+			defer cancel()
+			rerankURL, startErr := rerankdMgr.Start(startCtx)
+			if startErr != nil {
+				logger.Warn().Err(startErr).Msg("managed reranker sidecar did not start; recall continues without reranking")
+				return
+			}
+			logger.Info().Str("url", rerankURL).Msg("managed reranker sidecar ready")
+		})
+	}
+	if managedOllama {
+		startWorker(func() {
+			superviseManagedOllama(ctx, ollamaMgr, 30*time.Second, logger)
+		})
+	}
+
+	// Seed the replay-nonce allocator from the final chain store. This callback
+	// must never capture the closed pre-state-sync Badger instance.
+	tx.SetNonceFloorFunc(func(pub ed25519.PublicKey) (uint64, bool) {
+		n, gerr := badgerStore.GetNonce(auth.PublicKeyToAgentID(pub))
+		if gerr != nil || n == 0 {
+			return 0, false
+		}
+		return n, true
+	})
+
+	// Badger is canonical scoped content; SQLite is only the serving projection.
+	// Verify/rebuild only after the final app/store graph is frozen.
+	rebuildScopedProjection := func(rebuildCtx context.Context) (int, error) {
+		contents, listErr := badgerStore.ListScopedContents()
+		if listErr != nil {
+			health.SetScopedProjectionStatus(metrics.ScopedProjectionStatus{Required: true, Detail: listErr.Error()})
+			return 0, listErr
+		}
+		status := metrics.ScopedProjectionStatus{Required: len(contents) > 0, Records: len(contents)}
+		if len(contents) == 0 {
+			status.OK = true
+			health.SetScopedProjectionStatus(status)
+			return 0, nil
+		}
+		if sqliteStore.VaultLocked() {
+			status.Detail = "vault locked; scoped serving projection rebuild deferred"
+			health.SetScopedProjectionStatus(status)
+			return 0, fmt.Errorf("%s", status.Detail)
+		}
+		rebuilt, rebuildErr := app.RebuildScopedProjection(rebuildCtx)
+		status.Rebuilt = rebuilt
+		status.OK = rebuildErr == nil && rebuilt == len(contents)
+		if rebuildErr != nil {
+			status.Detail = rebuildErr.Error()
+		} else if !status.OK {
+			status.Detail = fmt.Sprintf("rebuilt %d of %d scoped records", rebuilt, len(contents))
+			rebuildErr = fmt.Errorf("%s", status.Detail)
+		}
+		health.SetScopedProjectionStatus(status)
+		return rebuilt, rebuildErr
+	}
+	if rebuilt, rebuildErr := rebuildScopedProjection(ctx); rebuildErr != nil {
+		logger.Warn().Err(rebuildErr).Msg("scoped serving projection is not ready")
+	} else if rebuilt > 0 {
+		logger.Info().Int("records", rebuilt).Msg("scoped serving projection verified from canonical state")
+	}
+
+	if warn := app.ContentValidationEnforcementWarning(); warn != "" {
+		logger.Warn().Msg(warn)
+	}
+
+	snapEncrypted := vaultUnlocked && vaultPassphrase != ""
+	snapKeep := 5
+	if v := os.Getenv("SAGE_SNAPSHOT_KEEP"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 {
+			snapKeep = n
+		} else {
+			logger.Warn().Str("value", v).Int("using", snapKeep).Msg("ignoring invalid SAGE_SNAPSHOT_KEEP (want integer >= 1)")
+		}
+	}
+	if sched := sageabci.NewSnapshotScheduler(sageabci.SnapshotSchedulerConfig{
+		DataDir:         cfg.DataDir,
+		BinaryVersion:   version,
+		VaultKeyPath:    vaultKeyPath,
+		VaultEncrypted:  snapEncrypted,
+		VaultPassphrase: vaultPassphrase,
+		HeightInterval:  10_000,
+		TimeInterval:    6 * time.Hour,
+		KeepLast:        snapKeep,
+		LiveBadger:      badgerStore.DB(),
+	}, logger); sched != nil {
+		app.SetSnapshotScheduler(sched)
+		logger.Info().Msg("v7.5 snapshot scheduler armed")
+	}
+
+	// Local snapshot cleanup and all serving/search workers start only after the
+	// state-sync seal. They can never observe quarantine or the pre-sync store.
+	go func() { //nolint:gosec
+		if swept, sErr := snapshot.SweepStaging(cfg.DataDir); sErr != nil {
+			logger.Warn().Err(sErr).Msg("snapshot staging sweep hit an error")
+		} else if swept > 0 {
+			logger.Info().Int("removed", swept).Msg("reaped crashed snapshot staging dirs")
+		}
+		if pruned, pErr := snapshot.KeepLast(cfg.DataDir, snapKeep); pErr != nil {
+			logger.Warn().Err(pErr).Int("keep_last", snapKeep).Msg("snapshot retention (KeepLast) hit an error at boot")
+		} else if pruned > 0 {
+			logger.Info().Int("removed", pruned).Int("keep_last", snapKeep).Msg("snapshot retention pruned old snapshots at boot")
+		}
+	}()
+	startWorker(func() {
+		start := time.Now()
+		if ftsErr := sqliteStore.BackfillFTS(ctx); ftsErr != nil {
+			logger.Warn().Err(ftsErr).Msg("FTS5 backfill failed — text search may be incomplete")
+			return
+		}
+		logger.Info().Dur("elapsed", time.Since(start)).Msg("FTS5 backfill complete (or already current)")
+	})
+
+	embedProvider := createEmbeddingProvider(cfg, logger)
+	embedderReady := make(chan struct{}, 1)
+	trackDone(startEmbedderWatchdog(ctx, embedProvider, health, logger, func() {
+		select {
+		case embedderReady <- struct{}{}:
+		default:
+		}
+	}))
 
 	health.SetCometBFTHealth(true)
-	cometNode := nodeCtrl.GetCometNode()
 	logger.Info().
 		Str("node_id", string(cometNode.NodeInfo().ID())).
 		Msg("CometBFT node started (single-validator personal mode)")

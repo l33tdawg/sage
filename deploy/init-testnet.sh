@@ -3,8 +3,30 @@ set -euo pipefail
 
 # Generate 4-node CometBFT testnet configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GENESIS_DIR="${SCRIPT_DIR}/genesis"
+GENESIS_DIR="${SAGE_TESTNET_GENESIS_DIR:-${SCRIPT_DIR}/genesis}"
 NUM_VALIDATORS=4
+COMETBFT_VERSION="${COMETBFT_VERSION:-0.38.23}"
+ABCI_HOST_SUFFIX="${SAGE_TESTNET_ABCI_HOST_SUFFIX:-}"
+
+if [ -z "${GENESIS_DIR}" ] || [ "${GENESIS_DIR}" = "/" ]; then
+    echo "ERROR: refusing unsafe testnet genesis directory '${GENESIS_DIR}'" >&2
+    exit 1
+fi
+mkdir -p "$(dirname "${GENESIS_DIR}")"
+GENESIS_DIR="$(cd "$(dirname "${GENESIS_DIR}")" && pwd -P)/$(basename "${GENESIS_DIR}")"
+if [ -n "${SAGE_TESTNET_GENESIS_DIR:-}" ]; then
+    OWNER_MARKER="${SAGE_TESTNET_GENESIS_OWNER_MARKER:-}"
+    EXPECTED_MARKER="$(dirname "${GENESIS_DIR}")/.sage-testnet-genesis-owner"
+    if [ -n "${OWNER_MARKER}" ] && [ -d "$(dirname "${OWNER_MARKER}")" ]; then
+        OWNER_MARKER="$(cd "$(dirname "${OWNER_MARKER}")" && pwd -P)/$(basename "${OWNER_MARKER}")"
+    fi
+    if [ "$(basename "${GENESIS_DIR}")" != "genesis" ] ||
+       [ "${OWNER_MARKER}" != "${EXPECTED_MARKER}" ] ||
+       [ ! -f "${OWNER_MARKER}" ] || [ -L "${OWNER_MARKER}" ]; then
+        echo "ERROR: custom genesis cleanup requires an owned <parent>/genesis directory and regular ${EXPECTED_MARKER} marker" >&2
+        exit 1
+    fi
+fi
 
 # The amid/ABCI container (deploy/Dockerfile.abci) runs as the unprivileged
 # system user 'sage' (uid/gid 100/101 on Alpine). cometbft writes
@@ -23,15 +45,38 @@ echo "==> Generating ${NUM_VALIDATORS}-node testnet configuration..."
 rm -rf "${GENESIS_DIR}"
 mkdir -p "${GENESIS_DIR}"
 
-# Prefer a host-built cometbft from the standard Go install location so we skip the
-# in-container build entirely when the developer already has one installed.
+# Prefer a host-built cometbft from the standard Go install location only when
+# it is the exact version used by the validator image. Generating fixtures with
+# a different binary makes version-sensitive state-sync tests misleading.
 if [ -x "${HOME}/go/bin/cometbft" ]; then
     PATH="${HOME}/go/bin:${PATH}"
 fi
 
-# Check if cometbft binary is available
-if ! command -v cometbft &> /dev/null; then
-    echo "cometbft binary not found. Building from Docker..."
+# Check if the exact cometbft binary is available.
+HOST_COMETBFT_VERSION=""
+if command -v cometbft &> /dev/null; then
+    HOST_COMETBFT_VERSION="$(cometbft version 2>/dev/null | head -n 1 | sed 's/^v//')"
+fi
+if [ -n "${COMETBFT_DOCKER_IMAGE:-}" ]; then
+    echo "using pinned CometBFT generator image ${COMETBFT_DOCKER_IMAGE}"
+    HOST_UID=$(id -u)
+    HOST_GID=$(id -g)
+    docker run --rm --entrypoint sh -v "${GENESIS_DIR}:/genesis" \
+        "${COMETBFT_DOCKER_IMAGE}" -c '
+        set -e
+        cometbft testnet \
+            --v '"${NUM_VALIDATORS}"' \
+            --o /genesis \
+            --hostname-prefix cometbft \
+            --populate-persistent-peers
+        chown -R '"${HOST_UID}:${HOST_GID}"' /genesis
+        for d in /genesis/node*/config; do
+            chmod 0640 "$d/priv_validator_key.json"
+            chown '"${AMID_UID}:${AMID_GID}"' "$d/priv_validator_key.json"
+        done
+    '
+elif [ "${HOST_COMETBFT_VERSION}" != "${COMETBFT_VERSION#v}" ]; then
+    echo "cometbft ${COMETBFT_VERSION} not found. Building from Docker..."
     HOST_UID=$(id -u)
     HOST_GID=$(id -g)
     # NOTE: 'set -e' inside the container so a failed clone/build aborts loudly here
@@ -41,10 +86,10 @@ if ! command -v cometbft &> /dev/null; then
         golang:1.22-alpine sh -c '
         set -e
         apk add --no-cache git make >/dev/null 2>&1
-        git clone --branch v0.38.15 --depth 1 https://github.com/cometbft/cometbft.git /tmp/cometbft 2>/dev/null
+        git clone --branch v'"${COMETBFT_VERSION#v}"' --depth 1 https://github.com/cometbft/cometbft.git /tmp/cometbft 2>/dev/null
         cd /tmp/cometbft
         if ! CGO_ENABLED=0 go build -o /usr/local/bin/cometbft ./cmd/cometbft; then
-            echo "ERROR: failed to build cometbft v0.38.15 in-container" >&2
+            echo "ERROR: failed to build cometbft v'"${COMETBFT_VERSION#v}"' in-container" >&2
             exit 1
         fi
         cometbft testnet \
@@ -106,7 +151,7 @@ for i in $(seq 0 $((NUM_VALIDATORS - 1))); do
     sed -i.bak 's/prometheus = false/prometheus = true/' "$CONFIG"
 
     # Set proxy_app for ABCI connection (TCP to separate ABCI container)
-    sed -i.bak "s|proxy_app = \".*\"|proxy_app = \"tcp://abci${i}:26658\"|" "$CONFIG"
+    sed -i.bak "s|proxy_app = \".*\"|proxy_app = \"tcp://abci${i}${ABCI_HOST_SUFFIX}:26658\"|" "$CONFIG"
 
     # Set listen addresses to bind all interfaces
     sed -i.bak 's|laddr = "tcp://127.0.0.1:26657"|laddr = "tcp://0.0.0.0:26657"|' "$CONFIG"

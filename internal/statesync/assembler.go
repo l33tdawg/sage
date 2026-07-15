@@ -2,6 +2,7 @@ package statesync
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -116,8 +117,21 @@ func (a *Assembler) Missing() []uint32 {
 // Badger backup hash and byte count, fsyncs, then atomically renames it. It
 // refuses to replace an existing output.
 func (a *Assembler) Assemble(outputPath string) error {
+	return a.AssembleContext(context.Background(), outputPath)
+}
+
+// AssembleContext is Assemble with cancellation checks before and during each
+// bounded chunk copy. Receivers derive this context from the authorization
+// lifetime so assembly cannot continue indefinitely past ticket expiry.
+func (a *Assembler) AssembleContext(ctx context.Context, outputPath string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if ctx == nil {
+		return errors.New("state sync assembly context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(a.received) != len(a.metadata.ChunkHashes) {
 		return errors.New("state sync snapshot is incomplete")
 	}
@@ -153,11 +167,14 @@ func (a *Assembler) Assemble(outputPath string) error {
 	}
 	sort.Ints(indexes)
 	for _, index := range indexes {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		chunkFile, err := os.Open(filepath.Join(a.dir, chunkFilename(uint32(index)))) //nolint:gosec // index is bounded metadata
 		if err != nil {
 			return err
 		}
-		count, copyErr := io.Copy(io.MultiWriter(tmp, whole), chunkFile)
+		count, copyErr := io.Copy(io.MultiWriter(tmp, whole), stateSyncContextReader{ctx: ctx, reader: chunkFile})
 		closeErr := chunkFile.Close()
 		if copyErr != nil {
 			return copyErr
@@ -184,6 +201,18 @@ func (a *Assembler) Assemble(outputPath string) error {
 	}
 	ok = true
 	return nil
+}
+
+type stateSyncContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (reader stateSyncContextReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return reader.reader.Read(buffer)
 }
 
 func chunkFilename(index uint32) string { return fmt.Sprintf("chunk-%06d", index) }

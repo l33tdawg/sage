@@ -13,12 +13,13 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 
+	"github.com/l33tdawg/sage/internal/poe"
 	"github.com/l33tdawg/sage/internal/statesync"
 	"github.com/l33tdawg/sage/internal/store"
 )
 
 // AppV20StateSyncBackupVerifier returns the exporter callback for a committed
-// app-v20 height. It loads the backup into an isolated database, verifies the
+// app-v20 height. It restores the canonical image into an isolated database, verifies the
 // persisted height/fork, recomputes the narrow AppHash, and validates every
 // canonical scoped envelope without mutating the live node.
 func AppV20StateSyncBackupVerifier(height uint64) statesync.BackupVerifier {
@@ -32,7 +33,7 @@ func AppV20StateSyncBackupVerifier(height uint64) statesync.BackupVerifier {
 	}
 }
 
-// PrepareAppV20StateSyncBackup loads and fully verifies a received backup into
+// PrepareAppV20StateSyncBackup restores and fully verifies a received canonical image into
 // a fresh staging directory. It never touches the live Badger directory and
 // removes targetDir on every failure. Successful atomic activation/rebinding is
 // deliberately a separate release gate.
@@ -236,11 +237,11 @@ func inspectAppV20StateSyncBackup(ctx context.Context, backupPath, targetDir str
 		_ = db.Close()
 		return nil, err
 	}
-	loadErr := db.Load(backup, 16)
+	loadErr := statesync.RestoreCanonicalState(ctx, backup, db)
 	closeBackupErr := backup.Close()
 	closeDBErr := db.Close()
 	if loadErr != nil {
-		return nil, fmt.Errorf("load state sync Badger backup: %w", loadErr)
+		return nil, fmt.Errorf("restore state sync canonical state: %w", loadErr)
 	}
 	if closeBackupErr != nil {
 		return nil, closeBackupErr
@@ -281,6 +282,9 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 	}
 	if state.Height <= 0 {
 		return 0, nil, fmt.Errorf("%s app height must be positive", label)
+	}
+	if state.EpochNum != poe.EpochNumber(state.Height) {
+		return 0, nil, fmt.Errorf("%s persisted epoch does not match height", label)
 	}
 	applied, err := badgerStore.GetAppliedUpgrade(appV20UpgradeName)
 	if err != nil {

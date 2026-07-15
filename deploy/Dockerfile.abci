@@ -10,6 +10,10 @@ WORKDIR /app
 
 # Download dependencies first (layer caching)
 COPY go.mod go.sum ./
+# The root module pins CometBFT to SAGE's local, audited source subset. Copy
+# its module metadata into the cache layer before `go mod download`; the full
+# source arrives with the repository copy below.
+COPY third_party/cometbft/go.mod third_party/cometbft/go.sum ./third_party/cometbft/
 RUN go mod download
 
 # Copy source and build

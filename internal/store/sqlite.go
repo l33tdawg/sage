@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -266,6 +267,106 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 	}
 
 	return s, nil
+}
+
+var defaultDomainSeeds = []struct {
+	tag  string
+	rate float64
+}{
+	{"crypto", 0.001},
+	{"vuln_intel", 0.01},
+	{"challenge_generation", 0.005},
+	{"solver_feedback", 0.005},
+	{"calibration", 0.005},
+	{"infrastructure", 0.005},
+}
+
+// RequirePristineStateSyncProjection rejects every application-owned row in a
+// receiving node's off-chain database except the exact canonical domain seeds
+// installed by initSchema. State sync rebuilds canonical scoped content by
+// upsert; allowing any other pre-existing row would preserve stale local
+// memories, identities, policy, credentials, or federation state that the
+// trusted AppHash did not authorize. FTS5 shadow tables are internal storage;
+// the virtual memories_fts table itself is checked.
+func (s *SQLiteStore) RequirePristineStateSyncProjection(ctx context.Context) error {
+	if s == nil || s.conn == nil {
+		return errors.New("state sync projection store is required")
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT name FROM sqlite_master
+		WHERE type='table' AND name NOT LIKE 'sqlite_%'
+		ORDER BY name`)
+	if err != nil {
+		return fmt.Errorf("list state sync projection tables: %w", err)
+	}
+	tables := make([]string, 0, 32)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan state sync projection table: %w", err)
+		}
+		if strings.HasPrefix(name, "memories_fts_") {
+			continue
+		}
+		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("iterate state sync projection tables: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close state sync projection table list: %w", err)
+	}
+	for _, table := range tables {
+		if table == "domains" {
+			if err := s.requireDefaultStateSyncDomains(ctx); err != nil {
+				return err
+			}
+			continue
+		}
+		quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
+		var populated int
+		if err := s.conn.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM `+quoted+` LIMIT 1)`).Scan(&populated); err != nil {
+			return fmt.Errorf("inspect state sync projection table %q: %w", table, err)
+		}
+		if populated != 0 {
+			return fmt.Errorf("state sync receiving requires an empty off-chain projection; table %q is populated", table)
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteStore) requireDefaultStateSyncDomains(ctx context.Context) error {
+	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag, decay_rate FROM domains ORDER BY domain_tag`)
+	if err != nil {
+		return fmt.Errorf("inspect state sync default domains: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	actual := make(map[string]float64, len(defaultDomainSeeds))
+	for rows.Next() {
+		var tag string
+		var rate float64
+		if err := rows.Scan(&tag, &rate); err != nil {
+			return fmt.Errorf("scan state sync default domain: %w", err)
+		}
+		if _, duplicate := actual[tag]; duplicate {
+			return errors.New("state sync receiving default domains contain a duplicate")
+		}
+		actual[tag] = rate
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate state sync default domains: %w", err)
+	}
+	if len(actual) != len(defaultDomainSeeds) {
+		return errors.New("state sync receiving requires the exact canonical default domains")
+	}
+	for _, seed := range defaultDomainSeeds {
+		if rate, ok := actual[seed.tag]; !ok || rate != seed.rate {
+			return errors.New("state sync receiving requires the exact canonical default domains")
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) initSchema(ctx context.Context) error {
@@ -644,18 +745,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	`)
 
 	// Seed default domains
-	seeds := []struct {
-		tag  string
-		rate float64
-	}{
-		{"crypto", 0.001},
-		{"vuln_intel", 0.01},
-		{"challenge_generation", 0.005},
-		{"solver_feedback", 0.005},
-		{"calibration", 0.005},
-		{"infrastructure", 0.005},
-	}
-	for _, seed := range seeds {
+	for _, seed := range defaultDomainSeeds {
 		_, err := s.writeExecContext(ctx,
 			`INSERT INTO domains (domain_tag, decay_rate) VALUES (?, ?) ON CONFLICT DO NOTHING`,
 			seed.tag, seed.rate)

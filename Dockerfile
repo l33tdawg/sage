@@ -5,6 +5,10 @@ FROM golang:1.25-alpine AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./
+# The root module replaces CometBFT with SAGE's audited local source subset.
+# Seed that module's metadata before dependency download; COPY . supplies the
+# complete source tree for the build layer below.
+COPY third_party/cometbft/go.mod third_party/cometbft/go.sum ./third_party/cometbft/
 RUN go mod download
 COPY . .
 

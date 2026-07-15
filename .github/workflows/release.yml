@@ -44,10 +44,20 @@ jobs:
           go-version: '1.25'
           cache: true
       - run: go test ./... -count=1 -race
+      - name: Test local CometBFT hardening
+        run: make test-cometbft-patch
       - name: Run natter tests
         run: |
           cd natter
           go test ./... -count=1 -race
+
+  v119-fault-gates:
+    name: v11.9 Multi-Process Fault Gates
+    needs: test
+    uses: ./.github/workflows/v11.9-fault-gates.yml
+    with:
+      require_scoped_reconfiguration: ${{ startsWith(github.ref_name, 'v11.9') }}
+      require_authorized_state_sync: ${{ startsWith(github.ref_name, 'v11.9') }}
 
   frontend-static:
     name: Frontend Static Checks
@@ -62,7 +72,7 @@ jobs:
   goreleaser:
     name: GoReleaser (tarballs)
     runs-on: ubuntu-latest
-    needs: [lint, test, frontend-static]
+    needs: [lint, test, frontend-static, v119-fault-gates]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -265,7 +275,7 @@ jobs:
   docker-mcp:
     name: Docker Image + MCP Registry
     runs-on: ubuntu-latest
-    needs: [lint, test, frontend-static]
+    needs: [lint, test, frontend-static, v119-fault-gates]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
@@ -325,7 +335,7 @@ jobs:
   pypi-publish:
     name: Publish Python SDK to PyPI
     runs-on: ubuntu-latest
-    needs: [lint, test, frontend-static]
+    needs: [lint, test, frontend-static, v119-fault-gates]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 

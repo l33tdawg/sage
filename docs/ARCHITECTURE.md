@@ -95,7 +95,7 @@ make init
 
 This runs `deploy/init-testnet.sh`, which:
 
-- Builds CometBFT v0.38.15 from source inside a Docker container (if not locally installed)
+- Builds CometBFT v0.38.23 from source inside a Docker container (if the exact version is not locally installed)
 - Generates Ed25519 validator keys and genesis configuration for 4 validator nodes
 - Writes configs to `deploy/genesis/node{0..3}/`
 - Patches `config.toml` for Docker networking (disables PEX, enables Prometheus, sets block time to 3s)
@@ -185,7 +185,7 @@ make down-clean    # Stop containers AND wipe all data (volumes, orphans)
 
 | Layer | Encryption | Protocol |
 |-------|-----------|----------|
-| CometBFT P2P (26656) | **Encrypted** — SecretConnection (X25519 DH + ChaCha20-Poly1305) | STS protocol, built into CometBFT v0.38.15 |
+| CometBFT P2P (26656) | **Encrypted** — SecretConnection (X25519 DH + ChaCha20-Poly1305) | STS protocol, built into CometBFT v0.38.23 |
 | REST API (8443, quorum mode) | **TLS 1.3** — per-quorum ECDSA P-256 CA, node certs with IP/DNS SANs | `internal/tlsca/` package |
 | REST API (8080, localhost) | Plain HTTP | Localhost only, for dashboard/MCP |
 | ABCI (26658, Docker) | Plain TCP | Docker bridge network isolation |
@@ -1173,10 +1173,10 @@ Wait for `Models ready` in the output before submitting memories that require em
 
 **Symptom:** Docker build of CometBFT from source fails.
 
-**Cause:** Network issues pulling the Go image or cloning CometBFT. Retry, or install CometBFT v0.38.15 locally:
+**Cause:** Network issues pulling the Go image or cloning CometBFT. Retry, or install CometBFT v0.38.23 locally:
 
 ```bash
-git clone --branch v0.38.15 --depth 1 https://github.com/cometbft/cometbft.git
+git clone --branch v0.38.23 --depth 1 https://github.com/cometbft/cometbft.git
 cd cometbft && make install
 cd .. && make init
 ```

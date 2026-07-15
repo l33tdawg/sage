@@ -1,9 +1,9 @@
-<!-- Core document reconciled through SAGE v11.7.0; the v11.9 quorum/state-sync section is code-verified through the 2026-07 foundation branch. -->
+<!-- Core document reconciled through SAGE v11.7.0; the v11.9 quorum/state-sync section is code-verified through the 2026-07 opt-in state-sync implementation. -->
 
 # RBAC, Organizations, and Federation
 
 Verified against code at SAGE v11.7.0, with the v11.9 quorum/state-sync section
-updated against the 2026-07 foundation implementation.
+updated against the 2026-07 opt-in implementation and open release gates.
 
 ## Overview
 
@@ -286,12 +286,9 @@ configuration, and a binary, so it must never be sent over ABCI/P2P
 (`internal/snapshot/snapshot.go:1-9`). Its v11.9 integration test restores the
 bundle, deletes SQLite, recomputes AppHash, reloads app-v20, and rebuilds scoped
 content plus classification from Badger
-(`internal/abci/appv20_recovery_integration_test.go:152-285`). Network state sync
-is not yet enabled: CometBFT receives a dormant boot runtime that advertises no
-snapshots, rejects offers, returns no chunks, and aborts apply
-(`internal/abci/boot_state_sync_runtime.go`, `cmd/sage-gui/node.go`). A future
-enabled network path must therefore use
-the separate consensus-only, key-free format described below.
+(`internal/abci/appv20_recovery_integration_test.go:152-285`). Network state
+sync never accepts that rollback format. It is fail-closed by default and can
+be armed only as the separate, explicit consensus-only path described below.
 
 Crash replay is height-bound rather than a nonce bypass. Scoped votes store the
 immutable first decision and its FinalizeBlock height atomically; only an exact
@@ -303,50 +300,142 @@ the original AppHashes, restores all SQL votes, and confirms that the same
 signed vote at a later height is still rejected
 (`internal/abci/appv20_recovery_integration_test.go:287-426`).
 
-The dormant network-state-sync substrate is isolated in `internal/statesync`.
-Its canonical metadata binds CometBFT's trusted height/AppHash to a bounded
-chunked Badger backup, hashes every chunk and the complete stream, caps chunks
-at 8 MiB and count at 512, and rejects the unrelated local rollback manifest
-(`internal/statesync/format.go:1-230`). Its disk assembler accepts out-of-order
-delivery, makes an exact duplicate idempotent, rejects corrupt/incorrect-size
-chunks, and verifies the whole backup before an atomic file rename
-(`internal/statesync/assembler.go:15-198`). Tests include malformed canonical
-encodings, wrong trusted hashes, interrupted/incomplete assembly, and a real
-Badger backup/load with an identical AppHash (`internal/statesync/format_test.go`).
-The ABCI endpoints stay disabled even though these format proofs pass.
+The network-state-sync implementation is isolated in `internal/statesync`. Its
+versioned wire image is a deterministic, lexicographically ordered stream of
+the latest visible Badger keys and values, not a physical Badger backup. LSM
+history, tombstones, and expired values never enter it; TTL/user metadata fails
+export. Restore requires an empty database and rejects duplicate/out-of-order
+keys, invalid lengths/counts, truncation, and trailing bytes
+(`internal/statesync/canonical_state.go`). Canonical metadata binds CometBFT's
+trusted height/AppHash to that bounded chunked stream, hashes every chunk and
+the complete image, caps chunks at 8 MiB and count at 512, and rejects the
+unrelated rollback manifest (`internal/statesync/format.go`). The disk assembler
+accepts out-of-order delivery, makes an exact duplicate idempotent, rejects
+corrupt/wrong-size chunks, and verifies the complete stream before atomic
+publication (`internal/statesync/assembler.go`).
 
-The network producer and receiver endpoints are also dormant. Export makes a bounded
-live Badger backup, requires an app-v20 reload verifier to match the committed
-AppHash, atomically publishes only metadata/chunks, rejects extra files and
-symlinks, and hashes a chunk again immediately before read
-(`internal/statesync/exporter.go:23-362`). Receiver preparation loads only into
-a new staging directory, reopens it read-only so validation cannot backfill or
-mutate consensus state, requires exact persisted height plus active app-v20,
-recomputes the narrow AppHash, validates all canonical scoped state, and removes
-the stage on failure (`internal/store/badger.go`,
-`internal/abci/scoped_state_sync.go:19-139`,
-`internal/abci/scoped_recovery.go:73-114`). A guarded boot-only executor can now
-journal and rename a prepared directory while verifying restart decisions
-against persisted Comet state (`internal/statesync/activation_directories.go`),
-but no endpoint invokes it or publishes its result into a serving process, so
-`ListSnapshots` still advertises none.
+`quorum.state_sync` has mutually exclusive `serving` and `receiving` boot roles
+and remains off when neither is set (`cmd/sage-gui/state_sync_config.go`). Both
+roles require a strict locally installed JSON trust root. Its schema binds
+chain ID, joining Comet node ID, joining validator Ed25519 public key, app
+version 20, expiry, snapshot floor, existing validator node IDs, and approved
+providers. Provider IDs must exactly equal validator IDs; v1 does not permit a
+preferred subset. The loader rejects files over 64 KiB, symlinks, non-regular or
+group/world-writable modes, open-time replacement, unknown fields, trailing
+JSON, and non-canonical values (`internal/statesync/authorization.go`).
 
-The accepted activation design deliberately avoids changing `BadgerStore.db`
-inside a serving process. It replaces the whole ABCI application bundle during
-boot, journals the filesystem/Comet persistence crash window, delays REST,
-dashboard, projection, snapshot-scheduler, and worker construction until the
-runtime is sealed, and requires an authenticated validator-only P2P allowlist.
-This remains disabled behavior; the detailed gates are in
+The in-process `sage-gui` path pins CometBFT v0.38.23 and hardens the effective
+armed-node profile before the node starts: PEX/seeds/seed mode are off, ordinary
+inbound and outbound limits are zero, unconditional/private IDs exactly equal
+the authorization, and persistent peers are restricted to it
+(`cmd/sage-gui/state_sync_p2p_profile.go`). The receiver requires every approved
+provider as a persistent peer and at least two distinct HTTP(S) RPC origins for
+light-client verification. Provider expiry is rechecked on every list/load.
+Receiver expiry is deadline-bound, rechecked through preparation and every
+durable activation boundary, and permanently latched once observed so clock
+rollback cannot revive the session. Expiry does not disconnect an
+unconditional peer already held by Comet; leaving the one-shot profile requires
+a config transition and process restart.
+
+The root module replaces upstream v0.38.23 with the provenance-recorded local
+subset in `third_party/cometbft`. Six overlays prevent an inactive-syncer nil
+dereference, recognize only SAGE's seal-abort sentinel as a graceful block-sync
+shutdown, bridge positive state over an empty block store, retain that bridge
+across consecutive empty-blockstore restarts, enforce `seen commit -> positive
+state -> successful block-sync switch -> durable height/AppHash marker`, and
+make the state/effective-height bootstrap atomic. Commit and completion-marker
+writes are synchronous. If the state DB is independently proven empty, startup
+inspects the raw block-store database and may remove only the exact lone valid
+seen-commit residue. This avoids the upstream `NewBlockStore` panic on malformed
+metadata; additional or malformed content is preserved and rejected.
+`make test-cometbft-patch` race-tests both reactors, two consecutive empty-store
+restarts, atomic bootstrap-marker persistence, ordered failure boundaries,
+marker encoding, and raw exact-residue recovery. The pinned source commit is
+`feb2aea4dc271d612129afc958cb844713ec792b`; because that v0.38.23 source still
+declares core semver `0.38.22`, the stamped standalone runtime reports
+`0.38.22+feb2aea4dc271d612129afc958cb844713ec792b`.
+`third_party/cometbft/README-SAGE.md` records source/module provenance, exact
+overlay files, and retained Apache-2.0 license/NOTICE.
+
+At provider startup, effective block retention must be zero (`retain_blocks: 0`
+is the quorum default); a positive pruning window is rejected until rolling
+snapshots become block-base aware. Maintenance then sweeps only proven SAGE-
+owned staging and retains eight verified snapshots. Export writes the canonical
+latest-visible stream, restores it into an isolated database to match committed
+app-v20 height/epoch/AppHash/scoped state, and atomically publishes metadata/
+chunks before P2P exposure. `ListSnapshots` advertises snapshot `H` only after
+live height reaches `H+2`; the two newest retained candidates may wait for those
+light blocks while six older fallbacks remain. `LoadSnapshotChunk` uses that
+same de-duplicated catalog and rehashes immediately before read
+(`internal/statesync/exporter.go`,
+`internal/abci/boot_state_sync_endpoints.go`).
+
+A receiver accepts a role only when application Info and raw Badger are empty
+and SQLite contains exactly the default domain seed rows while every other
+application table is empty. Persisted Comet state must also be empty. Startup
+may then remove only an exact lone valid seen-commit residue; afterward the
+`state`, `blockstore`, `evidence`, and `tx_index` databases must have no entries.
+The WAL is absent or a zero-length regular non-symlink file, FilePV signing
+state is zero, and genesis cannot initialize a single-local-validator chain.
+Offer and preparation separately preflight `2 * snapshot + 256 MiB` and
+`4 * snapshot + 256 MiB`, respectively, on their target filesystems. Local
+capacity failure is terminal rather than a provider rejection. Native restore
+failures such as Unix `ENOSPC`/`EDQUOT` and Windows disk-full/quota equivalents
+remain terminal even after a successful preflight. Each chunk
+sender must be an approved existing validator/provider. Complete candidates
+are restored and verified in isolation while live state remains open; a
+malformed candidate can be rejected back to discovery for another provider,
+bounded to eight rejections (`cmd/sage-gui/state_sync_runtime.go`,
+`internal/abci/scoped_state_sync.go`,
+`internal/abci/boot_state_sync_endpoints.go`).
+
+Activation deliberately does not mutate `BadgerStore.db` inside a serving app.
+Under the runtime's exclusive lease it journals and switches whole Badger
+directories, reopens without migrations, constructs and publishes a complete
+replacement `SageApp` bundle, then waits for the running Comet state store to
+persist matching height/AppHash/app version and a valid seen commit, complete
+the block-sync switch, and publish the exact durable completion marker. That
+wait defaults to 30 minutes and any positive explicit duration is accepted.
+Externally triggerable `Query` and `CheckTx` fail fast throughout every
+unsealed phase, including PendingComet, so neither can hold Comet's shared in-
+process ABCI-client mutex while the syncer performs its final `Info`. Consensus
+methods fail fast before PendingComet; a consensus block call arriving after
+the switch waits behind the seal without holding the bundle lease. `Info` and
+the state-sync methods remain available throughout the receive phases. Only
+after sealing and freezing bundle replacement may
+projection, snapshot, REST/dashboard/MCP/federation, voter, or other workers
+capture the final app/store graph
+(`cmd/sage-gui/state_sync_runtime.go`, `cmd/sage-gui/state_sync_boot.go`,
+`cmd/sage-gui/node.go`). Pre-handshake journal recovery still resolves crashes
+before the canonical Badger directory opens. When recovery keeps a matching
+activated directory, startup disables the recovered `receiving` role in memory
+and resumes that process as an ordinary synchronized node. Persistent config is
+not rewritten and must still be disabled before a later restart. From the
+`prepared` transition onward, any local close, journal, rename, reopen, or
+bundle-activation failure is terminal and does not consume provider fallback.
+If shutdown/failure releases a waiting block call, it returns SAGE's seal-abort
+sentinel; only that sentinel selects the graceful block-sync exit, while every
+unrelated application failure retains upstream panic behavior.
+
+This is implemented opt-in behavior, not a v11.9 release claim. The real Docker
+gate still lacks an authorized provider-to-receiver transfer and signed app-v20
+scope reconfiguration. Its firewall partitions preserve private per-validator
+ABCI links, publish host REST/RPC only on loopback, use an owned temporary
+fixture, prove the 2/4 peer split and halt, and require the same latest Comet
+block hash plus live ABCI height/AppHash and `catching_up=false` after healing.
+The standalone image
+copies the same six overlays as `sage-gui`. A `v11.9*` release enables both
+`V119_REQUIRE_SCOPED_RECONFIG=1` and
+`V119_REQUIRE_AUTHORIZED_STATE_SYNC=1`; the current topology cannot satisfy
+either missing proof. The real-transfer proof must use integrated
+`sage-gui serve` processes; split `amid`/Comet containers do not own the boot
+runtime or seal boundary.
+Operationally, Comet P2P (normally raw TCP 26656) plus the configured Comet RPC
+origins must be reachable. Internet validators need routable addresses, port
+forwarding, or a VPN; federation is not a validator tunnel. A future tunnel
+layer and the integrated real-transfer proof are both still blocking work. The
+detailed schema and open gates are in
 [`../../v11.9-state-sync-activation.md`](../../v11.9-state-sync-activation.md).
-Delivered foundations include the canonical/fsynced journal and recovery
-decision (`internal/statesync/activation.go`), guarded directory executor,
-writable no-migration opener (`internal/store/badger.go:105-128`), and dormant
-complete-bundle runtime with read/write leases
-(`internal/abci/boot_state_sync_runtime.go`). Startup now resolves any durable
-activation journal against persisted Comet state before creating/opening the
-canonical Badger directory (`cmd/sage-gui/state_sync_boot.go`). Ordinary
-services are not yet delayed behind runtime sealing, and no network receiver is
-armed.
 
 Scope proposals no longer require operators or agents to hand-encode that
 binary record. REST/dashboard accept a structured `scope` template, MCP exposes

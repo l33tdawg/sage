@@ -15,7 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/poe"
 	"github.com/l33tdawg/sage/internal/scope"
+	"github.com/l33tdawg/sage/internal/statesync"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/validator"
@@ -55,6 +57,7 @@ func TestPrepareAppV20StateSyncBackupValidatesWithoutActivating(t *testing.T) {
 	}
 
 	app.state.Height = 5
+	app.state.EpochNum = poe.EpochNumber(app.state.Height)
 	appHash, err := source.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
 	app.state.AppHash = append([]byte(nil), appHash...)
@@ -67,8 +70,7 @@ func TestPrepareAppV20StateSyncBackupValidatesWithoutActivating(t *testing.T) {
 	backupPath := filepath.Join(root, "badger.backup")
 	backup, err := os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	require.NoError(t, err)
-	_, err = source.DB().Backup(backup, 0)
-	require.NoError(t, err)
+	require.NoError(t, statesync.WriteCanonicalState(context.Background(), source.DB(), backup))
 	require.NoError(t, backup.Close())
 	require.NoError(t, app.Close())
 	closed = true
@@ -114,7 +116,7 @@ func TestPrepareAppV20StateSyncBackupRejectsMalformedCanonicalScope(t *testing.T
 	require.NoError(t, bs.DB().Update(func(txn *badger.Txn) error {
 		return txn.Set([]byte("state:scope-content:malformed"), []byte("not-a-canonical-envelope"))
 	}))
-	state := &AppState{Height: 2}
+	state := &AppState{Height: 2, EpochNum: poe.EpochNumber(2)}
 	hash, err := bs.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
 	state.AppHash = hash
@@ -126,8 +128,7 @@ func TestPrepareAppV20StateSyncBackupRejectsMalformedCanonicalScope(t *testing.T
 	backupPath := filepath.Join(root, "badger.backup")
 	backup, err := os.OpenFile(backupPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	require.NoError(t, err)
-	_, err = bs.DB().Backup(backup, 0)
-	require.NoError(t, err)
+	require.NoError(t, statesync.WriteCanonicalState(context.Background(), bs.DB(), backup))
 	require.NoError(t, backup.Close())
 	require.NoError(t, bs.CloseBadger())
 
