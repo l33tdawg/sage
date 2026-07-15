@@ -1,6 +1,7 @@
 package scope
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -71,4 +72,26 @@ func TestRecordCodecRejectsUnknownVersionAndTrailingBytes(t *testing.T) {
 	trailing := append(append([]byte(nil), encoded...), 0)
 	_, err = Decode(trailing)
 	assert.Error(t, err)
+}
+
+func FuzzDecodeRecord(f *testing.F) {
+	canonical, err := Encode(validRecord())
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(canonical)
+	f.Add([]byte("not a scope record"))
+	f.Fuzz(func(t *testing.T, input []byte) {
+		record, decodeErr := Decode(input)
+		if decodeErr != nil {
+			return
+		}
+		reencoded, encodeErr := Encode(record)
+		if encodeErr != nil {
+			t.Fatalf("decoded record failed validation on re-encode: %v", encodeErr)
+		}
+		if !bytes.Equal(reencoded, input) {
+			t.Fatal("accepted scope record has a second wire encoding")
+		}
+	})
 }

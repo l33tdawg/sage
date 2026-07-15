@@ -1,6 +1,7 @@
 package scope
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -98,4 +99,48 @@ func TestContentCodecRoundTripAndRejectsInvalidValues(t *testing.T) {
 	require.ErrorContains(t, err, "finite")
 	_, err = DecodeContent(append(encoded, 0))
 	require.ErrorContains(t, err, "trailing")
+}
+
+func FuzzDecodeBallot(f *testing.F) {
+	canonical, err := EncodeBallot(testBallot())
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(canonical)
+	f.Add([]byte("not a ballot"))
+	f.Fuzz(func(t *testing.T, input []byte) {
+		ballot, decodeErr := DecodeBallot(input)
+		if decodeErr != nil {
+			return
+		}
+		reencoded, encodeErr := EncodeBallot(ballot)
+		if encodeErr != nil {
+			t.Fatalf("decoded ballot failed validation on re-encode: %v", encodeErr)
+		}
+		if !bytes.Equal(reencoded, input) {
+			t.Fatal("accepted scope ballot has a second wire encoding")
+		}
+	})
+}
+
+func FuzzDecodeContent(f *testing.F) {
+	canonical, err := EncodeContent(testContent())
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(canonical)
+	f.Add([]byte("not scoped content"))
+	f.Fuzz(func(t *testing.T, input []byte) {
+		content, decodeErr := DecodeContent(input)
+		if decodeErr != nil {
+			return
+		}
+		reencoded, encodeErr := EncodeContent(content)
+		if encodeErr != nil {
+			t.Fatalf("decoded content failed validation on re-encode: %v", encodeErr)
+		}
+		if !bytes.Equal(reencoded, input) {
+			t.Fatal("accepted scoped content has a second wire encoding")
+		}
+	})
 }
