@@ -351,16 +351,16 @@ func prepareDisposableStateSyncRoot(root, liveBadgerPath string) error {
 		if markerOpenErr != nil {
 			return fmt.Errorf("create disposable state sync marker: %w", markerOpenErr)
 		}
-		if _, err := marker.Write([]byte("SAGE state-sync disposable root v1\n")); err != nil {
+		if _, writeErr := marker.Write([]byte("SAGE state-sync disposable root v1\n")); writeErr != nil {
 			_ = marker.Close()
-			return err
+			return writeErr
 		}
-		if err := marker.Sync(); err != nil {
+		if syncErr := marker.Sync(); syncErr != nil {
 			_ = marker.Close()
-			return err
+			return syncErr
 		}
-		if err := marker.Close(); err != nil {
-			return err
+		if closeErr := marker.Close(); closeErr != nil {
+			return closeErr
 		}
 		cleanupUnownedRoot = false
 	} else if markerErr := requireStateSyncDisposableMarker(ownedRoot); markerErr != nil {
