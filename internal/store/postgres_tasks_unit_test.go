@@ -121,6 +121,13 @@ func TestPostgresEnsureMemoriesSchemaRepairsTaskStatusAndClassification(t *testi
 		WillReturnResult(pgxmock.NewResult("ALTER TABLE", 0))
 	mock.ExpectExec(regexp.QuoteMeta(`CREATE INDEX IF NOT EXISTS idx_memories_embedding_provider ON memories (embedding_provider)`)).
 		WillReturnResult(pgxmock.NewResult("CREATE INDEX", 0))
+	mock.ExpectExec(regexp.QuoteMeta(`CREATE TABLE IF NOT EXISTS memory_tags (
+			memory_id UUID NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE,
+			tag TEXT NOT NULL,
+			PRIMARY KEY (memory_id, tag)
+		)`)).WillReturnResult(pgxmock.NewResult("CREATE TABLE", 0))
+	mock.ExpectExec(regexp.QuoteMeta(`CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag)`)).
+		WillReturnResult(pgxmock.NewResult("CREATE INDEX", 0))
 	for _, stmt := range postgresTaskAssignmentSchema {
 		mock.ExpectExec(regexp.QuoteMeta(stmt)).WillReturnResult(pgxmock.NewResult("DDL", 0))
 	}
@@ -134,6 +141,30 @@ func TestPostgresEnsureMemoriesSchemaRepairsTaskStatusAndClassification(t *testi
 		WillReturnResult(pgxmock.NewResult("INSERT", 0))
 
 	require.NoError(t, store.ensureMemoriesSchema(context.Background()))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPostgresTagProjectionUsesCanonicalTable(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(mock.Close)
+	store := &PostgresStore{db: mock}
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM memory_tags WHERE memory_id = $1`)).
+		WithArgs("00000000-0000-4000-8000-000000000000").
+		WillReturnResult(pgxmock.NewResult("DELETE", 1))
+	for _, tag := range []string{"alpha", "zeta"} {
+		mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO memory_tags (memory_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`)).
+			WithArgs("00000000-0000-4000-8000-000000000000", tag).
+			WillReturnResult(pgxmock.NewResult("INSERT", 1))
+	}
+	require.NoError(t, store.SetTags(context.Background(), "00000000-0000-4000-8000-000000000000", []string{"alpha", "zeta"}))
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT tag FROM memory_tags WHERE memory_id = $1 ORDER BY tag`)).
+		WithArgs("00000000-0000-4000-8000-000000000000").
+		WillReturnRows(pgxmock.NewRows([]string{"tag"}).AddRow("alpha").AddRow("zeta"))
+	got, err := store.GetTags(context.Background(), "00000000-0000-4000-8000-000000000000")
+	require.NoError(t, err)
+	require.Equal(t, []string{"alpha", "zeta"}, got)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

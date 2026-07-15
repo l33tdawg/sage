@@ -107,6 +107,11 @@ async def test_scope_read_surface(async_client, mock_api):
             "joined_revision": 1,
             "active": True,
         }],
+        "drain": {
+            "pending_ballot_count": 1,
+            "pending_memory_ids": ["memory-a"],
+            "blocking_validator_ids": ["validator-a"],
+        },
     }
     mock_api.get("/v1/scopes").mock(
         return_value=httpx.Response(200, json={"scopes": [record], "count": 1})
@@ -121,6 +126,7 @@ async def test_scope_read_surface(async_client, mock_api):
 
     listed = await async_client.list_scopes()
     assert listed.scopes[0].domains[0].name == "research"
+    assert listed.scopes[0].drain.blocking_validator_ids == ["validator-a"]
     assert (await async_client.get_scope("scope-a")).state == "active"
     assert (await async_client.get_scope("scope a")).scope_id == "scope a"
     assert escaped.called

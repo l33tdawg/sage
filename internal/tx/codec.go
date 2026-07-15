@@ -1,6 +1,7 @@
 package tx
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
@@ -8,6 +9,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	memorytags "github.com/l33tdawg/sage/internal/tags"
 )
 
 // Wire format: [1-byte type][payload][64-byte signature][32-byte pubkey][8-byte nonce][8-byte unix-nano timestamp]
@@ -705,8 +708,14 @@ func encodeMemorySubmit(s *MemorySubmit) []byte {
 	buf = appendBytes(buf, []byte(s.ParentHash))
 	buf = append(buf, byte(s.Classification))
 	buf = appendBytes(buf, []byte(s.TaskStatus))
+	if len(s.Tags) > 0 {
+		buf = append(buf, memorySubmitTagsMarker...)
+		buf = appendStringSlice(buf, s.Tags)
+	}
 	return buf
 }
+
+var memorySubmitTagsMarker = []byte("SAGE-MEM-TAGS-V1\x00")
 
 func decodeMemorySubmit(data []byte) (*MemorySubmit, error) {
 	s := &MemorySubmit{}
@@ -769,13 +778,52 @@ func decodeMemorySubmit(data []byte) (*MemorySubmit, error) {
 
 	// TaskStatus: backward compatible — empty string if absent
 	if off < len(data) {
-		b, _, err = readBytes(data, off)
+		var next int
+		b, next, err = readBytes(data, off)
 		if err == nil {
 			s.TaskStatus = string(b)
+			off = next
+			if off < len(data) {
+				s.tagExtension = append([]byte(nil), data[off:]...)
+			}
 		}
 	}
 
 	return s, nil
+}
+
+// ActivateMemorySubmitTags interprets the app-v20 tag extension after the
+// caller has established that the deterministic fork is active. Keeping this
+// out of DecodeTx preserves pre-v20 replay: legacy decoders ignored every byte
+// after TaskStatus, including arbitrary historical trailing data.
+func ActivateMemorySubmitTags(parsed *ParsedTx) error {
+	if parsed == nil || parsed.Type != TxTypeMemorySubmit || parsed.MemorySubmit == nil {
+		return nil
+	}
+	submit := parsed.MemorySubmit
+	if len(submit.tagExtension) == 0 {
+		return memorytags.ValidateCanonical(submit.Tags)
+	}
+	if !bytes.HasPrefix(submit.tagExtension, memorySubmitTagsMarker) {
+		return fmt.Errorf("%w: invalid memory tag extension", ErrInvalidTxData)
+	}
+	countOffset := len(memorySubmitTagsMarker)
+	if len(submit.tagExtension)-countOffset < 4 {
+		return fmt.Errorf("%w: malformed memory tag extension", ErrInvalidTxData)
+	}
+	count := binary.BigEndian.Uint32(submit.tagExtension[countOffset : countOffset+4])
+	if count == 0 || count > memorytags.MaxCount {
+		return fmt.Errorf("%w: invalid memory tag count", ErrInvalidTxData)
+	}
+	values, off, err := readStringSlice(submit.tagExtension, len(memorySubmitTagsMarker))
+	if err != nil || off != len(submit.tagExtension) {
+		return fmt.Errorf("%w: malformed memory tag extension", ErrInvalidTxData)
+	}
+	if err := memorytags.ValidateCanonical(values); err != nil {
+		return fmt.Errorf("%w: non-canonical memory tags: %v", ErrInvalidTxData, err)
+	}
+	submit.Tags = values
+	return nil
 }
 
 // --- CoCommit (v11 / app-v15) ---

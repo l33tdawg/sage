@@ -611,6 +611,59 @@ func TestSubmitMemory_AttachesTagsAfterCommit(t *testing.T) {
 	assert.Equal(t, []string{"project-x", "follow-up"}, tags)
 }
 
+func TestSubmitMemory_AppV20CarriesCanonicalTagsInSignedTransaction(t *testing.T) {
+	var captured string
+	var capturedURI string
+	cometMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/broadcast_tx_commit" {
+			capturedURI = r.RequestURI
+			captured = strings.TrimPrefix(r.URL.Query().Get("tx"), "0x")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{
+			"check_tx": map[string]any{"code": 0}, "tx_result": map[string]any{"code": 0},
+			"hash": "V20TAGS", "height": "2",
+		}})
+	}))
+	defer cometMock.Close()
+
+	srv, memStore, _ := newTestServer(t, cometMock.URL)
+	srv.SetPostV20ForNextTxAccessor(func() bool { return true })
+	body := []byte(`{"content":"scoped tags","memory_type":"fact","domain_tag":"research","confidence_score":0.9,"tags":["zeta","alpha","alpha"]}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+
+	raw, err := hex.DecodeString(captured)
+	require.NoError(t, err)
+	require.NotEmpty(t, raw, "captured Comet transaction is empty: request_uri=%q", capturedURI)
+	parsed, err := tx.DecodeTx(raw)
+	require.NoError(t, err, "captured_len=%d captured_prefix=%q", len(raw), captured[:min(len(captured), 24)])
+	require.NoError(t, tx.ActivateMemorySubmitTags(parsed))
+	assert.Equal(t, []string{"alpha", "zeta"}, parsed.MemorySubmit.Tags)
+	valid, err := tx.VerifyTx(parsed)
+	require.NoError(t, err)
+	assert.True(t, valid)
+
+	var response SubmitMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	assert.Equal(t, []string{"alpha", "zeta"}, memStore.setTagsCalls[response.MemoryID])
+}
+
+func TestSubmitMemory_AppV20RejectsInvalidTagsBeforeBroadcast(t *testing.T) {
+	broadcast := false
+	cometMock := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { broadcast = true }))
+	defer cometMock.Close()
+	srv, _, _ := newTestServer(t, cometMock.URL)
+	srv.SetPostV20ForNextTxAccessor(func() bool { return true })
+	body := []byte(`{"content":"bad tags","memory_type":"fact","domain_tag":"research","confidence_score":0.9,"tags":[" padded "]}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.False(t, broadcast)
+}
+
 func TestSubmitMemory_NoTags_SkipsSetTags(t *testing.T) {
 	// When the client submits without a tags field, the handler must not
 	// call SetTags at all (would clear any existing tags otherwise).

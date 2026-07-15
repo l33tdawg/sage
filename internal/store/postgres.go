@@ -296,6 +296,16 @@ func (s *PostgresStore) ensureMemoriesSchema(ctx context.Context) error {
 			`CREATE INDEX IF NOT EXISTS idx_memories_embedding_provider ON memories (embedding_provider)`); err != nil {
 			return fmt.Errorf("index memories.embedding_provider: %w", err)
 		}
+		if _, err := ps.db.Exec(ctx, `CREATE TABLE IF NOT EXISTS memory_tags (
+			memory_id UUID NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE,
+			tag TEXT NOT NULL,
+			PRIMARY KEY (memory_id, tag)
+		)`); err != nil {
+			return fmt.Errorf("migrate memory_tags: %w", err)
+		}
+		if _, err := ps.db.Exec(ctx, `CREATE INDEX IF NOT EXISTS idx_memory_tags_tag ON memory_tags(tag)`); err != nil {
+			return fmt.Errorf("index memory_tags.tag: %w", err)
+		}
 		for _, stmt := range postgresTaskAssignmentSchema {
 			if _, err := ps.db.Exec(ctx, stmt); err != nil {
 				return fmt.Errorf("migrate task assignment schema: %w", err)
@@ -553,8 +563,15 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		}
 		query += " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
 	}
-	// opts.Tags is ignored on PostgresStore — tags are a SQLite-only feature
-	// (PostgresStore.SetTags is a no-op, so no tagged memories can exist).
+	if len(opts.Tags) > 0 {
+		placeholders := make([]string, len(opts.Tags))
+		for i, tag := range opts.Tags {
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
+			args = append(args, tag)
+			argIdx++
+		}
+		query += " AND EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.memory_id AND mt.tag IN (" + strings.Join(placeholders, ",") + "))"
+	}
 
 	scanLimit := opts.TopK
 	if opts.DecayFloor > 0 {
@@ -1368,6 +1385,13 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 		query += filter
 		countQuery += filter
 	}
+	if opts.Tag != "" {
+		filter := fmt.Sprintf(" AND EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.memory_id AND mt.tag = $%d)", argIdx)
+		query += filter
+		countQuery += filter
+		args = append(args, opts.Tag)
+		argIdx++
+	}
 
 	switch opts.Sort {
 	case "oldest":
@@ -2033,26 +2057,79 @@ func (s *PostgresStore) GetAllTasks(ctx context.Context, domain string, limit in
 	return records, rows.Err()
 }
 
-// ---- Tag operations (stubs — Postgres uses enterprise deployment, tags are SQLite/personal) ----
+// ---- Tag operations ----
 
-func (s *PostgresStore) SetTags(_ context.Context, _ string, _ []string) error {
-	return nil
+func (s *PostgresStore) SetTags(ctx context.Context, memoryID string, tags []string) error {
+	return s.RunInTx(ctx, func(tx OffchainStore) error {
+		ps := tx.(*PostgresStore)
+		if _, err := ps.db.Exec(ctx, `DELETE FROM memory_tags WHERE memory_id = $1`, memoryID); err != nil {
+			return fmt.Errorf("clear tags: %w", err)
+		}
+		for _, tag := range tags {
+			if _, err := ps.db.Exec(ctx, `INSERT INTO memory_tags (memory_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`, memoryID, tag); err != nil {
+				return fmt.Errorf("insert tag %q: %w", tag, err)
+			}
+		}
+		return nil
+	})
 }
 
-func (s *PostgresStore) GetTags(_ context.Context, _ string) ([]string, error) {
-	return nil, nil
+func (s *PostgresStore) GetTags(ctx context.Context, memoryID string) ([]string, error) {
+	rows, err := s.db.Query(ctx, `SELECT tag FROM memory_tags WHERE memory_id = $1 ORDER BY tag`, memoryID)
+	if err != nil {
+		return nil, fmt.Errorf("query tags: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var tag string
+		if err := rows.Scan(&tag); err != nil {
+			return nil, fmt.Errorf("scan tag: %w", err)
+		}
+		out = append(out, tag)
+	}
+	return out, rows.Err()
 }
 
-func (s *PostgresStore) GetTagsBatch(_ context.Context, _ []string) (map[string][]string, error) {
-	return map[string][]string{}, nil
+func (s *PostgresStore) GetTagsBatch(ctx context.Context, memoryIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(memoryIDs))
+	if len(memoryIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT memory_id, tag FROM memory_tags WHERE memory_id = ANY($1) ORDER BY memory_id, tag`, memoryIDs)
+	if err != nil {
+		return nil, fmt.Errorf("query tags batch: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var memoryID, tag string
+		if err := rows.Scan(&memoryID, &tag); err != nil {
+			return nil, fmt.Errorf("scan tag: %w", err)
+		}
+		out[memoryID] = append(out[memoryID], tag)
+	}
+	return out, rows.Err()
 }
 
-func (s *PostgresStore) ListAllTags(_ context.Context) ([]TagCount, error) {
-	return nil, nil
+func (s *PostgresStore) ListAllTags(ctx context.Context) ([]TagCount, error) {
+	rows, err := s.db.Query(ctx, `SELECT tag, COUNT(*) FROM memory_tags GROUP BY tag ORDER BY COUNT(*) DESC, tag ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list tags: %w", err)
+	}
+	defer rows.Close()
+	var out []TagCount
+	for rows.Next() {
+		var item TagCount
+		if err := rows.Scan(&item.Tag, &item.Count); err != nil {
+			return nil, fmt.Errorf("scan tag count: %w", err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
-func (s *PostgresStore) ListMemoriesByTag(_ context.Context, _ string, _, _ int) ([]*memory.MemoryRecord, int, error) {
-	return nil, 0, nil
+func (s *PostgresStore) ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error) {
+	return s.ListMemories(ctx, ListOptions{Tag: tag, Limit: limit, Offset: offset})
 }
 
 func (s *PostgresStore) FindByContentHash(_ context.Context, _ string) (bool, error) {

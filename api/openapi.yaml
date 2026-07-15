@@ -283,12 +283,17 @@ components:
             For task-type memories: planned, in_progress, done, or dropped.
         tags:
           type: array
+          maxItems: 32
           items:
             type: string
           description: >-
-            Optional user-defined labels attached after consensus commit.
-            Stored as node-local metadata (not part of the on-chain tx);
-            queryable via `tags` on /v1/memory/query and /v1/memory/search.
+            Optional user-defined labels, each at most 128 UTF-8 bytes. Above
+            app-v20 the node trims no values: it rejects empty/padded/oversized
+            tags, then sorts and deduplicates them into the signed transaction.
+            For scoped domains they are also AppHash-covered canonical content
+            and survive projection rebuild. Ordinary-domain tags remain
+            node-local serving metadata. Queryable via `tags` on
+            /v1/memory/query and /v1/memory/search.
         provider:
           type: string
           description: Stored off-chain only; not on-chain.
@@ -333,8 +338,8 @@ components:
             type: string
           description: >-
             Optional filter — when non-empty, restricts results to memories
-            tagged with ANY of the listed values (OR semantics). SQLite-only;
-            ignored on PostgresStore.
+            tagged with ANY of the listed values (OR semantics). Supported by
+            both SQLiteStore and PostgresStore.
 
     MemorySearchRequest:
       type: object
@@ -939,7 +944,7 @@ components:
 
     ScopeMember:
       type: object
-      required: [validator_id, assigned_weight, joined_revision, active]
+      required: [validator_id, assigned_weight, joined_revision, active, pending_ballot_count, validator_removal_blocked]
       properties:
         validator_id:
           type: string
@@ -951,10 +956,35 @@ components:
           format: uint64
         active:
           type: boolean
+        pending_ballot_count:
+          type: integer
+          minimum: 0
+          description: Pending ballots whose pinned roster includes this validator.
+        validator_removal_blocked:
+          type: boolean
+          description: True while active scope membership or a pinned pending ballot prevents safe CometBFT validator removal.
+
+    ScopeDrain:
+      type: object
+      required: [pending_ballot_count, pending_memory_ids, blocking_validator_ids]
+      properties:
+        pending_ballot_count:
+          type: integer
+          minimum: 0
+        pending_memory_ids:
+          type: array
+          items:
+            type: string
+          description: Pending scoped memories in canonical memory-ID order.
+        blocking_validator_ids:
+          type: array
+          items:
+            type: string
+          description: Validators blocked from CometBFT removal by this scope head or its pinned ballots.
 
     ScopeRecord:
       type: object
-      required: [scope_id, revision, revision_hash, state, controller_validator_id, created_height, updated_height, domains, members]
+      required: [scope_id, revision, revision_hash, state, controller_validator_id, created_height, updated_height, domains, members, drain]
       properties:
         scope_id:
           type: string
@@ -984,6 +1014,8 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/ScopeMember"
+        drain:
+          $ref: "#/components/schemas/ScopeDrain"
 
     ScopeListResponse:
       type: object
@@ -3344,12 +3376,12 @@ paths:
   /v1/scopes:
     get:
       operationId: listScopes
-      summary: List canonical v11.9 quorum scopes (operator/admin only).
+      summary: List canonical v11.9 quorum scopes and removal drain state (operator/admin only).
       tags:
         - Governance
       responses:
         "200":
-          description: Canonical scope heads in scope-ID order.
+          description: Canonical scope heads, pending ballot drains, and validator-removal blockers in scope-ID order.
           content:
             application/json:
               schema:
@@ -3364,7 +3396,7 @@ paths:
   /v1/scopes/{scope_id}:
     get:
       operationId: getScope
-      summary: Read one canonical v11.9 quorum scope (operator/admin only).
+      summary: Read one canonical v11.9 quorum scope and removal drain state (operator/admin only).
       tags:
         - Governance
       parameters:
@@ -3375,7 +3407,7 @@ paths:
             type: string
       responses:
         "200":
-          description: Canonical scope head and immutable current-revision anchor.
+          description: Canonical scope head, immutable current-revision anchor, pending ballot drain, and validator-removal blockers.
           content:
             application/json:
               schema:

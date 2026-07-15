@@ -3,11 +3,14 @@ package tx
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	memorytags "github.com/l33tdawg/sage/internal/tags"
 )
 
 func testKeypair(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
@@ -208,6 +211,51 @@ func TestVerifyTxTampered(t *testing.T) {
 	valid, err := VerifyTx(tx)
 	require.NoError(t, err)
 	assert.False(t, valid)
+}
+
+func TestMemorySubmitTagsRemainDormantUntilAppV20Activation(t *testing.T) {
+	_, priv := testKeypair(t)
+	tagged := sampleSubmitTx()
+	tagged.MemorySubmit.Tags = []string{"alpha", "zeta"}
+	require.NoError(t, SignTx(tagged, priv))
+	raw, err := EncodeTx(tagged)
+	require.NoError(t, err)
+
+	decoded, err := DecodeTx(raw)
+	require.NoError(t, err)
+	assert.Nil(t, decoded.MemorySubmit.Tags, "DecodeTx alone must preserve pre-v20 semantics")
+	preActivation, err := EncodeTx(decoded)
+	require.NoError(t, err)
+	assert.NotEqual(t, raw, preActivation, "a pre-v20 canonicality check rejects the dormant extension exactly as an older binary does")
+	valid, err := VerifyTx(decoded)
+	require.NoError(t, err)
+	assert.False(t, valid, "the extension cannot become unsigned metadata before activation")
+
+	require.NoError(t, ActivateMemorySubmitTags(decoded))
+	assert.Equal(t, []string{"alpha", "zeta"}, decoded.MemorySubmit.Tags)
+	canonical, err := EncodeTx(decoded)
+	require.NoError(t, err)
+	assert.Equal(t, raw, canonical)
+	valid, err = VerifyTx(decoded)
+	require.NoError(t, err)
+	assert.True(t, valid)
+}
+
+func TestMemorySubmitTagActivationRejectsNonCanonicalExtension(t *testing.T) {
+	parsed := sampleSubmitTx()
+	parsed.MemorySubmit.Tags = []string{"zeta", "alpha"}
+	require.ErrorContains(t, ActivateMemorySubmitTags(parsed), "canonical")
+
+	parsed.MemorySubmit.Tags = nil
+	parsed.MemorySubmit.tagExtension = append(append([]byte(nil), memorySubmitTagsMarker...), appendStringSlice(nil, []string{"alpha", "alpha"})...)
+	require.ErrorContains(t, ActivateMemorySubmitTags(parsed), "canonical")
+
+	tooMany := make([]string, memorytags.MaxCount+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("tag-%02d", i)
+	}
+	parsed.MemorySubmit.tagExtension = append(append([]byte(nil), memorySubmitTagsMarker...), appendStringSlice(nil, tooMany)...)
+	require.ErrorContains(t, ActivateMemorySubmitTags(parsed), "tag count")
 }
 
 func TestDecodeInvalidBytes(t *testing.T) {

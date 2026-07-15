@@ -491,6 +491,14 @@ class ScopeMember(BaseModel):
     assigned_weight: int
     joined_revision: int
     active: bool
+    pending_ballot_count: int = 0
+    validator_removal_blocked: bool = False
+
+
+class ScopeDrain(BaseModel):
+    pending_ballot_count: int = 0
+    pending_memory_ids: list[str] = Field(default_factory=list)
+    blocking_validator_ids: list[str] = Field(default_factory=list)
 
 
 class ScopeRecord(BaseModel):
@@ -503,6 +511,7 @@ class ScopeRecord(BaseModel):
     updated_height: int
     domains: list[ScopeDomain]
     members: list[ScopeMember]
+    drain: ScopeDrain = Field(default_factory=ScopeDrain)
 
 
 class ScopeListResponse(BaseModel):

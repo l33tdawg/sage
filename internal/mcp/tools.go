@@ -352,7 +352,7 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_scope_list": {
 			Name:        "sage_scope_list",
-			Description: "List canonical app-v20 quorum scopes, their exact domain allowlists, pinned integer weights, lifecycle state, and revision audit anchors. Requires node-operator or admin access.",
+			Description: "List canonical app-v20 quorum scopes, exact domains, pinned weights, revision anchors, pending-ballot drain state, and validator-removal blockers. Requires node-operator or admin access.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
@@ -361,7 +361,7 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_scope_get": {
 			Name:        "sage_scope_get",
-			Description: "Read one canonical app-v20 quorum scope by exact scope ID. Requires node-operator or admin access.",
+			Description: "Read one canonical app-v20 quorum scope and its pending-ballot/validator-removal drain state by exact scope ID. Requires node-operator or admin access.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

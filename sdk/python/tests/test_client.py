@@ -256,6 +256,11 @@ def test_scope_read_surface(client, mock_api):
             "joined_revision": 1,
             "active": True,
         }],
+        "drain": {
+            "pending_ballot_count": 1,
+            "pending_memory_ids": ["memory-a"],
+            "blocking_validator_ids": ["validator-a"],
+        },
     }
     mock_api.get("/v1/scopes").mock(
         return_value=httpx.Response(200, json={"scopes": [record], "count": 1})
@@ -271,6 +276,7 @@ def test_scope_read_surface(client, mock_api):
     listed = client.list_scopes()
     assert listed.count == 1
     assert listed.scopes[0].members[0].assigned_weight == 7
+    assert listed.scopes[0].drain.pending_memory_ids == ["memory-a"]
     assert client.get_scope("scope-a").revision_hash == "ab" * 32
     assert client.get_scope("scope a").scope_id == "scope a"
     assert escaped.called

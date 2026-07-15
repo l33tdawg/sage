@@ -1204,6 +1204,29 @@ func TestSetTags_ConcurrentWithInserts(t *testing.T) {
 	}
 }
 
+func TestSetTagsParticipatesInOuterTransaction(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	record := testMemory("atomic-tags", "agent1", "atomic content", "research")
+	require.NoError(t, s.InsertMemory(ctx, record))
+
+	err := s.RunInTx(ctx, func(tx OffchainStore) error {
+		require.NoError(t, tx.SetTags(ctx, record.MemoryID, []string{"alpha", "zeta"}))
+		return fmt.Errorf("force rollback")
+	})
+	require.ErrorContains(t, err, "force rollback")
+	got, err := s.GetTags(ctx, record.MemoryID)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	require.NoError(t, s.RunInTx(ctx, func(tx OffchainStore) error {
+		return tx.SetTags(ctx, record.MemoryID, []string{"alpha", "zeta"})
+	}))
+	got, err = s.GetTags(ctx, record.MemoryID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alpha", "zeta"}, got)
+}
+
 // TestSearchByText_VaultActiveErrors confirms the v6.6.10 fix: when the store
 // has an attached vault (content encrypted at rest), SearchByText must return
 // the canonical "text search unavailable: content is vault-encrypted" error

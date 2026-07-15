@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"unicode/utf8"
+
+	memorytags "github.com/l33tdawg/sage/internal/tags"
 )
 
 const maxContentBytes = 1 << 20
@@ -25,6 +27,7 @@ type Content struct {
 	ParentHash        string
 	Classification    byte
 	TaskStatus        string
+	Tags              []string
 	SubmittedHeight   int64
 	SubmittedUnix     int64
 }
@@ -49,8 +52,17 @@ func EncodeContent(content Content) ([]byte, error) {
 	buf = appendString(buf, content.TaskStatus)
 	buf = appendInt64(buf, content.SubmittedHeight)
 	buf = appendInt64(buf, content.SubmittedUnix)
+	if len(content.Tags) > 0 {
+		buf = append(buf, scopedContentTagsMarker...)
+		buf = appendUint32(buf, uint32(len(content.Tags))) // #nosec G115 -- bounded by tags.MaxCount
+		for _, tag := range content.Tags {
+			buf = appendString(buf, tag)
+		}
+	}
 	return buf, nil
 }
+
+var scopedContentTagsMarker = []byte("SAGE-CONTENT-TAGS-V1\x00")
 
 func DecodeContent(data []byte) (Content, error) {
 	if len(data) == 0 || data[0] != SchemaV1 {
@@ -112,6 +124,26 @@ func DecodeContent(data []byte) (Content, error) {
 	if content.SubmittedUnix, off, err = readInt64(data, off); err != nil {
 		return Content{}, fmt.Errorf("submitted unix time: %w", err)
 	}
+	if off < len(data) {
+		if len(data)-off < len(scopedContentTagsMarker) || string(data[off:off+len(scopedContentTagsMarker)]) != string(scopedContentTagsMarker) {
+			return Content{}, errors.New("scoped content has invalid trailing bytes")
+		}
+		off += len(scopedContentTagsMarker)
+		count, next, countErr := readUint32(data, off)
+		if countErr != nil || count == 0 || count > memorytags.MaxCount {
+			return Content{}, errors.New("scoped content has invalid tag count")
+		}
+		off = next
+		content.Tags = make([]string, 0, int(count))
+		for i := uint32(0); i < count; i++ {
+			tag, tagNext, tagErr := readString(data, off, memorytags.MaxBytes)
+			if tagErr != nil {
+				return Content{}, fmt.Errorf("tag %d: %w", i, tagErr)
+			}
+			content.Tags = append(content.Tags, tag)
+			off = tagNext
+		}
+	}
 	if off != len(data) {
 		return Content{}, errors.New("scoped content has trailing bytes")
 	}
@@ -157,6 +189,9 @@ func ValidateContent(content Content) error {
 	}
 	if content.Classification > 4 {
 		return fmt.Errorf("invalid classification %d", content.Classification)
+	}
+	if err := memorytags.ValidateCanonical(content.Tags); err != nil {
+		return fmt.Errorf("tags: %w", err)
 	}
 	return nil
 }

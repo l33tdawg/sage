@@ -96,6 +96,41 @@ func TestScopedVoteAndVerdictPreservePinnedContentHash(t *testing.T) {
 	require.ErrorContains(t, err, "already reached")
 }
 
+func TestScopeValidatorDrainRequiresRosterExitAndTerminalBallots(t *testing.T) {
+	bs := newTestBadger(t)
+	record := testScopeRecord(1, "research")
+	require.NoError(t, bs.SetScopeRecord(record))
+	ballot, content := scopedSubmissionFixture()
+	content.ScopeID = record.ScopeID
+	ballot.ScopeID = record.ScopeID
+	require.NoError(t, bs.SetScopedMemorySubmission(ballot, content))
+
+	drain, err := bs.GetScopeValidatorDrain("validator-a")
+	require.NoError(t, err)
+	assert.False(t, drain.Ready())
+	assert.Equal(t, []string{"scope-a"}, drain.ActiveScopeIDs)
+	assert.Equal(t, []string{"memory-a"}, drain.PendingMemoryIDs)
+	pending, err := bs.ListPendingScopeBallots()
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	assert.Equal(t, "memory-a", pending[0].MemoryID)
+
+	updated := testScopeRecord(2, "research")
+	updated.ControllerValidatorID = "validator-b"
+	updated.Members = []scope.Member{{ValidatorID: "validator-b", AssignedWeight: 3, JoinedRevision: 1, Active: true}}
+	require.NoError(t, bs.SetScopeRecord(updated))
+	drain, err = bs.GetScopeValidatorDrain("validator-a")
+	require.NoError(t, err)
+	assert.Empty(t, drain.ActiveScopeIDs)
+	assert.Equal(t, []string{"memory-a"}, drain.PendingMemoryIDs)
+	assert.False(t, drain.Ready(), "leaving the current roster cannot discard an older ballot's pinned dependency")
+
+	require.NoError(t, bs.SetScopedMemoryVerdict(content.MemoryID, scope.BallotCommitted))
+	drain, err = bs.GetScopeValidatorDrain("validator-a")
+	require.NoError(t, err)
+	assert.True(t, drain.Ready())
+}
+
 func mustMemoryDomain(t *testing.T, bs *BadgerStore, memoryID string) string {
 	t.Helper()
 	value, err := bs.GetMemoryDomain(memoryID)

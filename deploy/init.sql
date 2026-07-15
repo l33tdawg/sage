@@ -46,6 +46,13 @@ CREATE TABLE memory_links (
 );
 CREATE INDEX idx_memory_links_target ON memory_links(target_id);
 
+CREATE TABLE memory_tags (
+    memory_id UUID NOT NULL REFERENCES memories(memory_id) ON DELETE CASCADE,
+    tag       TEXT NOT NULL,
+    PRIMARY KEY (memory_id, tag)
+);
+CREATE INDEX idx_memory_tags_tag ON memory_tags(tag);
+
 -- ============================================================
 -- 2. knowledge_triples
 -- ============================================================

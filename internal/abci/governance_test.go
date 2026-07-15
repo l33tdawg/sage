@@ -3,7 +3,9 @@ package abci
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	_ "github.com/l33tdawg/sage/internal/governance" // ensure governance package compiles with tests
+	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/validator"
 )
@@ -248,6 +251,84 @@ func TestGov_RemoveValidator(t *testing.T) {
 
 	_, exists := app.validators.GetValidator(val3.id)
 	assert.False(t, exists, "val3 should be removed from set")
+}
+
+func TestGovAppV20RemovalInterlockChecksProposalAndExecution(t *testing.T) {
+	setupThree := func(t *testing.T) (*SageApp, agentKey, agentKey, agentKey) {
+		t.Helper()
+		app, admin := setupGovTestApp(t)
+		app.appV20AppliedHeight = 1
+		val2, val3 := newAgentKey(t), newAgentKey(t)
+		registerAgent(t, app, val2, "validator-2", "admin")
+		registerAgent(t, app, val3, "validator-3", "admin")
+		for _, candidate := range []agentKey{val2, val3} {
+			require.NoError(t, app.validators.AddValidator(&validator.ValidatorInfo{ID: candidate.id, PublicKey: candidate.pub, Power: 10}))
+		}
+		require.NoError(t, app.badgerStore.SaveValidators(map[string]int64{admin.id: 10, val2.id: 10, val3.id: 10}))
+		return app, admin, val2, val3
+	}
+	installActiveScope := func(t *testing.T, app *SageApp, members ...agentKey) {
+		t.Helper()
+		sort.Slice(members, func(i, j int) bool { return members[i].id < members[j].id })
+		scopeMembers := make([]scope.Member, 0, len(members))
+		for _, member := range members {
+			scopeMembers = append(scopeMembers, scope.Member{ValidatorID: member.id, AssignedWeight: 1, JoinedRevision: 1, Active: true})
+		}
+		require.NoError(t, app.badgerStore.SetScopeRecord(scope.Record{
+			ScopeID: "scope-removal", Revision: 1, State: scope.StateActive,
+			ControllerValidatorID: members[0].id, CreatedHeight: 1, UpdatedHeight: 2,
+			Domains: []scope.Domain{{Name: "research"}}, Members: scopeMembers,
+		}))
+	}
+
+	t.Run("proposal admission", func(t *testing.T) {
+		app, admin, val2, val3 := setupThree(t)
+		installActiveScope(t, app, admin, val2, val3)
+		resp := finalizeBlock(t, app, 2, makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "remove scoped validator", 1))
+		require.Len(t, resp.TxResults, 1)
+		assert.Equal(t, uint32(72), resp.TxResults[0].Code)
+		assert.Contains(t, resp.TxResults[0].Log, "active scope memberships")
+		assert.Empty(t, resp.ValidatorUpdates)
+	})
+
+	t.Run("pinned ballot after roster exit", func(t *testing.T) {
+		app, admin, _, val3 := setupThree(t)
+		hash := sha256.Sum256([]byte("pending removal dependency"))
+		require.NoError(t, app.badgerStore.SetScopedMemorySubmission(scope.Ballot{
+			MemoryID: "pending-removal", ScopeID: "old-scope", ScopeRevision: 1, SubmittedHeight: 2,
+			State: scope.BallotPending, Members: []scope.BallotMember{
+				{ValidatorID: val3.id, EffectiveWeight: 1},
+			}, TotalWeight: 1,
+		}, scope.Content{
+			MemoryID: "pending-removal", ScopeID: "old-scope", ScopeRevision: 1,
+			SubmittingAgentID: admin.id, ContentHash: hash[:], MemoryType: 1,
+			Domain: "research", ConfidenceScore: 0.9, Content: "pending removal dependency",
+			SubmittedHeight: 2, SubmittedUnix: 100,
+		}))
+		resp := finalizeBlock(t, app, 3, makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "wait for pinned ballot", 1))
+		require.Len(t, resp.TxResults, 1)
+		assert.Equal(t, uint32(72), resp.TxResults[0].Code)
+		assert.Contains(t, resp.TxResults[0].Log, "pending scoped ballots [pending-removal]")
+		assert.NotContains(t, resp.TxResults[0].Log, "active scope memberships")
+	})
+
+	t.Run("execution recheck", func(t *testing.T) {
+		app, admin, val2, val3 := setupThree(t)
+		resp := finalizeBlock(t, app, 2, makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "remove after vote", 1))
+		require.Zero(t, resp.TxResults[0].Code, resp.TxResults[0].Log)
+		proposal, err := app.govEngine.GetActiveProposal()
+		require.NoError(t, err)
+		require.NotNil(t, proposal)
+
+		// A new scope dependency appearing during the governance voting window
+		// must make execution fail closed even though proposal admission passed.
+		installActiveScope(t, app, admin, val2, val3)
+		resp = finalizeBlock(t, app, 12, makeGovVoteTx(t, val2, proposal.ProposalID, tx.VoteDecisionAccept, 1))
+		require.Zero(t, resp.TxResults[0].Code, resp.TxResults[0].Log)
+		assert.Empty(t, resp.ValidatorUpdates)
+		_, stillPresent := app.validators.GetValidator(val3.id)
+		assert.True(t, stillPresent)
+	})
 }
 
 func TestGov_ProposalExpiry(t *testing.T) {

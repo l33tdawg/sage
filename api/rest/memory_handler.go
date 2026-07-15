@@ -21,6 +21,7 @@ import (
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
+	memorytags "github.com/l33tdawg/sage/internal/tags"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -39,9 +40,9 @@ type SubmitMemoryRequest struct {
 	ParentHash       string                   `json:"parent_hash,omitempty"`
 	TaskStatus       string                   `json:"task_status,omitempty"`
 	LinkedMemories   []string                 `json:"linked_memories,omitempty"`
-	// Tags are user-defined labels attached after consensus commit. They're
-	// node-local metadata (not part of the on-chain tx), queryable via the
-	// `tags` filter on /v1/memory/query and /v1/memory/search.
+	// Tags remain node-local for ordinary domains. Above app-v20 they are also
+	// carried canonically by the transaction so scoped domains can recover the
+	// same query projection on every validator and after state sync.
 	Tags []string `json:"tags,omitempty"`
 }
 
@@ -64,7 +65,7 @@ type QueryMemoryRequest struct {
 	TopK          int       `json:"top_k,omitempty"`
 	Cursor        string    `json:"cursor,omitempty"`
 	// Tags, when non-empty, restricts results to memories tagged with ANY
-	// of the listed values (OR semantics). SQLite-only.
+	// of the listed values (OR semantics) on both supported SQL backends.
 	Tags []string `json:"tags,omitempty"`
 	// Federated opts this recall into the v11 cross-network proxy: results
 	// from every active cross_fed peer are merged in (read-only, stamped with
@@ -480,6 +481,15 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	// into INTERNAL on the wire, which then triggered the per-record
 	// classification gate in handleQueryMemory for every cross-agent read.
 	classification := req.Classification
+	var consensusTags []string
+	if s.isPostV20ForNextTx() {
+		consensusTags, err = memorytags.Normalize(req.Tags)
+		if err != nil {
+			writeProblem(w, http.StatusBadRequest, "Invalid tags", err.Error())
+			return
+		}
+		req.Tags = consensusTags
+	}
 
 	submitTx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemorySubmit,
@@ -496,6 +506,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 			ParentHash:      req.ParentHash,
 			Classification:  tx.ClearanceLevel(classification), // #nosec G115 -- validated small int
 			TaskStatus:      req.TaskStatus,
+			Tags:            consensusTags,
 		},
 	}
 
@@ -564,18 +575,20 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 
 	metrics.MemoriesTotal.WithLabelValues(req.MemoryType, req.DomainTag, string(memory.StatusProposed)).Inc()
 
-	// Attach user-defined tags after the block is committed. Tags are
-	// non-consensus metadata (node-local), so we set them via the store
-	// rather than folding them into the tx. broadcastTxCommit has already
-	// returned after Commit flushed the memory, so SetTags will find it.
+	// Materialize user-defined tags after the block is committed. Above app-v20
+	// scoped tags are also carried by the signed transaction, mirrored in
+	// AppHash-covered scoped content, and flushed during Commit. This call is an
+	// idempotent serving-projection fallback for scoped records and remains the
+	// node-local source for ordinary unscoped domains. broadcastTxCommit has
+	// already returned after Commit flushed the memory, so SetTags will find it.
 	//
 	// Use a fresh short-timeout context rather than r.Context() — the
 	// client may have disconnected (SIGKILL, network drop) between
 	// broadcastTxCommit completing and here, and with r.Context() every
 	// interrupted submit leaves an untagged orphan row that the next
 	// idempotency run re-proposes as a duplicate. The commit has already
-	// landed on-chain; tag attachment is a node-local finalisation step
-	// and must not depend on the HTTP request staying alive.
+	// landed on-chain; projection finalisation must not depend on the HTTP
+	// request staying alive.
 	tagCtx, tagCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer tagCancel()
 

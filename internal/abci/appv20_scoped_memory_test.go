@@ -87,6 +87,7 @@ func TestAppV20ScopedBallotPinsRosterAcrossScopeUpdate(t *testing.T) {
 	record := installScopeForValidators(t, app, "scope-research", domain, 1, scope.StateActive, validators[:4])
 
 	submit := makeMemorySubmitTx(t, validators[0], domain, "pinned canonical memory")
+	submit.MemorySubmit.Tags = []string{"alpha", "research"}
 	result := app.processMemorySubmit(submit, 2, time.Unix(2, 0))
 	require.Zero(t, result.Code, result.Log)
 	memoryID := string(result.Data)
@@ -101,6 +102,15 @@ func TestAppV20ScopedBallotPinsRosterAcrossScopeUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, content)
 	assert.Equal(t, submit.MemorySubmit.Content, content.Content)
+	assert.Equal(t, submit.MemorySubmit.Tags, content.Tags)
+	require.Condition(t, func() bool {
+		for _, write := range app.pendingWrites {
+			if write.writeType == "memory_tags" {
+				return true
+			}
+		}
+		return false
+	}, "scoped submission must project canonical tags during Commit")
 
 	assert.Equal(t, uint32(13), scopedVote(t, app, validators[4], memoryID, tx.VoteDecisionAccept, 3), "current-chain outsider is not a scoped ballot member")
 	require.Zero(t, scopedVote(t, app, validators[0], memoryID, tx.VoteDecisionAccept, 4))
@@ -288,6 +298,7 @@ func TestAppV20ScopedProjectionRebuildFromCanonicalBadger(t *testing.T) {
 	app, validators, domain := setupScopedMemoryApp(t, 1)
 	installScopeForValidators(t, app, "scope-recovery", domain, 1, scope.StateActive, validators)
 	submit := makeMemorySubmitTx(t, validators[0], domain, "recoverable after projection loss")
+	submit.MemorySubmit.Tags = []string{"alpha", "recoverable"}
 	result := app.processMemorySubmit(submit, 2, time.Unix(200, 0))
 	require.Zero(t, result.Code, result.Log)
 	memoryID := string(result.Data)
@@ -304,6 +315,7 @@ func TestAppV20ScopedProjectionRebuildFromCanonicalBadger(t *testing.T) {
 		DomainTag: "other", ConfidenceScore: 0.1, Status: memory.StatusProposed,
 		CreatedAt: time.Unix(1, 0),
 	}))
+	require.NoError(t, projection.SetTags(context.Background(), memoryID, []string{"poisoned"}))
 	app.offchainStore = projection
 	rebuilt, err := app.RebuildScopedProjection(context.Background())
 	require.NoError(t, err)
@@ -323,6 +335,9 @@ func TestAppV20ScopedProjectionRebuildFromCanonicalBadger(t *testing.T) {
 	classification, err := projection.GetMemoryClassificationLocal(context.Background(), memoryID)
 	require.NoError(t, err)
 	assert.Equal(t, int(submit.MemorySubmit.Classification), classification)
+	projectedTags, err := projection.GetTags(context.Background(), memoryID)
+	require.NoError(t, err)
+	assert.Equal(t, submit.MemorySubmit.Tags, projectedTags)
 
 	challenge := app.processMemoryChallenge(makeMemoryChallengeTx(t, validators[0], memoryID, "retire bad knowledge"), 4, time.Unix(400, 0))
 	require.Zero(t, challenge.Code, challenge.Log)

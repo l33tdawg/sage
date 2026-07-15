@@ -4335,6 +4335,20 @@ func (s *SQLiteStore) TakeAgentNotifications(ctx context.Context, agentID string
 
 // SetTags replaces all tags on a memory with the given set.
 func (s *SQLiteStore) SetTags(ctx context.Context, memoryID string, tags []string) error {
+	// Commit and scoped recovery already run inside RunInTx. Reuse that
+	// transaction directly; attempting beginTxLocked on a tx-scoped store would
+	// dereference the intentionally-nil s.db and would also break atomicity.
+	if s.db == nil {
+		if _, err := s.conn.ExecContext(ctx, `DELETE FROM memory_tags WHERE memory_id = ?`, memoryID); err != nil {
+			return fmt.Errorf("clear tags: %w", err)
+		}
+		for _, tag := range tags {
+			if _, err := s.conn.ExecContext(ctx, `INSERT OR IGNORE INTO memory_tags (memory_id, tag) VALUES (?, ?)`, memoryID, tag); err != nil {
+				return fmt.Errorf("insert tag %q: %w", tag, err)
+			}
+		}
+		return nil
+	}
 	tx, unlock, err := s.beginTxLocked(ctx)
 	if err != nil {
 		return fmt.Errorf("begin tx: %w", err)
