@@ -540,6 +540,41 @@ result = client.submit_domain_reassign(
 )
 ```
 
+App-v20 operators can inspect the canonical scope topology and immutable
+current-revision anchors without decoding Badger directly:
+
+```python
+scopes = client.list_scopes()
+for scope in scopes.scopes:
+    print(scope.scope_id, scope.state, scope.revision, scope.revision_hash)
+
+research = client.get_scope("research-quorum")
+print([(m.validator_id, m.assigned_weight) for m in research.members])
+```
+
+Create the first canonical scope without hand-encoding binary governance
+payloads:
+
+```python
+proposal = client.governance_propose_scope(
+    scope={
+        "scope_id": "research-quorum",
+        "revision": 1,
+        "state": "active",
+        "controller_validator_id": validator_id,
+        "domains": ["research"],
+        "members": [
+            {"validator_id": validator_id, "assigned_weight": 1},
+        ],
+    },
+    reason="form the research replica quorum",
+)
+```
+
+The server sorts domains and members canonically and supplies consensus-owned
+heights. For later revisions, include every member's historical
+`joined_revision`; `scope` and legacy binary `payload` cannot be combined.
+
 > **Code 50** (`shared domain not ownable`) surfaces as HTTP 403 with
 > `shared domain not ownable` in the error detail — see
 > `sage_sdk.exceptions` for the documented mapping.

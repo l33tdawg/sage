@@ -3,10 +3,12 @@ package rest
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -17,16 +19,19 @@ import (
 // Payload (added v8.0) is an optional base64-encoded blob carrying operation-
 // specific data. For OpDomainReassign it's the JSON-encoded DomainReassign
 // body {domain, new_owner_id, parent_domain, open_to_shared} that the
-// executing TxTypeDomainReassign tx must reproduce byte-for-byte. Legacy
-// validator-set ops (add/remove/update_power) leave Payload empty.
+// executing TxTypeDomainReassign tx must reproduce byte-for-byte. App-v20
+// scope_action accepts either a canonical binary scope record in Payload or a
+// guided Scope template that the node canonicalizes. Legacy validator-set ops
+// (add/remove/update_power) leave both empty.
 type GovProposeRequest struct {
-	Operation    string `json:"operation"`
-	TargetID     string `json:"target_id"`
-	TargetPubkey string `json:"target_pubkey,omitempty"`
-	TargetPower  int64  `json:"target_power,omitempty"`
-	ExpiryBlocks int64  `json:"expiry_blocks,omitempty"`
-	Reason       string `json:"reason"`
-	Payload      string `json:"payload,omitempty"`
+	Operation    string                  `json:"operation"`
+	TargetID     string                  `json:"target_id"`
+	TargetPubkey string                  `json:"target_pubkey,omitempty"`
+	TargetPower  int64                   `json:"target_power,omitempty"`
+	ExpiryBlocks int64                   `json:"expiry_blocks,omitempty"`
+	Reason       string                  `json:"reason"`
+	Payload      string                  `json:"payload,omitempty"`
+	Scope        *scope.ProposalTemplate `json:"scope,omitempty"`
 }
 
 // GovProposeResponse is the JSON body for a successful proposal.
@@ -70,11 +75,7 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Operation == "" {
-		writeProblem(w, http.StatusBadRequest, "Missing operation", "operation is required (add_validator, remove_validator, update_power).")
-		return
-	}
-	if req.TargetID == "" {
-		writeProblem(w, http.StatusBadRequest, "Missing target_id", "target_id is required.")
+		writeProblem(w, http.StatusBadRequest, "Missing operation", "operation is required (add_validator, remove_validator, update_power, domain_reassign, memory_domain_repair, sync_group_action, scope_action).")
 		return
 	}
 	if req.Reason == "" {
@@ -87,6 +88,10 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid operation", err.Error())
 		return
 	}
+	if op == tx.GovOpScopeAction && !s.isPostV20ForNextTx() {
+		writeProblem(w, http.StatusConflict, "Scope governance is not active", "scope_action requires app-v20 activation.")
+		return
+	}
 
 	var pubKeyBytes []byte
 	if req.TargetPubkey != "" {
@@ -97,17 +102,14 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// v8.0: optional base64-encoded payload carries operation-specific data
-	// (e.g. JSON DomainReassign body for OpDomainReassign). The raw bytes are
-	// stored verbatim on the proposal record so the executing tx can verify
-	// body-vs-proposal parity. Legacy ops leave this empty.
+	// v8.0 payloads remain byte-for-byte base64. For app-v20 scope_action,
+	// structured input is converted into the same canonical binary record and
+	// the target ID can be derived from scope_id.
 	var payloadBytes []byte
-	if req.Payload != "" {
-		payloadBytes, err = base64.StdEncoding.DecodeString(req.Payload)
-		if err != nil {
-			writeProblem(w, http.StatusBadRequest, "Invalid payload", "payload must be valid base64.")
-			return
-		}
+	req.TargetID, payloadBytes, err = resolveGovProposalPayload(op, req.TargetID, req.Payload, req.Scope)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid governance payload", err.Error())
+		return
 	}
 
 	proposeTx := &tx.ParsedTx{
@@ -163,6 +165,43 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 		TxHash:     txHash,
 		Status:     "voting",
 	})
+}
+
+func resolveGovProposalPayload(op tx.GovProposalOp, targetID, rawPayload string, template *scope.ProposalTemplate) (string, []byte, error) {
+	if template != nil {
+		if op != tx.GovOpScopeAction {
+			return "", nil, errors.New("scope is only valid for scope_action")
+		}
+		if rawPayload != "" {
+			return "", nil, errors.New("payload and scope are mutually exclusive")
+		}
+		encoded, err := scope.EncodeProposalTemplate(*template)
+		if err != nil {
+			return "", nil, fmt.Errorf("scope: %w", err)
+		}
+		if targetID == "" {
+			targetID = template.ScopeID
+		} else if targetID != template.ScopeID {
+			return "", nil, fmt.Errorf("target_id %q does not match scope_id %q", targetID, template.ScopeID)
+		}
+		return targetID, encoded, nil
+	}
+
+	var payload []byte
+	if rawPayload != "" {
+		decoded, err := base64.StdEncoding.DecodeString(rawPayload)
+		if err != nil {
+			return "", nil, errors.New("payload must be valid base64")
+		}
+		payload = decoded
+	}
+	if targetID == "" {
+		return "", nil, errors.New("target_id is required")
+	}
+	if op == tx.GovOpScopeAction && len(payload) == 0 {
+		return "", nil, errors.New("scope_action requires either payload or scope")
+	}
+	return targetID, payload, nil
 }
 
 // handleGovVote handles POST /v1/governance/vote.
@@ -312,7 +351,9 @@ func parseGovOp(s string) (tx.GovProposalOp, error) {
 		return tx.GovOpMemoryDomainRepair, nil
 	case "sync_group_action":
 		return tx.GovOpSyncGroupAction, nil
+	case "scope_action":
+		return tx.GovOpScopeAction, nil
 	default:
-		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, domain_reassign, memory_domain_repair, sync_group_action")
+		return 0, fmt.Errorf("operation must be one of: add_validator, remove_validator, update_power, domain_reassign, memory_domain_repair, sync_group_action, scope_action")
 	}
 }

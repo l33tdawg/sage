@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -85,6 +86,45 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 	}
 
 	return store, nil
+}
+
+// OpenBadgerStoreReadOnly opens an existing Badger database without running
+// constructor backfills or permitting writes. State-sync and snapshot
+// verification use this to recompute AppHash against the received bytes without
+// validation itself changing consensus state.
+func OpenBadgerStoreReadOnly(path string) (*BadgerStore, error) {
+	opts := badger.DefaultOptions(path).WithReadOnly(true)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		return nil, fmt.Errorf("open badger read-only: %w", err)
+	}
+	return &BadgerStore{db: db}, nil
+}
+
+// OpenBadgerStoreWithoutMigrations opens an existing Badger database writable
+// without running constructor backfills. It is reserved for a state-sync
+// database that has already been restored and verified read-only against a
+// trusted AppHash. Running NewBadgerStore on those bytes would be unsafe during
+// activation because a historical index backfill can change consensus state
+// after verification but before CometBFT performs its Info check.
+//
+// Ordinary boot and upgrade paths must continue to use NewBadgerStore.
+func OpenBadgerStoreWithoutMigrations(path string) (*BadgerStore, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect migration-free badger path: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("migration-free badger path must be a real directory")
+	}
+	opts := badger.DefaultOptions(path)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		return nil, fmt.Errorf("open badger without migrations: %w", err)
+	}
+	return &BadgerStore{db: db}, nil
 }
 
 // memoryKey returns the BadgerDB key for a memory's on-chain state.

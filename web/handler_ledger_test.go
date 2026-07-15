@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -59,6 +60,28 @@ func TestHandleEnableLedger(t *testing.T) {
 	assert.Equal(t, true, resp["ok"])
 	assert.NotEmpty(t, resp["recovery_key"])
 	assert.True(t, h.Encrypted.Load())
+}
+
+func TestVaultLoginTriggersScopedProjectionRecovery(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+	h.RunBackground = func(fn func(context.Context)) { fn(context.Background()) }
+	called := 0
+	h.ScopedProjectionRebuildFn = func(context.Context) (int, error) {
+		called++
+		return 3, nil
+	}
+	r := testRouter(h)
+
+	body, _ := json.Marshal(map[string]string{"passphrase": "test-pass-123"})
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	_ = loginAfterEnable(t, r, "test-pass-123")
+	assert.Equal(t, 1, called, "unlock must retry the canonical scoped projection before readiness can recover")
 }
 
 func TestHandleEnableLedger_MissingPassphrase(t *testing.T) {

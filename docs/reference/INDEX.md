@@ -23,7 +23,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`environment-variables.md`](environment-variables.md) | Every env var SAGE reads (`SAGE_HOME`, embeddings, hybrid recall, TLS, snapshots, …), with defaults and the `file:line` that consumes each. |
 | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) | submit → proposed → committed/deprecated; node-local vs on-chain data; confidence decay; corroboration. |
 | [`concepts/clearance-classification.md`](concepts/clearance-classification.md) | Per-record classification (0–4), the REST-vs-wire default gotcha, and the per-record query gate. |
-| [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, and the five-gate query pipeline. |
+| [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, the five-gate query pipeline, and the app-v20 one-chain quorum-scope boundary. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
 | [`concepts/block-production-and-idle.md`](concepts/block-production-and-idle.md) | Why an idle chain mints **no** blocks (SAGE has no heartbeat), when a block *is* minted, and how to tell healthy-idle from actually-stuck. Read this before alarming on a frozen block height. |
 | [`concepts/voter-operations.md`](concepts/voter-operations.md) | How `proposed` memories become `committed` (the per-node auto-voter), how to *guarantee* auto-commit (`--require-voter` / `voter:` config), the stuck-memory alarm + triage, key safety, and the honest REST-vote caveat. |
@@ -45,6 +45,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | Know if a memory will decay | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) |
 | Understand why your chain's block height isn't moving | [`concepts/block-production-and-idle.md`](concepts/block-production-and-idle.md) |
 | Make sure submitted memories actually get committed (not stuck at `proposed`) | [`concepts/voter-operations.md`](concepts/voter-operations.md) |
+| Distinguish internet federation, app-v20 quorum replication, and local-vs-network snapshot recovery | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) — “v11.9 quorum scopes are not cross-chain federation” |
 | Configure SAGE via environment variables | [`environment-variables.md`](environment-variables.md) |
 
 ---

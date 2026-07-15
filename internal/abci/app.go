@@ -24,6 +24,7 @@ import (
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/poe"
+	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/validator"
@@ -478,6 +479,15 @@ type SageApp struct {
 	// {Name:"app-v19", TargetAppVersion:19}.
 	appV19AppliedHeight int64 // 0 => fork dormant
 
+	// appV20AppliedHeight gates the v11.9 domain-scoped quorum foundation.
+	// It is independent/additive, strict >, and dormant on every current chain;
+	// the activation block is still evaluated under the prior rules. app-v20
+	// subsumes the additive v8..v17/v19 rule chain but deliberately does not
+	// enable app-v18's independent administrator override. The v11.9 scope
+	// transaction/state branches must key off postAppV20Fork, never this field
+	// directly, so pre-activation replay remains byte-identical.
+	appV20AppliedHeight int64 // 0 => fork dormant
+
 	// retainBlocks, when > 0, is the number of most-recent blocks Commit asks
 	// CometBFT to keep: ResponseCommit.RetainHeight = height - retainBlocks
 	// (clamped at 0 = keep everything). Pruning is LOCAL and advisory — it never
@@ -613,6 +623,12 @@ const appV18UpgradeName = "app-v18"
 // effect is off-consensus: the local-agents-default-READ flip in
 // web/handler.go, gated on IsAppV19ActiveForNextTx.
 const appV19UpgradeName = "app-v19"
+
+// appV20UpgradeName is the canonical activation-record name for the v11.9
+// domain-scoped quorum foundation. It is the next independent fork after the
+// behavior-empty app-v19 gate and must not reuse app-v18, whose activation has
+// a separate live RBAC-administrator effect.
+const appV20UpgradeName = "app-v20"
 
 // postV8Fork is the consensus-side fork-gate predicate. Use it inside
 // processTx and other height-aware paths. Strict greater-than mirrors
@@ -984,6 +1000,13 @@ func (app *SageApp) postAppV19Fork(height int64) bool {
 	return app.appV19AppliedHeight > 0 && height > app.appV19AppliedHeight
 }
 
+// postAppV20Fork is the consensus-side boundary for the v11.9 scoped-quorum
+// rules. It is strict so the applied-upgrade record is committed under the
+// previous rule set and all replicas begin the new behavior at H+1.
+func (app *SageApp) postAppV20Fork(height int64) bool {
+	return app.appV20AppliedHeight > 0 && height > app.appV20AppliedHeight
+}
+
 // postAppV17Rules reports whether app-v17's consensus rules are in force at
 // this height. app-v18 subsumes those additive rules on a skip-ahead chain;
 // historical blocks still collapse to exactly their original gate.
@@ -993,7 +1016,7 @@ func (app *SageApp) postAppV19Fork(height int64) bool {
 //
 //nolint:unused // C1 mints the empty gate; the first callsites land with C2/C3
 func (app *SageApp) postAppV17Rules(height int64) bool {
-	return app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
+	return app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height) || app.postAppV20Fork(height)
 }
 
 func (app *SageApp) postAppV18Rules(height int64) bool {
@@ -1010,7 +1033,7 @@ func (app *SageApp) postAppV18Rules(height int64) bool {
 //
 //nolint:unused // behavior-empty gate; no consensus callsite reads it (D adds zero processTx branch)
 func (app *SageApp) postAppV19Rules(height int64) bool {
-	return app.postAppV19Fork(height)
+	return app.postAppV19Fork(height) || app.postAppV20Fork(height)
 }
 
 // IsAppV17ActiveForNextTx is the REST-side transaction-construction accessor.
@@ -1041,7 +1064,15 @@ func (app *SageApp) IsAppV18ActiveForNextTx() bool {
 // consumer is web/handler.go's local-agents-default-READ flip (DashboardHandler
 // .AppV19ActiveFn).
 func (app *SageApp) IsAppV19ActiveForNextTx() bool {
-	return app.appV19AppliedHeight > 0 && app.state != nil && app.state.Height >= app.appV19AppliedHeight
+	return app.state != nil && app.postAppV19Rules(app.state.Height+1)
+}
+
+// IsAppV20ActiveForNextTx is the construction-side gate for v11.9 scope
+// governance. It flips immediately after the activation block commits, so REST,
+// MCP, and CEREBRUM do not submit op==8 while consensus still treats it as the
+// historical inert unknown operation.
+func (app *SageApp) IsAppV20ActiveForNextTx() bool {
+	return app.state != nil && app.postAppV20Fork(app.state.Height+1)
 }
 
 // postAppV16Rules reports whether app-v16's consensus rules are in force at this
@@ -1051,7 +1082,7 @@ func (app *SageApp) IsAppV19ActiveForNextTx() bool {
 // Collapses to exactly postAppV16Fork on every existing chain
 // (appV17AppliedHeight==0), so historical blocks replay byte-identically.
 func (app *SageApp) postAppV16Rules(height int64) bool {
-	return app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
+	return app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height) || app.postAppV20Fork(height)
 }
 
 // shouldRecordMemoryDomain reports whether a successful submit must persist its
@@ -1080,7 +1111,7 @@ func (app *SageApp) shouldRecordMemoryDomain(height int64) bool {
 // higher gates are 0, so this collapses to exactly postAppV8Fork and historical
 // blocks replay byte-identically.
 func (app *SageApp) postAppV8Rules(height int64) bool {
-	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
+	return app.postAppV8Fork(height) || app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height) || app.postAppV20Fork(height)
 }
 
 // postAppV9Rules reports whether app-v9's consensus rules (consensus-path
@@ -1091,7 +1122,7 @@ func (app *SageApp) postAppV8Rules(height int64) bool {
 // postAppV9Fork on every existing chain (appV10/appV11AppliedHeight==0), so replay
 // is byte-identical.
 func (app *SageApp) postAppV9Rules(height int64) bool {
-	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
+	return app.postAppV9Fork(height) || app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height) || app.postAppV20Fork(height)
 }
 
 // postAppV10Rules reports whether app-v10's consensus rules (corroboration
@@ -1103,7 +1134,7 @@ func (app *SageApp) postAppV9Rules(height int64) bool {
 // when app-v11 landed — app-v10 was the highest fork until then and needed no
 // subsumption helper.
 func (app *SageApp) postAppV10Rules(height int64) bool {
-	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
+	return app.postAppV10Fork(height) || app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height) || app.postAppV20Fork(height)
 }
 
 // postAppV11Rules reports whether app-v11's consensus rules (the per-node
@@ -1114,7 +1145,7 @@ func (app *SageApp) postAppV10Rules(height int64) bool {
 // postAppV11Fork on every existing chain (appV12AppliedHeight==0), so
 // historical blocks replay byte-identically.
 func (app *SageApp) postAppV11Rules(height int64) bool {
-	return app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
+	return app.postAppV11Fork(height) || app.postAppV12Fork(height) || app.postAppV13Fork(height) || app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height) || app.postAppV20Fork(height)
 }
 
 // postAppV12Rules reports whether app-v12's consensus rule (the FLAWED
@@ -1152,7 +1183,7 @@ func (app *SageApp) postAppV13Rules(height int64) bool {
 // postAppV12Rules/postAppV13Rules — those are mutually-exclusive
 // AppHash-REPLACEMENT rules, deliberately non-subsumed.
 func (app *SageApp) postAppV15Rules(height int64) bool {
-	return app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height)
+	return app.postAppV15Fork(height) || app.postAppV16Fork(height) || app.postAppV17Fork(height) || app.postAppV18Fork(height) || app.postAppV19Fork(height) || app.postAppV20Fork(height)
 }
 
 // refreshAppV9Fork populates appV9AppliedHeight from the persisted upgrade
@@ -1347,6 +1378,20 @@ func (app *SageApp) refreshAppV19Fork() {
 	}
 	if rec != nil {
 		app.appV19AppliedHeight = rec.AppliedHeight
+	}
+}
+
+// refreshAppV20Fork restores the v11.9 gate from the committed upgrade audit
+// trail during construction. A missing record leaves the gate dormant, which is
+// the replay-compatible state for every pre-v11.9 chain.
+func (app *SageApp) refreshAppV20Fork() {
+	rec, err := app.badgerStore.GetAppliedUpgrade(appV20UpgradeName)
+	if err != nil {
+		app.logger.Warn().Err(err).Str("name", appV20UpgradeName).Msg("read app-v20 applied-upgrade record")
+		return
+	}
+	if rec != nil {
+		app.appV20AppliedHeight = rec.AppliedHeight
 	}
 }
 
@@ -1760,6 +1805,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshAppV17Fork()
 	app.refreshAppV18Fork()
 	app.refreshAppV19Fork()
+	app.refreshAppV20Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -1821,6 +1867,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshAppV17Fork()
 	app.refreshAppV18Fork()
 	app.refreshAppV19Fork()
+	app.refreshAppV20Fork()
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -1886,6 +1933,8 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV20AppliedHeight > 0:
+		return 20 // app-v20 (v11.9 domain-scoped quorum foundation) — highest gate
 	case app.appV19AppliedHeight > 0:
 		return 19 // app-v19 (empty scaffolding gate, v11.8 — off-consensus default-read flip only) — highest gate
 	case app.appV18AppliedHeight > 0:
@@ -1928,13 +1977,13 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v19). It is the readiness ceiling for upgrade
+// fork gate for (currently app-v20). It is the readiness ceiling for upgrade
 // auto-voting: a validator must never vote to activate an upgrade it cannot
 // execute — doing so would commit consensus version.app=N while the binary
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 19
+const maxSupportedAppVersion uint64 = 20
 
 // MaxSupportedAppVersion returns the highest app version this binary has a
 // compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
@@ -2510,6 +2559,9 @@ func (app *SageApp) FinalizeBlock(_ context.Context, req *abcitypes.RequestFinal
 		if plan.Name == appV19UpgradeName {
 			app.appV19AppliedHeight = req.Height
 		}
+		if plan.Name == appV20UpgradeName {
+			app.appV20AppliedHeight = req.Height
+		}
 		if plan.Name == appV12UpgradeName {
 			app.appV12AppliedHeight = req.Height
 		}
@@ -2685,6 +2737,15 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 				return &abcitypes.ExecTxResult{Code: 4, Log: fmt.Sprintf("nonce lookup error: %v", nerr)}
 			}
 			if parsedTx.Nonce <= currentNonce && currentNonce > 0 {
+				// FinalizeBlock writes Badger before Commit flushes the SQL projection
+				// and persists state.Height. After a crash in that gap, CometBFT
+				// replays the exact block against those already-written effects. app-v20
+				// scoped records carry enough height-bound canonical evidence to
+				// recognize that one case and reconstruct only the lost projection
+				// writes. Every other consumed nonce remains a hard rejection.
+				if replayResult, exact := app.replayScopedFinalizeTx(parsedTx, height, blockTime); exact {
+					return replayResult
+				}
 				metrics.TxRejectedTotal.WithLabelValues("replay_nonce_consensus").Inc()
 				return &abcitypes.ExecTxResult{Code: 4, Log: fmt.Sprintf("nonce too low: got %d, expected > %d (rejected in consensus path)", parsedTx.Nonce, currentNonce)}
 			}
@@ -3016,13 +3077,8 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		}
 	}
 
-	// Generate memory ID if not provided
-	memoryID := submit.MemoryID
-	if memoryID == "" {
-		// Deterministic ID from content hash + height + agent (NO uuid.New()!)
-		h := sha256.Sum256([]byte(fmt.Sprintf("%x:%d:%s", submit.ContentHash, height, agentID)))
-		memoryID = hex.EncodeToString(h[:16])
-	}
+	// Generate memory ID if not provided.
+	memoryID := memoryIDForSubmit(submit, height, agentID)
 
 	// #3 (reverse): a normal memory must not clobber an existing co-commit that owns
 	// this id. The processCoCommitSubmit reclaim covers a normal squat being taken
@@ -3089,8 +3145,22 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		}
 	}
 
-	if setErr := app.badgerStore.SetMemoryHash(memoryID, contentHash, string(memory.StatusProposed)); setErr != nil {
-		return &abcitypes.ExecTxResult{Code: 12, Log: fmt.Sprintf("badger write error: %v", setErr)}
+	// app-v20: an active exact-domain scope pins its roster and canonical
+	// recoverable envelope in the same Badger transaction as the ordinary memory
+	// record. Unscoped domains retain the byte-identical historical path.
+	scopedSubmission := false
+	if app.postAppV20Fork(height) {
+		var scopeErr error
+		scopedSubmission, scopeErr = app.setScopedMemorySubmission(submit, memoryID, agentID, contentHash, height, blockTime)
+		if scopeErr != nil {
+			return &abcitypes.ExecTxResult{Code: 19, Log: "scoped memory submit rejected: " + scopeErr.Error()}
+		}
+	}
+
+	if !scopedSubmission {
+		if setErr := app.badgerStore.SetMemoryHash(memoryID, contentHash, string(memory.StatusProposed)); setErr != nil {
+			return &abcitypes.ExecTxResult{Code: 12, Log: fmt.Sprintf("badger write error: %v", setErr)}
+		}
 	}
 
 	// v8.4 records the memory's domain on-chain so checkAndApplyQuorum can read it
@@ -3099,7 +3169,7 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	// independently of v8.4. Both gates are strict >, keeping historical blocks and
 	// each activation block byte-identical. Shared domains are recorded too — the
 	// quorum decides per-vote whether to use domain-conditional weight or the scalar.
-	if submit.DomainTag != "" && app.shouldRecordMemoryDomain(height) {
+	if !scopedSubmission && submit.DomainTag != "" && app.shouldRecordMemoryDomain(height) {
 		if domErr := app.badgerStore.SetMemoryDomain(memoryID, submit.DomainTag); domErr != nil {
 			app.logger.Error().Err(domErr).Str("memory_id", memoryID).Msg("set memory domain")
 		}
@@ -3115,7 +3185,7 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	// First post-fork writer wins. Post-fork only; the strict-> gate keeps pre-fork
 	// blocks + the activation block byte-identical (no memauthor: key enters the
 	// AppHash keyspace until H_act+1).
-	if app.postAppV10Rules(height) {
+	if !scopedSubmission && app.postAppV10Rules(height) {
 		if existing, gErr := app.badgerStore.GetMemoryAuthor(memoryID); gErr == nil && existing == "" {
 			if authErr := app.badgerStore.SetMemoryAuthor(memoryID, agentID); authErr != nil {
 				app.logger.Error().Err(authErr).Str("memory_id", memoryID).Msg("app-v10 set memory author")
@@ -3177,8 +3247,10 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	// compat for old txs that omit the classification byte still defaults
 	// to INTERNAL in tx/codec.go decodeMemorySubmit.
 	classification := uint8(submit.Classification)
-	if classErr := app.badgerStore.SetMemoryClassification(memoryID, classification); classErr != nil {
-		app.logger.Error().Err(classErr).Str("memory_id", memoryID).Msg("failed to set memory classification")
+	if !scopedSubmission {
+		if classErr := app.badgerStore.SetMemoryClassification(memoryID, classification); classErr != nil {
+			app.logger.Error().Err(classErr).Str("memory_id", memoryID).Msg("failed to set memory classification")
+		}
 	}
 
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{
@@ -3196,6 +3268,18 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		Data: []byte(memoryID),
 		Log:  fmt.Sprintf("memory %s submitted", memoryID),
 	}
+}
+
+// memoryIDForSubmit is shared by normal execution and the app-v20 exact-block
+// crash-replay recognizer. Keep this byte-for-byte equivalent to the historical
+// derivation: it intentionally hashes the submitted ContentHash field before
+// processMemorySubmit's empty-hash fallback.
+func memoryIDForSubmit(submit *tx.MemorySubmit, height int64, agentID string) string {
+	if submit.MemoryID != "" {
+		return submit.MemoryID
+	}
+	h := sha256.Sum256([]byte(fmt.Sprintf("%x:%d:%s", submit.ContentHash, height, agentID)))
+	return hex.EncodeToString(h[:16])
 }
 
 // maxCoCommitCoauthors caps the coauthor count on a single co-commit envelope.
@@ -3418,6 +3502,15 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 				}
 			}
 		}
+	}
+
+	// app-v20: co-commit has its own immediate-commit authority model and cannot
+	// safely inherit a scope ballot without a new jointly-signed envelope schema.
+	// Refuse it for an active/paused scoped domain so it cannot bypass the pinned
+	// scoped quorum path. Retired scopes release their mapping and resume the
+	// ordinary unscoped lifecycle by design.
+	if err := app.rejectScopedCoCommit(env.Domain, height); err != nil {
+		return &abcitypes.ExecTxResult{Code: 97, Log: "co-commit: " + err.Error()}
 	}
 
 	// #3 namespace-collision defense + resubmit guard. SharedID is content-derived,
@@ -3778,6 +3871,21 @@ func (app *SageApp) processMemoryVote(parsedTx *tx.ParsedTx, height int64, block
 		return &abcitypes.ExecTxResult{Code: 13, Log: fmt.Sprintf("vote rejected: %s is not in the validator set", validatorID[:16])}
 	}
 
+	// app-v20: if this memory has a pinned scope ballot, only a member of that
+	// exact historical ballot may vote. Roster updates are prospective and a
+	// live-scope lookup must never rewrite an in-flight denominator.
+	var scopedBallot *scope.Ballot
+	if app.postAppV20Fork(height) {
+		var ballotErr error
+		scopedBallot, ballotErr = app.badgerStore.GetScopeBallot(vote.MemoryID)
+		if ballotErr != nil {
+			return &abcitypes.ExecTxResult{Code: 13, Log: "vote rejected: scope ballot lookup failed: " + ballotErr.Error()}
+		}
+		if scopedBallot != nil && !scopeBallotHasMember(*scopedBallot, validatorID) {
+			return &abcitypes.ExecTxResult{Code: 13, Log: fmt.Sprintf("vote rejected: %s is not a pinned member of scope ballot %s", validatorID[:16], scopedBallot.ScopeID)}
+		}
+	}
+
 	app.logger.Info().
 		Str("memory_id", vote.MemoryID).
 		Str("validator_id", validatorID[:16]).
@@ -3785,16 +3893,27 @@ func (app *SageApp) processMemoryVote(parsedTx *tx.ParsedTx, height int64, block
 		Msg("processing vote")
 
 	// Store vote on-chain
-	voteKey := fmt.Sprintf("vote:%s:%s", vote.MemoryID, validatorID)
-	if err := app.badgerStore.SetState(voteKey, []byte(decision)); err != nil {
-		return &abcitypes.ExecTxResult{Code: 14, Log: fmt.Sprintf("badger write error: %v", err)}
+	newVote := true
+	if scopedBallot != nil {
+		var voteErr error
+		newVote, voteErr = app.badgerStore.SetScopedVote(vote.MemoryID, validatorID, decision, height)
+		if voteErr != nil {
+			return &abcitypes.ExecTxResult{Code: 14, Log: fmt.Sprintf("scoped vote rejected: %v", voteErr)}
+		}
+	} else {
+		voteKey := fmt.Sprintf("vote:%s:%s", vote.MemoryID, validatorID)
+		if err := app.badgerStore.SetState(voteKey, []byte(decision)); err != nil {
+			return &abcitypes.ExecTxResult{Code: 14, Log: fmt.Sprintf("badger write error: %v", err)}
+		}
 	}
 
 	// Increment on-chain validator vote stats for PoE scoring
-	accepted := decision == "accept"
-	uHeight := uint64(height) // #nosec G115 -- height is always non-negative
-	if err := app.badgerStore.IncrementVoteStats(validatorID, accepted, uHeight, app.postV8_3Fork(height)); err != nil {
-		app.logger.Error().Err(err).Str("validator", validatorID).Msg("failed to increment vote stats")
+	if newVote {
+		accepted := decision == "accept"
+		uHeight := uint64(height) // #nosec G115 -- height is always non-negative
+		if err := app.badgerStore.IncrementVoteStats(validatorID, accepted, uHeight, app.postV8_3Fork(height)); err != nil {
+			app.logger.Error().Err(err).Str("validator", validatorID).Msg("failed to increment vote stats")
+		}
 	}
 
 	// Buffer PostgreSQL vote write
@@ -3817,6 +3936,20 @@ func (app *SageApp) processMemoryVote(parsedTx *tx.ParsedTx, height int64, block
 }
 
 func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime time.Time) {
+	// app-v20 scope ballots use their pinned integer denominator. The unscoped
+	// path below remains untouched and continues to use current PoE weighting.
+	if app.postAppV20Fork(height) {
+		ballot, err := app.badgerStore.GetScopeBallot(memoryID)
+		if err != nil {
+			app.logger.Error().Err(err).Str("memory_id", memoryID).Msg("scope ballot lookup failed during quorum")
+			return
+		}
+		if ballot != nil {
+			app.checkAndApplyScopedQuorum(*ballot, height, blockTime)
+			return
+		}
+	}
+
 	// Get all validators sorted
 	validators := app.validators.GetAll()
 	votes := make(map[string]bool)
@@ -4132,9 +4265,16 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 			if rec.ChallengerID == challengerID {
 				return &abcitypes.ExecTxResult{Code: 93, Log: fmt.Sprintf("challenge: agent %s already opened this challenge; a DISTINCT modify-verb holder must confirm", challengerID[:16])}
 			}
-			// Confirm → deprecated (terminal): nil the hash (matches the legacy
-			// deprecate shape) and clear the open-challenge record.
-			if err := app.badgerStore.ResolveChallenge(challenge.MemoryID, nil, string(memory.StatusDeprecated)); err != nil {
+			// Confirm → deprecated (terminal). Unscoped memories retain the legacy
+			// nil-hash shape; app-v20 scoped memories preserve their canonical hash
+			// so state-sync projection recovery remains verifiable.
+			var resolvedHash []byte
+			if _, scopedHash, scopedErr := app.scopedLifecycleState(challenge.MemoryID, height); scopedErr != nil {
+				return &abcitypes.ExecTxResult{Code: 16, Log: "challenge: " + scopedErr.Error()}
+			} else if scopedHash != nil {
+				resolvedHash = scopedHash
+			}
+			if err := app.badgerStore.ResolveChallenge(challenge.MemoryID, resolvedHash, string(memory.StatusDeprecated)); err != nil {
 				return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
 			}
 			app.pendingWrites = append(app.pendingWrites, pendingWrite{
@@ -4219,7 +4359,20 @@ func (app *SageApp) processMemoryChallenge(parsedTx *tx.ParsedTx, height int64, 
 
 	// A challenge that passes BFT consensus (included in a block) is decisive —
 	// the memory is deprecated immediately. The block inclusion IS the consensus.
-	if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, nil, string(memory.StatusDeprecated)); err != nil {
+	// A pending scoped ballot transitions atomically with the ordinary status;
+	// an already-committed ballot remains the historical acceptance proof while
+	// the later lifecycle status changes and retains the canonical content hash.
+	if scopedBallot, scopedHash, scopedErr := app.scopedLifecycleState(challenge.MemoryID, height); scopedErr != nil {
+		return &abcitypes.ExecTxResult{Code: 16, Log: "challenge: " + scopedErr.Error()}
+	} else if scopedBallot != nil && scopedBallot.State == scope.BallotPending {
+		if err := app.badgerStore.SetScopedMemoryVerdict(challenge.MemoryID, scope.BallotDeprecated); err != nil {
+			return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
+		}
+	} else if scopedBallot != nil {
+		if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, scopedHash, string(memory.StatusDeprecated)); err != nil {
+			return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
+		}
+	} else if err := app.badgerStore.SetMemoryHash(challenge.MemoryID, nil, string(memory.StatusDeprecated)); err != nil {
 		return &abcitypes.ExecTxResult{Code: 16, Log: err.Error()}
 	}
 
@@ -6407,22 +6560,24 @@ func (app *SageApp) Query(_ context.Context, req *abcitypes.RequestQuery) (*abci
 	}
 }
 
-// ListSnapshots is not used in Phase 1.
+// ListSnapshots deliberately advertises no network snapshots. The existing
+// internal/snapshot bundle contains private local material and is not an ABCI
+// payload; state sync stays disabled until a consensus-only format exists.
 func (app *SageApp) ListSnapshots(_ context.Context, req *abcitypes.RequestListSnapshots) (*abcitypes.ResponseListSnapshots, error) {
 	return &abcitypes.ResponseListSnapshots{}, nil
 }
 
-// OfferSnapshot is not used in Phase 1.
+// OfferSnapshot rejects while network-safe state sync is unimplemented.
 func (app *SageApp) OfferSnapshot(_ context.Context, req *abcitypes.RequestOfferSnapshot) (*abcitypes.ResponseOfferSnapshot, error) {
 	return &abcitypes.ResponseOfferSnapshot{Result: abcitypes.ResponseOfferSnapshot_REJECT}, nil
 }
 
-// LoadSnapshotChunk is not used in Phase 1.
+// LoadSnapshotChunk returns no local rollback-bundle bytes over the network.
 func (app *SageApp) LoadSnapshotChunk(_ context.Context, req *abcitypes.RequestLoadSnapshotChunk) (*abcitypes.ResponseLoadSnapshotChunk, error) {
 	return &abcitypes.ResponseLoadSnapshotChunk{}, nil
 }
 
-// ApplySnapshotChunk is not used in Phase 1.
+// ApplySnapshotChunk aborts while network-safe state sync is unimplemented.
 func (app *SageApp) ApplySnapshotChunk(_ context.Context, req *abcitypes.RequestApplySnapshotChunk) (*abcitypes.ResponseApplySnapshotChunk, error) {
 	return &abcitypes.ResponseApplySnapshotChunk{Result: abcitypes.ResponseApplySnapshotChunk_ABORT}, nil
 }
@@ -6519,6 +6674,17 @@ func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ tim
 		}
 	}
 
+	// app-v20: a scope action is the governance decision itself. Its payload is
+	// one canonical, versioned scope-record template; consensus supplies only
+	// the execution heights after quorum. Keep this validation fork-aware so a
+	// historical pre-v20 op==8 remains the same inert unknown operation that an
+	// older binary would record and later fail to apply.
+	if app.postAppV20Fork(height) && op == governance.OpScopeAction {
+		if _, scopeErr := app.prepareScopeProposal(gp.TargetID, gp.TargetPubKey, gp.TargetPower, gp.Payload, proposerID, height, false); scopeErr != nil {
+			return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: invalid OpScopeAction: " + scopeErr.Error()}
+		}
+	}
+
 	proposalID, propErr := app.govEngine.Propose(
 		proposerID, op, gp.TargetID, gp.TargetPubKey,
 		gp.TargetPower, gp.ExpiryBlocks, gp.Reason, height,
@@ -6544,7 +6710,7 @@ func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ tim
 		writeType: "gov_proposal",
 		data: govProposalData{
 			ProposalID:    proposalID,
-			Operation:     opToString(op),
+			Operation:     app.governanceOperationName(op, height),
 			TargetID:      gp.TargetID,
 			TargetPower:   gp.TargetPower,
 			ProposerID:    proposerID,
@@ -7305,6 +7471,14 @@ func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, 
 		return nil, app.applyMemoryDomainRepair(proposal, height)
 	}
 
+	// app-v20: quorum execution directly installs the exact scope record voted
+	// on by validators. Dispatch before validator pubkey derivation because the
+	// TargetID is a scope ID, not an Ed25519 key. Before the fork op==8 retains
+	// the historical unknown-op path for byte-identical replay.
+	if proposal.Operation == governance.OpScopeAction && app.postAppV20Fork(height) {
+		return nil, app.applyScopeProposal(proposal, height)
+	}
+
 	// OpDomainReassign has NO validator-set effect: the transfer is applied by the
 	// separate DomainReassign tx (processDomainReassign), not here. Return cleanly
 	// so it does not fall through to the validator-pubkey derivation below, whose
@@ -7490,9 +7664,21 @@ func opToString(op governance.ProposalOp) string {
 		return "upgrade"
 	case governance.OpMemoryDomainRepair:
 		return "memory_domain_repair"
+	case governance.OpScopeAction:
+		return "scope_action"
 	default:
 		return fmt.Sprintf("unknown_%d", op)
 	}
+}
+
+// governanceOperationName keeps the off-chain projection replay-compatible:
+// before app-v20, op==8 was unknown and must retain its historical label even
+// though the upgraded binary knows the future operation name.
+func (app *SageApp) governanceOperationName(op governance.ProposalOp, height int64) string {
+	if op == governance.OpScopeAction && !app.postAppV20Fork(height) {
+		return fmt.Sprintf("unknown_%d", op)
+	}
+	return opToString(op)
 }
 
 // voteDecisionToGovString converts a tx.VoteDecision to governance vote string.

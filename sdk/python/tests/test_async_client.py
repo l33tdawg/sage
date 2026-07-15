@@ -88,3 +88,66 @@ async def test_reinstate(async_client, mock_api):
     result = await async_client.reinstate(memory_id, reason="false alarm")
     assert result["status"] == "committed"
     assert route.calls.last.request.read() == b'{"reason":"false alarm"}'
+
+
+@pytest.mark.asyncio
+async def test_scope_read_surface(async_client, mock_api):
+    record = {
+        "scope_id": "scope-a",
+        "revision": 2,
+        "revision_hash": "ab" * 32,
+        "state": "active",
+        "controller_validator_id": "validator-a",
+        "created_height": 10,
+        "updated_height": 20,
+        "domains": [{"name": "research", "subtree": False}],
+        "members": [{
+            "validator_id": "validator-a",
+            "assigned_weight": 7,
+            "joined_revision": 1,
+            "active": True,
+        }],
+    }
+    mock_api.get("/v1/scopes").mock(
+        return_value=httpx.Response(200, json={"scopes": [record], "count": 1})
+    )
+    mock_api.get("/v1/scopes/scope-a").mock(
+        return_value=httpx.Response(200, json=record)
+    )
+    # The client must keep a valid scope ID within one URL path segment.
+    escaped = mock_api.get("/v1/scopes/scope%20a").mock(
+        return_value=httpx.Response(200, json={**record, "scope_id": "scope a"})
+    )
+
+    listed = await async_client.list_scopes()
+    assert listed.scopes[0].domains[0].name == "research"
+    assert (await async_client.get_scope("scope-a")).state == "active"
+    assert (await async_client.get_scope("scope a")).scope_id == "scope a"
+    assert escaped.called
+
+
+@pytest.mark.asyncio
+async def test_governance_propose_scope_uses_guided_template(async_client, mock_api):
+    import json
+
+    route = mock_api.post("/v1/governance/propose").mock(
+        return_value=httpx.Response(200, json={
+            "proposal_id": "proposal-1", "tx_hash": "tx-1", "status": "voting",
+        })
+    )
+    result = await async_client.governance_propose_scope(
+        scope={
+            "scope_id": "scope-a",
+            "revision": 1,
+            "state": "active",
+            "controller_validator_id": "validator-a",
+            "domains": ["research"],
+            "members": [{"validator_id": "validator-a", "assigned_weight": 1}],
+        },
+        reason="form research quorum",
+    )
+    body = json.loads(route.calls.last.request.read())
+    assert result.tx_hash == "tx-1"
+    assert body["target_id"] == "scope-a"
+    assert body["scope"]["domains"] == ["research"]
+    assert "payload" not in body

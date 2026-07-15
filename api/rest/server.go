@@ -77,6 +77,9 @@ type Server struct {
 	// transactions carry the proof envelope before their first eligible block.
 	// nil preserves the legacy wire encoding used by tests and pre-v17 nodes.
 	postV17ForNextTxFn func() bool
+	// postV20ForNextTxFn prevents operator surfaces from constructing a scope
+	// proposal before app-v20 consensus can apply it. nil is fail-closed.
+	postV20ForNextTxFn func() bool
 
 	// federation is the v11 OFF-consensus transport (recall proxy, co-commit
 	// receipt exchange, cross-fed agreement setup). nil disables every
@@ -210,6 +213,16 @@ func (s *Server) SetPostV17ForNextTxAccessor(fn func() bool) {
 
 func (s *Server) isPostV17ForNextTx() bool {
 	return s.postV17ForNextTxFn != nil && s.postV17ForNextTxFn()
+}
+
+// SetPostV20ForNextTxAccessor wires the dynamic app-v20 scope-construction
+// gate. Callers should pass app.IsAppV20ActiveForNextTx.
+func (s *Server) SetPostV20ForNextTxAccessor(fn func() bool) {
+	s.postV20ForNextTxFn = fn
+}
+
+func (s *Server) isPostV20ForNextTx() bool {
+	return s.postV20ForNextTxFn != nil && s.postV20ForNextTxFn()
 }
 
 // loadValidatorSigningKey loads the CometBFT validator private key so that
@@ -421,6 +434,10 @@ func (s *Server) setupRouter() chi.Router {
 		r.Post("/v1/governance/propose", s.handleGovPropose)
 		r.Post("/v1/governance/vote", s.handleGovVote)
 		r.Post("/v1/governance/cancel", s.handleGovCancel)
+
+		// v11.9 canonical scope topology (operator/admin read-only).
+		r.Get("/v1/scopes", s.handleListScopes)
+		r.Get("/v1/scopes/{scope_id}", s.handleGetScope)
 
 		// HTTP MCP token management — admin issues tokens for external MCP
 		// clients (ChatGPT, Cursor, etc.) that can't sign every request with

@@ -1,10 +1,12 @@
 // Package snapshot implements SAGE's local snapshot/restore substrate.
 //
 // A snapshot captures all three persistent layers (BadgerDB on-chain state,
-// SQLite mirror, CometBFT block+state+evidence dbs) plus enough config to
-// boot a fresh data directory against the same chain. The on-disk layout
-// mirrors the cosmos-sdk snapshots module convention so future ABCI
-// state-sync integration is additive.
+// SQLite mirror, CometBFT block+state+evidence dbs) plus enough private config
+// to boot a fresh data directory against the same chain. It is an operator-local
+// rollback bundle, not a network state-sync payload: it can contain node and
+// validator keys, vault material, local content, config, and a binary. Never
+// advertise or transmit this format through ABCI/P2P. Future ABCI state sync
+// requires a separate consensus-only, key-free format.
 //
 // Trigger plumbing (height/time/pre-upgrade) and the boot-time auto-restore
 // path live in separate files in this package; this file owns the Take

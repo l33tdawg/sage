@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.8.0 is the current release.** This document records the v11.7 slate and the v11.8 synchronization-group release as shipped and looks forward to v11.9, the v11.10–v11.13 productization bridge, and the v12 completion milestone. Everything past v11.8 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.8.5 is the current release.** This document records the v11.7 slate and the v11.8 synchronization-group release as shipped and looks forward to v11.9, the v11.10–v11.13 productization bridge, and the v12 completion milestone. Everything past v11.8 is planned, not promised, and carries no date.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -124,9 +124,9 @@ Extend the agent-to-agent pipe (today a node-local inbox) across a federation li
 
 ### Domain-scoped quorum + self-healing replication
 
-Turn selected shared domains into hardened replicated canonical state across validator groups. Validators independently evaluate proposed memories, commit only quorum-approved results, and retain replicated full content plus all serving indexes. A surviving **greater-than-two-thirds voting-power quorum** continues accepting memories while a member is offline; authenticated replay or state sync catches it up when it returns.
+Turn selected shared domains into hardened replicated canonical state across validator groups. A v11.9 scope is contained inside one SAGE consensus chain: its on-chain roster names existing validators, its exact domain allowlist prevents scope bleed, and its canonical Badger content mirror lets recovering nodes rebuild serving indexes. Validators independently evaluate proposed memories and commit only quorum-approved results. A surviving **greater-than-two-thirds voting-power quorum** continues accepting memories while a member is offline; ordered committed-block replay catches it up when it returns, and a separate network-safe ABCI state-sync path remains a release gate. The v11.8 SQLite/cross-chain Synchronization Group remains an off-consensus sharing overlay; v11.9 does not relabel it as BFT. SAGE's existing full local rollback snapshot contains private node material and must never be reused as a network payload.
 
-The release gate includes offline-write/catch-up, snapshot/state-sync recovery, validator and membership reconfiguration, revocation, conflict/degraded-mode behavior, and chaos testing. Topologies remain honest: four equal-power validators tolerate one offline validator; three equal-power validators do not continue with only two online because CometBFT requires more than two-thirds voting power. The design must choose explicitly between domain-specific quorum shards and an extension of federation domain sync; it must never tunnel or replicate the whole current chain if that exposes unselected domains.
+The release gate includes offline-write/catch-up, snapshot/state-sync recovery, validator and membership reconfiguration, revocation, conflict/degraded-mode behavior, and chaos testing. Topologies remain honest: four equal-power validators tolerate one offline validator; three equal-power validators do not continue with only two online because CometBFT requires more than two-thirds voting power. The chosen model is an exact-domain quorum scope inside one existing chain, not an extension of cross-chain federation sync. State-sync activation is boot-only whole-application replacement with crash journaling and validator-only P2P authorization; the ABCI endpoints remain disabled until its kill-point and multi-process gates pass. It must never reuse the private local rollback bundle or expose it to a federation peer.
 
 ---
 

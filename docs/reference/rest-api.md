@@ -904,17 +904,44 @@ Revoking an agreement atomically purges its sync policy, controller binding, and
 
 Submit a governance proposal. Broadcasts `TxTypeGovPropose`.
 
-**Request body** (`governance_handler.go:22-30`):
+**Request body** (`governance_handler.go:26-35`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `operation` | string | yes | `add_validator`, `remove_validator`, `update_power`, `domain_reassign`, `memory_domain_repair` |
-| `target_id` | string | yes | Hex validator pubkey for validator ops; domain keying ID for `domain_reassign` |
+| `operation` | string | yes | `add_validator`, `remove_validator`, `update_power`, `domain_reassign`, `memory_domain_repair`, `sync_group_action`, `scope_action` |
+| `target_id` | string | conditional | Hex validator pubkey for validator ops; operation key for other ops. May be omitted only when `scope_action` supplies `scope.scope_id`; otherwise it is required. |
 | `reason` | string | yes | |
 | `target_pubkey` | string | no | Hex Ed25519 pubkey, required for `add_validator` |
 | `target_power` | int64 | no | Validator power for add/update ops |
 | `expiry_blocks` | int64 | no | 0 = chain default |
-| `payload` | string | no | Base64-encoded operation-specific body. For `domain_reassign`: base64(JSON `{domain, new_owner_id, parent_domain, open_to_shared}`). The executing `POST /v1/domain/reassign` tx must reproduce this payload byte-for-byte. For `memory_domain_repair` (app-v16, 2/3 quorum): base64(JSON `[{"memory_id","domain"}]`) — the backfill applies directly on proposal execution (no follow-up tx), writing the on-chain domain only for a memory that exists, has no domain yet, and whose target domain is registered. |
+| `payload` | string | no | Base64-encoded operation-specific body. For `domain_reassign`: base64(JSON `{domain, new_owner_id, parent_domain, open_to_shared}`). The executing `POST /v1/domain/reassign` tx must reproduce this payload byte-for-byte. For `memory_domain_repair` (app-v16, 2/3 quorum): base64(JSON `[{"memory_id","domain"}]`) — the backfill applies directly on proposal execution. Legacy `scope_action` callers may pass canonical binary `ScopeRecordV1`; mutually exclusive with `scope`. |
+| `scope` | object | no | Preferred guided `scope_action` template: `{scope_id, revision, state, controller_validator_id, domains: string[], members: [{validator_id, assigned_weight, joined_revision?, active?}]}`. `scope_id` is one non-empty path segment (no `/`). The node sorts domains/members bytewise, defaults `active` to true and `joined_revision` to 1 only for revision 1, fixes both heights to zero, then encodes canonical `ScopeRecordV1`. |
+
+For app-v20 scope formation, use the structured form rather than constructing
+binary bytes (`governance_handler.go:105-113`, `scope/proposal.go:33-81`):
+
+```json
+{
+  "operation": "scope_action",
+  "reason": "form the research replica quorum",
+  "scope": {
+    "scope_id": "research-quorum",
+    "revision": 1,
+    "state": "active",
+    "controller_validator_id": "<validator-id>",
+    "domains": ["research"],
+    "members": [
+      {"validator_id": "<validator-id>", "assigned_weight": 1}
+    ]
+  }
+}
+```
+
+Later revisions must provide every member's historical `joined_revision`; this
+prevents a convenience client from silently rewriting roster history
+(`scope/proposal.go:22-30`, `scope/proposal.go:50-68`). `payload` and `scope`
+are mutually exclusive, and an explicit `target_id` must equal `scope_id`
+(`governance_handler.go:170-204`).
 
 **Response** (HTTP 200):
 
@@ -956,6 +983,27 @@ Cancel a pending governance proposal. Proposer or admin.
 | `proposal_id` | string | yes |
 
 **Response** (HTTP 200): `{"tx_hash": "...", "status": "cancelled"}`
+
+---
+
+### `GET /v1/scopes`
+
+List canonical v11.9 scope heads in bytewise scope-ID order. Read-only and
+restricted to the node operator or an administrator because the response
+contains validator topology. Each record includes its current domain-separated
+SHA-256 `revision_hash`, exact domain allowlist, pinned integer weights, state,
+and materialized consensus heights.
+
+**Response** (HTTP 200): `{"scopes": [...], "count": 1}`
+
+---
+
+### `GET /v1/scopes/{scope_id}`
+
+Return one canonical v11.9 scope head with the same shape as an entry from
+`GET /v1/scopes`. Returns 404 when absent and fails closed if its immutable
+revision audit anchor is missing. Scope IDs cannot contain `/`; clients URL-
+escape the remaining path-segment characters. Node-operator/admin only.
 
 ---
 
@@ -1236,8 +1284,9 @@ The `version` field is intentionally omitted — `/health` is reachable through 
 
 ### `GET /ready`
 
-Readiness probe. Checks the store (postgres/SQLite), CometBFT, and the embedding
-provider. No auth. (`internal/metrics/health.go`)
+Readiness probe. Checks the store (PostgreSQL/SQLite), CometBFT, the embedding
+provider, and any required v11.9 scoped serving projection. No auth.
+(`internal/metrics/health.go`)
 
 **Response** (HTTP 200 or 503):
 
@@ -1246,6 +1295,14 @@ provider. No auth. (`internal/metrics/health.go`)
   "status": "ready",          // ready | degraded | not_ready
   "postgres": true,
   "cometbft": true,
+  "scoped_projection": {
+    "checked": true,
+    "required": true,        // canonical scoped envelopes exist in Badger
+    "ok": true,
+    "records": 42,
+    "rebuilt": 42,
+    "detail": ""
+  },
   "embedder": {
     "checked": true,          // false until the watchdog's first probe
     "ok": true,
@@ -1258,7 +1315,10 @@ provider. No auth. (`internal/metrics/health.go`)
 ```
 
 Status semantics:
-- `not_ready` → **HTTP 503**: core infrastructure (store or CometBFT) is down.
+- `not_ready` → **HTTP 503**: core infrastructure (store or CometBFT) is down,
+  or canonical scoped envelopes exist but the local SQL serving projection is
+  locked, incomplete, or failed verification. A locked SQLite vault retries the
+  scoped rebuild after unlock.
 - `degraded` → **HTTP 200** by default: core is up but a *semantic* embedder has been
   probed and is unreachable, so hybrid/semantic recall has dropped to keyword-only.
   The node still serves. Pass `?strict=1` to make this a **503** for gates that

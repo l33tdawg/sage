@@ -85,6 +85,36 @@ func main() {
 	}
 	defer func() { _ = app.Close() }()
 
+	// v11.9 recovery: canonical scoped envelopes live in Badger and must be
+	// verified into PostgreSQL before this replica advertises serving readiness.
+	// A failure does not stop consensus from catching up, but /ready remains 503
+	// so traffic cannot be routed to an incomplete selected-domain projection.
+	if contents, listErr := app.GetBadgerStore().ListScopedContents(); listErr != nil {
+		health.SetScopedProjectionStatus(metrics.ScopedProjectionStatus{Required: true, Detail: listErr.Error()})
+		logger.Warn().Err(listErr).Msg("scoped serving projection state is unreadable")
+	} else if len(contents) == 0 {
+		health.SetScopedProjectionStatus(metrics.ScopedProjectionStatus{OK: true})
+	} else {
+		rebuilt, rebuildErr := app.RebuildScopedProjection(context.Background())
+		projectionStatus := metrics.ScopedProjectionStatus{
+			Required: true,
+			OK:       rebuildErr == nil && rebuilt == len(contents),
+			Records:  len(contents),
+			Rebuilt:  rebuilt,
+		}
+		if rebuildErr != nil {
+			projectionStatus.Detail = rebuildErr.Error()
+		} else if !projectionStatus.OK {
+			projectionStatus.Detail = fmt.Sprintf("rebuilt %d of %d scoped records", rebuilt, len(contents))
+		}
+		health.SetScopedProjectionStatus(projectionStatus)
+		if !projectionStatus.OK {
+			logger.Warn().Str("detail", projectionStatus.Detail).Msg("scoped serving projection is not ready")
+		} else {
+			logger.Info().Int("records", rebuilt).Msg("scoped serving projection verified from canonical state")
+		}
+	}
+
 	// Content-validation enforcement advisory (non-fatal): warn when the app-v7
 	// fork is active but this binary has no validator registry compiled in, so
 	// this node won't enforce the gate. A mixed fleet (some nodes wired, some
@@ -309,6 +339,7 @@ func startServices(ctx context.Context, app *sageabci.SageApp, restAddr, metrics
 	// height. Advisory only — the consensus path uses app.postV8Fork(height).
 	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
 	restServer.SetPostV17ForNextTxAccessor(app.IsAppV17ActiveForNextTx)
+	restServer.SetPostV20ForNextTxAccessor(app.IsAppV20ActiveForNextTx)
 
 	if tlsCert != "" && tlsKey != "" {
 		// TLS mode: load certs and start HTTPS.

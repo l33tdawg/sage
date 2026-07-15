@@ -286,17 +286,43 @@ func (s *Server) registerTools() map[string]Tool {
 
 		"sage_gov_propose": {
 			Name:        "sage_gov_propose",
-			Description: "Submit a governance proposal to add, remove, or update a validator. Requires admin role.",
+			Description: "Submit a governance proposal. Validator-set operations use scalar fields; app-v20 scope_action accepts a guided scope object that the node encodes canonically. Requires admin role.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"operation":     map[string]any{"type": "string", "enum": []string{"add_validator", "remove_validator", "update_power", "sync_group_action"}, "description": "Governance operation; sync_group_action attests one exact federation journal digest"},
-					"target_id":     map[string]any{"type": "string", "description": "Hex-encoded agent/validator ID"},
+					"operation":     map[string]any{"type": "string", "enum": []string{"add_validator", "remove_validator", "update_power", "sync_group_action", "scope_action"}, "description": "Governance operation"},
+					"target_id":     map[string]any{"type": "string", "description": "Validator ID for validator ops; optional for scope_action when scope.scope_id is supplied"},
 					"target_pubkey": map[string]any{"type": "string", "description": "Hex-encoded Ed25519 public key (required for add_validator)"},
 					"target_power":  map[string]any{"type": "integer", "description": "Voting power (required for add_validator and update_power)"},
 					"reason":        map[string]any{"type": "string", "description": "Human-readable justification for the proposal"},
+					"payload":       map[string]any{"type": "string", "description": "Optional legacy base64 operation payload; mutually exclusive with scope"},
+					"scope": map[string]any{
+						"type":        "object",
+						"description": "Guided app-v20 scope_action template; the node sorts it canonically and owns the execution heights",
+						"properties": map[string]any{
+							"scope_id":                map[string]any{"type": "string"},
+							"revision":                map[string]any{"type": "integer", "minimum": 1},
+							"state":                   map[string]any{"type": "string", "enum": []string{"active", "paused", "retired"}},
+							"controller_validator_id": map[string]any{"type": "string"},
+							"domains":                 map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+							"members": map[string]any{
+								"type": "array", "minItems": 1,
+								"items": map[string]any{
+									"type": "object",
+									"properties": map[string]any{
+										"validator_id":    map[string]any{"type": "string"},
+										"assigned_weight": map[string]any{"type": "integer", "minimum": 1},
+										"joined_revision": map[string]any{"type": "integer", "minimum": 1, "description": "May be omitted only for revision 1"},
+										"active":          map[string]any{"type": "boolean", "default": true},
+									},
+									"required": []string{"validator_id", "assigned_weight"},
+								},
+							},
+						},
+						"required": []string{"scope_id", "revision", "state", "controller_validator_id", "domains", "members"},
+					},
 				},
-				"required": []string{"operation", "target_id", "reason"},
+				"required": []string{"operation", "reason"},
 			},
 			Handler: s.toolGovPropose,
 		},
@@ -323,6 +349,27 @@ func (s *Server) registerTools() map[string]Tool {
 				},
 			},
 			Handler: s.toolGovStatus,
+		},
+		"sage_scope_list": {
+			Name:        "sage_scope_list",
+			Description: "List canonical app-v20 quorum scopes, their exact domain allowlists, pinned integer weights, lifecycle state, and revision audit anchors. Requires node-operator or admin access.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+			Handler: s.toolScopeList,
+		},
+		"sage_scope_get": {
+			Name:        "sage_scope_get",
+			Description: "Read one canonical app-v20 quorum scope by exact scope ID. Requires node-operator or admin access.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"scope_id": map[string]any{"type": "string", "description": "Exact canonical scope ID"},
+				},
+				"required": []string{"scope_id"},
+			},
+			Handler: s.toolScopeGet,
 		},
 		"sage_corroborate": {
 			Name:        "sage_corroborate",
@@ -2330,9 +2377,19 @@ func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
 func (s *Server) toolGovPropose(ctx context.Context, params map[string]any) (any, error) {
 	operation := stringParam(params, "operation", "")
 	if operation == "" {
-		return nil, fmt.Errorf("operation is required (add_validator, remove_validator, update_power, sync_group_action)")
+		return nil, fmt.Errorf("operation is required (add_validator, remove_validator, update_power, sync_group_action, scope_action)")
 	}
 	targetID := stringParam(params, "target_id", "")
+	scopeTemplate, hasScope := params["scope"]
+	if hasScope {
+		scopeMap, ok := scopeTemplate.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("scope must be an object")
+		}
+		if targetID == "" {
+			targetID = stringParam(scopeMap, "scope_id", "")
+		}
+	}
 	if targetID == "" {
 		return nil, fmt.Errorf("target_id is required")
 	}
@@ -2343,17 +2400,26 @@ func (s *Server) toolGovPropose(ctx context.Context, params map[string]any) (any
 
 	targetPubkey := stringParam(params, "target_pubkey", "")
 	targetPower := intParam(params, "target_power", 0)
+	payload := stringParam(params, "payload", "")
 
 	reqBody := map[string]any{
 		"operation": operation,
-		"target_id": targetID,
 		"reason":    reason,
+	}
+	if targetID != "" {
+		reqBody["target_id"] = targetID
 	}
 	if targetPubkey != "" {
 		reqBody["target_pubkey"] = targetPubkey
 	}
 	if targetPower > 0 {
 		reqBody["target_power"] = targetPower
+	}
+	if payload != "" {
+		reqBody["payload"] = payload
+	}
+	if hasScope {
+		reqBody["scope"] = scopeTemplate
 	}
 
 	body, _ := json.Marshal(reqBody)
@@ -2406,6 +2472,27 @@ func (s *Server) toolGovVote(ctx context.Context, params map[string]any) (any, e
 		"proposal_id": proposalID,
 		"decision":    decision,
 	}, nil
+}
+
+func (s *Server) toolScopeList(ctx context.Context, _ map[string]any) (any, error) {
+	var response map[string]any
+	if err := s.doSignedJSON(ctx, "GET", "/v1/scopes", nil, &response); err != nil {
+		return nil, fmt.Errorf("list canonical scopes: %w", err)
+	}
+	return response, nil
+}
+
+func (s *Server) toolScopeGet(ctx context.Context, params map[string]any) (any, error) {
+	scopeID := stringParam(params, "scope_id", "")
+	if scopeID == "" {
+		return nil, fmt.Errorf("scope_id is required")
+	}
+	var response map[string]any
+	path := "/v1/scopes/" + url.PathEscape(scopeID)
+	if err := s.doSignedJSON(ctx, "GET", path, nil, &response); err != nil {
+		return nil, fmt.Errorf("get canonical scope: %w", err)
+	}
+	return response, nil
 }
 
 // toolCorroborate wraps POST /v1/memory/{memory_id}/corroborate, the one

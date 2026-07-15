@@ -928,12 +928,130 @@ components:
         parent:
           type: string
 
+    ScopeDomain:
+      type: object
+      required: [name, subtree]
+      properties:
+        name:
+          type: string
+        subtree:
+          type: boolean
+
+    ScopeMember:
+      type: object
+      required: [validator_id, assigned_weight, joined_revision, active]
+      properties:
+        validator_id:
+          type: string
+        assigned_weight:
+          type: integer
+          format: uint64
+        joined_revision:
+          type: integer
+          format: uint64
+        active:
+          type: boolean
+
+    ScopeRecord:
+      type: object
+      required: [scope_id, revision, revision_hash, state, controller_validator_id, created_height, updated_height, domains, members]
+      properties:
+        scope_id:
+          type: string
+          pattern: '^[^/]+$'
+        revision:
+          type: integer
+          format: uint64
+        revision_hash:
+          type: string
+          description: Domain-separated SHA-256 audit anchor for this revision.
+        state:
+          type: string
+          enum: [active, paused, retired]
+        controller_validator_id:
+          type: string
+        created_height:
+          type: integer
+          format: int64
+        updated_height:
+          type: integer
+          format: int64
+        domains:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScopeDomain"
+        members:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScopeMember"
+
+    ScopeListResponse:
+      type: object
+      required: [scopes, count]
+      properties:
+        scopes:
+          type: array
+          items:
+            $ref: "#/components/schemas/ScopeRecord"
+        count:
+          type: integer
+
+    ScopeActionMember:
+      type: object
+      required: [validator_id, assigned_weight]
+      properties:
+        validator_id:
+          type: string
+        assigned_weight:
+          type: integer
+          format: uint64
+          minimum: 1
+        joined_revision:
+          type: integer
+          format: uint64
+          minimum: 1
+          description: Required after revision 1; may be omitted for a new scope.
+        active:
+          type: boolean
+          default: true
+
+    ScopeActionTemplate:
+      type: object
+      required: [scope_id, revision, state, controller_validator_id, domains, members]
+      properties:
+        scope_id:
+          type: string
+          pattern: '^[^/]+$'
+        revision:
+          type: integer
+          format: uint64
+          minimum: 1
+        state:
+          type: string
+          enum: [active, paused, retired]
+        controller_validator_id:
+          type: string
+        domains:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        members:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ScopeActionMember"
+      description: >-
+        Guided app-v20 scope proposal. The server bytewise-sorts domains and
+        members, defaults omitted member active flags to true, sets both
+        consensus-owned heights to zero, validates ScopeRecordV1 invariants,
+        and emits the canonical binary governance payload.
+
     # -- Governance (v8.0 payload-aware) ----------------------------------------
     GovProposeRequest:
       type: object
       required:
         - operation
-        - target_id
         - reason
       properties:
         operation:
@@ -944,6 +1062,8 @@ components:
             - update_power
             - domain_reassign
             - memory_domain_repair
+            - sync_group_action
+            - scope_action
           description: >-
             Governance operation. `memory_domain_repair` (app-v16, 2/3 quorum) is
             the domainless-forget remediation — it carries a base64 JSON
@@ -952,13 +1072,16 @@ components:
             `domain_reassign` (v8.0) is the
             access-control recovery primitive — it carries the target
             DomainReassign body via the `payload` field rather than the
-            scalar target_* fields.
+            scalar target_* fields. `scope_action` (app-v20) accepts either
+            the guided `scope` object or the legacy canonical binary
+            ScopeRecordV1 `payload`; the two fields are mutually exclusive.
         target_id:
           type: string
           description: >-
             Hex-encoded validator pubkey for validator-set ops; reused as
             the proposal-keying identifier for `domain_reassign` (typically
-            the dotted-path domain name).
+            the dotted-path domain name). Required except when a
+            `scope_action` supplies `scope.scope_id`, from which it is derived.
         target_pubkey:
           type: string
           description: Hex-encoded Ed25519 public key (required for add_validator).
@@ -980,7 +1103,11 @@ components:
             `domain_reassign`, the JSON-encoded body
             `{domain, new_owner_id, parent_domain, open_to_shared}` that
             the subsequent TxTypeDomainReassign execution tx must reproduce
-            byte-for-byte. Empty for legacy validator-set ops.
+            byte-for-byte. For legacy `scope_action` callers, the canonical
+            binary ScopeRecordV1 template with zero system-owned heights.
+            Mutually exclusive with `scope`; empty for validator-set ops.
+        scope:
+          $ref: "#/components/schemas/ScopeActionTemplate"
 
     GovProposeResponse:
       type: object
@@ -1383,6 +1510,30 @@ components:
           type: boolean
         cometbft:
           type: boolean
+        scoped_projection:
+          type: object
+          description: >-
+            v11.9 canonical scoped-content projection status. When required is
+            true and ok is false, readiness fails closed with HTTP 503.
+          required:
+            - checked
+            - required
+            - ok
+            - records
+            - rebuilt
+          properties:
+            checked:
+              type: boolean
+            required:
+              type: boolean
+            ok:
+              type: boolean
+            records:
+              type: integer
+            rebuilt:
+              type: integer
+            detail:
+              type: string
 
     ProblemDetails:
       type: object
@@ -3190,6 +3341,54 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/scopes:
+    get:
+      operationId: listScopes
+      summary: List canonical v11.9 quorum scopes (operator/admin only).
+      tags:
+        - Governance
+      responses:
+        "200":
+          description: Canonical scope heads in scope-ID order.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScopeListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/scopes/{scope_id}:
+    get:
+      operationId: getScope
+      summary: Read one canonical v11.9 quorum scope (operator/admin only).
+      tags:
+        - Governance
+      parameters:
+        - name: scope_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Canonical scope head and immutable current-revision anchor.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScopeRecord"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # -- Embeddings ---------------------------------------------------------
   /v1/embed:
     post:
@@ -3708,7 +3907,7 @@ paths:
   /ready:
     get:
       operationId: readinessCheck
-      summary: Readiness probe — checks PostgreSQL and CometBFT connectivity.
+      summary: Readiness probe — checks storage, CometBFT, and scoped projection integrity.
       tags:
         - Operational
       security: []

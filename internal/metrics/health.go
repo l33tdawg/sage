@@ -33,12 +33,26 @@ type VoterStatus struct {
 	PendingProposed          int     `json:"pending_proposed"`            // node-local count of status='proposed'
 }
 
+// ScopedProjectionStatus reports whether AppHash-covered v11.9 scoped content
+// has been verified into this node's local serving projection. Consensus can
+// remain healthy while this is false, but the node must not advertise serving
+// readiness until canonical scoped records are queryable locally.
+type ScopedProjectionStatus struct {
+	Checked  bool   `json:"checked"`
+	Required bool   `json:"required"`
+	OK       bool   `json:"ok"`
+	Records  int    `json:"records"`
+	Rebuilt  int    `json:"rebuilt"`
+	Detail   string `json:"detail,omitempty"`
+}
+
 // HealthChecker tracks the health status of dependencies.
 type HealthChecker struct {
 	postgresOK atomic.Bool
 	cometbftOK atomic.Bool
 	embedder   atomic.Value // EmbedderStatus, set by SetEmbedderHealth
 	voter      atomic.Value // VoterStatus, set by SetVoterStatus
+	scoped     atomic.Value // ScopedProjectionStatus, set by recovery wiring
 	Version    string
 }
 
@@ -76,6 +90,21 @@ func (h *HealthChecker) voterStatus() VoterStatus {
 		return v
 	}
 	return VoterStatus{}
+}
+
+// SetScopedProjectionStatus records the latest canonical projection rebuild.
+// Callers set Required only when canonical scoped envelopes actually exist, so
+// pre-v20 nodes and empty app-v20 scopes do not acquire a synthetic dependency.
+func (h *HealthChecker) SetScopedProjectionStatus(s ScopedProjectionStatus) {
+	s.Checked = true
+	h.scoped.Store(s)
+}
+
+func (h *HealthChecker) scopedProjectionStatus() ScopedProjectionStatus {
+	if v, ok := h.scoped.Load().(ScopedProjectionStatus); ok {
+		return v
+	}
+	return ScopedProjectionStatus{}
 }
 
 // SetPostgresHealth updates the PostgreSQL health status.
@@ -118,6 +147,7 @@ func (h *HealthChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request)
 	pgOK := h.postgresOK.Load()
 	cmtOK := h.cometbftOK.Load()
 	emb := h.embedderStatus()
+	scoped := h.scopedProjectionStatus()
 
 	status := "ready"
 	httpStatus := http.StatusOK
@@ -125,6 +155,12 @@ func (h *HealthChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request)
 	switch {
 	case !pgOK || !cmtOK:
 		// Core infrastructure down — genuinely not ready.
+		status = "not_ready"
+		httpStatus = http.StatusServiceUnavailable
+	case scoped.Required && (!scoped.Checked || !scoped.OK):
+		// Canonical scoped content exists but the local serving projection is
+		// absent, locked, or failed verification. Reporting ready here would let
+		// a state-synced replica silently serve an incomplete selected domain.
 		status = "not_ready"
 		httpStatus = http.StatusServiceUnavailable
 	case emb.Checked && emb.Semantic && !emb.OK:
@@ -143,10 +179,11 @@ func (h *HealthChecker) ReadinessHandler(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":   status,
-		"postgres": pgOK,
-		"cometbft": cmtOK,
-		"embedder": emb,
+		"status":            status,
+		"postgres":          pgOK,
+		"cometbft":          cmtOK,
+		"embedder":          emb,
+		"scoped_projection": scoped,
 		// Informational voter/backlog block — never gates the status above
 		// (a voter-less node is legitimate; peers may vote memories through).
 		"voter": h.voterStatus(),

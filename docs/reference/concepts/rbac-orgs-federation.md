@@ -251,6 +251,113 @@ The `FederationID` is deterministic: computed from the two org IDs + height to a
 
 ---
 
+## v11.9 quorum scopes are not cross-chain federation
+
+The v11.6–v11.8 federation path connects independent SAGE chains and copies
+selected domains through an authenticated off-consensus transport. An app-v20
+quorum scope instead lives inside one CometBFT chain and names validators that
+already belong to that chain. It does not merge independent chains or replace
+libp2p relay/NAT traversal (`internal/abci/app.go:627-631`,
+`internal/governance/types.go:53-58`).
+
+`OpScopeAction` governance creates, advances, pauses, or permanently retires the
+canonical scope record. Its exact-domain allowlist and integer member weights
+are stored in Badger with immutable per-revision audit anchors
+(`internal/store/scope_state.go:46-185`). A scoped memory submission atomically
+pins the current roster/denominator and a recoverable content envelope; quorum
+requires a strict greater-than-two-thirds integer comparison, so exactly 2/3 is
+not sufficient (`internal/store/scoped_memory_state.go:25-93`,
+`internal/scope/ballot.go:154-162`).
+
+Badger remains the recovery authority. After ordered block replay or verified
+local snapshot restore, the node verifies each canonical envelope and rebuilds
+its SQL serving projection in a transaction. `/ready` returns 503 while
+canonical scoped records exist but that projection is locked, incomplete, or
+invalid; a locked SQLite vault retries on operator unlock
+(`internal/abci/scoped_recovery.go:21-86`, `internal/metrics/health.go`). The
+catch-up integration proof compares every replayed AppHash and confirms that an
+unselected domain has no canonical scoped envelope
+(`internal/abci/appv20_recovery_integration_test.go:41-150`).
+
+The existing snapshot package is an operator-local rollback format. It can
+contain SQLite, CometBFT databases, node/validator keys, vault material, local
+configuration, and a binary, so it must never be sent over ABCI/P2P
+(`internal/snapshot/snapshot.go:1-9`). Its v11.9 integration test restores the
+bundle, deletes SQLite, recomputes AppHash, reloads app-v20, and rebuilds scoped
+content plus classification from Badger
+(`internal/abci/appv20_recovery_integration_test.go:152-285`). Network state sync
+is not yet implemented: the ABCI app advertises no snapshots, rejects offers,
+returns no chunks, and aborts apply (`internal/abci/app.go:6547-6566`). A future
+enabled network path must therefore use the separate dormant consensus-only,
+key-free format described below.
+
+Crash replay is height-bound rather than a nonce bypass. Scoped votes store the
+immutable first decision and its FinalizeBlock height atomically; only an exact
+submit envelope or exact vote at that same behind height can rebuild projection
+writes after a failed Commit (`internal/store/scoped_memory_state.go:214-324`,
+`internal/abci/scoped_memory.go:97-207`). The forced-failure integration test
+reopens the stores after failed submit and quorum-reaching vote commits, matches
+the original AppHashes, restores all SQL votes, and confirms that the same
+signed vote at a later height is still rejected
+(`internal/abci/appv20_recovery_integration_test.go:287-426`).
+
+The dormant network-state-sync substrate is isolated in `internal/statesync`.
+Its canonical metadata binds CometBFT's trusted height/AppHash to a bounded
+chunked Badger backup, hashes every chunk and the complete stream, caps chunks
+at 8 MiB and count at 512, and rejects the unrelated local rollback manifest
+(`internal/statesync/format.go:1-230`). Its disk assembler accepts out-of-order
+delivery, makes an exact duplicate idempotent, rejects corrupt/incorrect-size
+chunks, and verifies the whole backup before an atomic file rename
+(`internal/statesync/assembler.go:15-198`). Tests include malformed canonical
+encodings, wrong trusted hashes, interrupted/incomplete assembly, and a real
+Badger backup/load with an identical AppHash (`internal/statesync/format_test.go`).
+The ABCI endpoints stay disabled even though these format proofs pass.
+
+The producer and receiver foundations are also dormant. Export makes a bounded
+live Badger backup, requires an app-v20 reload verifier to match the committed
+AppHash, atomically publishes only metadata/chunks, rejects extra files and
+symlinks, and hashes a chunk again immediately before read
+(`internal/statesync/exporter.go:23-362`). Receiver preparation loads only into
+a new staging directory, reopens it read-only so validation cannot backfill or
+mutate consensus state, requires exact persisted height plus active app-v20,
+recomputes the narrow AppHash, validates all canonical scoped state, and removes
+the stage on failure (`internal/store/badger.go`,
+`internal/abci/scoped_state_sync.go:19-139`,
+`internal/abci/scoped_recovery.go:73-114`). No code swaps that directory into a
+live application yet, so `ListSnapshots` still advertises none.
+
+The accepted activation design deliberately avoids changing `BadgerStore.db`
+inside a serving process. It replaces the whole ABCI application bundle during
+boot, journals the filesystem/Comet persistence crash window, delays REST,
+dashboard, projection, snapshot-scheduler, and worker construction until the
+runtime is sealed, and requires an authenticated validator-only P2P allowlist.
+This is design work, not enabled behavior; the detailed gates are in
+[`../../v11.9-state-sync-activation.md`](../../v11.9-state-sync-activation.md).
+The first non-activating pieces are code: a bounded canonical/fsynced journal
+and pure Comet-vs-live recovery decision (`internal/statesync/activation.go`),
+plus a writable no-migration opener that preserves the already verified
+AppHash (`internal/store/badger.go:105-128`). No function performs the live
+directory rename yet.
+
+Scope proposals no longer require operators or agents to hand-encode that
+binary record. REST/dashboard accept a structured `scope` template, MCP exposes
+the same guided object, and both Python clients provide
+`governance_propose_scope`. The server sorts domains and members canonically,
+owns the zero proposal heights, preserves explicit historical join revisions,
+and rejects `payload` plus `scope` ambiguity. CEREBRUM builds controller and
+roster choices from the live CometBFT validator set's canonical Ed25519 IDs,
+not from ordinary dashboard-agent IDs; the consensus execution path rechecks
+the same authority. Scope IDs are one REST path segment and therefore cannot
+contain `/`
+(`internal/scope/proposal.go:9-94`, `api/rest/governance_handler.go:105-204`).
+
+Operator/admin visibility is available through `GET /v1/scopes`,
+`GET /v1/scopes/{scope_id}`, `sage_scope_list`, and `sage_scope_get`. These
+surfaces expose topology and audit hashes, never grant domain ownership, RBAC,
+federation access, or administrator authority.
+
+---
+
 ## REST Endpoints Reference
 
 | Method | Path | Tx Type | Description |
@@ -274,6 +381,8 @@ The `FederationID` is deterministic: computed from the two org IDs + height to a
 | GET | `/v1/access/grants/{agent_id}` | — | List active grants for agent |
 | POST | `/v1/domain/register` | `TxTypeDomainRegister` | Explicitly register domain ownership |
 | GET | `/v1/domain/{name}` | — | Get domain owner and metadata |
+| GET | `/v1/scopes` | — | List canonical app-v20 quorum scopes (operator/admin) |
+| GET | `/v1/scopes/{scope_id}` | — | Read one canonical app-v20 quorum scope (operator/admin) |
 
 ---
 
