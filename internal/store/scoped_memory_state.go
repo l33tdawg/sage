@@ -342,12 +342,12 @@ func (s *BadgerStore) SetScopedMemoryVerdict(memoryID string, verdict scope.Ball
 			return err
 		}
 		var ballot scope.Ballot
-		if err := ballotItem.Value(func(value []byte) error {
+		if ballotValueErr := ballotItem.Value(func(value []byte) error {
 			var decodeErr error
 			ballot, decodeErr = scope.DecodeBallot(value)
 			return decodeErr
-		}); err != nil {
-			return err
+		}); ballotValueErr != nil {
+			return ballotValueErr
 		}
 		if ballot.State == verdict {
 			return nil
@@ -360,18 +360,18 @@ func (s *BadgerStore) SetScopedMemoryVerdict(memoryID string, verdict scope.Ball
 			return err
 		}
 		var content scope.Content
-		if err := contentItem.Value(func(value []byte) error {
+		if contentValueErr := contentItem.Value(func(value []byte) error {
 			var decodeErr error
 			content, decodeErr = scope.DecodeContent(value)
 			return decodeErr
-		}); err != nil {
-			return err
+		}); contentValueErr != nil {
+			return contentValueErr
 		}
 		memoryItem, err := txn.Get(memoryKey(memoryID))
 		if err != nil {
 			return err
 		}
-		if err := memoryItem.Value(func(value []byte) error {
+		if memoryValueErr := memoryItem.Value(func(value []byte) error {
 			hash, current, decodeErr := decodeMemoryEntry(value)
 			if decodeErr != nil {
 				return decodeErr
@@ -380,8 +380,8 @@ func (s *BadgerStore) SetScopedMemoryVerdict(memoryID string, verdict scope.Ball
 				return errors.New("scoped content and ordinary memory state disagree")
 			}
 			return nil
-		}); err != nil {
-			return err
+		}); memoryValueErr != nil {
+			return memoryValueErr
 		}
 		ballot.State = verdict
 		encodedBallot, err := scope.EncodeBallot(ballot)

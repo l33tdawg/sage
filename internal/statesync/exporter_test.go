@@ -29,17 +29,17 @@ func narrowAppHashVerifier(t *testing.T) BackupVerifier {
 			_ = db.Close()
 			return nil, err
 		}
-		if err := db.Load(file, 16); err != nil {
+		if loadErr := db.Load(file, 16); loadErr != nil {
 			_ = file.Close()
 			_ = db.Close()
-			return nil, err
+			return nil, loadErr
 		}
-		if err := file.Close(); err != nil {
+		if closeFileErr := file.Close(); closeFileErr != nil {
 			_ = db.Close()
-			return nil, err
+			return nil, closeFileErr
 		}
-		if err := db.Close(); err != nil {
-			return nil, err
+		if closeDBErr := db.Close(); closeDBErr != nil {
+			return nil, closeDBErr
 		}
 		restored, err := store.NewBadgerStore(restoredPath)
 		if err != nil {
@@ -83,8 +83,8 @@ func TestExportCatalogAndLoadChunkContainOnlyConsensusState(t *testing.T) {
 	assert.Equal(t, exported.Hash, opened.Hash)
 	var backup bytes.Buffer
 	for index := range opened.Metadata.ChunkHashes {
-		chunk, err := opened.LoadChunk(uint32(index))
-		require.NoError(t, err)
+		chunk, loadChunkErr := opened.LoadChunk(uint32(index))
+		require.NoError(t, loadChunkErr)
 		_, _ = backup.Write(chunk)
 	}
 	assert.Equal(t, opened.Metadata.BackupSize, uint64(backup.Len()))

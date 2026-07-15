@@ -238,8 +238,8 @@ func TestAppV20ScopedReplicaAppHashDeterminism(t *testing.T) {
 	submit := makeMemorySubmitTx(t, validators[0], "research", "replicated canonical envelope")
 	submit.Nonce = 1
 	require.NoError(t, tx.SignTx(submit, validators[0].priv))
-	rawSubmit, err := tx.EncodeTx(submit)
-	require.NoError(t, err)
+	rawSubmit, encodeSubmitErr := tx.EncodeTx(submit)
+	require.NoError(t, encodeSubmitErr)
 	blockTime := time.Unix(1000, 0)
 	finalizeBoth := func(height int64, raw []byte) (*abcitypes.ResponseFinalizeBlock, *abcitypes.ResponseFinalizeBlock) {
 		leftResp, err := left.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{Height: height, Time: blockTime, Txs: [][]byte{raw}})

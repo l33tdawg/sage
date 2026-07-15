@@ -55,8 +55,7 @@ func (s *BadgerStore) SetScopeRecord(record scope.Record) error {
 		exactReplay := false
 		item, getErr := txn.Get(key)
 		if getErr == nil {
-			var decodeErr error
-			decodeErr = item.Value(func(value []byte) error {
+			decodeErr := item.Value(func(value []byte) error {
 				decoded, err := scope.Decode(value)
 				if err != nil {
 					return err

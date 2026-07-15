@@ -98,8 +98,8 @@ func Export(ctx context.Context, db *badger.DB, root string, height uint64, appH
 	}
 
 	chunksDir := filepath.Join(staging, chunksDirname)
-	if err := os.Mkdir(chunksDir, 0o700); err != nil {
-		return nil, err
+	if mkdirChunksErr := os.Mkdir(chunksDir, 0o700); mkdirChunksErr != nil {
+		return nil, mkdirChunksErr
 	}
 	input, err := os.Open(backupPath) //nolint:gosec // staging-owned path
 	if err != nil {
@@ -109,9 +109,9 @@ func Export(ctx context.Context, db *badger.DB, root string, height uint64, appH
 	chunkHashes := make([][]byte, 0, (uint64(stat.Size())+uint64(chunkSize)-1)/uint64(chunkSize)) // #nosec G115 -- positive bounded size
 	buffer := make([]byte, int(chunkSize))
 	for index := uint32(0); ; index++ {
-		if err := ctx.Err(); err != nil {
+		if contextErr := ctx.Err(); contextErr != nil {
 			_ = input.Close()
-			return nil, err
+			return nil, contextErr
 		}
 		if index >= MaxChunks {
 			_ = input.Close()
@@ -129,22 +129,22 @@ func Export(ctx context.Context, db *badger.DB, root string, height uint64, appH
 		_, _ = whole.Write(chunk)
 		hash := sha256.Sum256(chunk)
 		chunkHashes = append(chunkHashes, append([]byte(nil), hash[:]...))
-		if err := writeSyncedFile(filepath.Join(chunksDir, chunkFilename(index)), chunk); err != nil {
+		if writeChunkErr := writeSyncedFile(filepath.Join(chunksDir, chunkFilename(index)), chunk); writeChunkErr != nil {
 			_ = input.Close()
-			return nil, err
+			return nil, writeChunkErr
 		}
 		if errors.Is(readErr, io.ErrUnexpectedEOF) {
 			break
 		}
 	}
-	if err := input.Close(); err != nil {
-		return nil, err
+	if closeInputErr := input.Close(); closeInputErr != nil {
+		return nil, closeInputErr
 	}
 	if len(chunkHashes) == 0 {
 		return nil, errors.New("state sync backup produced no chunks")
 	}
-	if err := os.Remove(backupPath); err != nil {
-		return nil, err
+	if removeBackupErr := os.Remove(backupPath); removeBackupErr != nil {
+		return nil, removeBackupErr
 	}
 	metadata, encoded, snapshotHash, err := buildMetadataFromDigests(
 		height, appHash, uint64(stat.Size()), chunkSize, whole.Sum(nil), chunkHashes, // #nosec G115 -- positive bounded size
@@ -204,8 +204,8 @@ func OpenSnapshot(dir string) (*Snapshot, error) {
 		return nil, errors.New("state sync chunks path is not a real directory")
 	}
 	metadataPath := filepath.Join(dir, metadataFilename)
-	if err := requireRegularFile(metadataPath); err != nil {
-		return nil, err
+	if regularMetadataErr := requireRegularFile(metadataPath); regularMetadataErr != nil {
+		return nil, regularMetadataErr
 	}
 	encoded, err := os.ReadFile(metadataPath) //nolint:gosec // caller-selected snapshot root
 	if err != nil {
@@ -260,8 +260,8 @@ func (snapshot *Snapshot) LoadChunk(index uint32) ([]byte, error) {
 		return nil, err
 	}
 	path := filepath.Join(snapshot.Dir, chunksDirname, chunkFilename(index))
-	if err := requireRegularFile(path); err != nil {
-		return nil, err
+	if regularChunkErr := requireRegularFile(path); regularChunkErr != nil {
+		return nil, regularChunkErr
 	}
 	chunk, err := os.ReadFile(path) //nolint:gosec // index is bounded metadata
 	if err != nil {

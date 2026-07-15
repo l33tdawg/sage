@@ -54,23 +54,23 @@ func inspectAppV20StateSyncBackup(ctx context.Context, backupPath, targetDir str
 	if backupPath == "" || targetDir == "" || height == 0 || height > math.MaxInt64 {
 		return nil, errors.New("state sync backup path, target, and positive int64 height are required")
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
 	}
-	stat, err := os.Lstat(backupPath)
-	if err != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 || uint64(stat.Size()) > statesync.MaxSnapshotBytes { // #nosec G115 -- positive checked first
+	stat, statErr := os.Lstat(backupPath)
+	if statErr != nil || !stat.Mode().IsRegular() || stat.Size() <= 0 || uint64(stat.Size()) > statesync.MaxSnapshotBytes { // #nosec G115 -- positive checked first
 		return nil, errors.New("state sync backup is missing, non-regular, empty, or oversized")
 	}
-	if _, err := os.Stat(targetDir); err == nil {
+	if _, targetErr := os.Stat(targetDir); targetErr == nil {
 		return nil, errors.New("state sync target already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	} else if !errors.Is(targetErr, os.ErrNotExist) {
+		return nil, targetErr
 	}
-	if err := os.MkdirAll(filepath.Dir(targetDir), 0o700); err != nil {
-		return nil, err
+	if mkdirParentErr := os.MkdirAll(filepath.Dir(targetDir), 0o700); mkdirParentErr != nil {
+		return nil, mkdirParentErr
 	}
-	if err := os.Mkdir(targetDir, 0o700); err != nil {
-		return nil, err
+	if mkdirTargetErr := os.Mkdir(targetDir, 0o700); mkdirTargetErr != nil {
+		return nil, mkdirTargetErr
 	}
 	keep := false
 	defer func() {
@@ -100,8 +100,8 @@ func inspectAppV20StateSyncBackup(ctx context.Context, backupPath, targetDir str
 	if closeDBErr != nil {
 		return nil, closeDBErr
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if contextErr := ctx.Err(); contextErr != nil {
+		return nil, contextErr
 	}
 
 	readOnly, err := store.OpenBadgerStoreReadOnly(targetDir)
