@@ -4,22 +4,40 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"testing"
+	"time"
 
 	dbm "github.com/cometbft/cometbft-db"
+	cmted25519 "github.com/cometbft/cometbft/crypto/ed25519"
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 	"github.com/cometbft/cometbft/types"
 	"github.com/stretchr/testify/require"
 )
 
-func sageStateSyncBootstrapTestCommit(height int64) *types.Commit {
+func sageStateSyncBootstrapTestCommit(t *testing.T, height int64) *types.Commit {
+	t.Helper()
 	blockHash := sha256.Sum256([]byte("state-sync block"))
 	partsHash := sha256.Sum256([]byte("state-sync parts"))
+	blockID := types.BlockID{
+		Hash:          blockHash[:],
+		PartSetHeader: types.PartSetHeader{Total: 1, Hash: partsHash[:]},
+	}
+	privateKey := cmted25519.GenPrivKey()
+	vote := &types.Vote{
+		Type:             cmtproto.PrecommitType,
+		Height:           height,
+		Round:            0,
+		BlockID:          blockID,
+		Timestamp:        time.Unix(1, 0).UTC(),
+		ValidatorAddress: privateKey.PubKey().Address(),
+		ValidatorIndex:   0,
+	}
+	signature, err := privateKey.Sign(types.VoteSignBytes("sage-state-sync-recovery-test", vote.ToProto()))
+	require.NoError(t, err)
+	vote.Signature = signature
 	return &types.Commit{
-		Height: height,
-		BlockID: types.BlockID{
-			Hash:          blockHash[:],
-			PartSetHeader: types.PartSetHeader{Total: 1, Hash: partsHash[:]},
-		},
-		Signatures: []types.CommitSig{types.NewCommitSigAbsent()},
+		Height:     height,
+		BlockID:    blockID,
+		Signatures: []types.CommitSig{vote.CommitSig()},
 	}
 }
 
@@ -86,7 +104,11 @@ func TestStateSyncBootstrapCompleteRejectsMalformedRecords(t *testing.T) {
 func TestRecoverIncompleteStateSyncBootstrapRemovesOnlyExactSeenCommit(t *testing.T) {
 	db := dbm.NewMemDB()
 	blockStore := NewBlockStore(db)
-	require.NoError(t, blockStore.SaveSeenCommit(42, sageStateSyncBootstrapTestCommit(42)))
+	require.NoError(t, blockStore.SaveSeenCommit(42, sageStateSyncBootstrapTestCommit(t, 42)))
+	recoverable, err := IsIncompleteStateSyncBootstrapDB(db)
+	require.NoError(t, err)
+	require.True(t, recoverable)
+	require.NotNil(t, blockStore.LoadSeenCommit(42), "inspection never removes the commit")
 
 	recovered, err := blockStore.RecoverIncompleteStateSyncBootstrap()
 	require.NoError(t, err)
@@ -106,13 +128,35 @@ func TestRecoverIncompleteStateSyncBootstrapPreservesAmbiguousData(t *testing.T)
 		"malformed commit": func(db dbm.DB) {
 			require.NoError(t, db.SetSync(calcSeenCommitKey(42), []byte("not a commit")))
 		},
+		"canonical all-absent commit": func(db dbm.DB) {
+			commit := sageStateSyncBootstrapTestCommit(t, 42)
+			commit.Signatures = []types.CommitSig{types.NewCommitSigAbsent()}
+			require.NoError(t, NewBlockStore(db).SaveSeenCommit(42, commit))
+		},
+		"canonical short commit signature": func(db dbm.DB) {
+			commit := sageStateSyncBootstrapTestCommit(t, 42)
+			commit.Signatures[0].Signature = []byte{0x01}
+			require.NoError(t, NewBlockStore(db).SaveSeenCommit(42, commit))
+		},
+		"noncanonical commit with unknown field": func(db dbm.DB) {
+			canonical, err := db.Get(calcSeenCommitKey(42))
+			require.NoError(t, err)
+			// Valid unknown protobuf field 99 (wire type 0, value 1). A decoder
+			// may ignore it, but this byte sequence was not emitted by
+			// SaveSeenCommit and must remain untouched.
+			noncanonical := append(append([]byte(nil), canonical...), 0x98, 0x06, 0x01)
+			require.NoError(t, db.SetSync(calcSeenCommitKey(42), noncanonical))
+		},
 	}
 	for name, contaminate := range tests {
 		t.Run(name, func(t *testing.T) {
 			db := dbm.NewMemDB()
 			blockStore := NewBlockStore(db)
-			require.NoError(t, blockStore.SaveSeenCommit(42, sageStateSyncBootstrapTestCommit(42)))
+			require.NoError(t, blockStore.SaveSeenCommit(42, sageStateSyncBootstrapTestCommit(t, 42)))
 			contaminate(db)
+			recoverable, err := IsIncompleteStateSyncBootstrapDB(db)
+			require.NoError(t, err)
+			require.False(t, recoverable)
 			recovered, err := blockStore.RecoverIncompleteStateSyncBootstrap()
 			require.NoError(t, err)
 			require.False(t, recovered)

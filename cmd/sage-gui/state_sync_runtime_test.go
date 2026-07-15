@@ -12,11 +12,16 @@ import (
 	"testing"
 	"time"
 
+	dbm "github.com/cometbft/cometbft-db"
+
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/config"
 	cmted25519 "github.com/cometbft/cometbft/crypto/ed25519"
+	cmtnode "github.com/cometbft/cometbft/node"
 	"github.com/cometbft/cometbft/p2p"
 	"github.com/cometbft/cometbft/privval"
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+	cmtstate "github.com/cometbft/cometbft/state"
 	cmtstore "github.com/cometbft/cometbft/store"
 	cmttypes "github.com/cometbft/cometbft/types"
 	badger "github.com/dgraph-io/badger/v4"
@@ -67,6 +72,88 @@ func writeStateSyncRuntimeAuthorization(t *testing.T, path string, authorization
 	encoded, err := json.Marshal(authorization)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, encoded, 0o600))
+}
+
+func cacheStateSyncRuntimeGenesis(t *testing.T, cometCfg *config.Config) {
+	t.Helper()
+	db, err := config.DefaultDBProvider(&config.DBContext{ID: "state", Config: cometCfg})
+	require.NoError(t, err)
+	state, _, loadErr := cmtnode.LoadStateFromDBOrGenesisDocProvider(db, cmtnode.DefaultGenesisDocProviderFunc(cometCfg))
+	closeErr := db.Close()
+	require.NoError(t, loadErr)
+	require.NoError(t, closeErr)
+	require.Zero(t, state.LastBlockHeight)
+}
+
+func saveStateSyncRuntimeCommitResidue(t *testing.T, cometCfg *config.Config, height int64) {
+	t.Helper()
+	blockDB, err := config.DefaultDBProvider(&config.DBContext{ID: "blockstore", Config: cometCfg})
+	require.NoError(t, err)
+	blockStore := cmtstore.NewBlockStore(blockDB)
+	blockHash := sha256.Sum256([]byte("commit-only crash block"))
+	partsHash := sha256.Sum256([]byte("commit-only crash parts"))
+	blockID := cmttypes.BlockID{
+		Hash:          blockHash[:],
+		PartSetHeader: cmttypes.PartSetHeader{Total: 1, Hash: partsHash[:]},
+	}
+	privateKey := cmted25519.GenPrivKey()
+	vote := &cmttypes.Vote{
+		Type:             cmtproto.PrecommitType,
+		Height:           height,
+		Round:            0,
+		BlockID:          blockID,
+		Timestamp:        time.Unix(1, 0).UTC(),
+		ValidatorAddress: privateKey.PubKey().Address(),
+		ValidatorIndex:   0,
+	}
+	signature, err := privateKey.Sign(cmttypes.VoteSignBytes("sage-state-sync-test", vote.ToProto()))
+	require.NoError(t, err)
+	vote.Signature = signature
+	commit := &cmttypes.Commit{
+		Height:     height,
+		BlockID:    blockID,
+		Signatures: []cmttypes.CommitSig{vote.CommitSig()},
+	}
+	require.NoError(t, blockStore.SaveSeenCommit(commit.Height, commit))
+	require.NoError(t, blockStore.Close())
+}
+
+func snapshotStateSyncRuntimeCometDatabase(t *testing.T, cometCfg *config.Config, database string) map[string][]byte {
+	t.Helper()
+	db, err := config.DefaultDBProvider(&config.DBContext{ID: database, Config: cometCfg})
+	require.NoError(t, err)
+	iterator, err := db.Iterator(nil, nil)
+	require.NoError(t, err)
+	contents := make(map[string][]byte)
+	for ; iterator.Valid(); iterator.Next() {
+		contents[string(iterator.Key())] = append([]byte(nil), iterator.Value()...)
+	}
+	require.NoError(t, iterator.Error())
+	require.NoError(t, iterator.Close())
+	require.NoError(t, db.Close())
+	return contents
+}
+
+type stateSyncRuntimeIteratorErrorDB struct {
+	dbm.DB
+	err error
+}
+
+func (db stateSyncRuntimeIteratorErrorDB) Iterator(start, end []byte) (dbm.Iterator, error) {
+	iterator, err := db.DB.Iterator(start, end)
+	if err != nil {
+		return nil, err
+	}
+	return stateSyncRuntimeErrorIterator{Iterator: iterator, err: db.err}, nil
+}
+
+type stateSyncRuntimeErrorIterator struct {
+	dbm.Iterator
+	err error
+}
+
+func (iterator stateSyncRuntimeErrorIterator) Error() error {
+	return iterator.err
 }
 
 func stateSyncRuntimePeerAddress(nodeKey *p2p.NodeKey, port int) string {
@@ -343,7 +430,7 @@ func TestArmConfiguredStateSyncServingPublishesAndExposesVerifiedSnapshot(t *tes
 	assert.False(t, cometCfg.StateSync.Enable)
 }
 
-func TestArmConfiguredStateSyncReceiverBindsCometAndStartsOneShotPhase(t *testing.T) {
+func TestArmConfiguredStateSyncReceiverRetriesCometPreStateSyncCrashAndStartsOneShotPhase(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()
 	cometCfg := config.DefaultConfig()
@@ -400,12 +487,19 @@ func TestArmConfiguredStateSyncReceiverBindsCometAndStartsOneShotPhase(t *testin
 			StateSync: stateSyncCfg,
 		},
 	}
+	// Model the synchronous writes owned by the prior Comet process before its
+	// asynchronous state-sync bootstrap crashed: the exact cached genesis plus
+	// the commit-first record written before StateStore.Bootstrap.
+	cacheStateSyncRuntimeGenesis(t, cometCfg)
+	saveStateSyncRuntimeCommitResidue(t, cometCfg, 42)
 	require.NoError(t, armConfiguredStateSync(ctx, cfg, cometCfg, joiningPV, joiningNode, app, offchain, runtime, zerolog.Nop()))
 	assert.Equal(t, sageabci.BootStateSyncDiscovering, runtime.Phase())
 	assert.True(t, cometCfg.StateSync.Enable)
 	assert.Equal(t, stateSyncCfg.RPCServers, cometCfg.StateSync.RPCServers)
 	assert.Equal(t, statesync.MaxChunks, cometCfg.StateSync.MaxSnapshotChunks)
 	assert.Equal(t, filepath.Join(dataDir, defaultStateSyncReceivingDir, stateSyncCometTempDirname), cometCfg.StateSync.TempDir)
+	require.NoError(t, requireEmptyCometDatabase(cometCfg, "state"))
+	require.NoError(t, requireEmptyCometDatabase(cometCfg, "blockstore"))
 }
 
 func TestFreshStateSyncReceiverRejectsSoloLocalGenesis(t *testing.T) {
@@ -427,26 +521,159 @@ func TestFreshStateSyncReceiverRejectsSoloLocalGenesis(t *testing.T) {
 	require.ErrorContains(t, err, "only the local validator")
 }
 
-func TestFreshStateSyncReceiverRecoversCommitOnlyCrashResidue(t *testing.T) {
-	ctx, cometCfg, pv, app, offchain := newFreshStateSyncReceiverFixture(t)
-	blockDB, err := config.DefaultDBProvider(&config.DBContext{ID: "blockstore", Config: cometCfg})
-	require.NoError(t, err)
-	blockStore := cmtstore.NewBlockStore(blockDB)
-	blockHash := sha256.Sum256([]byte("commit-only crash block"))
-	partsHash := sha256.Sum256([]byte("commit-only crash parts"))
-	commit := &cmttypes.Commit{
-		Height: 42,
-		BlockID: cmttypes.BlockID{
-			Hash:          blockHash[:],
-			PartSetHeader: cmttypes.PartSetHeader{Total: 1, Hash: partsHash[:]},
-		},
-		Signatures: []cmttypes.CommitSig{cmttypes.NewCommitSigAbsent()},
+func TestFreshStateSyncReceiverRecoversExactCometPreStateSyncResidues(t *testing.T) {
+	tests := []struct {
+		name            string
+		cachedGenesis   bool
+		commitBootstrap bool
+	}{
+		{name: "cached genesis only", cachedGenesis: true},
+		{name: "cached genesis plus commit-only bootstrap", cachedGenesis: true, commitBootstrap: true},
+		{name: "commit-only after cached-genesis cleanup", commitBootstrap: true},
 	}
-	require.NoError(t, blockStore.SaveSeenCommit(commit.Height, commit))
-	require.NoError(t, blockStore.Close())
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cometCfg, pv, app, offchain := newFreshStateSyncReceiverFixture(t)
+			if test.cachedGenesis {
+				cacheStateSyncRuntimeGenesis(t, cometCfg)
+			}
+			if test.commitBootstrap {
+				saveStateSyncRuntimeCommitResidue(t, cometCfg, 42)
+			}
+			if test.cachedGenesis {
+				require.NotEmpty(t, snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "state"))
+			}
+			if test.commitBootstrap {
+				require.NotEmpty(t, snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "blockstore"))
+			}
 
-	require.NoError(t, requireFreshStateSyncReceiver(ctx, cometCfg, pv, app, offchain))
-	require.NoError(t, requireEmptyCometDatabase(cometCfg, "blockstore"))
+			require.NoError(t, requireFreshStateSyncReceiver(ctx, cometCfg, pv, app, offchain))
+			require.NoError(t, requireEmptyCometDatabase(cometCfg, "state"))
+			require.NoError(t, requireEmptyCometDatabase(cometCfg, "blockstore"))
+			require.NoError(t, requireFreshStateSyncReceiver(ctx, cometCfg, pv, app, offchain), "cleanup remains idempotently fresh")
+		})
+	}
+}
+
+func TestFreshStateSyncReceiverRejectsAmbiguousCometResiduesWithoutMutation(t *testing.T) {
+	tests := map[string]func(*testing.T, *config.Config){
+		"additional state key": func(t *testing.T, cometCfg *config.Config) {
+			db, err := config.DefaultDBProvider(&config.DBContext{ID: "state", Config: cometCfg})
+			require.NoError(t, err)
+			require.NoError(t, db.SetSync([]byte("unexpected-state"), []byte("preserve me")))
+			require.NoError(t, db.Close())
+		},
+		"configured genesis changed": func(t *testing.T, cometCfg *config.Config) {
+			genesis, err := cmttypes.GenesisDocFromFile(cometCfg.GenesisFile())
+			require.NoError(t, err)
+			genesis.ChainID += "-changed"
+			require.NoError(t, genesis.SaveAs(cometCfg.GenesisFile()))
+		},
+		"malformed cached genesis": func(t *testing.T, cometCfg *config.Config) {
+			db, err := config.DefaultDBProvider(&config.DBContext{ID: "state", Config: cometCfg})
+			require.NoError(t, err)
+			require.NoError(t, db.SetSync([]byte("genesisDoc"), []byte("malformed cached genesis")))
+			require.NoError(t, db.Close())
+		},
+		"additional blockstore key": func(t *testing.T, cometCfg *config.Config) {
+			db, err := config.DefaultDBProvider(&config.DBContext{ID: "blockstore", Config: cometCfg})
+			require.NoError(t, err)
+			require.NoError(t, db.SetSync([]byte("unexpected-block"), []byte("preserve me")))
+			require.NoError(t, db.Close())
+		},
+		"malformed commit residue": func(t *testing.T, cometCfg *config.Config) {
+			db, err := config.DefaultDBProvider(&config.DBContext{ID: "blockstore", Config: cometCfg})
+			require.NoError(t, err)
+			require.NoError(t, db.SetSync([]byte("SC:42"), []byte("malformed commit")))
+			require.NoError(t, db.Close())
+		},
+		"canonical all-absent commit residue": func(t *testing.T, cometCfg *config.Config) {
+			db, err := config.DefaultDBProvider(&config.DBContext{ID: "blockstore", Config: cometCfg})
+			require.NoError(t, err)
+			blockStore := cmtstore.NewBlockStore(db)
+			commit := blockStore.LoadSeenCommit(42)
+			require.NotNil(t, commit)
+			commit.Signatures = []cmttypes.CommitSig{cmttypes.NewCommitSigAbsent()}
+			require.NoError(t, blockStore.SaveSeenCommit(42, commit))
+			require.NoError(t, blockStore.Close())
+		},
+		"canonical short commit signature": func(t *testing.T, cometCfg *config.Config) {
+			db, err := config.DefaultDBProvider(&config.DBContext{ID: "blockstore", Config: cometCfg})
+			require.NoError(t, err)
+			blockStore := cmtstore.NewBlockStore(db)
+			commit := blockStore.LoadSeenCommit(42)
+			require.NotNil(t, commit)
+			commit.Signatures[0].Signature = []byte{0x01}
+			require.NoError(t, blockStore.SaveSeenCommit(42, commit))
+			require.NoError(t, blockStore.Close())
+		},
+		"persisted canonical state": func(t *testing.T, cometCfg *config.Config) {
+			genesis, err := cmttypes.GenesisDocFromFile(cometCfg.GenesisFile())
+			require.NoError(t, err)
+			genesisState, err := cmtstate.MakeGenesisState(genesis)
+			require.NoError(t, err)
+			db, err := config.DefaultDBProvider(&config.DBContext{ID: "state", Config: cometCfg})
+			require.NoError(t, err)
+			require.NoError(t, cmtstate.NewStore(db, cmtstate.StoreOptions{}).Save(genesisState))
+			require.NoError(t, db.Close())
+		},
+		"malformed canonical state key": func(t *testing.T, cometCfg *config.Config) {
+			db, err := config.DefaultDBProvider(&config.DBContext{ID: "state", Config: cometCfg})
+			require.NoError(t, err)
+			require.NoError(t, db.SetSync([]byte("stateKey"), []byte("malformed state protobuf")))
+			require.NoError(t, db.Close())
+		},
+		"populated evidence database": func(t *testing.T, cometCfg *config.Config) {
+			populateStateSyncRuntimeCometDatabase(t, cometCfg, "evidence")
+		},
+		"populated transaction index": func(t *testing.T, cometCfg *config.Config) {
+			populateStateSyncRuntimeCometDatabase(t, cometCfg, "tx_index")
+		},
+		"nonempty consensus WAL": func(t *testing.T, cometCfg *config.Config) {
+			walPath := cometCfg.Consensus.WalFile()
+			require.NoError(t, os.MkdirAll(filepath.Dir(walPath), 0o700))
+			require.NoError(t, os.WriteFile(walPath, []byte("preserve signing evidence"), 0o600))
+		},
+	}
+
+	for name, contaminate := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx, cometCfg, pv, app, offchain := newFreshStateSyncReceiverFixture(t)
+			cacheStateSyncRuntimeGenesis(t, cometCfg)
+			saveStateSyncRuntimeCommitResidue(t, cometCfg, 42)
+			contaminate(t, cometCfg)
+			stateBefore := snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "state")
+			blockBefore := snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "blockstore")
+
+			err := requireFreshStateSyncReceiver(ctx, cometCfg, pv, app, offchain)
+			require.Error(t, err)
+			require.Equal(t, stateBefore, snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "state"))
+			require.Equal(t, blockBefore, snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "blockstore"))
+		})
+	}
+
+	t.Run("nonzero validator signing state", func(t *testing.T) {
+		ctx, cometCfg, pv, app, offchain := newFreshStateSyncReceiverFixture(t)
+		cacheStateSyncRuntimeGenesis(t, cometCfg)
+		saveStateSyncRuntimeCommitResidue(t, cometCfg, 42)
+		pv.LastSignState.Height = 1
+		stateBefore := snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "state")
+		blockBefore := snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "blockstore")
+
+		err := requireFreshStateSyncReceiver(ctx, cometCfg, pv, app, offchain)
+		require.ErrorContains(t, err, "fresh validator signing state")
+		require.Equal(t, stateBefore, snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "state"))
+		require.Equal(t, blockBefore, snapshotStateSyncRuntimeCometDatabase(t, cometCfg, "blockstore"))
+	})
+}
+
+func TestRequireEmptyCometDatabaseFailsClosedOnIteratorReadError(t *testing.T) {
+	cometCfg := config.DefaultConfig()
+	db := stateSyncRuntimeIteratorErrorDB{DB: dbm.NewMemDB(), err: fmt.Errorf("injected iterator read failure")}
+	err := requireEmptyCometDatabaseWithProvider(cometCfg, "state", func(*config.DBContext) (dbm.DB, error) {
+		return db, nil
+	})
+	require.ErrorContains(t, err, "injected iterator read failure")
 }
 
 func TestFreshStateSyncReceiverRejectsMalformedBlockStoreMetadataWithoutPanic(t *testing.T) {

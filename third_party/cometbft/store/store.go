@@ -708,7 +708,28 @@ func RecoverIncompleteStateSyncBootstrapDB(db dbm.DB) (bool, error) {
 	return recovered, err
 }
 
+// IsIncompleteStateSyncBootstrapDB reports whether the raw database contains
+// the exact lone seen-commit record accepted by
+// RecoverIncompleteStateSyncBootstrapDB. It never mutates the database, which
+// lets startup validate every independent persistence surface before removing
+// any recognized crash residue.
+func IsIncompleteStateSyncBootstrapDB(db dbm.DB) (bool, error) {
+	_, recoverable, err := inspectIncompleteStateSyncBootstrap(db)
+	return recoverable, err
+}
+
 func recoverIncompleteStateSyncBootstrap(db dbm.DB) (int64, bool, error) {
+	height, recoverable, err := inspectIncompleteStateSyncBootstrap(db)
+	if err != nil || !recoverable {
+		return 0, false, err
+	}
+	if err := db.DeleteSync(calcSeenCommitKey(height)); err != nil {
+		return 0, false, fmt.Errorf("remove incomplete state-sync seen commit: %w", err)
+	}
+	return height, true, nil
+}
+
+func inspectIncompleteStateSyncBootstrap(db dbm.DB) (int64, bool, error) {
 	if db == nil {
 		return 0, false, errors.New("recover incomplete state-sync bootstrap requires a database")
 	}
@@ -754,8 +775,24 @@ func recoverIncompleteStateSyncBootstrap(db dbm.DB) (int64, bool, error) {
 	if err != nil || commit.Height != height || commit.ValidateBasic() != nil {
 		return 0, false, nil
 	}
-	if err := db.DeleteSync(key); err != nil {
-		return 0, false, fmt.Errorf("remove incomplete state-sync seen commit: %w", err)
+	hasBlockCommitSignature := false
+	for _, signature := range commit.Signatures {
+		if signature.BlockIDFlag != types.BlockIDFlagAbsent && len(signature.Signature) != types.MaxSignatureSize {
+			return 0, false, nil
+		}
+		if signature.BlockIDFlag == types.BlockIDFlagCommit {
+			hasBlockCommitSignature = true
+		}
+	}
+	if !hasBlockCommitSignature {
+		return 0, false, nil
+	}
+	canonicalValue, err := proto.Marshal(commit.ToProto())
+	if err != nil {
+		return 0, false, fmt.Errorf("re-encode incomplete state-sync seen commit: %w", err)
+	}
+	if !bytes.Equal(value, canonicalValue) {
+		return 0, false, nil
 	}
 	return height, true, nil
 }

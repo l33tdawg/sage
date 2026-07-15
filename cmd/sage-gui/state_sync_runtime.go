@@ -13,9 +13,12 @@ import (
 	"strings"
 	"time"
 
+	dbm "github.com/cometbft/cometbft-db"
+
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/config"
 	cmted25519 "github.com/cometbft/cometbft/crypto/ed25519"
+	cmtnode "github.com/cometbft/cometbft/node"
 	"github.com/cometbft/cometbft/p2p"
 	"github.com/cometbft/cometbft/privval"
 	cmtstore "github.com/cometbft/cometbft/store"
@@ -555,17 +558,37 @@ func requireFreshStateSyncReceiver(ctx context.Context, cometCfg *config.Config,
 	if err := offchain.RequirePristineStateSyncProjection(ctx); err != nil {
 		return err
 	}
-	cometHeight, cometHash, err := readPersistedCometState(cometCfg)
+	genesis, err := cmttypes.GenesisDocFromFile(cometCfg.GenesisFile())
 	if err != nil {
-		return fmt.Errorf("read state sync receiver Comet state: %w", err)
+		return fmt.Errorf("read state sync receiver genesis: %w", err)
 	}
-	if cometHeight != 0 || len(cometHash) != 0 {
-		return errors.New("state sync receiving requires an empty local CometBFT state")
+	localPublicKey, err := pv.GetPubKey()
+	if err != nil || localPublicKey == nil {
+		return errors.New("read state sync receiver validator public key")
 	}
-	if _, err := recoverIncompleteCometStateSyncBootstrap(cometCfg); err != nil {
+	if len(genesis.Validators) == 1 && genesis.Validators[0].PubKey != nil &&
+		bytes.Equal(genesis.Validators[0].PubKey.Address(), localPublicKey.Address()) {
+		return errors.New("state sync receiving would be skipped because genesis names only the local validator")
+	}
+	genesisResidue, err := inspectCachedCometStateSyncGenesis(cometCfg, genesis)
+	if err != nil {
 		return err
 	}
-	for _, database := range []string{"state", "blockstore", "evidence", "tx_index"} {
+	if !genesisResidue {
+		if err := requireEmptyCometDatabase(cometCfg, "state"); err != nil {
+			return err
+		}
+	}
+	commitResidue, err := inspectIncompleteCometStateSyncBootstrap(cometCfg)
+	if err != nil {
+		return err
+	}
+	if !commitResidue {
+		if err := requireEmptyCometDatabase(cometCfg, "blockstore"); err != nil {
+			return err
+		}
+	}
+	for _, database := range []string{"evidence", "tx_index"} {
 		if err := requireEmptyCometDatabase(cometCfg, database); err != nil {
 			return err
 		}
@@ -586,65 +609,122 @@ func requireFreshStateSyncReceiver(ctx context.Context, cometCfg *config.Config,
 	if lastSign.Height != 0 || lastSign.Round != 0 || lastSign.Step != 0 || len(lastSign.Signature) != 0 || len(lastSign.SignBytes) != 0 {
 		return errors.New("state sync receiving requires a fresh validator signing state")
 	}
-	genesis, err := cmttypes.GenesisDocFromFile(cometCfg.GenesisFile())
-	if err != nil {
-		return fmt.Errorf("read state sync receiver genesis: %w", err)
+	// Inspect every independent persistence surface before removing either
+	// recognized crash residue. If a crash lands between these two idempotent
+	// deletes, the next startup accepts and removes the single remaining exact
+	// record. Ambiguous data is never modified.
+	if genesisResidue {
+		recovered, recoverErr := recoverCachedCometStateSyncGenesis(cometCfg, genesis)
+		if recoverErr != nil {
+			return recoverErr
+		}
+		if !recovered {
+			return errors.New("state sync receiver cached genesis changed during recovery")
+		}
 	}
-	localPublicKey, err := pv.GetPubKey()
-	if err != nil || localPublicKey == nil {
-		return errors.New("read state sync receiver validator public key")
+	if commitResidue {
+		recovered, recoverErr := recoverIncompleteCometStateSyncBootstrap(cometCfg)
+		if recoverErr != nil {
+			return recoverErr
+		}
+		if !recovered {
+			return errors.New("state sync receiver commit-only residue changed during recovery")
+		}
 	}
-	if len(genesis.Validators) == 1 && genesis.Validators[0].PubKey != nil &&
-		bytes.Equal(genesis.Validators[0].PubKey.Address(), localPublicKey.Address()) {
-		return errors.New("state sync receiving would be skipped because genesis names only the local validator")
+	for _, database := range []string{"state", "blockstore", "evidence", "tx_index"} {
+		if err := requireEmptyCometDatabase(cometCfg, database); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// recoverIncompleteCometStateSyncBootstrap runs only after the state store has
-// been proven canonically empty. It removes the exact lone seen-commit residue
-// left by a crash between Comet's commit-first and state-bootstrap writes; all
-// ambiguous block-store content remains for the freshness gate to reject.
-func recoverIncompleteCometStateSyncBootstrap(cometCfg *config.Config) (bool, error) {
-	if cometCfg == nil {
-		return false, errors.New("recover incomplete state sync bootstrap requires CometBFT config")
+func runCometStateSyncResidueOperation(
+	cometCfg *config.Config,
+	database string,
+	action string,
+	operation func(dbm.DB) (bool, error),
+) (bool, error) {
+	if cometCfg == nil || operation == nil {
+		return false, errors.New("CometBFT config and residue operation are required")
 	}
-	db, err := config.DefaultDBProvider(&config.DBContext{ID: "blockstore", Config: cometCfg})
+	db, err := config.DefaultDBProvider(&config.DBContext{ID: database, Config: cometCfg})
 	if err != nil {
-		return false, fmt.Errorf("open state sync receiver CometBFT block store: %w", err)
+		return false, fmt.Errorf("open state sync receiver CometBFT %s database: %w", database, err)
 	}
-	recovered, recoverErr := cmtstore.RecoverIncompleteStateSyncBootstrapDB(db)
+	result, operationErr := operation(db)
 	closeErr := db.Close()
-	if closeErr != nil {
-		closeErr = fmt.Errorf("close state sync receiver CometBFT block store: %w", closeErr)
-	}
-	if recoverErr != nil {
-		return false, errors.Join(recoverErr, closeErr)
+	if operationErr != nil {
+		operationErr = fmt.Errorf("%s: %w", action, operationErr)
 	}
 	if closeErr != nil {
-		return false, closeErr
+		closeErr = fmt.Errorf("close state sync receiver CometBFT %s database: %w", database, closeErr)
 	}
-	return recovered, nil
+	return result, errors.Join(operationErr, closeErr)
+}
+
+func inspectCachedCometStateSyncGenesis(cometCfg *config.Config, genesis *cmttypes.GenesisDoc) (bool, error) {
+	return runCometStateSyncResidueOperation(cometCfg, "state", "inspect cached state-sync genesis", func(db dbm.DB) (bool, error) {
+		return cmtnode.IsStateSyncGenesisDocDBResidue(db, genesis)
+	})
+}
+
+func recoverCachedCometStateSyncGenesis(cometCfg *config.Config, genesis *cmttypes.GenesisDoc) (bool, error) {
+	return runCometStateSyncResidueOperation(cometCfg, "state", "recover cached state-sync genesis", func(db dbm.DB) (bool, error) {
+		return cmtnode.RecoverStateSyncGenesisDocDBResidue(db, genesis)
+	})
+}
+
+func inspectIncompleteCometStateSyncBootstrap(cometCfg *config.Config) (bool, error) {
+	return runCometStateSyncResidueOperation(cometCfg, "blockstore", "inspect incomplete state-sync bootstrap", cmtstore.IsIncompleteStateSyncBootstrapDB)
+}
+
+// recoverIncompleteCometStateSyncBootstrap runs only after the state store has
+// been proven canonically empty and every other persistence surface has been
+// classified as pristine or an exact crash residue. It removes the exact lone
+// seen-commit residue left by a crash between Comet's commit-first and
+// state-bootstrap writes; all ambiguous block-store content remains for the
+// freshness gate to reject.
+func recoverIncompleteCometStateSyncBootstrap(cometCfg *config.Config) (bool, error) {
+	return runCometStateSyncResidueOperation(cometCfg, "blockstore", "recover incomplete state-sync bootstrap", cmtstore.RecoverIncompleteStateSyncBootstrapDB)
 }
 
 func requireEmptyCometDatabase(cometCfg *config.Config, database string) error {
-	db, err := config.DefaultDBProvider(&config.DBContext{ID: database, Config: cometCfg})
+	return requireEmptyCometDatabaseWithProvider(cometCfg, database, config.DefaultDBProvider)
+}
+
+func requireEmptyCometDatabaseWithProvider(cometCfg *config.Config, database string, provider config.DBProvider) error {
+	if cometCfg == nil || provider == nil {
+		return errors.New("CometBFT config and DB provider are required")
+	}
+	db, err := provider(&config.DBContext{ID: database, Config: cometCfg})
 	if err != nil {
 		return fmt.Errorf("open state sync receiver CometBFT %s database: %w", database, err)
 	}
 	iterator, iterErr := db.Iterator(nil, nil)
 	if iterErr != nil {
-		_ = db.Close()
-		return fmt.Errorf("inspect state sync receiver CometBFT %s database: %w", database, iterErr)
+		iterErr = fmt.Errorf("inspect state sync receiver CometBFT %s database: %w", database, iterErr)
+		closeErr := db.Close()
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close state sync receiver CometBFT %s database: %w", database, closeErr)
+		}
+		return errors.Join(iterErr, closeErr)
 	}
 	populated := iterator.Valid()
+	iteratorErr := iterator.Error()
 	iteratorCloseErr := iterator.Close()
 	dbCloseErr := db.Close()
+	if iteratorErr != nil {
+		iteratorErr = fmt.Errorf("inspect state sync receiver CometBFT %s database: %w", database, iteratorErr)
+	}
 	if iteratorCloseErr != nil {
-		return fmt.Errorf("close state sync receiver CometBFT %s iterator: %w", database, iteratorCloseErr)
+		iteratorCloseErr = fmt.Errorf("close state sync receiver CometBFT %s iterator: %w", database, iteratorCloseErr)
 	}
 	if dbCloseErr != nil {
-		return fmt.Errorf("close state sync receiver CometBFT %s database: %w", database, dbCloseErr)
+		dbCloseErr = fmt.Errorf("close state sync receiver CometBFT %s database: %w", database, dbCloseErr)
+	}
+	if closeOrInspectErr := errors.Join(iteratorErr, iteratorCloseErr, dbCloseErr); closeOrInspectErr != nil {
+		return closeOrInspectErr
 	}
 	if populated {
 		return fmt.Errorf("state sync receiving requires an empty CometBFT %s database", database)

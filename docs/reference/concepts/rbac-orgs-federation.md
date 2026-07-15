@@ -432,8 +432,10 @@ either missing proof. The real-transfer proof must use integrated
 runtime or seal boundary.
 Operationally, Comet P2P (normally raw TCP 26656) plus the configured Comet RPC
 origins must be reachable. Internet validators need routable addresses, port
-forwarding, or a VPN; federation is not a validator tunnel. A future tunnel
-layer and the integrated real-transfer proof are both still blocking work. The
+forwarding, or a VPN today; federation is not a validator tunnel. A future
+tunnel layer is separate, out-of-scope work and is not a v11.9 release gate.
+The only remaining release-proof blockers are the integrated authorized
+provider-to-receiver transfer and signed app-v20 scope reconfiguration. The
 detailed schema and open gates are in
 [`../../v11.9-state-sync-activation.md`](../../v11.9-state-sync-activation.md).
 

@@ -653,6 +653,80 @@ func saveGenesisDoc(db dbm.DB, genDoc *types.GenesisDoc) error {
 	return db.SetSync(genesisDocKey, b)
 }
 
+// IsStateSyncGenesisDocDBResidue reports whether db contains exactly the
+// genesis document that LoadStateFromDBOrGenesisDocProvider synchronously
+// caches before asynchronous state sync starts. The expected document must be
+// the validated, completed document loaded from the receiver's current genesis
+// file. Any additional key or byte-level mismatch is ambiguous and therefore
+// not recoverable.
+func IsStateSyncGenesisDocDBResidue(db dbm.DB, expected *types.GenesisDoc) (bool, error) {
+	if db == nil || expected == nil {
+		return false, errors.New("inspect state-sync genesis residue requires a database and expected genesis document")
+	}
+	expectedBytes, err := cmtjson.Marshal(expected)
+	if err != nil {
+		return false, fmt.Errorf("marshal expected state-sync genesis document: %w", err)
+	}
+	var completed types.GenesisDoc
+	if err := cmtjson.Unmarshal(expectedBytes, &completed); err != nil {
+		return false, fmt.Errorf("clone expected state-sync genesis document: %w", err)
+	}
+	if err := completed.ValidateAndComplete(); err != nil {
+		return false, fmt.Errorf("validate expected state-sync genesis document: %w", err)
+	}
+	completedBytes, err := cmtjson.Marshal(&completed)
+	if err != nil {
+		return false, fmt.Errorf("marshal completed state-sync genesis document: %w", err)
+	}
+	if !bytes.Equal(expectedBytes, completedBytes) {
+		return false, errors.New("expected state-sync genesis document must already be validated and completed")
+	}
+	iterator, err := db.Iterator(nil, nil)
+	if err != nil {
+		return false, fmt.Errorf("inspect state-sync genesis residue: %w", err)
+	}
+	if !iterator.Valid() {
+		iteratorErr := iterator.Error()
+		closeErr := iterator.Close()
+		if iteratorErr != nil {
+			return false, fmt.Errorf("inspect state-sync genesis residue: %w", iteratorErr)
+		}
+		if closeErr != nil {
+			return false, fmt.Errorf("close state-sync genesis residue iterator: %w", closeErr)
+		}
+		return false, nil
+	}
+	key := append([]byte(nil), iterator.Key()...)
+	value := append([]byte(nil), iterator.Value()...)
+	iterator.Next()
+	hasAdditionalData := iterator.Valid()
+	iteratorErr := iterator.Error()
+	closeErr := iterator.Close()
+	if iteratorErr != nil {
+		return false, fmt.Errorf("inspect state-sync genesis residue: %w", iteratorErr)
+	}
+	if closeErr != nil {
+		return false, fmt.Errorf("close state-sync genesis residue iterator: %w", closeErr)
+	}
+	return !hasAdditionalData && bytes.Equal(key, genesisDocKey) && bytes.Equal(value, expectedBytes), nil
+}
+
+// RecoverStateSyncGenesisDocDBResidue removes only the exact sole record
+// accepted by IsStateSyncGenesisDocDBResidue. Callers must first prove all
+// other receiver persistence surfaces are either pristine or independently
+// recognized crash residues. Reinspection makes retries idempotent and keeps
+// changed or contaminated databases fail closed.
+func RecoverStateSyncGenesisDocDBResidue(db dbm.DB, expected *types.GenesisDoc) (bool, error) {
+	recoverable, err := IsStateSyncGenesisDocDBResidue(db, expected)
+	if err != nil || !recoverable {
+		return false, err
+	}
+	if err := db.DeleteSync(genesisDocKey); err != nil {
+		return false, fmt.Errorf("remove state-sync genesis residue: %w", err)
+	}
+	return true, nil
+}
+
 func createAndStartPrivValidatorSocketClient(
 	listenAddr,
 	chainID string,

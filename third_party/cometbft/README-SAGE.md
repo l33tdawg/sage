@@ -26,7 +26,7 @@ SAGE carries six coordinated state-sync production overlays:
 | `statesync/reactor.go` | An oversized `SnapshotsResponse` checks `Reactor.syncer` under `Reactor.mtx` before rejecting through it. Upstream can dereference a nil syncer when the advertisement arrives while state sync is inactive. |
 | `blocksync/reactor.go` | A SAGE boot-runtime seal-abort sentinel stops block sync gracefully while the node is already shutting down. Every unrelated application error retains upstream's panic behavior. |
 | `node/node.go` | Reactor construction reads the effective state-sync-height bridge while the block store is empty and deliberately retains it across consecutive empty-blockstore restarts. Once a block is materialized the bridge is ignored, so stale evidence cannot override the real block-store height. |
-| `node/setup.go` | The successful state-sync path persists the verified bootstrap commit before publishing positive-height `StateStore` state, switches successfully to block sync, and only then persists the completion marker consumed by SAGE's live seal. |
+| `node/setup.go` | The successful state-sync path persists the verified bootstrap commit before publishing positive-height `StateStore` state, switches successfully to block sync, and only then persists the completion marker consumed by SAGE's live seal. A startup helper recognizes and removes only the sole byte-exact configured `genesisDoc` record cached before asynchronous state sync; changed, malformed, or additional state data is preserved for rejection. |
 | `state/store.go` | `StateStore.Bootstrap` writes the effective state-sync height in the same synchronous batch as the bootstrapped state. A crash can therefore never expose positive state without the height bridge needed while the block store is still empty. |
 | `store/store.go` | `BlockStore.SaveSeenCommit` uses `SetSync`; the post-switch height/AppHash marker is fixed-format and synchronous; and an exact lone seen-commit residue can be removed when startup has independently proved the state DB empty. Startup inspects the raw DB before constructing `BlockStore`, so malformed metadata is preserved for rejection instead of triggering the upstream constructor panic. |
 
@@ -46,12 +46,14 @@ Regression coverage is split accordingly:
   empty-blockstore restarts and is ignored, but not destroyed, once a block is
   materialized;
 - `node/setup_sage_test.go` proves `commit -> state -> switch -> marker`, with
-  no later step after commit/state/switch failure;
+  no later step after commit/state/switch failure, and proves the real
+  pre-state-sync genesis-cache shape plus exact-only, idempotent recovery;
 - `state/store_sage_test.go` proves the bootstrapped state and effective-height
   marker are published by the same synchronous bootstrap operation;
-- `store/store_sage_test.go` proves completion-marker encoding and exact-match
-  commit-only crash-residue recovery, including preservation of malformed raw
-  `blockStore` metadata without a constructor panic; and
+- `store/store_sage_test.go` proves completion-marker encoding and non-mutating
+  inspection plus exact-match commit-only crash-residue recovery, including
+  preservation of malformed raw `blockStore` metadata without a constructor
+  panic; and
 - SAGE runtime tests prove block execution arriving after the switch waits
   behind the seal without holding the bundle lease, then resumes only after
   the runtime observes matching positive-height state, a valid commit, and the
