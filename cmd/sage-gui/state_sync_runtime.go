@@ -210,15 +210,15 @@ func armConfiguredStateSync(
 	sessionsRoot := filepath.Join(base, stateSyncSessionsDirname)
 	cometTempRoot := filepath.Join(base, stateSyncCometTempDirname)
 	for _, root := range []string{sessionsRoot, cometTempRoot} {
-		if err := prepareDisposableStateSyncRoot(root, filepath.Join(cfg.DataDir, "badger")); err != nil {
-			return err
+		if rootErr := prepareDisposableStateSyncRoot(root, filepath.Join(cfg.DataDir, "badger")); rootErr != nil {
+			return rootErr
 		}
 	}
 	if freshErr := requireFreshStateSyncReceiver(ctx, cometCfg, pv, app, offchain); freshErr != nil {
 		return freshErr
 	}
-	if err := configureCometStateSyncReceiver(cometCfg.StateSync, stateSyncCfg, cometTempRoot); err != nil {
-		return err
+	if configErr := configureCometStateSyncReceiver(cometCfg.StateSync, stateSyncCfg, cometTempRoot); configErr != nil {
+		return configErr
 	}
 	controller, err := sageabci.NewStateSyncReceiverController(sageabci.StateSyncReceiverControllerConfig{
 		Authorization: authorization,
@@ -274,8 +274,8 @@ func prepareStateSyncRoot(root, liveBadgerPath string) error {
 	if pathsOverlap(physicalRoot, physicalLive) {
 		return errors.New("state sync staging/snapshot root must not overlap the live Badger directory")
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		return fmt.Errorf("create state sync root: %w", err)
+	if mkdirErr := os.MkdirAll(root, 0o700); mkdirErr != nil {
+		return fmt.Errorf("create state sync root: %w", mkdirErr)
 	}
 	info, err := os.Lstat(root)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -347,9 +347,9 @@ func prepareDisposableStateSyncRoot(root, liveBadgerPath string) error {
 		}
 	}()
 	if created {
-		marker, err := ownedRoot.OpenFile(stateSyncDisposableMarker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err != nil {
-			return fmt.Errorf("create disposable state sync marker: %w", err)
+		marker, markerOpenErr := ownedRoot.OpenFile(stateSyncDisposableMarker, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if markerOpenErr != nil {
+			return fmt.Errorf("create disposable state sync marker: %w", markerOpenErr)
 		}
 		if _, err := marker.Write([]byte("SAGE state-sync disposable root v1\n")); err != nil {
 			_ = marker.Close()
@@ -363,8 +363,8 @@ func prepareDisposableStateSyncRoot(root, liveBadgerPath string) error {
 			return err
 		}
 		cleanupUnownedRoot = false
-	} else if err := requireStateSyncDisposableMarker(ownedRoot); err != nil {
-		return err
+	} else if markerErr := requireStateSyncDisposableMarker(ownedRoot); markerErr != nil {
+		return markerErr
 	}
 	directory, err := ownedRoot.Open(".")
 	if err != nil {
@@ -543,20 +543,20 @@ func requireFreshStateSyncReceiver(ctx context.Context, cometCfg *config.Config,
 		return errors.New("state sync receiver has no local Badger store")
 	}
 	badgerEmpty := true
-	if err := badgerStore.DB().View(func(txn *badger.Txn) error {
+	if viewErr := badgerStore.DB().View(func(txn *badger.Txn) error {
 		iterator := txn.NewIterator(badger.DefaultIteratorOptions)
 		defer iterator.Close()
 		iterator.Rewind()
 		badgerEmpty = !iterator.Valid()
 		return nil
-	}); err != nil {
-		return fmt.Errorf("inspect state sync receiver Badger store: %w", err)
+	}); viewErr != nil {
+		return fmt.Errorf("inspect state sync receiver Badger store: %w", viewErr)
 	}
 	if !badgerEmpty {
 		return errors.New("state sync receiving requires an empty Badger keyspace")
 	}
-	if err := offchain.RequirePristineStateSyncProjection(ctx); err != nil {
-		return err
+	if projectionErr := offchain.RequirePristineStateSyncProjection(ctx); projectionErr != nil {
+		return projectionErr
 	}
 	genesis, err := cmttypes.GenesisDocFromFile(cometCfg.GenesisFile())
 	if err != nil {
@@ -575,8 +575,8 @@ func requireFreshStateSyncReceiver(ctx context.Context, cometCfg *config.Config,
 		return err
 	}
 	if !genesisResidue {
-		if err := requireEmptyCometDatabase(cometCfg, "state"); err != nil {
-			return err
+		if emptyStateErr := requireEmptyCometDatabase(cometCfg, "state"); emptyStateErr != nil {
+			return emptyStateErr
 		}
 	}
 	commitResidue, err := inspectIncompleteCometStateSyncBootstrap(cometCfg)
@@ -770,8 +770,8 @@ func newStateSyncReceivePreparer(
 		if err != nil {
 			return nil, fmt.Errorf("calculate state sync preparation capacity: %w", err)
 		}
-		if err := statesync.RequireAvailableDiskSpace(dataDir, requiredDisk); err != nil {
-			return nil, fmt.Errorf("reserve state sync preparation capacity: %w", err)
+		if diskErr := statesync.RequireAvailableDiskSpace(dataDir, requiredDisk); diskErr != nil {
+			return nil, fmt.Errorf("reserve state sync preparation capacity: %w", diskErr)
 		}
 		encoded, err := statesync.EncodeMetadata(metadata)
 		if err != nil {

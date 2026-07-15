@@ -104,14 +104,14 @@ func Export(ctx context.Context, db *badger.DB, root string, height uint64, appH
 			_ = os.RemoveAll(staging)
 		}
 	}()
-	if err := writeSyncedFile(filepath.Join(staging, snapshotOwnerFilename), []byte(snapshotOwnerContents)); err != nil {
-		return nil, err
+	if ownerWriteErr := writeSyncedFile(filepath.Join(staging, snapshotOwnerFilename), []byte(snapshotOwnerContents)); ownerWriteErr != nil {
+		return nil, ownerWriteErr
 	}
-	if err := syncDir(staging); err != nil {
-		return nil, err
+	if stagingSyncErr := syncDir(staging); stagingSyncErr != nil {
+		return nil, stagingSyncErr
 	}
-	if err := syncDir(root); err != nil {
-		return nil, err
+	if rootSyncErr := syncDir(root); rootSyncErr != nil {
+		return nil, rootSyncErr
 	}
 
 	backupPath := filepath.Join(staging, canonicalStateFilename)
@@ -257,8 +257,8 @@ func OpenSnapshot(dir string) (*Snapshot, error) {
 		return nil, errors.New("state sync snapshot chunks directory is missing")
 	}
 	if _, ok := entryTypes[snapshotOwnerFilename]; ok {
-		if err := requireSnapshotOwnerMarker(filepath.Join(dir, snapshotOwnerFilename)); err != nil {
-			return nil, err
+		if ownerErr := requireSnapshotOwnerMarker(filepath.Join(dir, snapshotOwnerFilename)); ownerErr != nil {
+			return nil, ownerErr
 		}
 	}
 	chunksInfo, err := os.Lstat(filepath.Join(dir, chunksDirname))
@@ -625,11 +625,11 @@ func writeSyncedFile(path string, data []byte) error {
 			_ = os.Remove(path)
 		}
 	}()
-	if _, err := file.Write(data); err != nil {
-		return err
+	if _, writeErr := file.Write(data); writeErr != nil {
+		return writeErr
 	}
-	if err := file.Sync(); err != nil {
-		return err
+	if syncErr := file.Sync(); syncErr != nil {
+		return syncErr
 	}
 	if err := file.Close(); err != nil {
 		return err

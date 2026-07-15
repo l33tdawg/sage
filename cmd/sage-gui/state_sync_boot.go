@@ -111,17 +111,6 @@ func readPersistedCometStateWithProvider(cfg *config.Config, provider config.DBP
 	return uint64(state.LastBlockHeight), append([]byte(nil), state.AppHash...), nil // #nosec G115 -- positive int64 checked above
 }
 
-// readRunningCometState observes the state store owned by a started node. This
-// avoids reopening Comet's DB while its live handle is active and includes the
-// persisted ABCI protocol version needed by the runtime seal.
-func readRunningCometState(cometNode *cmtnode.Node, expectedHeight int64, expectedAppHash []byte) (int64, []byte, uint64, error) {
-	read, err := newRunningCometStateReader(cometNode)
-	if err != nil {
-		return 0, nil, 0, err
-	}
-	return read(expectedHeight, expectedAppHash)
-}
-
 // newRunningCometStateReader captures the node-owned StateStore once. Calling
 // ConfigureRPC on every startup poll would repeatedly rebuild RPC/genesis
 // plumbing while Comet is bootstrapping state sync.

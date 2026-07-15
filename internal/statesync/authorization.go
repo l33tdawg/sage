@@ -195,9 +195,9 @@ func validateJoinAuthorizationJSONFields(encoded []byte) error {
 	}
 	seen := make([]string, 0, len(joinAuthorizationJSONFields))
 	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return fmt.Errorf("decode state sync join authorization field: %w", err)
+		token, tokenErr := decoder.Token()
+		if tokenErr != nil {
+			return fmt.Errorf("decode state sync join authorization field: %w", tokenErr)
 		}
 		name, ok := token.(string)
 		if !ok {
@@ -218,8 +218,8 @@ func validateJoinAuthorizationJSONFields(encoded []byte) error {
 		}
 		seen = append(seen, name)
 		var value json.RawMessage
-		if err := decoder.Decode(&value); err != nil {
-			return fmt.Errorf("decode state sync join authorization field %q: %w", name, err)
+		if decodeErr := decoder.Decode(&value); decodeErr != nil {
+			return fmt.Errorf("decode state sync join authorization field %q: %w", name, decodeErr)
 		}
 	}
 	closing, err := decoder.Token()

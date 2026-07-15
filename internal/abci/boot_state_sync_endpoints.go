@@ -313,7 +313,7 @@ func (r *BootStateSyncRuntime) OfferSnapshot(ctx context.Context, request *abcit
 	if err != nil {
 		return stateSyncOfferResponse(abcitypes.ResponseOfferSnapshot_REJECT), nil
 	}
-	if err := controller.requireDiskSpace(controller.stagingRoot, requiredDisk); err != nil {
+	if diskErr := controller.requireDiskSpace(controller.stagingRoot, requiredDisk); diskErr != nil {
 		controller.fail(r)
 		return stateSyncOfferResponse(abcitypes.ResponseOfferSnapshot_ABORT), nil
 	}
@@ -402,11 +402,11 @@ func (r *BootStateSyncRuntime) ApplySnapshotChunk(ctx context.Context, request *
 	}
 	defer cancel()
 	statePath := filepath.Join(controller.session.dir, "canonical.state")
-	if err := controller.session.assembler.AssembleContext(operationCtx, statePath); err != nil {
+	if assembleErr := controller.session.assembler.AssembleContext(operationCtx, statePath); assembleErr != nil {
 		controller.fail(r)
 		return stateSyncApplyResponse(abcitypes.ResponseApplySnapshotChunk_ABORT), nil
 	}
-	if err := controller.requireAuthorizedLocked(); err != nil {
+	if authErr := controller.requireAuthorizedLocked(); authErr != nil {
 		controller.fail(r)
 		return stateSyncApplyResponse(abcitypes.ResponseApplySnapshotChunk_ABORT), nil
 	}
