@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -38,6 +39,23 @@ func writeLegacyOrg(bs *BadgerStore, orgID, name, description, adminAgent string
 		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is non-negative
 		return txn.Set(orgKey(orgID), val)
 	})
+}
+
+// clearIndexBackfillProgress makes a test database look like one produced by a
+// binary from before the durable startup sidecars existed. NewBadgerStore marks
+// both migrations complete on a fresh, empty database, while the legacy fixture
+// helpers above deliberately add old-schema rows afterwards.
+func clearIndexBackfillProgress(bs *BadgerStore, key []byte) error {
+	var sidecar string
+	switch string(key) {
+	case string(agentOrgsIndexBackfillProgressKey):
+		sidecar = agentOrgsIndexBackfillSidecar
+	case string(orgNameIndexBackfillProgressKey):
+		sidecar = orgNameIndexBackfillSidecar
+	default:
+		return fmt.Errorf("unknown test index backfill progress key %q", key)
+	}
+	return writeIndexBackfillProgress(filepath.Clean(bs.db.Opts().Dir), sidecar, indexBackfillProgress{})
 }
 
 // v6.6.8 regression: an agent that joins a second org used to lose visibility
@@ -190,6 +208,7 @@ func TestMultiOrg_EnsureAgentOrgsIndex_BackfillsLegacyData(t *testing.T) {
 	require.NoError(t, bs.RegisterOrg(orgB, "Org B", "", admin, 2))
 	require.NoError(t, writeLegacyMembership(bs, orgA, legacyAgent, 4, "member", 3))
 	require.NoError(t, writeLegacyMembership(bs, orgB, legacyAgent, 4, "member", 4))
+	require.NoError(t, clearIndexBackfillProgress(bs, agentOrgsIndexBackfillProgressKey))
 
 	// Before backfill the multi-org reverse index is empty.
 	orgs, err := bs.ListAgentOrgs(legacyAgent)
@@ -300,6 +319,7 @@ func TestEnsureOrgNameIndex_BackfillsLegacyData(t *testing.T) {
 
 	require.NoError(t, writeLegacyOrg(bs, orgIDA, "levelup", "tenant A", adminA, 1))
 	require.NoError(t, writeLegacyOrg(bs, orgIDB, "levelup", "tenant B", adminB, 2))
+	require.NoError(t, clearIndexBackfillProgress(bs, orgNameIndexBackfillProgressKey))
 
 	// Sanity check: GetOrg still works against the forward index.
 	gotName, gotAdmin, err := bs.GetOrg(orgIDA)
@@ -339,6 +359,7 @@ func TestNewBadgerStore_RunsOrgNameBackfill(t *testing.T) {
 	bs1, err := NewBadgerStore(dir)
 	require.NoError(t, err)
 	require.NoError(t, writeLegacyOrg(bs1, orgID, "levelup", "", admin, 9))
+	require.NoError(t, clearIndexBackfillProgress(bs1, orgNameIndexBackfillProgressKey))
 	require.NoError(t, bs1.CloseBadger())
 
 	// Second open: NewBadgerStore must run EnsureOrgNameIndex so the
@@ -361,6 +382,7 @@ func TestOpenBadgerStoreWithoutMigrationsPreservesVerifiedBytes(t *testing.T) {
 	initial, err := NewBadgerStore(dir)
 	require.NoError(t, err)
 	require.NoError(t, writeLegacyOrg(initial, orgID, "levelup", "", admin, 9))
+	require.NoError(t, clearIndexBackfillProgress(initial, orgNameIndexBackfillProgressKey))
 	before, err := initial.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
 	require.NoError(t, initial.CloseBadger())

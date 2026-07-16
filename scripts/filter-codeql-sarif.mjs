@@ -29,6 +29,10 @@ const SOURCE_ROOT_BASE_ID = '%SRCROOT%';
 const EXPECTED_VENDOR_PREFIX = 'third_party/cometbft/';
 const EXPECTED_TEST_SUFFIX = '_sage_test.go';
 const EXPECTED_SOURCE_COMMIT = 'feb2aea4dc271d612129afc958cb844713ec792b';
+const CODEQL_PR_DIFF_EXTENSION_NAME = 'codeql-action/pr-diff-range';
+const CODEQL_PR_DIFF_EXTENSION_VERSION = '0.0.0';
+const AUDITED_RUN_FULL = 'full';
+const AUDITED_RUN_PR_DIFF = 'pr-diff';
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
 const LINE_HASH_PATTERN = /^[0-9a-f]{1,64}:[1-9][0-9]*$/u;
 const START_COLUMN_FINGERPRINT_PATTERN = /^[1-9][0-9]*$/u;
@@ -1236,7 +1240,7 @@ function stableIdentityMatches(result, identity, finding) {
   return hasStartColumnFingerprint || hasCorrelationGUID;
 }
 
-function auditedToolRun(run, baseline) {
+function auditedToolRunKind(run, baseline) {
   if (
     !isRecord(run.tool)
     || !isRecord(run.tool.driver)
@@ -1246,9 +1250,8 @@ function auditedToolRun(run, baseline) {
     || run.automationDetails.id !== baseline.automationId
     || 'originalUriBaseIds' in run
     || !Array.isArray(run.tool.extensions)
-    || run.tool.extensions.length !== baseline.extensions.size
   ) {
-    return false;
+    return undefined;
   }
   const actualExtensions = new Map();
   for (const extension of run.tool.extensions) {
@@ -1258,13 +1261,30 @@ function auditedToolRun(run, baseline) {
       || typeof extension.semanticVersion !== 'string'
       || actualExtensions.has(extension.name)
     ) {
-      return false;
+      return undefined;
     }
     actualExtensions.set(extension.name, extension.semanticVersion);
   }
-  return [...baseline.extensions.entries()].every(
-    ([name, version]) => actualExtensions.get(name) === version,
-  );
+  const hasPRDiffExtension = actualExtensions.has(CODEQL_PR_DIFF_EXTENSION_NAME);
+  const expectedExtensionCount = baseline.extensions.size + Number(hasPRDiffExtension);
+  if (
+    actualExtensions.size !== expectedExtensionCount
+    || (
+      hasPRDiffExtension
+      && actualExtensions.get(CODEQL_PR_DIFF_EXTENSION_NAME)
+        !== CODEQL_PR_DIFF_EXTENSION_VERSION
+    )
+    || ![...baseline.extensions.entries()].every(
+      ([name, version]) => actualExtensions.get(name) === version,
+    )
+  ) {
+    return undefined;
+  }
+  return hasPRDiffExtension ? AUDITED_RUN_PR_DIFF : AUDITED_RUN_FULL;
+}
+
+function auditedToolRun(run, baseline) {
+  return auditedToolRunKind(run, baseline) !== undefined;
 }
 
 function remainingFindingMultiset(baseline) {
@@ -1289,6 +1309,7 @@ function baselineAuditState(baseline, expectedAutomationId) {
     expectedAutomationId,
     expectedAutomationRuns: 0,
     auditedRuns: 0,
+    auditedPRDiffRuns: 0,
     expectedFindingKeys: new Set(
       baseline.findings
         .filter((finding) => baseline.verifiedPaths.has(finding.path))
@@ -1334,6 +1355,13 @@ function assertExpectedAuditCoverage(auditState, baseline) {
   }
   if (auditState.auditedRuns !== auditState.expectedAutomationRuns) {
     throw new Error('audited CodeQL run metadata does not match the pinned Go baseline');
+  }
+  // CodeQL PRs with no relevant Go source delta can emit a differential run:
+  // it carries the exact pinned query packs plus the generated pr-diff-range
+  // extension, but intentionally omits unchanged baseline findings. Per-result
+  // suppression remains exact; only the full-run coverage expectation changes.
+  if (auditState.auditedPRDiffRuns === auditState.expectedAutomationRuns) {
+    return;
   }
   const missing = [...auditState.expectedFindingKeys]
     .filter((key) => !auditState.observedFindingKeys.has(key));
@@ -1401,8 +1429,12 @@ function filterSarifDocumentWithState(value, baseline, remainingFindings, auditS
     ) {
       auditState.expectedAutomationRuns += 1;
     }
-    if (auditedToolRun(run, baseline)) {
+    const auditedRunKind = auditedToolRunKind(run, baseline);
+    if (auditedRunKind !== undefined) {
       auditState.auditedRuns += 1;
+      if (auditedRunKind === AUDITED_RUN_PR_DIFF) {
+        auditState.auditedPRDiffRuns += 1;
+      }
     }
     const results = optionalArray(run, 'results', `SARIF document.runs[${runIndex}]`);
     if (results === undefined) {

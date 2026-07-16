@@ -29,7 +29,7 @@ func approvedSession(t *testing.T) (st *JoinStore, id string, certSPKI []byte, e
 	}
 	rb := false
 	rolledBack = &rb
-	scopeG := ScopeWire{MaxClearance: 1, AllowedDomains: []string{"*"}, Mode: "exchange", Direction: "both"}
+	scopeG := trustOnlyJoinScope
 	bound, err := st.Request(id, now, GuestRequestInput{
 		GuestChain:      "guest-yyyyy",
 		GuestAgentPub:   guestPub,
@@ -44,10 +44,11 @@ func approvedSession(t *testing.T) (st *JoinStore, id string, certSPKI []byte, e
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	grant := ScopeWire{MaxClearance: 2, AllowedDomains: []string{"*"}, Mode: "exchange", Direction: "both"}
+	grant := trustOnlyJoinScope
 	codeG, _ := bound.confirmCodes()
 	locked, err := st.ApproveWithCode(id, codeG, HostGrant{
-		Clearance: 2, Domains: []string{"*"}, Mode: "exchange", Direction: "both", Scope: grant.digest(),
+		Clearance: uint8(trustOnlyJoinScope.MaxClearance), Domains: nil,
+		Mode: trustOnlyJoinScope.Mode, Direction: trustOnlyJoinScope.Direction, Scope: grant.digest(),
 	})
 	if err != nil || locked {
 		t.Fatalf("ApproveWithCode: err=%v locked=%v", err, locked)

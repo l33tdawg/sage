@@ -13,12 +13,14 @@ import (
 
 // configureValidatorStateSyncP2P applies the fail-closed CometBFT profile
 // required before SAGE may advertise or receive a network state-sync snapshot.
-// Persistent peers are the fixed validator/provider mesh; authorizedPeerIDs is
-// the reciprocal allowlist, including any time-bounded joining node.
-func configureValidatorStateSyncP2P(cfg *config.P2PConfig, persistentPeers, authorizedPeerIDs []string) error {
-	if cfg == nil {
+// Persistent peers are the fixed validator/provider mesh. authorizedPeerIDs
+// drives the matching capacity/privacy sets and, critically, the authenticated
+// ABCI node-ID filter enforced by BootStateSyncRuntime.
+func configureValidatorStateSyncP2P(cometCfg *config.Config, persistentPeers, authorizedPeerIDs []string) error {
+	if cometCfg == nil || cometCfg.P2P == nil {
 		return errors.New("validator state-sync P2P config is required")
 	}
+	cfg := cometCfg.P2P
 	ids, err := canonicalStateSyncPeerIDs(authorizedPeerIDs)
 	if err != nil {
 		return err
@@ -63,15 +65,23 @@ func configureValidatorStateSyncP2P(cfg *config.P2PConfig, persistentPeers, auth
 	cfg.MaxNumOutboundPeers = 0
 	cfg.UnconditionalPeerIDs = allowlist
 	cfg.PrivatePeerIDs = allowlist
-	return validateValidatorStateSyncP2P(cfg, ids)
+	// CometBFT's unconditional/private peer sets are not authorization filters:
+	// they affect capacity and address gossip only. The authenticated node-ID
+	// callback is the enforcement boundary for this exact allowlist.
+	cometCfg.FilterPeers = true
+	return validateValidatorStateSyncP2P(cometCfg, ids)
 }
 
 // validateValidatorStateSyncP2P is also used as the endpoint arming gate. It
 // checks the effective CometBFT config, not merely the operator's input.
-func validateValidatorStateSyncP2P(cfg *config.P2PConfig, authorizedPeerIDs []string) error {
-	if cfg == nil {
+func validateValidatorStateSyncP2P(cometCfg *config.Config, authorizedPeerIDs []string) error {
+	if cometCfg == nil || cometCfg.P2P == nil {
 		return errors.New("validator state-sync P2P config is required")
 	}
+	if !cometCfg.FilterPeers {
+		return errors.New("validator state-sync P2P profile requires authenticated peer filtering")
+	}
+	cfg := cometCfg.P2P
 	want, err := canonicalStateSyncPeerIDs(authorizedPeerIDs)
 	if err != nil {
 		return err
@@ -83,7 +93,7 @@ func validateValidatorStateSyncP2P(cfg *config.P2PConfig, authorizedPeerIDs []st
 		return errors.New("validator state-sync P2P profile forbids seeds, PEX, and seed mode")
 	}
 	if cfg.MaxNumInboundPeers != 0 || cfg.MaxNumOutboundPeers != 0 {
-		return errors.New("validator state-sync P2P profile permits only unconditional inbound and persistent outbound peers")
+		return errors.New("validator state-sync P2P profile requires zero ordinary inbound and outbound peer capacity")
 	}
 	unconditional, err := canonicalStateSyncPeerIDs(splitPeerIDs(cfg.UnconditionalPeerIDs))
 	if err != nil {

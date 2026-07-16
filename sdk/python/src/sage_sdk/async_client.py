@@ -8,7 +8,7 @@ import httpx
 
 from sage_sdk.auth import AgentIdentity
 from sage_sdk.client import _encode_gov_payload, _looks_like_org_id
-from sage_sdk.exceptions import SageAPIError
+from sage_sdk.exceptions import SageAPIError, SageNotFoundError
 from sage_sdk.models import (
     AgentInfo,
     AgentProfile,
@@ -27,6 +27,7 @@ from sage_sdk.models import (
     GovProposalListResponse,
     GovVoteRequest,
     GovVoteResponse,
+    GovernanceContext,
     KnowledgeTriple,
     MemoryLinkResponse,
     MemoryListResponse,
@@ -801,6 +802,15 @@ class AsyncSageClient:
 
     # --- Governance ---------------------------------------------------------------
 
+    async def _governance_context(self) -> GovernanceContext | None:
+        """Load app-v20 governance binding, downgrading only for old 404s."""
+        try:
+            resp = await self._request("GET", "/v1/governance/context")
+        except SageNotFoundError:
+            return None
+        governance_context = GovernanceContext.model_validate(resp.json())
+        return governance_context if governance_context.app_v20_active else None
+
     async def governance_propose(
         self,
         operation: str,
@@ -820,6 +830,7 @@ class AsyncSageClient:
         """
         if payload is not None and scope is not None:
             raise ValueError("payload and scope are mutually exclusive")
+        governance_context = await self._governance_context()
         req = GovProposeRequest(
             operation=operation,
             target_id=target_id,
@@ -828,6 +839,14 @@ class AsyncSageClient:
             reason=reason,
             payload=_encode_gov_payload(payload),
             scope=scope,
+            validator_id=(
+                governance_context.validator_id if governance_context is not None else None
+            ),
+            governance_domain=(
+                governance_context.governance_domain
+                if governance_context is not None
+                else None
+            ),
         )
         resp = await self._request("POST", "/v1/governance/propose", json=req.model_dump(exclude_none=True))
         return GovProposeResponse.model_validate(resp.json())
@@ -848,14 +867,41 @@ class AsyncSageClient:
 
     async def governance_vote(self, proposal_id: str, decision: str) -> GovVoteResponse:
         """Vote on an active governance proposal."""
-        req = GovVoteRequest(proposal_id=proposal_id, decision=decision)
-        resp = await self._request("POST", "/v1/governance/vote", json=req.model_dump())
+        governance_context = await self._governance_context()
+        req = GovVoteRequest(
+            proposal_id=proposal_id,
+            decision=decision,
+            validator_id=(
+                governance_context.validator_id if governance_context is not None else None
+            ),
+            governance_domain=(
+                governance_context.governance_domain
+                if governance_context is not None
+                else None
+            ),
+        )
+        resp = await self._request(
+            "POST", "/v1/governance/vote", json=req.model_dump(exclude_none=True)
+        )
         return GovVoteResponse.model_validate(resp.json())
 
     async def governance_cancel(self, proposal_id: str) -> GovCancelResponse:
         """Cancel a governance proposal (proposer only)."""
-        req = GovCancelRequest(proposal_id=proposal_id)
-        resp = await self._request("POST", "/v1/governance/cancel", json=req.model_dump())
+        governance_context = await self._governance_context()
+        req = GovCancelRequest(
+            proposal_id=proposal_id,
+            validator_id=(
+                governance_context.validator_id if governance_context is not None else None
+            ),
+            governance_domain=(
+                governance_context.governance_domain
+                if governance_context is not None
+                else None
+            ),
+        )
+        resp = await self._request(
+            "POST", "/v1/governance/cancel", json=req.model_dump(exclude_none=True)
+        )
         return GovCancelResponse.model_validate(resp.json())
 
     async def list_scopes(self) -> ScopeListResponse:

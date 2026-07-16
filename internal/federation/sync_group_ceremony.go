@@ -11,11 +11,14 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
+
+var errGroupPeerNoLongerBound = errors.New("federation peer is no longer the active frozen operator")
 
 type domainAddHeadRequest struct {
 	GroupID   string `json:"group_id"`
@@ -88,8 +91,16 @@ func (m *Manager) handleGroupSubchains(w http.ResponseWriter, r *http.Request) {
 	}
 	policyUnlock := ss.LockSyncPolicyRead()
 	defer policyUnlock()
+	if bound, err := m.inboundGroupPeerBound(r.Context(), ss, peer); err != nil || !bound {
+		httpError(w, http.StatusForbidden, "not authorized for group journals")
+		return
+	}
 	member, err := ss.GetSyncGroupMember(r.Context(), req.GroupID, peer.ChainID)
 	if err != nil || member == nil || (member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing) {
+		httpError(w, http.StatusForbidden, "not authorized for group journals")
+		return
+	}
+	if _, keyErr := decodePub(member.MemberAgentPubkey); keyErr != nil || member.MemberAgentPubkey != peer.AgentID {
 		httpError(w, http.StatusForbidden, "not authorized for group journals")
 		return
 	}
@@ -164,6 +175,12 @@ func (m *Manager) handleDomainAddHead(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotImplemented, "group journal unavailable")
 		return
 	}
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
+	if bound, err := m.inboundGroupPeerBound(r.Context(), ss, peer); err != nil || !bound {
+		httpError(w, http.StatusNotFound, "domain admission unavailable")
+		return
+	}
 	g, err := ss.GetSyncGroup(r.Context(), req.GroupID)
 	if err != nil || g == nil || g.ControllerChainID != m.localChainID || g.ControllerAgentPubkey != hex.EncodeToString(m.agentPub) {
 		httpError(w, http.StatusForbidden, "local node is not this group's controller")
@@ -171,6 +188,10 @@ func (m *Manager) handleDomainAddHead(w http.ResponseWriter, r *http.Request) {
 	}
 	member, err := ss.GetSyncGroupMember(r.Context(), req.GroupID, peer.ChainID)
 	if err != nil || member == nil || (member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing) {
+		httpError(w, http.StatusNotFound, "domain admission unavailable")
+		return
+	}
+	if _, keyErr := decodePub(member.MemberAgentPubkey); keyErr != nil || member.MemberAgentPubkey != peer.AgentID {
 		httpError(w, http.StatusNotFound, "domain admission unavailable")
 		return
 	}
@@ -217,18 +238,47 @@ func (m *Manager) handleDomainAddAdmit(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotImplemented, "group journal unavailable")
 		return
 	}
+	policyUnlock := ss.LockSyncPolicyRead()
+	if bound, err := m.inboundGroupPeerBound(r.Context(), ss, peer); err != nil || !bound {
+		policyUnlock()
+		httpError(w, http.StatusNotFound, "domain admission unavailable")
+		return
+	}
 	payload := parseJournalPayload(req.Entry.PayloadJSON)
+	member, memberErr := ss.GetSyncGroupMember(r.Context(), req.GroupID, peer.ChainID)
+	if memberErr != nil || member == nil || (member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing) ||
+		member.MemberAgentPubkey != peer.AgentID {
+		policyUnlock()
+		httpError(w, http.StatusNotFound, "domain admission unavailable")
+		return
+	}
+	if _, keyErr := decodePub(member.MemberAgentPubkey); keyErr != nil {
+		policyUnlock()
+		httpError(w, http.StatusNotFound, "domain admission unavailable")
+		return
+	}
 	mayOwn, capErr := ss.GroupMemberMayOwnDomain(r.Context(), req.GroupID, peer.ChainID, payload[pkDomainTag])
 	if capErr != nil {
+		policyUnlock()
 		httpError(w, http.StatusInternalServerError, "could not authorize domain admission")
 		return
 	}
 	if !mayOwn {
+		policyUnlock()
 		httpError(w, http.StatusNotFound, "domain admission unavailable")
 		return
 	}
-	entry, err := m.AdmitOwnerDomainAdd(r.Context(), req.GroupID, req.Entry)
+	// Admission appends a journal entry, whose projection takes the policy write
+	// lease. Release the read-side authorization snapshot before entering that
+	// path; the signed entry is revalidated against the pinned group roster while
+	// the journal mutation is serialized.
+	policyUnlock()
+	entry, err := m.admitOwnerDomainAddFromPeer(r.Context(), req.GroupID, req.Entry, peer)
 	if err != nil {
+		if errors.Is(err, errGroupPeerNoLongerBound) {
+			httpError(w, http.StatusNotFound, "domain admission unavailable")
+			return
+		}
 		httpError(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -404,6 +454,43 @@ func (m *Manager) handleMemberInviteAccept(w http.ResponseWriter, r *http.Reques
 		httpError(w, http.StatusForbidden, "invitation CA pin does not match this node")
 		return
 	}
+	ss := m.syncStore()
+	if ss == nil {
+		httpError(w, http.StatusNotImplemented, "group journal unavailable")
+		return
+	}
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
+	if bound, err := m.inboundGroupPeerBound(r.Context(), ss, peer); err != nil || !bound {
+		httpError(w, http.StatusForbidden, "group invitation policy binding mismatch")
+		return
+	}
+	control, controlErr := ss.GetSyncControl(r.Context(), peer.ChainID)
+	if controlErr != nil {
+		httpError(w, http.StatusInternalServerError, "group invitation policy lookup failed")
+		return
+	}
+	peerPolicy, policyErr := m.getPeerRBACPolicyForAgreement(r.Context(), peer.Agreement)
+	if policyErr != nil {
+		httpError(w, http.StatusForbidden, "group invitation policy binding mismatch")
+		return
+	}
+	v3 := peerPolicy != nil || (control != nil && (control.PolicyVersion >= SyncPolicyVersionPeerRBAC ||
+		control.RemotePolicyVersion >= SyncPolicyVersionPeerRBAC))
+	var selectedAuthority, ownedAuthority []string
+	if v3 {
+		// JOIN authenticates the exact controller edge; the signed group invitation
+		// is a separate RBAC lane and must not be clamped to direct Copy/Subscribe.
+		// The controller's payload defines the offered selected scope, while locally
+		// owned domains still require this node's own admin/owner authority below.
+		if !m.syncControlPeerBound(control, peer) {
+			httpError(w, http.StatusForbidden, "group invitation policy binding mismatch")
+			return
+		}
+	} else {
+		selectedAuthority = peer.Agreement.AllowedDomains
+		ownedAuthority = peer.Agreement.AllowedDomains
+	}
 	selected, selectedErr := decodeOwnedDomains(req.Payload[pkSelectedDomains])
 	if req.Payload[pkRole] == store.GroupRoleSelectiveSync {
 		if selectedErr != nil {
@@ -411,8 +498,8 @@ func (m *Manager) handleMemberInviteAccept(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		for _, domain := range selected {
-			if !DomainAllowed(peer.Agreement.AllowedDomains, domain) {
-				httpError(w, http.StatusForbidden, "selective invitation exceeds the federation treaty")
+			if !v3 && !DomainAllowed(selectedAuthority, domain) {
+				httpError(w, http.StatusForbidden, "selective invitation exceeds the configured receive scope")
 				return
 			}
 		}
@@ -426,8 +513,8 @@ func (m *Manager) handleMemberInviteAccept(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	for _, domain := range owned {
-		if !DomainAllowed(peer.Agreement.AllowedDomains, domain) {
-			httpError(w, http.StatusForbidden, "invitation owner domains exceed the federation treaty")
+		if !v3 && !DomainAllowed(ownedAuthority, domain) {
+			httpError(w, http.StatusForbidden, "invitation owner domains exceed the configured publish scope")
 			return
 		}
 	}
@@ -476,42 +563,82 @@ func (m *Manager) handleMemberBootstrap(w http.ResponseWriter, r *http.Request) 
 		httpError(w, http.StatusNotImplemented, "group journal unavailable")
 		return
 	}
-	m.journalMu.Lock()
-	var evicted, removed []string
-	err = ss.RunInTx(r.Context(), func(txStore store.OffchainStore) error {
-		txSS := txStore.(*store.SQLiteStore)
-		g, getErr := txSS.GetSyncGroup(r.Context(), req.GroupID)
-		if getErr != nil {
-			return getErr
-		}
-		if g == nil {
-			if upErr := txSS.UpsertSyncGroup(r.Context(), store.SyncGroup{GroupID: req.GroupID, ControllerChainID: peer.ChainID, ControllerAgentPubkey: peer.AgentID, Epoch: p[pkEpoch]}); upErr != nil {
-				return upErr
-			}
-		} else if g.ControllerChainID != peer.ChainID || g.ControllerAgentPubkey != peer.AgentID {
-			return fmt.Errorf("bootstrap conflicts with the pinned group controller")
-		}
-		_, evicted, removed, getErr = m.ingestJournalEntriesLocked(r.Context(), txSS, req.GroupID, RosterSubchain, entries)
-		if getErr != nil {
-			return getErr
-		}
-		member, getErr := txSS.GetSyncGroupMember(r.Context(), req.GroupID, m.localChainID)
-		if getErr != nil || member == nil || member.MemberState != store.GroupMemberActive || member.MemberAgentPubkey != hex.EncodeToString(m.agentPub) {
-			return fmt.Errorf("bootstrap did not activate the exact local identity")
-		}
-		current, getErr := txSS.GetSyncGroup(r.Context(), req.GroupID)
-		if getErr != nil || current == nil || current.ControllerChainID != peer.ChainID || current.ControllerAgentPubkey != peer.AgentID {
-			return fmt.Errorf("bootstrap sender is not the current pinned controller")
-		}
-		return nil
-	})
-	m.journalMu.Unlock()
+	policyUnlock := ss.LockSyncPolicyRead()
+	bound, bindErr := m.inboundGroupPeerBound(r.Context(), ss, peer)
+	if bindErr != nil {
+		policyUnlock()
+		httpError(w, http.StatusInternalServerError, "bootstrap trust lookup failed")
+		return
+	}
+	if !bound {
+		policyUnlock()
+		httpError(w, http.StatusForbidden, "bootstrap sender is not the frozen peer operator")
+		return
+	}
+	// Journal ingestion takes the policy write lease while applying the signed
+	// roster projection. Do not carry this read lease into that mutation path.
+	policyUnlock()
+	evicted, removed, err := m.admitMemberBootstrap(r.Context(), ss, peer, req.GroupID, p[pkEpoch], entries)
+	if errors.Is(err, errGroupPeerNoLongerBound) {
+		httpError(w, http.StatusForbidden, "bootstrap sender is no longer the active frozen peer operator")
+		return
+	}
 	if err != nil {
 		httpError(w, http.StatusConflict, err.Error())
 		return
 	}
 	m.enforceRemovalBatch(ss, req.GroupID, evicted, removed)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "bootstrapped"})
+}
+
+// admitMemberBootstrap owns the mutation half of bootstrap. The wire request is
+// parsed and signature-checked before entry, but the active agreement and exact
+// JOIN binding are deliberately re-read only after acquiring the policy WRITE
+// lease. Thus a revoke that completes while the request waits wins cleanly and
+// no stale bootstrap rows can land after it.
+func (m *Manager) admitMemberBootstrap(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, groupID, epoch string, entries []store.SyncGroupLogEntry) ([]string, []string, error) {
+	m.journalMu.Lock()
+	policyWriteUnlock := ss.LockSyncPolicyWrite()
+	var evicted, removed []string
+	err := func() error {
+		defer m.journalMu.Unlock()
+		defer policyWriteUnlock()
+		bound, bindErr := m.currentInboundGroupPeerBound(ctx, ss, peer.ChainID, peer.AgentID)
+		if bindErr != nil {
+			return fmt.Errorf("revalidate bootstrap peer: %w", bindErr)
+		}
+		if !bound {
+			return errGroupPeerNoLongerBound
+		}
+		return ss.RunInTx(ctx, func(txStore store.OffchainStore) error {
+			txSS := txStore.(*store.SQLiteStore)
+			g, getErr := txSS.GetSyncGroup(ctx, groupID)
+			if getErr != nil {
+				return getErr
+			}
+			if g == nil {
+				if upErr := txSS.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: groupID, ControllerChainID: peer.ChainID, ControllerAgentPubkey: peer.AgentID, Epoch: epoch}); upErr != nil {
+					return upErr
+				}
+			} else if g.ControllerChainID != peer.ChainID || g.ControllerAgentPubkey != peer.AgentID {
+				return fmt.Errorf("bootstrap conflicts with the pinned group controller")
+			}
+			_, evicted, removed, getErr = m.ingestJournalEntriesInTxLocked(ctx, txSS, groupID, RosterSubchain, entries)
+			if getErr != nil {
+				return getErr
+			}
+			member, getErr := txSS.GetSyncGroupMember(ctx, groupID, m.localChainID)
+			if getErr != nil || member == nil || member.MemberState != store.GroupMemberActive || member.MemberAgentPubkey != hex.EncodeToString(m.agentPub) {
+				return fmt.Errorf("bootstrap did not activate the exact local identity")
+			}
+			current, getErr := txSS.GetSyncGroup(ctx, groupID)
+			if getErr != nil || current == nil || current.ControllerChainID != peer.ChainID || current.ControllerAgentPubkey != peer.AgentID {
+				return fmt.Errorf("bootstrap sender is not the current pinned controller")
+			}
+			return nil
+		})
+	}()
+	return evicted, removed, err
 }
 
 // EmitEpochRotate runs the outgoing->incoming controller countersign ceremony.
@@ -598,11 +725,18 @@ func (m *Manager) handleEpochRotateCosign(w http.ResponseWriter, r *http.Request
 		httpError(w, http.StatusNotImplemented, "group journal unavailable")
 		return
 	}
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
+	if bound, err := m.inboundGroupPeerBound(r.Context(), ss, peer); err != nil || !bound {
+		httpError(w, http.StatusForbidden, "epoch rotation does not bind the current and incoming controllers")
+		return
+	}
 	gs, err := loadGroupApplyState(r.Context(), ss, req.GroupID)
 	p := parseJournalPayload(req.Entry.PayloadJSON)
 	if err != nil || req.Entry.GroupID != req.GroupID || validateAuthoredEntry(req.Entry) != nil ||
 		req.Entry.EntryType != "epoch_rotate" || req.Entry.Subchain != RosterSubchain ||
 		req.Entry.AuthorChainID != peer.ChainID || peer.ChainID != gs.controllerChain ||
+		peer.AgentID != hex.EncodeToString(gs.controllerKey) ||
 		p[pkControllerChain] != m.localChainID || p[pkControllerPubkey] != hex.EncodeToString(m.agentPub) ||
 		!gs.memberActive(m.localChainID) || verifyJournalEntry(req.Entry, gs.controllerKey) != nil {
 		httpError(w, http.StatusForbidden, "epoch rotation does not bind the current and incoming controllers")

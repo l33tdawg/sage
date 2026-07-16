@@ -23,6 +23,7 @@ type UpgradePlanRecord struct {
 	TargetAppVersion uint64 `json:"target_app_version"`
 	ActivationHeight int64  `json:"activation_height"`
 	BinarySHA256     string `json:"binary_sha256,omitempty"`
+	GovernanceDomain string `json:"governance_domain,omitempty"`
 	ProposedAt       int64  `json:"proposed_at"`
 	ProposerID       string `json:"proposer_id"`
 }
@@ -65,8 +66,8 @@ func (s *BadgerStore) SetUpgradePlan(rec *UpgradePlanRecord) error {
 	if err != nil {
 		return fmt.Errorf("marshal upgrade plan: %w", err)
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(upgradePlanKey(), payload)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, upgradePlanKey(), payload)
 	})
 }
 
@@ -74,7 +75,7 @@ func (s *BadgerStore) SetUpgradePlan(rec *UpgradePlanRecord) error {
 // when none exists.
 func (s *BadgerStore) GetUpgradePlan() (*UpgradePlanRecord, error) {
 	var rec *UpgradePlanRecord
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(upgradePlanKey())
 		if getErr != nil {
 			return getErr
@@ -100,8 +101,8 @@ func (s *BadgerStore) GetUpgradePlan() (*UpgradePlanRecord, error) {
 // DeleteUpgradePlan removes the pending plan unconditionally. Returns
 // nil if no plan exists (idempotent).
 func (s *BadgerStore) DeleteUpgradePlan() error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		if dErr := txn.Delete(upgradePlanKey()); dErr != nil && !errors.Is(dErr, badger.ErrKeyNotFound) {
+	return s.update(func(txn *badger.Txn) error {
+		if dErr := s.txnDelete(txn, upgradePlanKey()); dErr != nil && !errors.Is(dErr, badger.ErrKeyNotFound) {
 			return dErr
 		}
 		return nil
@@ -124,11 +125,11 @@ func (s *BadgerStore) MarkUpgradeApplied(name string, targetAppVersion uint64, a
 	if err != nil {
 		return fmt.Errorf("marshal applied record: %w", err)
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
-		if sErr := txn.Set(upgradeAppliedKey(name), payload); sErr != nil {
+	return s.update(func(txn *badger.Txn) error {
+		if sErr := s.txnSet(txn, upgradeAppliedKey(name), payload); sErr != nil {
 			return sErr
 		}
-		if dErr := txn.Delete(upgradePlanKey()); dErr != nil && !errors.Is(dErr, badger.ErrKeyNotFound) {
+		if dErr := s.txnDelete(txn, upgradePlanKey()); dErr != nil && !errors.Is(dErr, badger.ErrKeyNotFound) {
 			return dErr
 		}
 		return nil
@@ -139,7 +140,7 @@ func (s *BadgerStore) MarkUpgradeApplied(name string, targetAppVersion uint64, a
 // (so callers can distinguish "never applied" from "read error").
 func (s *BadgerStore) GetAppliedUpgrade(name string) (*AppliedUpgradeRecord, error) {
 	var rec *AppliedUpgradeRecord
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(upgradeAppliedKey(name))
 		if getErr != nil {
 			return getErr

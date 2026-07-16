@@ -317,13 +317,28 @@ func TestSageCorroborate_MissingID(t *testing.T) {
 
 func TestSageGovProposePassesGuidedScopeTemplate(t *testing.T) {
 	var requestBody map[string]any
+	contextCalls := 0
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "/v1/governance/propose", r.URL.Path)
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&requestBody))
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"proposal_id": "proposal-1", "tx_hash": "tx-1", "status": "voting",
-		})
+		switch r.URL.Path {
+		case "/v1/governance/context":
+			require.Equal(t, http.MethodGet, r.Method)
+			require.NotEmpty(t, r.Header.Get("X-Signature"))
+			require.Len(t, r.Header.Get("X-Nonce"), 16)
+			contextCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"validator_id": "validator-a", "governance_domain": "chain-a/governance",
+				"app_v20_active": true,
+			})
+		case "/v1/governance/propose":
+			require.Equal(t, http.MethodPost, r.Method)
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&requestBody))
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"proposal_id": "proposal-1", "tx_hash": "tx-1", "status": "voting",
+			})
+		default:
+			t.Fatalf("unexpected governance path %q", r.URL.Path)
+		}
 	}))
 	defer ts.Close()
 
@@ -342,7 +357,10 @@ func TestSageGovProposePassesGuidedScopeTemplate(t *testing.T) {
 		"operation": "scope_action", "reason": "form research quorum", "scope": scopeTemplate,
 	})
 	require.NoError(t, err)
+	assert.Equal(t, 1, contextCalls)
 	assert.Equal(t, "scope-a", requestBody["target_id"])
+	assert.Equal(t, "validator-a", requestBody["validator_id"])
+	assert.Equal(t, "chain-a/governance", requestBody["governance_domain"])
 	forwardedScope, ok := requestBody["scope"].(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "scope-a", forwardedScope["scope_id"])
@@ -350,6 +368,81 @@ func TestSageGovProposePassesGuidedScopeTemplate(t *testing.T) {
 	assert.Equal(t, float64(1), forwardedScope["revision"])
 	assert.NotContains(t, requestBody, "payload")
 	assert.Equal(t, "scope-a", result.(map[string]any)["target_id"])
+}
+
+func TestSageGovVoteIncludesGovernanceContext(t *testing.T) {
+	var requestBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/governance/context":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"validator_id": "validator-b", "governance_domain": "chain-b/governance",
+				"app_v20_active": true,
+			})
+		case "/v1/governance/vote":
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&requestBody))
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"tx_hash": "vote-tx", "status": "accepted",
+			})
+		default:
+			t.Fatalf("unexpected governance path %q", r.URL.Path)
+		}
+	}))
+	t.Cleanup(ts.Close)
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, priv)
+	_, err = s.toolGovVote(context.Background(), map[string]any{
+		"proposal_id": "proposal-1", "decision": "accept",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "validator-b", requestBody["validator_id"])
+	assert.Equal(t, "chain-b/governance", requestBody["governance_domain"])
+}
+
+func TestSageGovVotePreservesPreV20Body(t *testing.T) {
+	tests := map[string]func(http.ResponseWriter){
+		"inactive context": func(w http.ResponseWriter) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"validator_id": "validator-a", "governance_domain": "",
+				"app_v20_active": false,
+			})
+		},
+		"missing legacy route": func(w http.ResponseWriter) {
+			http.Error(w, "404 page not found", http.StatusNotFound)
+		},
+	}
+	for name, writeContext := range tests {
+		t.Run(name, func(t *testing.T) {
+			var requestBody map[string]any
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/governance/context" {
+					writeContext(w)
+					return
+				}
+				require.Equal(t, "/v1/governance/vote", r.URL.Path)
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&requestBody))
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"tx_hash": "vote-tx", "status": "accepted",
+				})
+			}))
+			t.Cleanup(ts.Close)
+
+			_, priv, err := ed25519.GenerateKey(nil)
+			require.NoError(t, err)
+			s := NewServer(ts.URL, priv)
+			_, err = s.toolGovVote(context.Background(), map[string]any{
+				"proposal_id": "proposal-1", "decision": "accept",
+			})
+			require.NoError(t, err)
+			assert.NotContains(t, requestBody, "validator_id")
+			assert.NotContains(t, requestBody, "governance_domain")
+		})
+	}
 }
 
 func TestSageLink(t *testing.T) {

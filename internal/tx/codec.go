@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -2456,6 +2457,11 @@ func encodeUpgradePropose(u *UpgradePropose) []byte {
 	buf = appendBytes(buf, []byte(u.BinarySHA256))
 	buf = appendBytes(buf, []byte(u.ProposerID))
 	buf = appendInt64(buf, u.UpgradeDelayBlocks)
+	// Optional wire tail: omitting the empty field preserves every pre-app-v20
+	// UpgradePropose byte-for-byte while target 20 commits the chain domain.
+	if u.GovernanceDomain != "" {
+		buf = appendBytes(buf, []byte(u.GovernanceDomain))
+	}
 	return buf
 }
 
@@ -2488,9 +2494,24 @@ func decodeUpgradePropose(data []byte) (*UpgradePropose, error) {
 	}
 	u.ProposerID = string(b)
 
-	u.UpgradeDelayBlocks, _, err = readInt64(data, off)
+	u.UpgradeDelayBlocks, off, err = readInt64(data, off)
 	if err != nil {
 		return nil, err
+	}
+	if u.Name == "app-v20" && u.TargetAppVersion == 20 && off < len(data) {
+		// The governance-domain field is a trailing app-v20 extension. Legacy
+		// decoders ignored every byte after UpgradeDelayBlocks, including malformed
+		// tails, so keep DecodeTx tolerant for historical replay. At app-v15+
+		// FinalizeBlock's canonical re-encode gate rejects an unparseable or extra
+		// tail before execution; a canonical app-v20 proposal decodes the field and
+		// round-trips byte-for-byte.
+		if decoded, next, tailErr := readBytes(data, off); tailErr == nil && next == len(data) {
+			encoded := string(decoded)
+			domain, domainErr := hex.DecodeString(encoded)
+			if domainErr == nil && len(domain) == sha256.Size && hex.EncodeToString(domain) == encoded {
+				u.GovernanceDomain = encoded
+			}
+		}
 	}
 
 	return u, nil

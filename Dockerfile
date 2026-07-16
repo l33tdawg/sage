@@ -12,7 +12,7 @@ COPY third_party/cometbft/go.mod third_party/cometbft/go.sum ./third_party/comet
 RUN go mod download
 COPY . .
 
-ARG VERSION=4.5.7
+ARG VERSION=dev
 ARG COMMIT=unknown
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /sage-gui ./cmd/sage-gui
 

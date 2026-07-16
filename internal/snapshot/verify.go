@@ -37,6 +37,8 @@ import (
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/klauspost/compress/zstd"
+
+	"github.com/l33tdawg/sage/internal/consensuskeys"
 )
 
 // AppHashComputer lets the verifier hash a restored BadgerDB without
@@ -361,6 +363,9 @@ func computeAppHashStandalone(badgerPath string) ([]byte, error) {
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
+			if consensuskeys.IsAppHashExcludedLocalKey(item.Key()) {
+				continue
+			}
 			k := append([]byte(nil), item.Key()...)
 			if vErr := item.Value(func(v []byte) error {
 				val := append([]byte(nil), v...)
@@ -418,6 +423,9 @@ func computeAppHashAllRulesStandalone(badgerPath string) ([]byte, error) {
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
+			if consensuskeys.IsAppHashExcludedLocalKey(item.Key()) {
+				continue
+			}
 			k := append([]byte(nil), item.Key()...)
 			if vErr := item.Value(func(v []byte) error {
 				legacy.Write(k)

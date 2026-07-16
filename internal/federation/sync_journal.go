@@ -364,11 +364,21 @@ func (m *Manager) appendAndApply(ctx context.Context, ss *store.SQLiteStore, gs 
 		if !ok {
 			return fmt.Errorf("group journal requires the SQLite store backend")
 		}
-		if err := tx.AppendSyncGroupLog(ctx, e); err != nil {
-			return err
-		}
-		return gs.apply(ctx, tx, e)
+		return m.appendAndApplyInTx(ctx, tx, gs, e)
 	})
+}
+
+// appendAndApplyInTx is the transaction-scoped half of appendAndApply. The
+// caller must already hold the sync-policy WRITE lease and must pass a
+// transaction-scoped store. It exists for atomic multi-entry ceremonies: taking
+// and releasing the policy lease once per entry while an outer transaction
+// holds SQLite's write mutex creates a lock-order cycle and exposes projections
+// before the outer commit barrier.
+func (m *Manager) appendAndApplyInTx(ctx context.Context, tx *store.SQLiteStore, gs *groupApplyState, e store.SyncGroupLogEntry) error {
+	if err := tx.AppendSyncGroupLog(ctx, e); err != nil {
+		return err
+	}
+	return gs.apply(ctx, tx, e)
 }
 
 // AppendGroupJournalEntry builds, signs, and appends the next entry to a group

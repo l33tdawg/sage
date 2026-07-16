@@ -82,6 +82,16 @@ function sarif(results, run = {}) {
   };
 }
 
+function prDiffSarif(results, extensionOverrides = {}) {
+  const document = sarif(results);
+  document.runs[0].tool.extensions.unshift({
+    name: 'codeql-action/pr-diff-range',
+    semanticVersion: '0.0.0',
+    ...extensionOverrides,
+  });
+  return document;
+}
+
 function filteredResults(document, selectedBaseline = baseline) {
   return filterSarifDocument(document, selectedBaseline).document.runs[0].results;
 }
@@ -157,6 +167,15 @@ test('suppresses all and only the 29 exact audited upstream findings', () => {
 
   assert.deepEqual(filtered.document.runs[0].results, []);
   assert.deepEqual(filtered.stats, { total: 29, suppressed: 29, retained: 0 });
+});
+
+test('PR-diff metadata preserves exact per-result suppression invariants', () => {
+  const exact = auditedResult(baseline.findings[0]);
+  const future = auditedResult(baseline.findings[1], { ruleId: 'go/a-new-rule' });
+  const filtered = filterSarifDocument(prDiffSarif([exact, future]), baseline);
+
+  assert.deepEqual(filtered.stats, { total: 2, suppressed: 1, retained: 1 });
+  assert.deepEqual(filtered.document.runs[0].results, [future]);
 });
 
 test('suppresses exact pre-upload CodeQL findings before GitHub adds correlation GUIDs', () => {
@@ -998,6 +1017,106 @@ test('CLI coverage gate rejects Go tool drift even with no baseline results', as
     /metadata does not match the pinned Go baseline/u,
   );
   await assert.rejects(readFile(output), /ENOENT/u);
+});
+
+test('CLI coverage gate accepts exact zero-result CodeQL PR-diff metadata', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sage-sarif-filter-'));
+  const input = join(root, 'input.sarif');
+  const output = join(root, 'output.sarif');
+  const document = prDiffSarif([]);
+  await writeFile(input, JSON.stringify(document));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const summary = await filterSarifPath(input, output, manifestPath, {
+    sourceRoot: repoRoot,
+    expectedAutomationId: baseline.automationId,
+  });
+  const written = JSON.parse(await readFile(output, 'utf8'));
+
+  assert.deepEqual(summary, { files: 1, total: 0, suppressed: 0, retained: 0 });
+  assert.deepEqual(written, document);
+});
+
+test('PR-diff metadata cannot waive an incomplete full-run coverage audit', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sage-sarif-filter-'));
+  const input = join(root, 'input.sarif');
+  const output = join(root, 'output.sarif');
+  const differentialRun = prDiffSarif([]).runs[0];
+  const fullRun = sarif([]).runs[0];
+  await writeFile(input, JSON.stringify({
+    version: '2.1.0',
+    runs: [differentialRun, fullRun],
+  }));
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  await assert.rejects(
+    filterSarifPath(input, output, manifestPath, {
+      sourceRoot: repoRoot,
+      expectedAutomationId: baseline.automationId,
+    }),
+    /missing 29 expected CometBFT baseline finding/u,
+  );
+  await assert.rejects(readFile(output), /ENOENT/u);
+});
+
+test('CLI coverage gate rejects spoofed or additional PR-diff extensions', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'sage-sarif-filter-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cases = [
+    {
+      name: 'wrong generated-extension version',
+      document: prDiffSarif([], { semanticVersion: '0.0.1' }),
+    },
+    {
+      name: 'lookalike generated-extension name',
+      document: prDiffSarif([], { name: 'codeql-action/pr-diff-range-spoof' }),
+    },
+    {
+      name: 'unexpected fifth extension',
+      document: (() => {
+        const document = prDiffSarif([]);
+        document.runs[0].tool.extensions.push({
+          name: 'attacker/extra-pack',
+          semanticVersion: '1.0.0',
+        });
+        return document;
+      })(),
+    },
+    {
+      name: 'duplicate generated extension',
+      document: (() => {
+        const document = prDiffSarif([]);
+        document.runs[0].tool.extensions.push({
+          name: 'codeql-action/pr-diff-range',
+          semanticVersion: '0.0.0',
+        });
+        return document;
+      })(),
+    },
+    {
+      name: 'drifted pinned query pack',
+      document: (() => {
+        const document = prDiffSarif([]);
+        document.runs[0].tool.extensions[1].semanticVersion = 'next-query-pack';
+        return document;
+      })(),
+    },
+  ];
+
+  for (const [index, testCase] of cases.entries()) {
+    const input = join(root, `input-${index}.sarif`);
+    const output = join(root, `output-${index}.sarif`);
+    await writeFile(input, JSON.stringify(testCase.document));
+    await assert.rejects(
+      filterSarifPath(input, output, manifestPath, {
+        sourceRoot: repoRoot,
+        expectedAutomationId: baseline.automationId,
+      }),
+      /metadata does not match the pinned Go baseline/u,
+      testCase.name,
+    );
+    await assert.rejects(readFile(output), /ENOENT/u, testCase.name);
+  }
 });
 
 test('file mode writes filtered SARIF and reports exact counts', async (t) => {

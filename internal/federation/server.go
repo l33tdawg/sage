@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -51,6 +52,7 @@ func (m *Manager) Router() http.Handler {
 		r.Use(m.peerAuth)
 		r.Get("/fed/v1/status", m.handleStatus)
 		r.Post("/fed/v1/query", m.handleQuery)
+		r.Post("/fed/v1/write", m.handleRemoteWrite)
 		r.Post("/fed/v1/receipt", m.handleReceipt)
 		r.Post("/fed/v1/sync/push", m.handleSyncPush)       // v11.5 domain sync
 		r.Post("/fed/v1/sync/digest", m.handleSyncDigest)   // v11.5 anti-entropy
@@ -278,24 +280,120 @@ func peerFromCtx(ctx context.Context) *peerIdentity {
 	return p
 }
 
+// sameAgreementGeneration requires a request authenticated by peerAuth to
+// still name the exact active trust snapshot at the handler's policy
+// linearization point. The CA pin is the transport trust anchor; the remaining
+// fields prevent an in-flight request from retaining a superseded treaty scope
+// or clearance after the agreement is replaced.
+func sameAgreementGeneration(authenticated, current *store.CrossFedRecord) bool {
+	return authenticated != nil && current != nil &&
+		authenticated.RemoteChainID == current.RemoteChainID &&
+		authenticated.Endpoint == current.Endpoint &&
+		bytes.Equal(authenticated.PeerPubKey, current.PeerPubKey) &&
+		authenticated.MaxClearance == current.MaxClearance &&
+		authenticated.ExpiresAt == current.ExpiresAt &&
+		slices.Equal(authenticated.AllowedDomains, current.AllowedDomains) &&
+		slices.Equal(authenticated.AllowedDepts, current.AllowedDepts) &&
+		authenticated.Status == current.Status
+}
+
+// currentRequestAgreementBound closes the gap between peerAuth and a handler's
+// effective-policy read. Callers hold the sync-policy read lease, so a revoke
+// whose local purge completes before this check is denied, while a revoke that
+// starts afterward cannot complete until the response has finished. Where a
+// JOIN-era sync control exists, the live signer must also be the exact operator
+// frozen by that ceremony; a legacy agreement with no such local binding keeps
+// its historical treaty behavior.
+func (m *Manager) currentRequestAgreementBound(ctx context.Context, peer *peerIdentity) (*store.CrossFedRecord, error) {
+	if peer == nil || peer.Agreement == nil || peer.ChainID == "" || peer.AgentID == "" {
+		return nil, fmt.Errorf("authenticated peer identity is incomplete")
+	}
+	current, err := m.ActiveAgreement(peer.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	if !sameAgreementGeneration(peer.Agreement, current) {
+		return nil, fmt.Errorf("authenticated federation agreement generation changed")
+	}
+	ss := m.syncStore()
+	if ss == nil {
+		return current, nil
+	}
+	control, err := ss.GetSyncControl(ctx, peer.ChainID)
+	if err != nil {
+		return nil, fmt.Errorf("read peer operator binding: %w", err)
+	}
+	if control == nil {
+		return current, nil
+	}
+	peerOperator, err := m.resolvePeerOperatorAgentID(ctx, current)
+	if err != nil {
+		return nil, err
+	}
+	if peerOperator != peer.AgentID {
+		return nil, fmt.Errorf("requesting operator does not match the active federation binding")
+	}
+	return current, nil
+}
+
 // handleStatus — authenticated reachability/identity preflight. Capabilities
 // advertises optional route groups so senders can feature-detect: "sync" only
 // when the backend actually supports it (SQLite-only).
-func (m *Manager) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
+	peer := peerFromCtx(r.Context())
+	if peer == nil || peer.Agreement == nil {
+		httpError(w, http.StatusForbidden, "unauthenticated")
+		return
+	}
+	if ss := m.syncStore(); ss != nil {
+		policyUnlock := ss.LockSyncPolicyRead()
+		defer policyUnlock()
+	}
+	agreement, err := m.currentRequestAgreementBound(r.Context(), peer)
+	if err != nil {
+		httpError(w, http.StatusForbidden, "federation agreement is no longer active for this operator")
+		return
+	}
 	var caps []string
 	if m.syncStore() != nil {
 		caps = append(caps, CapabilitySync)
 	}
-	writeJSON(w, http.StatusOK, &StatusResponse{ChainID: m.localChainID, Time: time.Now().Unix(), Capabilities: caps})
+	policy, err := m.getPeerRBACPolicyForAgreement(r.Context(), agreement)
+	if err != nil {
+		m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation status peer RBAC lookup failed")
+		httpError(w, http.StatusInternalServerError, "peer RBAC lookup failed")
+		return
+	}
+	var peerRBACGrant *PeerRBACGrant
+	if policy != nil {
+		if policy.PeerAgentID != peer.AgentID {
+			httpError(w, http.StatusForbidden, "requesting operator is not bound to this peer RBAC policy")
+			return
+		}
+		peerRBACGrant = peerRBACGrantFromPolicy(policy)
+	}
+	domains := []string{}
+	if policy == nil {
+		domains = append(domains, agreement.AllowedDomains...)
+	}
+	writeJSON(w, http.StatusOK, &StatusResponse{
+		ChainID:      m.localChainID,
+		Time:         time.Now().Unix(),
+		Capabilities: caps,
+		SharingGrant: &SharingGrant{
+			AllowedDomains: domains,
+			MaxClearance:   agreement.MaxClearance,
+		},
+		PeerRBACGrant: peerRBACGrant,
+	})
 }
 
 // handleQuery serves a scoped read-only recall to an authenticated peer.
-// Authorization is AGREEMENT-level: the peer node has already authorized its
-// own requesting agent under its local rules; here we enforce OUR side of the
-// treaty — allowed domains, the MaxClearance ceiling, committed-only — and
-// nothing else. Local-agent RBAC (resolveVisibleAgents et al.) is deliberately
-// NOT consulted: a foreign chain has no local org membership (the same reason
-// co-commit verifies coauthors standalone).
+// A configured directional peer-RBAC snapshot is authoritative for domain
+// scope, including an empty deny-all snapshot. Legacy connections without a
+// snapshot retain their tx-33 domain scope. The tx-33 MaxClearance ceiling is
+// retained in both cases as fail-closed legacy classification metadata until a
+// dedicated peer-RBAC clearance field exists.
 func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 	peer := peerFromCtx(r.Context())
 	if peer == nil {
@@ -307,16 +405,41 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
+	// Lease the effective policy from authorization through the completed
+	// response write. A permissions update/revoke takes the write side, so after
+	// it returns no query can still disclose data under the old Read snapshot.
+	if ss := m.syncStore(); ss != nil {
+		policyUnlock := ss.LockSyncPolicyRead()
+		defer policyUnlock()
+	}
+	agreement, agreementErr := m.currentRequestAgreementBound(r.Context(), peer)
+	if agreementErr != nil {
+		httpError(w, http.StatusForbidden, "federation agreement is no longer active for this operator")
+		return
+	}
+	peerPolicy, policyErr := m.getPeerRBACPolicyForAgreement(r.Context(), agreement)
+	if policyErr != nil {
+		m.logger.Error().Err(policyErr).Str("peer", peer.ChainID).Msg("federation query peer RBAC lookup failed")
+		httpError(w, http.StatusInternalServerError, "peer RBAC lookup failed")
+		return
+	}
+	if peerPolicy != nil && peerPolicy.PeerAgentID != peer.AgentID {
+		httpError(w, http.StatusForbidden, "requesting operator is not bound to this peer RBAC policy")
+		return
+	}
 
-	// Scope gate on the REQUESTED domain. A domainless query is only accepted
-	// under a wildcard agreement — otherwise the store would search across all
-	// domains and rely purely on post-filtering; reject instead (fail closed,
-	// and the error tells the caller to scope).
-	if !DomainAllowed(peer.Agreement.AllowedDomains, req.DomainTag) {
+	// Scope gate on the REQUESTED domain. Once peer RBAC is configured it fully
+	// replaces tx-33 AllowedDomains, and concrete domain rows mean an unscoped
+	// query is always denied. Legacy links keep the wildcard treaty behavior.
+	requestAllowed := peerRBACAllowsRead(peerPolicy, req.DomainTag)
+	if peerPolicy == nil {
+		requestAllowed = DomainAllowed(agreement.AllowedDomains, req.DomainTag)
+	}
+	if !requestAllowed {
 		if req.DomainTag == "" {
-			httpError(w, http.StatusForbidden, "agreement is domain-scoped: a domain_tag is required")
+			httpError(w, http.StatusForbidden, "a permitted domain_tag is required")
 		} else {
-			httpError(w, http.StatusForbidden, "domain not covered by agreement")
+			httpError(w, http.StatusForbidden, "domain read is not permitted")
 		}
 		return
 	}
@@ -392,7 +515,11 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 			hidden++
 			continue
 		}
-		if !DomainAllowed(peer.Agreement.AllowedDomains, rec.DomainTag) {
+		recordAllowed := peerRBACAllowsRead(peerPolicy, rec.DomainTag)
+		if peerPolicy == nil {
+			recordAllowed = DomainAllowed(agreement.AllowedDomains, rec.DomainTag)
+		}
+		if !recordAllowed {
 			hidden++
 			continue
 		}
@@ -402,7 +529,7 @@ func (m *Manager) handleQuery(w http.ResponseWriter, r *http.Request) {
 		// across the federation boundary. This is the sole clearance gate on the
 		// egress path, so an error hides the record.
 		memClass, classErr := m.badger.GetMemoryClassification(rec.MemoryID)
-		if classErr != nil || memClass > peer.Agreement.MaxClearance {
+		if classErr != nil || memClass > agreement.MaxClearance {
 			hidden++
 			continue
 		}
@@ -450,7 +577,20 @@ func (m *Manager) handleReceipt(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	resp, err := m.HandleIncomingReceipt(peer.ChainID, &push)
+	// A receipt is an authenticated peer-triggered consensus write. Hold the
+	// same policy lease used by data-serving/mutation routes, re-resolve the exact
+	// request agreement/operator beneath it, and retain the lease through the
+	// blocking attest broadcast. A completed revoke can therefore never be
+	// followed by a stale receipt write.
+	if ss := m.syncStore(); ss != nil {
+		policyUnlock := ss.LockSyncPolicyRead()
+		defer policyUnlock()
+	}
+	if _, err := m.currentRequestAgreementBound(r.Context(), peer); err != nil {
+		httpError(w, http.StatusForbidden, "federation agreement is no longer active for this operator")
+		return
+	}
+	resp, err := m.handleIncomingReceiptValidated(peer.ChainID, &push)
 	if err != nil {
 		m.logger.Warn().Err(err).Str("peer", peer.ChainID).Msg("receipt push rejected")
 		httpError(w, http.StatusUnprocessableEntity, fmt.Sprintf("receipt rejected: %v", err))

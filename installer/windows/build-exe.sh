@@ -12,7 +12,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-VERSION="${SAGE_VERSION:-dev}"
+ASSET_VERSION="${SAGE_VERSION:-dev}"
+VERSION="${ASSET_VERSION#v}"
 
 BUILD_DIR="${PROJECT_ROOT}/dist/windows-amd64"
 
@@ -50,10 +51,10 @@ cp "$SCRIPT_DIR/sage.ico" "$BUILD_DIR/"
 # Build installer with NSIS
 echo "==> Building NSIS installer..."
 cd "$BUILD_DIR"
-makensis -DVERSION="${VERSION}" sage-installer.nsi
+makensis -DVERSION="${VERSION}" -DASSET_VERSION="${ASSET_VERSION}" sage-installer.nsi
 
 echo ""
 echo "==> Done! Installer created at:"
-echo "    ${BUILD_DIR}/SAGE-${VERSION}-Windows-Setup.exe"
+echo "    ${BUILD_DIR}/SAGE-${ASSET_VERSION}-Windows-Setup.exe"
 echo ""
-ls -lh "${BUILD_DIR}/SAGE-${VERSION}-Windows-Setup.exe"
+ls -lh "${BUILD_DIR}/SAGE-${ASSET_VERSION}-Windows-Setup.exe"

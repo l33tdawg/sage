@@ -21,12 +21,12 @@ import (
 // R, member M all active full-sync in group g1 carrying `domain` (owner + max
 // clearance configurable). X's roster key is pinned so a relayed origin_sig
 // verifies against it, never the relayer's.
-func seedRelayGroup(t *testing.T, ms *store.SQLiteStore, domain, owner string, maxClearance int, xPubHex string) {
+func seedRelayGroup(t *testing.T, ms *store.SQLiteStore, domain, owner string, maxClearance int, xPubHex, rPubHex, mPubHex string) {
 	t.Helper()
 	seedGroupDomain(t, ms, "g1", domain, owner, maxClearance)
 	seedGroupMember(t, ms, "g1", "chain-x", store.GroupRoleFullSync, store.GroupMemberActive, xPubHex)
-	seedGroupMember(t, ms, "g1", "chain-r", store.GroupRoleFullSync, store.GroupMemberActive, "keyr")
-	seedGroupMember(t, ms, "g1", "chain-m", store.GroupRoleFullSync, store.GroupMemberActive, "keym")
+	seedGroupMember(t, ms, "g1", "chain-r", store.GroupRoleFullSync, store.GroupMemberActive, rPubHex)
+	seedGroupMember(t, ms, "g1", "chain-m", store.GroupRoleFullSync, store.GroupMemberActive, mPubHex)
 }
 
 // TestMeshPullRelayEndToEnd is the load-bearing D4 proof (docs §9.2): a rejoining
@@ -66,13 +66,29 @@ func TestMeshPullRelayEndToEnd(t *testing.T) {
 	R, msR, bsR := newDrainTestManager(t)
 	R.localChainID = "chain-r"
 	R.syncNudge = make(chan struct{}, 1)
-	seedRelayGroup(t, msR, "studio", "chain-x", 0, xPubHex)
+	comet := &scriptedComet{responses: []string{cometOK}}
+	M, msM := newSyncTestManager(t, comet)
+	M.localChainID = "chain-m"
+	relayerID := hex.EncodeToString(R.agentPub)
+	memberID := hex.EncodeToString(M.agentPub)
+	seedRelayGroup(t, msR, "studio", "chain-x", 0, xPubHex, relayerID, memberID)
+	seedRelayGroup(t, msM, "studio", "chain-x", 0, xPubHex, relayerID, memberID)
 	seedDrainAgreement(t, bsR, "chain-m", 2, "studio")
+	require.NoError(t, msR.SetSyncDomains(ctx, "chain-m", []string{"studio"}))
+	agreement, err := R.ActiveAgreement("chain-m")
+	require.NoError(t, err)
+	require.NoError(t, msR.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-m", Role: "host", ControllerChainID: R.localChainID,
+		ControllerAgentID: relayerID, PeerAgentID: memberID, PolicyEpoch: "legacy-group",
+		RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey),
+	}))
+	require.NoError(t, msR.ActivateSyncControl(ctx, "chain-m", "legacy-group"))
 	// R holds X's admitted copy as an immutable local memory + provenance ledger row.
 	require.NoError(t, seedSyncedMirror(ctx, msR, R, localID, originItem))
 	require.NoError(t, msR.RecordSyncOrigin(ctx, store.SyncOrigin{
 		OriginChainID: "chain-x", OriginMemoryID: "x-mem-1", OriginCreatedAt: originItem.OriginCreatedAt,
-		LocalMemoryID: localID, DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted,
+		OriginAgentPubkey: xPubHex,
+		LocalMemoryID:     localID, DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted,
 		OriginSig: originItem.OriginSig,
 	}))
 	// R's digest seam reports M holds nothing (a fresh rejoining member).
@@ -81,10 +97,7 @@ func TestMeshPullRelayEndToEnd(t *testing.T) {
 	}
 
 	// ---- Member M (admits via the real handleSyncPush + a scripted broadcast) ----
-	comet := &scriptedComet{responses: []string{cometOK}}
-	M, msM := newSyncTestManager(t, comet)
-	M.localChainID = "chain-m"
-	seedRelayGroup(t, msM, "studio", "chain-x", 0, xPubHex)
+	require.NoError(t, msM.SetSyncDomains(ctx, "chain-r", []string{"studio"}))
 	comet.after = func() {
 		lid := syncMemoryID("chain-x", "x-mem-1")
 		_ = seedCommittedMemory(ctx, msM, lid, "studio", content, sum[:])
@@ -98,6 +111,7 @@ func TestMeshPullRelayEndToEnd(t *testing.T) {
 			RemoteChainID: "chain-r", MaxClearance: 2, AllowedDomains: []string{"studio"}, Status: "active",
 		},
 	}
+	bindInboundGroupPeer(t, M, msM, peerR, "guest")
 	R.syncPushFn = func(_ context.Context, chain string, req *SyncPushRequest) (*SyncPushResponse, error) {
 		assert.Equal(t, "chain-m", chain)
 		body, mErr := json.Marshal(req)
@@ -113,8 +127,6 @@ func TestMeshPullRelayEndToEnd(t *testing.T) {
 	}
 
 	// ---- 1. Reconcile: R discovers M lacks X's item and enqueues a RELAYED row ----
-	agreement, err := R.ActiveAgreement("chain-m")
-	require.NoError(t, err)
 	consented, err := R.effectiveConsent(ctx, msR, "chain-m")
 	require.NoError(t, err)
 	R.reconcilePeer(ctx, msR, agreement, consented)
@@ -148,6 +160,190 @@ func TestMeshPullRelayEndToEnd(t *testing.T) {
 	assert.Equal(t, originItem.OriginSig, mOrigin.OriginSig, "M must persist the ORIGIN's sig, not the relayer's")
 }
 
+// TestTrustOnlyV3MeshRelayUsesIndependentExactGroupRBAC is the fresh-JOIN
+// compatibility proof. Both transport agreements have the mandatory empty
+// tx-33 envelope. A three-node X -> R -> M backfill uses the exact X/R/M group
+// projection independently of direct Copy/Subscribe; removing a group member
+// is the revocation gate.
+func TestTrustOnlyV3MeshRelayUsesIndependentExactGroupRBAC(t *testing.T) {
+	ctx := context.Background()
+	xPub, xPriv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	xPubHex := hex.EncodeToString(xPub)
+
+	R, msR, bsR := newDrainTestManager(t)
+	R.localChainID = "chain-r"
+	R.syncNudge = make(chan struct{}, 1)
+	comet := &scriptedComet{responses: []string{cometOK}}
+	M, msM := newSyncTestManager(t, comet)
+	M.localChainID = "chain-m"
+	memberID := hex.EncodeToString(M.agentPub)
+	relayerID := hex.EncodeToString(R.agentPub)
+	seedRelayGroup(t, msR, "studio", "chain-x", 0, xPubHex, relayerID, memberID)
+	seedRelayGroup(t, msM, "studio", "chain-x", 0, xPubHex, relayerID, memberID)
+	seedDrainAgreement(t, bsR, "chain-m", 2) // fresh JOIN: tx-33 grants no domains
+	agreementRM, err := R.ActiveAgreement("chain-m")
+	require.NoError(t, err)
+	require.Empty(t, agreementRM.AllowedDomains)
+	require.NoError(t, msR.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-m", Role: "host", ControllerChainID: R.localChainID,
+		ControllerAgentID: relayerID, PeerAgentID: memberID, PolicyEpoch: "fresh-v3",
+		RemoteCAPin: hex.EncodeToString(agreementRM.PeerPubKey), PolicyVersion: SyncPolicyVersionPeerRBAC,
+	}))
+	require.NoError(t, msR.ActivateSyncControl(ctx, "chain-m", "fresh-v3"))
+	_, err = R.ReplacePeerRBACPolicy(ctx, "chain-m", []store.PeerRBACDomainPermission{
+		{Domain: "studio", Read: true, Copy: true},
+	})
+	require.NoError(t, err)
+	_, err = msR.ApplyLocalDirectionalSyncPolicy(ctx, "chain-m", "fresh-v3",
+		SyncPolicyVersionPeerRBAC, 1, "r-local-1", []string{"studio"}, nil)
+	require.NoError(t, err)
+	_, err = msR.ApplyRemoteDirectionalSyncPolicy(ctx, "chain-m", "fresh-v3",
+		SyncPolicyVersionPeerRBAC, 1, "m-remote-1", nil, []string{"studio"})
+	require.NoError(t, err)
+	require.NoError(t, msR.MarkSyncPolicyDelivered(ctx, "chain-m", "fresh-v3", 1))
+
+	relayerPin := []byte("pin-bytes-32-rrrrrrrrrrrrrrrrrrrr")
+	agreementMR := &store.CrossFedRecord{
+		RemoteChainID: "chain-r", PeerPubKey: relayerPin, MaxClearance: 2,
+		AllowedDomains: nil, Status: "active",
+	}
+	require.NoError(t, msM.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-r", Role: "guest", ControllerChainID: "chain-r",
+		ControllerAgentID: relayerID, PeerAgentID: relayerID, PolicyEpoch: "fresh-v3",
+		RemoteCAPin: hex.EncodeToString(relayerPin), PolicyVersion: SyncPolicyVersionPeerRBAC,
+	}))
+	require.NoError(t, msM.ActivateSyncControl(ctx, "chain-r", "fresh-v3"))
+	_, err = msM.ApplyLocalDirectionalSyncPolicy(ctx, "chain-r", "fresh-v3",
+		SyncPolicyVersionPeerRBAC, 1, "m-local-1", nil, []string{"studio"})
+	require.NoError(t, err)
+	_, err = msM.ApplyRemoteDirectionalSyncPolicy(ctx, "chain-r", "fresh-v3",
+		SyncPolicyVersionPeerRBAC, 1, "r-remote-1", []string{"studio"}, nil)
+	require.NoError(t, err)
+	_, err = msM.ReplacePeerRBACPolicy(ctx, store.PeerRBACPolicy{
+		RemoteChainID: "chain-r", PeerAgentID: relayerID,
+		PolicyEpoch: "fresh-v3", RemoteCAPin: hex.EncodeToString(relayerPin),
+		PolicyVersion: store.CurrentPeerRBACPolicyVersion, Domains: []store.PeerRBACDomainPermission{},
+	})
+	require.NoError(t, err)
+
+	seedRelayCopy := func(originID, content string) (SyncItem, string) {
+		t.Helper()
+		sum := sha256.Sum256([]byte(content))
+		item := SyncItem{
+			OriginChainID: "chain-x", OriginMemoryID: originID,
+			OriginCreatedAt: "2026-07-16T00:00:00Z", Domain: "studio",
+			Classification: 1, MemoryType: "fact", ConfidenceScore: 0.9,
+			Content: content, ContentHash: hex.EncodeToString(sum[:]),
+		}
+		item.OriginSig = signOriginSig(xPriv, &item)
+		localID := syncMemoryID("chain-x", originID)
+		require.NoError(t, seedSyncedMirror(ctx, msR, R, localID, item))
+		require.NoError(t, msR.RecordSyncOrigin(ctx, store.SyncOrigin{
+			OriginChainID: "chain-x", OriginMemoryID: originID,
+			OriginAgentPubkey: xPubHex,
+			OriginCreatedAt:   item.OriginCreatedAt, LocalMemoryID: localID,
+			DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted, OriginSig: item.OriginSig,
+		}))
+		return item, localID
+	}
+
+	accepted, _ := seedRelayCopy("fresh-accepted", "fresh trust-only relay")
+	comet.after = func() {
+		hash, _ := hex.DecodeString(accepted.ContentHash)
+		_ = seedCommittedMemory(ctx, msM, syncMemoryID("chain-x", accepted.OriginMemoryID),
+			accepted.Domain, accepted.Content, hash)
+	}
+	R.syncDigestFn = func(_ context.Context, _ string, _ *SyncDigestRequest) (*SyncDigestResponse, error) {
+		return &SyncDigestResponse{}, nil
+	}
+	peerR := &peerIdentity{ChainID: "chain-r", AgentID: relayerID, Agreement: agreementMR}
+	bindTestPeerAgreement(t, M, peerR)
+	pushes := 0
+	R.syncPushFn = func(_ context.Context, chain string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		require.Equal(t, "chain-m", chain)
+		pushes++
+		body, marshalErr := json.Marshal(req)
+		require.NoError(t, marshalErr)
+		httpReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/push", bytes.NewReader(body))
+		httpReq = httpReq.WithContext(context.WithValue(httpReq.Context(), peerCtxKey{}, peerR))
+		rr := httptest.NewRecorder()
+		M.handleSyncPush(rr, httpReq)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var resp SyncPushResponse
+		require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
+		return &resp, nil
+	}
+
+	consented, err := R.effectiveConsent(ctx, msR, "chain-m")
+	require.NoError(t, err)
+	R.reconcilePeer(ctx, msR, agreementRM, consented)
+	R.syncDrain(ctx, msR, agreementRM, consented)
+	require.Equal(t, 1, pushes)
+	require.Equal(t, int32(1), comet.calls.Load())
+	_, err = msM.GetSyncOrigin(ctx, "chain-x", accepted.OriginMemoryID)
+	require.NoError(t, err, "fresh trust-only v3 relay was not admitted")
+
+	// Direct Copy may be revoked without changing the independently authorized
+	// exact group relay.
+	_, err = R.ReplacePeerRBACPolicy(ctx, "chain-m", []store.PeerRBACDomainPermission{
+		{Domain: "studio", Read: true},
+	})
+	require.NoError(t, err)
+	copyIndependent, copyRevokedID := seedRelayCopy("copy-revoked", "copy revoked before group relay")
+	comet.after = func() {
+		hash, _ := hex.DecodeString(copyIndependent.ContentHash)
+		_ = seedCommittedMemory(ctx, msM, syncMemoryID("chain-x", copyIndependent.OriginMemoryID),
+			copyIndependent.Domain, copyIndependent.Content, hash)
+	}
+	_, err = msR.EnqueueRelayedSyncOutbox(ctx, "chain-m", copyRevokedID, "chain-x")
+	require.NoError(t, err)
+	consented, err = R.effectiveConsent(ctx, msR, "chain-m")
+	require.NoError(t, err)
+	R.syncDrain(ctx, msR, agreementRM, consented)
+	require.Equal(t, 2, pushes, "direct Copy revocation must not revoke exact group RBAC")
+	require.Equal(t, int32(2), comet.calls.Load())
+	_, err = msM.GetSyncOrigin(ctx, "chain-x", copyIndependent.OriginMemoryID)
+	require.NoError(t, err)
+
+	// Direct Subscribe is equally independent from exact group relay admission.
+	_, err = R.ReplacePeerRBACPolicy(ctx, "chain-m", []store.PeerRBACDomainPermission{
+		{Domain: "studio", Read: true, Copy: true},
+	})
+	require.NoError(t, err)
+	_, err = msM.ApplyLocalDirectionalSyncPolicy(ctx, "chain-r", "fresh-v3",
+		SyncPolicyVersionPeerRBAC, 2, "m-local-2", nil, nil)
+	require.NoError(t, err)
+	subscribeIndependent, subscribeRevokedID := seedRelayCopy("subscribe-revoked", "subscribe revoked before group admission")
+	comet.after = func() {
+		hash, _ := hex.DecodeString(subscribeIndependent.ContentHash)
+		_ = seedCommittedMemory(ctx, msM, syncMemoryID("chain-x", subscribeIndependent.OriginMemoryID),
+			subscribeIndependent.Domain, subscribeIndependent.Content, hash)
+	}
+	_, err = msR.EnqueueRelayedSyncOutbox(ctx, "chain-m", subscribeRevokedID, "chain-x")
+	require.NoError(t, err)
+	consented, err = R.effectiveConsent(ctx, msR, "chain-m")
+	require.NoError(t, err)
+	R.syncDrain(ctx, msR, agreementRM, consented)
+	require.Equal(t, 3, pushes)
+	require.Equal(t, int32(3), comet.calls.Load(), "group relay remains authorized after direct Subscribe revoke")
+	_, err = msM.GetSyncOrigin(ctx, "chain-x", subscribeIndependent.OriginMemoryID)
+	require.NoError(t, err)
+
+	// Removing M from the shared group closes the relay without changing the
+	// underlying transport trust or either direct policy snapshot.
+	require.NoError(t, msR.SetSyncGroupMemberState(ctx, "g1", "chain-m", store.GroupMemberRemoved, 1))
+	removed, removedID := seedRelayCopy("member-removed", "group member removed before relay")
+	_, err = msR.EnqueueRelayedSyncOutbox(ctx, "chain-m", removedID, "chain-x")
+	require.NoError(t, err)
+	consented, err = R.effectiveConsent(ctx, msR, "chain-m")
+	require.NoError(t, err)
+	R.syncDrain(ctx, msR, agreementRM, consented)
+	require.Equal(t, 3, pushes, "removed group member must receive no further relay bytes")
+	_, err = msM.GetSyncOrigin(ctx, "chain-x", removed.OriginMemoryID)
+	require.Error(t, err)
+}
+
 // TestMeshPullRelayUnsignedCopyNotServed proves a relayer refuses to serve a copy
 // whose stored origin_sig is absent (a pre-v11.8 / unsigned admission): it can
 // only relay authentically, never forge a signature — the row is terminal-failed
@@ -156,8 +352,21 @@ func TestMeshPullRelayUnsignedCopyNotServed(t *testing.T) {
 	ctx := context.Background()
 	R, msR, bsR := newDrainTestManager(t)
 	R.localChainID = "chain-r"
-	seedRelayGroup(t, msR, "studio", "chain-x", 0, "keyx")
+	xPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	mPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	xID, memberID, relayerID := hex.EncodeToString(xPub), hex.EncodeToString(mPub), hex.EncodeToString(R.agentPub)
+	seedRelayGroup(t, msR, "studio", "chain-x", 0, xID, relayerID, memberID)
 	seedDrainAgreement(t, bsR, "chain-m", 2, "studio")
+	agreement, err := R.ActiveAgreement("chain-m")
+	require.NoError(t, err)
+	require.NoError(t, msR.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-m", Role: "host", ControllerChainID: R.localChainID,
+		ControllerAgentID: relayerID, PeerAgentID: memberID, PolicyEpoch: "legacy-unsigned",
+		RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey),
+	}))
+	require.NoError(t, msR.ActivateSyncControl(ctx, "chain-m", "legacy-unsigned"))
 
 	content := "unsigned relay fact"
 	sum := sha256.Sum256([]byte(content))
@@ -166,9 +375,9 @@ func TestMeshPullRelayUnsignedCopyNotServed(t *testing.T) {
 	// Admitted copy WITHOUT an origin_sig (nil).
 	require.NoError(t, msR.RecordSyncOrigin(ctx, store.SyncOrigin{
 		OriginChainID: "chain-x", OriginMemoryID: "x-unsigned", LocalMemoryID: localID,
-		DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted,
+		OriginAgentPubkey: xID, DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted,
 	}))
-	_, err := msR.EnqueueRelayedSyncOutbox(ctx, "chain-m", localID, "chain-x")
+	_, err = msR.EnqueueRelayedSyncOutbox(ctx, "chain-m", localID, "chain-x")
 	require.NoError(t, err)
 
 	pushed := false
@@ -176,8 +385,6 @@ func TestMeshPullRelayUnsignedCopyNotServed(t *testing.T) {
 		pushed = true
 		return &SyncPushResponse{}, nil
 	}
-	agreement, err := R.ActiveAgreement("chain-m")
-	require.NoError(t, err)
 	consented, err := R.effectiveConsent(ctx, msR, "chain-m")
 	require.NoError(t, err)
 	R.syncDrain(ctx, msR, agreement, consented)
@@ -198,7 +405,11 @@ func TestMeshPullRelayForgedSigRejected(t *testing.T) {
 	comet := &scriptedComet{responses: []string{cometOK}}
 	M, msM := newSyncTestManager(t, comet)
 	M.localChainID = "chain-m"
-	seedRelayGroup(t, msM, "studio", "chain-x", 0, hex.EncodeToString(xPub))
+	rPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	seedRelayGroup(t, msM, "studio", "chain-x", 0, hex.EncodeToString(xPub),
+		hex.EncodeToString(rPub), hex.EncodeToString(M.agentPub))
+	require.NoError(t, msM.SetSyncDomains(context.Background(), "chain-r", []string{"studio"}))
 
 	content := "forged relay fact"
 	sum := sha256.Sum256([]byte(content))
@@ -218,11 +429,12 @@ func TestMeshPullRelayForgedSigRejected(t *testing.T) {
 
 	peerR := &peerIdentity{
 		ChainID: "chain-r",
-		AgentID: hex.EncodeToString(M.agentPub), // relayer's own key — irrelevant to origin verify
+		AgentID: hex.EncodeToString(rPub), // relayer's own key — irrelevant to origin verify
 		Agreement: &store.CrossFedRecord{
 			RemoteChainID: "chain-r", MaxClearance: 2, AllowedDomains: []string{"studio"}, Status: "active",
 		},
 	}
+	bindInboundGroupPeer(t, M, msM, peerR, "guest")
 	// R (chain-r) is already an active member via seedRelayGroup, so relay is
 	// authorized (ResolveGroupRelay succeeds); the forged sig is what fails.
 	body, err := json.Marshal(SyncPushRequest{Items: []SyncItem{item}})
@@ -273,7 +485,8 @@ func TestMeshRelayReauthorizedAtDrain(t *testing.T) {
 	require.NoError(t, seedSyncedMirror(ctx, msR, R, localID, originItem))
 	require.NoError(t, msR.RecordSyncOrigin(ctx, store.SyncOrigin{
 		OriginChainID: "chain-x", OriginMemoryID: "x-mem-9", OriginCreatedAt: originItem.OriginCreatedAt,
-		LocalMemoryID: localID, DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted, OriginSig: originItem.OriginSig,
+		OriginAgentPubkey: hex.EncodeToString(xPub),
+		LocalMemoryID:     localID, DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted, OriginSig: originItem.OriginSig,
 	}))
 	// A relayed backfill row toward chain-m already sits in the outbox (enqueued while
 	// chain-m was still a group member, before its removal).

@@ -9,6 +9,8 @@ import (
 	"io"
 
 	badger "github.com/dgraph-io/badger/v4"
+
+	"github.com/l33tdawg/sage/internal/consensuskeys"
 )
 
 const (
@@ -53,6 +55,13 @@ func WriteCanonicalState(ctx context.Context, db *badger.DB, output io.Writer) e
 			}
 			item := iterator.Item()
 			key := item.KeyCopy(nil)
+			// Current startup-migration progress lives in local sidecars. Reject
+			// the two exact legacy dirty-tree markers defensively: they are excluded
+			// from every AppHash rule and must neither leak from a provider nor
+			// become an unauthenticated, AppHash-invisible receiver input.
+			if consensuskeys.IsAppHashExcludedLocalKey(key) {
+				continue
+			}
 			if len(key) == 0 || len(key) > MaxCanonicalKeyBytes {
 				return fmt.Errorf("canonical state key size %d is outside 1..%d", len(key), MaxCanonicalKeyBytes)
 			}
@@ -173,6 +182,9 @@ func RestoreCanonicalState(ctx context.Context, input io.Reader, db *badger.DB) 
 		key := make([]byte, int(keyLength))
 		if _, err := io.ReadFull(input, key); err != nil {
 			return fmt.Errorf("read canonical state key: %w", err)
+		}
+		if consensuskeys.IsAppHashExcludedLocalKey(key) {
+			return errors.New("canonical state contains excluded local bookkeeping")
 		}
 		if previous != nil && bytes.Compare(previous, key) >= 0 {
 			return errors.New("canonical state keys are duplicated or out of order")

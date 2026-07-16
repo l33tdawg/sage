@@ -68,9 +68,9 @@ func TestPurgeGroupSyncPeerStateKeepsPairwise(t *testing.T) {
 		t.Fatalf("PrepareSyncControl: %v", err)
 	}
 
-	seedPurgeMemory(t, s, "m-hr", "hr")          // pairwise-covered (exact)
+	seedPurgeMemory(t, s, "m-hr", "hr")            // pairwise-covered (exact)
 	seedPurgeMemory(t, s, "m-hr-pub", "hr.public") // pairwise-covered (subtree)
-	seedPurgeMemory(t, s, "m-studio", "studio")  // group-only, NOT pairwise-covered
+	seedPurgeMemory(t, s, "m-studio", "studio")    // group-only, NOT pairwise-covered
 	for _, id := range []string{"m-hr", "m-hr-pub", "m-studio"} {
 		mustEnqueue(t, s, "chain-b", id)
 	}
@@ -115,13 +115,13 @@ func TestDomainRemovalDropsFromServePaths(t *testing.T) {
 	ctx := context.Background()
 	s := newSyncTestStore(t)
 
-	mustGroupMember(t, s, "g1", "chain-local", GroupRoleFullSync, GroupMemberActive, "")
-	mustGroupMember(t, s, "g1", "chain-b", GroupRoleFullSync, GroupMemberActive, "")
+	mustGroupMember(t, s, "g1", "chain-local", GroupRoleFullSync, GroupMemberActive, "local-key")
+	mustGroupMember(t, s, "g1", "chain-b", GroupRoleFullSync, GroupMemberActive, "b-key")
 	mustGroupDomain(t, s, "g1", "studio", "chain-local", 0)
 	// An admitted origin id served from the backfill candidate scan.
 	if err := s.RecordSyncOrigin(ctx, SyncOrigin{
-		OriginChainID: "chain-local", OriginMemoryID: "s-1", DomainTag: "studio",
-		Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l-1"}); err != nil {
+		OriginChainID: "chain-local", OriginAgentPubkey: "local-key", OriginMemoryID: "s-1", DomainTag: "studio",
+		Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l-1", OriginSig: make([]byte, 64)}); err != nil {
 		t.Fatalf("RecordSyncOrigin: %v", err)
 	}
 
@@ -189,7 +189,7 @@ func mustGroupDomain(t *testing.T, s *SQLiteStore, groupID, domain, owner string
 }
 
 // TestPurgeGroupSyncPeerStateAlwaysPurgesRelayed proves R1: a RELAYED row
-// (origin_chain_id != '') is ALWAYS purged on a group removal, even when a pairwise
+// (origin_chain_id != ”) is ALWAYS purged on a group removal, even when a pairwise
 // consent coincidentally covers its domain — a pairwise relationship never entitles the
 // peer to a THIRD member's relayed group copy. Only NATIVE rows may be spared by pairwise.
 func TestPurgeGroupSyncPeerStateAlwaysPurgesRelayed(t *testing.T) {
@@ -200,7 +200,7 @@ func TestPurgeGroupSyncPeerStateAlwaysPurgesRelayed(t *testing.T) {
 		t.Fatalf("SetSyncDomains: %v", err)
 	}
 	seedPurgeMemory(t, s, "m-native", "studio")    // native, pairwise-covered -> survives
-	seedPurgeMemory(t, s, "m-relaycopy", "studio")  // a local copy of a third member's memory
+	seedPurgeMemory(t, s, "m-relaycopy", "studio") // a local copy of a third member's memory
 	mustEnqueue(t, s, "chain-b", "m-native")
 	if _, err := s.EnqueueRelayedSyncOutbox(ctx, "chain-b", "m-relaycopy", "chain-x"); err != nil {
 		t.Fatalf("EnqueueRelayedSyncOutbox: %v", err)

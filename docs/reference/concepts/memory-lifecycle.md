@@ -69,9 +69,14 @@ CometBFT calls `CheckTx`. The ABCI app decodes the tx, verifies the Ed25519 node
 
 `Commit` (`app.go:2596-2665`) runs after `FinalizeBlock` for each block. It:
 
-1. Flushes all `pendingWrites` to PostgreSQL **inside a single database transaction** (via `RunInTx`), with exponential-backoff retry for `SQLITE_BUSY`.
-2. If the flush fails after max retries, **panics** — consensus has committed the writes on-chain; losing the offchain projection would create undetectable divergence.
-3. Saves ABCI state (`height`, `appHash`) to BadgerDB only after PostgreSQL success. This ordering ensures CometBFT replays the block on restart if PostgreSQL write failed.
+1. Inside the same SQL transaction as every `pendingWrite`, claims the permanent `abci_projection_batches(height, app_hash)` receipt. An exact replay skips the whole already-durable batch; a different AppHash at the same height fails closed.
+2. Flushes all `pendingWrites` to PostgreSQL **inside that single database transaction** (via `RunInTx`), with exponential-backoff retry for `SQLITE_BUSY`. Invalid or unknown buffered sink payloads fail the transaction instead of silently committing a receipt.
+3. If the flush fails after max retries, **panics** — consensus has committed these writes logically; losing the offchain projection would create undetectable divergence.
+4. Saves ABCI state (`height`, `appHash`) to BadgerDB only after SQL success. A SIGKILL after SQL commit but before Badger commit therefore causes CometBFT to replay the block, and the durable receipt prevents duplicate triples, challenges, corroborations, access logs, or governance rows.
+
+Receipts are intentionally never pruned. The storage cost is one indexed height/hash row per projected block, preserving exact-replay safety when a validator returns after an arbitrarily long Internet partition to a shared PostgreSQL projection. This ledger is not a general cross-store rollback mechanism: operator disaster-recovery snapshots must restore BadgerDB, the SQL projection, and CometBFT state as a pair. A one-sided restore or a different chain reusing a height is unsupported and fails closed rather than rewriting projection history.
+
+One narrow PostgreSQL-only merge remains reachable after an exact receipt. `SupplementaryCache` is process-local, so the validator that wins the shared projection receipt may not be the REST receiver holding raw co-commit content, embeddings, provider metadata, an initial task assignee, or knowledge triples. A later validator may fill only previously empty supplementary memory fields and exact-unique triples. Existing non-empty enrichment wins; embedding, embedding hash, and embedding-provider identity are accepted as one hash-bound group so fields from conflicting validators cannot be composed. Status/timestamps, access logs, challenges, corroborations, governance, RBAC, and every other history sink are outside this allowlist and cannot run on receipt replay. These enrichment values remain intentionally off-consensus and never affect AppHash.
 
 ### 5. Voting → Committed or Deprecated
 

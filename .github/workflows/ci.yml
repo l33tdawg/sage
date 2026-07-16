@@ -52,6 +52,11 @@ jobs:
     name: v11.9 Multi-Process Fault Gates
     needs: test
     uses: ./.github/workflows/v11.9-fault-gates.yml
+    with:
+      # PR/main green must carry the same evidence required before a release
+      # tag can publish artifacts.
+      require_scoped_reconfiguration: true
+      require_authorized_state_sync: true
 
   frontend-static:
     name: Frontend Static Checks

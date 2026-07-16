@@ -646,6 +646,13 @@ type OffchainStore interface {
 	PipelineStore
 	GovernanceStore
 	Ping(ctx context.Context) error
+	// ClaimProjectionBatch records the consensus block whose off-chain mirror is
+	// about to be applied. It MUST be called on the transaction-scoped store
+	// supplied by RunInTx, in the same transaction as every projection write.
+	// The bool is true only for the first application of (height, appHash); an
+	// exact block replay returns false so callers skip the already-committed
+	// writes. Reusing a height with a different AppHash fails closed.
+	ClaimProjectionBatch(ctx context.Context, height int64, appHash []byte) (bool, error)
 	// RunInTx executes fn within a database transaction. If fn returns an error,
 	// the transaction is rolled back; otherwise it is committed. The OffchainStore
 	// passed to fn is scoped to the transaction — all writes through it are atomic.

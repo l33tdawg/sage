@@ -38,6 +38,7 @@ FROM alpine:3.20
 
 ARG COMETBFT_VERSION=0.38.23
 ARG COMETBFT_SOURCE_COMMIT=feb2aea4dc271d612129afc958cb844713ec792b
+ARG V119_STATE_SYNC_SOURCE_ID
 
 RUN apk add --no-cache ca-certificates iptables
 
@@ -46,6 +47,7 @@ COPY --from=builder /usr/local/bin/cometbft /usr/local/bin/cometbft
 EXPOSE 26656 26657 26660
 
 LABEL org.opencontainers.image.version="${COMETBFT_VERSION}" \
-      org.opencontainers.image.revision="${COMETBFT_SOURCE_COMMIT}"
+      org.opencontainers.image.revision="${COMETBFT_SOURCE_COMMIT}" \
+      dev.sage.v119-state-sync.source-id="${V119_STATE_SYNC_SOURCE_ID}"
 
 CMD ["cometbft", "node", "--home", "/cometbft"]

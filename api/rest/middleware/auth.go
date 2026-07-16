@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -90,6 +91,8 @@ var skipAuthPaths = map[string]bool{
 // maxTimestampSkew is the maximum allowed clock drift for request timestamps.
 const maxTimestampSkew = 5 * time.Minute
 
+const defaultAuthenticatedBodyLimit = 1 << 20
+
 // Ed25519AuthMiddleware validates Ed25519 signature authentication via headers:
 //   - X-Agent-ID:  hex-encoded Ed25519 public key
 //   - X-Signature: hex-encoded Ed25519 signature
@@ -150,12 +153,20 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Read and buffer the request body for signature verification (capped at 1 MB).
+		// Read and buffer the request body for signature verification. Every
+		// authenticated route is capped at 1 MiB. The reserved federation Write
+		// route returns 501 before parsing and receives no preview-era headroom.
 		var body []byte
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+			r.Body = http.MaxBytesReader(w, r.Body, defaultAuthenticatedBodyLimit)
 			body, err = io.ReadAll(r.Body)
 			if err != nil {
+				var maxBytesErr *http.MaxBytesError
+				if errors.As(err, &maxBytesErr) {
+					writeProblem(w, http.StatusRequestEntityTooLarge, "Request body too large",
+						"Authenticated request bodies are limited to 1 MiB.")
+					return
+				}
 				log.Error().Err(err).Msg("failed to read request body for auth")
 				writeProblem(w, http.StatusInternalServerError, "Internal error",
 					"Failed to read request body.")

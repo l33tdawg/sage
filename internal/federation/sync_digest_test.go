@@ -3,6 +3,8 @@ package federation
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,7 @@ import (
 
 func digestAs(t *testing.T, m *Manager, peer *peerIdentity, req SyncDigestRequest) (*httptest.ResponseRecorder, *SyncDigestResponse) {
 	t.Helper()
+	bindTestPeerAgreement(t, m, peer)
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
 	httpReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/digest", bytes.NewReader(body))
@@ -79,10 +82,16 @@ func TestGroupDigestServeLeaseLinearizesMemberRemoval(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	seedGroup(t, ms, "g1", "chain-ctl")
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	memberIDs := map[string]string{
+		"chain-local": hex.EncodeToString(m.agentPub),
+		"chain-peer":  hex.EncodeToString(peerPub),
+	}
 	for _, chain := range []string{"chain-local", "chain-peer"} {
 		require.NoError(t, ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
 			GroupID: "g1", MemberChainID: chain, Role: store.GroupRoleFullSync,
-			MemberState: store.GroupMemberActive,
+			MemberState: store.GroupMemberActive, MemberAgentPubkey: memberIDs[chain],
 		}))
 	}
 	require.NoError(t, ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
@@ -91,8 +100,12 @@ func TestGroupDigestServeLeaseLinearizesMemberRemoval(t *testing.T) {
 
 	body, err := json.Marshal(SyncDigestRequest{GroupID: "g1", Domain: "hr"})
 	require.NoError(t, err)
+	peer := &peerIdentity{ChainID: "chain-peer", AgentID: memberIDs["chain-peer"], Agreement: &store.CrossFedRecord{
+		RemoteChainID: "chain-peer", AllowedDomains: []string{"hr"}, Status: "active",
+	}}
+	bindInboundGroupPeer(t, m, ms, peer, "guest")
 	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/digest", bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: "chain-peer"}))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, peer))
 	bw := newBlockingResponseWriter()
 	served := make(chan struct{})
 	go func() { m.handleSyncDigest(bw, req); close(served) }()
@@ -119,9 +132,84 @@ func TestGroupDigestServeLeaseLinearizesMemberRemoval(t *testing.T) {
 	<-removalDone
 	assert.Equal(t, http.StatusOK, bw.status)
 
-	rr, resp := digestAs(t, m, &peerIdentity{ChainID: "chain-peer"}, SyncDigestRequest{GroupID: "g1", Domain: "hr"})
+	rr, resp := digestAs(t, m, peer, SyncDigestRequest{GroupID: "g1", Domain: "hr"})
 	assert.Equal(t, http.StatusForbidden, rr.Code)
 	assert.Nil(t, resp, "no post-removal group digest may be served")
+}
+
+func TestPairwiseDigestServeLeaseLinearizesConsentRemoval(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	peer := testPeer(2, "hr")
+	bindTestPeerAgreement(t, m, peer)
+	require.NoError(t, ms.SetSyncDomains(ctx, peer.ChainID, []string{"hr"}))
+
+	body, err := json.Marshal(SyncDigestRequest{Domain: "hr"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/digest", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, peer))
+	bw := newBlockingResponseWriter()
+	served := make(chan struct{})
+	go func() { m.handleSyncDigest(bw, req); close(served) }()
+	<-bw.entered
+
+	removalDone := make(chan error, 1)
+	go func() { removalDone <- ms.DeleteSyncDomains(ctx, peer.ChainID) }()
+	select {
+	case err := <-removalDone:
+		t.Fatalf("consent removal returned while a stale pairwise digest response was in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(bw.release)
+	<-served
+	require.NoError(t, <-removalDone)
+	assert.Equal(t, http.StatusOK, bw.status)
+
+	rr, resp := digestAs(t, m, peer, SyncDigestRequest{Domain: "hr"})
+	assert.Equal(t, http.StatusOK, rr.Code)
+	require.NotNil(t, resp)
+	assert.False(t, resp.Consented, "removed pairwise consent remained visible after the removal returned")
+}
+
+func TestLegacyDigestReleasedAfterCompletedRevokeDoesNotExposeOriginIDs(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	peer := testPeer(2, "hr")
+	bindTestPeerAgreement(t, m, peer)
+	require.NoError(t, ms.SetSyncDomains(ctx, peer.ChainID, []string{"hr"}))
+	require.NoError(t, ms.RecordSyncOrigin(ctx, store.SyncOrigin{
+		OriginChainID: peer.ChainID, OriginMemoryID: "secret-origin-id", DomainTag: "hr",
+		Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "local-copy",
+	}))
+	body, err := json.Marshal(SyncDigestRequest{Domain: "hr"})
+	require.NoError(t, err)
+	blocked := &blockingPeerValueContext{
+		Context: context.Background(), peer: peer,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/digest", bytes.NewReader(body)).WithContext(blocked)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		m.handleSyncDigest(rec, req)
+		close(done)
+	}()
+	select {
+	case <-blocked.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("digest handler did not pause at its authenticated peer context")
+	}
+	require.NoError(t, m.badger.UpdateCrossFedStatus(peer.ChainID, "revoked"))
+	require.NoError(t, ms.PurgeSyncPeerState(ctx, peer.ChainID))
+	close(blocked.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("released stale digest did not finish")
+	}
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "secret-origin-id")
 }
 
 func TestSyncReconcileBackfillsAndSettles(t *testing.T) {

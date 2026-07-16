@@ -257,6 +257,10 @@ func TestAppV20ScopedReplicaAppHashDeterminism(t *testing.T) {
 		rightResp, err := right.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{Height: height, Time: blockTime, Txs: [][]byte{raw}})
 		require.NoError(t, err)
 		assert.Equal(t, leftResp.AppHash, rightResp.AppHash, "replicas diverged at height %d", height)
+		_, err = left.Commit(context.Background(), &abcitypes.RequestCommit{})
+		require.NoError(t, err)
+		_, err = right.Commit(context.Background(), &abcitypes.RequestCommit{})
+		require.NoError(t, err)
 		return leftResp, rightResp
 	}
 	leftResp, rightResp := finalizeBoth(2, rawSubmit)

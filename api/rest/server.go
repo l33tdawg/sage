@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/memory"
@@ -44,10 +45,15 @@ type Server struct {
 	logger      zerolog.Logger
 	httpServer  *http.Server
 	signingKey  ed25519.PrivateKey // Node-level key for signing on-chain txs
-	embedder    embedding.Provider // Embedding provider (Ollama or hash)
-	OnEvent     EventCallback      // Optional: called when notable events occur
-	suppCache   SuppCacheWriter    // Bridges off-chain data (embeddings) to ABCI for consensus-first writes
-	mempool     *mempoolSampler    // TTL-cached CometBFT mempool depth for backpressure signals
+	// validatorSigningKeyConfigured is true only when signingKey came from the
+	// live CometBFT priv-validator key (environment or explicit runtime wiring).
+	// The legacy random fallback keeps non-governance embedded/test callers
+	// source-compatible, but governance always fails closed unless this is true.
+	validatorSigningKeyConfigured bool
+	embedder                      embedding.Provider // Embedding provider (Ollama or hash)
+	OnEvent                       EventCallback      // Optional: called when notable events occur
+	suppCache                     SuppCacheWriter    // Bridges off-chain data (embeddings) to ABCI for consensus-first writes
+	mempool                       *mempoolSampler    // TTL-cached CometBFT mempool depth for backpressure signals
 
 	// nodeOperatorID is the hex-encoded ed25519 public key of the local
 	// node operator (~/.sage/agent.key). When a request's X-Agent-ID
@@ -57,6 +63,15 @@ type Server struct {
 	// access gates (per-domain, classification) still run.
 	// Empty string disables the bypass entirely (preserves pre-v7.1 behaviour).
 	nodeOperatorID string
+
+	// governanceOperatorID is deliberately separate from nodeOperatorID: read
+	// visibility bypass and authority to make this validator mutate governance
+	// are distinct capabilities. Empty disables every REST governance mutation.
+	governanceOperatorID string
+	// governanceDomainFn returns the consensus-derived app-v20 chain domain.
+	// It is read for every governance mutation so a restored/state-synced node
+	// never serves an authorization against stale process-local context.
+	governanceDomainFn func() string
 
 	// PreValidateFunc runs the per-node validation checks without on-chain submission.
 	// Set during node startup. Returns per-check results.
@@ -130,11 +145,12 @@ type PreValidateResult struct {
 }
 
 // NewServer creates a new REST API server.
-// It loads the node's signing key from VALIDATOR_KEY_FILE env var (CometBFT priv_validator_key.json format)
-// so that vote transactions are signed by the same identity as the CometBFT validator.
-// Falls back to a random key if the env var is not set.
+// It loads the node's signing key from VALIDATOR_KEY_FILE env var (CometBFT
+// priv_validator_key.json format). A random compatibility key is retained for
+// older embedded callers when the file is absent or invalid, but governance
+// mutations remain disabled until a real validator key is explicitly wired.
 func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.ValidatorScoreStore, badgerStore *store.BadgerStore, health *metrics.HealthChecker, logger zerolog.Logger, embedProvider embedding.Provider) *Server {
-	signingKey := loadValidatorSigningKey(logger)
+	signingKey, signingKeyConfigured := loadValidatorSigningKey(logger)
 
 	// Type-assert memStore to AccessStore if possible (PostgresStore implements both)
 	var accessStore store.AccessStore
@@ -155,18 +171,19 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 	}
 
 	s := &Server{
-		cometbftRPC: cometbftRPC,
-		store:       memStore,
-		scoreStore:  scoreStore,
-		badgerStore: badgerStore,
-		accessStore: accessStore,
-		orgStore:    orgStore,
-		agentStore:  agentStore,
-		health:      health,
-		logger:      logger,
-		signingKey:  signingKey,
-		embedder:    embedProvider,
-		mempool:     newMempoolSampler(cometbftRPC, DefaultMempoolMaxTxs),
+		cometbftRPC:                   cometbftRPC,
+		store:                         memStore,
+		scoreStore:                    scoreStore,
+		badgerStore:                   badgerStore,
+		accessStore:                   accessStore,
+		orgStore:                      orgStore,
+		agentStore:                    agentStore,
+		health:                        health,
+		logger:                        logger,
+		signingKey:                    signingKey,
+		validatorSigningKeyConfigured: signingKeyConfigured,
+		embedder:                      embedProvider,
+		mempool:                       newMempoolSampler(cometbftRPC, DefaultMempoolMaxTxs),
 	}
 	s.router = s.setupRouter()
 	return s
@@ -215,8 +232,9 @@ func (s *Server) isPostV17ForNextTx() bool {
 	return s.postV17ForNextTxFn != nil && s.postV17ForNextTxFn()
 }
 
-// SetPostV20ForNextTxAccessor wires the dynamic app-v20 scope-construction
-// gate. Callers should pass app.IsAppV20ActiveForNextTx.
+// SetPostV20ForNextTxAccessor wires the dynamic app-v20 scope-construction and
+// validator/chain-bound governance gate. Callers should pass
+// app.IsAppV20ActiveForNextTx.
 func (s *Server) SetPostV20ForNextTxAccessor(fn func() bool) {
 	s.postV20ForNextTxFn = fn
 }
@@ -228,19 +246,19 @@ func (s *Server) isPostV20ForNextTx() bool {
 // loadValidatorSigningKey loads the CometBFT validator private key so that
 // vote transactions are signed by the same identity in the validator set.
 // This is critical for quorum: checkAndApplyQuorum matches votes by validator ID.
-func loadValidatorSigningKey(logger zerolog.Logger) ed25519.PrivateKey {
+func loadValidatorSigningKey(logger zerolog.Logger) (ed25519.PrivateKey, bool) {
 	keyFile := os.Getenv("VALIDATOR_KEY_FILE")
 	if keyFile == "" {
-		logger.Warn().Msg("VALIDATOR_KEY_FILE not set — generating random signing key (quorum will not work)")
+		logger.Warn().Msg("VALIDATOR_KEY_FILE not set — generating compatibility signing key (governance disabled)")
 		_, sk, _ := ed25519.GenerateKey(nil)
-		return sk
+		return sk, false
 	}
 
 	data, err := os.ReadFile(keyFile) //nolint:gosec // keyFile is from trusted config
 	if err != nil {
-		logger.Error().Err(err).Str("file", keyFile).Msg("failed to read validator key file — using random key")
+		logger.Error().Err(err).Str("file", keyFile).Msg("failed to read validator key file — using compatibility key (governance disabled)")
 		_, sk, _ := ed25519.GenerateKey(nil)
-		return sk
+		return sk, false
 	}
 
 	// CometBFT priv_validator_key.json format:
@@ -252,23 +270,43 @@ func loadValidatorSigningKey(logger zerolog.Logger) ed25519.PrivateKey {
 		} `json:"priv_key"`
 	}
 	if err = json.Unmarshal(data, &keyDoc); err != nil {
-		logger.Error().Err(err).Msg("failed to parse validator key JSON — using random key")
+		logger.Error().Err(err).Msg("failed to parse validator key JSON — using compatibility key (governance disabled)")
 		_, sk, _ := ed25519.GenerateKey(nil)
-		return sk
+		return sk, false
 	}
 
 	keyBytes, err := base64.StdEncoding.DecodeString(keyDoc.PrivKey.Value)
 	if err != nil || len(keyBytes) != ed25519.PrivateKeySize {
-		logger.Error().Err(err).Int("key_len", len(keyBytes)).Msg("invalid validator key — using random key")
+		logger.Error().Err(err).Int("key_len", len(keyBytes)).Msg("invalid validator key — using compatibility key (governance disabled)")
 		_, sk, _ := ed25519.GenerateKey(nil)
-		return sk
+		return sk, false
 	}
 
 	sk := ed25519.PrivateKey(keyBytes)
 	pub, _ := sk.Public().(ed25519.PublicKey)
 	pubHex := fmt.Sprintf("%x", pub)
 	logger.Info().Str("validator_id", pubHex[:16]+"...").Msg("loaded CometBFT validator signing key")
-	return sk
+	return sk, true
+}
+
+// SetValidatorSigningKey injects the concrete private-validator key owned by
+// the embedding runtime. Governance never trusts the random compatibility key
+// created by NewServer, so sage-gui/amid must call this before serving.
+func (s *Server) SetValidatorSigningKey(key ed25519.PrivateKey) error {
+	if len(key) != ed25519.PrivateKeySize {
+		return fmt.Errorf("validator signing key has length %d, want %d", len(key), ed25519.PrivateKeySize)
+	}
+	s.signingKey = append(ed25519.PrivateKey(nil), key...)
+	s.validatorSigningKeyConfigured = true
+	return nil
+}
+
+// DisableValidatorSigningKey explicitly closes the governance gateway. The
+// embedding runtimes call this before attempting authoritative key injection,
+// preventing NewServer's legacy VALIDATOR_KEY_FILE fallback from remaining
+// enabled when an explicit --home/--validator-key-file load fails.
+func (s *Server) DisableValidatorSigningKey() {
+	s.validatorSigningKeyConfigured = false
 }
 
 // SetFederation wires the v11 federation transport. Must be called before the
@@ -294,6 +332,35 @@ func (s *Server) NodeOperatorID() string {
 	return s.nodeOperatorID
 }
 
+// SetGovernanceOperatorID configures the sole HTTP signer allowed to ask this
+// validator to propose, vote, or cancel. The canonical lowercase encoding
+// avoids rejecting valid uppercase hex identities after middleware verification.
+func (s *Server) SetGovernanceOperatorID(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		s.governanceOperatorID = ""
+		return nil
+	}
+	pub, err := auth.AgentIDToPublicKey(id)
+	if err != nil {
+		return fmt.Errorf("governance operator id: %w", err)
+	}
+	s.governanceOperatorID = auth.PublicKeyToAgentID(pub)
+	return nil
+}
+
+// GovernanceOperatorID returns the canonical configured governance operator.
+func (s *Server) GovernanceOperatorID() string {
+	return s.governanceOperatorID
+}
+
+// SetGovernanceDomainAccessor wires the committed app-v20 chain domain used to
+// bind delegated operator proofs to this chain. nil/empty fails closed once
+// app-v20 is active.
+func (s *Server) SetGovernanceDomainAccessor(fn func() string) {
+	s.governanceDomainFn = fn
+}
+
 // setupRouter configures the chi router with middleware and routes.
 func (s *Server) setupRouter() chi.Router {
 	r := chi.NewRouter()
@@ -308,7 +375,7 @@ func (s *Server) setupRouter() chi.Router {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   corsOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Content-Type", "X-Agent-ID", "X-Signature", "X-Timestamp"},
+		AllowedHeaders:   []string{"Accept", "Content-Type", "X-Agent-ID", "X-Signature", "X-Timestamp", "X-Nonce"},
 		ExposedHeaders:   []string{"X-Request-ID", "X-Sage-Mempool-Pct", "Retry-After"},
 		AllowCredentials: false,
 		MaxAge:           300,
@@ -349,6 +416,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/federation/cross", s.handleCrossFedList)
 		r.Post("/v1/federation/cross/{chain_id}/revoke", s.handleCrossFedRevoke)
 		r.Get("/v1/federation/cross/{chain_id}/status", s.handleCrossFedPeerStatus)
+		r.Post("/v1/federation/cross/{chain_id}/write", s.handleCrossFedWrite)
 		// v11.6 host-controlled domain sync (off-consensus; operator-only)
 		r.Put("/v1/federation/cross/{chain_id}/sync", s.handleSyncDomainsSet)
 		r.Get("/v1/federation/cross/{chain_id}/sync", s.handleSyncDomainsGet)
@@ -431,6 +499,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/pipe/results", s.handlePipeResults)
 
 		// Governance endpoints
+		r.Get("/v1/governance/context", s.handleGovernanceContext)
 		r.Post("/v1/governance/propose", s.handleGovPropose)
 		r.Post("/v1/governance/vote", s.handleGovVote)
 		r.Post("/v1/governance/cancel", s.handleGovCancel)

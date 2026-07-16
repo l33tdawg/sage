@@ -67,6 +67,17 @@ func TestRequirePristineStateSyncProjectionAcceptsOnlyCanonicalSchemaSeeds(t *te
 		require.NoError(t, s.InsertMemory(ctx, testMemory("stale", "agent", "stale", "crypto")))
 		require.ErrorContains(t, s.RequirePristineStateSyncProjection(ctx), `table "memories" is populated`)
 	})
+	t.Run("projection receipt", func(t *testing.T) {
+		s := newTestStore(t)
+		appHash := sha256.Sum256([]byte("stale-projection"))
+		require.NoError(t, s.RunInTx(ctx, func(tx OffchainStore) error {
+			claimed, err := tx.ClaimProjectionBatch(ctx, 1, appHash[:])
+			require.NoError(t, err)
+			require.True(t, claimed)
+			return nil
+		}))
+		require.ErrorContains(t, s.RequirePristineStateSyncProjection(ctx), `table "abci_projection_batches" is populated`)
+	})
 	t.Run("modified default domain", func(t *testing.T) {
 		s := newTestStore(t)
 		_, err := s.conn.ExecContext(ctx, `UPDATE domains SET decay_rate = 0.5 WHERE domain_tag = 'crypto'`)

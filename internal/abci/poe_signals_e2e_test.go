@@ -63,7 +63,7 @@ func TestV83_EndToEnd_PoESignalsAcrossActivation(t *testing.T) {
 			TargetAppVersion:   4,
 			BinarySHA256:       "deadbeef",
 			ProposerID:         proposer.id,
-			UpgradeDelayBlocks: 0, // chain floor raises to defaultUpgradeDelayBlocks (200)
+			UpgradeDelayBlocks: defaultUpgradeDelayBlocks,
 		},
 	}
 	require.NoError(t, tx.SignTx(proposeTx, proposer.priv))

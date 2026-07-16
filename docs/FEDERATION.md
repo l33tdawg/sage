@@ -1,6 +1,6 @@
 # Connect your SAGE to another network
 
-This guide shows you how to link your whole SAGE to someone else's whole SAGE, so the two brains can share memories on the same LAN or across the internet. In the app this lives under the **Federation** section (the federation icon in the sidebar). v11.6 carries the same pinned mTLS protocol over libp2p, with direct-path discovery, NAT traversal, and Circuit Relay v2 fallback. The relay only carries encrypted bytes; it never receives the federation keys or plaintext memories.
+This guide shows you how to link your whole SAGE to someone else's whole SAGE, then independently choose which existing domains may cross that trusted link. The two brains can connect on the same LAN or across the internet. In the app this lives under the **Federation** section (the federation icon in the sidebar). The transport introduced in v11.6 carries the same pinned mTLS protocol over libp2p, with direct-path discovery, NAT traversal, and Circuit Relay v2 fallback. The relay only carries encrypted bytes; it never receives the federation keys or plaintext memories.
 
 It is written for the person clicking the buttons. You do not need to understand consensus or certificates to follow it. There is a short honest section at the end that explains what actually keeps the link safe, and what it does not promise.
 
@@ -8,15 +8,16 @@ It is written for the person clicking the buttons. You do not need to understand
 
 ## What a federation connection is
 
-A federation connection is a treaty between **two whole SAGE networks**. Once it is on, your SAGE can ask the other SAGE questions and get answers back, within limits you both agree to.
+A federation connection is a trusted link between **two whole SAGE networks**. JOIN proves which SAGE is on the other end; it does not grant access to any domain. After the link is active, each person separately chooses what their own SAGE may share.
 
-Three things make it what it is:
+Four things make it what it is:
 
 - **Whole-SAGE to whole-SAGE.** You are linking one entire brain to another entire brain. This is not the same as adding an agent to your own SAGE (that is the **Agents** section), and it is not the same as joining more computers on your own LAN into one shared brain (that is the node-join flow under **Connect an AI tool**, which makes another computer a peer node on your own network).
-- **Read-only recall exchange.** When your SAGE queries the other side, the answers come back tagged with where they came from and are shown to you in the moment. **They are never written into your own brain.** Nothing foreign is stored on your chain. Turn the link off and those borrowed answers simply stop arriving. (See `internal/federation/proxy.go` - foreign results are "merge-in-response only", never persisted.)
-- **It deletes nothing.** Connecting adds a small treaty record. It does not touch, move, or erase a single memory on either side. The only thing that undoes a connection is turning it off (a revoke), and even that erases no memories - it just stops the two networks from reaching each other.
+- **Read borrows; Copy is a separate two-sided choice.** Read results come back tagged with their source and are shown in the moment; they are not stored merely because Read is enabled. Copy is offered by the source per domain, but nothing is retained unless the receiving SAGE independently selects **Save here**. An accepted copy enters the receiver's ordinary local consensus pipeline and then follows that brain's own lifecycle.
+- **Connection-bound Write is not available in v11.9.** The versioned field and route are reserved for compatibility, but the route returns authenticated `501`. An ordinary domain grant is not enough because it is not bound to one trusted connection and one exact submission.
+- **It deletes nothing.** Connecting adds a small treaty record and an empty permission policy. It does not touch, move, or erase a single memory on either side. Turning the connection off stops future access and synchronization; copies already accepted by either sovereign brain remain governed there.
 
-Every connection is one-directional in the sense that each side keeps its own treaty record. You grant what **they** can read from **you**; they grant what **you** can read from **them**. Neither side can quietly widen the other's access.
+You grant what **they** may Read or Copy from **you**; they grant what **you** may Read or Copy from **them**. The two permission snapshots are independent, start empty, and can change at any time without running JOIN again. Neither side can quietly widen the other's access, and a Copy offer still cannot force the receiver to retain anything.
 
 ---
 
@@ -25,7 +26,7 @@ Every connection is one-directional in the sense that each side keeps its own tr
 - Both people need federation switched on. For **Same LAN**, the wizard uses the federation listener (usually port **8444**) for the ceremony, then securely exchanges roaming routes after signing when both nodes support v11.6. For **Internet**, the host's enrollment code carries its signed-session libp2p routes and the ceremony uses those routes from the start.
 - Internet connectivity depends on at least one configured relay being reachable. SAGE ships with the project relay route and operators may add or replace relay multiaddrs. A relay outage can delay a relay-only connection, but does not weaken authentication or expose memory content.
 - You will each need a camera, or a shared screen, or at least a phone call you placed to a number you trust. The connection is safest when you are in the same room or on a video call you started.
-- Decide roughly what you are willing to share (which topics, and how sensitive) before you begin. You can leave it blank and share nothing, and you can change it later.
+- You do not choose domains during JOIN. After both codes match, open the connection and choose from domains that already exist on your own SAGE. Leaving every box clear is a healthy connected state that shares nothing.
 
 Open **Federation** in the sidebar. You will see two big choices:
 
@@ -81,16 +82,11 @@ The app fetches the host's certificate and checks that its fingerprint matches t
 
 ### 3. Show them your code
 
-Now the app shows **your** code (a QR). Hold it up to their camera, or send it for them to paste. Their SAGE scans this to check that the network calling itself "you" really is you. When they have it, press **They've got my code - next**.
+Now the app shows **your** code (a QR). Hold it up to their camera, or send it for them to paste. Their SAGE scans this to check that the network calling itself "you" really is you. When they have it, press **They've got my code - verify trust**.
 
-### 4. Choose what you will share
+### 4. Start the trust check
 
-Set what the host will be allowed to read from you:
-
-- **Domains they can read** - a comma-separated list like `family, recipes`. Leave it blank to share nothing. Type `*` to share everything (use with care).
-- **Highest level they can read** - a slider from 0 (lowest) to 4 (most sensitive). Anything above this ceiling is never served, even inside an allowed domain.
-
-Press **Continue**.
+Once they have your return code, press **They've got my code - verify trust**. This sends a fixed trust-only request with no shared domains. Domain permissions are deliberately unavailable until both people complete the spoken-code check.
 
 ### 5. Read your code out loud
 
@@ -105,7 +101,7 @@ When the host approves, the app shows the compare screen. **They will now read y
 
 ### 7. Connected
 
-That is it. You will see "You're connected", a two-of-two meter filled in, and a reminder that nothing was deleted. Your new connection appears in the list on the Federation page.
+That is it. You will see "You're connected", a two-of-two meter filled in, and a reminder that trust and permissions are separate. Your new connection appears in the list on the Federation page. Open it to choose which existing domains the other SAGE may Read or Copy; they make their own choices on their computer.
 
 ---
 
@@ -113,9 +109,9 @@ That is it. You will see "You're connected", a two-of-two meter filled in, and a
 
 Pick **Let someone join mine**.
 
-### 1. Your network address
+### 1. Choose how the computers connect
 
-Enter the address the other person will use to reach you (default `https://your-host:8444`). Press **Show my connection code**.
+Pick **Same LAN** when both computers are on the same local network, or **Internet** when they need the signed libp2p route carried in the enrollment code. Enter the address the other person will use to reach you (default `https://your-host:8444`), then press **Show my connection code**.
 
 ### 2. Show your code, then scan theirs back
 
@@ -127,14 +123,9 @@ Then the guest shows **their** code back to you. Scan it, or paste it. This is t
 
 The app waits while the guest's SAGE reaches out to yours. When it arrives, you move on automatically.
 
-### 4. Review who wants to connect and set their access
+### 4. Review who wants to connect
 
-You will see something like *Someone using the name "their-network" wants to connect*, along with what **they** are offering to let you reach. Below that, set **what they can read on your network**:
-
-- **Domains they can read** - blank shares nothing; `*` shares everything.
-- **Highest level they can read** - the 0-4 ceiling.
-
-Conservative by default. Press **Next: check their code**, or **Ignore** to walk away (which burns the request and shares nothing).
+You will see something like *Someone using the name "their-network" wants to connect*. This screen establishes identity trust only: approving it grants no domains. Press **Next: verify their identity**, or **Ignore** to burn the request and walk away with nothing shared.
 
 ### 5. Check their code
 
@@ -149,15 +140,14 @@ Now your SAGE shows a code for you to read **back** to the guest, out loud. Say 
 
 ### 7. Connected
 
-When the guest confirms, you see "Connected", the two-of-two meter full, and the reminder that nothing was deleted. The connection is now in your list, and you can turn it off any time.
+When the guest confirms, you see "Connected", the two-of-two meter full, and the reminder that trust is established but domain permissions are still empty. The connection is now in your list, and you can turn it off any time.
 
-The host then gets a separate **Memory sync** choice. It is off by default:
+Open the connection to manage two separate views:
 
-- **Not now** keeps the connection as live, read-only recall exchange.
-- **Choose shared topics** lets the host select concrete domains permitted by both sides' treaty scopes, or enter a new domain tag for future memories. The host must be the local admin or owner of each chosen domain.
-- The selected set is the complete bidirectional replication allowlist. Memories with any other domain stay local, including memories already held by the guest.
+- **What this computer shares with them** is your editable snapshot over existing domains. Read enables live lookup. Copy offers synchronized copies and automatically includes Read. Write is visibly unavailable.
+- **What they share with this computer** is read-only on your screen because they control it. If they offer Copy for a domain, **Save here** is your independent receiver opt-in.
 
-The guest sees the result but cannot widen it. The host can later add, remove, or disable synchronized domains from the connection's sync controls; a dedicated multi-node Sharing & Sync workspace is planned for v11.7.
+Both people can change their own snapshot whenever domains or working relationships change. No one has to reconnect, and neither side controls the other's choices.
 
 ---
 
@@ -174,29 +164,31 @@ Under the covers each code is a short **time-based one-time code (TOTP, RFC-6238
 
 ---
 
-## Scope controls - what actually crosses the link
+## Permissions after JOIN - what actually crosses the link
 
-Two settings decide what the other side can ever read from you. They are enforced on **your** SAGE, when it serves a query, so a peer cannot talk its way past them (`internal/federation/server.go`).
+Open a connection from **Federation**. Each side controls a complete per-peer snapshot on its own SAGE; saving replaces that side's previous snapshot. The source enforces it again when serving or sending, so a peer cannot talk its way past a withdrawn permission (`web/federation_permissions.go`, `internal/federation/server.go`, `internal/federation/sync_outbox.go`).
 
-- **Allowed domains.** A query for a domain that is not on your list gets nothing. Blank means you share nothing at all - the connection still authenticates and stays healthy, it just serves no memories. `*` means every domain.
-- **Max clearance ceiling.** A number from 0 to 4. Any memory classified above your ceiling is hidden, even if its domain is allowed. A foreign network has no standing inside your organization, so it can never read above this ceiling no matter what - there is no grant that widens it.
+- **Existing domains only.** The picker is built from domains already registered or observed on the source node. A trailing `*` such as `tii*` filters the list for safe bulk selection; it does not create a wildcard grant or a new domain.
+- **Read.** Allows live recall inside that exact domain subtree. Every returned record is checked again, and the receiver borrows the result without storing it.
+- **Copy offer.** Implies Read and permits the source to synchronize the domain, but delivery is effective only where the receiver has separately checked **Save here**. Removing either the offer or the subscription closes future delivery.
+- **Write (not yet).** Always off in v11.9. Attempts fail closed because SAGE does not yet have a consensus authorization bound to the active connection generation, peer, domain, and exact submission.
 
-You set your own ceiling for them; they set their own ceiling for you. The two are independent.
+A present empty snapshot is explicit deny-all, including immediately after a fresh JOIN. Each side can change its own snapshot independently and at any time without pairing again.
 
 ---
 
 ## Turning a connection off
 
-Open **Federation**. Each connection is a row with a status dot (green when active and unexpired) and the shared domains. Active connections have a **Turn off** button.
+Open **Federation**. Each connection is a row with a status dot (green when active and unexpired) and expandable directional permissions. Active connections have a **Turn off** button.
 
 Press it and confirm. This:
 
 - Broadcasts a revoke on your chain (an on-chain "this treaty is over").
-- Clears the shared secret and the peer's cached certificate from your node, so a future re-connection starts clean.
+- Purges the local connection capabilities, copy lanes, queued deliveries, cached seed/CA, and persisted peer route, so a future re-connection starts clean.
 
-**It erases no memories.** It only stops the two networks from reaching each other. If you ever want the link back, just run the join ceremony again.
+**It erases no memories.** It stops future live Read and Copy traffic; memories already accepted as local copies remain under the receiving brain's own lifecycle. If you ever want the link back, run the join ceremony again.
 
-The other side keeps its own record until it revokes too - turning off your side stops you serving them and stops your queries counting against their treaty, but each network owns its own half.
+The other side may still show its own treaty row until it revokes too, but live traffic requires the current exact agreement and identity on both ends and therefore fails closed.
 
 ---
 
@@ -212,10 +204,11 @@ So: only ever connect when you are confident, by your own eyes or your own ears 
 
 **What the link can and cannot do once connected:**
 
-- It can serve read-only recall within the domains and clearance ceiling you set.
-- It cannot write anything into your brain. Borrowed answers are shown, tagged with their source, and never stored on your chain.
+- It can serve live borrowed recall only for domains where you enabled Read.
+- It can offer copies only for domains where you enabled Copy, and the other person must independently choose **Save here** before their SAGE retains them.
+- It cannot perform connection-bound remote Write in v11.9. The authenticated endpoint returns `501` and never dispatches the submitted body into the memory API.
 - It cannot delete anything, on either side.
-- It cannot read above your ceiling or outside your allowed domains.
+- It cannot use the JOIN itself, a stale agreement generation, a different operator/CA, or unrelated group membership to widen domain access.
 
 ---
 
@@ -245,8 +238,16 @@ The listener rate-limits repeated attempts from the same connection. Wait a minu
 **A connection shows as expired.**
 Some treaties carry an expiry. An expired row no longer serves or queries. Turn it off and re-run the join to refresh it.
 
+**The connection is green but no memories are shared.**
+That is the safe default. JOIN establishes trust with an empty permission snapshot. Expand the connection, enable Read or Copy on existing domains you control, and save your snapshot. For copies, the other person must also enable **Save here** on their computer.
+
+**Read works but copies do not arrive.**
+Check both halves of the Copy decision: the source must offer Copy for the domain and the receiver must subscribe with **Save here**. Either side can withdraw its half without reconnecting.
+
 ---
 
 ### Under the hood (optional)
 
-The whole ceremony runs off-consensus over a dedicated mutually-authenticated federation listener; the only things ever written to a chain are each operator's own treaty record (a set on connect, a revoke on turn-off). The operator wizard routes live at `/v1/dashboard/federation/join/*` (`web/federation_join.go`), the peer-facing ceremony at `/fed/v1/join/*` (`internal/federation/join_routes.go`), and the scope enforcement on served recall at `internal/federation/server.go`. Foreign results are never persisted (`internal/federation/proxy.go`).
+The ceremony runs over a dedicated mutually authenticated federation listener. Each operator's compatibility treaty set/revoke reaches its own chain, while mutable peer Read/Copy snapshots and transport subscriptions remain off-consensus. Fresh JOIN accepts only the fixed empty-domain compatibility envelope and installs an explicit deny-all policy. Peer admission binds the exact active agreement, chain, operator key, CA pin, and policy epoch; synchronization-group traffic additionally needs the exact active group/member/domain projection. Agreement changes, JOIN activation, narrowing, and revocation use the same mutation boundary across signed REST and dashboard paths, so a completed change cannot leave a superseded broader response in flight.
+
+The operator wizard routes live at `/v1/dashboard/federation/join/*` (`web/federation_join.go`), dashboard permissions at `/v1/dashboard/federation/connections/{chain_id}/permissions` (`web/federation_permissions.go`), the peer-facing ceremony and data plane at `/fed/v1/*` (`internal/federation/join_routes.go`, `internal/federation/server.go`), and Copy authorization in `internal/federation/sync_outbox.go`. Borrowed Read results are never persisted (`internal/federation/proxy.go`); accepted copies are locally signed ordinary memory submissions. The reserved Write route fails before parsing or dialing (`api/rest/federation_write_handler.go`, `internal/federation/remote_write.go`).

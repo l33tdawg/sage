@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **Current SAGE release: v11.3.0** | **TLS, RBAC, federation, domain recovery, and per-record `classification` supported**
+**Requires Python 3.10+** | **SAGE v11.9.0 SDK** | **TLS, RBAC, federation, domain recovery, scoped governance, and per-record `classification` supported**
 
 ## Installation
 
@@ -501,6 +501,9 @@ from sage_sdk import SageClient, AgentIdentity
 admin = AgentIdentity.from_file("chain-admin.key")
 client = SageClient(base_url="http://localhost:8080", identity=admin)
 
+# This identity must be the target validator node's configured governance
+# operator. The node's live validator key remains the on-chain actor.
+
 # One-shot: propose -> poll -> submit. Raises SageAPIError on
 # reject/expire/cancel/timeout.
 result = client.reassign_domain(
@@ -513,6 +516,17 @@ result = client.reassign_domain(
 )
 print(result.tx_hash, "purged", result.purged_grants, "grants")
 ```
+
+Governance responses carry a deterministic `proposal_id` (use it for
+vote/cancel) and a distinct CometBFT `tx_hash`. After app-v20, the SDK first
+fetches the authenticated `/v1/governance/context` and signs its validator ID
+and chain domain into every delegated mutation. Consensus treats the exact
+signed proposal as global-admin authorization while the target node's validator
+key remains the proposal/vote actor; one operator cannot make another reachable
+validator vote. Vote/cancel operators can remain validator-local and do not
+need the global proposal-admin key. Missing node key/operator/domain wiring
+returns 503 before broadcast, a different valid signer receives 403, and stale
+context receives 409; repeat the SDK call to fetch and sign fresh context.
 
 If you want to drive the flow manually (e.g. you already accepted a proposal
 out of band), use the two primitives directly. `governance_propose` now

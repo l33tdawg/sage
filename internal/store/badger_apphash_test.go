@@ -12,8 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// referenceAppHash reproduces the pre-#26 algorithm: collect every key/value
-// into a slice, sort by key, then hash key||value in sorted order. The
+// referenceAppHash reproduces the pre-#26 algorithm: collect every consensus
+// key/value into a slice, sort by key, then hash key||value in sorted order.
+// Exact legacy startup-migration marker keys are omitted just as ComputeAppHash
+// omits them. Current progress lives in sidecars. The
 // streaming ComputeAppHash must be byte-identical to this — that equality is
 // what guarantees issue #26's perf fix did NOT change the app hash (i.e. it is
 // a consensus no-op, not a fork). If this ever diverges, the fix changed the
@@ -29,6 +31,9 @@ func referenceAppHash(t *testing.T, s *BadgerStore) []byte {
 		defer it.Close()
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
+			if isIndexBackfillProgressKey(item.Key()) {
+				continue
+			}
 			k := append([]byte(nil), item.Key()...)
 			var v []byte
 			require.NoError(t, item.Value(func(val []byte) error {

@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func completeActivationTest() error { return nil }
+
 var errSimulatedActivationCrash = errors.New("simulated process crash")
 
 func writeActivationTestState(t *testing.T, path string, height uint64, appHash []byte) {
@@ -92,7 +94,7 @@ func TestActivationDirectoryCrashRecoveryRestoresPersistedCometState(t *testing.
 			})
 			require.ErrorIs(t, err, errSimulatedActivationCrash)
 
-			action, err := RecoverActivationDirectories(root, journalPath, 40, oldHash, inspectActivationTestState)
+			action, err := RecoverActivationDirectories(root, journalPath, 40, oldHash, inspectActivationTestState, completeActivationTest)
 			require.NoError(t, err)
 			if step == activationStepJournalPrepared {
 				assert.Equal(t, RecoveryDiscardPrepared, action)
@@ -134,7 +136,7 @@ func TestActivationDirectoryCrashRecoveryRestoresFreshCometState(t *testing.T) {
 				return nil
 			})
 			require.ErrorIs(t, err, errSimulatedActivationCrash)
-			action, err := RecoverActivationDirectories(root, journalPath, 0, nil, inspectActivationTestState)
+			action, err := RecoverActivationDirectories(root, journalPath, 0, nil, inspectActivationTestState, completeActivationTest)
 			require.NoError(t, err)
 			if step == activationStepJournalPrepared {
 				assert.Equal(t, RecoveryDiscardPrepared, action)
@@ -156,7 +158,7 @@ func TestRecoverActivationDirectoriesSealsCommittedState(t *testing.T) {
 	root, journalPath, journal, _, newHash := setupActivationDirectories(t)
 	require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
 
-	action, err := RecoverActivationDirectories(root, journalPath, journal.Height, newHash, inspectActivationTestState)
+	action, err := RecoverActivationDirectories(root, journalPath, journal.Height, newHash, inspectActivationTestState, completeActivationTest)
 	require.NoError(t, err)
 	assert.Equal(t, RecoveryKeepActivated, action)
 	height, appHash, err := inspectActivationTestState(filepath.Join(root, journal.LiveName))
@@ -176,11 +178,51 @@ func TestSealActivatedDirectoryUsesAlreadyVerifiedLiveState(t *testing.T) {
 	}))
 	require.Equal(t, 1, reopenCalls)
 
-	require.NoError(t, SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, newHash))
+	require.NoError(t, SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, newHash, completeActivationTest))
 	assert.Equal(t, 1, reopenCalls, "runtime seal must not reopen the live database")
 	assert.DirExists(t, filepath.Join(root, journal.LiveName))
 	assert.NoDirExists(t, filepath.Join(root, journal.QuarantineName))
 	assert.NoFileExists(t, journalPath)
+}
+
+func TestSealActivatedDirectoryRetriesCompletionBeforeCleanup(t *testing.T) {
+	root, journalPath, journal, _, newHash := setupActivationDirectories(t)
+	require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
+	simulatedCrash := errors.New("simulated crash after receiver-role persistence")
+	rolePersisted := false
+	err := SealActivatedDirectory(
+		root, journalPath,
+		journal.Height, newHash,
+		journal.Height, newHash,
+		func() error {
+			rolePersisted = true
+			return simulatedCrash
+		},
+	)
+	require.ErrorIs(t, err, simulatedCrash)
+	assert.True(t, rolePersisted)
+	sealed, loadErr := LoadActivationJournal(journalPath)
+	require.NoError(t, loadErr)
+	assert.Equal(t, ActivationSealed, sealed.Phase)
+	assert.DirExists(t, filepath.Join(root, journal.QuarantineName), "cleanup cannot precede durable receiver disarm")
+
+	completionRetries := 0
+	action, err := RecoverActivationDirectories(
+		root, journalPath, journal.Height, newHash, inspectActivationTestState,
+		func() error {
+			completionRetries++
+			assert.True(t, rolePersisted, "receiver disarm is idempotently retried")
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, RecoveryKeepActivated, action)
+	assert.Equal(t, 1, completionRetries)
+	assert.NoDirExists(t, filepath.Join(root, journal.QuarantineName))
+	assert.NoFileExists(t, journalPath)
+
+	err = SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, newHash, nil)
+	assert.ErrorContains(t, err, "completion is required")
 }
 
 func TestSealActivatedDirectoryRejectsUnverifiedOrAmbiguousState(t *testing.T) {
@@ -188,7 +230,7 @@ func TestSealActivatedDirectoryRejectsUnverifiedOrAmbiguousState(t *testing.T) {
 		root, journalPath, journal, _, newHash := setupActivationDirectories(t)
 		require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
 		wrongHash := sha256.Sum256([]byte("active differs"))
-		err := SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, wrongHash[:])
+		err := SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, wrongHash[:], completeActivationTest)
 		assert.ErrorContains(t, err, "does not match")
 		assert.DirExists(t, filepath.Join(root, journal.QuarantineName))
 		assert.FileExists(t, journalPath)
@@ -197,7 +239,7 @@ func TestSealActivatedDirectoryRejectsUnverifiedOrAmbiguousState(t *testing.T) {
 	t.Run("Comet below pending activation", func(t *testing.T) {
 		root, journalPath, journal, oldHash, _ := setupActivationDirectories(t)
 		require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
-		err := SealActivatedDirectory(root, journalPath, 40, oldHash, 40, oldHash)
+		err := SealActivatedDirectory(root, journalPath, 40, oldHash, 40, oldHash, completeActivationTest)
 		assert.ErrorContains(t, err, "below pending activation")
 		assert.DirExists(t, filepath.Join(root, journal.QuarantineName))
 		assert.FileExists(t, journalPath)
@@ -207,7 +249,7 @@ func TestSealActivatedDirectoryRejectsUnverifiedOrAmbiguousState(t *testing.T) {
 		root, journalPath, journal, _, newHash := setupActivationDirectories(t)
 		require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
 		require.NoError(t, os.RemoveAll(filepath.Join(root, journal.QuarantineName)))
-		err := SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, newHash)
+		err := SealActivatedDirectory(root, journalPath, journal.Height, newHash, journal.Height, newHash, completeActivationTest)
 		assert.ErrorContains(t, err, "layout is ambiguous")
 		assert.FileExists(t, journalPath)
 	})
@@ -220,7 +262,7 @@ func TestRecoverActivationDirectoriesFinishesInterruptedRecovery(t *testing.T) {
 		require.NoError(t, os.Rename(filepath.Join(root, journal.LiveName), filepath.Join(root, journal.QuarantineName)))
 		require.NoError(t, os.Rename(filepath.Join(root, journal.QuarantineName), filepath.Join(root, journal.LiveName)))
 
-		action, err := RecoverActivationDirectories(root, journalPath, 40, oldHash, inspectActivationTestState)
+		action, err := RecoverActivationDirectories(root, journalPath, 40, oldHash, inspectActivationTestState, completeActivationTest)
 		require.NoError(t, err)
 		assert.Equal(t, RecoveryDiscardPrepared, action)
 		assert.NoDirExists(t, filepath.Join(root, journal.PreparedName))
@@ -234,7 +276,7 @@ func TestRecoverActivationDirectoriesFinishesInterruptedRecovery(t *testing.T) {
 		require.NoError(t, WriteActivationJournal(journalPath, journal))
 		require.NoError(t, os.RemoveAll(filepath.Join(root, journal.QuarantineName)))
 
-		action, err := RecoverActivationDirectories(root, journalPath, journal.Height, newHash, inspectActivationTestState)
+		action, err := RecoverActivationDirectories(root, journalPath, journal.Height, newHash, inspectActivationTestState, completeActivationTest)
 		require.NoError(t, err)
 		assert.Equal(t, RecoveryKeepActivated, action)
 		assert.NoFileExists(t, journalPath)
@@ -298,7 +340,7 @@ func TestActivationDirectoriesRejectUnsafeOrAmbiguousLayouts(t *testing.T) {
 		require.NoError(t, WriteActivationJournal(journalPath, journal))
 		writeActivationTestState(t, filepath.Join(root, journal.QuarantineName), 40, oldHash)
 
-		_, err := RecoverActivationDirectories(root, journalPath, 40, oldHash, inspectActivationTestState)
+		_, err := RecoverActivationDirectories(root, journalPath, 40, oldHash, inspectActivationTestState, completeActivationTest)
 		assert.ErrorContains(t, err, "ambiguous")
 		assert.DirExists(t, filepath.Join(root, journal.LiveName))
 		assert.DirExists(t, filepath.Join(root, journal.PreparedName))
@@ -311,7 +353,7 @@ func TestActivationDirectoriesRejectUnsafeOrAmbiguousLayouts(t *testing.T) {
 		require.NoError(t, ActivatePreparedDirectory(root, journalPath, journal, verifyActivationTestState))
 		wrongHash := sha256.Sum256([]byte("wrong persisted state"))
 
-		_, err := RecoverActivationDirectories(root, journalPath, 40, wrongHash[:], inspectActivationTestState)
+		_, err := RecoverActivationDirectories(root, journalPath, 40, wrongHash[:], inspectActivationTestState, completeActivationTest)
 		assert.ErrorContains(t, err, "does not match")
 		assert.DirExists(t, filepath.Join(root, journal.LiveName))
 		assert.DirExists(t, filepath.Join(root, journal.QuarantineName))

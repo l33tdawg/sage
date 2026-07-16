@@ -659,7 +659,11 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 				StatusCode: resp.StatusCode,
 			}
 		}
-		return fmt.Errorf("API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		return &apiProblemError{
+			Title:      fmt.Sprintf("API error (HTTP %d)", resp.StatusCode),
+			Detail:     string(respBody),
+			StatusCode: resp.StatusCode,
+		}
 	}
 
 	if out != nil {
@@ -681,6 +685,11 @@ type apiProblemError struct {
 
 func (e *apiProblemError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Title, e.Detail)
+}
+
+func isAPIStatus(err error, statusCode int) bool {
+	var problem *apiProblemError
+	return errors.As(err, &problem) && problem.StatusCode == statusCode
 }
 
 func isTransientMCPTransportErr(err error) bool {

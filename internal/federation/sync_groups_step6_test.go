@@ -40,14 +40,30 @@ func TestSyncWatcherGroupStarFanout(t *testing.T) {
 
 	// A group where chain-local OWNS domain "studio"; three peers hold it.
 	seedGroupDomain(t, ms, "g1", "studio", "chain-local", 0)
-	seedGroupMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, store.GroupMemberActive, "")
-	seedGroupMember(t, ms, "g1", "chain-b", store.GroupRoleFullSync, store.GroupMemberActive, "")
-	seedGroupMember(t, ms, "g1", "chain-c", store.GroupRoleFullSync, store.GroupMemberActive, "")
-	seedGroupMember(t, ms, "g1", "chain-d", store.GroupRoleSelectiveSync, store.GroupMemberActive, "")
+	localID := hex.EncodeToString(m.agentPub)
+	seedGroupMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, store.GroupMemberActive, localID)
+	peerIDs := map[string]string{}
+	for _, chain := range []string{"chain-b", "chain-c", "chain-d"} {
+		pub, _, err := ed25519.GenerateKey(nil)
+		require.NoError(t, err)
+		peerIDs[chain] = hex.EncodeToString(pub)
+	}
+	seedGroupMember(t, ms, "g1", "chain-b", store.GroupRoleFullSync, store.GroupMemberActive, peerIDs["chain-b"])
+	seedGroupMember(t, ms, "g1", "chain-c", store.GroupRoleFullSync, store.GroupMemberActive, peerIDs["chain-c"])
+	seedGroupMember(t, ms, "g1", "chain-d", store.GroupRoleSelectiveSync, store.GroupMemberActive, peerIDs["chain-d"])
 	// Trust edges (fan-out re-gates clearance/scope against the pairwise edge).
 	seedDrainAgreement(t, bs, "chain-b", 2, "studio")
 	seedDrainAgreement(t, bs, "chain-c", 2, "studio")
 	seedDrainAgreement(t, bs, "chain-d", 2, "studio")
+	for _, chain := range []string{"chain-b", "chain-c", "chain-d"} {
+		agreement := mustDrainAgreement(t, m, chain)
+		require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{
+			RemoteChainID: chain, Role: "host", ControllerChainID: m.localChainID,
+			ControllerAgentID: localID, PeerAgentID: peerIDs[chain], PolicyEpoch: "legacy-" + chain,
+			RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey), PolicyVersion: 1,
+		}))
+		require.NoError(t, ms.ActivateSyncControl(ctx, chain, "legacy-"+chain))
+	}
 
 	seedCommitted(t, ms, "m-native", "studio", "owner authored fact")
 	m.syncNudge = make(chan struct{}, 1)
@@ -102,12 +118,21 @@ func TestSyncDigestGroupHardGate(t *testing.T) {
 	ctx := context.Background()
 	comet := &scriptedComet{responses: []string{cometOK}}
 	m, ms := newSyncTestManager(t, comet) // localChainID == "chain-local"
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	peerID := hex.EncodeToString(peerPub)
+	chainCPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	chainCID := hex.EncodeToString(chainCPub)
+	chainXPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	chainXID := hex.EncodeToString(chainXPub)
 
 	// chain-local shares "studio" (owned by chain-c) and "band" (owned locally)
 	// with the requester chain-b; "secret" is classified and owned by chain-c.
-	seedGroupMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, store.GroupMemberActive, "")
-	seedGroupMember(t, ms, "g1", "chain-b", store.GroupRoleFullSync, store.GroupMemberActive, "")
-	seedGroupMember(t, ms, "g1", "chain-c", store.GroupRoleFullSync, store.GroupMemberActive, "")
+	seedGroupMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, store.GroupMemberActive, hex.EncodeToString(m.agentPub))
+	seedGroupMember(t, ms, "g1", "chain-b", store.GroupRoleFullSync, store.GroupMemberActive, peerID)
+	seedGroupMember(t, ms, "g1", "chain-c", store.GroupRoleFullSync, store.GroupMemberActive, chainCID)
 	seedGroupDomain(t, ms, "g1", "studio", "chain-c", 0)
 	seedGroupDomain(t, ms, "g1", "band", "chain-local", 0)
 	seedGroupDomain(t, ms, "g1", "secret", "chain-c", 3) // classified, NOT owned locally
@@ -115,16 +140,17 @@ func TestSyncDigestGroupHardGate(t *testing.T) {
 	// Admitted ledger holds ids from MULTIPLE origins: chain-c (a member) and chain-b in
 	// shared domains; chain-x is NOT a group member; sec-1 sits in the classified "secret".
 	for _, o := range []store.SyncOrigin{
-		{OriginChainID: "chain-c", OriginMemoryID: "s-01", DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-1"},
-		{OriginChainID: "chain-x", OriginMemoryID: "s-02", DomainTag: "studio.public", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-2"},
-		{OriginChainID: "chain-b", OriginMemoryID: "b-99", DomainTag: "band", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-3"},
-		{OriginChainID: "chain-c", OriginMemoryID: "sec-1", DomainTag: "secret", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-4"},
+		{OriginChainID: "chain-c", OriginAgentPubkey: chainCID, OriginMemoryID: "s-01", DomainTag: "studio", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-1", OriginSig: make([]byte, 64)},
+		{OriginChainID: "chain-x", OriginAgentPubkey: chainXID, OriginMemoryID: "s-02", DomainTag: "studio.public", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-2", OriginSig: make([]byte, 64)},
+		{OriginChainID: "chain-b", OriginAgentPubkey: peerID, OriginMemoryID: "b-99", DomainTag: "band", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-3", OriginSig: make([]byte, 64)},
+		{OriginChainID: "chain-c", OriginAgentPubkey: chainCID, OriginMemoryID: "sec-1", DomainTag: "secret", Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "l-4", OriginSig: make([]byte, 64)},
 	} {
 		require.NoError(t, ms.RecordSyncOrigin(ctx, o))
 	}
 
-	peer := &peerIdentity{ChainID: "chain-b", AgentID: "peer-agent",
+	peer := &peerIdentity{ChainID: "chain-b", AgentID: peerID,
 		Agreement: &store.CrossFedRecord{RemoteChainID: "chain-b", MaxClearance: 2, AllowedDomains: []string{"*"}, Status: "active"}}
+	bindInboundGroupPeer(t, m, ms, peer, "guest")
 
 	// Group digest for a SHARED domain: serves any MEMBER origin's ids, subtree-matched.
 	// chain-c (a member) is served; chain-x's id is EXCLUDED because chain-x is not a
@@ -217,14 +243,19 @@ func TestSyncPushRelayOriginAuth(t *testing.T) {
 	// The origin (chain-c) is a group member with a pinned roster key.
 	originPub, originPriv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
-	seedGroupMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, store.GroupMemberActive, "")
-	seedGroupMember(t, ms, "g1", "chain-b", store.GroupRoleFullSync, store.GroupMemberActive, "") // relayer
+	relayerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	relayerID := hex.EncodeToString(relayerPub)
+	seedGroupMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, store.GroupMemberActive, hex.EncodeToString(m.agentPub))
+	seedGroupMember(t, ms, "g1", "chain-b", store.GroupRoleFullSync, store.GroupMemberActive, relayerID) // relayer
 	seedGroupMember(t, ms, "g1", "chain-c", store.GroupRoleFullSync, store.GroupMemberActive, hex.EncodeToString(originPub))
 	seedGroupDomain(t, ms, "g1", "studio", "chain-c", 0)
 
 	// The relayer is chain-b; the item's origin is chain-c.
-	relayer := &peerIdentity{ChainID: "chain-b", AgentID: "relayer-agent",
+	relayer := &peerIdentity{ChainID: "chain-b", AgentID: relayerID,
 		Agreement: &store.CrossFedRecord{RemoteChainID: "chain-b", MaxClearance: 2, AllowedDomains: []string{"*"}, Status: "active"}}
+	bindInboundGroupPeer(t, m, ms, relayer, "guest")
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"studio"}))
 
 	relayed := SyncItem{OriginChainID: "chain-c", OriginMemoryID: "m-relayed", Domain: "studio",
 		Classification: 1, Content: "relayed fact", ContentHash: contentHashHex("relayed fact")}

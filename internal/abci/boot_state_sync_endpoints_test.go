@@ -36,13 +36,13 @@ func stateSyncEndpointAuthorizations(t *testing.T, now time.Time) (*statesync.Se
 	}
 	approved := []string{stateSyncProviderA, stateSyncProviderB, stateSyncJoiner}
 	serving, err := statesync.NewServingAuthorization(join, statesync.ValidatorP2PProfile{
-		ChainID: join.ChainID, LocalNodeID: stateSyncProviderA,
+		ChainID: join.ChainID, LocalNodeID: stateSyncProviderA, FilterPeers: true,
 		UnconditionalPeerIDs: approved, PrivatePeerIDs: approved,
 		PersistentPeerIDs: []string{stateSyncProviderB, stateSyncJoiner},
 	}, now)
 	require.NoError(t, err)
 	receiving, err := statesync.NewReceivingAuthorization(join, statesync.ValidatorP2PProfile{
-		ChainID: join.ChainID, LocalNodeID: stateSyncJoiner,
+		ChainID: join.ChainID, LocalNodeID: stateSyncJoiner, FilterPeers: true,
 		LocalValidatorPublicKey: validatorKey,
 		UnconditionalPeerIDs:    approved, PrivatePeerIDs: approved,
 		PersistentPeerIDs: []string{stateSyncProviderA, stateSyncProviderB},
@@ -159,6 +159,34 @@ func TestBootStateSyncServingRequiresExplicitAuthorizationAndUsesPublicCatalog(t
 	assert.Empty(t, expired.Snapshots, "expired serving authorization fails closed without destabilizing ABCI")
 }
 
+func TestBootStateSyncServingLatchesClockRollbackBeforeExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	clockNow := now
+	serving, _ := stateSyncEndpointAuthorizations(t, now)
+	root := t.TempDir()
+	publishStateSyncEndpointSnapshot(t, root, 42, 0x31, 1)
+	runtime := newBootRuntimeTestRuntime(t, &bootRuntimeTestApp{})
+	controller, err := NewStateSyncServingController(StateSyncServingControllerConfig{
+		Authorization: serving, SnapshotRoot: root, Now: func() time.Time { return clockNow },
+		MaxSnapshotHeight: func(context.Context) (uint64, error) { return 42, nil },
+	})
+	require.NoError(t, err)
+	require.NoError(t, runtime.ArmStateSyncServing(controller))
+	clockNow = now.Add(30 * time.Minute)
+	listed, err := runtime.ListSnapshots(context.Background(), &abcitypes.RequestListSnapshots{})
+	require.NoError(t, err)
+	require.Len(t, listed.Snapshots, 1)
+
+	clockNow = now.Add(15 * time.Minute)
+	rolledBack, err := runtime.ListSnapshots(context.Background(), &abcitypes.RequestListSnapshots{})
+	require.NoError(t, err)
+	assert.Empty(t, rolledBack.Snapshots, "clock rollback must fail closed before wall-clock expiry")
+	clockNow = now.Add(31 * time.Minute)
+	latched, err := runtime.ListSnapshots(context.Background(), &abcitypes.RequestListSnapshots{})
+	require.NoError(t, err)
+	assert.Empty(t, latched.Snapshots, "rollback failure is permanently latched")
+}
+
 func TestBootStateSyncReceiverAuthorizesProviderAndActivatesSynchronously(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	_, receiving := stateSyncEndpointAuthorizations(t, now)
@@ -225,8 +253,61 @@ func TestBootStateSyncReceiverAuthorizesProviderAndActivatesSynchronously(t *tes
 	})
 	require.NoError(t, err)
 	assert.Equal(t, abcitypes.ResponseApplySnapshotChunk_ACCEPT, retransmitted.Result, "exact post-activation retransmission is idempotent")
-	require.NoError(t, runtime.sealActivatedBundle(context.Background(), 42, snapshot.Metadata.AppHash, statesync.RequiredAppVersion))
+	sealed, err := sealBootRuntimeTest(runtime, 42, snapshot.Metadata.AppHash, statesync.RequiredAppVersion, bootRuntimeTestDurableSeal)
+	require.NoError(t, err)
+	require.True(t, sealed)
 	assert.Equal(t, BootStateSyncSealed, runtime.Phase())
+}
+
+func TestBootStateSyncReceiverAuthorizationCannotExpireBeforeSeal(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	for _, tc := range []struct {
+		name string
+		next time.Time
+		want string
+	}{
+		{name: "deadline", next: now.Add(2 * time.Hour), want: "expired"},
+		{name: "clock rollback", next: now.Add(-time.Minute), want: "clock moved backwards"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clockNow := now
+			_, receiving := stateSyncEndpointAuthorizations(t, now)
+			snapshot, chunks := publishStateSyncEndpointSnapshot(t, t.TempDir(), 42, 0x45, 1)
+			oldHash := sha256.Sum256([]byte("pre-seal-authorization-old"))
+			runtime := newBootRuntimeTestRuntime(t, &bootRuntimeTestApp{height: 10, appHash: oldHash[:], appVersion: 19})
+			newApp := &bootRuntimeTestApp{height: 42, appHash: snapshot.Metadata.AppHash, appVersion: statesync.RequiredAppVersion}
+			controller, err := NewStateSyncReceiverController(StateSyncReceiverControllerConfig{
+				Authorization: receiving,
+				StagingRoot:   t.TempDir(),
+				Now:           func() time.Time { return clockNow },
+				Prepare: stateSyncEndpointPreparer(func(context.Context, *ConsensusBundle, statesync.Metadata, string) (*ConsensusBundle, error) {
+					return NewConsensusBundleWithCleanup(context.Background(), newApp, newApp.Close)
+				}),
+			})
+			require.NoError(t, err)
+			require.NoError(t, runtime.ArmStateSyncReceiver(controller))
+			offered, err := runtime.OfferSnapshot(context.Background(), stateSyncEndpointOffer(snapshot))
+			require.NoError(t, err)
+			require.Equal(t, abcitypes.ResponseOfferSnapshot_ACCEPT, offered.Result)
+			applied, err := runtime.ApplySnapshotChunk(context.Background(), &abcitypes.RequestApplySnapshotChunk{
+				Index: 0, Chunk: chunks[0], Sender: stateSyncProviderA,
+			})
+			require.NoError(t, err)
+			require.Equal(t, abcitypes.ResponseApplySnapshotChunk_ACCEPT, applied.Result)
+			require.Equal(t, BootStateSyncPendingComet, runtime.Phase())
+
+			clockNow = tc.next
+			durableCalled := false
+			sealed, err := sealBootRuntimeTest(runtime, 42, snapshot.Metadata.AppHash, statesync.RequiredAppVersion, func(int64, []byte, uint64) error {
+				durableCalled = true
+				return nil
+			})
+			require.ErrorContains(t, err, tc.want)
+			assert.False(t, sealed)
+			assert.False(t, durableCalled, "an unauthorized session must not cross the durable seal boundary")
+			assert.Equal(t, BootStateSyncFailed, runtime.Phase())
+		})
+	}
 }
 
 func TestBootStateSyncReceiverRejectsBadPreparedCandidateAndFallsBack(t *testing.T) {
@@ -423,6 +504,36 @@ func TestBootStateSyncReceiverLatchesAuthorizationExpiryDuringPreparation(t *tes
 	replayed, err := runtime.OfferSnapshot(context.Background(), stateSyncEndpointOffer(snapshot))
 	require.NoError(t, err)
 	assert.Equal(t, abcitypes.ResponseOfferSnapshot_ABORT, replayed.Result, "clock rollback must never re-enable an expired session")
+	assert.Equal(t, BootStateSyncFailed, runtime.Phase())
+}
+
+func TestBootStateSyncReceiverLatchesClockRollbackBeforeExpiry(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	clockNow := now
+	_, receiving := stateSyncEndpointAuthorizations(t, now)
+	snapshot, chunks := publishStateSyncEndpointSnapshot(t, t.TempDir(), 42, 0x64, 1)
+	runtime := newBootRuntimeTestRuntime(t, &bootRuntimeTestApp{})
+	controller, err := NewStateSyncReceiverController(StateSyncReceiverControllerConfig{
+		Authorization: receiving,
+		StagingRoot:   t.TempDir(),
+		Now:           func() time.Time { return clockNow },
+		Prepare: stateSyncEndpointPreparer(func(context.Context, *ConsensusBundle, statesync.Metadata, string) (*ConsensusBundle, error) {
+			return nil, nil
+		}),
+	})
+	require.NoError(t, err)
+	require.NoError(t, runtime.ArmStateSyncReceiver(controller))
+	clockNow = now.Add(30 * time.Minute)
+	offered, err := runtime.OfferSnapshot(context.Background(), stateSyncEndpointOffer(snapshot))
+	require.NoError(t, err)
+	require.Equal(t, abcitypes.ResponseOfferSnapshot_ACCEPT, offered.Result)
+
+	clockNow = now.Add(15 * time.Minute)
+	applied, err := runtime.ApplySnapshotChunk(context.Background(), &abcitypes.RequestApplySnapshotChunk{
+		Index: 0, Chunk: chunks[0], Sender: stateSyncProviderA,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, abcitypes.ResponseApplySnapshotChunk_ABORT, applied.Result)
 	assert.Equal(t, BootStateSyncFailed, runtime.Phase())
 }
 

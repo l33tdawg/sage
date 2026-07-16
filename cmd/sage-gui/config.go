@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -465,6 +466,87 @@ func persistFederationEnabled(enabled bool) error {
 	return atomicWriteConfig(configPath, out)
 }
 
+// persistStateSyncReceiving flips only the one-shot receiver role in the raw
+// config. Activation sealing calls this before removing its final recovery
+// journal, so a process crash cannot re-arm a completed receiver. As with the
+// other raw round-trips, operator-authored relative paths remain untouched.
+func persistStateSyncReceiving(receiving bool) error {
+	configPersistMu.Lock()
+	defer configPersistMu.Unlock()
+	home := SageHome()
+	if err := os.MkdirAll(home, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	configPath := filepath.Join(home, "config.yaml")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return errors.New("persist state-sync receiver role: config file is missing")
+		}
+		return fmt.Errorf("read config: %w", err)
+	}
+	var document yaml.Node
+	if parseErr := yaml.Unmarshal(data, &document); parseErr != nil {
+		return fmt.Errorf("parse config: %w", parseErr)
+	}
+	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
+		return errors.New("parse config: top-level YAML mapping is required")
+	}
+	quorum, err := ensureYAMLMapping(document.Content[0], "quorum")
+	if err != nil {
+		return fmt.Errorf("parse config quorum: %w", err)
+	}
+	stateSync, err := ensureYAMLMapping(quorum, "state_sync")
+	if err != nil {
+		return fmt.Errorf("parse config quorum.state_sync: %w", err)
+	}
+	setYAMLBool(stateSync, "receiving", receiving)
+	out, err := yaml.Marshal(&document)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	return atomicWriteConfig(configPath, out)
+}
+
+func ensureYAMLMapping(parent *yaml.Node, key string) (*yaml.Node, error) {
+	if parent == nil || parent.Kind != yaml.MappingNode || len(parent.Content)%2 != 0 {
+		return nil, errors.New("parent is not a valid YAML mapping")
+	}
+	for i := 0; i < len(parent.Content); i += 2 {
+		if parent.Content[i].Value != key {
+			continue
+		}
+		value := parent.Content[i+1]
+		if value.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("%s must be a mapping", key)
+		}
+		return value, nil
+	}
+	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+	valueNode := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	parent.Content = append(parent.Content, keyNode, valueNode)
+	return valueNode, nil
+}
+
+func setYAMLBool(parent *yaml.Node, key string, value bool) {
+	encoded := strconv.FormatBool(value)
+	for i := 0; i < len(parent.Content); i += 2 {
+		if parent.Content[i].Value == key {
+			node := parent.Content[i+1]
+			node.Kind = yaml.ScalarNode
+			node.Tag = "!!bool"
+			node.Value = encoded
+			node.Style = 0
+			return
+		}
+	}
+	parent.Content = append(parent.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: encoded},
+	)
+}
+
 // maxNetworkNameLen bounds the friendly network label. Long enough for
 // "Dhillon's MacBook Pro (office)", short enough that a hostile peer can't blow
 // out the ceremony UI or a log line with it.
@@ -619,14 +701,10 @@ func atomicWriteConfig(path string, data []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := replaceConfigFileDurably(tmp, path); err != nil {
 		return err
 	}
 	ok = true
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
 	return nil
 }
 

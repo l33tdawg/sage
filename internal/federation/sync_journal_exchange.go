@@ -282,6 +282,24 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 	// old policy.
 	policyUnlock := ss.LockSyncPolicyRead()
 	defer policyUnlock()
+	if bound, err := m.inboundGroupPeerBound(r.Context(), ss, peer); err != nil || !bound {
+		httpError(w, http.StatusForbidden, "not authorized for this journal sub-chain")
+		return
+	}
+	member, memberErr := ss.GetSyncGroupMember(r.Context(), req.GroupID, peer.ChainID)
+	if memberErr != nil {
+		httpError(w, http.StatusInternalServerError, "authorization failed")
+		return
+	}
+	if member == nil || (member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing) ||
+		member.MemberAgentPubkey != peer.AgentID {
+		httpError(w, http.StatusForbidden, "not authorized for this journal sub-chain")
+		return
+	}
+	if _, keyErr := decodePub(member.MemberAgentPubkey); keyErr != nil {
+		httpError(w, http.StatusForbidden, "not authorized for this journal sub-chain")
+		return
+	}
 	scope, err := m.journalSubchainServeScope(r.Context(), ss, req.GroupID, peer.ChainID, req.Subchain)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "authorization failed")
@@ -338,6 +356,18 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 //     the caller can run the POST-BATCH removal-enforcement hook once journalMu is
 //     released (never from inside apply()'s transaction).
 func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry) (int, []string, []string, error) {
+	return m.ingestJournalEntries(ctx, ss, groupID, subchain, entries, false)
+}
+
+// ingestJournalEntriesInTxLocked is used only by a caller that already holds
+// journalMu, the sync-policy WRITE lease, and an outer store transaction. It
+// keeps a multi-entry ceremony behind one commit/serve barrier and avoids
+// recursively taking the non-reentrant policy gate.
+func (m *Manager) ingestJournalEntriesInTxLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry) (int, []string, []string, error) {
+	return m.ingestJournalEntries(ctx, ss, groupID, subchain, entries, true)
+}
+
+func (m *Manager) ingestJournalEntries(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry, transactionAndPolicyWriteHeld bool) (int, []string, []string, error) {
 	gs, err := loadGroupApplyState(ctx, ss, groupID)
 	if err != nil {
 		return 0, nil, nil, err
@@ -401,8 +431,14 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 		// ATOMIC append + apply: a store-write failure rolls the append back, so a
 		// logged entry is always fully applied (semantic-fault skips are no-ops that
 		// commit); the idempotent-skip path can never meet a logged-but-unapplied entry.
-		if err := m.appendAndApply(ctx, ss, gs, e); err != nil {
-			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("append+apply %s/%d (%s): %w", subchain, e.Seq, e.EntryType, err)
+		var appendErr error
+		if transactionAndPolicyWriteHeld {
+			appendErr = m.appendAndApplyInTx(ctx, ss, gs, e)
+		} else {
+			appendErr = m.appendAndApply(ctx, ss, gs, e)
+		}
+		if appendErr != nil {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("append+apply %s/%d (%s): %w", subchain, e.Seq, e.EntryType, appendErr)
 		}
 		appended++
 		wantSeq, wantPrev = e.Seq+1, e.EntryHash
@@ -413,14 +449,15 @@ func (m *Manager) ingestJournalEntriesLocked(ctx context.Context, ss *store.SQLi
 	return appended, gs.evictedChains, gs.removedDomains, nil
 }
 
-// ingestTerminalJournalEntriesLocked admits the deliberately sparse terminal
-// suffix served after a domain removal. It keeps every normal ingest invariant
-// except contiguous prev-link availability: a prior sharer is intentionally not
-// sent the old domain body, so it cannot possess the immediate predecessor hash.
-// Each entry remains independently signature-verified against the pinned roster
-// key, type-restricted, strictly ascending, and fork-checked before append.
-// CALLER MUST hold m.journalMu.
-func (m *Manager) ingestTerminalJournalEntriesLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry) (int, []string, []string, error) {
+// ingestTerminalJournalEntriesInTxLocked is the sparse-terminal counterpart to
+// ingestJournalEntriesInTxLocked. The caller already owns journalMu, the policy
+// WRITE lease, and an outer transaction, so it must not recursively acquire the
+// non-reentrant policy gate for each entry.
+func (m *Manager) ingestTerminalJournalEntriesInTxLocked(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry) (int, []string, []string, error) {
+	return m.ingestTerminalJournalEntries(ctx, ss, groupID, subchain, entries, true)
+}
+
+func (m *Manager) ingestTerminalJournalEntries(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry, transactionAndPolicyWriteHeld bool) (int, []string, []string, error) {
 	if _, ok := strings.CutPrefix(subchain, "domain:"); !ok {
 		return 0, nil, nil, fmt.Errorf("terminal journal response is valid only for a domain sub-chain")
 	}
@@ -461,12 +498,121 @@ func (m *Manager) ingestTerminalJournalEntriesLocked(ctx context.Context, ss *st
 			return appended, gs.evictedChains, gs.removedDomains, err
 		}
 		e.PayloadJSON = canonicalPayloadJSON(e.PayloadJSON)
-		if err := m.appendAndApply(ctx, ss, gs, e); err != nil {
-			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("append+apply terminal %s/%d (%s): %w", subchain, e.Seq, e.EntryType, err)
+		var appendErr error
+		if transactionAndPolicyWriteHeld {
+			appendErr = m.appendAndApplyInTx(ctx, ss, gs, e)
+		} else {
+			appendErr = m.appendAndApply(ctx, ss, gs, e)
+		}
+		if appendErr != nil {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("append+apply terminal %s/%d (%s): %w", subchain, e.Seq, e.EntryType, appendErr)
 		}
 		appended++
 	}
 	return appended, gs.evictedChains, gs.removedDomains, nil
+}
+
+// currentPullGroupPeerBound is the final authorization check for a fetched
+// journal page. Fetching is deliberately lock-free, so every value that can be
+// revoked while the peer holds a response must be re-resolved after journalMu
+// and the policy WRITE lease are acquired: the current consensus agreement, the
+// exact active JOIN control, the remote member/operator key, and our own active
+// group identity.
+func (m *Manager) currentPullGroupPeerBound(ctx context.Context, ss *store.SQLiteStore, remoteChainID, groupID string) (bool, error) {
+	agreement, err := m.ActiveAgreement(remoteChainID)
+	if err != nil {
+		return false, nil
+	}
+	control, err := ss.GetSyncControl(ctx, remoteChainID)
+	if err != nil {
+		return false, err
+	}
+	if control == nil || control.PolicyEpoch == "" || control.PeerAgentID == "" {
+		return false, nil
+	}
+	peer := &peerIdentity{ChainID: remoteChainID, AgentID: control.PeerAgentID, Agreement: agreement}
+	if !m.syncControlPeerBound(control, peer) {
+		return false, nil
+	}
+	remote, err := ss.GetSyncGroupMember(ctx, groupID, remoteChainID)
+	if err != nil {
+		return false, err
+	}
+	if !activeGroupMember(remote) || remote.MemberAgentPubkey != control.PeerAgentID {
+		return false, nil
+	}
+	local, err := ss.GetSyncGroupMember(ctx, groupID, m.localChainID)
+	if err != nil {
+		return false, err
+	}
+	if !activeGroupMember(local) || local.MemberAgentPubkey != hex.EncodeToString(m.agentPub) {
+		return false, nil
+	}
+	return true, nil
+}
+
+// ingestPulledJournalPage linearizes a lock-free network fetch with trust and
+// group-policy revocation. The complete page, including convergence cursors, is
+// committed in one transaction while journalMu -> policy WRITE are held. A
+// revoke that finishes before this point removes the binding and the page is
+// discarded; a revoke that started later waits for this transaction to finish.
+func (m *Manager) ingestPulledJournalPage(ctx context.Context, ss *store.SQLiteStore, remoteChainID, groupID, subchain string, terminalOnly bool, entries []store.SyncGroupLogEntry, peerRosterHead string) (int, []string, []string, error) {
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
+	policyUnlock := ss.LockSyncPolicyWrite()
+	defer policyUnlock()
+
+	bound, err := m.currentPullGroupPeerBound(ctx, ss, remoteChainID, groupID)
+	if err != nil {
+		return 0, nil, nil, fmt.Errorf("revalidate journal peer: %w", err)
+	}
+	if !bound {
+		return 0, nil, nil, fmt.Errorf("peer %s is no longer an active frozen member of group %s", remoteChainID, groupID)
+	}
+
+	var appended int
+	var evicted, removed []string
+	err = ss.RunInTx(ctx, func(txStore store.OffchainStore) error {
+		txSS, ok := txStore.(*store.SQLiteStore)
+		if !ok {
+			return fmt.Errorf("group journal requires the SQLite store backend")
+		}
+		var ingestErr error
+		if terminalOnly {
+			appended, evicted, removed, ingestErr = m.ingestTerminalJournalEntriesInTxLocked(ctx, txSS, groupID, subchain, entries)
+		} else {
+			appended, evicted, removed, ingestErr = m.ingestJournalEntriesInTxLocked(ctx, txSS, groupID, subchain, entries)
+		}
+		if ingestErr != nil {
+			return ingestErr
+		}
+		if subchain != RosterSubchain {
+			return nil
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		if peerRosterHead != "" {
+			if seenErr := txSS.SetSyncGroupMemberSeen(ctx, groupID, remoteChainID, peerRosterHead, now); seenErr != nil {
+				return seenErr
+			}
+		}
+		if appended == 0 {
+			return nil
+		}
+		group, groupErr := txSS.GetSyncGroup(ctx, groupID)
+		if groupErr != nil {
+			return groupErr
+		}
+		if group == nil {
+			return fmt.Errorf("group %s disappeared during journal ingest", groupID)
+		}
+		return txSS.UpdateSyncGroupMemberProgress(ctx, groupID, m.localChainID, group.RosterRevision, group.RosterJournalHead, now)
+	})
+	if err != nil {
+		// RunInTx rolled the complete page back. Do not report partial transitions
+		// accumulated in the in-memory fold as durable side effects.
+		return 0, nil, nil, err
+	}
+	return appended, evicted, removed, nil
 }
 
 // PullGroupJournal fetches a peer's sub-chain from the local head onward,
@@ -505,7 +651,6 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 	// enforces exactly what durably applied (docs §10, POST-BATCH hook).
 	var evictedChains, removedDomains []string
 	defer func() { m.enforceRemovalBatch(ss, groupID, evictedChains, removedDomains) }()
-	var peerRosterHead string
 	for page := 0; page < syncJournalMaxPages; page++ {
 		if ctx.Err() != nil {
 			return appended, ctx.Err()
@@ -524,17 +669,21 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		if resp.Version != JournalWireVersion {
 			return appended, fmt.Errorf("peer %s returned unsupported journal response version %d (want %d)", remoteChainID, resp.Version, JournalWireVersion)
 		}
-		if resp.RosterHead != "" {
-			peerRosterHead = resp.RosterHead
-		}
-		if len(resp.Entries) == 0 {
-			break
-		}
 		if len(resp.Entries) > SyncJournalMaxEntries {
 			return appended, fmt.Errorf("peer %s returned %d entries (max %d)", remoteChainID, len(resp.Entries), SyncJournalMaxEntries)
 		}
 		if resp.TerminalOnly && !strings.HasPrefix(subchain, "domain:") {
 			return appended, fmt.Errorf("peer %s returned terminal-only roster response", remoteChainID)
+		}
+		if len(resp.Entries) == 0 {
+			n, evicted, removed, ingestErr := m.ingestPulledJournalPage(ctx, ss, remoteChainID, groupID, subchain, resp.TerminalOnly, nil, resp.RosterHead)
+			appended += n
+			evictedChains = append(evictedChains, evicted...)
+			removedDomains = append(removedDomains, removed...)
+			if ingestErr != nil {
+				return appended, ingestErr
+			}
+			break
 		}
 		// Contiguity/ascending check BEFORE any verification work — a peer cannot
 		// make us re-verify entries at or below our head. Terminal-only pages are
@@ -550,18 +699,10 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 			st = append(st, wireToStore(groupID, wentry))
 		}
 		maxSeq := st[len(st)-1].Seq
-		// Ingest this page under the lock (fetch was lock-free); re-reads the head
-		// each iteration so append-atomicity holds.
-		m.journalMu.Lock()
-		var n int
-		var evicted, removed []string
-		var iErr error
-		if resp.TerminalOnly {
-			n, evicted, removed, iErr = m.ingestTerminalJournalEntriesLocked(ctx, ss, groupID, subchain, st)
-		} else {
-			n, evicted, removed, iErr = m.ingestJournalEntriesLocked(ctx, ss, groupID, subchain, st)
-		}
-		m.journalMu.Unlock()
+		// The fetch above intentionally held no local lock. Revalidate the current
+		// trust edge and exact group identities under journalMu -> policy WRITE, then
+		// commit the complete page and convergence cursors in one transaction.
+		n, evicted, removed, iErr := m.ingestPulledJournalPage(ctx, ss, remoteChainID, groupID, subchain, resp.TerminalOnly, st, resp.RosterHead)
 		appended += n
 		evictedChains = append(evictedChains, evicted...)
 		removedDomains = append(removedDomains, removed...)
@@ -572,25 +713,6 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 			break // no forward progress (defensive) or last page
 		}
 		after = maxSeq
-	}
-	// Convergence tracking (§9.3, the #3 dashboard "N revisions behind / last
-	// synced T / converged Y/N"):
-	//   - the PEER's observed roster head (a no-op if the peer isn't a member row),
-	//     leaving last_acked_roster_revision — which the apply layer owns — untouched;
-	//   - THIS node's own catch-up: once the roster page is verified + applied, our
-	//     self member row advances to the group's current roster_revision (monotonic
-	//     via SetSyncGroupManifest), so "am I converged" is renderable. Only after a
-	//     real append, and never regressing (roster_revision only advances).
-	if subchain == RosterSubchain {
-		now := time.Now().UTC().Format(time.RFC3339)
-		if peerRosterHead != "" {
-			_ = ss.SetSyncGroupMemberSeen(ctx, groupID, remoteChainID, peerRosterHead, now)
-		}
-		if appended > 0 {
-			if g, gErr := ss.GetSyncGroup(ctx, groupID); gErr == nil && g != nil {
-				_ = ss.UpdateSyncGroupMemberProgress(ctx, groupID, m.localChainID, g.RosterRevision, g.RosterJournalHead, now)
-			}
-		}
 	}
 	return appended, nil
 }

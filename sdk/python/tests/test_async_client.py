@@ -9,6 +9,15 @@ BASE_URL = "http://localhost:8080"
 @pytest.fixture
 def mock_api():
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as respx_mock:
+        respx_mock.get(
+            "/v1/governance/context", name="governance_context"
+        ).mock(
+            return_value=httpx.Response(200, json={
+                "validator_id": "validator-a",
+                "governance_domain": "sage.governance",
+                "app_v20_active": True,
+            })
+        )
         yield respx_mock
 
 
@@ -155,5 +164,66 @@ async def test_governance_propose_scope_uses_guided_template(async_client, mock_
     body = json.loads(route.calls.last.request.read())
     assert result.tx_hash == "tx-1"
     assert body["target_id"] == "scope-a"
+    assert body["validator_id"] == "validator-a"
+    assert body["governance_domain"] == "sage.governance"
     assert body["scope"]["domains"] == ["research"]
     assert "payload" not in body
+
+
+@pytest.mark.asyncio
+async def test_governance_vote_and_cancel_include_fetched_context(async_client, mock_api):
+    import json
+
+    vote = mock_api.post("/v1/governance/vote").mock(
+        return_value=httpx.Response(200, json={"tx_hash": "vote-tx", "status": "accepted"})
+    )
+    cancel = mock_api.post("/v1/governance/cancel").mock(
+        return_value=httpx.Response(200, json={"tx_hash": "cancel-tx", "status": "cancelled"})
+    )
+
+    await async_client.governance_vote("proposal-1", "accept")
+    await async_client.governance_cancel("proposal-1")
+
+    for route in (vote, cancel):
+        body = json.loads(route.calls.last.request.read())
+        assert body["validator_id"] == "validator-a"
+        assert body["governance_domain"] == "sage.governance"
+    assert mock_api["governance_context"].call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_governance_context_404_preserves_pre_v20_body(async_client, mock_api):
+    import json
+
+    mock_api["governance_context"].mock(
+        return_value=httpx.Response(404, text="404 page not found")
+    )
+    route = mock_api.post("/v1/governance/cancel").mock(
+        return_value=httpx.Response(200, json={"tx_hash": "cancel-tx", "status": "cancelled"})
+    )
+
+    await async_client.governance_cancel("proposal-1")
+    body = json.loads(route.calls.last.request.read())
+    assert "validator_id" not in body
+    assert "governance_domain" not in body
+
+
+@pytest.mark.asyncio
+async def test_inactive_governance_context_preserves_pre_v20_body(async_client, mock_api):
+    import json
+
+    mock_api["governance_context"].mock(
+        return_value=httpx.Response(200, json={
+            "validator_id": "validator-a",
+            "governance_domain": "",
+            "app_v20_active": False,
+        })
+    )
+    route = mock_api.post("/v1/governance/vote").mock(
+        return_value=httpx.Response(200, json={"tx_hash": "vote-tx", "status": "accepted"})
+    )
+
+    await async_client.governance_vote("proposal-1", "accept")
+    body = json.loads(route.calls.last.request.read())
+    assert "validator_id" not in body
+    assert "governance_domain" not in body

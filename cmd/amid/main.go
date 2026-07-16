@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -48,7 +51,8 @@ func main() {
 	badgerPath := flag.String("badger-path", envOrDefault("BADGER_PATH", "data/sage.db"), "BadgerDB data path")
 	abciAddr := flag.String("abci-addr", envOrDefault("ABCI_ADDR", ""), "ABCI server listen address (e.g. tcp://0.0.0.0:26658). If set, runs as standalone ABCI server; otherwise embeds CometBFT in-process")
 	cometRPC := flag.String("comet-rpc", envOrDefault("COMET_RPC", "http://127.0.0.1:26657"), "CometBFT RPC endpoint for REST API tx broadcast")
-	validatorKeyFile := flag.String("validator-key-file", os.Getenv("VALIDATOR_KEY_FILE"), "priv_validator_key.json for the memory auto-voter in socket mode (in-process mode uses the key under --home). If unset in socket mode, no voter runs")
+	validatorKeyFile := flag.String("validator-key-file", os.Getenv("VALIDATOR_KEY_FILE"), "priv_validator_key.json for the memory auto-voter and REST governance gateway in socket mode (in-process mode uses the key under --home). If unset in socket mode, no voter runs and governance mutations return 503")
+	governanceOperatorID := flag.String("governance-operator-id", os.Getenv("SAGE_GOVERNANCE_OPERATOR_ID"), "hex Ed25519 identity allowed to authorize this validator's REST governance mutations (empty disables them)")
 	requireVoter := flag.Bool("require-voter", envBoolOrDefault("VOTER_REQUIRED", false), "Exit non-zero at startup if the memory auto-voter cannot start (missing/unreadable/invalid validator key) instead of serving without a voter")
 	tlsCert := flag.String("tls-cert", os.Getenv("TLS_CERT"), "TLS certificate file for REST API (PEM)")
 	tlsKey := flag.String("tls-key", os.Getenv("TLS_KEY"), "TLS private key file for REST API (PEM)")
@@ -144,13 +148,13 @@ func main() {
 
 	if *abciAddr != "" {
 		// ── Standalone ABCI server mode (Docker: separate CometBFT container) ──
-		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *validatorKeyFile, *tlsCert, *tlsKey, *tlsCA, *requireVoter, health, logger)
+		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *validatorKeyFile, *governanceOperatorID, *tlsCert, *tlsKey, *tlsCA, *requireVoter, health, logger)
 	} else {
 		// ── In-process mode (single binary: ABCI + CometBFT embedded) ──
 		if *cometHome == "" {
 			logger.Fatal().Msg("CometBFT home directory is required in in-process mode (--home or COMETBFT_HOME)")
 		}
-		runInProcess(app, *cometHome, *restAddr, *metricsAddr, *tlsCert, *tlsKey, *tlsCA, *requireVoter, health, logger)
+		runInProcess(app, *cometHome, *restAddr, *metricsAddr, *governanceOperatorID, *tlsCert, *tlsKey, *tlsCA, *requireVoter, health, logger)
 	}
 }
 
@@ -190,8 +194,121 @@ func requireVoterKeyOrExit(keyFile string, logger zerolog.Logger) {
 	}
 }
 
+type governanceDomainBinder interface {
+	SetExpectedGovernanceDelegationDomain(chainID string) error
+}
+
+const (
+	governanceDomainRequestTimeout = 3 * time.Second
+	governanceDomainResponseLimit  = 1 << 20
+	governanceDomainRetryInitial   = 250 * time.Millisecond
+	governanceDomainRetryMax       = 5 * time.Second
+)
+
+func newGovernanceDomainHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: governanceDomainRequestTimeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			// The validator's chain identity must come from the exact operator-
+			// configured Comet endpoint, never a redirected authority.
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// configureExpectedGovernanceDomainFromRPC performs one bounded lookup of the
+// authoritative CometBFT chain_id and binds it into the local app-v20 voter
+// guard. Socket mode deliberately starts ABCI before the external Comet process,
+// so transient connection failures are returned to the caller for retry.
+func configureExpectedGovernanceDomainFromRPC(ctx context.Context, client *http.Client, app governanceDomainBinder, cometRPC string) (string, error) {
+	if client == nil {
+		return "", errors.New("CometBFT chain-id HTTP client is nil")
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, governanceDomainRequestTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(cometRPC, "/")+"/status", nil)
+	if err != nil {
+		return "", fmt.Errorf("build CometBFT chain-id request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fetch CometBFT chain-id: %w", err)
+	}
+	defer resp.Body.Close()
+	var status struct {
+		Result struct {
+			NodeInfo struct {
+				Network string `json:"network"`
+			} `json:"node_info"`
+		} `json:"result"`
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetch CometBFT chain-id: HTTP status %d", resp.StatusCode)
+	}
+	if decodeErr := json.NewDecoder(io.LimitReader(resp.Body, governanceDomainResponseLimit)).Decode(&status); decodeErr != nil {
+		return "", fmt.Errorf("decode CometBFT chain-id response: %w", decodeErr)
+	}
+	if status.Result.NodeInfo.Network == "" {
+		return "", errors.New("CometBFT status omitted chain-id")
+	}
+	if err = app.SetExpectedGovernanceDelegationDomain(status.Result.NodeInfo.Network); err != nil {
+		return "", fmt.Errorf("bind CometBFT chain-id: %w", err)
+	}
+	return status.Result.NodeInfo.Network, nil
+}
+
+// bindExpectedGovernanceDomainFromRPCUntilReady keeps the app-v20 voter
+// fail-closed until the external Comet process is reachable. A successful bind
+// is permanent for this process; SageApp rejects any later attempt to swap the
+// chain identity underneath a live validator.
+func bindExpectedGovernanceDomainFromRPCUntilReady(
+	ctx context.Context,
+	client *http.Client,
+	app governanceDomainBinder,
+	cometRPC string,
+	initialRetry time.Duration,
+	maxRetry time.Duration,
+	logger zerolog.Logger,
+) error {
+	if initialRetry <= 0 || maxRetry < initialRetry {
+		return fmt.Errorf("invalid CometBFT chain-id retry window: initial=%s max=%s", initialRetry, maxRetry)
+	}
+	retryDelay := initialRetry
+	for attempt := 1; ; attempt++ {
+		chainID, err := configureExpectedGovernanceDomainFromRPC(ctx, client, app, cometRPC)
+		if err == nil {
+			logger.Info().Str("chain_id", chainID).Int("attempt", attempt).
+				Msg("app-v20 upgrade voter bound to authoritative CometBFT chain-id")
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if attempt == 1 || attempt%12 == 0 {
+			logger.Warn().Err(err).Int("attempt", attempt).Dur("retry_in", retryDelay).
+				Msg("waiting for CometBFT chain-id; app-v20 upgrade voter remains fail-closed")
+		}
+
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if retryDelay < maxRetry {
+			retryDelay *= 2
+			if retryDelay > maxRetry {
+				retryDelay = maxRetry
+			}
+		}
+	}
+}
+
 // runABCIServer starts the ABCI app as a TCP server for an external CometBFT node.
-func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC, validatorKeyFile, tlsCert, tlsKey, tlsCA string, requireVoter bool, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC, validatorKeyFile, governanceOperatorID, tlsCert, tlsKey, tlsCA string, requireVoter bool, health *metrics.HealthChecker, logger zerolog.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cmtLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(os.Stdout))
@@ -216,16 +333,31 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 		}
 	}()
 
-	health.SetCometBFTHealth(true)
 	logger.Info().Str("addr", abciAddr).Msg("ABCI server listening")
 
 	// Start metrics + REST + health in background
-	startServices(ctx, app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
+	startServices(ctx, app, restAddr, metricsAddr, cometRPC, validatorKeyFile, governanceOperatorID, tlsCert, tlsKey, tlsCA, health, logger)
 
 	// Socket mode: the consensus key lives with the separate CometBFT process, so
 	// the voter needs it supplied explicitly (operator mounts priv_validator_key.json
 	// readable to amid via --validator-key-file). Absent → no voter (or no boot at
 	// all under --require-voter, enforced by the pre-serve gate above).
+	go func() {
+		client := newGovernanceDomainHTTPClient()
+		if bindErr := bindExpectedGovernanceDomainFromRPCUntilReady(
+			ctx,
+			client,
+			app,
+			cometRPC,
+			governanceDomainRetryInitial,
+			governanceDomainRetryMax,
+			logger,
+		); bindErr == nil {
+			health.SetCometBFTHealth(true)
+		} else if !errors.Is(bindErr, context.Canceled) {
+			logger.Warn().Err(bindErr).Msg("CometBFT chain-id binding stopped; app-v20 upgrade voter remains fail-closed")
+		}
+	}()
 	if err := startMemoryVoter(ctx, app, cometRPC, validatorKeyFile, health, logger); err != nil {
 		if requireVoter {
 			// Normally unreachable — requireVoterKeyOrExit already refused to serve —
@@ -240,7 +372,7 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 }
 
 // runInProcess embeds CometBFT in the same process as the ABCI app.
-func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCert, tlsKey, tlsCA string, requireVoter bool, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, governanceOperatorID, tlsCert, tlsKey, tlsCA string, requireVoter bool, health *metrics.HealthChecker, logger zerolog.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cometCfg, err := loadCometConfig(cometHome)
@@ -291,14 +423,21 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCe
 		cometNode.Wait()
 	}()
 
-	health.SetCometBFTHealth(true)
 	logger.Info().
 		Str("node_id", string(cometNode.NodeInfo().ID())).
 		Msg("CometBFT node started (in-process)")
+	defaultNodeInfo, ok := cometNode.NodeInfo().(p2p.DefaultNodeInfo)
+	if !ok {
+		logger.Fatal().Msg("cannot read embedded CometBFT chain-id from node info")
+	}
+	if err := app.SetExpectedGovernanceDelegationDomain(defaultNodeInfo.Network); err != nil {
+		logger.Fatal().Err(err).Msg("cannot bind app-v20 upgrade voter to embedded CometBFT chain-id")
+	}
+	health.SetCometBFTHealth(true)
 
 	// In-process: CometBFT RPC is localhost
 	cometRPC := fmt.Sprintf("http://127.0.0.1%s", cometCfg.RPC.ListenAddress[len("tcp://0.0.0.0"):])
-	startServices(ctx, app, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA, health, logger)
+	startServices(ctx, app, restAddr, metricsAddr, cometRPC, cometCfg.PrivValidatorKeyFile(), governanceOperatorID, tlsCert, tlsKey, tlsCA, health, logger)
 
 	// In-process: the consensus key is right here under --home; the voter signs
 	// memory votes with it (same key CometBFT validates blocks with).
@@ -318,7 +457,7 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, tlsCe
 }
 
 // startServices launches the metrics server and REST API.
-func startServices(ctx context.Context, app *sageabci.SageApp, restAddr, metricsAddr, cometRPC, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
+func startServices(ctx context.Context, app *sageabci.SageApp, restAddr, metricsAddr, cometRPC, validatorKeyFile, governanceOperatorID, tlsCert, tlsKey, tlsCA string, health *metrics.HealthChecker, logger zerolog.Logger) {
 	// Prometheus metrics server
 	metricsServer := metrics.NewMetricsServer(metricsAddr, health)
 	go func() {
@@ -332,6 +471,21 @@ func startServices(ctx context.Context, app *sageabci.SageApp, restAddr, metrics
 	pgStore := app.GetOffchainStore()
 	badgerStore := app.GetBadgerStore()
 	restServer := rest.NewServer(cometRPC, pgStore, pgStore, badgerStore, health, logger, embedding.NewClient("", ""))
+	// --home/--validator-key-file is authoritative for amid. Neutralize any key
+	// NewServer inherited from the compatibility env path before explicit load.
+	restServer.DisableValidatorSigningKey()
+	if validatorKeyFile == "" {
+		logger.Warn().Msg("REST governance disabled: validator key file is not configured")
+	} else if validatorKey, keyErr := voter.LoadPrivValidatorKey(validatorKeyFile); keyErr != nil {
+		logger.Error().Err(keyErr).Str("key_file", validatorKeyFile).Msg("REST governance disabled: validator key is unusable")
+	} else if keyErr = restServer.SetValidatorSigningKey(validatorKey); keyErr != nil {
+		logger.Error().Err(keyErr).Msg("REST governance disabled: validator key injection failed")
+	}
+	if governanceOperatorID == "" {
+		logger.Warn().Msg("REST governance disabled: set --governance-operator-id / SAGE_GOVERNANCE_OPERATOR_ID")
+	} else if operatorErr := restServer.SetGovernanceOperatorID(governanceOperatorID); operatorErr != nil {
+		logger.Error().Err(operatorErr).Msg("REST governance disabled: governance operator identity is invalid")
+	}
 	restServer.StartEmbeddingRepair(ctx)
 	restServer.SetSuppCache(app.SuppCache)
 	// v8.0: wire the off-consensus fork-gate accessor so REST handlers
@@ -340,6 +494,7 @@ func startServices(ctx context.Context, app *sageabci.SageApp, restAddr, metrics
 	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
 	restServer.SetPostV17ForNextTxAccessor(app.IsAppV17ActiveForNextTx)
 	restServer.SetPostV20ForNextTxAccessor(app.IsAppV20ActiveForNextTx)
+	restServer.SetGovernanceDomainAccessor(app.GovernanceDelegationDomain)
 
 	if tlsCert != "" && tlsKey != "" {
 		// TLS mode: load certs and start HTTPS.

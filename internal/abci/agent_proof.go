@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/l33tdawg/sage/internal/auth"
+	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/store"
 	memorytags "github.com/l33tdawg/sage/internal/tags"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -34,11 +37,25 @@ type signedAgentRequest struct {
 // enforceDelegatedAgentProof closes the delegated-signing gap that existed in
 // the original app-v17 candidate. When the outer transaction signer is not the
 // agent, consensus must independently prove that the signed HTTP request maps
-// to this exact type-specific payload. Same-key node-originated transactions
-// are already bound by the outer transaction signature and nonce.
-func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusTime time.Time, claim bool, bindMemoryTags bool) error {
-	if !txUsesAgentIdentity(parsedTx.Type) || bytes.Equal(parsedTx.PublicKey, parsedTx.AgentPubKey) {
+// to this exact type-specific payload. App-v20 additionally validates every
+// proof-bearing governance request, including same-key envelopes, so their
+// signed validator and chain domain cannot be ignored during cross-chain replay.
+// Truly proofless direct governance (including the upgrade auto-voter) retains
+// its historical outer-signature + nonce behavior.
+func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusTime time.Time, claim bool, postAppV20 bool) error {
+	usesAgentIdentity := txUsesAgentIdentity(parsedTx.Type)
+	governanceProof := postAppV20 && isProofBearingGovernanceRequest(parsedTx)
+	if (!usesAgentIdentity && !governanceProof) ||
+		(bytes.Equal(parsedTx.PublicKey, parsedTx.AgentPubKey) && !governanceProof) {
 		return nil
+	}
+	// Proof-bearing governance is new at app-v20, so it can require the complete
+	// modern request proof without changing historical REST or truly proofless
+	// direct-validator transactions. Eight bytes is the canonical X-Nonce size
+	// used by the SDK and gives each authorization a signer-chosen,
+	// signature-bound claim key.
+	if governanceProof && len(parsedTx.AgentNonce) != 8 {
+		return fmt.Errorf("app-v20 governance proof requires an 8-byte request nonce")
 	}
 	if len(parsedTx.AgentRequest) == 0 {
 		return fmt.Errorf("delegated agent proof is missing its signed request")
@@ -58,12 +75,15 @@ func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusT
 	if !agentProofTimestampFresh(parsedTx.AgentTimestamp, consensusTime) {
 		return fmt.Errorf("delegated agent proof timestamp is older than the 5-minute consensus window")
 	}
+	if governanceProof && !appV20GovernanceProofTimestampFresh(parsedTx.AgentTimestamp, consensusTime) {
+		return fmt.Errorf("app-v20 governance proof timestamp is more than 5 minutes ahead of consensus time")
+	}
 
 	req, err := parseSignedAgentRequest(parsedTx.AgentRequest)
 	if err != nil {
 		return err
 	}
-	if bindErr := app.verifySignedAgentAction(parsedTx, agentID, req, bindMemoryTags); bindErr != nil {
+	if bindErr := app.verifySignedAgentAction(parsedTx, agentID, req, postAppV20); bindErr != nil {
 		return fmt.Errorf("delegated agent action mismatch: %w", bindErr)
 	}
 
@@ -88,6 +108,47 @@ func (app *SageApp) enforceDelegatedAgentProof(parsedTx *tx.ParsedTx, consensusT
 		return store.ErrAgentProofReplayed
 	}
 	return nil
+}
+
+func isGovernanceTx(txType tx.TxType) bool {
+	switch txType {
+	case tx.TxTypeGovPropose, tx.TxTypeGovVote, tx.TxTypeGovCancel:
+		return true
+	default:
+		return false
+	}
+}
+
+// hasAgentProofMaterial distinguishes an intentional proof-bearing envelope
+// (delegated or same-key) from the zero-filled optional fields produced when a
+// direct transaction is encoded. Direct validator governance (including the
+// built-in upgrade voter) therefore keeps its historical no-proof behavior
+// after app-v20.
+func hasAgentProofMaterial(parsedTx *tx.ParsedTx) bool {
+	return hasNonZeroByte(parsedTx.AgentPubKey) ||
+		hasNonZeroByte(parsedTx.AgentSig) ||
+		parsedTx.AgentTimestamp != 0 ||
+		hasNonZeroByte(parsedTx.AgentBodyHash) ||
+		len(parsedTx.AgentNonce) != 0 ||
+		len(parsedTx.AgentRequest) != 0
+}
+
+func hasNonZeroByte(value []byte) bool {
+	for _, b := range value {
+		if b != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func isDelegatedGovernanceProof(parsedTx *tx.ParsedTx) bool {
+	return isProofBearingGovernanceRequest(parsedTx) &&
+		!bytes.Equal(parsedTx.PublicKey, parsedTx.AgentPubKey)
+}
+
+func isProofBearingGovernanceRequest(parsedTx *tx.ParsedTx) bool {
+	return isGovernanceTx(parsedTx.Type) && hasAgentProofMaterial(parsedTx)
 }
 
 func txUsesAgentIdentity(txType tx.TxType) bool {
@@ -128,7 +189,9 @@ func txUsesAgentIdentity(txType tx.TxType) bool {
 	}
 }
 
-// agentProofTimestampFresh keeps only a LOWER bound (reject captured-old proofs);
+// agentProofTimestampFresh keeps only a LOWER bound (reject captured-old proofs)
+// for the historical/non-governance path. App-v20 proof-bearing governance adds
+// its forward-only upper bound in appV20GovernanceProofTimestampFresh;
 // the upper bound was dropped in v11.7.6 so a future-dated proof from a node whose
 // deterministic block time lags its wall clock (idle single-validator chains) is
 // still accepted. Like the embedding relaxation above, this is an UNGATED v11.7.6
@@ -149,6 +212,24 @@ func agentProofTimestampFresh(timestamp int64, consensusTime time.Time) bool {
 	// wall clock before constructing the transaction, and the agent signature
 	// means a future-dated proof still cannot be forged by the outer node.
 	return timestamp >= min
+}
+
+// appV20GovernanceProofTimestampFresh is a forward-only tightening for the new
+// app-v20 governance authorization surface. Unlike historical non-governance
+// delegated proofs, governance requests must be within the deterministic block
+// time window in both directions so a far-future authorization cannot remain
+// replayable for an attacker-chosen duration.
+func appV20GovernanceProofTimestampFresh(timestamp int64, consensusTime time.Time) bool {
+	if !agentProofTimestampFresh(timestamp, consensusTime) {
+		return false
+	}
+	now := consensusTime.Unix()
+	skew := int64(delegatedAgentProofSkew / time.Second)
+	max := int64(math.MaxInt64)
+	if now <= math.MaxInt64-skew {
+		max = now + skew
+	}
+	return timestamp <= max
 }
 
 func delegatedAgentProofFingerprint(parsedTx *tx.ParsedTx) [sha256.Size]byte {
@@ -242,6 +323,124 @@ func requireAgentRoute(req signedAgentRequest, method string, want ...string) ([
 	return params, nil
 }
 
+// requireGovernanceAgentRoute accepts the two operator surfaces that construct
+// governance transactions. The dashboard intentionally has no cancel route.
+// It returns whether the matched route is the dashboard family so proposal-op
+// parsing can mirror that handler's narrower public contract exactly.
+func requireGovernanceAgentRoute(req signedAgentRequest, action string) (bool, error) {
+	if req.method != "POST" {
+		return false, fmt.Errorf("method %q does not authorize POST", req.method)
+	}
+	parts, err := req.pathParts()
+	if err != nil {
+		return false, err
+	}
+	if len(parts) == 3 && parts[0] == "v1" && parts[1] == "governance" && parts[2] == action {
+		return false, nil
+	}
+	if action != "cancel" && len(parts) == 4 && parts[0] == "v1" && parts[1] == "dashboard" && parts[2] == "governance" && parts[3] == action {
+		return true, nil
+	}
+	return false, fmt.Errorf("path %q does not authorize a governance %s", req.path, action)
+}
+
+func governanceProposalOpFromRequest(value string, dashboard bool) (tx.GovProposalOp, error) {
+	switch value {
+	case "add_validator":
+		return tx.GovOpAddValidator, nil
+	case "remove_validator":
+		return tx.GovOpRemoveValidator, nil
+	case "update_power":
+		return tx.GovOpUpdatePower, nil
+	case "domain_reassign":
+		if !dashboard {
+			return tx.GovOpDomainReassign, nil
+		}
+	case "memory_domain_repair":
+		if !dashboard {
+			return tx.GovOpMemoryDomainRepair, nil
+		}
+	case tx.GovOperationNameSyncGroupAction:
+		return tx.GovOpSyncGroupAction, nil
+	case "scope_action":
+		return tx.GovOpScopeAction, nil
+	}
+	return 0, fmt.Errorf("operation %q is not supported by this governance route", value)
+}
+
+func governanceVoteDecisionFromRequest(value string) (tx.VoteDecision, error) {
+	switch value {
+	case "accept":
+		return tx.VoteDecisionAccept, nil
+	case "reject":
+		return tx.VoteDecisionReject, nil
+	case "abstain":
+		return tx.VoteDecisionAbstain, nil
+	default:
+		return 0, fmt.Errorf("decision %q is not supported", value)
+	}
+}
+
+func resolveSignedGovernancePayload(op tx.GovProposalOp, targetID, rawPayload string, template *scope.ProposalTemplate) (string, []byte, error) {
+	if template != nil {
+		if op != tx.GovOpScopeAction {
+			return "", nil, fmt.Errorf("scope is only valid for scope_action")
+		}
+		if rawPayload != "" {
+			return "", nil, fmt.Errorf("payload and scope are mutually exclusive")
+		}
+		encoded, err := scope.EncodeProposalTemplate(*template)
+		if err != nil {
+			return "", nil, fmt.Errorf("scope: %w", err)
+		}
+		if targetID == "" {
+			targetID = template.ScopeID
+		} else if targetID != template.ScopeID {
+			return "", nil, fmt.Errorf("target_id %q does not match scope_id %q", targetID, template.ScopeID)
+		}
+		return targetID, encoded, nil
+	}
+
+	var payload []byte
+	if rawPayload != "" {
+		decoded, err := base64.StdEncoding.DecodeString(rawPayload)
+		if err != nil {
+			return "", nil, fmt.Errorf("payload must be valid base64")
+		}
+		payload = decoded
+	}
+	if targetID == "" {
+		return "", nil, fmt.Errorf("target_id is required")
+	}
+	if op == tx.GovOpScopeAction && len(payload) == 0 {
+		return "", nil, fmt.Errorf("scope_action requires either payload or scope")
+	}
+	return targetID, payload, nil
+}
+
+// verifyGovernanceDelegationContext binds an operator's signed HTTP action to
+// exactly one validator actor on exactly this app-v20 chain. Without these two
+// signed fields a Byzantine validator can copy a valid mempool proof, re-sign
+// the outer transaction, and steal proposal ownership or voting power.
+func (app *SageApp) verifyGovernanceDelegationContext(actual *tx.ParsedTx, validatorID, governanceDomain string) error {
+	validatorPub, err := auth.AgentIDToPublicKey(validatorID)
+	if err != nil || auth.PublicKeyToAgentID(validatorPub) != validatorID {
+		return fmt.Errorf("validator_id must be canonical lowercase Ed25519 hex")
+	}
+	outerID := auth.PublicKeyToAgentID(ed25519.PublicKey(actual.PublicKey))
+	if validatorID != outerID {
+		return fmt.Errorf("validator_id %q does not authorize outer validator %q", validatorID, outerID)
+	}
+	domain, err := app.governanceDelegationDomain()
+	if err != nil {
+		return err
+	}
+	if governanceDomain != hex.EncodeToString(domain) {
+		return fmt.Errorf("governance_domain does not match this chain")
+	}
+	return nil
+}
+
 func memoryTypeFromRequest(value string) (tx.MemoryType, error) {
 	switch value {
 	case "fact":
@@ -283,7 +482,8 @@ func compareAgentPayload(actual, expected *tx.ParsedTx) error {
 // REPLAY-CRITICAL (H-2) — DO NOT FORK-GATE THE RELAXATION BELOW.
 // The delegated MemorySubmit binding here uses the NODE-derived EmbeddingHash
 // (expected.EmbeddingHash = actual.MemorySubmit.EmbeddingHash), and the sibling
-// agentProofTimestampFresh keeps only a lower time bound. Both relaxations shipped
+// agentProofTimestampFresh keeps only a lower time bound for historical
+// non-governance proofs. Both relaxations shipped
 // UNGATED in the v11.7.6 release ("restore reliable MCP turns", commit 534b6fd) and
 // are therefore the consensus rule from that height onward. They form a strict
 // SUPERSET of the prior v11.7.5 rule (everything the old rule accepted, the new rule
@@ -295,7 +495,8 @@ func compareAgentPayload(actual, expected *tx.ParsedTx) error {
 // needs a v11.8 quorum), so such a gate would replay committed delegated sage_turn
 // writes under the stricter OLD rule, Code-109-reject them, and diverge on
 // AppHash/LastResultsHash — crashing every chain that upgraded through v11.7.6. If the
-// embedding/timestamp posture must be tightened, it has to be a NEW forward-only fork
+// embedding/timestamp posture for those historical operations must be tightened,
+// it has to be a NEW forward-only fork
 // that changes behaviour only ABOVE its own activation height, never a retroactive
 // re-strictification. Guarded by TestReplayGuardDelegatedMemorySubmitAcceptedBelowAppV19.
 func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string, req signedAgentRequest, bindMemoryTags bool) error { //nolint:gocyclo,maintidx // exhaustive protocol routing is intentionally centralized
@@ -759,6 +960,103 @@ func (app *SageApp) verifySignedAgentAction(actual *tx.ParsedTx, agentID string,
 			OrgID:         backfillString(body.OrgID, orgID),
 			DeptID:        backfillString(body.DeptID, deptID),
 		}
+
+	case tx.TxTypeGovPropose:
+		dashboard, err := requireGovernanceAgentRoute(req, "propose")
+		if err != nil {
+			return err
+		}
+		var body struct {
+			ValidatorID      string                  `json:"validator_id"`
+			GovernanceDomain string                  `json:"governance_domain"`
+			Operation        string                  `json:"operation"`
+			TargetID         string                  `json:"target_id"`
+			TargetPubkey     string                  `json:"target_pubkey,omitempty"`
+			TargetPower      int64                   `json:"target_power,omitempty"`
+			ExpiryBlocks     int64                   `json:"expiry_blocks,omitempty"`
+			Reason           string                  `json:"reason"`
+			Payload          string                  `json:"payload,omitempty"`
+			Scope            *scope.ProposalTemplate `json:"scope,omitempty"`
+		}
+		if err = decodeSignedJSON(req.body, &body, false); err != nil {
+			return err
+		}
+		if body.Operation == "" || body.Reason == "" {
+			return fmt.Errorf("signed governance proposal fails the REST contract")
+		}
+		if err = app.verifyGovernanceDelegationContext(actual, body.ValidatorID, body.GovernanceDomain); err != nil {
+			return err
+		}
+		op, err := governanceProposalOpFromRequest(body.Operation, dashboard)
+		if err != nil {
+			return err
+		}
+		var targetPubKey []byte
+		if body.TargetPubkey != "" {
+			targetPubKey, err = hex.DecodeString(body.TargetPubkey)
+			if err != nil {
+				return fmt.Errorf("target_pubkey must be valid hex")
+			}
+		}
+		var expectedPayload []byte
+		body.TargetID, expectedPayload, err = resolveSignedGovernancePayload(op, body.TargetID, body.Payload, body.Scope)
+		if err != nil {
+			return err
+		}
+		expected.GovPropose = &tx.GovPropose{
+			Operation:    op,
+			TargetID:     body.TargetID,
+			TargetPubKey: targetPubKey,
+			TargetPower:  body.TargetPower,
+			ExpiryBlocks: body.ExpiryBlocks,
+			Reason:       body.Reason,
+			Payload:      expectedPayload,
+		}
+
+	case tx.TxTypeGovVote:
+		if _, err := requireGovernanceAgentRoute(req, "vote"); err != nil {
+			return err
+		}
+		var body struct {
+			ValidatorID      string `json:"validator_id"`
+			GovernanceDomain string `json:"governance_domain"`
+			ProposalID       string `json:"proposal_id"`
+			Decision         string `json:"decision"`
+		}
+		if err := decodeSignedJSON(req.body, &body, false); err != nil {
+			return err
+		}
+		if body.ProposalID == "" {
+			return fmt.Errorf("proposal_id is required")
+		}
+		if err := app.verifyGovernanceDelegationContext(actual, body.ValidatorID, body.GovernanceDomain); err != nil {
+			return err
+		}
+		decision, err := governanceVoteDecisionFromRequest(body.Decision)
+		if err != nil {
+			return err
+		}
+		expected.GovVote = &tx.GovVote{ProposalID: body.ProposalID, Decision: decision}
+
+	case tx.TxTypeGovCancel:
+		if _, err := requireGovernanceAgentRoute(req, "cancel"); err != nil {
+			return err
+		}
+		var body struct {
+			ValidatorID      string `json:"validator_id"`
+			GovernanceDomain string `json:"governance_domain"`
+			ProposalID       string `json:"proposal_id"`
+		}
+		if err := decodeSignedJSON(req.body, &body, false); err != nil {
+			return err
+		}
+		if body.ProposalID == "" {
+			return fmt.Errorf("proposal_id is required")
+		}
+		if err := app.verifyGovernanceDelegationContext(actual, body.ValidatorID, body.GovernanceDomain); err != nil {
+			return err
+		}
+		expected.GovCancel = &tx.GovCancel{ProposalID: body.ProposalID}
 
 	case tx.TxTypeDomainReassign:
 		if _, err := requireAgentRoute(req, "POST", "v1", "domain", "reassign"); err != nil {

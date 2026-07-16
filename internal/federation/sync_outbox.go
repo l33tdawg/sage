@@ -39,6 +39,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -254,11 +255,15 @@ func (m *Manager) syncPeerChains(ctx context.Context, ss *store.SQLiteStore) ([]
 // is empty, so behaviour is unchanged; for a group-only member the pairwise half
 // is empty and the group domains carry the fan-out.
 func (m *Manager) effectiveConsent(ctx context.Context, ss *store.SQLiteStore, chain string) ([]string, error) {
-	pairwise, err := ss.GetSyncDomains(ctx, chain)
+	agreement, err := m.ActiveAgreement(chain)
 	if err != nil {
 		return nil, err
 	}
-	group, gErr := ss.GroupSharedDomains(ctx, m.localChainID, chain)
+	pairwise, _, err := m.pairwiseEgressPolicy(ctx, ss, agreement)
+	if err != nil {
+		return nil, err
+	}
+	group, gErr := m.groupSharedDomainsForAgreement(ctx, ss, agreement)
 	if gErr != nil {
 		return nil, gErr
 	}
@@ -272,15 +277,113 @@ func (m *Manager) effectiveConsent(ctx context.Context, ss *store.SQLiteStore, c
 // symmetric effectiveConsent, which also includes group domains a full-sync member
 // merely holds (scanning those would re-export another owner's domain).
 func (m *Manager) senderConsent(ctx context.Context, ss *store.SQLiteStore, chain string) ([]string, error) {
-	pairwise, err := ss.GetSyncDomains(ctx, chain)
+	agreement, err := m.ActiveAgreement(chain)
 	if err != nil {
 		return nil, err
 	}
-	owned, oErr := ss.GroupOwnedDomainsForPeer(ctx, m.localChainID, chain)
+	pairwise, _, err := m.pairwiseEgressPolicy(ctx, ss, agreement)
+	if err != nil {
+		return nil, err
+	}
+	owned, oErr := m.sharedGroupOwnedDomainsForAgreement(ctx, ss, agreement)
 	if oErr != nil {
 		return nil, oErr
 	}
 	return unionDomains(pairwise, owned), nil
+}
+
+// exactGroupPeerAgentID resolves the remote operator identity frozen by JOIN.
+// A legacy direct edge without this binding may continue using its treaty, but
+// it cannot exercise a group capability because a chain id alone is not an
+// identity. Invalid/mismatched bindings fail the group lane closed.
+func (m *Manager) exactGroupPeerAgentID(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord) (string, bool, error) {
+	if agreement == nil {
+		return "", false, nil
+	}
+	control, err := ss.GetSyncControl(ctx, agreement.RemoteChainID)
+	if err != nil {
+		return "", false, err
+	}
+	if control == nil || control.PeerAgentID == "" || !m.syncControlPeerBound(control, &peerIdentity{
+		ChainID: agreement.RemoteChainID, AgentID: control.PeerAgentID, Agreement: agreement,
+	}) {
+		return "", false, nil
+	}
+	if _, err := decodePub(control.PeerAgentID); err != nil {
+		return "", false, nil
+	}
+	return control.PeerAgentID, true, nil
+}
+
+func (m *Manager) groupSharedDomainsForAgreement(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord) ([]string, error) {
+	peerAgentID, ok, err := m.exactGroupPeerAgentID(ctx, ss, agreement)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return ss.GroupSharedDomainsForAgents(ctx,
+		m.localChainID, hex.EncodeToString(m.agentPub), agreement.RemoteChainID, peerAgentID)
+}
+
+func (m *Manager) groupSharedDomainsWithGroupForAgreement(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord) ([]store.GroupDomainRef, error) {
+	peerAgentID, ok, err := m.exactGroupPeerAgentID(ctx, ss, agreement)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return ss.GroupSharedDomainsWithGroupForAgents(ctx,
+		m.localChainID, hex.EncodeToString(m.agentPub), agreement.RemoteChainID, peerAgentID)
+}
+
+// sharedGroupOwnedDomainsForAgents is the exact group-native owner lane:
+// owner and recipient must both match the roster keys pinned for their chains.
+func sharedGroupOwnedDomainsForAgents(ctx context.Context, ss *store.SQLiteStore, ownerChainID, ownerAgentID, peerChainID, peerAgentID string) ([]string, error) {
+	return ss.GroupOwnedDomainsForPeerAgents(ctx, ownerChainID, ownerAgentID, peerChainID, peerAgentID)
+}
+
+func (m *Manager) sharedGroupOwnedDomainsForAgreement(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord) ([]string, error) {
+	peerAgentID, ok, err := m.exactGroupPeerAgentID(ctx, ss, agreement)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return sharedGroupOwnedDomainsForAgents(ctx, ss,
+		m.localChainID, hex.EncodeToString(m.agentPub), agreement.RemoteChainID, peerAgentID)
+}
+
+func (m *Manager) resolveGroupRelayForAgreement(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, originChainID, originAgentID, domain string) (string, bool, error) {
+	peerAgentID, ok, err := m.exactGroupPeerAgentID(ctx, ss, agreement)
+	if err != nil || !ok {
+		return "", false, err
+	}
+	if originAgentID != "" {
+		return ss.ResolveGroupRelayForOriginAgent(ctx,
+			m.localChainID, hex.EncodeToString(m.agentPub), agreement.RemoteChainID, peerAgentID,
+			originChainID, originAgentID, domain)
+	}
+	return ss.ResolveGroupRelayForAgents(ctx,
+		m.localChainID, hex.EncodeToString(m.agentPub), agreement.RemoteChainID, peerAgentID, originChainID, domain)
+}
+
+// verifyStoredGroupRelayItem binds a locally admitted copy to the exact origin
+// operator pinned by the SAME group before any content crosses the network.
+// Receiver verification remains a backstop; it is too late to prevent a leak.
+func verifyStoredGroupRelayItem(ctx context.Context, ss *store.SQLiteStore, groupID, localMemoryID string, item *SyncItem) error {
+	ro, err := ss.GetRelayOrigin(ctx, item.OriginChainID, localMemoryID)
+	if err != nil {
+		return err
+	}
+	originAgentID, err := ss.GetGroupMemberAgentPubkey(ctx, groupID, item.OriginChainID)
+	if err != nil {
+		return err
+	}
+	if ro.OriginAgentPubkey == "" || ro.OriginAgentPubkey != originAgentID ||
+		ro.OriginMemoryID != item.OriginMemoryID || ro.OriginCreatedAt != item.OriginCreatedAt ||
+		string(ro.OriginSig) != string(item.OriginSig) {
+		return fmt.Errorf("stored relay provenance does not match the exact group origin")
+	}
+	originPub, err := decodePub(originAgentID)
+	if err != nil || !verifyOriginSig(originPub, item) {
+		return fmt.Errorf("stored relay signature does not verify against the exact group origin")
+	}
+	return nil
 }
 
 // unionDomains merges two domain slices, dropping duplicates and empties while
@@ -314,8 +417,179 @@ func unionDomains(a, b []string) []string {
 	return out
 }
 
+// intersectDomainScopes intersects two subtree scopes and returns the narrower
+// covering tag for every overlap. Unlike the exact-set helper used by group
+// digest disclosure, this preserves the meaning of a grant for "tii" combined
+// with a subscription for "tii.research": only "tii.research" is effective.
+func intersectDomainScopes(a, b []string) []string {
+	if len(a) == 0 || len(b) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0)
+	add := func(domain string) {
+		if domain == "" {
+			return
+		}
+		if _, ok := seen[domain]; ok {
+			return
+		}
+		seen[domain] = struct{}{}
+		out = append(out, domain)
+	}
+	for _, left := range a {
+		for _, right := range b {
+			switch {
+			case DomainAllowed([]string{left}, right):
+				add(right)
+			case DomainAllowed([]string{right}, left):
+				add(left)
+			}
+		}
+	}
+	return out
+}
+
+// pairwiseEgressPolicy is the publisher-side direct-pair copy scope. On an
+// active v3 binding it is the intersection of this node's published scope, the
+// peer's subscription, and the authoritative PeerRBAC Copy grant. No PeerRBAC
+// policy is deny-all. A v3 marker with a stale identity/CA binding fails closed instead of
+// silently falling back to legacy tx-33 rows.
+func (m *Manager) pairwiseEgressPolicy(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord) ([]string, bool, error) {
+	if agreement == nil {
+		return nil, false, fmt.Errorf("active agreement is required")
+	}
+	chain := agreement.RemoteChainID
+	control, err := ss.GetSyncControl(ctx, chain)
+	if err != nil {
+		return nil, false, err
+	}
+	// The PeerRBAC snapshot is itself a durable v3 marker. During an in-place
+	// legacy upgrade it is written before the directional lanes are published;
+	// treating only sync_control.policy_version as authoritative would leave a
+	// crash window where stale legacy sync_domains could keep copying after the
+	// new RBAC snapshot revoked Copy. Once a bound snapshot exists, switch to v3
+	// immediately and let absent directional lanes deny all.
+	policy, policyErr := m.getPeerRBACPolicyForAgreement(ctx, agreement)
+	if policyErr != nil {
+		return nil, true, policyErr
+	}
+	v3 := policy != nil || (control != nil &&
+		(control.PolicyVersion >= SyncPolicyVersionPeerRBAC || control.RemotePolicyVersion >= SyncPolicyVersionPeerRBAC))
+	if !v3 {
+		legacyDomains, legacyErr := ss.GetSyncDomains(ctx, chain)
+		return legacyDomains, false, legacyErr
+	}
+	if !m.peerRBACSyncBinding(control, agreement, control.PeerAgentID) {
+		return nil, true, fmt.Errorf("active peer RBAC copy binding mismatch")
+	}
+	publish, err := ss.GetDirectionalSyncDomains(ctx, chain, store.SyncDirectionLocalPublish)
+	if err != nil {
+		return nil, true, err
+	}
+	remoteSubscribe, err := ss.GetDirectionalSyncDomains(ctx, chain, store.SyncDirectionRemoteSubscribe)
+	if err != nil {
+		return nil, true, err
+	}
+	effective := intersectDomainScopes(publish, remoteSubscribe)
+	if policy == nil {
+		return []string{}, true, nil
+	}
+	copyGrants := make([]string, 0, len(policy.Domains))
+	for _, grant := range policy.Domains {
+		if grant.Copy {
+			copyGrants = append(copyGrants, grant.Domain)
+		}
+	}
+	effective = intersectDomainScopes(effective, copyGrants)
+	return effective, true, nil
+}
+
+// pairwiseIngressPolicy is the receiver-side direct-pair copy scope. v3
+// requires BOTH the authenticated peer's published Copy scope and this node's
+// local subscription. peerAgentID must be the live authenticated identity on an
+// inbound path; sender-side/read-only callers may pass the frozen control id.
+func (m *Manager) pairwiseIngressPolicy(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, peerAgentID string) ([]string, bool, error) {
+	if agreement == nil {
+		return nil, false, fmt.Errorf("active agreement is required")
+	}
+	chain := agreement.RemoteChainID
+	control, err := ss.GetSyncControl(ctx, chain)
+	if err != nil {
+		return nil, false, err
+	}
+	// As on egress, a bound PeerRBAC snapshot closes the legacy migration window
+	// before any directional rows are installed. Inbound legacy sync_domains must
+	// not remain usable merely because the process stopped between those writes.
+	policy, policyErr := m.getPeerRBACPolicyForAgreement(ctx, agreement)
+	if policyErr != nil {
+		return nil, true, policyErr
+	}
+	v3 := policy != nil || (control != nil &&
+		(control.PolicyVersion >= SyncPolicyVersionPeerRBAC || control.RemotePolicyVersion >= SyncPolicyVersionPeerRBAC))
+	if !v3 {
+		legacyDomains, legacyErr := ss.GetSyncDomains(ctx, chain)
+		return legacyDomains, false, legacyErr
+	}
+	if !m.peerRBACSyncBinding(control, agreement, peerAgentID) {
+		return nil, true, fmt.Errorf("active peer RBAC copy binding mismatch")
+	}
+	remotePublish, err := ss.GetDirectionalSyncDomains(ctx, chain, store.SyncDirectionRemotePublish)
+	if err != nil {
+		return nil, true, err
+	}
+	localSubscribe, err := ss.GetDirectionalSyncDomains(ctx, chain, store.SyncDirectionLocalSubscribe)
+	if err != nil {
+		return nil, true, err
+	}
+	return intersectDomainScopes(remotePublish, localSubscribe), true, nil
+}
+
+// pairwiseEgressDomains is the effective direct-pair publisher scope used by
+// the watcher, scan, drainer and anti-entropy scheduler.
+func (m *Manager) pairwiseEgressDomains(ctx context.Context, ss *store.SQLiteStore, chain string) ([]string, error) {
+	agreement, err := m.ActiveAgreement(chain)
+	if err != nil {
+		return nil, err
+	}
+	domains, _, err := m.pairwiseEgressPolicy(ctx, ss, agreement)
+	return domains, err
+}
+
+// syncEgressDomainAllowed selects the authority for one outbound item after the
+// caller has validated the active transport edge. Direct v3 traffic requires
+// Publish(Copy) intersected with the recipient's Subscribe. Group-native
+// traffic requires the exact owner->member projection, and relays require the
+// exact receiver/relayer/origin projection. Fresh v3 group traffic intentionally
+// ignores tx-33; legacy direct and group paths retain that treaty gate.
+func syncEgressDomainAllowed(agreement *store.CrossFedRecord, directV3Domains []string, v3 bool,
+	groupAuthorized, relayed bool, domain string,
+) bool {
+	legacyTreaty := agreement != nil && DomainAllowed(agreement.AllowedDomains, domain)
+	if relayed {
+		if !groupAuthorized {
+			return false
+		}
+		return v3 || legacyTreaty
+	}
+	if v3 {
+		return DomainAllowed(directV3Domains, domain) || groupAuthorized
+	}
+	return legacyTreaty
+}
+
 // syncScan enqueues committed memories from the consented subtrees.
 func (m *Manager) syncScan(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
+	directV3, v3, err := m.pairwiseEgressPolicy(ctx, ss, agreement)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("peer", agreement.RemoteChainID).Msg("sync: direct copy policy lookup failed")
+		return
+	}
+	groupOwned, err := m.sharedGroupOwnedDomainsForAgreement(ctx, ss, agreement)
+	if err != nil {
+		m.logger.Warn().Err(err).Str("peer", agreement.RemoteChainID).Msg("sync: group owner policy lookup failed")
+		return
+	}
 	cands, err := ss.ListSyncCandidates(ctx, agreement.RemoteChainID, consented, syncScanLimit)
 	if err != nil {
 		m.logger.Warn().Err(err).Str("peer", agreement.RemoteChainID).Msg("sync: candidate scan failed")
@@ -323,8 +597,10 @@ func (m *Manager) syncScan(ctx context.Context, ss *store.SQLiteStore, agreement
 	}
 	for _, c := range cands {
 		// Enqueue gates (all re-run at send time; these just keep junk out of
-		// the queue): treaty scope + local classification ceiling.
-		if !DomainAllowed(agreement.AllowedDomains, c.DomainTag) {
+		// the queue): direct v3 Copy+subscription OR legacy/group treaty scope,
+		// plus the fail-closed legacy classification ceiling.
+		groupAuthorized := DomainAllowed(groupOwned, c.DomainTag)
+		if !syncEgressDomainAllowed(agreement, directV3, v3, groupAuthorized, false, c.DomainTag) {
 			continue
 		}
 		if c.Classification > int(agreement.MaxClearance) {
@@ -339,6 +615,16 @@ func (m *Manager) syncScan(ctx context.Context, ss *store.SQLiteStore, agreement
 // syncDrain claims one batch and delivers it.
 func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
 	chain := agreement.RemoteChainID
+	directV3, v3, directErr := m.pairwiseEgressPolicy(ctx, ss, agreement)
+	if directErr != nil {
+		m.logger.Warn().Err(directErr).Str("peer", chain).Msg("sync: direct copy policy lookup failed")
+		return
+	}
+	groupOwned, groupErr := m.sharedGroupOwnedDomainsForAgreement(ctx, ss, agreement)
+	if groupErr != nil {
+		m.logger.Warn().Err(groupErr).Str("peer", chain).Msg("sync: group owner policy lookup failed")
+		return
+	}
 	claimed, claimErr := ss.ClaimDueSyncOutbox(ctx, chain, SyncPushMaxItems)
 	if claimErr != nil {
 		m.logger.Warn().Err(claimErr).Str("peer", chain).Msg("sync: claim failed")
@@ -419,7 +705,19 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 			_ = ss.MarkSyncOutboxFailed(writeCtx, chain, row.MemoryID, "content too large")
 			continue
 		}
-		if !DomainAllowed(agreement.AllowedDomains, rec.DomainTag) || !DomainAllowed(consented, rec.DomainTag) {
+		relayed := row.OriginChainID != "" && row.OriginChainID != m.localChainID
+		groupAuthorized := DomainAllowed(groupOwned, rec.DomainTag)
+		if relayed {
+			_, groupAuthorized, err = m.resolveGroupRelayForAgreement(ctx, ss, agreement, row.OriginChainID, "", rec.DomainTag)
+			if err != nil {
+				retry(row, true, false, syncBackoff(row.Attempts+1), "relay authorization read failed")
+				continue
+			}
+		}
+		// Direct and group-native traffic use independent capabilities. A relay may
+		// use only the exact group route; it can never borrow pairwise direct scope.
+		domainInScope := syncEgressDomainAllowed(agreement, directV3, v3, groupAuthorized, relayed, rec.DomainTag)
+		if !domainInScope || !DomainAllowed(consented, rec.DomainTag) {
 			// Agreement re-scoped narrower, consent changed, or the memory was
 			// re-domained (v11.3 reassign) since enqueue — a property of the
 			// sender's own state, so terminal.
@@ -510,23 +808,51 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 	currentAgreement, gateErr := m.ActiveAgreement(chain)
 	currentConsent, consentErr := m.effectiveConsent(ctx, ss, chain)
 	control, controlErr := ss.GetSyncControl(ctx, chain)
-	policyPending := control != nil && control.Role == "host" && control.Revision > control.DeliveredRevision
-	if gateErr != nil || consentErr != nil || controlErr != nil || len(currentConsent) == 0 || policyPending {
+	currentDirectV3, currentV3, directPolicyErr := m.pairwiseEgressPolicy(ctx, ss, currentAgreement)
+	currentGroupOwned, currentGroupErr := m.sharedGroupOwnedDomainsForAgreement(ctx, ss, currentAgreement)
+	policyPending := control != nil && control.Revision > control.DeliveredRevision &&
+		(control.Role == "host" || control.PolicyVersion >= SyncPolicyVersionPeerRBAC)
+	if gateErr != nil || consentErr != nil || controlErr != nil || directPolicyErr != nil || currentGroupErr != nil {
 		policyUnlock()
 		policyLocked = false
 		for _, row := range itemRows {
-			reason := "sync policy changed before delivery"
-			if policyPending {
-				reason = "sync policy awaiting peer acknowledgement"
-			}
-			retry(row, false, false, syncBackoffBase, reason)
+			retry(row, false, false, syncBackoffBase, "sync policy changed before delivery")
 		}
 		return
 	}
 	filteredItems := items[:0]
 	filteredRows := itemRows[:0]
 	for i, item := range items {
-		if !DomainAllowed(currentAgreement.AllowedDomains, item.Domain) || !DomainAllowed(currentConsent, item.Domain) ||
+		relayed := item.OriginChainID != "" && item.OriginChainID != m.localChainID
+		groupAuthorized := DomainAllowed(currentGroupOwned, item.Domain)
+		groupID := ""
+		if relayed {
+			ro, provenanceErr := ss.GetRelayOrigin(ctx, item.OriginChainID, itemRows[i].MemoryID)
+			if provenanceErr != nil {
+				retry(itemRows[i], true, false, syncBackoff(itemRows[i].Attempts+1), "relay provenance read failed")
+				continue
+			}
+			groupID, groupAuthorized, gateErr = m.resolveGroupRelayForAgreement(ctx, ss, currentAgreement,
+				item.OriginChainID, ro.OriginAgentPubkey, item.Domain)
+			if gateErr != nil {
+				retry(itemRows[i], true, false, syncBackoff(itemRows[i].Attempts+1), "relay re-authorization read failed")
+				continue
+			}
+			if groupAuthorized {
+				if verifyErr := verifyStoredGroupRelayItem(ctx, ss, groupID, itemRows[i].MemoryID, &item); verifyErr != nil {
+					_ = ss.MarkSyncOutboxRejected(writeCtx, chain, itemRows[i].MemoryID, "relay origin identity no longer matches shared group")
+					continue
+				}
+			}
+		}
+		// A pending directional-policy acknowledgement blocks only the direct lane.
+		// The group journal is independently authoritative for an exact projection.
+		if policyPending && !groupAuthorized {
+			retry(itemRows[i], false, false, syncBackoffBase, "sync policy awaiting peer acknowledgement")
+			continue
+		}
+		domainInScope := syncEgressDomainAllowed(currentAgreement, currentDirectV3, currentV3, groupAuthorized, relayed, item.Domain)
+		if !domainInScope || !DomainAllowed(currentConsent, item.Domain) ||
 			item.Classification > int(currentAgreement.MaxClearance) {
 			_ = ss.MarkSyncOutboxRejected(writeCtx, chain, itemRows[i].MemoryID, "domain out of scope at final policy gate")
 			continue
@@ -539,13 +865,8 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 		// pairwise relationship NEVER authorizes relaying a third party's copy — so a peer
 		// removed from the group must not receive a relayed backfill. This is the
 		// AUTHORITATIVE anti-leak (receiver Gate 6.5 only fires AFTER the bytes cross).
-		if item.OriginChainID != "" && item.OriginChainID != m.localChainID {
-			_, ok, rErr := ss.ResolveGroupRelay(ctx, m.localChainID, chain, item.OriginChainID, item.Domain)
-			if rErr != nil {
-				retry(itemRows[i], true, false, syncBackoff(itemRows[i].Attempts+1), "relay re-authorization read failed")
-				continue
-			}
-			if !ok {
+		if relayed {
+			if !groupAuthorized {
 				_ = ss.MarkSyncOutboxRejected(writeCtx, chain, itemRows[i].MemoryID, "relay no longer authorized by a shared group")
 				continue
 			}
@@ -796,12 +1117,22 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 		m.logger.Warn().Err(scErr).Str("peer", chain).Msg("sync reconcile: sender scope failed")
 		return
 	}
+	directV3, v3, directErr := m.pairwiseEgressPolicy(ctx, ss, agreement)
+	if directErr != nil {
+		m.logger.Warn().Err(directErr).Str("peer", chain).Msg("sync reconcile: direct copy policy failed")
+		return
+	}
+	groupOwned, groupErr := m.sharedGroupOwnedDomainsForAgreement(ctx, ss, agreement)
+	if groupErr != nil {
+		m.logger.Warn().Err(groupErr).Str("peer", chain).Msg("sync reconcile: group owner policy failed")
+		return
+	}
 	// While self-resyncing, restrict what we ORIGINATE to the pairwise consent set only:
 	// dropping owned group domains from senderScope stops a group-owned domain's backfill
 	// from re-exporting (and thus round-tripping / resurrecting) an item mid-rebuild,
 	// while leaving the pairwise candidate reconcile fully live.
 	if selfResyncing {
-		pairwise, pErr := ss.GetSyncDomains(ctx, chain)
+		pairwise, pErr := m.pairwiseEgressDomains(ctx, ss, chain)
 		if pErr != nil {
 			m.logger.Warn().Err(pErr).Str("peer", chain).Msg("sync reconcile: pairwise scope failed")
 			return
@@ -812,7 +1143,7 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 	// a group-scoped digest (GroupID set) actually reaches handleSyncDigestGroup (must-fix
 	// #8: without this the multi-node digest handler is never reached in production).
 	groupsByDomain := map[string][]string{}
-	if refs, gErr := ss.GroupSharedDomainsWithGroup(ctx, m.localChainID, chain); gErr == nil {
+	if refs, gErr := m.groupSharedDomainsWithGroupForAgreement(ctx, ss, agreement); gErr == nil {
 		for _, ref := range refs {
 			groupsByDomain[ref.DomainTag] = append(groupsByDomain[ref.DomainTag], ref.GroupID)
 		}
@@ -896,7 +1227,8 @@ func (m *Manager) reconcilePeer(ctx context.Context, ss *store.SQLiteStore, agre
 			if !DomainAllowed(senderScope, c.DomainTag) {
 				continue
 			}
-			if !DomainAllowed(agreement.AllowedDomains, c.DomainTag) || c.Classification > int(agreement.MaxClearance) {
+			groupAuthorized := DomainAllowed(groupOwned, c.DomainTag)
+			if !syncEgressDomainAllowed(agreement, directV3, v3, groupAuthorized, false, c.DomainTag) || c.Classification > int(agreement.MaxClearance) {
 				continue
 			}
 			created, eErr := ss.EnqueueSyncOutbox(ctx, chain, c.MemoryID)

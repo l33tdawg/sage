@@ -2374,6 +2374,45 @@ func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
 
 // --- Governance Tool Handlers ---
 
+type governanceRequestContext struct {
+	ValidatorID      string `json:"validator_id"`
+	GovernanceDomain string `json:"governance_domain"`
+	AppV20Active     bool   `json:"app_v20_active"`
+}
+
+// governanceContext fetches the validator/domain binding through the same
+// signed transport used for the mutation. Pre-v20 servers either omit the
+// route or return an inactive context with an empty domain; both retain the
+// historical request body. Every other failure remains fatal so an active
+// node cannot silently lose app-v20 authorization context.
+func (s *Server) governanceContext(ctx context.Context) (*governanceRequestContext, error) {
+	var response governanceRequestContext
+	if err := s.doSignedJSON(ctx, "GET", "/v1/governance/context", nil, &response); err != nil {
+		if isAPIStatus(err, 404) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if !response.AppV20Active {
+		return nil, nil
+	}
+	if strings.TrimSpace(response.ValidatorID) == "" {
+		return nil, fmt.Errorf("governance context returned an empty validator_id")
+	}
+	if strings.TrimSpace(response.GovernanceDomain) == "" {
+		return nil, fmt.Errorf("governance context returned an empty governance_domain")
+	}
+	return &response, nil
+}
+
+func addGovernanceContext(body map[string]any, governanceContext *governanceRequestContext) {
+	if governanceContext == nil {
+		return
+	}
+	body["validator_id"] = governanceContext.ValidatorID
+	body["governance_domain"] = governanceContext.GovernanceDomain
+}
+
 func (s *Server) toolGovPropose(ctx context.Context, params map[string]any) (any, error) {
 	operation := stringParam(params, "operation", "")
 	if operation == "" {
@@ -2401,6 +2440,10 @@ func (s *Server) toolGovPropose(ctx context.Context, params map[string]any) (any
 	targetPubkey := stringParam(params, "target_pubkey", "")
 	targetPower := intParam(params, "target_power", 0)
 	payload := stringParam(params, "payload", "")
+	governanceContext, err := s.governanceContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("governance propose context: %w", err)
+	}
 
 	reqBody := map[string]any{
 		"operation": operation,
@@ -2421,6 +2464,7 @@ func (s *Server) toolGovPropose(ctx context.Context, params map[string]any) (any
 	if hasScope {
 		reqBody["scope"] = scopeTemplate
 	}
+	addGovernanceContext(reqBody, governanceContext)
 
 	body, _ := json.Marshal(reqBody)
 
@@ -2452,11 +2496,17 @@ func (s *Server) toolGovVote(ctx context.Context, params map[string]any) (any, e
 	if decision == "" {
 		return nil, fmt.Errorf("decision is required (accept, reject, abstain)")
 	}
+	governanceContext, err := s.governanceContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("governance vote context: %w", err)
+	}
 
-	body, _ := json.Marshal(map[string]any{
+	reqBody := map[string]any{
 		"proposal_id": proposalID,
 		"decision":    decision,
-	})
+	}
+	addGovernanceContext(reqBody, governanceContext)
+	body, _ := json.Marshal(reqBody)
 
 	var resp struct {
 		TxHash string `json:"tx_hash"`

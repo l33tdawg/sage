@@ -1,6 +1,7 @@
 package abci
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -96,4 +97,33 @@ func TestAppV17_C5_FreshCoCommitNoVoteKeys(t *testing.T) {
 	keys, err := app.badgerStore.PrefixKeys("vote:" + env.SharedID + ":")
 	require.NoError(t, err)
 	assert.Empty(t, keys, "no vote keys on a fresh co-commit")
+}
+
+func TestAppV20_CoCommitSquatReclaimBoundsStaleVotePruning(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV15AppliedHeight = 1
+	app.appV17AppliedHeight = 1
+	app.appV20AppliedHeight = 1
+	local := newAgentKey(t)
+	env, _ := buildCoCommitEnvelope(t, local, "family.photos", []byte("bounded"), "sage-b")
+
+	require.NoError(t, app.badgerStore.SetMemoryHash(env.SharedID, []byte("squat-hash"), string(memory.StatusProposed)))
+	const extra = 17
+	for i := 0; i < maxAppV20CoCommitStaleVotePrune+extra; i++ {
+		require.NoError(t, app.badgerStore.SetState(
+			fmt.Sprintf("vote:%s:validator-%04d", env.SharedID, i),
+			[]byte("accept"),
+		))
+	}
+
+	res := app.processCoCommitSubmit(coCommitSubmitTx(t, local, env), 10, time.Now())
+	require.Zero(t, res.Code, res.Log)
+	keys, err := app.badgerStore.PrefixKeys("vote:" + env.SharedID + ":")
+	require.NoError(t, err)
+	assert.Len(t, keys, extra, "app-v20 reclaim prunes only its deterministic per-tx allowance")
+	assert.Equal(t,
+		fmt.Sprintf("vote:%s:validator-%04d", env.SharedID, maxAppV20CoCommitStaleVotePrune),
+		keys[0],
+		"the lexicographically first bounded prefix is pruned deterministically",
+	)
 }

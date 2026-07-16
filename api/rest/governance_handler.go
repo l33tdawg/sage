@@ -1,13 +1,20 @@
 package rest
 
 import (
+	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
+	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/auth"
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -24,14 +31,16 @@ import (
 // guided Scope template that the node canonicalizes. Legacy validator-set ops
 // (add/remove/update_power) leave both empty.
 type GovProposeRequest struct {
-	Operation    string                  `json:"operation"`
-	TargetID     string                  `json:"target_id"`
-	TargetPubkey string                  `json:"target_pubkey,omitempty"`
-	TargetPower  int64                   `json:"target_power,omitempty"`
-	ExpiryBlocks int64                   `json:"expiry_blocks,omitempty"`
-	Reason       string                  `json:"reason"`
-	Payload      string                  `json:"payload,omitempty"`
-	Scope        *scope.ProposalTemplate `json:"scope,omitempty"`
+	ValidatorID      string                  `json:"validator_id,omitempty"`
+	GovernanceDomain string                  `json:"governance_domain,omitempty"`
+	Operation        string                  `json:"operation"`
+	TargetID         string                  `json:"target_id"`
+	TargetPubkey     string                  `json:"target_pubkey,omitempty"`
+	TargetPower      int64                   `json:"target_power,omitempty"`
+	ExpiryBlocks     int64                   `json:"expiry_blocks,omitempty"`
+	Reason           string                  `json:"reason"`
+	Payload          string                  `json:"payload,omitempty"`
+	Scope            *scope.ProposalTemplate `json:"scope,omitempty"`
 }
 
 // GovProposeResponse is the JSON body for a successful proposal.
@@ -41,10 +50,32 @@ type GovProposeResponse struct {
 	Status     string `json:"status"`
 }
 
+// GovernanceContextResponse is the validator-and-chain context an operator
+// must include inside every signed post-app-v20 governance mutation.
+type GovernanceContextResponse struct {
+	ValidatorID      string                         `json:"validator_id"`
+	GovernanceDomain string                         `json:"governance_domain"`
+	AppV20Active     bool                           `json:"app_v20_active"`
+	ValidatorActive  bool                           `json:"validator_active"`
+	ActiveValidators []GovernanceActiveValidatorRef `json:"active_validators"`
+}
+
+// GovernanceActiveValidatorRef is the AppHash-covered validator roster read
+// from Badger for an authenticated governance context. It lets operators prove
+// that a restarted gateway agrees with CometBFT about both membership and
+// power instead of treating a correct Comet validator response as evidence
+// that the ABCI application's persisted validator:* keys are also correct.
+type GovernanceActiveValidatorRef struct {
+	ValidatorID string `json:"validator_id"`
+	VotingPower int64  `json:"voting_power"`
+}
+
 // GovVoteRequest is the JSON body for POST /v1/governance/vote.
 type GovVoteRequest struct {
-	ProposalID string `json:"proposal_id"`
-	Decision   string `json:"decision"`
+	ValidatorID      string `json:"validator_id,omitempty"`
+	GovernanceDomain string `json:"governance_domain,omitempty"`
+	ProposalID       string `json:"proposal_id"`
+	Decision         string `json:"decision"`
 }
 
 // GovVoteResponse is the JSON body for a successful governance vote.
@@ -55,7 +86,9 @@ type GovVoteResponse struct {
 
 // GovCancelRequest is the JSON body for POST /v1/governance/cancel.
 type GovCancelRequest struct {
-	ProposalID string `json:"proposal_id"`
+	ValidatorID      string `json:"validator_id,omitempty"`
+	GovernanceDomain string `json:"governance_domain,omitempty"`
+	ProposalID       string `json:"proposal_id"`
 }
 
 // GovCancelResponse is the JSON body for a successful governance cancel.
@@ -66,11 +99,42 @@ type GovCancelResponse struct {
 
 // --- Handlers ----------------------------------------------------------------
 
+// handleGovernanceContext returns the public validator/chain binding only to
+// the configured operator. Clients sign these exact values into the following
+// mutation, preventing a mempool observer from rewrapping the proof for a
+// different validator or SAGE chain.
+func (s *Server) handleGovernanceContext(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGovernanceOperator(w, r.Context()) {
+		return
+	}
+	validatorID, domain, err := s.currentGovernanceAuthorizationContext()
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Governance unavailable", err.Error())
+		return
+	}
+	validatorActive, activeValidators, err := s.persistedGovernanceValidatorReadiness(validatorID)
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Governance unavailable", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, GovernanceContextResponse{
+		ValidatorID: validatorID, GovernanceDomain: domain, AppV20Active: s.isPostV20ForNextTx(),
+		ValidatorActive: validatorActive, ActiveValidators: activeValidators,
+	})
+}
+
 // handleGovPropose handles POST /v1/governance/propose.
 func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGovernanceOperator(w, r.Context()) {
+		return
+	}
+
 	var req GovProposeRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if !s.validateGovernanceAuthorizationContext(w, req.ValidatorID, req.GovernanceDomain) {
 		return
 	}
 
@@ -144,26 +208,45 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txHash, err := s.broadcastTxCommit(encoded)
+	txHash, committedHeight, err := s.broadcastTxCommitWithHeight(encoded)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to broadcast gov propose tx")
 		status, publicMsg := broadcastErrorPublic(err)
 		writeProblem(w, status, "Broadcast error", publicMsg)
 		return
 	}
+	validatorID := auth.PublicKeyToAgentID(ed25519.PublicKey(proposeTx.PublicKey))
+	proposalID := governance.ComputeProposalID(
+		validatorID,
+		committedHeight,
+		governance.ProposalOp(op),
+		req.TargetID,
+	)
+	proposalStatus := governance.ProposalStatus("unknown")
+	if s.badgerStore != nil {
+		committed, loadErr := s.loadCommittedGovernanceProposal(proposalID)
+		if loadErr != nil {
+			s.logger.Error().Err(loadErr).Str("proposal_id", proposalID).Str("tx_hash", txHash).
+				Msg("committed governance proposal does not match authoritative state")
+			writeProblem(w, http.StatusInternalServerError, "Committed proposal verification failed", "The transaction committed, but the node could not verify its proposal state. Inspect the tx_hash before retrying.")
+			return
+		}
+		proposalStatus = committed.Status
+	}
 
 	if s.OnEvent != nil {
 		s.OnEvent("governance", "", "", "Proposal submitted: "+req.Operation+" "+req.TargetID, map[string]any{
-			"tx_hash":   txHash,
-			"operation": req.Operation,
-			"target_id": req.TargetID,
+			"proposal_id": proposalID,
+			"tx_hash":     txHash,
+			"operation":   req.Operation,
+			"target_id":   req.TargetID,
 		})
 	}
 
 	writeJSON(w, http.StatusOK, GovProposeResponse{
-		ProposalID: txHash, // ABCI computes the deterministic proposal ID; tx_hash is the on-chain reference
+		ProposalID: proposalID,
 		TxHash:     txHash,
-		Status:     "voting",
+		Status:     string(proposalStatus),
 	})
 }
 
@@ -206,9 +289,16 @@ func resolveGovProposalPayload(op tx.GovProposalOp, targetID, rawPayload string,
 
 // handleGovVote handles POST /v1/governance/vote.
 func (s *Server) handleGovVote(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGovernanceOperator(w, r.Context()) {
+		return
+	}
+
 	var req GovVoteRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if !s.validateGovernanceAuthorizationContext(w, req.ValidatorID, req.GovernanceDomain) {
 		return
 	}
 
@@ -274,9 +364,16 @@ func (s *Server) handleGovVote(w http.ResponseWriter, r *http.Request) {
 
 // handleGovCancel handles POST /v1/governance/cancel.
 func (s *Server) handleGovCancel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGovernanceOperator(w, r.Context()) {
+		return
+	}
+
 	var req GovCancelRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if !s.validateGovernanceAuthorizationContext(w, req.ValidatorID, req.GovernanceDomain) {
 		return
 	}
 
@@ -333,6 +430,117 @@ func (s *Server) handleGovCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Helpers -----------------------------------------------------------------
+
+// requireGovernanceOperator preserves the validator-gateway ownership model:
+// the configured local operator authorizes an action over HTTP, while this
+// node's validator key remains the sole on-chain proposer/voter. Ed25519 request
+// authentication proves only key possession; without this authorization gate,
+// any valid signer could make every reachable validator cast a distinct vote.
+func (s *Server) requireGovernanceOperator(w http.ResponseWriter, ctx context.Context) bool {
+	if !s.validatorSigningKeyConfigured || len(s.signingKey) != ed25519.PrivateKeySize {
+		writeProblem(w, http.StatusServiceUnavailable, "Governance unavailable", "The live CometBFT validator signing key is not configured.")
+		return false
+	}
+	if s.governanceOperatorID == "" {
+		writeProblem(w, http.StatusServiceUnavailable, "Governance unavailable", "The local node operator identity is not configured.")
+		return false
+	}
+	callerPub, err := auth.AgentIDToPublicKey(middleware.ContextAgentID(ctx))
+	if err != nil || auth.PublicKeyToAgentID(callerPub) != s.governanceOperatorID {
+		writeProblem(w, http.StatusForbidden, "Governance access denied", "Only the local node operator may authorize this validator's governance actions.")
+		return false
+	}
+	return true
+}
+
+func (s *Server) currentGovernanceAuthorizationContext() (string, string, error) {
+	if !s.validatorSigningKeyConfigured || len(s.signingKey) != ed25519.PrivateKeySize {
+		return "", "", errors.New("the live CometBFT validator signing key is not configured")
+	}
+	pub, ok := s.signingKey.Public().(ed25519.PublicKey)
+	if !ok || len(pub) != ed25519.PublicKeySize {
+		return "", "", errors.New("the live CometBFT validator identity is invalid")
+	}
+	validatorID := auth.PublicKeyToAgentID(pub)
+	if !s.isPostV20ForNextTx() {
+		return validatorID, "", nil
+	}
+	if s.governanceDomainFn == nil {
+		return "", "", errors.New("the app-v20 governance chain domain is not configured")
+	}
+	domain := s.governanceDomainFn()
+	decoded, err := hex.DecodeString(domain)
+	if err != nil || len(decoded) != 32 || hex.EncodeToString(decoded) != domain {
+		return "", "", errors.New("the app-v20 governance chain domain is unavailable")
+	}
+	return validatorID, domain, nil
+}
+
+func (s *Server) persistedGovernanceValidatorReadiness(localValidatorID string) (bool, []GovernanceActiveValidatorRef, error) {
+	if s.badgerStore == nil {
+		return false, nil, errors.New("the persisted ABCI validator store is not configured")
+	}
+	powers, err := s.badgerStore.LoadValidators()
+	if err != nil {
+		return false, nil, fmt.Errorf("load persisted ABCI validators: %w", err)
+	}
+	validators := make([]GovernanceActiveValidatorRef, 0, len(powers))
+	for validatorID, power := range powers {
+		pub, decodeErr := auth.AgentIDToPublicKey(validatorID)
+		if decodeErr != nil || auth.PublicKeyToAgentID(pub) != validatorID {
+			return false, nil, fmt.Errorf("persisted ABCI validator %q is not a canonical Ed25519 identity", validatorID)
+		}
+		if power <= 0 {
+			return false, nil, fmt.Errorf("persisted ABCI validator %q has non-positive voting power %d", validatorID, power)
+		}
+		validators = append(validators, GovernanceActiveValidatorRef{
+			ValidatorID: validatorID,
+			VotingPower: power,
+		})
+	}
+	sort.Slice(validators, func(i, j int) bool {
+		return validators[i].ValidatorID < validators[j].ValidatorID
+	})
+	_, active := powers[localValidatorID]
+	return active, validators, nil
+}
+
+func (s *Server) validateGovernanceAuthorizationContext(w http.ResponseWriter, validatorID, domain string) bool {
+	if !s.isPostV20ForNextTx() {
+		return true
+	}
+	expectedValidator, expectedDomain, err := s.currentGovernanceAuthorizationContext()
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Governance unavailable", err.Error())
+		return false
+	}
+	if validatorID != expectedValidator || domain != expectedDomain {
+		writeProblem(w, http.StatusConflict, "Governance context mismatch", "Refresh /v1/governance/context and sign the request for this validator and chain.")
+		return false
+	}
+	return true
+}
+
+func (s *Server) loadCommittedGovernanceProposal(proposalID string) (*governance.ProposalState, error) {
+	if s.badgerStore == nil {
+		return nil, errors.New("on-chain governance store is not configured")
+	}
+	data, err := s.badgerStore.GetGovProposal(proposalID)
+	if err != nil {
+		return nil, fmt.Errorf("load proposal: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, errors.New("proposal is absent after successful commit")
+	}
+	var proposal governance.ProposalState
+	if err := json.Unmarshal(data, &proposal); err != nil {
+		return nil, fmt.Errorf("decode proposal: %w", err)
+	}
+	if proposal.ProposalID != proposalID {
+		return nil, fmt.Errorf("proposal id mismatch: got %q", proposal.ProposalID)
+	}
+	return &proposal, nil
+}
 
 func parseGovOp(s string) (tx.GovProposalOp, error) {
 	switch s {

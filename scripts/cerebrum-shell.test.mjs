@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 const appSource = await readFile(new URL('../web/static/js/app.js', import.meta.url), 'utf8');
+const apiSource = await readFile(new URL('../web/static/js/api.js', import.meta.url), 'utf8');
 const cssSource = await readFile(new URL('../web/static/css/sage.css', import.meta.url), 'utf8');
 const mriSource = await readFile(new URL('../web/static/js/mri-brain.js', import.meta.url), 'utf8');
 const mriPageSource = await readFile(new URL('../web/static/mri.html', import.meta.url), 'utf8');
@@ -47,6 +48,57 @@ test('task board scrolls as one page instead of trapping wheel input in columns'
     assert.match(tasksPage, /overflow-y:\s*auto/);
     assert.doesNotMatch(tasksPage, /overflow:\s*hidden/);
     assert.match(cards, /overflow-y:\s*visible/);
+});
+
+test('federation owns a viewport-bounded vertical scroll container', () => {
+    const federationPage = cssSource.match(/\.fed-page\s*\{([^}]*)\}/)?.[1] || '';
+    assert.match(federationPage, /flex:\s*1/);
+    assert.match(federationPage, /min-height:\s*0/);
+    assert.match(federationPage, /overflow-y:\s*auto/);
+});
+
+test('federation separates trust from directional per-domain RBAC', () => {
+    const panel = appSource.slice(appSource.indexOf('function FedPermissionsPanel('), appSource.indexOf('// FederationWarmup'));
+    const remoteSection = panel.slice(panel.indexOf('fed-perm-section fed-perm-remote'));
+
+    assert.match(apiSource, /\/v1\/dashboard\/federation\/shareable-domains/);
+    assert.match(apiSource, /connections\/\$\{encodeURIComponent\(chainId\)\}\/permissions/);
+    assert.match(apiSource, /\{ permissions \}/,
+        'permission updates must replace a complete directional permission snapshot');
+    assert.match(panel, /local_permissions/);
+    assert.match(panel, /remote_permissions/);
+    assert.match(panel, /remote_known/);
+    assert.match(panel, /setSaved\(null\); setDraft\(null\)/,
+        'a failed snapshot read must fail closed instead of making an empty replacement editable');
+    assert.match(panel, /\.\.\.Object\.keys\(catalog\).*\.\.\.Object\.keys\(saved\).*\.\.\.Object\.keys\(draft\)/s,
+        'catalog rows must retain stale grants so they remain revocable');
+    assert.match(appSource, /query\.endsWith\('\*'\).*name\.startsWith/s,
+        'a filter such as tii* must use prefix matching');
+    assert.match(panel, /visibleRows\.forEach/,
+        'bulk changes must apply only to the filtered rows');
+    assert.match(panel, /if \(field === 'write'\) return/,
+        'the reserved Write control must not mutate the local policy');
+    assert.match(panel, /field === 'copy'\) nextPermission\.read = true/,
+        'copy grants imply read');
+    assert.match(panel, /field === 'read' && !enabling[\s\S]*nextPermission\.write = false;[\s\S]*nextPermission\.copy = false;/,
+        'clearing read must clear dependent copy and any stale reserved Write bit');
+    assert.match(panel, /Write unavailable/);
+    assert.match(panel, /disabled=\$\{field === 'write'/,
+        'the reserved per-domain Write checkbox must stay disabled');
+    assert.match(appSource, /write: false, copy: !!p\.copy/,
+        'serialized snapshots must fail closed even if stale UI state carries a Write bit');
+    assert.match(remoteSection, /Copy offered/);
+    assert.match(remoteSection, /Save here/);
+    assert.match(remoteSection, /toggleSubscription\(domain, permission\.copy\)/,
+        'the recipient independently opts into copies only after the source offers Copy');
+    assert.match(apiSource, /subscribe_domains:\s*subscribeDomains/);
+    assert.match(appSource, /const trustOnlyGrant = \{ max_clearance: 4, allowed_domains: \[\]/,
+        'new pairing ceremonies must establish trust with an empty legacy domain scope');
+    assert.doesNotMatch(appSource, /function FedShareForm/,
+        'mutable domain permissions must not be part of the trust ceremony');
+    assert.doesNotMatch(panel, /Add a topic|syncRole|Managed by the host|host-managed/);
+    assert.match(appSource, /<\$\{FedPermissionsPanel\} conn=\$\{c\}/);
+    assert.doesNotMatch(appSource, /FedSyncPanel/);
 });
 
 test('task cards expand fully and planned task edits preserve consensus history', () => {

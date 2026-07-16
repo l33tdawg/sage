@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/blocksync"
@@ -131,6 +132,8 @@ type BootStateSyncRuntime struct {
 	configureApplication func(abcitypes.Application) error
 	consensusServingGate chan struct{}
 	consensusGateOnce    sync.Once
+	p2pFilterFailed      atomic.Bool
+	p2pFilterSealed      atomic.Bool
 
 	endpointsMu sync.RWMutex
 	serving     *StateSyncServingController
@@ -244,6 +247,9 @@ func (r *BootStateSyncRuntime) Info(ctx context.Context, req *abcitypes.RequestI
 }
 
 func (r *BootStateSyncRuntime) Query(ctx context.Context, req *abcitypes.RequestQuery) (*abcitypes.ResponseQuery, error) {
+	if isBootStateSyncP2PFilterQuery(req) {
+		return r.queryBootStateSyncP2PFilter(req), nil
+	}
 	if err := r.lockNonBlockingServing(); err != nil {
 		return nil, err
 	}
@@ -371,6 +377,15 @@ func (r *BootStateSyncRuntime) lockConsensusServing(ctx context.Context) error {
 
 func (r *BootStateSyncRuntime) setBootStateSyncPhaseLocked(next BootStateSyncPhase) {
 	r.phase = next
+	if next == BootStateSyncFailed {
+		r.p2pFilterFailed.Store(true)
+	}
+	if next == BootStateSyncSealed {
+		// The transfer authorization remains authoritative for every snapshot
+		// endpoint, but the now-live validator must be able to reconnect to the
+		// immutable pre-join validator set after that one-shot session expires.
+		r.p2pFilterSealed.Store(true)
+	}
 	if next == BootStateSyncSealed || next == BootStateSyncFailed {
 		r.consensusGateOnce.Do(func() { close(r.consensusServingGate) })
 	}
@@ -475,45 +490,37 @@ func (r *BootStateSyncRuntime) activatePreparedBundleAuthorized(
 	return nil
 }
 
-// sealActivatedBundle verifies CometBFT and the live application agree after
-// bootstrap before allowing boot to proceed to ordinary services.
-func (r *BootStateSyncRuntime) sealActivatedBundle(ctx context.Context, cometHeight int64, cometAppHash []byte, cometAppVersion uint64) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.sealActivatedBundleLocked(ctx, cometHeight, cometAppHash, cometAppVersion)
-}
-
-// SealActivatedBundle observes CometBFT state persisted after bootstrap. A
-// dormant runtime is a no-op. An armed runtime is sealed only after persisted
-// height/hash/version exactly match the live application. The bool reports
-// whether durable activation-directory cleanup is now required before serving.
-func (r *BootStateSyncRuntime) SealActivatedBundle(ctx context.Context, cometHeight int64, cometAppHash []byte, cometAppVersion uint64) (bool, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	switch r.phase {
-	case BootStateSyncDisabled:
-		return false, nil
-	case BootStateSyncPendingComet:
-		if err := r.sealActivatedBundleLocked(ctx, cometHeight, cometAppHash, cometAppVersion); err != nil {
-			return false, err
-		}
-		return true, nil
-	default:
-		return false, fmt.Errorf("consensus bundle sealing requires disabled or pending-Comet phase, got %d", r.phase)
-	}
-}
-
 // SealActivatedBundleFromComet holds the exclusive application lease while it
-// observes Comet's live state store. If Comet persistence is still behind the
-// active application, callers receive ErrBootStateSyncPersistencePending and
-// may retry without poisoning the one-shot runtime. Equal-height conflict or
-// impossible Comet-ahead state fails the runtime permanently.
+// observes Comet's live state store and executes durableSeal before publishing
+// Sealed. This is the sole sealing API: callers cannot inject a claimed Comet
+// tuple through a second path. If persistence is behind the active application,
+// callers receive ErrBootStateSyncPersistencePending and may retry without
+// poisoning the runtime. Conflict or impossible Comet-ahead state fails it.
 func (r *BootStateSyncRuntime) SealActivatedBundleFromComet(
 	ctx context.Context,
 	readComet func() (height int64, appHash []byte, appVersion uint64, err error),
+	durableSeal func(height int64, appHash []byte, appVersion uint64) error,
 ) (bool, int64, []byte, uint64, error) {
 	if readComet == nil {
 		return false, 0, nil, 0, errors.New("running CometBFT state reader is required")
+	}
+	// ApplySnapshotChunk owns the receiver mutex before it takes the runtime
+	// bundle lease. Preserve that lock order here: holding r.mu and then waiting
+	// for the receiver would deadlock with a final chunk that is still publishing
+	// its prepared bundle. Keeping the receiver lock through the seal also makes
+	// the deadline check and durable completion one serialized session boundary.
+	var authorize func() error
+	r.endpointsMu.RLock()
+	receiver := r.receiving
+	serving := r.serving
+	r.endpointsMu.RUnlock()
+	if receiver != nil {
+		if serving != nil {
+			return false, 0, nil, 0, errors.New("state sync seal requires exactly one endpoint controller")
+		}
+		receiver.mu.Lock()
+		defer receiver.mu.Unlock()
+		authorize = receiver.requireAuthorizedLocked
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -523,6 +530,12 @@ func (r *BootStateSyncRuntime) SealActivatedBundleFromComet(
 	case BootStateSyncPendingComet:
 	default:
 		return false, 0, nil, 0, fmt.Errorf("consensus bundle sealing requires disabled or pending-Comet phase, got %d", r.phase)
+	}
+	if authorize != nil {
+		if err := authorize(); err != nil {
+			r.setBootStateSyncPhaseLocked(BootStateSyncFailed)
+			return false, 0, nil, 0, fmt.Errorf("authorize pending-Comet state-sync seal: %w", err)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return false, 0, nil, 0, err
@@ -562,13 +575,20 @@ func (r *BootStateSyncRuntime) SealActivatedBundleFromComet(
 		r.setBootStateSyncPhaseLocked(BootStateSyncFailed)
 		return false, cometHeight, cometHash, cometVersion, errors.New("persisted CometBFT state conflicts with the active application")
 	}
-	if err := r.sealActivatedBundleLocked(ctx, cometHeight, cometHash, cometVersion); err != nil {
+	if err := r.sealActivatedBundleLocked(ctx, cometHeight, cometHash, cometVersion, authorize, durableSeal); err != nil {
 		return false, cometHeight, cometHash, cometVersion, err
 	}
 	return true, cometHeight, cometHash, cometVersion, nil
 }
 
-func (r *BootStateSyncRuntime) sealActivatedBundleLocked(ctx context.Context, cometHeight int64, cometAppHash []byte, cometAppVersion uint64) error {
+func (r *BootStateSyncRuntime) sealActivatedBundleLocked(
+	ctx context.Context,
+	cometHeight int64,
+	cometAppHash []byte,
+	cometAppVersion uint64,
+	authorize func() error,
+	durableSeal func(height int64, appHash []byte, appVersion uint64) error,
+) error {
 	if r.phase != BootStateSyncPendingComet {
 		return fmt.Errorf("consensus bundle sealing requires pending-Comet phase, got %d", r.phase)
 	}
@@ -591,6 +611,27 @@ func (r *BootStateSyncRuntime) sealActivatedBundleLocked(ctx context.Context, co
 	if info == nil || info.LastBlockHeight != cometHeight || !bytes.Equal(info.LastBlockAppHash, cometAppHash) || info.AppVersion != cometAppVersion {
 		r.setBootStateSyncPhaseLocked(BootStateSyncFailed)
 		return errors.New("activated consensus bundle does not match persisted CometBFT state")
+	}
+	if durableSeal == nil {
+		r.setBootStateSyncPhaseLocked(BootStateSyncFailed)
+		return errors.New("durable state-sync activation seal is required")
+	}
+	// Comet persistence can legitimately lag for minutes after bundle activation.
+	// Recheck the one-shot authorization immediately before the final durable
+	// boundary so startup_timeout can never extend an expired join session.
+	if authorize != nil {
+		if err := authorize(); err != nil {
+			r.setBootStateSyncPhaseLocked(BootStateSyncFailed)
+			return fmt.Errorf("authorize durable state-sync activation seal: %w", err)
+		}
+	}
+	if err := durableSeal(cometHeight, append([]byte(nil), cometAppHash...), cometAppVersion); err != nil {
+		r.setBootStateSyncPhaseLocked(BootStateSyncFailed)
+		return fmt.Errorf("durably seal state-sync activation before consensus serving: %w", err)
+	}
+	if err := runBootStateSyncPrePublishHook(ctx, cometHeight, cometAppHash, cometAppVersion); err != nil {
+		r.setBootStateSyncPhaseLocked(BootStateSyncFailed)
+		return fmt.Errorf("state-sync pre-publication fixture hook: %w", err)
 	}
 	r.setBootStateSyncPhaseLocked(BootStateSyncSealed)
 	return nil

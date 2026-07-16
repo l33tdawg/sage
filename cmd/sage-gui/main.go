@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/web"
 )
 
@@ -14,12 +15,27 @@ var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
+
+	// optionalCommandHandler is nil in production builds. Build-tagged test
+	// fixtures may register a private command surface without teaching release
+	// binaries any fixture command or environment-variable names.
+	optionalCommandHandler func([]string) (bool, error)
 )
 
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
 		os.Exit(1)
+	}
+	if optionalCommandHandler != nil {
+		handled, optionalErr := optionalCommandHandler(os.Args[1:])
+		if handled {
+			if optionalErr != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", optionalErr)
+				os.Exit(1)
+			}
+			return
+		}
 	}
 
 	var err error
@@ -46,7 +62,7 @@ func main() {
 				if resolved, resolveErr := filepath.EvalSymlinks(execPath); resolveErr == nil {
 					execPath = resolved
 				}
-				rolledBack, rollbackErr := web.RollbackPendingUpdate(execPath)
+				rolledBack, rollbackErr := rollbackPendingUpdateAfterIndexInvalidation(execPath)
 				if rolledBack {
 					fmt.Fprintln(os.Stderr, "SAGE update did not boot cleanly — restored the previous version and restarting it.")
 					if rollbackErr != nil {
@@ -121,6 +137,49 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func rollbackPendingUpdateAfterIndexInvalidation(execPath string) (bool, error) {
+	return rollbackPendingUpdateAfterIndexInvalidationWith(
+		execPath,
+		web.PendingUpdateVersion,
+		invalidateIndexBackfillProgressForAutomaticRollback,
+		web.RollbackPendingUpdate,
+	)
+}
+
+func rollbackPendingUpdateAfterIndexInvalidationWith(
+	execPath string,
+	pendingVersion func(string) string,
+	invalidate func() error,
+	rollback func(string) (bool, error),
+) (bool, error) {
+	if pendingVersion == nil || invalidate == nil || rollback == nil {
+		return false, errors.New("automatic rollback index-progress hooks are required")
+	}
+	if pendingVersion(execPath) == "" {
+		return false, nil
+	}
+	// A pre-index binary can create authoritative rows that a completed v11.9
+	// migration sidecar would later skip. runServe has already closed Badger at
+	// this point. Reset both local cursors before swapping the executable or
+	// removing its pending marker; if reset fails, launchd must keep retrying the
+	// new binary rather than gaining any path to the old one.
+	if err := invalidate(); err != nil {
+		return false, fmt.Errorf("invalidate index-migration progress before executable rollback: %w", err)
+	}
+	return rollback(execPath)
+}
+
+func invalidateIndexBackfillProgressForAutomaticRollback() error {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	if err := store.InvalidateIndexBackfillProgress(filepath.Join(cfg.DataDir, "badger")); err != nil {
+		return err
+	}
+	return nil
 }
 
 func printUsage() {

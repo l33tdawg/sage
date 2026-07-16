@@ -34,10 +34,14 @@ type StateSyncServingControllerConfig struct {
 // StateSyncServingController serves only the public consensus snapshot format.
 // It never opens or delegates to SAGE's operator-only rollback snapshots.
 type StateSyncServingController struct {
+	authMu        sync.Mutex
 	authorization *statesync.ServingAuthorization
 	snapshotRoot  string
 	maxHeight     func(context.Context) (uint64, error)
 	now           func() time.Time
+	deadline      time.Time
+	lastObserved  time.Time
+	expired       bool
 }
 
 // NewStateSyncServingController builds a still-dormant controller. The runtime
@@ -50,9 +54,11 @@ func NewStateSyncServingController(config StateSyncServingControllerConfig) (*St
 		return nil, errors.New("state sync serving requires a live eligible-height reader")
 	}
 	now := stateSyncClock(config.Now)
-	if err := config.Authorization.ValidateAt(now()); err != nil {
+	observed := now()
+	if err := config.Authorization.ValidateAt(observed); err != nil {
 		return nil, err
 	}
+	deadline := config.Authorization.Deadline()
 	root, err := validateStateSyncControllerRoot(config.SnapshotRoot, "snapshot")
 	if err != nil {
 		return nil, err
@@ -62,6 +68,8 @@ func NewStateSyncServingController(config StateSyncServingControllerConfig) (*St
 		snapshotRoot:  root,
 		maxHeight:     config.MaxSnapshotHeight,
 		now:           now,
+		deadline:      deadline,
+		lastObserved:  observed,
 	}, nil
 }
 
@@ -107,6 +115,8 @@ type StateSyncReceiverController struct {
 	stagingRoot      string
 	prepare          StateSyncReceivePreparer
 	now              func() time.Time
+	deadline         time.Time
+	lastObserved     time.Time
 	requireDiskSpace func(path string, required uint64) error
 	session          *stateSyncReceiveSession
 	completed        *stateSyncCompletedSession
@@ -140,9 +150,11 @@ func NewStateSyncReceiverController(config StateSyncReceiverControllerConfig) (*
 	if requireDiskSpace == nil {
 		requireDiskSpace = statesync.RequireAvailableDiskSpace
 	}
-	if err := config.Authorization.ValidateAt(now()); err != nil {
+	observed := now()
+	if err := config.Authorization.ValidateAt(observed); err != nil {
 		return nil, err
 	}
+	deadline := config.Authorization.Deadline()
 	root, err := validateStateSyncControllerRoot(config.StagingRoot, "staging")
 	if err != nil {
 		return nil, err
@@ -152,6 +164,8 @@ func NewStateSyncReceiverController(config StateSyncReceiverControllerConfig) (*
 		stagingRoot:      root,
 		prepare:          config.Prepare,
 		now:              now,
+		deadline:         deadline,
+		lastObserved:     observed,
 		requireDiskSpace: requireDiskSpace,
 	}, nil
 }
@@ -162,7 +176,7 @@ func (r *BootStateSyncRuntime) ArmStateSyncServing(controller *StateSyncServingC
 	if controller == nil {
 		return errors.New("state sync serving controller is required")
 	}
-	if err := controller.authorization.ValidateAt(controller.now()); err != nil {
+	if err := controller.requireAuthorized(); err != nil {
 		return err
 	}
 	r.endpointsMu.Lock()
@@ -188,8 +202,11 @@ func (r *BootStateSyncRuntime) ArmStateSyncReceiver(controller *StateSyncReceive
 	if controller == nil {
 		return errors.New("state sync receiving controller is required")
 	}
-	if err := controller.authorization.ValidateAt(controller.now()); err != nil {
-		return err
+	controller.mu.Lock()
+	authorizationErr := controller.requireAuthorizedLocked()
+	controller.mu.Unlock()
+	if authorizationErr != nil {
+		return authorizationErr
 	}
 	r.endpointsMu.Lock()
 	defer r.endpointsMu.Unlock()
@@ -216,7 +233,7 @@ func (r *BootStateSyncRuntime) ListSnapshots(ctx context.Context, _ *abcitypes.R
 	if controller == nil {
 		return &abcitypes.ResponseListSnapshots{}, nil
 	}
-	if err := controller.authorization.ValidateAt(controller.now()); err != nil {
+	if err := controller.requireAuthorized(); err != nil {
 		return &abcitypes.ResponseListSnapshots{}, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -247,7 +264,7 @@ func (r *BootStateSyncRuntime) LoadSnapshotChunk(ctx context.Context, request *a
 	if controller == nil || request == nil || request.Format != statesync.Format {
 		return &abcitypes.ResponseLoadSnapshotChunk{}, nil
 	}
-	if err := controller.authorization.ValidateAt(controller.now()); err != nil {
+	if err := controller.requireAuthorized(); err != nil {
 		return &abcitypes.ResponseLoadSnapshotChunk{}, nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -568,9 +585,15 @@ func (controller *StateSyncReceiverController) requireAuthorizedLocked() error {
 	if controller.expired {
 		return errors.New("state sync receiving authorization is permanently expired")
 	}
-	if err := controller.authorization.ValidateAt(controller.now()); err != nil {
+	observed := controller.now()
+	if observed.Before(controller.lastObserved) {
 		controller.expired = true
-		return err
+		return errors.New("state sync receiving authorization clock moved backwards")
+	}
+	controller.lastObserved = observed
+	if !observed.Before(controller.deadline) {
+		controller.expired = true
+		return errors.New("state sync receiving authorization is expired")
 	}
 	return nil
 }
@@ -582,13 +605,32 @@ func (controller *StateSyncReceiverController) authorizedContextLocked(parent co
 	if err := controller.requireAuthorizedLocked(); err != nil {
 		return nil, nil, err
 	}
-	remaining := controller.authorization.ExpiresAt().Sub(controller.now())
+	remaining := controller.deadline.Sub(controller.lastObserved)
 	if remaining <= 0 {
 		controller.expired = true
 		return nil, nil, errors.New("state sync receiving authorization is expired")
 	}
 	ctx, cancel := context.WithTimeout(parent, remaining)
 	return ctx, cancel, nil
+}
+
+func (controller *StateSyncServingController) requireAuthorized() error {
+	controller.authMu.Lock()
+	defer controller.authMu.Unlock()
+	if controller.expired {
+		return errors.New("state sync serving authorization is permanently expired")
+	}
+	observed := controller.now()
+	if observed.Before(controller.lastObserved) {
+		controller.expired = true
+		return errors.New("state sync serving authorization clock moved backwards")
+	}
+	controller.lastObserved = observed
+	if !observed.Before(controller.deadline) {
+		controller.expired = true
+		return errors.New("state sync serving authorization is expired")
+	}
+	return nil
 }
 
 func validStateSyncTransportChunk(metadata statesync.Metadata, index uint32, chunk []byte) bool {

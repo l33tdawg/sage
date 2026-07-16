@@ -4,24 +4,24 @@ on:
   workflow_call:
     inputs:
       require_scoped_reconfiguration:
-        description: Fail unless the real app-v20 scoped reconfiguration phase runs
+        description: Require signed app-v20 scope reconfiguration plus the real-Comet partition gate
         required: false
         default: false
         type: boolean
       require_authorized_state_sync:
-        description: Fail unless a real authorized provider-to-receiver state-sync transfer runs
+        description: Require the integrated authorized provider-to-pristine-full-node state-sync transfer
         required: false
         default: false
         type: boolean
   workflow_dispatch:
     inputs:
       require_scoped_reconfiguration:
-        description: Require the still-open real app-v20 scoped reconfiguration phase
+        description: Require signed app-v20 scope reconfiguration plus the real-Comet partition gate
         required: false
         default: false
         type: boolean
       require_authorized_state_sync:
-        description: Require the still-open authorized provider-to-receiver state-sync phase
+        description: Require the integrated authorized provider-to-pristine-full-node state-sync phase
         required: false
         default: false
         type: boolean
@@ -40,7 +40,9 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
-      - name: Run race-enabled multi-process replay/reconfiguration oracle
+      - name: Run race-enabled signed scope/replay oracle
+        env:
+          V119_REQUIRE_SCOPED_RECONFIG: ${{ inputs.require_scoped_reconfiguration && '1' || '0' }}
         run: bash deploy/scripts/run-v11.9-multiprocess.sh
       - name: Test local CometBFT state-sync hardening
         run: make test-cometbft-patch
@@ -58,14 +60,28 @@ jobs:
           cache: true
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Test collision-safe source identity framing
+        run: python3 deploy/scripts/v11.9-source-id-test.py
+      - name: Compute exact v11.9 fixture source identity
+        id: source-id
+        run: |
+          source_id=$(python3 deploy/scripts/v11.9-source-id.py)
+          if [[ ! "$source_id" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "invalid v11.9 source identity: $source_id" >&2
+            exit 1
+          fi
+          echo "value=$source_id" >> "$GITHUB_OUTPUT"
       - name: Build cached ABCI image from this commit
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: deploy/Dockerfile.abci
+          target: v119-state-sync-fixture
           load: true
           push: false
           tags: sage-v119-chaos-abci:local
+          build-args: |
+            V119_STATE_SYNC_SOURCE_ID=${{ steps.source-id.outputs.value }}
           cache-from: type=gha,scope=v119-chaos-abci
           cache-to: type=gha,mode=max,scope=v119-chaos-abci
       - name: Build cached CometBFT image
@@ -76,11 +92,12 @@ jobs:
           load: true
           push: false
           tags: sage-v119-chaos-node:local
+          build-args: |
+            V119_STATE_SYNC_SOURCE_ID=${{ steps.source-id.outputs.value }}
           cache-from: type=gha,scope=v119-chaos-node
           cache-to: type=gha,mode=max,scope=v119-chaos-node
       - name: Run bounded real process fault gate
         env:
           V119_CHAOS_REBUILD: '0'
-          V119_REQUIRE_SCOPED_RECONFIG: ${{ inputs.require_scoped_reconfiguration && '1' || '0' }}
           V119_REQUIRE_AUTHORIZED_STATE_SYNC: ${{ inputs.require_authorized_state_sync && '1' || '0' }}
         run: bash deploy/scripts/run-v11.9-chaos.sh

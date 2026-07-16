@@ -24,12 +24,12 @@ func authorizationTestConfig(now time.Time) (JoinAuthorizationConfig, ValidatorP
 	}
 	expected := []string{providerA, providerB, joiner}
 	serving := ValidatorP2PProfile{
-		ChainID: join.ChainID, LocalNodeID: providerA, MaxInboundPeers: 0,
+		ChainID: join.ChainID, LocalNodeID: providerA, FilterPeers: true, MaxInboundPeers: 0,
 		UnconditionalPeerIDs: append([]string(nil), expected...), PrivatePeerIDs: append([]string(nil), expected...),
 		PersistentPeerIDs: []string{providerB, joiner},
 	}
 	receiving := ValidatorP2PProfile{
-		ChainID: join.ChainID, LocalNodeID: joiner,
+		ChainID: join.ChainID, LocalNodeID: joiner, FilterPeers: true,
 		LocalValidatorPublicKey: append([]byte(nil), join.ValidatorPublicKey...), MaxInboundPeers: 0,
 		UnconditionalPeerIDs: append([]string(nil), expected...), PrivatePeerIDs: append([]string(nil), expected...),
 		PersistentPeerIDs: []string{providerA, providerB},
@@ -111,8 +111,11 @@ func TestStateSyncAuthorizationRejectsUnsafeP2PProfiles(t *testing.T) {
 		want   string
 	}{
 		{name: "pex", mutate: func(p *ValidatorP2PProfile) { p.PEX = true }, want: "disable PEX"},
+		{name: "peer filter", mutate: func(p *ValidatorP2PProfile) { p.FilterPeers = false }, want: "peer filtering"},
 		{name: "seed", mutate: func(p *ValidatorP2PProfile) { p.Seeds = []string{"seed"} }, want: "disable PEX"},
-		{name: "inbound", mutate: func(p *ValidatorP2PProfile) { p.MaxInboundPeers = 1 }, want: "max inbound"},
+		{name: "seed mode", mutate: func(p *ValidatorP2PProfile) { p.SeedMode = true }, want: "seed mode"},
+		{name: "inbound", mutate: func(p *ValidatorP2PProfile) { p.MaxInboundPeers = 1 }, want: "peer capacity"},
+		{name: "outbound", mutate: func(p *ValidatorP2PProfile) { p.MaxOutboundPeers = 1 }, want: "peer capacity"},
 		{name: "wrong local", mutate: func(p *ValidatorP2PProfile) { p.LocalNodeID = join.ProviderNodeIDs[0] }, want: "does not match"},
 		{name: "wrong chain", mutate: func(p *ValidatorP2PProfile) { p.ChainID = "another-chain" }, want: "chain ID"},
 		{name: "wrong validator key", mutate: func(p *ValidatorP2PProfile) { p.LocalValidatorPublicKey[0] ^= 0xff }, want: "public key"},

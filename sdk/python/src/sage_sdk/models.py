@@ -426,6 +426,27 @@ class DeptMemberInfo(BaseModel):
 
 # --- Governance Models ---
 
+class GovernanceActiveValidator(BaseModel):
+    """One AppHash-covered validator in the node's persisted ABCI roster."""
+
+    validator_id: str = Field(min_length=1)
+    voting_power: int = Field(gt=0)
+
+
+class GovernanceContext(BaseModel):
+    """Validator-bound authorization context for governance mutations."""
+
+    validator_id: str = Field(min_length=1)
+    # Empty before app-v20 activation; active contexts are revalidated by the
+    # mutation request models, which require a non-empty domain.
+    governance_domain: str
+    app_v20_active: bool
+    # Defaults keep clients compatible with older v11.9 prerelease nodes that
+    # returned only the mutation-binding fields.
+    validator_active: bool = False
+    active_validators: list[GovernanceActiveValidator] = Field(default_factory=list)
+
+
 class ScopeActionMember(BaseModel):
     """One member in a guided app-v20 scope governance template."""
 
@@ -459,6 +480,11 @@ class GovProposeRequest(BaseModel):
     # Guided scope_action input. Mutually exclusive with payload; the server
     # sorts it canonically and materializes consensus-owned heights later.
     scope: ScopeActionTemplate | None = None
+    # App-v20 binds the exact operator-signed HTTP request to the local
+    # validator and governance domain. These stay optional so a new SDK can
+    # still talk to a pre-v20 server that lacks the context endpoint.
+    validator_id: str | None = Field(default=None, min_length=1)
+    governance_domain: str | None = Field(default=None, min_length=1)
 
 
 class GovProposeResponse(BaseModel):
@@ -470,6 +496,8 @@ class GovProposeResponse(BaseModel):
 class GovVoteRequest(BaseModel):
     proposal_id: str
     decision: str  # "accept", "reject", "abstain"
+    validator_id: str | None = Field(default=None, min_length=1)
+    governance_domain: str | None = Field(default=None, min_length=1)
 
 
 class GovVoteResponse(BaseModel):
@@ -479,6 +507,8 @@ class GovVoteResponse(BaseModel):
 
 class GovCancelRequest(BaseModel):
     proposal_id: str
+    validator_id: str | None = Field(default=None, min_length=1)
+    governance_domain: str | None = Field(default=None, min_length=1)
 
 
 class ScopeDomain(BaseModel):

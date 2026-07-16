@@ -13,6 +13,7 @@ package federation
 
 import (
 	"context"
+	"encoding/hex"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -46,6 +47,7 @@ func (m *Manager) onCommitted(ids []string) {
 	type scope struct {
 		agreement *store.CrossFedRecord
 		consented []string
+		v3        bool
 	}
 	scopes := make([]scope, 0, len(chains))
 	for _, chain := range chains {
@@ -53,11 +55,11 @@ func (m *Manager) onCommitted(ids []string) {
 		if aErr != nil {
 			continue // revoked/expired: fail closed and quiet
 		}
-		consented, cErr := ss.GetSyncDomains(ctx, chain)
+		consented, v3, cErr := m.pairwiseEgressPolicy(ctx, ss, agreement)
 		if cErr != nil || len(consented) == 0 {
 			continue
 		}
-		scopes = append(scopes, scope{agreement: agreement, consented: consented})
+		scopes = append(scopes, scope{agreement: agreement, consented: consented, v3: v3})
 	}
 	// A group-only node has no pairwise scopes but still owns domains to fan out
 	// (§9.1). Only bail when there is NEITHER pairwise consent NOR any active
@@ -83,7 +85,8 @@ func (m *Manager) onCommitted(ids []string) {
 			continue
 		}
 		for _, sc := range scopes {
-			if !DomainAllowed(sc.consented, domain) || !DomainAllowed(sc.agreement.AllowedDomains, domain) {
+			if !DomainAllowed(sc.consented, domain) ||
+				!syncEgressDomainAllowed(sc.agreement, sc.consented, sc.v3, false, false, domain) {
 				continue
 			}
 			if cls > int(sc.agreement.MaxClearance) {
@@ -108,7 +111,24 @@ func (m *Manager) onCommitted(ids []string) {
 				if aErr != nil {
 					continue // no active trust edge to this member: fail closed
 				}
-				if !DomainAllowed(ag.AllowedDomains, domain) || cls > int(ag.MaxClearance) {
+				peerAgentID, bound, bindErr := m.exactGroupPeerAgentID(ctx, ss, ag)
+				if bindErr != nil || !bound {
+					continue
+				}
+				// The target projection proves the recipient's role/selection. Re-check
+				// both exact roster identities for this group so a removed/replaced
+				// operator cannot keep a stale best-effort enqueue capability.
+				localShares, lErr := ss.MemberSharesGroupDomainForAgent(ctx, tg.GroupID,
+					m.localChainID, hex.EncodeToString(m.agentPub), domain)
+				peerShares, pErr := ss.MemberSharesGroupDomainForAgent(ctx, tg.GroupID,
+					tg.MemberChainID, peerAgentID, domain)
+				if lErr != nil || pErr != nil || !localShares || !peerShares {
+					continue
+				}
+				direct, v3, edgeErr := m.pairwiseEgressPolicy(ctx, ss, ag)
+				if edgeErr != nil ||
+					!syncEgressDomainAllowed(ag, direct, v3, true, false, domain) ||
+					cls > int(ag.MaxClearance) {
 					continue
 				}
 				if _, eErr := ss.EnqueueSyncOutbox(ctx, tg.MemberChainID, id); eErr != nil {

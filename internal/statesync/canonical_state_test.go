@@ -10,6 +10,8 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/l33tdawg/sage/internal/consensuskeys"
 )
 
 type canonicalStateTestRecord struct {
@@ -110,6 +112,45 @@ func TestCanonicalStateOmitsHiddenVersionsAndTombstones(t *testing.T) {
 	restoredRetainedVersions := canonicalStateTestVersions(t, restored, []byte("retained"))
 	require.Equal(t, []canonicalStateTestVersion{{value: []byte("latest-visible-version")}}, restoredRetainedVersions)
 	assert.Empty(t, canonicalStateTestVersions(t, restored, []byte("removed")))
+}
+
+func TestCanonicalStateExcludesAndRejectsLocalMigrationProgress(t *testing.T) {
+	source := openCanonicalStateTestDB(t)
+	require.NoError(t, source.Update(func(txn *badger.Txn) error {
+		if err := txn.Set([]byte("memory:retained"), []byte("consensus-value")); err != nil {
+			return err
+		}
+		if err := txn.Set([]byte(consensuskeys.AgentOrgsIndexBackfillProgress), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set([]byte(consensuskeys.OrgNameIndexBackfillProgress), append([]byte{0}, []byte("org:legacy")...))
+	}))
+
+	var encoded bytes.Buffer
+	require.NoError(t, WriteCanonicalState(context.Background(), source, &encoded))
+	assert.NotContains(t, encoded.String(), consensuskeys.AgentOrgsIndexBackfillProgress)
+	assert.NotContains(t, encoded.String(), consensuskeys.OrgNameIndexBackfillProgress)
+	restored := openCanonicalStateTestDB(t)
+	require.NoError(t, RestoreCanonicalState(context.Background(), bytes.NewReader(encoded.Bytes()), restored))
+	require.NoError(t, restored.View(func(txn *badger.Txn) error {
+		_, err := txn.Get([]byte("memory:retained"))
+		return err
+	}))
+
+	for _, key := range []string{
+		consensuskeys.AgentOrgsIndexBackfillProgress,
+		consensuskeys.OrgNameIndexBackfillProgress,
+	} {
+		t.Run(key, func(t *testing.T) {
+			target := openCanonicalStateTestDB(t)
+			stream := canonicalStateTestStream(canonicalStateTestRecord{key: []byte(key), value: []byte{1}})
+			err := RestoreCanonicalState(context.Background(), bytes.NewReader(stream), target)
+			require.ErrorContains(t, err, "excluded local bookkeeping")
+			empty, emptyErr := badgerDatabaseEmpty(target)
+			require.NoError(t, emptyErr)
+			assert.True(t, empty)
+		})
+	}
 }
 
 func TestCanonicalStateRejectsTTLAndUserMetadata(t *testing.T) {

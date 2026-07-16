@@ -57,6 +57,11 @@ type statusWriter struct {
 	wroteHeader bool
 }
 
+// Unwrap lets http.ResponseController reach the real network writer for
+// narrowly-scoped deadline overrides around bounded consensus operations. It
+// does not change ordinary response capture.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 func (w *statusWriter) WriteHeader(code int) {
 	if !w.wroteHeader {
 		w.status = code

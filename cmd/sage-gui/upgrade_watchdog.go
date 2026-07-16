@@ -29,6 +29,7 @@ import (
 	"github.com/rs/zerolog"
 
 	sageabci "github.com/l33tdawg/sage/internal/abci"
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -67,6 +68,7 @@ const upgradeTargetAppVersion uint64 = 6
 // in runServe after the agent key is loaded and CometBFT is up.
 type upgradeWatchdogConfig struct {
 	BinaryVersion string             // ldflags-injected version string
+	ChainID       string             // authoritative CometBFT genesis chain_id
 	AgentKey      ed25519.PrivateKey // operator's signing key
 	CometRPC      string             // e.g. "http://127.0.0.1:26657"
 	TickInterval  time.Duration      // default 30s if zero
@@ -616,6 +618,14 @@ func buildUpgradeProposeTx(cfg upgradeWatchdogConfig, target uint64) (*tx.Parsed
 	sig := ed25519.Sign(cfg.AgentKey, message)
 
 	binarySHA, _ := computeSelfBinarySHA256()
+	var governanceDomain string
+	if target == 20 {
+		var domainErr error
+		governanceDomain, domainErr = governance.DelegationDomainForChainID(cfg.ChainID)
+		if domainErr != nil {
+			return nil, fmt.Errorf("derive app-v20 governance domain: %w", domainErr)
+		}
+	}
 
 	ptx := &tx.ParsedTx{
 		Type:           tx.TxTypeUpgradePropose,
@@ -631,6 +641,7 @@ func buildUpgradeProposeTx(cfg upgradeWatchdogConfig, target uint64) (*tx.Parsed
 			BinarySHA256:       binarySHA,
 			ProposerID:         agentID,
 			UpgradeDelayBlocks: 0, // chain applies floor (200 blocks)
+			GovernanceDomain:   governanceDomain,
 		},
 	}
 	// Outer tx-level signature for CheckTx (separate from the agent proof).
@@ -744,6 +755,39 @@ func readChainAppVersion(ctx context.Context, cometRPC string) (uint64, error) {
 		return 0, fmt.Errorf("parse app_version %q: %w", out.Result.Response.AppVersion, err)
 	}
 	return v, nil
+}
+
+// readCometChainID reads the authoritative genesis chain_id exposed as
+// status.result.node_info.network. App-v20's upgrade proposal commits a hash
+// of this value so delegated governance authorizations cannot cross networks.
+func readCometChainID(ctx context.Context, cometRPC string) (string, error) {
+	url := strings.TrimRight(cometRPC, "/") + "/status"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("status: HTTP %d", resp.StatusCode)
+	}
+	var out struct {
+		Result struct {
+			NodeInfo struct {
+				Network string `json:"network"`
+			} `json:"node_info"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", fmt.Errorf("decode status: %w", err)
+	}
+	if out.Result.NodeInfo.Network == "" {
+		return "", fmt.Errorf("status returned an empty chain_id")
+	}
+	return out.Result.NodeInfo.Network, nil
 }
 
 // broadcastTxSync POSTs to /broadcast_tx_sync (NOT commit — the

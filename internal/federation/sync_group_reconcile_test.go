@@ -27,30 +27,41 @@ func TestGroupSubchainDiscoveryRevealsOnlyAuthenticatedEntitlement(t *testing.T)
 	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{GroupID: "g-discovery", DomainTag: "secret", OwnerChainID: "chain-owner", RemovedRevision: 4}); err != nil {
 		t.Fatal(err)
 	}
-	request := func() []string {
+	peerID := hex.EncodeToString(peerPub)
+	agreement := &store.CrossFedRecord{RemoteChainID: "chain-peer", Status: "active"}
+	bindInboundGroupPeer(t, m, ms, &peerIdentity{
+		ChainID: "chain-peer", AgentID: peerID, Agreement: agreement,
+	}, "guest")
+	request := func(agentID string) (*httptest.ResponseRecorder, []string) {
 		body, _ := json.Marshal(groupSubchainsRequest{GroupID: "g-discovery"})
 		req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/subchains", bytes.NewReader(body))
-		req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: "chain-peer"}))
+		req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{
+			ChainID: "chain-peer", AgentID: agentID, Agreement: agreement,
+		}))
 		rr := httptest.NewRecorder()
 		m.handleGroupSubchains(rr, req)
 		if rr.Code != http.StatusOK {
-			t.Fatalf("discovery status=%d body=%s", rr.Code, rr.Body.String())
+			return rr, nil
 		}
 		var resp groupSubchainsResponse
 		if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
 			t.Fatal(err)
 		}
-		return resp.Subchains
+		return rr, resp.Subchains
 	}
-	if got := request(); len(got) != 1 || got[0] != DomainSubchain("hr") {
+	if _, got := request(peerID); len(got) != 1 || got[0] != DomainSubchain("hr") {
 		t.Fatalf("removed unentitled domain leaked: %v", got)
+	}
+	wrongPub, _, _ := ed25519.GenerateKey(nil)
+	if rr, _ := request(hex.EncodeToString(wrongPub)); rr.Code != http.StatusForbidden {
+		t.Fatalf("same-chain wrong operator discovery status=%d want 403", rr.Code)
 	}
 	if err := ms.SnapshotRemovedDomainEntitlements(ctx, "g-discovery", "secret", 4); err != nil {
 		t.Fatal(err)
 	}
 	// Snapshot after removal has no active source row and therefore cannot forge
 	// prior entitlement; the terminal chain must remain hidden.
-	if got := request(); len(got) != 1 || got[0] != DomainSubchain("hr") {
+	if _, got := request(peerID); len(got) != 1 || got[0] != DomainSubchain("hr") {
 		t.Fatalf("post-removal snapshot forged entitlement: %v", got)
 	}
 }
@@ -72,6 +83,7 @@ func TestReconcilePeerJournalsPropagatesDomainMutationAndRemoval(t *testing.T) {
 	}
 	seedActiveMember(t, ms, "g-reconcile", "chain-local", store.GroupRoleFullSync, m.agentPub)
 	seedActiveMember(t, ms, "g-reconcile", "chain-peer", store.GroupRoleFullSync, peerPub)
+	bindPullJournalPeer(t, m, ms, "g-reconcile", "chain-peer", peerPub)
 
 	add, err := buildJournalEntry("g-reconcile", DomainSubchain("hr"), 0, "", "domain_add",
 		"chain-peer", peerPub, peerKey, domainAddPayload("hr", "chain-peer", 0))

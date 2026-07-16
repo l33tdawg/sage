@@ -1061,6 +1061,8 @@ func TestCommitRetriesOnSQLITE_BUSYAndEventuallyFlushes(t *testing.T) {
 	require.Equal(t, uint32(0), submit.Code, "submit should succeed: %s", submit.Log)
 	require.NotEmpty(t, app.pendingWrites, "submit must buffer a pending write")
 	app.state.Height = 2
+	testAppHash := sha256.Sum256([]byte("busy-retry-block-2"))
+	app.state.AppHash = testAppHash[:]
 
 	_, err = app.Commit(context.Background(), nil)
 	require.NoError(t, err)

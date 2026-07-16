@@ -12,39 +12,43 @@ import (
 func TestConfigureValidatorStateSyncP2P(t *testing.T) {
 	first := strings.Repeat("01", 20)
 	second := strings.Repeat("02", 20)
-	cfg := config.DefaultP2PConfig()
-	cfg.Seeds = "seed.example:26656"
+	cfg := config.DefaultConfig()
+	cfg.P2P.Seeds = "seed.example:26656"
 
 	require.NoError(t, configureValidatorStateSyncP2P(cfg,
 		[]string{second + "@10.0.0.2:26656"}, []string{second, first}))
-	assert.Empty(t, cfg.Seeds)
-	assert.False(t, cfg.PexReactor)
-	assert.False(t, cfg.SeedMode)
-	assert.Zero(t, cfg.MaxNumInboundPeers)
-	assert.Zero(t, cfg.MaxNumOutboundPeers)
-	assert.Equal(t, first+","+second, cfg.UnconditionalPeerIDs)
-	assert.Equal(t, cfg.UnconditionalPeerIDs, cfg.PrivatePeerIDs)
-	assert.Equal(t, second+"@10.0.0.2:26656", cfg.PersistentPeers)
+	assert.True(t, cfg.FilterPeers)
+	assert.Empty(t, cfg.P2P.Seeds)
+	assert.False(t, cfg.P2P.PexReactor)
+	assert.False(t, cfg.P2P.SeedMode)
+	assert.Zero(t, cfg.P2P.MaxNumInboundPeers)
+	assert.Zero(t, cfg.P2P.MaxNumOutboundPeers)
+	assert.Equal(t, first+","+second, cfg.P2P.UnconditionalPeerIDs)
+	assert.Equal(t, cfg.P2P.UnconditionalPeerIDs, cfg.P2P.PrivatePeerIDs)
+	assert.Equal(t, second+"@10.0.0.2:26656", cfg.P2P.PersistentPeers)
 	require.NoError(t, validateValidatorStateSyncP2P(cfg, []string{first, second}))
 }
 
 func TestValidatorStateSyncP2PRejectsProfileDrift(t *testing.T) {
 	first := strings.Repeat("01", 20)
 	second := strings.Repeat("02", 20)
-	cfg := config.DefaultP2PConfig()
+	cfg := config.DefaultConfig()
 	require.NoError(t, configureValidatorStateSyncP2P(cfg,
 		[]string{first + "@127.0.0.1:26656"}, []string{first, second}))
 
-	tests := map[string]func(*config.P2PConfig){
-		"PEX":             func(c *config.P2PConfig) { c.PexReactor = true },
-		"seed":            func(c *config.P2PConfig) { c.Seeds = second + "@127.0.0.1:26657" },
-		"inbound":         func(c *config.P2PConfig) { c.MaxNumInboundPeers = 1 },
-		"outbound":        func(c *config.P2PConfig) { c.MaxNumOutboundPeers = 1 },
-		"missing private": func(c *config.P2PConfig) { c.PrivatePeerIDs = first },
+	tests := map[string]func(*config.Config){
+		"peer filter":     func(c *config.Config) { c.FilterPeers = false },
+		"PEX":             func(c *config.Config) { c.P2P.PexReactor = true },
+		"seed":            func(c *config.Config) { c.P2P.Seeds = second + "@127.0.0.1:26657" },
+		"inbound":         func(c *config.Config) { c.P2P.MaxNumInboundPeers = 1 },
+		"outbound":        func(c *config.Config) { c.P2P.MaxNumOutboundPeers = 1 },
+		"missing private": func(c *config.Config) { c.P2P.PrivatePeerIDs = first },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			copy := *cfg
+			p2pCopy := *cfg.P2P
+			copy.P2P = &p2pCopy
 			mutate(&copy)
 			assert.Error(t, validateValidatorStateSyncP2P(&copy, []string{first, second}))
 		})
@@ -68,7 +72,7 @@ func TestValidatorStateSyncP2PRejectsUnauthorizedOrMalformedPeers(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			assert.Error(t, configureValidatorStateSyncP2P(config.DefaultP2PConfig(), test.peers, test.authorized))
+			assert.Error(t, configureValidatorStateSyncP2P(config.DefaultConfig(), test.peers, test.authorized))
 		})
 	}
 }

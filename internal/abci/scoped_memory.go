@@ -8,12 +8,8 @@ import (
 	"math"
 	"time"
 
-	abcitypes "github.com/cometbft/cometbft/abci/types"
-
-	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/scope"
-	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -93,124 +89,6 @@ func (app *SageApp) setScopedMemorySubmission(submit *tx.MemorySubmit, memoryID,
 		return false, err
 	}
 	return true, nil
-}
-
-// replayScopedFinalizeTx recognizes only an exact app-v20 scoped transaction
-// whose Badger effects already exist at the same height while persisted
-// state.Height is still behind. That state can arise when FinalizeBlock
-// succeeded but Commit crashed before its SQL flush/SaveState boundary. The
-// canonical envelope or immutable vote-height record is the replay witness.
-//
-// The function performs no consensus write. It reconstructs the projection
-// batch that the failed Commit lost and returns the original successful result.
-// A later block, changed payload/decision, ordinary unscoped transaction, or
-// merely reused nonce cannot satisfy the height-bound evidence.
-func (app *SageApp) replayScopedFinalizeTx(parsedTx *tx.ParsedTx, height int64, blockTime time.Time) (*abcitypes.ExecTxResult, bool) {
-	if app.state == nil || app.state.Height >= height || !app.postAppV20Fork(height) {
-		return nil, false
-	}
-
-	switch parsedTx.Type {
-	case tx.TxTypeMemorySubmit:
-		submit := parsedTx.MemorySubmit
-		if submit == nil {
-			return nil, false
-		}
-		submittingAgent, err := verifyAgentIdentity(parsedTx)
-		if err != nil {
-			return nil, false
-		}
-		memoryID := memoryIDForSubmit(submit, height, submittingAgent)
-		content, err := app.badgerStore.GetScopedContent(memoryID)
-		if err != nil || content == nil {
-			return nil, false
-		}
-		effectiveHash := submit.ContentHash
-		if len(effectiveHash) == 0 {
-			computed := sha256.Sum256([]byte(submit.Content))
-			effectiveHash = computed[:]
-		}
-		if content.MemoryID != memoryID || content.SubmittingAgentID != submittingAgent ||
-			content.SubmittedHeight != height || content.SubmittedUnix != blockTime.Unix() ||
-			content.Domain != submit.DomainTag || content.Content != submit.Content ||
-			content.MemoryType != byte(submit.MemoryType) ||
-			content.Classification != byte(submit.Classification) ||
-			content.TaskStatus != submit.TaskStatus ||
-			!equalStrings(content.Tags, submit.Tags) ||
-			math.Float64bits(content.ConfidenceScore) != math.Float64bits(submit.ConfidenceScore) ||
-			!bytes.Equal(content.ContentHash, effectiveHash) ||
-			content.ParentHash != submit.ParentHash {
-			return nil, false
-		}
-		onChainHash, status, err := app.badgerStore.GetMemoryHash(memoryID)
-		if err != nil || !bytes.Equal(onChainHash, content.ContentHash) {
-			return nil, false
-		}
-		ballot, err := app.badgerStore.GetScopeBallot(memoryID)
-		if err != nil || ballot == nil || ballot.SubmittedHeight != height ||
-			ballot.MemoryID != memoryID || ballot.ScopeID != content.ScopeID ||
-			ballot.ScopeRevision != content.ScopeRevision {
-			return nil, false
-		}
-		if err := validateRecoveredScopeStatus(ballot.State, status); err != nil {
-			return nil, false
-		}
-
-		app.pendingWrites = append(app.pendingWrites,
-			pendingWrite{writeType: "memory", data: &memory.MemoryRecord{
-				MemoryID: memoryID, SubmittingAgent: submittingAgent,
-				Content: submit.Content, ContentHash: append([]byte(nil), content.ContentHash...),
-				EmbeddingHash: append([]byte(nil), submit.EmbeddingHash...),
-				MemoryType:    memory.MemoryType(txMemoryTypeToStringValue(content.MemoryType)),
-				DomainTag:     content.Domain, ConfidenceScore: content.ConfidenceScore,
-				Status: memory.MemoryStatus(status), ParentHash: content.ParentHash,
-				TaskStatus: memory.TaskStatus(content.TaskStatus), CreatedAt: blockTime,
-			}},
-			pendingWrite{writeType: "mem_classification", data: &memClassificationData{
-				MemoryID: memoryID, Classification: store.ClearanceLevel(content.Classification),
-			}},
-		)
-		if len(content.Tags) > 0 {
-			app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "memory_tags", data: &memoryTagsData{
-				MemoryID: memoryID, Tags: append([]string(nil), content.Tags...),
-			}})
-		}
-		return &abcitypes.ExecTxResult{
-			Code: 0, Data: []byte(memoryID), Log: fmt.Sprintf("memory %s submitted", memoryID),
-		}, true
-
-	case tx.TxTypeMemoryVote:
-		vote := parsedTx.MemoryVote
-		if vote == nil {
-			return nil, false
-		}
-		validatorID := auth.PublicKeyToAgentID(parsedTx.PublicKey)
-		decision := voteDecisionToString(vote.Decision)
-		storedDecision, storedHeight, ok, err := app.badgerStore.GetScopedVote(vote.MemoryID, validatorID)
-		if err != nil || !ok || storedHeight != height || storedDecision != decision {
-			return nil, false
-		}
-		ballot, err := app.badgerStore.GetScopeBallot(vote.MemoryID)
-		if err != nil || ballot == nil || !scopeBallotHasMember(*ballot, validatorID) {
-			return nil, false
-		}
-		app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "vote", data: &store.ValidationVote{
-			MemoryID: vote.MemoryID, ValidatorID: validatorID, Decision: decision,
-			Rationale: vote.Rationale, BlockHeight: height, CreatedAt: blockTime,
-		}})
-		if ballot.State == scope.BallotCommitted || ballot.State == scope.BallotDeprecated {
-			status := memory.StatusDeprecated
-			if ballot.State == scope.BallotCommitted {
-				status = memory.StatusCommitted
-			}
-			app.pendingWrites = append(app.pendingWrites, pendingWrite{writeType: "status_update", data: &statusUpdate{
-				MemoryID: vote.MemoryID, Status: status, At: blockTime,
-			}})
-		}
-		return &abcitypes.ExecTxResult{Code: 0, Log: fmt.Sprintf("vote recorded for memory %s", vote.MemoryID)}, true
-	}
-
-	return nil, false
 }
 
 func equalStrings(a, b []string) bool {

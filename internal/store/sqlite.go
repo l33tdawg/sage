@@ -1,9 +1,11 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -671,6 +673,16 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		height       INTEGER NOT NULL,
 		PRIMARY KEY (proposal_id, validator_id)
 	);
+
+	-- Exactly-once receipt for one consensus block's complete off-chain
+	-- projection transaction. This is intentionally separate from individual
+	-- table identities: two legitimate events may have identical payloads, while
+	-- an exact CometBFT block replay must apply the complete batch zero times.
+	CREATE TABLE IF NOT EXISTS abci_projection_batches (
+		block_height INTEGER PRIMARY KEY,
+		app_hash     BLOB NOT NULL CHECK (length(app_hash) = 32),
+		created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	);
 	`
 
 	if _, err := s.writeExecContext(ctx, schema); err != nil {
@@ -732,6 +744,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// sync_group roster, sync_group_member, sync_group_domain, sync_group_log audit
 	// journal, sync_tombstone) + the sync_control.group_id binding column.
 	s.migrateSyncGroupTables(ctx)
+
+	// Directional peer-RBAC capability snapshots. Header presence is meaningful:
+	// a present header with zero domain rows is explicit deny-all, not legacy.
+	s.migratePeerRBACPolicies(ctx)
 
 	// FTS5 full-text search index on memory content.
 	// Used as a fallback when semantic embeddings are unavailable (hash mode).
@@ -1912,7 +1928,13 @@ func (s *SQLiteStore) InsertTriples(ctx context.Context, memoryID string, triple
 	insertAll := func(q sqlQuerier) error {
 		for _, t := range triples {
 			if _, err := q.ExecContext(ctx,
-				`INSERT INTO knowledge_triples (memory_id, subject, predicate, object) VALUES (?, ?, ?, ?)`,
+				`INSERT INTO knowledge_triples (memory_id, subject, predicate, object)
+				 SELECT ?, ?, ?, ?
+				 WHERE NOT EXISTS (
+					SELECT 1 FROM knowledge_triples
+					WHERE memory_id = ? AND subject = ? AND predicate = ? AND object = ?
+				 )`,
+				memoryID, t.Subject, t.Predicate, t.Object,
 				memoryID, t.Subject, t.Predicate, t.Object); err != nil {
 				return fmt.Errorf("insert triple: %w", err)
 			}
@@ -1975,10 +1997,18 @@ func (s *SQLiteStore) GetVotes(ctx context.Context, memoryID string) ([]*Validat
 }
 
 func (s *SQLiteStore) InsertChallenge(ctx context.Context, challenge *ChallengeEntry) error {
+	createdAt := formatTime(challenge.CreatedAt)
 	_, err := s.writeExecContext(ctx,
 		`INSERT INTO challenges (memory_id, challenger_id, reason, evidence, block_height, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		challenge.MemoryID, challenge.ChallengerID, challenge.Reason, challenge.Evidence, challenge.BlockHeight, formatTime(challenge.CreatedAt))
+		 SELECT ?, ?, ?, ?, ?, ?
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM challenges
+			WHERE memory_id = ? AND challenger_id = ? AND reason = ?
+			  AND COALESCE(evidence, '') = ? AND COALESCE(block_height, 0) = ?
+			  AND created_at = ?
+		 )`,
+		challenge.MemoryID, challenge.ChallengerID, challenge.Reason, challenge.Evidence, challenge.BlockHeight, createdAt,
+		challenge.MemoryID, challenge.ChallengerID, challenge.Reason, challenge.Evidence, challenge.BlockHeight, createdAt)
 	if err != nil {
 		return fmt.Errorf("insert challenge: %w", err)
 	}
@@ -1986,10 +2016,17 @@ func (s *SQLiteStore) InsertChallenge(ctx context.Context, challenge *ChallengeE
 }
 
 func (s *SQLiteStore) InsertCorroboration(ctx context.Context, corr *Corroboration) error {
+	createdAt := formatTime(corr.CreatedAt)
 	_, err := s.writeExecContext(ctx,
 		`INSERT INTO corroborations (memory_id, agent_id, evidence, created_at)
-		VALUES (?, ?, ?, ?)`,
-		corr.MemoryID, corr.AgentID, corr.Evidence, formatTime(corr.CreatedAt))
+		 SELECT ?, ?, ?, ?
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM corroborations
+			WHERE memory_id = ? AND agent_id = ?
+			  AND COALESCE(evidence, '') = ? AND created_at = ?
+		 )`,
+		corr.MemoryID, corr.AgentID, corr.Evidence, createdAt,
+		corr.MemoryID, corr.AgentID, corr.Evidence, createdAt)
 	if err != nil {
 		return fmt.Errorf("insert corroboration: %w", err)
 	}
@@ -3606,6 +3643,53 @@ func (s *SQLiteStore) Ping(ctx context.Context) error {
 	return nil
 }
 
+// ClaimProjectionBatch implements the cross-store crash boundary used by
+// SageApp.Commit. The receipt and every mirror write commit in one SQLite
+// transaction. A SIGKILL after that transaction but before Badger Commit makes
+// Comet replay the block; the existing receipt then turns the replay into a
+// no-op instead of duplicating append-only audit rows. Receipts are retained:
+// a validator returning from an arbitrarily long partition may share an
+// already-advanced PostgreSQL projection and must still recognize old replays.
+// The storage tradeoff is one indexed height/hash row per projected block.
+// This is exact-replay protection, not a general cross-store rollback protocol:
+// operator snapshots must still restore Badger, SQL, and CometBFT as a pair.
+func (s *SQLiteStore) ClaimProjectionBatch(ctx context.Context, height int64, appHash []byte) (bool, error) {
+	if s.db != nil {
+		return false, errors.New("claim projection batch must run inside RunInTx")
+	}
+	if height <= 0 {
+		return false, fmt.Errorf("claim projection batch: invalid height %d", height)
+	}
+	if len(appHash) != sha256.Size {
+		return false, fmt.Errorf("claim projection batch at height %d: AppHash must be %d bytes, got %d", height, sha256.Size, len(appHash))
+	}
+	result, err := s.conn.ExecContext(ctx, `
+		INSERT INTO abci_projection_batches (block_height, app_hash)
+		VALUES (?, ?)
+		ON CONFLICT (block_height) DO NOTHING`, height, appHash)
+	if err != nil {
+		return false, fmt.Errorf("claim projection batch at height %d: %w", height, err)
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim projection batch at height %d rows affected: %w", height, err)
+	}
+	if inserted == 0 {
+		var existing []byte
+		if err := s.conn.QueryRowContext(ctx,
+			`SELECT app_hash FROM abci_projection_batches WHERE block_height = ?`, height,
+		).Scan(&existing); err != nil {
+			return false, fmt.Errorf("read projection batch at height %d: %w", height, err)
+		}
+		if !bytes.Equal(existing, appHash) {
+			return false, fmt.Errorf("projection batch height %d already belongs to AppHash %x, refusing %x", height, existing, appHash)
+		}
+		return false, nil
+	}
+
+	return true, nil
+}
+
 // RunInTx executes fn within a SQLite transaction. All writes through
 // the tx-scoped OffchainStore are atomic — either all succeed or all roll back.
 func (s *SQLiteStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) error) error {
@@ -3624,7 +3708,11 @@ func (s *SQLiteStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	txStore := &SQLiteStore{conn: tx, dbPath: s.dbPath, syncPolicyGate: s.syncPolicyGate, syncOriginGate: s.syncOriginGate}
+	txStore := &SQLiteStore{
+		conn: tx, dbPath: s.dbPath,
+		vault: s.vault, vaultExpected: s.vaultExpected,
+		syncPolicyGate: s.syncPolicyGate, syncOriginGate: s.syncOriginGate,
+	}
 	if err := fn(txStore); err != nil {
 		return err
 	}
@@ -4928,7 +5016,8 @@ func (s *SQLiteStore) InsertGovProposal(ctx context.Context, p *GovProposal) err
 	_, err := s.writeExecContext(ctx, `
 		INSERT INTO governance_proposals (proposal_id, operation, target_agent_id, target_pubkey,
 			target_power, proposer_id, status, created_height, expiry_height, executed_height, reason)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (proposal_id) DO NOTHING`,
 		p.ProposalID, p.Operation, p.TargetAgentID, p.TargetPubkey,
 		p.TargetPower, p.ProposerID, p.Status, p.CreatedHeight,
 		p.ExpiryHeight, p.ExecutedHeight, p.Reason)

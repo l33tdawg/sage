@@ -139,7 +139,7 @@ func TestJoinCeremonyRelayOnlyMTLSAndPersistedRoutes(t *testing.T) {
 	if scanErr := hostNode.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); scanErr != nil {
 		t.Fatal(scanErr)
 	}
-	scope := ScopeWire{MaxClearance: 1, AllowedDomains: []string{"shared"}, Mode: "exchange", Direction: "both"}
+	scope := trustOnlyJoinScope
 	codes, err := guestNode.mgr.GuestRequest(ctx, create.SessionID, "https://127.0.0.1:1", scope)
 	if err != nil {
 		t.Fatal(err)

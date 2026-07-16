@@ -1,8 +1,8 @@
 # SAGE ABCI application (Go state machine)
 # Multi-stage build: compile Go binary, copy to minimal Alpine
 
-# ── Builder ──────────────────────────────────
-FROM golang:1.25-alpine AS builder
+# ── Shared source ─────────────────────────────
+FROM golang:1.25-alpine AS source
 
 RUN apk add --no-cache git
 
@@ -16,20 +16,43 @@ COPY go.mod go.sum ./
 COPY third_party/cometbft/go.mod third_party/cometbft/go.sum ./third_party/cometbft/
 RUN go mod download
 
-# Copy source and build
+# Copy source. The fixture binary is built in an isolated named stage below;
+# the default/final production image neither builds nor contains it.
 COPY . .
+
+FROM source AS amid-builder
 RUN CGO_ENABLED=0 go build -o /app/amid ./cmd/amid
 
-# ── Final ────────────────────────────────────
-FROM alpine:3.20
+# This stage is reachable only from the explicit v119-state-sync-fixture
+# target. The binary is intentionally fixture-named and carries the
+# v119testfixture build tag: two governance timing bounds are shortened (the
+# upgrade-delay floor and proposer cooldown) so the isolated wire gate can drive
+# a fresh chain through the real signed app-v20 ceremony in bounded CI time. It
+# also includes a dormant, environment-activated pre-publication pause hook for
+# placing an exact crash. The production build does not recognize that hook;
+# all production authorization, quorum, identity, state-sync, P2P, sealing, and
+# serving logic remains identical.
+FROM source AS v119-state-sync-fixture-builder
+ARG V119_STATE_SYNC_SOURCE_ID
+RUN test "${#V119_STATE_SYNC_SOURCE_ID}" -eq 64 \
+    && case "${V119_STATE_SYNC_SOURCE_ID}" in *[!0-9a-f]*) exit 1;; *) exit 0;; esac
+RUN CGO_ENABLED=0 go build -tags=v119testfixture \
+      -ldflags "-X main.version=v11.9.0-state-sync-fixture -X main.commit=${V119_STATE_SYNC_SOURCE_ID}" \
+      -o /app/sage-gui-v119-fixture ./cmd/sage-gui \
+    && CGO_ENABLED=0 go build -tags=v119testfixture \
+      -ldflags "-X main.version=v11.9.0-governance-fixture -X main.commit=${V119_STATE_SYNC_SOURCE_ID}" \
+      -o /app/amid-v119-fixture ./cmd/amid \
+    && CGO_ENABLED=0 go build -tags=v119testfixture \
+      -o /app/v119-governance-fixture ./cmd/v119-governance-fixture
+
+# ── Runtime base ─────────────────────────────
+FROM alpine:3.20 AS runtime
 
 RUN apk add --no-cache ca-certificates \
     && addgroup -S sage && adduser -S sage -G sage
 
 WORKDIR /app
-COPY --from=builder /app/amid ./amid
-RUN chown -R sage:sage /app \
-    && mkdir -p /data && chown sage:sage /data
+RUN mkdir -p /data && chown sage:sage /data
 
 USER sage
 
@@ -42,3 +65,23 @@ HEALTHCHECK --interval=15s --timeout=5s --start-period=5m --retries=3 \
     CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1
 
 CMD ["./amid"]
+
+# Official production image. It contains only amid.
+FROM runtime AS production
+COPY --from=amid-builder --chown=sage:sage /app/amid ./amid
+
+# Explicit test-only image used by the v11.9 wire gate. Never select this
+# target for Compose or release image publication.
+FROM production AS v119-state-sync-fixture
+ARG V119_STATE_SYNC_SOURCE_ID
+LABEL dev.sage.v119-state-sync.source-id="${V119_STATE_SYNC_SOURCE_ID}"
+COPY --from=v119-state-sync-fixture-builder --chown=sage:sage \
+    /app/sage-gui-v119-fixture ./sage-gui-v119-fixture
+COPY --from=v119-state-sync-fixture-builder --chown=sage:sage \
+    /app/amid-v119-fixture ./amid-v119-fixture
+COPY --from=v119-state-sync-fixture-builder --chown=sage:sage \
+    /app/v119-governance-fixture ./v119-governance-fixture
+
+# Docker's default target remains production-only even though the named
+# fixture target is declared above.
+FROM production AS final

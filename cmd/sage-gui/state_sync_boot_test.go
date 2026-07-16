@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/config"
 	cmtcrypto "github.com/cometbft/cometbft/crypto/ed25519"
+	"github.com/cometbft/cometbft/privval"
 	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
 	cmtstate "github.com/cometbft/cometbft/state"
 	cmtstore "github.com/cometbft/cometbft/store"
@@ -47,9 +49,20 @@ func savePersistedCometStateWithoutCommit(t *testing.T, cfg *config.Config, heig
 
 func savePersistedCometStateFixture(t *testing.T, cfg *config.Config, height int64, appHash []byte, persistCommit bool) {
 	t.Helper()
+	savePersistedCometStateFixtureWithKey(t, cfg, height, appHash, persistCommit, cmtcrypto.GenPrivKey())
+}
+
+func savePersistedCometStateFixtureWithKey(
+	t *testing.T,
+	cfg *config.Config,
+	height int64,
+	appHash []byte,
+	persistCommit bool,
+	privKey cmtcrypto.PrivKey,
+) {
+	t.Helper()
 	db, err := config.DefaultDBProvider(&config.DBContext{ID: "state", Config: cfg})
 	require.NoError(t, err)
-	privKey := cmtcrypto.GenPrivKey()
 	pubKey := privKey.PubKey()
 	genesis := &cmttypes.GenesisDoc{
 		GenesisTime:     time.Unix(1, 0).UTC(),
@@ -64,21 +77,23 @@ func savePersistedCometStateFixture(t *testing.T, cfg *config.Config, height int
 	require.NoError(t, err)
 	state.LastBlockHeight = height
 	state.AppHash = append([]byte(nil), appHash...)
+	var blockID cmttypes.BlockID
 	if height > 0 {
 		state.LastValidators = state.Validators.Copy()
-	}
-	require.NoError(t, cmtstate.NewStore(db, cmtstate.StoreOptions{}).Save(state))
-	require.NoError(t, db.Close())
-	if height > 0 && persistCommit {
 		blockHash := sha256.Sum256([]byte("state-sync-test-block"))
 		partsHash := sha256.Sum256([]byte("state-sync-test-parts"))
-		blockID := cmttypes.BlockID{
+		blockID = cmttypes.BlockID{
 			Hash: blockHash[:],
 			PartSetHeader: cmttypes.PartSetHeader{
 				Total: 1,
 				Hash:  partsHash[:],
 			},
 		}
+		state.LastBlockID = blockID
+	}
+	require.NoError(t, cmtstate.NewStore(db, cmtstate.StoreOptions{}).Save(state))
+	require.NoError(t, db.Close())
+	if height > 0 && persistCommit {
 		vote := &cmttypes.Vote{
 			ValidatorAddress: pubKey.Address(),
 			ValidatorIndex:   0,
@@ -127,6 +142,47 @@ func TestReadPersistedCometStateBeforeHandshake(t *testing.T) {
 	assert.Equal(t, want[:], hashAgain, "callers receive a private AppHash copy")
 }
 
+func TestStateSyncSealEvidenceDoesNotRequireBootstrapBlockBody(t *testing.T) {
+	cfg := stateSyncCometConfig(t)
+	wantHash := sha256.Sum256([]byte("state-sync application state at H"))
+	savePersistedCometState(t, cfg, 97, wantHash[:])
+
+	stateDB, err := config.DefaultDBProvider(&config.DBContext{ID: "state", Config: cfg})
+	require.NoError(t, err)
+	stateStore := cmtstate.NewStore(stateDB, cmtstate.StoreOptions{})
+	state, err := stateStore.Load()
+	require.NoError(t, err)
+	state.Version.Consensus.App = 20
+	require.NoError(t, stateStore.Save(state))
+	require.NoError(t, stateDB.Close())
+
+	height, appHash, err := readPersistedCometState(cfg)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(97), height)
+	assert.Equal(t, wantHash[:], appHash)
+
+	blockDB, err := config.DefaultDBProvider(&config.DBContext{ID: "blockstore", Config: cfg})
+	require.NoError(t, err)
+	blockStore := cmtstore.NewBlockStore(blockDB)
+	assert.Zero(t, blockStore.Base())
+	assert.Zero(t, blockStore.Height(), "Comet /status remains empty until block sync materializes H+1")
+	assert.Nil(t, blockStore.LoadBlockMeta(97))
+	assert.Nil(t, blockStore.LoadBlock(97))
+	commit := blockStore.LoadSeenCommit(97)
+	require.NotNil(t, commit)
+	assert.True(t, commit.BlockID.Equals(state.LastBlockID))
+	require.NoError(t, blockStore.SaveStateSyncBootstrapComplete(97, wantHash[:]))
+	require.NoError(t, validateCometBootstrapCommit(state, blockStore))
+	require.NoError(t, validateCometStateSyncHandoff(97, wantHash[:], blockStore))
+	require.NoError(t, blockStore.Close())
+
+	runningHeight, runningHash, appVersion, err := runningCometState(state)
+	require.NoError(t, err)
+	assert.Equal(t, int64(97), runningHeight)
+	assert.Equal(t, wantHash[:], runningHash)
+	assert.Equal(t, uint64(20), appVersion)
+}
+
 func TestReadPersistedCometStateHandlesFreshAndInvalidDatabases(t *testing.T) {
 	fresh := stateSyncCometConfig(t)
 	height, appHash, err := readPersistedCometState(fresh)
@@ -172,6 +228,21 @@ func TestReadPersistedCometStateHandlesFreshAndInvalidDatabases(t *testing.T) {
 	savePersistedCometStateWithoutCommit(t, missingCommit, 11, missingHash[:])
 	_, _, err = readPersistedCometState(missingCommit)
 	require.ErrorIs(t, err, errStateSyncBootstrapCommitMissing)
+
+	mismatchedCommit := stateSyncCometConfig(t)
+	mismatchedHash := sha256.Sum256([]byte("mismatched bootstrap commit"))
+	savePersistedCometState(t, mismatchedCommit, 12, mismatchedHash[:])
+	db, err = config.DefaultDBProvider(&config.DBContext{ID: "state", Config: mismatchedCommit})
+	require.NoError(t, err)
+	stateStore := cmtstate.NewStore(db, cmtstate.StoreOptions{})
+	state, err := stateStore.Load()
+	require.NoError(t, err)
+	wrongBlockHash := sha256.Sum256([]byte("wrong persisted block ID"))
+	state.LastBlockID.Hash = wrongBlockHash[:]
+	require.NoError(t, stateStore.Save(state))
+	require.NoError(t, db.Close())
+	_, _, err = readPersistedCometState(mismatchedCommit)
+	require.ErrorContains(t, err, "block ID does not match persisted state")
 }
 
 func TestRunningCometStateAllowsCanonicalEmptyBootstrap(t *testing.T) {
@@ -192,6 +263,46 @@ func TestRunningCometStateAllowsCanonicalEmptyBootstrap(t *testing.T) {
 
 	_, _, _, err = runningCometState(cmtstate.State{LastBlockHeight: 0, AppHash: wantHash[:]})
 	assert.ErrorContains(t, err, "invalid height")
+}
+
+func TestCometStateSyncReceiverMustBeAbsentFromEveryPersistedValidatorSet(t *testing.T) {
+	receiverKey := cmtcrypto.GenPrivKey()
+	otherKey := cmtcrypto.GenPrivKey()
+	receiverSet := cmttypes.NewValidatorSet([]*cmttypes.Validator{
+		cmttypes.NewValidator(receiverKey.PubKey(), 10),
+	})
+	otherSet := cmttypes.NewValidatorSet([]*cmttypes.Validator{
+		cmttypes.NewValidator(otherKey.PubKey(), 10),
+	})
+	base := func() cmtstate.State {
+		return cmtstate.State{
+			LastBlockHeight: 42,
+			LastValidators:  otherSet.Copy(),
+			Validators:      otherSet.Copy(),
+			NextValidators:  otherSet.Copy(),
+		}
+	}
+
+	require.NoError(t, requireCometStateSyncReceiverNonValidator(base(), nil))
+	require.NoError(t, requireCometStateSyncReceiverNonValidator(base(), receiverKey.PubKey().Bytes()))
+	for _, tc := range []struct {
+		name string
+		set  func(*cmtstate.State)
+		want string
+	}{
+		{name: "last", set: func(state *cmtstate.State) { state.LastValidators = receiverSet.Copy() }, want: "last"},
+		{name: "current", set: func(state *cmtstate.State) { state.Validators = receiverSet.Copy() }, want: "current"},
+		{name: "next", set: func(state *cmtstate.State) { state.NextValidators = receiverSet.Copy() }, want: "next"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := base()
+			tc.set(&state)
+			require.ErrorContains(t, requireCometStateSyncReceiverNonValidator(state, receiverKey.PubKey().Bytes()), tc.want)
+		})
+	}
+	state := base()
+	state.NextValidators = nil
+	require.ErrorContains(t, requireCometStateSyncReceiverNonValidator(state, receiverKey.PubKey().Bytes()), "no next validator set")
 }
 
 type stateSyncCompletionStoreStub struct {
@@ -258,6 +369,7 @@ func TestRecoverPendingStateSyncActivationRunsBeforeLiveDirectoryCreation(t *tes
 		context.Background(), dataDir, cometHome, badgerPath,
 		func(*config.Config) (uint64, []byte, error) { return 40, oldHash[:], nil },
 		inspectBootRecoveryTestState,
+		func() error { return errors.New("rollback must not complete the receiver role") },
 	)
 	require.NoError(t, err)
 	assert.True(t, found)
@@ -269,6 +381,48 @@ func TestRecoverPendingStateSyncActivationRunsBeforeLiveDirectoryCreation(t *tes
 	assert.NoDirExists(t, filepath.Join(dataDir, journal.PreparedName))
 	assert.NoDirExists(t, filepath.Join(dataDir, journal.QuarantineName))
 	assert.NoFileExists(t, journalPath)
+}
+
+func TestRecoverPendingStateSyncActivationRejectsReceiverInPersistedCometRoster(t *testing.T) {
+	dataDir := t.TempDir()
+	cometHome := filepath.Join(dataDir, "cometbft")
+	cometCfg := config.DefaultConfig()
+	cometCfg.SetRoot(cometHome)
+	require.NoError(t, os.MkdirAll(filepath.Dir(cometCfg.PrivValidatorKeyFile()), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Dir(cometCfg.PrivValidatorStateFile()), 0o700))
+	receiverKey := cmtcrypto.GenPrivKey()
+	receiverPV := privval.NewFilePV(receiverKey, cometCfg.PrivValidatorKeyFile(), cometCfg.PrivValidatorStateFile())
+	receiverPV.Save()
+
+	oldHash := sha256.Sum256([]byte("old state"))
+	newHash := sha256.Sum256([]byte("new state"))
+	metadataHash := sha256.Sum256([]byte("metadata"))
+	journal := statesync.ActivationJournal{
+		Phase: statesync.ActivationPendingComet, Height: 42, AppHash: newHash[:], MetadataHash: metadataHash[:],
+		PreparedName: "state-sync-prepared-42", QuarantineName: "badger-old-42", LiveName: "badger",
+	}
+	journalPath := filepath.Join(dataDir, stateSyncActivationJournalName)
+	require.NoError(t, statesync.WriteActivationJournal(journalPath, journal))
+	badgerPath := filepath.Join(dataDir, journal.LiveName)
+	writeBootRecoveryTestState(t, badgerPath, journal.Height, newHash[:])
+	writeBootRecoveryTestState(t, filepath.Join(dataDir, journal.QuarantineName), 40, oldHash[:])
+	savePersistedCometStateFixtureWithKey(t, cometCfg, int64(journal.Height), newHash[:], true, receiverKey)
+
+	completed := false
+	action, found, err := recoverPendingStateSyncActivation(
+		context.Background(), dataDir, cometHome, badgerPath,
+		func() error {
+			completed = true
+			return nil
+		},
+	)
+	require.ErrorContains(t, err, "receiver validator key is already active")
+	assert.True(t, found)
+	assert.Zero(t, action)
+	assert.False(t, completed, "recovery must not disarm the receiver role")
+	assert.FileExists(t, journalPath)
+	assert.DirExists(t, badgerPath)
+	assert.DirExists(t, filepath.Join(dataDir, journal.QuarantineName))
 }
 
 func TestRecoverPendingStateSyncActivationNoJournalAndCanonicalTarget(t *testing.T) {
@@ -283,6 +437,7 @@ func TestRecoverPendingStateSyncActivationNoJournalAndCanonicalTarget(t *testing
 			return 0, nil, nil
 		},
 		inspectBootRecoveryTestState,
+		func() error { return errors.New("missing journal must not complete the receiver role") },
 	)
 	require.NoError(t, err)
 	assert.False(t, found)
@@ -290,16 +445,20 @@ func TestRecoverPendingStateSyncActivationNoJournalAndCanonicalTarget(t *testing
 	assert.False(t, readCalled, "Comet DB stays untouched when no recovery journal exists")
 }
 
-func TestFinishRecoveredStateSyncRoleOnlyDisablesKeptReceiver(t *testing.T) {
-	config := &Config{}
+func TestCompleteStateSyncReceivingRolePersistsOneShotDisarm(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SAGE_HOME", home)
+	config := DefaultConfig(home)
 	config.Quorum.StateSync.Receiving = true
-	assert.False(t, finishRecoveredStateSyncRole(config, false, statesync.RecoveryKeepActivated))
-	assert.True(t, config.Quorum.StateSync.Receiving)
-	assert.False(t, finishRecoveredStateSyncRole(config, true, statesync.RecoveryRestoreQuarantine))
-	assert.True(t, config.Quorum.StateSync.Receiving)
-	assert.True(t, finishRecoveredStateSyncRole(config, true, statesync.RecoveryKeepActivated))
+	require.NoError(t, SaveConfig(config))
+
+	require.NoError(t, completeStateSyncReceivingRole(config))
 	assert.False(t, config.Quorum.StateSync.Receiving)
-	assert.False(t, finishRecoveredStateSyncRole(config, true, statesync.RecoveryKeepActivated), "completed role is one-shot")
+	require.NoError(t, completeStateSyncReceivingRole(config), "completed role is idempotent")
+	written, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(written), "receiving: true")
+	assert.ErrorContains(t, completeStateSyncReceivingRole(nil), "required")
 }
 
 type normalServingRuntimeStub struct {
@@ -351,6 +510,7 @@ func (s *stateSyncSealRuntimeStub) Phase() sageabci.BootStateSyncPhase {
 func (s *stateSyncSealRuntimeStub) SealActivatedBundleFromComet(
 	_ context.Context,
 	read func() (int64, []byte, uint64, error),
+	durableSeal func(int64, []byte, uint64) error,
 ) (bool, int64, []byte, uint64, error) {
 	s.sealCalls++
 	if s.pending > 0 {
@@ -358,6 +518,9 @@ func (s *stateSyncSealRuntimeStub) SealActivatedBundleFromComet(
 		return false, 40, bytes.Repeat([]byte{0x40}, sha256.Size), 20, sageabci.ErrBootStateSyncPersistencePending
 	}
 	height, appHash, appVersion, err := read()
+	if err == nil {
+		err = durableSeal(height, appHash, appVersion)
+	}
 	return true, height, appHash, appVersion, err
 }
 
@@ -377,6 +540,7 @@ func TestWaitForBootStateSyncSeal(t *testing.T) {
 			require.Equal(t, hash[:], expectedHash)
 			return 43, catchupHash[:], 20, nil
 		},
+		func(int64, []byte, uint64) error { return nil },
 		time.Millisecond,
 	)
 	require.NoError(t, err)
@@ -394,6 +558,7 @@ func TestWaitForBootStateSyncSealHonorsDeadline(t *testing.T) {
 	_, err := waitForBootStateSyncSealWithInterval(
 		ctx, runtime,
 		func(int64, []byte) (int64, []byte, uint64, error) { return 0, nil, 0, nil },
+		func(int64, []byte, uint64) error { return nil },
 		time.Millisecond,
 	)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)

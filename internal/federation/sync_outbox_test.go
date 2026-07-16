@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -116,6 +117,124 @@ func TestSyncDrainEndToEnd(t *testing.T) {
 	assert.Empty(t, pushed)
 }
 
+func TestSyncDrainV3RequiresCopyGrantAndRecipientSubscription(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "legacy-only")
+	operatorID := hex.EncodeToString(m.agentPub)
+	require.NoError(t, bs.RegisterAgent(operatorID, "operator", "admin", "", "test", "", 1))
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	agreement := mustDrainAgreement(t, m, "chain-b")
+	require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-b", Role: "host", ControllerChainID: m.localChainID,
+		ControllerAgentID: operatorID, PeerAgentID: hex.EncodeToString(peerPub),
+		PolicyEpoch: "epoch-v3", RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey),
+	}))
+	require.NoError(t, ms.ActivateSyncControl(ctx, "chain-b", "epoch-v3"))
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-b", []store.PeerRBACDomainPermission{
+		{Domain: "tii", Read: true, Copy: true},
+	})
+	require.NoError(t, err)
+	_, err = ms.ApplyLocalDirectionalSyncPolicy(ctx, "chain-b", "epoch-v3",
+		SyncPolicyVersionPeerRBAC, 1, "local-1", []string{"tii"}, nil)
+	require.NoError(t, err)
+	_, err = ms.ApplyRemoteDirectionalSyncPolicy(ctx, "chain-b", "epoch-v3",
+		SyncPolicyVersionPeerRBAC, 1, "remote-1", nil, []string{"tii.project"})
+	require.NoError(t, err)
+	require.NoError(t, ms.MarkSyncPolicyDelivered(ctx, "chain-b", "epoch-v3", 1))
+
+	effective, v3, err := m.pairwiseEgressPolicy(ctx, ms, agreement)
+	require.NoError(t, err)
+	assert.True(t, v3)
+	assert.Equal(t, []string{"tii.project"}, effective, "subtree intersection must narrow to the recipient subscription")
+	require.NoError(t, ms.DeletePeerRBACPolicy(ctx, "chain-b"))
+	effective, v3, err = m.pairwiseEgressPolicy(ctx, ms, agreement)
+	require.NoError(t, err)
+	assert.True(t, v3)
+	assert.Empty(t, effective, "active v3 without an explicit PeerRBAC policy is deny-all for Copy")
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-b", []store.PeerRBACDomainPermission{
+		{Domain: "tii", Read: true, Copy: true},
+	})
+	require.NoError(t, err)
+
+	seedCommitted(t, ms, "m-v3", "tii.project", "copy outside the legacy treaty")
+	var pushed []SyncItem
+	m.syncPushFn = func(_ context.Context, _ string, req *SyncPushRequest) (*SyncPushResponse, error) {
+		pushed = append(pushed, req.Items...)
+		results := make([]SyncItemResult, len(req.Items))
+		for i, item := range req.Items {
+			results[i] = SyncItemResult{OriginMemoryID: item.OriginMemoryID, Outcome: SyncOutcomeAccepted}
+		}
+		return &SyncPushResponse{Results: results}, nil
+	}
+	m.syncTick(ctx, ms)
+	require.Len(t, pushed, 1)
+	assert.Equal(t, "m-v3", pushed[0].OriginMemoryID)
+
+	// A PeerRBAC revoke is authoritative even if a stale local_publish row still
+	// exists. The transport intersection must fail closed immediately.
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-b", []store.PeerRBACDomainPermission{
+		{Domain: "tii", Read: true},
+	})
+	require.NoError(t, err)
+	seedCommitted(t, ms, "m-no-copy", "tii.project", "copy permission revoked")
+	pushed = nil
+	m.syncTick(ctx, ms)
+	assert.Empty(t, pushed)
+
+	// Restoring Copy alone is insufficient: the recipient must still opt in.
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-b", []store.PeerRBACDomainPermission{
+		{Domain: "tii", Read: true, Copy: true},
+	})
+	require.NoError(t, err)
+	_, err = ms.ApplyRemoteDirectionalSyncPolicy(ctx, "chain-b", "epoch-v3",
+		SyncPolicyVersionPeerRBAC, 2, "remote-2", nil, nil)
+	require.NoError(t, err)
+	seedCommitted(t, ms, "m-no-subscribe", "tii.project", "recipient unsubscribed")
+	pushed = nil
+	m.syncTick(ctx, ms)
+	assert.Empty(t, pushed)
+}
+
+func TestLegacyPeerRBACSnapshotImmediatelyClosesLegacyCopyLane(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-b", 2, "legacy")
+	agreement := mustDrainAgreement(t, m, "chain-b")
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-b", Role: "host", ControllerChainID: m.localChainID,
+		ControllerAgentID: hex.EncodeToString(m.agentPub), PeerAgentID: hex.EncodeToString(peerPub),
+		PolicyEpoch: "legacy-upgrade", RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey),
+		PolicyVersion: SyncPolicyVersionLegacy,
+	}))
+	require.NoError(t, ms.ActivateSyncControl(ctx, "chain-b", "legacy-upgrade"))
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"legacy"}))
+
+	// The snapshot commit atomically flips the local v3 marker before the
+	// dashboard publishes directional lanes. If the process stops at this exact
+	// boundary, absent lanes are deny-all and stale tx-33 rows stay inert.
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-b", []store.PeerRBACDomainPermission{
+		{Domain: "legacy", Read: true}, // Copy explicitly revoked.
+	})
+	require.NoError(t, err)
+	control, err := ms.GetSyncControl(ctx, "chain-b")
+	require.NoError(t, err)
+	require.Equal(t, SyncPolicyVersionPeerRBAC, control.PolicyVersion)
+
+	egress, v3, err := m.pairwiseEgressPolicy(ctx, ms, agreement)
+	require.NoError(t, err)
+	assert.True(t, v3, "a bound PeerRBAC snapshot must immediately become the version marker")
+	assert.Empty(t, egress, "stale legacy sync_domains must not survive a Copy revoke")
+
+	ingress, v3, err := m.pairwiseIngressPolicy(ctx, ms, agreement, hex.EncodeToString(peerPub))
+	require.NoError(t, err)
+	assert.True(t, v3)
+	assert.Empty(t, ingress, "the same migration boundary must fail closed for inbound copies")
+}
+
 func TestSyncDrainReplicatesMemoryTags(t *testing.T) {
 	ctx := context.Background()
 	m, ms, bs := newDrainTestManager(t)
@@ -207,7 +326,8 @@ func TestSyncDataWaitsForHostPolicyAcknowledgement(t *testing.T) {
 	m, ms, bs := newDrainTestManager(t)
 	seedDrainAgreement(t, bs, "chain-b", 2, "hr")
 	require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{RemoteChainID: "chain-b", Role: "host",
-		ControllerChainID: m.localChainID, ControllerAgentID: "operator", PolicyEpoch: "epoch", RemoteCAPin: "pin"}))
+		ControllerChainID: m.localChainID, ControllerAgentID: "operator", PolicyEpoch: "epoch", RemoteCAPin: "pin",
+		PolicyVersion: SyncPolicyVersionLegacy}))
 	require.NoError(t, ms.ActivateSyncControl(ctx, "chain-b", "epoch"))
 	require.NoError(t, ms.SetSyncDomains(ctx, "chain-b", []string{"hr"}))
 	// Simulate a widened host snapshot that has not reached the guest yet.

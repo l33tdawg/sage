@@ -292,20 +292,24 @@ func TestDomainAddCeremonyHidesHeadAndRejectsMemberHijack(t *testing.T) {
 	seedActiveMember(t, ms, "g1", "chain-owner", store.GroupRoleFullSync, ownerPub)
 	seedActiveMember(t, ms, "g1", "chain-evil", store.GroupRoleFullSync, evilPub)
 	seedOwnerCapability(t, ms, "g1", "chain-owner", "hr")
+	ownerPeer := &peerIdentity{ChainID: "chain-owner", AgentID: hex.EncodeToString(ownerPub), Agreement: &store.CrossFedRecord{RemoteChainID: "chain-owner", Status: "active"}}
+	evilPeer := &peerIdentity{ChainID: "chain-evil", AgentID: hex.EncodeToString(evilPub), Agreement: &store.CrossFedRecord{RemoteChainID: "chain-evil", Status: "active"}}
+	bindInboundGroupPeer(t, m, ms, ownerPeer, "host")
+	bindInboundGroupPeer(t, m, ms, evilPeer, "host")
 
-	headCall := func(chain, tag string) *httptest.ResponseRecorder {
+	headCall := func(peer *peerIdentity, tag string) *httptest.ResponseRecorder {
 		body, _ := json.Marshal(domainAddHeadRequest{GroupID: "g1", DomainTag: tag})
 		req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/domain-add/head", bytes.NewReader(body))
-		req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: chain}))
+		req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, peer))
 		rr := httptest.NewRecorder()
 		m.handleDomainAddHead(rr, req)
 		return rr
 	}
-	if got := headCall("chain-owner", "hr"); got.Code != http.StatusOK {
+	if got := headCall(ownerPeer, "hr"); got.Code != http.StatusOK {
 		t.Fatalf("authorized owner head status=%d body=%s", got.Code, got.Body.String())
 	}
-	unknown := headCall("chain-evil", "finance")
-	hidden := headCall("chain-evil", "hr")
+	unknown := headCall(evilPeer, "finance")
+	hidden := headCall(evilPeer, "hr")
 	if unknown.Code != http.StatusNotFound || hidden.Code != unknown.Code || hidden.Body.String() != unknown.Body.String() {
 		t.Fatalf("hidden tag became an oracle: unknown=(%d,%q) hidden=(%d,%q)", unknown.Code, unknown.Body.String(), hidden.Code, hidden.Body.String())
 	}
@@ -314,7 +318,7 @@ func TestDomainAddCeremonyHidesHeadAndRejectsMemberHijack(t *testing.T) {
 		domainAddPayload("hr", "chain-evil", 0))
 	body, _ := json.Marshal(signedGroupEntryRequest{GroupID: "g1", Entry: hijack})
 	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/domain-add/admit", bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: "chain-evil"}))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, evilPeer))
 	rr := httptest.NewRecorder()
 	m.handleDomainAddAdmit(rr, req)
 	if rr.Code != http.StatusNotFound {
@@ -412,9 +416,11 @@ func TestMemberInviteAcceptBootstrapConvergesWithoutRosterDiscoveryEscape(t *tes
 	payload[pkOwnedDomains], _ = encodeSelectedDomains([]string{"hr"})
 	payload[pkInviteHead] = head.EntryHash
 	agreement := &store.CrossFedRecord{RemoteChainID: controller.localChainID, AllowedDomains: []string{"hr"}, Status: "active"}
+	controllerPeer := &peerIdentity{ChainID: controller.localChainID, AgentID: controllerPubHex, Agreement: agreement}
+	bindInboundGroupPeer(t, invitee, inviteeStore, controllerPeer, "guest")
 	acceptBody, _ := json.Marshal(memberInviteAcceptRequest{GroupID: "g-expand", ControllerPub: controllerPubHex, Payload: payload})
 	acceptReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/member-invite/accept", bytes.NewReader(acceptBody))
-	acceptReq = acceptReq.WithContext(context.WithValue(acceptReq.Context(), peerCtxKey{}, &peerIdentity{ChainID: controller.localChainID, AgentID: controllerPubHex, Agreement: agreement}))
+	acceptReq = acceptReq.WithContext(context.WithValue(acceptReq.Context(), peerCtxKey{}, controllerPeer))
 	acceptRR := httptest.NewRecorder()
 	invitee.handleMemberInviteAccept(acceptRR, acceptReq)
 	if acceptRR.Code != http.StatusOK {
@@ -441,7 +447,7 @@ func TestMemberInviteAcceptBootstrapConvergesWithoutRosterDiscoveryEscape(t *tes
 	}
 	bootstrapBody, _ := json.Marshal(memberBootstrapRequest{GroupID: "g-expand", Roster: wire})
 	bootstrapReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/group/member-invite/bootstrap", bytes.NewReader(bootstrapBody))
-	bootstrapReq = bootstrapReq.WithContext(context.WithValue(bootstrapReq.Context(), peerCtxKey{}, &peerIdentity{ChainID: controller.localChainID, AgentID: controllerPubHex, Agreement: agreement}))
+	bootstrapReq = bootstrapReq.WithContext(context.WithValue(bootstrapReq.Context(), peerCtxKey{}, controllerPeer))
 	bootstrapRR := httptest.NewRecorder()
 	invitee.handleMemberBootstrap(bootstrapRR, bootstrapReq)
 	if bootstrapRR.Code != http.StatusOK {

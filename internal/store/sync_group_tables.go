@@ -1475,6 +1475,35 @@ func (s *SQLiteStore) MemberSharesGroupDomain(ctx context.Context, groupID, memb
 	return n > 0, nil
 }
 
+// MemberSharesGroupDomainForAgent is the identity-bound form used on federation
+// data and digest boundaries. A chain id is not an operator identity: the live
+// authenticated/frozen ed25519 key must equal the key pinned by the exact group
+// roster entry before its role or domain projection is usable.
+func (s *SQLiteStore) MemberSharesGroupDomainForAgent(ctx context.Context, groupID, memberChainID, memberAgentID, domainTag string) (bool, error) {
+	if groupID == "" || memberChainID == "" || memberAgentID == "" || domainTag == "" {
+		return false, nil
+	}
+	var n int
+	if err := s.conn.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member gm ON gm.group_id = gd.group_id
+		 WHERE gd.group_id = ? AND gm.member_chain_id = ?
+		   AND gm.member_agent_pubkey = ? AND gm.member_state = 'active'
+		   AND gd.removed_revision = 0
+		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		   AND (gm.role = 'full-sync' OR gm.member_chain_id = gd.owner_chain_id
+		        OR (gm.role = 'selective-sync' AND EXISTS (
+		            SELECT 1 FROM sync_group_member_domain c
+		             WHERE c.group_id = gd.group_id AND c.member_chain_id = gm.member_chain_id
+		               AND c.removed_revision = 0
+		               AND (c.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))`,
+		groupID, memberChainID, memberAgentID, domainTag, domainTag, domainTag, domainTag).Scan(&n); err != nil {
+		return false, fmt.Errorf("member agent shares group domain: %w", err)
+	}
+	return n > 0, nil
+}
+
 // GroupSharedDomains returns the active group domains that BOTH chains are
 // entitled to (across every group where both are active members). This is the
 // effective group consent between two peers — unioned with pairwise sync_domains
@@ -1495,6 +1524,28 @@ func (s *SQLiteStore) GroupSharedDomains(ctx context.Context, chainA, chainB str
 			seen[ref.DomainTag] = struct{}{}
 			domains = append(domains, ref.DomainTag)
 		}
+	}
+	return domains, nil
+}
+
+// GroupSharedDomainsForAgents returns only group scopes carried by roster rows
+// whose chain AND pinned operator key match both supplied identities.
+func (s *SQLiteStore) GroupSharedDomainsForAgents(ctx context.Context, chainA, agentA, chainB, agentB string) ([]string, error) {
+	if chainA == "" || agentA == "" || chainB == "" || agentB == "" {
+		return nil, nil
+	}
+	refs, err := s.groupSharedDomainRefsForAgents(ctx, chainA, agentA, chainB, agentB)
+	if err != nil {
+		return nil, err
+	}
+	domains := make([]string, 0, len(refs))
+	seen := make(map[string]struct{}, len(refs))
+	for _, ref := range refs {
+		if _, ok := seen[ref.DomainTag]; ok {
+			continue
+		}
+		seen[ref.DomainTag] = struct{}{}
+		domains = append(domains, ref.DomainTag)
 	}
 	return domains, nil
 }
@@ -1551,6 +1602,95 @@ func (s *SQLiteStore) ResolveGroupRelay(ctx context.Context, localChainID, relay
 	return "", false, rows.Err()
 }
 
+// ResolveGroupRelayForAgents is the federation-bound relay resolver. The local
+// receiver and authenticated relayer must match the exact keys pinned in one
+// shared group. The origin key is resolved from that same group and its item
+// signature is verified by the caller, so it is intentionally not supplied by
+// the relayer.
+func (s *SQLiteStore) ResolveGroupRelayForAgents(ctx context.Context, localChainID, localAgentID, relayerChainID, relayerAgentID, originChainID, domainTag string) (string, bool, error) {
+	routes, err := s.ListGroupRelayRoutesForAgents(ctx, localChainID, localAgentID, relayerChainID, relayerAgentID, originChainID, domainTag)
+	if err != nil || len(routes) == 0 {
+		return "", false, err
+	}
+	return routes[0].GroupID, true, nil
+}
+
+// GroupRelayRoute binds an eligible relay group to the exact origin operator
+// pinned by that group's roster. Multiple groups can carry the same domain and
+// chain with different keys, so callers that possess a signature must select a
+// route by the key that actually verifies it rather than trusting lexical order.
+type GroupRelayRoute struct {
+	GroupID           string
+	OriginAgentPubkey string
+}
+
+func (s *SQLiteStore) ListGroupRelayRoutesForAgents(ctx context.Context, localChainID, localAgentID, relayerChainID, relayerAgentID, originChainID, domainTag string) ([]GroupRelayRoute, error) {
+	if localChainID == "" || localAgentID == "" || relayerChainID == "" || relayerAgentID == "" || originChainID == "" || domainTag == "" {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT gd.group_id, origin.member_agent_pubkey
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member relayer ON relayer.group_id = gd.group_id
+		       AND relayer.member_chain_id = ? AND relayer.member_agent_pubkey = ? AND relayer.member_state = 'active'
+		  JOIN sync_group_member origin ON origin.group_id = gd.group_id
+		       AND origin.member_chain_id = ? AND origin.member_state = 'active'
+		  JOIN sync_group_member receiver ON receiver.group_id = gd.group_id
+		       AND receiver.member_chain_id = ? AND receiver.member_agent_pubkey = ? AND receiver.member_state = 'active'
+		 WHERE gd.removed_revision = 0
+		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
+		   AND (relayer.role = 'full-sync' OR relayer.member_chain_id = gd.owner_chain_id
+		        OR (relayer.role = 'selective-sync' AND EXISTS (
+		            SELECT 1 FROM sync_group_member_domain c
+		             WHERE c.group_id = gd.group_id AND c.member_chain_id = relayer.member_chain_id
+		               AND c.removed_revision = 0
+		               AND (c.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
+		   AND (origin.role = 'full-sync' OR origin.member_chain_id = gd.owner_chain_id
+		        OR (origin.role = 'selective-sync' AND EXISTS (
+		            SELECT 1 FROM sync_group_member_domain c
+		             WHERE c.group_id = gd.group_id AND c.member_chain_id = origin.member_chain_id
+		               AND c.removed_revision = 0
+		               AND (c.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
+		   AND (receiver.role = 'full-sync' OR receiver.member_chain_id = gd.owner_chain_id
+		        OR (receiver.role = 'selective-sync' AND EXISTS (
+		            SELECT 1 FROM sync_group_member_domain c
+		             WHERE c.group_id = gd.group_id AND c.member_chain_id = receiver.member_chain_id
+		               AND c.removed_revision = 0
+		               AND (c.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(c.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\'))))
+		 ORDER BY gd.group_id`,
+		relayerChainID, relayerAgentID, originChainID, localChainID, localAgentID,
+		domainTag, domainTag, domainTag, domainTag, domainTag, domainTag, domainTag, domainTag)
+	if err != nil {
+		return nil, fmt.Errorf("list exact group relay routes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var routes []GroupRelayRoute
+	for rows.Next() {
+		var route GroupRelayRoute
+		if err := rows.Scan(&route.GroupID, &route.OriginAgentPubkey); err != nil {
+			return nil, err
+		}
+		routes = append(routes, route)
+	}
+	return routes, rows.Err()
+}
+
+func (s *SQLiteStore) ResolveGroupRelayForOriginAgent(ctx context.Context, localChainID, localAgentID, relayerChainID, relayerAgentID, originChainID, originAgentID, domainTag string) (string, bool, error) {
+	if originAgentID == "" {
+		return "", false, nil
+	}
+	routes, err := s.ListGroupRelayRoutesForAgents(ctx, localChainID, localAgentID, relayerChainID, relayerAgentID, originChainID, domainTag)
+	if err != nil {
+		return "", false, err
+	}
+	for _, route := range routes {
+		if route.OriginAgentPubkey == originAgentID {
+			return route.GroupID, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // GetGroupMemberAgentPubkey resolves the pinned ed25519 pubkey (hex) that a
 // relayed item's origin_sig must verify against (docs §9.2 must-fix #1). Only an
 // active/resyncing member's key is returned — a removed/left/invited member can
@@ -1605,8 +1745,10 @@ func (s *SQLiteStore) ListGroupServableOriginIDs(ctx context.Context, groupID, r
 		SELECT so.origin_memory_id, so.origin_chain_id
 		  FROM sync_origin so
 		  JOIN sync_group_member om
-		       ON om.group_id = ? AND om.member_chain_id = so.origin_chain_id AND om.member_state = 'active'
+		       ON om.group_id = ? AND om.member_chain_id = so.origin_chain_id
+		      AND om.member_agent_pubkey = so.origin_agent_pubkey AND om.member_state = 'active'
 		 WHERE so.outcome = 'admitted'
+		   AND length(so.origin_sig) = 64
 		   AND (so.domain_tag = ? OR so.domain_tag LIKE ? ESCAPE '\')
 		   AND EXISTS (
 		       SELECT 1 FROM sync_group_domain mc
@@ -1709,8 +1851,10 @@ func (s *SQLiteStore) ListGroupRelayCandidates(ctx context.Context, groupID, req
 		SELECT so.origin_memory_id, so.origin_chain_id, so.local_memory_id
 		  FROM sync_origin so
 		  JOIN sync_group_member om
-		       ON om.group_id = ? AND om.member_chain_id = so.origin_chain_id AND om.member_state = 'active'
+		       ON om.group_id = ? AND om.member_chain_id = so.origin_chain_id
+		      AND om.member_agent_pubkey = so.origin_agent_pubkey AND om.member_state = 'active'
 		 WHERE so.outcome = 'admitted'
+		   AND length(so.origin_sig) = 64
 		   AND so.local_memory_id != ''
 		   AND so.origin_chain_id != ?
 		   AND (so.domain_tag = ? OR so.domain_tag LIKE ? ESCAPE '\')
@@ -1831,6 +1975,61 @@ func (s *SQLiteStore) GroupOwnedDomainsForPeer(ctx context.Context, ownerChainID
 	return normalizeConsentSubtree(out), nil
 }
 
+// GroupOwnedDomainsForPeerAgents is the identity-bound, same-group owner
+// projection used at federation boundaries. Ownership from one group can never
+// be combined with an exact shared-domain row from another group that happens
+// to use the same tag.
+func (s *SQLiteStore) GroupOwnedDomainsForPeerAgents(ctx context.Context, ownerChainID, ownerAgentID, peerChainID, peerAgentID string) ([]string, error) {
+	if ownerChainID == "" || ownerAgentID == "" || peerChainID == "" || peerAgentID == "" {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT DISTINCT gd.group_id, gd.domain_tag, peer.role
+		  FROM sync_group_domain gd
+		  JOIN sync_group_member owner ON owner.group_id = gd.group_id
+		       AND owner.member_chain_id = ? AND owner.member_agent_pubkey = ? AND owner.member_state = 'active'
+		  JOIN sync_group_member peer ON peer.group_id = gd.group_id
+		       AND peer.member_chain_id = ? AND peer.member_agent_pubkey = ? AND peer.member_state = 'active'
+		 WHERE gd.owner_chain_id = ? AND gd.removed_revision = 0
+		 ORDER BY gd.group_id, gd.domain_tag`, ownerChainID, ownerAgentID, peerChainID, peerAgentID, ownerChainID)
+	if err != nil {
+		return nil, fmt.Errorf("exact group owned domains for peer: %w", err)
+	}
+	type owned struct{ groupID, domain, role string }
+	var candidates []owned
+	for rows.Next() {
+		var d owned
+		if err := rows.Scan(&d.groupID, &d.domain, &d.role); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan exact group owned domain: %w", err)
+		}
+		candidates = append(candidates, d)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, d := range candidates {
+		if d.role == GroupRoleFullSync || peerChainID == ownerChainID {
+			out = append(out, d.domain)
+			continue
+		}
+		if d.role != GroupRoleSelectiveSync {
+			continue
+		}
+		consent, err := s.ListGroupMemberConsentDomains(ctx, d.groupID, peerChainID)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range consent {
+			if c == d.domain || isDomainDescendant(c, d.domain) {
+				out = append(out, c)
+			}
+		}
+	}
+	return normalizeConsentSubtree(out), nil
+}
+
 // GroupDomainRef is one (group, domain) pair both peers are entitled to.
 type GroupDomainRef struct {
 	GroupID   string
@@ -1847,6 +2046,15 @@ func (s *SQLiteStore) GroupSharedDomainsWithGroup(ctx context.Context, chainA, c
 		return nil, nil
 	}
 	return s.groupSharedDomainRefs(ctx, chainA, chainB)
+}
+
+// GroupSharedDomainsWithGroupForAgents is the exact-identity form used before
+// sending group-scoped digest and relay traffic.
+func (s *SQLiteStore) GroupSharedDomainsWithGroupForAgents(ctx context.Context, chainA, agentA, chainB, agentB string) ([]GroupDomainRef, error) {
+	if chainA == "" || agentA == "" || chainB == "" || agentB == "" {
+		return nil, nil
+	}
+	return s.groupSharedDomainRefsForAgents(ctx, chainA, agentA, chainB, agentB)
 }
 
 // groupSharedDomainRefs computes the exact intersection of each member's
@@ -1876,6 +2084,37 @@ func (s *SQLiteStore) groupSharedDomainRefs(ctx context.Context, chainA, chainB 
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	return s.groupSharedDomainRefsFromGroups(ctx, groups, chainA, chainB)
+}
+
+func (s *SQLiteStore) groupSharedDomainRefsForAgents(ctx context.Context, chainA, agentA, chainB, agentB string) ([]GroupDomainRef, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT DISTINCT ma.group_id
+		  FROM sync_group_member ma
+		  JOIN sync_group_member mb ON mb.group_id=ma.group_id
+		 WHERE ma.member_chain_id=? AND ma.member_agent_pubkey=?
+		   AND mb.member_chain_id=? AND mb.member_agent_pubkey=?
+		   AND ma.member_state='active' AND mb.member_state='active'
+		 ORDER BY ma.group_id`, chainA, agentA, chainB, agentB)
+	if err != nil {
+		return nil, fmt.Errorf("exact group shared domains with group: %w", err)
+	}
+	var groups []string
+	for rows.Next() {
+		var groupID string
+		if err := rows.Scan(&groupID); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan exact shared group: %w", err)
+		}
+		groups = append(groups, groupID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	return s.groupSharedDomainRefsFromGroups(ctx, groups, chainA, chainB)
+}
+
+func (s *SQLiteStore) groupSharedDomainRefsFromGroups(ctx context.Context, groups []string, chainA, chainB string) ([]GroupDomainRef, error) {
 	var out []GroupDomainRef
 	for _, groupID := range groups {
 		a, err := s.GroupDomainsForMember(ctx, groupID, chainA)

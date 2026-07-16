@@ -166,6 +166,14 @@ func newStateSyncRuntimeTestStore(t *testing.T, path string, height int64, marke
 	badgerStore, err := store.NewBadgerStore(path)
 	require.NoError(t, err)
 	require.NoError(t, badgerStore.MarkUpgradeApplied("app-v20", statesync.RequiredAppVersion, 1))
+	require.NoError(t, badgerStore.SetState("appv20_legacy_resource_audit_complete_v1", []byte("complete-v1")))
+	// Active app-v20 snapshots must carry the committed chain authorization
+	// domain. Seed it before the trusted AppHash is calculated so the runtime
+	// verifier exercises the same semantic invariant as production state sync.
+	require.NoError(t, badgerStore.SetState(
+		"governance_delegation_domain_v20",
+		bytes.Repeat([]byte{0x5a}, sha256.Size),
+	))
 	require.NoError(t, badgerStore.DB().Update(func(txn *badger.Txn) error {
 		return txn.Set([]byte("state-sync-test:consensus"), []byte{marker})
 	}))
@@ -212,6 +220,31 @@ func TestStateSyncRuntimePathsAndRootsFailClosed(t *testing.T) {
 	info, err := os.Lstat(root)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
+func TestConfigureStateSyncApplicationBundleReappliesChainPolicy(t *testing.T) {
+	root := t.TempDir()
+	badgerStore, err := store.NewBadgerStore(filepath.Join(root, "badger"))
+	require.NoError(t, err)
+	projection, err := store.NewSQLiteStore(context.Background(), filepath.Join(root, "projection.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, projection.Close())
+	})
+	app, err := sageabci.NewSageAppWithStores(badgerStore, projection, zerolog.Nop())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, app.CloseConsensusState())
+	})
+
+	require.NoError(t, configureStateSyncApplicationBundle(app, "v11.9-test", 77, "sage-state-sync-test"))
+	info, err := app.Info(context.Background(), &abcitypes.RequestInfo{})
+	require.NoError(t, err)
+	assert.Equal(t, "v11.9-test", info.Version)
+
+	err = configureStateSyncApplicationBundle(app, "ignored", 0, "")
+	assert.ErrorContains(t, err, "chain_id must be non-empty")
+	assert.ErrorContains(t, configureStateSyncApplicationBundle(nil, "test", 0, "sage-state-sync-test"), "expected *abci.SageApp")
 }
 
 func TestPrepareStateSyncRootRejectsSymlinkAncestorAliasOfLiveBadger(t *testing.T) {
@@ -315,7 +348,8 @@ func TestStateSyncReceivePreparerVerifiesBeforeActivationAndLeavesSealJournal(t 
 	offchain, err := store.NewSQLiteStore(ctx, filepath.Join(dataDir, "projection.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = offchain.Close() })
-	prepare := newStateSyncReceivePreparer(dataDir, livePath, offchain, zerolog.Nop())
+	receiverPublicKey := cmted25519.GenPrivKey().PubKey().Bytes()
+	prepare := newStateSyncReceivePreparer(dataDir, livePath, offchain, receiverPublicKey, zerolog.Nop())
 	prepared, err := prepare(ctx, metadata, backupPath)
 	require.NoError(t, err)
 	require.NotNil(t, prepared)
@@ -339,11 +373,46 @@ func TestStateSyncReceivePreparerVerifiesBeforeActivationAndLeavesSealJournal(t 
 	assert.Equal(t, uint64(7), journal.Height)
 	_, err = os.Lstat(filepath.Join(dataDir, journal.QuarantineName))
 	require.NoError(t, err)
-	require.NoError(t, statesync.SealActivatedDirectory(dataDir, journalPath, 7, appHash, 7, appHash))
+	require.NoError(t, statesync.SealActivatedDirectory(dataDir, journalPath, 7, appHash, 7, appHash, func() error { return nil }))
 	_, err = os.Lstat(journalPath)
 	assert.ErrorIs(t, err, os.ErrNotExist)
 	require.NoError(t, prepared.Discard())
 	require.NoError(t, bundle.Close())
+}
+
+func TestStateSyncReceivePreparerRejectsAlreadyActiveReceiverValidator(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	livePath := filepath.Join(dataDir, "badger")
+	live, err := store.NewBadgerStore(livePath)
+	require.NoError(t, err)
+	require.NoError(t, live.CloseBadger())
+
+	receiverPublicKey := cmted25519.GenPrivKey().PubKey().Bytes()
+	receiverID := fmt.Sprintf("%x", receiverPublicKey)
+	source, _ := newStateSyncRuntimeTestStore(t, filepath.Join(t.TempDir(), "source"), 7, 0x34)
+	require.NoError(t, source.SaveValidators(map[string]int64{receiverID: 10}))
+	state, err := sageabci.LoadState(source)
+	require.NoError(t, err)
+	appHash, err := source.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+	state.AppHash = append([]byte(nil), appHash...)
+	require.NoError(t, sageabci.SaveState(source, state))
+
+	backupPath := filepath.Join(t.TempDir(), "badger.backup")
+	backupBytes := writeStateSyncRuntimeBackup(t, source, backupPath)
+	require.NoError(t, source.CloseBadger())
+	metadata, _, _, err := statesync.BuildMetadata(7, appHash, statesync.MaxChunkSize, [][]byte{backupBytes})
+	require.NoError(t, err)
+
+	offchain, err := store.NewSQLiteStore(ctx, filepath.Join(dataDir, "projection.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = offchain.Close() })
+	prepare := newStateSyncReceivePreparer(dataDir, livePath, offchain, receiverPublicKey, zerolog.Nop())
+	_, err = prepare(ctx, metadata, backupPath)
+	require.ErrorContains(t, err, "receiver validator key is already active")
+	_, journalErr := os.Lstat(filepath.Join(dataDir, stateSyncActivationJournalName))
+	assert.ErrorIs(t, journalErr, os.ErrNotExist)
 }
 
 func TestArmConfiguredStateSyncServingPublishesAndExposesVerifiedSnapshot(t *testing.T) {

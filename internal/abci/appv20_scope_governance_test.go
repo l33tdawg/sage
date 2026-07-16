@@ -31,7 +31,9 @@ func makeScopeGovProposeTx(t *testing.T, proposer agentKey, record scope.Record,
 	payload, err := scope.Encode(record)
 	require.NoError(t, err)
 	reason := "govern canonical replication scope"
-	pubKey, sig, bodyHash, ts := signAgentProof(t, proposer, []byte(reason))
+	// This lifecycle exercises historical direct-validator governance. Keep the
+	// envelope truly proofless; proof-bearing app-v20 requests are tested through
+	// the exact REST/dashboard request binders in appv20_governance_agent_proof_test.
 	parsed := &tx.ParsedTx{
 		Type:  tx.TxTypeGovPropose,
 		Nonce: nonce,
@@ -41,10 +43,6 @@ func makeScopeGovProposeTx(t *testing.T, proposer agentKey, record scope.Record,
 			Reason:    reason,
 			Payload:   payload,
 		},
-		AgentPubKey:    pubKey,
-		AgentSig:       sig,
-		AgentBodyHash:  bodyHash,
-		AgentTimestamp: ts,
 	}
 	require.NoError(t, tx.SignTx(parsed, proposer.priv))
 	encoded, err := tx.EncodeTx(parsed)
@@ -61,6 +59,8 @@ func finalizeScopeBlock(t *testing.T, app *SageApp, height int64, blockTime time
 	})
 	require.NoError(t, err)
 	require.Len(t, resp.TxResults, 1)
+	_, err = app.Commit(context.Background(), &abcitypes.RequestCommit{})
+	require.NoError(t, err)
 	return resp
 }
 

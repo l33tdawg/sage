@@ -1,4 +1,4 @@
-<!-- Core document reconciled through SAGE v11.7.0; the v11.9 quorum/state-sync section is code-verified through the 2026-07 opt-in state-sync implementation. -->
+<!-- Core document reconciled through SAGE v11.9.0, including directional cross-chain peer RBAC and the quorum/state-sync/governance-gateway sections. -->
 
 # RBAC, Organizations, and Federation
 
@@ -250,13 +250,128 @@ The `FederationID` is deterministic: computed from the two org IDs + height to a
 
 `POST /v1/federation/{fed_id}/revoke` → `TxTypeFederationRevoke` → sets status to `"revoked"`. All subsequent `HasAccessMultiOrg` calls for this pair return false.
 
+### Cross-chain peer trust and RBAC are separate
+
+The organization federation above is an on-chain relationship between local
+orgs. The cross-chain federation UI is a separate layer: JOIN establishes the
+identity of another SAGE node, then each node applies a unilateral per-peer
+domain policy to that trusted identity. A fresh ceremony freezes the remote
+chain, remote operator key, CA pin, and policy epoch on both sides
+(`internal/federation/join_routes.go:450-455`, `1219-1222`; the persisted peer
+key is explicitly distinct from the historical controller key in
+`internal/store/sync_tables.go:119-138`). The v3 Manager accepts only the fixed
+`{max_clearance:4, allowed_domains:[], mode:"exchange", direction:"both"}`
+compatibility scope and rejects any domain-bearing JOIN
+(`internal/federation/join_routes.go:75-91`, `257-280`, `730-740`,
+`1051-1055`, `1126-1149`). The browser sends that
+same empty envelope (`web/static/js/app.js:11680-11694`, `11803-11806`). Thus
+trust answers **who is connected**; it grants no current domain access by
+itself.
+
+For a trusted peer, the source node replaces a complete snapshot of concrete
+existing domains with live Read/Copy capabilities and one reserved field:
+
+| Capability | Meaning |
+|---|---|
+| **Read** | The peer may run live remote recall in the selected domain subtree. Results are borrowed for that response and are not retained merely because Read is enabled. |
+| **Copy** | The source permits replication, but no copy moves unless the receiving node independently subscribes to save that domain locally. |
+| **Write (reserved)** | Unavailable in v11.9. The versioned field remains for compatibility but must be false; neither pairing nor an ordinary `AccessGrant` enables connection-scoped remote submission. |
+
+`Copy` implies `Read`; the stored policy canonicalizes that invariant and rejects
+`Write` (`internal/store/peer_rbac_policy.go:26-41`, `113-142`). The dashboard lists the
+local node's already registered/observed domains and refuses a grant for a
+domain the operator does not control (`web/federation_permissions.go:30-111`,
+`292-305`). It shows the local snapshot as editable and the authenticated
+peer's snapshot as read-only (`web/federation_permissions.go:161-220`). The
+peer performs the same operation on its side for the reverse direction. Either
+side may replace its snapshot as domains or working relationships change; no
+new JOIN is involved (`internal/federation/peer_rbac.go:193-229`,
+`internal/store/peer_rbac_policy.go:226-260`).
+
+Existing v11.8 links also avoid re-pairing when the original ceremony artifacts
+still prove the peer. Guest-side rows already name the remote controller; a
+host-side row is recovered only from the exact two-member, epoch-matching,
+CA-pinned enrollment roster. The recovered key is compare-and-frozen into the
+active sync control and cannot later be rebound (`internal/federation/peer_rbac.go:62-118`,
+`193-229`; `internal/store/sync_tables.go:378-415`). Ambiguous or incomplete
+legacy evidence fails closed and must be re-enrolled.
+
+Enforcement follows the verb, not the trust ceremony. Read gates both the
+requested domain and every returned record at the peer boundary
+(`internal/federation/server.go:318-363`, `427-453`). Write fails closed: the
+peer endpoint returns authenticated `501`, `WritePeer` returns a typed error
+before lookup or dial, status omits `write-v1`, and the permissions PUT rejects
+`write:true` (`internal/federation/remote_write.go:9-52`;
+`internal/federation/server.go:282-315`; `web/federation_permissions.go:223-258`).
+Copy egress is the intersection of the source's published domains, the
+receiver's subscription, and the source's current `Copy` grant;
+ingress independently rechecks remote Publish ∩ local Subscribe
+(`internal/federation/sync_outbox.go:351-428`).
+
+The effective policy is also generation-linearized. Peer handlers re-resolve
+the exact current agreement and frozen operator under the sync-policy read
+lease before serving or admitting anything. Every local tx-33/tx-34 control
+surface shares one agreement-mutation lease: JOIN retains it through
+CA/seed/control/RBAC activation, a set retains it through matching CA
+promotion, and revoke retains it through local capability purge. A legacy
+tx-33 narrowing additionally takes the policy write side, so once the mutation
+returns no in-flight response can still use the superseded broader agreement
+(`internal/federation/server.go`; `internal/federation/join_routes.go`;
+`api/rest/federation_handler.go`).
+
+Sync-group sharing is a separate RBAC lane, but it is not a second trust system.
+Every inbound group route first requires the live signer to match the exact
+chain/operator/CA tuple frozen by the still-active JOIN control; only then may an
+exact active group owner/member/domain projection authorize that group's fanout
+or relay without borrowing or requiring a direct pairwise Copy/Subscribe grant.
+Removing the member/domain or revoking the JOIN closes the affected lane under
+the same policy lease used by in-flight reads and writes. Direct v3 sharing still
+requires the intersection above, and legacy direct/group paths retain their
+historical tx-33 checks (`internal/federation/sync_policy.go`;
+`internal/federation/sync_group_ceremony.go`;
+`internal/federation/sync_journal_exchange.go`;
+`internal/federation/sync_outbox.go`; `internal/federation/sync_server.go`).
+
+Relayed provenance is identity-bound, not merely chain-bound. Admission records
+the exact origin operator whose Ed25519 signature verified. Digest and relay
+queries require that stored key to equal the origin roster key in the **same**
+eligible group as the receiver and relayer; callers enumerate same-domain groups
+rather than joining membership from one group to ownership in another. The sender
+re-verifies the stored signature immediately before egress, and the receiver tries
+only eligible group-pinned keys (`internal/store/sync_group_tables.go`;
+`internal/federation/sync_outbox.go`; `internal/federation/sync_server.go`).
+
+The Write denial is deliberately stronger than checking a normal level-2
+`AccessGrant`. Such a grant authorizes an agent for a domain and remains usable
+through the ordinary submit API outside this particular trusted link. It cannot
+represent connection-scoped A↔B authority. A future Write design therefore
+needs a consensus-bound ingress capability tied to the active ceremony
+generation, frozen peer, domain, and exact submission
+(`internal/federation/remote_write.go:10-19`).
+Preview-era managed grants are cleanup-only: migration first clears stored
+Write bits, then `sage-gui` revokes every tracked exact grant and confirms its
+absence before binding any application listener. Failure to complete that retirement aborts
+startup even when the federation transport itself is disabled or unavailable
+(`internal/store/peer_rbac_policy.go:106-110`; `cmd/sage-gui/node.go`;
+`web/federation_grant_cleanup.go:71-161`).
+
+The distinction between “no policy yet” and “a policy granting nothing” is
+security-significant. A **present empty** policy is explicit deny-all, and fresh
+JOIN activation installs one for the frozen peer
+(`internal/federation/peer_rbac.go:219-251`). Only an **absent** policy on a
+legacy/unconfigured connection may fall back to historical tx-33 read/sync
+scope. A frozen v3 binding whose policy row is unexpectedly absent is
+synthesized as deny-all instead (`internal/store/peer_rbac_policy.go:3-6`,
+`173-224`; `internal/federation/peer_rbac.go:121-190`;
+`internal/federation/server.go:318-355`).
+
 ---
 
 ## v11.9 quorum scopes are not cross-chain federation
 
-The v11.6–v11.8 federation path connects independent SAGE chains and copies
-selected domains through an authenticated off-consensus transport. An app-v20
-quorum scope instead lives inside one CometBFT chain and names validators that
+The v11.6+ cross-chain federation path connects independent SAGE chains and
+copies selected domains through an authenticated off-consensus transport. An
+app-v20 quorum scope instead lives inside one CometBFT chain and names validators that
 already belong to that chain. It does not merge independent chains or replace
 libp2p relay/NAT traversal (`internal/abci/app.go:627-631`,
 `internal/governance/types.go:53-58`).
@@ -269,6 +384,54 @@ pins the current roster/denominator and a recoverable content envelope; quorum
 requires a strict greater-than-two-thirds integer comparison, so exactly 2/3 is
 not sufficient (`internal/store/scoped_memory_state.go:25-93`,
 `internal/scope/ballot.go:154-162`).
+
+App-v20 governance uses a dual-principal validator gateway. The configured
+operator signs the exact REST or dashboard action, including its 8-byte nonce,
+the target validator ID, and a committed chain domain; consensus requires that
+proof within ±5 minutes of deterministic block time and checks single use,
+payload equality, and both bindings before consuming it. This applies to every
+proof-bearing governance envelope, including a same-key envelope whose embedded
+operator equals the outer validator. Every delegated proposal operation also
+requires the embedded operator's registered global-admin role. The outer
+transaction is still signed by the live active validator and remains the
+proposal owner, deterministic-ID actor,
+automatic voter, vote-power holder, and canceller. Delegated vote/cancel calls
+use each validator's node-local operator and do not require a shared global
+admin key; the governance engine still enforces validator voting membership
+and proposer-only cancellation. Truly proofless direct validator governance
+(including the upgrade auto-voter), historical non-governance same-key
+transactions, and pre-app-v20 replay keep their historical wire behavior
+(`internal/abci/agent_proof.go`, `internal/abci/governance_agent_auth.go`,
+`internal/abci/app.go`).
+
+The chain domain is lowercase hex of
+`SHA-256("sage/governance-delegation-domain/v20\x00" || exact chain_id bytes)`.
+The non-empty chain ID is capped at CometBFT's 50-byte limit and is not trimmed
+or case-folded. Validators approve the domain inside the signed target-20
+upgrade transaction, quorum proposal payload, and pending plan. The activation
+block persists its 32 raw bytes before consuming that plan; crash replay,
+constructor recovery, and app-v20 state-sync verification require the canonical
+state entry. Consequently a proof-bearing governance request observed on one
+validator or chain — even a same-key request — cannot be rewrapped for another
+outer validator or replayed on a differently named chain. A deliberately
+proofless direct validator transaction retains its historical compatibility
+semantics and is not domain-bound.
+Operators fetch the current binding through authenticated
+`GET /v1/governance/context`; a `409` mutation response requires a fresh read
+and signature.
+
+The ceremony discriminator is exact: name `app-v20`, target version `20`, and
+a canonical lowercase 32-byte governance-domain hex tail. Empty, malformed, or
+non-canonical historical target-20 tails remain on the frozen legacy replay
+path and never activate the domain-bound rules. Every validator must therefore
+restart on the identical v11.9 binary before the tagged ceremony; upgrading
+only a greater-than-two-thirds subset is not a supported rollout boundary.
+
+Operational prerequisite: before app-v20 activation, every operator intended
+to expose a *proposal* gateway must be registered as a global admin. A topology
+where only a validator key is admin can use a direct validator-key proposal or
+register the separate operator first. Validator-local vote/cancel operators do
+not need that admin role.
 
 Badger remains the recovery authority. After ordered block replay or verified
 local snapshot restore, the node verifies each canonical envelope and rebuilds
@@ -317,25 +480,50 @@ publication (`internal/statesync/assembler.go`).
 `quorum.state_sync` has mutually exclusive `serving` and `receiving` boot roles
 and remains off when neither is set (`cmd/sage-gui/state_sync_config.go`). Both
 roles require a strict locally installed JSON trust root. Its schema binds
-chain ID, joining Comet node ID, joining validator Ed25519 public key, app
+chain ID, joining Comet node ID, the joining node's prospective validator
+Ed25519 public key, app
 version 20, expiry, snapshot floor, existing validator node IDs, and approved
 providers. Provider IDs must exactly equal validator IDs; v1 does not permit a
 preferred subset. The loader rejects files over 64 KiB, symlinks, non-regular or
 group/world-writable modes, open-time replacement, unknown fields, trailing
 JSON, and non-canonical values (`internal/statesync/authorization.go`).
 
+Authorization and a successful transfer do not grant voting power: the sealed
+receiver remains a non-validator until a separate signed governance action
+adds that key. The prepared and activated application rosters must omit its
+canonical validator ID, and both ordinary seal and journal-bearing crash
+recovery require its address absent from CometBFT's persisted last, current,
+and next validator sets. Normal activation order is durable `sealed` activation-journal fsync,
+durable raw `quorum.state_sync.receiving: false` replacement, quarantine and
+journal cleanup with parent-directory fsync, runtime transition to `Sealed`,
+and only then REST/dashboard/MCP/federation or background service admission.
+No serving endpoint may observe an earlier phase.
+
 The in-process `sage-gui` path pins CometBFT v0.38.23 and hardens the effective
 armed-node profile before the node starts: PEX/seeds/seed mode are off, ordinary
 inbound and outbound limits are zero, unconditional/private IDs exactly equal
-the authorization, and persistent peers are restricted to it
+the authorization as capacity/privacy sets, authenticated peer filtering is
+mandatory and admits only that exact ID set, and persistent peers are restricted
+to it
 (`cmd/sage-gui/state_sync_p2p_profile.go`). The receiver requires every approved
 provider as a persistent peer and at least two distinct HTTP(S) RPC origins for
 light-client verification. Provider expiry is rechecked on every list/load.
 Receiver expiry is deadline-bound, rechecked through preparation and every
 durable activation boundary, and permanently latched once observed so clock
-rollback cannot revive the session. Expiry does not disconnect an
-unconditional peer already held by Comet; leaving the one-shot profile requires
-a config transition and process restart.
+rollback cannot revive the session. Address admission is only a pre-handshake
+syntax/liveness gate; the post-handshake ABCI query enforces the authenticated
+node ID before Comet adds the peer. Expiry rejects new admissions but does not
+disconnect a peer already held by Comet; leaving the one-shot profile requires a
+config transition and process restart.
+Remote admission runs independently, so an outbound switch can briefly list a
+locally approved provider before rejection closes the connection. The provider
+has zero ordinary inbound capacity: an unknown authenticated ID is rejected
+before `addPeer`. The integrated gate must separately require the live ABCI
+query to return `111` for the unknown ID and `0` for the approved receiver,
+observe a real provider-side zero-capacity rejection, sample no provider peer or
+receiver snapshot/session/height/REST progress, drain both switches, and only
+then admit the approved receiver. The final exact-source cold run remains
+pending; these are acceptance requirements, not a claimed result.
 
 The root module replaces upstream v0.38.23 with the provenance-recorded local
 subset in `third_party/cometbft`. Six overlays prevent an inactive-syncer nil
@@ -408,35 +596,40 @@ capture the final app/store graph
 (`cmd/sage-gui/state_sync_runtime.go`, `cmd/sage-gui/state_sync_boot.go`,
 `cmd/sage-gui/node.go`). Pre-handshake journal recovery still resolves crashes
 before the canonical Badger directory opens. When recovery keeps a matching
-activated directory, startup disables the recovered `receiving` role in memory
-and resumes that process as an ordinary synchronized node. Persistent config is
-not rewritten and must still be disabled before a later restart. From the
+activated directory, startup durably changes only the raw
+`quorum.state_sync.receiving` YAML node to `false`, fsyncs that replacement and
+its parent, and performs the same idempotent transition during matching crash
+recovery before removing the journal. The process then resumes as an ordinary
+synchronized node without re-arming on a later restart. From the
 `prepared` transition onward, any local close, journal, rename, reopen, or
 bundle-activation failure is terminal and does not consume provider fallback.
 If shutdown/failure releases a waiting block call, it returns SAGE's seal-abort
 sentinel; only that sentinel selects the graceful block-sync exit, while every
 unrelated application failure retains upstream panic behavior.
 
-This is implemented opt-in behavior, not a v11.9 release claim. The real Docker
-gate still lacks an authorized provider-to-receiver transfer and signed app-v20
-scope reconfiguration. Its firewall partitions preserve private per-validator
+This is implemented opt-in behavior, not by itself a v11.9 release claim. The
+split real-Comet Docker topology does not itself run state sync or the scope
+state-machine ceremony. Its firewall partitions preserve private per-validator
 ABCI links, publish host REST/RPC only on loopback, use an owned temporary
 fixture, prove the 2/4 peer split and halt, and require the same latest Comet
 block hash plus live ABCI height/AppHash and `catching_up=false` after healing.
 The standalone image
 copies the same six overlays as `sage-gui`. A `v11.9*` release enables both
 `V119_REQUIRE_SCOPED_RECONFIG=1` and
-`V119_REQUIRE_AUTHORIZED_STATE_SYNC=1`; the current topology cannot satisfy
-either missing proof. The real-transfer proof must use integrated
+`V119_REQUIRE_AUTHORIZED_STATE_SYNC=1`; the scoped flag is routed to the
+race-enabled signed OS-process oracle and composes with the real-Comet
+partition proof. The real-transfer proof must use integrated
 `sage-gui serve` processes; split `amid`/Comet containers do not own the boot
 runtime or seal boundary.
 Operationally, Comet P2P (normally raw TCP 26656) plus the configured Comet RPC
 origins must be reachable. Internet validators need routable addresses, port
 forwarding, or a VPN today; federation is not a validator tunnel. A future
 tunnel layer is separate, out-of-scope work and is not a v11.9 release gate.
-The only remaining release-proof blockers are the integrated authorized
-provider-to-receiver transfer and signed app-v20 scope reconfiguration. The
-detailed schema and open gates are in
+The remaining state-sync evidence is the final exact-source cold execution of
+the integrated authorized provider-to-two-receiver transfer. Signed app-v20
+formation/revision and pinned ballots are covered by the composite fault
+workflow; its held subprocess is not described as a TCP partition. The detailed
+schema and gates are in
 [`../../v11.9-state-sync-activation.md`](../../v11.9-state-sync-activation.md).
 
 Scope proposals no longer require operators or agents to hand-encode that

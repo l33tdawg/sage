@@ -205,6 +205,15 @@ func runUpgradePropose(args []string) error {
 	if err != nil {
 		return err
 	}
+	var chainID string
+	if *target == 20 {
+		chainCtx, cancelChain := context.WithTimeout(context.Background(), 15*time.Second)
+		chainID, err = readCometChainID(chainCtx, *rpc)
+		cancelChain()
+		if err != nil {
+			return fmt.Errorf("read chain_id for app-v20 governance domain: %w", err)
+		}
+	}
 
 	// Confirm — this is a consensus action routed through the 2/3 quorum.
 	if !*yes {
@@ -225,6 +234,7 @@ func runUpgradePropose(args []string) error {
 	// Build + broadcast, reusing the watchdog's signing path.
 	cfg := upgradeWatchdogConfig{
 		BinaryVersion: version,
+		ChainID:       chainID,
 		AgentKey:      key,
 		CometRPC:      *rpc,
 		Logger:        logger,

@@ -45,13 +45,36 @@ Full deployment guide (multi-agent networks, RBAC, federation, monitoring): **[A
 | Control Board | Federation | Recall Engine |
 |:---:|:---:|:---:|
 | ![CEREBRUM overview dashboard](docs/screen-overview.png) | ![Federation join dashboard](docs/screen-network.png) | ![Recall engine settings](docs/screen-config.png) |
-| Chain health, quorum, agents, federation, and embeddings | Human-verified LAN or internet joins between separate SAGE brains, scoped and revocable | Smart-memory setup, managed reranker install, and recall-depth tuning |
+| Chain health, quorum, agents, federation, and embeddings | Trust-only LAN or internet JOIN, followed by independent Read/Copy choices on each SAGE | Smart-memory setup, managed reranker install, and recall-depth tuning |
 
 The dashboard also includes agent management, domain permissions, key rotation, import/export, software updates, and encryption controls.
 
 ---
 
-## What's New in v11.8.5
+## What's New in v11.9.0
+
+> **Release evidence:** the exact-source `make v119-state-sync` cold run passed on source identity `7535074403bda428337e20a1e5edf7cf7c6b9a554fda690cf837bd3748d5f53c`. The branch and tag workflows independently rerun the complete race, lint, SDK/frontend, security, fault, packaging, and publication gates before exposing release artifacts.
+
+> **Validator rollout boundary:** install and restart the exact frozen v11.9 artifact on **every participating validator** before anyone broadcasts the non-empty-domain `app-v20` / target-20 ceremony transaction. A merely >2/3 upgraded subset is unsafe: v11.8 does not understand the signed governance-domain tail. For operator-managed socket-mode Comet, keep `recheck=true`, cap `max_tx_bytes` at 1 MiB, and restart Comet as well so no pre-rollout oversized mempool entry survives.
+
+**Selected domains can now become canonical, recoverable quorum state inside one SAGE consensus chain.** App-v20 adds exact-domain scopes whose on-chain roster and integer weights are fixed by validator governance. Each scoped memory pins its submission-time denominator, so later membership changes cannot rewrite an in-flight ballot; acceptance requires strictly greater than two-thirds of that pinned weight. Scope membership grants voting weight only—it does not grant domain ownership, RBAC, federation access, or administrator authority.
+
+- **Canonical recovery instead of projection trust.** Scoped content, classification, tags, roster revisions, and ballots are AppHash-covered in Badger. A recovering replica verifies the canonical envelopes and rebuilds its discarded SQLite/PostgreSQL serving projection; `/ready` stays unavailable when required scoped content is missing, locked, or inconsistent.
+- **Authorized, boot-only network state sync.** Real ABCI state-sync endpoints serve a bounded latest-visible consensus stream, never the private local rollback bundle. A strict local authorization binds the chain, existing validator/provider IDs, joining node and validator key, app version, height floor, and expiry. The effective Comet profile disables peer discovery and ordinary peer capacity, enables authenticated exact-ID filtering, and requires two distinct reachable RPC origins for light-client verification. A synchronized receiver remains a non-validator until a separate signed governance action admits its validator key.
+- **Crash-safe seal-before-serving.** A pristine receiver verifies the candidate in isolation, activates a complete application bundle under an exclusive lease, waits for Comet's signed commit/state/block-sync handoff, durably writes the sealed activation journal, durably disarms `quorum.state_sync.receiving`, cleans recovery evidence, and only then publishes the runtime seal. Projection rebuild, snapshots, REST/dashboard/MCP/federation, voters, and background workers start from that final frozen bundle.
+- **Validator-bound governance sessions.** The configured operator signs the exact REST/MCP action, while the live validator still owns the outer transaction, proposal, vote, and voting power. App-v20 binds delegated governance proofs to the target validator and a chain-derived governance domain, with deterministic freshness and single-use replay protection.
+- **Colleague-style sharing between independent SAGE brains.** A fresh JOIN establishes exact chain/operator/CA/epoch trust and starts with zero shared domains. Each peer independently selects existing domains and can change them without pairing again: Read borrows live recall, while Copy also requires the receiver's separate “Save here” opt-in. Cross-host Write remains an authenticated `501` until it has connection-bound consensus authorization. Direct and synchronization-group traffic revalidate the exact live identity, and agreement set, JOIN activation, narrowing, and revocation are linearized so a completed change cannot leave stale access in flight.
+- **Crash-atomic app-v20 blocks.** The one authenticated app-v20 bootstrap is isolated into a dedicated block; after its marker commits, FinalizeBlock evaluates each complete block in one speculative Badger transaction. Commit atomically persists every ordinary/governance write, validator reconfiguration, nonce, AppHash, and handshake height. A pre-Commit crash discards the whole transition, so ordinary mixed blocks replay exactly without an app-local result journal or ongoing governance-only block isolation.
+- **Release evidence spans real failures.** The gate suite combines signed app-v20 scope formation/revision in independent OS processes, FinalizeBlock/Commit SIGKILL replay, held-replica catch-up, real four-validator Comet TCP crash/partition/heal checks, and the integrated provider/observer/unauthorized/two-receiver state-sync topology. The final exact-tree cold execution passed before the release branch was published.
+
+This is same-chain validator replication, not a relabeling of v11.8 synchronization groups or independent-chain federation. Internet validators still need mutually routable Comet TCP, explicit port forwarding, or an operator VPN, plus reachable RPC origins. Federation is not a validator tunnel; a future tunnel layer is separate work and is not part of v11.9.0.
+
+App-v20 remains dormant until the governed upgrade activates it, preserving byte-identical pre-activation replay. A rolling binary install is safe only while the tagged target-20 ceremony has not been submitted. SDK 11.9.0.
+
+## Older releases
+
+<details>
+<summary>v11.8.5 - anatomical MRI boundary</summary>
 
 **MRI memories now remain inside the anatomical cranium at every zoom and rotation.** The memory cloud previously used a vertically symmetric ellipsoid even though the bundled anatomical mesh has a much shallower lower cranial boundary outside its narrow, off-centre brainstem. Lower-hemisphere nodes could therefore protrude through the mesh, especially after the v11.8.3 spread increase. CEREBRUM now uses an asymmetric vertical envelope with explicit clearance for each rendered sphere and bloom halo. The upper cortex keeps its full spread, and the newest-to-outer / oldest-to-inner age ordering is unchanged.
 
@@ -59,7 +82,7 @@ The placement contract is directly regression-tested across the full age, radial
 
 SDK 11.8.5.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.8.4 - actionable domain write denials</summary>
@@ -479,7 +502,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:6.0.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.9.0`.
 
 ### Upgrading from an older version?
 
