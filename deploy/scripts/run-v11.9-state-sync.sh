@@ -435,6 +435,34 @@ rest_ready() {
   docker exec "$1" wget -qO- "http://127.0.0.1:8080/ready" >/dev/null 2>&1
 }
 
+wait_closed_provider_placeholder() {
+  local container=$1
+  local expected_ip=$2
+  local deadline=$((SECONDS + 15))
+  local lookup=
+
+  while :; do
+    if [ "$(docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null || true)" != true ]; then
+      echo "ERROR: ${container} exited while waiting for the closed provider-p2p placeholder" >&2
+      return 1
+    fi
+    lookup=$(docker exec "${container}" busybox nslookup provider-p2p 2>&1 || true)
+    if printf '%s\n' "${lookup}" | awk -v want="${expected_ip}" '$NF == want { found=1 } END { exit !found }'; then
+      if docker exec "${container}" busybox nc -z -w 1 provider-p2p 26656; then
+        echo "ERROR: ${container} reached a P2P listener before provider exposure" >&2
+        return 1
+      fi
+      return 0
+    fi
+    if [ "${SECONDS}" -ge "${deadline}" ]; then
+      echo "ERROR: ${container} did not resolve provider-p2p to closed placeholder ${expected_ip}" >&2
+      echo "last DNS response: ${lookup:-<empty>}" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 rest_json() {
   docker exec "$1" wget -qO- "http://127.0.0.1:8080$2"
 }
@@ -920,6 +948,17 @@ docker network disconnect "${P2P_NETWORK}" "${PROVIDER}" >/dev/null
 docker run -d --pull never --name "${P2P_PLACEHOLDER}" \
   --network "${P2P_NETWORK}" --network-alias provider-p2p \
   "${NODE_IMAGE}" sh -ec 'exec tail -f /dev/null' >/dev/null
+placeholder_ip=$(docker inspect "${P2P_PLACEHOLDER}" | python3 -c '
+import json
+import sys
+
+network = sys.argv[1]
+print(json.load(sys.stdin)[0]["NetworkSettings"]["Networks"][network]["IPAddress"])
+' "${P2P_NETWORK}")
+if [ -z "${placeholder_ip}" ]; then
+  echo "ERROR: closed provider-p2p placeholder has no P2P-network address" >&2
+  exit 1
+fi
 create_sage "${RECEIVER}" "${RECEIVER_HOME}" receiver-rpc
 create_sage "${ATTACKER}" "${ATTACKER_HOME}" unauthorized-rpc
 docker network connect --alias receiver-p2p "${P2P_NETWORK}" "${RECEIVER}"
@@ -928,16 +967,8 @@ docker start "${RECEIVER}" "${ATTACKER}" >/dev/null
 wait_rpc "${RECEIVER}"
 wait_rpc "${ATTACKER}"
 start_readiness_probe
-sleep 2
 for candidate in "${RECEIVER}" "${ATTACKER}"; do
-  if ! docker exec "${candidate}" busybox nslookup provider-p2p >/dev/null 2>&1; then
-    echo "ERROR: ${candidate} could not resolve the closed provider-p2p placeholder" >&2
-    exit 1
-  fi
-  if docker exec "${candidate}" busybox nc -z -w 1 provider-p2p 26656; then
-    echo "ERROR: ${candidate} reached a P2P listener before provider exposure" >&2
-    exit 1
-  fi
+  wait_closed_provider_placeholder "${candidate}" "${placeholder_ip}"
 done
 if rest_ready "${RECEIVER}" || rest_ready "${ATTACKER}"; then
   echo "ERROR: an unsealed receiver exposed REST before its authorized P2P path existed" >&2
