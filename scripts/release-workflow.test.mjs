@@ -17,6 +17,10 @@ const v119Chaos = readFileSync(
   new URL('../deploy/scripts/run-v11.9-chaos.sh', import.meta.url),
   'utf8',
 );
+const v119StateSync = readFileSync(
+  new URL('../deploy/scripts/run-v11.9-state-sync.sh', import.meta.url),
+  'utf8',
+);
 
 function job(id) {
   const marker = `  ${id}:\n`;
@@ -99,6 +103,12 @@ test('the composite fault gate rechecks frozen source after every companion', ()
   const pass = v119Chaos.lastIndexOf('=== v11.9 REAL MULTI-PROCESS FAULT GATE PASSED ===');
   assert.ok(companion >= 0 && finalCheck > companion && pass > finalCheck);
   assert.match(v119Chaos.slice(finalCheck, pass), /docker image inspect/);
+});
+
+test('the Linux cold gate atomically replaces container-owned config files', () => {
+  assert.match(v119StateSync, /mktemp "\$\{home\}\/\.config\.yaml\.XXXXXX"/);
+  assert.match(v119StateSync, /mv -f -- "\$\{staged\}" "\$\{target\}"/);
+  assert.doesNotMatch(v119StateSync, /cat >"\$\{(?:PROVIDER_HOME|home)\}\/config\.yaml"/);
 });
 
 test('Dependabot ignores only incompatible post-v0 go-libp2p versions', () => {

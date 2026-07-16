@@ -184,8 +184,54 @@ for home in "${PROVIDER_HOME}" "${OBSERVER_HOME}" "${RECEIVER_HOME}" "${SUCCESS_
   write_agent_key "${home}/agent.key"
 done
 
+new_config_file() {
+  local home=$1
+  case "${home}" in
+    "${PROVIDER_HOME}"|"${OBSERVER_HOME}"|"${RECEIVER_HOME}"|"${SUCCESS_RECEIVER_HOME}"|"${ATTACKER_HOME}") ;;
+    *)
+      echo "ERROR: refusing to stage config outside the fixture homes: ${home}" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -d "${home}" ] || [ -L "${home}" ]; then
+    echo "ERROR: fixture home is not a real directory: ${home}" >&2
+    return 1
+  fi
+  mktemp "${home}/.config.yaml.XXXXXX"
+}
+
+install_config_file() {
+  local home=$1
+  local staged=$2
+  local target=${home}/config.yaml
+  case "${staged}" in
+    "${home}"/.config.yaml.*) ;;
+    *)
+      echo "ERROR: refusing to install config from an unowned path: ${staged}" >&2
+      return 1
+      ;;
+  esac
+  if [ ! -f "${staged}" ] || [ -L "${staged}" ]; then
+    echo "ERROR: staged config is not a regular file: ${staged}" >&2
+    return 1
+  fi
+  if [ -L "${target}" ]; then
+    rm -f -- "${target}"
+  elif [ -e "${target}" ] && [ ! -f "${target}" ]; then
+    echo "ERROR: refusing to replace non-file config target: ${target}" >&2
+    return 1
+  fi
+  chmod 0644 "${staged}"
+  # sage-gui may atomically persist config.yaml from its container UID. Replace
+  # the directory entry instead of truncating that possibly root-owned inode;
+  # this keeps the cold gate portable across native Linux and Docker Desktop.
+  mv -f -- "${staged}" "${target}"
+}
+
 write_provider_personal_config() {
-  cat >"${PROVIDER_HOME}/config.yaml" <<'YAML'
+  local staged
+  staged=$(new_config_file "${PROVIDER_HOME}")
+  cat >"${staged}" <<'YAML'
 embedding:
   provider: hash
   dimension: 768
@@ -206,14 +252,16 @@ agent_key_file: /sage/agent.key
 retain_blocks: -1
 disable_auto_upgrade: false
 YAML
-  chmod 0644 "${PROVIDER_HOME}/config.yaml"
+  install_config_file "${PROVIDER_HOME}" "${staged}"
 }
 
 write_ordinary_config() {
   local home=$1
   local peer=${2:-}
   local voter=${3:-false}
-  cat >"${home}/config.yaml" <<YAML
+  local staged
+  staged=$(new_config_file "${home}")
+  cat >"${staged}" <<YAML
 embedding:
   provider: hash
   dimension: 768
@@ -224,11 +272,11 @@ quorum:
   peers:
 YAML
   if [ -n "${peer}" ]; then
-    printf '    - "%s"\n' "${peer}" >>"${home}/config.yaml"
+    printf '    - "%s"\n' "${peer}" >>"${staged}"
   else
-    printf '    []\n' >>"${home}/config.yaml"
+    printf '    []\n' >>"${staged}"
   fi
-  cat >>"${home}/config.yaml" <<YAML
+  cat >>"${staged}" <<YAML
   p2p_addr: tcp://0.0.0.0:26656
 federation:
   enabled: false
@@ -243,13 +291,15 @@ agent_key_file: /sage/agent.key
 retain_blocks: 0
 disable_auto_upgrade: true
 YAML
-  chmod 0644 "${home}/config.yaml"
+  install_config_file "${home}" "${staged}"
 }
 
 write_provider_serving_config() {
   local provider_id=$1
   local receiver_id=$2
-  cat >"${PROVIDER_HOME}/config.yaml" <<YAML
+  local staged
+  staged=$(new_config_file "${PROVIDER_HOME}")
+  cat >"${staged}" <<YAML
 embedding:
   provider: hash
   dimension: 768
@@ -280,7 +330,7 @@ agent_key_file: /sage/agent.key
 retain_blocks: 0
 disable_auto_upgrade: true
 YAML
-  chmod 0644 "${PROVIDER_HOME}/config.yaml"
+  install_config_file "${PROVIDER_HOME}" "${staged}"
 }
 
 write_receiving_config() {
@@ -290,7 +340,9 @@ write_receiving_config() {
   local trust_height=$4
   local trust_hash=$5
   local startup_timeout=$6
-  cat >"${home}/config.yaml" <<YAML
+  local staged
+  staged=$(new_config_file "${home}")
+  cat >"${staged}" <<YAML
 embedding:
   provider: hash
   dimension: 768
@@ -328,7 +380,7 @@ agent_key_file: /sage/agent.key
 retain_blocks: 0
 disable_auto_upgrade: true
 YAML
-  chmod 0644 "${home}/config.yaml"
+  install_config_file "${home}" "${staged}"
 }
 
 create_sage() {
