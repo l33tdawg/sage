@@ -9,12 +9,12 @@
   },
   "codeql": {
     "driverName": "CodeQL",
-    "semanticVersion": "2.26.0",
+    "semanticVersion": "2.26.1",
     "automationId": "/language:go/",
     "extensions": {
-      "codeql/go-queries": "1.6.5+e4a7b4ff515d6f23af5a4b8a837652348657e84b",
-      "codeql/go-all": "7.2.0+e4a7b4ff515d6f23af5a4b8a837652348657e84b",
-      "codeql/threat-models": "1.0.52+e4a7b4ff515d6f23af5a4b8a837652348657e84b"
+      "codeql/go-queries": "1.6.6+373814b4300341b090f18e6a75c92a65cb2f193a",
+      "codeql/go-all": "7.2.1+373814b4300341b090f18e6a75c92a65cb2f193a",
+      "codeql/threat-models": "1.0.53+373814b4300341b090f18e6a75c92a65cb2f193a"
     }
   },
   "vendorPrefix": "third_party/cometbft/",

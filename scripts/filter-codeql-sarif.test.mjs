@@ -98,7 +98,7 @@ function filteredResults(document, selectedBaseline = baseline) {
 
 test('manifest binds the exact audited tool, files, overlays, and 29 findings', () => {
   assert.equal(baseline.driverName, 'CodeQL');
-  assert.equal(baseline.semanticVersion, '2.26.0');
+  assert.equal(baseline.semanticVersion, '2.26.1');
   assert.equal(baseline.automationId, '/language:go/');
   assert.equal(baseline.extensions.size, 3);
   assert.equal(baseline.provenance.sourceCommit, 'feb2aea4dc271d612129afc958cb844713ec792b');
@@ -868,7 +868,7 @@ test('uses explicit URIs and falls back to artifact indexes when URI is absent',
 test('retains results from any missing or different CodeQL driver version', () => {
   const result = auditedResult(baseline.findings[0]);
   const wrongVersion = sarif([result]);
-  wrongVersion.runs[0].tool.driver.semanticVersion = '2.26.1';
+  wrongVersion.runs[0].tool.driver.semanticVersion = '2.26.2';
   const wrongName = sarif([result]);
   wrongName.runs[0].tool.driver.name = 'Another scanner';
   const missingTool = sarif([result]);
