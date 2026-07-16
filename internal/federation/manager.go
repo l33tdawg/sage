@@ -205,12 +205,35 @@ type Manager struct {
 	// the join ceremony can be driven without a live CometBFT node.
 	broadcastFn func(txBytes []byte) (string, int64, error)
 
+	// agreementMutationMu serializes every local tx-33/tx-34 control surface,
+	// including legacy REST through LockAgreementMutation. A sharing update is a
+	// read-current-terms -> replace-scope operation, so the read, committed
+	// broadcast, and matching local activation/purge must be one generation
+	// critical section or a concurrent update/revoke could clobber newer terms,
+	// reactivate a revoked agreement, or purge newly activated capabilities.
+	agreementMutationMu sync.Mutex
+
 	// nameMu guards networkName — the friendly, operator-editable label peers
 	// see during the join ceremony. Runtime-mutable (dashboard rename) without a
 	// node restart, so it is read under the lock every time a ceremony message
 	// is built. Cosmetic + unauthenticated; never a trust input.
 	nameMu      sync.RWMutex
 	networkName string
+}
+
+// LockAgreementMutation acquires the process-wide federation agreement
+// mutation lease and returns its release function. Every control surface that
+// can commit a tx-33/tx-34 agreement generation must hold this lease from
+// before the committed broadcast through the matching node-local activation
+// or purge. Callers that also need the SQLite sync-policy gate must acquire
+// this lease first; the global lock order is agreement mutation -> policy.
+//
+// This is exported only so the legacy REST transaction builder can participate
+// in the same critical section as Manager-driven JOIN, sharing updates, and
+// revocation. Callers must invoke the returned function exactly once.
+func (m *Manager) LockAgreementMutation() func() {
+	m.agreementMutationMu.Lock()
+	return m.agreementMutationMu.Unlock
 }
 
 // PeerDialFunc returns a stream-backed connection for remoteChainID. handled
@@ -361,6 +384,9 @@ func (m *Manager) ActiveAgreement(remoteChainID string) (*store.CrossFedRecord, 
 		// chain id (see processCrossFedSet).
 		return nil, fmt.Errorf("agreement %s: refusing self-federation", remoteChainID)
 	}
+	if m.badger == nil {
+		return nil, fmt.Errorf("agreement %s: consensus state store is unavailable", remoteChainID)
+	}
 	endpoint, peerPubKey, maxClearance, expiresAt, allowedDomains, allowedDepts, status, err := m.badger.GetCrossFed(remoteChainID)
 	if err != nil {
 		return nil, fmt.Errorf("no agreement for %s: %w", remoteChainID, err)
@@ -388,6 +414,10 @@ func (m *Manager) ActiveAgreement(remoteChainID string) (*store.CrossFedRecord, 
 // gates. Invalid/self/revoked/expired records are silently skipped — this
 // feeds the handshake verifier and the "*" recall fan-out.
 func (m *Manager) ActiveAgreements() []store.CrossFedRecord {
+	if m.badger == nil {
+		m.logger.Warn().Msg("list cross_fed agreements skipped: consensus state store is unavailable")
+		return nil
+	}
 	all, err := m.badger.ListCrossFed()
 	if err != nil {
 		m.logger.Warn().Err(err).Msg("list cross_fed agreements failed")
@@ -522,6 +552,24 @@ func (m *Manager) coauthorsOf(sharedID string) ([]tx.CoCommitCoauthor, error) {
 // re-verifies every bind deterministically. Idempotent: an identical existing
 // anchor short-circuits without a tx.
 func (m *Manager) HandleIncomingReceipt(peerChainID string, push *ReceiptPush) (*ReceiptPushResponse, error) {
+	// Direct callers do not carry peerAuth's request snapshot, but they still
+	// must linearize the consensus write with connection revocation. The HTTP
+	// handler performs the stronger exact-generation/operator check under its
+	// own lease and calls handleIncomingReceiptValidated directly.
+	if ss := m.syncStore(); ss != nil {
+		policyUnlock := ss.LockSyncPolicyRead()
+		defer policyUnlock()
+	}
+	if _, err := m.ActiveAgreement(peerChainID); err != nil {
+		return nil, fmt.Errorf("receipt sender has no active federation agreement: %w", err)
+	}
+	return m.handleIncomingReceiptValidated(peerChainID, push)
+}
+
+// handleIncomingReceiptValidated contains the receipt/consensus validation.
+// The caller holds the sync-policy read lease and has resolved the current
+// agreement at that lease's linearization point.
+func (m *Manager) handleIncomingReceiptValidated(peerChainID string, push *ReceiptPush) (*ReceiptPushResponse, error) {
 	if push == nil || len(push.Receipt) == 0 || len(push.ValSig) != ed25519.SignatureSize {
 		return nil, fmt.Errorf("malformed receipt push")
 	}

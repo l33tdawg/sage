@@ -40,6 +40,13 @@ def client(agent_identity):
 @pytest.fixture
 def mock_api():
     with respx.mock(base_url=BASE_URL, assert_all_called=False) as respx_mock:
+        respx_mock.get("/v1/governance/context").mock(
+            return_value=httpx.Response(200, json={
+                "validator_id": "validator-a",
+                "governance_domain": "sage.governance",
+                "app_v20_active": True,
+            })
+        )
         yield respx_mock
 
 

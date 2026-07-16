@@ -54,7 +54,7 @@ func (s *BadgerStore) SetScopedMemorySubmission(ballot scope.Ballot, content sco
 		return errors.New("scope ballot and content identity do not match")
 	}
 
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		if err := requireExactOrMissing(txn, scopeBallotKey(ballot.MemoryID), ballotBytes, ErrScopeBallotConflict); err != nil {
 			return err
 		}
@@ -104,7 +104,7 @@ func (s *BadgerStore) SetScopedMemorySubmission(ballot scope.Ballot, content sco
 			{scopedContentKey(content.MemoryID), contentBytes},
 		}
 		for _, write := range writes {
-			if err := txn.Set(write.key, write.value); err != nil {
+			if err := s.txnSet(txn, write.key, write.value); err != nil {
 				return err
 			}
 		}
@@ -142,7 +142,7 @@ func decodeMemoryEntry(value []byte) ([]byte, string, error) {
 
 func (s *BadgerStore) GetScopeBallot(memoryID string) (*scope.Ballot, error) {
 	var ballot *scope.Ballot
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, err := txn.Get(scopeBallotKey(memoryID))
 		if err != nil {
 			return err
@@ -167,7 +167,7 @@ func (s *BadgerStore) GetScopeBallot(memoryID string) (*scope.Ballot, error) {
 
 func (s *BadgerStore) GetScopedContent(memoryID string) (*scope.Content, error) {
 	var content *scope.Content
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, err := txn.Get(scopedContentKey(memoryID))
 		if err != nil {
 			return err
@@ -196,7 +196,7 @@ func (s *BadgerStore) GetScopedContent(memoryID string) (*scope.Content, error) 
 func (s *BadgerStore) ListScopedContents() ([]scope.Content, error) {
 	prefix := []byte("state:scope-content:")
 	contents := make([]scope.Content, 0)
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
 		it := txn.NewIterator(opts)
@@ -232,7 +232,7 @@ func (s *BadgerStore) ListScopedContents() ([]scope.Content, error) {
 func (s *BadgerStore) ListPendingScopeBallots() ([]scope.Ballot, error) {
 	prefix := []byte("state:scope-proposal:")
 	ballots := make([]scope.Ballot, 0)
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
 		it := txn.NewIterator(opts)
@@ -273,7 +273,7 @@ func (s *BadgerStore) GetScopeValidatorDrain(validatorID string) (ScopeValidator
 	if validatorID == "" {
 		return drain, errors.New("validator id is required for scope drain")
 	}
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		scopePrefix := []byte("state:scope:")
 		scopeOpts := badger.DefaultIteratorOptions
 		scopeOpts.Prefix = scopePrefix
@@ -355,7 +355,7 @@ func (s *BadgerStore) SetScopedVote(memoryID, validatorID, decision string, heig
 		return false, errors.New("scoped vote height must be positive")
 	}
 	inserted := false
-	err := s.db.Update(func(txn *badger.Txn) error {
+	err := s.update(func(txn *badger.Txn) error {
 		item, err := txn.Get(scopeBallotKey(memoryID))
 		if err != nil {
 			return err
@@ -401,12 +401,12 @@ func (s *BadgerStore) SetScopedVote(memoryID, validatorID, decision string, heig
 		if ballot.State != scope.BallotPending {
 			return fmt.Errorf("scoped ballot is terminal: %d", ballot.State)
 		}
-		if err := txn.Set(voteKey, []byte(decision)); err != nil {
+		if err := s.txnSet(txn, voteKey, []byte(decision)); err != nil {
 			return err
 		}
 		heightBytes := make([]byte, 8)
 		binary.BigEndian.PutUint64(heightBytes, uint64(height)) // #nosec G115 -- height is validated positive
-		if err := txn.Set(scopedVoteHeightKey(memoryID, validatorID), heightBytes); err != nil {
+		if err := s.txnSet(txn, scopedVoteHeightKey(memoryID, validatorID), heightBytes); err != nil {
 			return err
 		}
 		inserted = true
@@ -416,12 +416,11 @@ func (s *BadgerStore) SetScopedVote(memoryID, validatorID, decision string, heig
 }
 
 // GetScopedVote returns a scoped member's immutable decision and the exact
-// FinalizeBlock height that first recorded it. The height binding lets crash
-// recovery distinguish replay of the same uncommitted block from a later
-// attempt to reuse an already-consumed nonce or vote.
+// FinalizeBlock height that first recorded it. The height remains canonical
+// ballot audit data and makes a changed-height duplicate distinguishable.
 func (s *BadgerStore) GetScopedVote(memoryID, validatorID string) (decision string, height int64, ok bool, err error) {
 	voteKey := []byte("state:vote:" + memoryID + ":" + validatorID)
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		voteItem, getErr := txn.Get(voteKey)
 		if getErr != nil {
 			return getErr
@@ -468,7 +467,7 @@ func (s *BadgerStore) SetScopedMemoryVerdict(memoryID string, verdict scope.Ball
 	default:
 		return errors.New("scoped verdict must be committed or deprecated")
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		ballotItem, err := txn.Get(scopeBallotKey(memoryID))
 		if err != nil {
 			return err
@@ -520,9 +519,9 @@ func (s *BadgerStore) SetScopedMemoryVerdict(memoryID string, verdict scope.Ball
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(scopeBallotKey(memoryID), encodedBallot); err != nil {
+		if err := s.txnSet(txn, scopeBallotKey(memoryID), encodedBallot); err != nil {
 			return err
 		}
-		return txn.Set(memoryKey(memoryID), encodeMemoryHashEntry(content.ContentHash, status))
+		return s.txnSet(txn, memoryKey(memoryID), encodeMemoryHashEntry(content.ContentHash, status))
 	})
 }

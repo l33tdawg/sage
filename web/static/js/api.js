@@ -850,9 +850,18 @@ export function fedReadiness() { return fedFetch('/v1/dashboard/federation/readi
 // Federation on/off (Settings).
 export function fedSettingGet() { return fedFetch('/v1/dashboard/settings/federation'); }
 export function fedSettingSet(enabled) { return fedPost('/v1/dashboard/settings/federation', { enabled }); }
-// v11.6 host-controlled domain sync + status (per connection).
+// Directional, per-connection RBAC. Trust is established by the join ceremony;
+// these grants can then change independently on either node.
+export function fedShareableDomains() { return fedFetch('/v1/dashboard/federation/shareable-domains'); }
+export function fedPermissionsGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`); }
+export function fedPermissionsSet(chainId, permissions) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`, { permissions }); }
+// Directional copy policy and status for one trusted connection.
 export function fedSyncGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`); }
-export function fedSyncSet(chainId, domains) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`, { domains }); }
+// A source's Copy grant is permission; subscribe_domains is this receiver's
+// independent choice to actually retain the offered domains locally.
+export function fedSyncSet(chainId, subscribeDomains) {
+    return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`, { subscribe_domains: subscribeDomains });
+}
 export function fedSyncStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync/status`); }
 export function fedSyncResend(chainId, memoryId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync/resend`, memoryId ? { memory_id: memoryId } : {}); }
 export function fedRevoke(chainId) { return fedPost(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/revoke`); }

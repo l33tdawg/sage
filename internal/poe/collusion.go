@@ -25,6 +25,23 @@ type PhiTracker struct {
 	buffers map[string][]VoteOutcome
 }
 
+// Clone returns an independent tracker snapshot. FinalizeBlock's app-v20
+// transaction path uses it so a panic cannot leak staged in-memory scoring
+// state into the committed application instance.
+func (p *PhiTracker) Clone() *PhiTracker {
+	if p == nil {
+		return nil
+	}
+	clone := &PhiTracker{
+		window:  p.window,
+		buffers: make(map[string][]VoteOutcome, len(p.buffers)),
+	}
+	for key, outcomes := range p.buffers {
+		clone.buffers[key] = append([]VoteOutcome(nil), outcomes...)
+	}
+	return clone
+}
+
 // NewPhiTracker creates a new phi coefficient tracker.
 func NewPhiTracker(window int) *PhiTracker {
 	if window <= 0 {

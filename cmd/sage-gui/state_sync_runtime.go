@@ -118,7 +118,7 @@ func armConfiguredStateSync(
 	if err != nil {
 		return fmt.Errorf("load state sync join authorization: %w", err)
 	}
-	if profileErr := configureValidatorStateSyncP2P(cometCfg.P2P, cfg.Quorum.Peers, stateSyncCfg.AuthorizedPeerIDs); profileErr != nil {
+	if profileErr := configureValidatorStateSyncP2P(cometCfg, cfg.Quorum.Peers, stateSyncCfg.AuthorizedPeerIDs); profileErr != nil {
 		return fmt.Errorf("configure validator-only state sync P2P profile: %w", profileErr)
 	}
 	// CometBFT's transport-level limit matches the bounded SAGE v1 format. The
@@ -227,6 +227,7 @@ func armConfiguredStateSync(
 			cfg.DataDir,
 			filepath.Join(cfg.DataDir, "badger"),
 			offchain,
+			authorization.ValidatorPublicKey(),
 			logger,
 		),
 	})
@@ -243,6 +244,29 @@ func armConfiguredStateSync(
 		Str("staging_dir", base).
 		Int64("trust_height", stateSyncCfg.TrustHeight).
 		Msg("authorized one-shot validator state-sync receiver armed")
+	return nil
+}
+
+// configureStateSyncApplicationBundle reapplies every process-local policy
+// that a freshly activated consensus bundle needs before the boot runtime may
+// publish it to CometBFT or ordinary services. The replacement SageApp is
+// constructed from the received store, so it must not inherit policy by
+// accident from the closed pre-sync application.
+func configureStateSyncApplicationBundle(
+	application abcitypes.Application,
+	binaryVersion string,
+	retainBlocks int64,
+	chainID string,
+) error {
+	configuredApp, ok := application.(*sageabci.SageApp)
+	if !ok {
+		return fmt.Errorf("expected *abci.SageApp, got %T", application)
+	}
+	configuredApp.Version = binaryVersion
+	configuredApp.SetRetainBlocks(retainBlocks)
+	if err := configuredApp.SetExpectedGovernanceDelegationDomain(chainID); err != nil {
+		return fmt.Errorf("configure governance domain from genesis chain_id: %w", err)
+	}
 	return nil
 }
 
@@ -453,9 +477,12 @@ func buildValidatorStateSyncProfile(cometCfg *config.Config, pv *privval.FilePV,
 		ChainID:                 chainID,
 		LocalNodeID:             string(nodeKey.ID()),
 		LocalValidatorPublicKey: append([]byte(nil), publicKey.Bytes()...),
+		FilterPeers:             cometCfg.FilterPeers,
 		PEX:                     cometCfg.P2P.PexReactor,
+		SeedMode:                cometCfg.P2P.SeedMode,
 		Seeds:                   splitStateSyncCSV(cometCfg.P2P.Seeds),
 		MaxInboundPeers:         cometCfg.P2P.MaxNumInboundPeers,
+		MaxOutboundPeers:        cometCfg.P2P.MaxNumOutboundPeers,
 		UnconditionalPeerIDs:    splitStateSyncCSV(cometCfg.P2P.UnconditionalPeerIDs),
 		PrivatePeerIDs:          splitStateSyncCSV(cometCfg.P2P.PrivatePeerIDs),
 		PersistentPeerIDs:       persistentIDs,
@@ -760,6 +787,7 @@ func newStateSyncReceivePreparer(
 	dataDir string,
 	liveBadgerPath string,
 	offchain *store.SQLiteStore,
+	receiverValidatorPublicKey []byte,
 	logger zerolog.Logger,
 ) sageabci.StateSyncReceivePreparer {
 	return func(ctx context.Context, metadata statesync.Metadata, statePath string) (*sageabci.StateSyncPreparedActivation, error) {
@@ -793,6 +821,15 @@ func newStateSyncReceivePreparer(
 			}
 			return nil, fmt.Errorf("prepare received app-v20 state: %w", prepareErr)
 		}
+		if rosterErr := requireStateSyncReceiverNonValidatorDirectory(ctx, preparedPath, receiverValidatorPublicKey); rosterErr != nil {
+			_ = os.RemoveAll(preparedPath)
+			return nil, fmt.Errorf("prepare received app-v20 state: %w", rosterErr)
+		}
+		logger.Info().
+			Uint64("height", metadata.Height).
+			Int("chunks", len(metadata.ChunkHashes)).
+			Uint64("backup_bytes", metadata.BackupSize).
+			Msg("authorized state-sync session assembled and app-v20 candidate verified")
 		journal := statesync.ActivationJournal{
 			Phase:          statesync.ActivationPrepared,
 			Height:         metadata.Height,
@@ -828,6 +865,10 @@ func newStateSyncReceivePreparer(
 					_ = activatedStore.CloseBadger()
 					return nil, fmt.Errorf("construct activated SAGE application: %w", err)
 				}
+				if rosterErr := requireStateSyncReceiverNonValidatorIDs(activatedApp.ValidatorIDs(), receiverValidatorPublicKey); rosterErr != nil {
+					_ = activatedApp.CloseConsensusState()
+					return nil, fmt.Errorf("construct activated SAGE application: %w", rosterErr)
+				}
 				bundle, err := sageabci.NewConsensusBundleWithCleanup(activationCtx, activatedApp, activatedApp.CloseConsensusState)
 				if err != nil {
 					return nil, fmt.Errorf("construct activated consensus bundle: %w", err)
@@ -847,6 +888,42 @@ func newStateSyncReceivePreparer(
 			},
 		}, nil
 	}
+}
+
+func requireStateSyncReceiverNonValidatorDirectory(ctx context.Context, path string, publicKey []byte) error {
+	if contextErr := ctx.Err(); contextErr != nil {
+		return contextErr
+	}
+	readOnly, err := store.OpenBadgerStoreReadOnly(path)
+	if err != nil {
+		return fmt.Errorf("open prepared state sync validator roster: %w", err)
+	}
+	validators, loadErr := readOnly.LoadValidators()
+	closeErr := readOnly.CloseBadger()
+	if loadErr != nil {
+		return fmt.Errorf("load prepared state sync validator roster: %w", loadErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close prepared state sync validator roster: %w", closeErr)
+	}
+	ids := make([]string, 0, len(validators))
+	for id := range validators {
+		ids = append(ids, id)
+	}
+	return requireStateSyncReceiverNonValidatorIDs(ids, publicKey)
+}
+
+func requireStateSyncReceiverNonValidatorIDs(validatorIDs []string, publicKey []byte) error {
+	if len(publicKey) != cmted25519.PubKeySize {
+		return errors.New("state sync receiver requires an Ed25519 validator public key")
+	}
+	receiverID := hex.EncodeToString(publicKey)
+	for _, validatorID := range validatorIDs {
+		if validatorID == receiverID {
+			return errors.New("state sync receiver validator key is already active in the synchronized application roster")
+		}
+	}
+	return nil
 }
 
 func allocateStateSyncActivationName(root, prefix string) (string, error) {

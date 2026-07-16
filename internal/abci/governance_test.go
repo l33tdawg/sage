@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	_ "github.com/l33tdawg/sage/internal/governance" // ensure governance package compiles with tests
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/validator"
@@ -124,6 +124,26 @@ func makeGovCancelTx(t *testing.T, ak agentKey, proposalID string, nonce uint64)
 	return encoded
 }
 
+// makeProoflessGovernanceTx converts the legacy same-key test envelope above
+// into the truly direct shape used by validator auto-voters. App-v20 validates
+// every governance envelope containing any proof material, so direct-compat
+// tests must not accidentally carry an incomplete historical HTTP proof.
+func makeProoflessGovernanceTx(t *testing.T, ak agentKey, encoded []byte) []byte {
+	t.Helper()
+	parsed, err := tx.DecodeTx(encoded)
+	require.NoError(t, err)
+	parsed.AgentPubKey = nil
+	parsed.AgentSig = nil
+	parsed.AgentTimestamp = 0
+	parsed.AgentBodyHash = nil
+	parsed.AgentNonce = nil
+	parsed.AgentRequest = nil
+	require.NoError(t, tx.SignTx(parsed, ak.priv))
+	direct, err := tx.EncodeTx(parsed)
+	require.NoError(t, err)
+	return direct
+}
+
 // finalizeBlock is a helper that calls FinalizeBlock with the given txs at a specific height.
 func finalizeBlock(t *testing.T, app *SageApp, height int64, txs ...[]byte) *abcitypes.ResponseFinalizeBlock {
 	t.Helper()
@@ -133,6 +153,10 @@ func finalizeBlock(t *testing.T, app *SageApp, height int64, txs ...[]byte) *abc
 		Time:   time.Now(),
 	})
 	require.NoError(t, err)
+	if app.pendingAppV20Finalize != nil {
+		_, err = app.Commit(context.TODO(), &abcitypes.RequestCommit{})
+		require.NoError(t, err)
+	}
 	return resp
 }
 
@@ -284,7 +308,8 @@ func TestGovAppV20RemovalInterlockChecksProposalAndExecution(t *testing.T) {
 	t.Run("proposal admission", func(t *testing.T) {
 		app, admin, val2, val3 := setupThree(t)
 		installActiveScope(t, app, admin, val2, val3)
-		resp := finalizeBlock(t, app, 2, makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "remove scoped validator", 1))
+		resp := finalizeBlock(t, app, 2, makeProoflessGovernanceTx(t, admin,
+			makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "remove scoped validator", 1)))
 		require.Len(t, resp.TxResults, 1)
 		assert.Equal(t, uint32(72), resp.TxResults[0].Code)
 		assert.Contains(t, resp.TxResults[0].Log, "active scope memberships")
@@ -305,7 +330,8 @@ func TestGovAppV20RemovalInterlockChecksProposalAndExecution(t *testing.T) {
 			Domain: "research", ConfidenceScore: 0.9, Content: "pending removal dependency",
 			SubmittedHeight: 2, SubmittedUnix: 100,
 		}))
-		resp := finalizeBlock(t, app, 3, makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "wait for pinned ballot", 1))
+		resp := finalizeBlock(t, app, 3, makeProoflessGovernanceTx(t, admin,
+			makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "wait for pinned ballot", 1)))
 		require.Len(t, resp.TxResults, 1)
 		assert.Equal(t, uint32(72), resp.TxResults[0].Code)
 		assert.Contains(t, resp.TxResults[0].Log, "pending scoped ballots [pending-removal]")
@@ -314,7 +340,8 @@ func TestGovAppV20RemovalInterlockChecksProposalAndExecution(t *testing.T) {
 
 	t.Run("execution recheck", func(t *testing.T) {
 		app, admin, val2, val3 := setupThree(t)
-		resp := finalizeBlock(t, app, 2, makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "remove after vote", 1))
+		resp := finalizeBlock(t, app, 2, makeProoflessGovernanceTx(t, admin,
+			makeGovProposeTx(t, admin, tx.GovOpRemoveValidator, val3.id, val3.pub, 0, "remove after vote", 1)))
 		require.Zero(t, resp.TxResults[0].Code, resp.TxResults[0].Log)
 		proposal, err := app.govEngine.GetActiveProposal()
 		require.NoError(t, err)
@@ -323,11 +350,24 @@ func TestGovAppV20RemovalInterlockChecksProposalAndExecution(t *testing.T) {
 		// A new scope dependency appearing during the governance voting window
 		// must make execution fail closed even though proposal admission passed.
 		installActiveScope(t, app, admin, val2, val3)
-		resp = finalizeBlock(t, app, 12, makeGovVoteTx(t, val2, proposal.ProposalID, tx.VoteDecisionAccept, 1))
-		require.Zero(t, resp.TxResults[0].Code, resp.TxResults[0].Log)
-		assert.Empty(t, resp.ValidatorUpdates)
+		failedResp, finalizeErr := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+			Height: 12,
+			Time:   time.Unix(1_012, 0).UTC(),
+			Txs: [][]byte{makeProoflessGovernanceTx(t, val2,
+				makeGovVoteTx(t, val2, proposal.ProposalID, tx.VoteDecisionAccept, 1))},
+		})
+		require.ErrorContains(t, finalizeErr, "atomic governance post-processing failed")
+		require.ErrorContains(t, finalizeErr, "active scope memberships")
+		assert.Nil(t, failedResp)
+		assert.Nil(t, app.pendingAppV20Finalize)
 		_, stillPresent := app.validators.GetValidator(val3.id)
 		assert.True(t, stillPresent)
+		proposal, err = app.govEngine.LoadProposal(proposal.ProposalID)
+		require.NoError(t, err)
+		assert.Equal(t, governance.StatusVoting, proposal.Status)
+		votes, err := app.govEngine.GetProposalVotes(proposal.ProposalID)
+		require.NoError(t, err)
+		assert.NotContains(t, votes, val2.id, "the vote preceding a failed execution recheck must be discarded")
 	})
 }
 

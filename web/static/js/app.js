@@ -7,7 +7,7 @@ deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedSyncResend, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
+fedConnections, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedSyncGet, fedSyncSet, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
@@ -23,7 +23,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.8.5';
+const SAGE_VERSION = 'v11.9.0';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -6697,21 +6697,21 @@ function HelpOverlay({ onClose, initialSection }) {
                 <p>This is the part that makes SAGE more than a personal notebook. You can link your memory to someone else's - a partner, a family member, a colleague - so your two AIs can draw on each other's knowledge. You can be in the same room or on opposite sides of the world; it works the same either way. Look for the sharing area of the app (its icon is two linked dots, labelled Federation).</p>
                 <div class="guide-steps">
                     <div class="guide-step"><span class="guide-step-num">1</span><div><strong>Both of you say yes</strong> - Nothing is shared until both sides agree. One of you picks <strong>Let someone join mine</strong> and shows a code; the other picks <strong>Join someone's network</strong> and scans it. If either of you does not confirm, nothing happens.</div></div>
-                    <div class="guide-step"><span class="guide-step-num">2</span><div><strong>You pick exactly what to share</strong> - You choose which topics the other person may see - just recipes, or one shared project, or nothing at all - and how private is too private to hand over. They choose the same for their side, and neither of you can quietly widen what the other set.</div></div>
-                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>You confirm it is really them</strong> - Near the end you each read the other a short number, over a phone or video call. If the numbers match, you know you are connecting to the right person and not an impostor. If they do not match, you stop. Only ever connect when you can see or hear that it is genuinely them.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">2</span><div><strong>You confirm it is really them</strong> - Near the end you each read the other a short number, over a phone or video call. If the numbers match, you know you are connecting to the right person and not an impostor. If they do not match, you stop. Only ever connect when you can see or hear that it is genuinely them.</div></div>
+                    <div class="guide-step"><span class="guide-step-num">3</span><div><strong>Trust comes first, permissions come next</strong> - Once trust is established, each of you independently selects which existing domains to share for live reading or optional synchronized copies, and can change those grants later without pairing again. Connection-bound contributions are reserved until SAGE can enforce them safely.</div></div>
                 </div>
                 <div class="guide-detail-grid">
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">What the other side can see</div>
-                        <div class="guide-detail-desc">When your AI looks something up, it can also peek at the topics you both agreed to share on their SAGE, and show you the answer marked as coming from them. It is shown to you in the moment, never quietly copied into your own memory.</div>
+                        <div class="guide-detail-desc">When your AI looks something up, it can also read domains the other person granted to you and mark the answer as coming from them. Nothing is copied into your own memory unless they offer Copy and you independently choose <strong>Save here</strong>.</div>
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">You stay in control</div>
                         <div class="guide-detail-desc">Turn a connection off whenever you like - it deletes nothing on either side, it just stops the two of you reaching each other. You can also narrow or change what you share at any time.</div>
                     </div>
                     <div class="guide-detail-item">
-                        <div class="guide-detail-label">Keeping topics up to date on both sides (optional)</div>
-                        <div class="guide-detail-desc">If you are the one hosting the connection, you can optionally choose a few specific topics to keep up to date on both sides, so new notes on either end show up for both of you. This is switched off unless you turn it on, and you are the one who picks which topics.</div>
+                        <div class="guide-detail-label">Keeping a local copy (optional)</div>
+                        <div class="guide-detail-desc">The owner of each domain decides whether the other computer may keep a synchronized copy; the receiver then decides whether to save it. That permission is directional: either person can offer Copy for their own domains without controlling what the other person shares back.</div>
                     </div>
                 </div>
                 <div class="guide-callout"><strong>The one thing that keeps it safe</strong> is that human moment of checking the number with someone you can actually see or hear. The app will always nudge you towards doing it in person or on a call you placed yourself. If anything ever looks off, stop, and reach the person another way before you connect.</div>
@@ -11551,7 +11551,7 @@ function FedScanInput({ onValue, busy }) {
 // pre-highlighted "Yes", no auto-advance, no timeout-confirm. Decisive consent
 // requires TYPING the code you heard; the confirm button stays inert until the
 // typed value matches what this node computed. "No - stop" is first-class danger.
-function FedCodeCompare({ title, instruction, expectedCode, scope, scopeHeading, confirmLabel, onConfirm, onReject, onBack, busy, tier4 }) {
+function FedCodeCompare({ title, instruction, expectedCode, confirmLabel, onConfirm, onReject, busy, tier4 }) {
     const [typed, setTyped] = useState('');
     const norm = typed.replace(/\D/g, '');
     const match = norm.length === 6 && expectedCode && norm === String(expectedCode);
@@ -11560,7 +11560,6 @@ function FedCodeCompare({ title, instruction, expectedCode, scope, scopeHeading,
         <h3>${title}</h3>
         <p class="fed-compare-instr">${instruction}</p>
         ${tier4 && html`<div class="fed-tier4-note">No camera or shared screen? This spoken-code compare is your ONLY safety check - say it out loud on a call you placed to someone you trust, and only continue if it matches exactly.</div>`}
-        ${scope && html`<${FedScopeSummary} scope=${scope} heading=${scopeHeading || 'They will be able to reach:'} />`}
         <label class="fed-compare-label">Type the code they read you</label>
         <input class="fed-compare-input" inputmode="numeric" autocomplete="off" maxlength="7"
             placeholder="• • • • • •" value=${typed} onInput=${e => setTyped(e.target.value)} />
@@ -11570,41 +11569,6 @@ function FedCodeCompare({ title, instruction, expectedCode, scope, scopeHeading,
             <button class="btn ${match ? 'btn-confirm-live' : ''}" disabled=${!match || busy} onClick=${() => onConfirm(norm)}>
                 ${busy ? 'Working…' : (confirmLabel || 'Yes, they match')}
             </button>
-        </div>
-        ${onBack && html`<button class="btn fed-compare-back" disabled=${busy} onClick=${onBack}>← Change what I share first</button>`}
-    </div>`;
-}
-
-// FedScopeSummary - plain-words rendering of a cross_fed scope (RT-9).
-function FedScopeSummary({ scope, heading }) {
-    if (!scope) return null;
-    const doms = (scope.allowed_domains && scope.allowed_domains.length) ? scope.allowed_domains : [];
-    const all = doms.some(d => d === '*');
-    const clr = CLEARANCE_LABELS[scope.max_clearance || 0] || 'Public';
-    return html`<div class="fed-scope">
-        <div class="fed-scope-h">${heading || 'What is shared:'}</div>
-        <div class="fed-scope-line">${all ? 'All domains' : (doms.length ? doms.join(', ') : 'Nothing (no domains shared)')}</div>
-        <div class="fed-scope-line muted">up to ${clr} level</div>
-    </div>`;
-}
-
-// FedShareForm - configure a cross_fed grant (what the OTHER side may read).
-function FedShareForm({ value, onChange }) {
-    const v = value || { max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' };
-    const [domInput, setDomInput] = useState((v.allowed_domains || []).join(', '));
-    const applyDomains = (s) => {
-        const list = s.split(',').map(x => x.trim()).filter(Boolean);
-        onChange({ ...v, allowed_domains: list });
-    };
-    return html`<div class="fed-share">
-        <label class="fed-share-label">Domains they can read (comma-separated, or * for everything)</label>
-        <input class="fed-share-input" placeholder="e.g. family, recipes   (blank = nothing)"
-            value=${domInput} onInput=${e => { setDomInput(e.target.value); applyDomains(e.target.value); }} />
-        <label class="fed-share-label">Highest level they can read</label>
-        <input type="range" min="0" max="4" value=${v.max_clearance || 0}
-            onInput=${e => onChange({ ...v, max_clearance: parseInt(e.target.value, 10) })} />
-        <div class="fed-share-clr ${(v.max_clearance || 0) >= 3 ? 'danger' : (v.max_clearance || 0) >= 2 ? 'warn' : ''}">
-            ${CLEARANCE_LABELS[v.max_clearance || 0]}
         </div>
     </div>`;
 }
@@ -11699,7 +11663,6 @@ function GuestJoinWizard({ onExit }) {
     const [endpoint, setEndpoint, lanCandidates] = useLanEndpoint();
     const [tier4, setTier4] = useState(false);
     const [scan, setScan] = useState(null);       // {session_id, host_chain, host_endpoint, host_pin, return_uri}
-    const [scopeG, setScopeG] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
     const [codes, setCodes] = useState(null);      // {code_g, code_h, confirm_step}
     const [hostScope, setHostScope] = useState(null);
     const [busy, setBusy] = useState(false);
@@ -11717,7 +11680,18 @@ function GuestJoinWizard({ onExit }) {
     const doRequest = async () => {
         setBusy(true); setErr('');
         try {
-            const r = await fedGuestRequest({ session_id: scan.session_id, endpoint, ...scopeG });
+            // JOIN establishes identity trust only. tx-33 still requires a
+            // wire scope for compatibility, so new peers commit an empty
+            // legacy scope and configure all domain access after pairing via
+            // the directional peer-RBAC surface.
+            const r = await fedGuestRequest({
+                session_id: scan.session_id,
+                endpoint,
+                max_clearance: 4,
+                allowed_domains: [],
+                mode: 'exchange',
+                direction: 'both',
+            });
             setCodes(r); setStep('yourcode');
         } catch (e) { fail(e); }
         setBusy(false);
@@ -11778,17 +11752,7 @@ function GuestJoinWizard({ onExit }) {
             <p class="muted">Connecting to <strong>${scan.host_name || scan.host_chain}</strong>${scan.host_name ? html` <span style="font-size:11px;">(id: <code>${scan.host_chain}</code>)</span>` : ''}. Hold this up to their camera, or send it for them to paste.</p>
             <${FedQr} text=${scan.return_uri} caption="Their SAGE scans this to check it's really you." />
             <div class="fed-step-actions">
-                <button class="btn btn-primary" onClick=${() => setStep('share')}>They've got my code - next</button>
-            </div>
-        </div>`}
-
-        ${step === 'share' && html`<div class="fed-step">
-            <${FedGreenRail} />
-            <h3>What will you let them read?</h3>
-            <p class="muted">Leave it blank to share nothing. You can change this later.</p>
-            <${FedShareForm} value=${scopeG} onChange=${setScopeG} />
-            <div class="fed-step-actions">
-                <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : 'Continue'}</button>
+                <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : "They've got my code - verify trust"}</button>
             </div>
         </div>`}
 
@@ -11806,8 +11770,6 @@ function GuestJoinWizard({ onExit }) {
             title="Check the code they read you"
             instruction="They'll read you a code. Type exactly what you hear."
             expectedCode=${codes.code_h}
-            scope=${hostScope}
-            scopeHeading="You will be able to reach:"
             tier4=${tier4}
             confirmLabel="Yes - connect"
             busy=${busy}
@@ -11818,7 +11780,7 @@ function GuestJoinWizard({ onExit }) {
             <div class="fed-done-check">✓</div>
             <h2>You're connected to ${scan && scan.host_chain}</h2>
             <${TwoOfTwoMeter} n=${2} />
-            <p class="muted">Nothing was deleted. Memory copying is off until the host chooses shared topics; you can always disconnect to opt out.</p>
+            <p class="muted">Trust is established. Each computer now manages what it shares. Open this connection to choose existing domains for live Read or optional Copy; disconnecting always stops future access. Connection-bound Write is reserved but not active yet.</p>
             <button class="btn btn-primary" onClick=${onExit}>Done</button>
         </div>`}
 
@@ -11838,11 +11800,12 @@ function HostJoinWizard({ onExit }) {
     const [endpoint, setEndpoint, lanCandidates] = useLanEndpoint();
     const [session, setSession] = useState(null);   // {session_id, otpauth_uri, host_pin}
     const [view, setView] = useState(null);          // host status view
-    const [grant, setGrant] = useState({ max_clearance: 0, allowed_domains: [], mode: 'exchange', direction: 'both' });
+    // The ceremony establishes trust, not authorization. The empty legacy
+    // scope keeps the existing consensus transaction compatible; operators
+    // add directional domain permissions only after the peer is trusted.
+    const trustOnlyGrant = { max_clearance: 4, allowed_domains: [], mode: 'exchange', direction: 'both' };
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
-    const [syncSel, setSyncSel] = useState(new Set());
-    const [syncAdd, setSyncAdd] = useState('');
     const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
 
     const doCreate = async (mode = routeMode || 'lan') => {
@@ -11879,7 +11842,7 @@ function HostJoinWizard({ onExit }) {
     };
     const doApprove = async (typedCode) => {
         setBusy(true); setErr('');
-        try { await fedHostApprove(session.session_id, { typed_code: typedCode, ...grant }); setStep('readback'); }
+        try { await fedHostApprove(session.session_id, { typed_code: typedCode, ...trustOnlyGrant }); setStep('readback'); }
         catch (e) { fail(e); }
         setBusy(false);
     };
@@ -11905,7 +11868,7 @@ function HostJoinWizard({ onExit }) {
                 if (!live) return;
                 setView(v);
                 if (step === 'waiting' && v.guest_chain) setStep('review');
-                if (step === 'readback' && v.active) setStep('syncsetup');
+                if (step === 'readback' && v.active) setStep('done');
             } catch (e) {}
         };
         const id = setInterval(tick, 2000); tick();
@@ -11960,13 +11923,11 @@ function HostJoinWizard({ onExit }) {
             <${FedGreenRail} />
             <h3>${view.guest_name ? html`<strong>${view.guest_name}</strong> wants to connect` : html`Someone using the name "${view.guest_chain}" wants to connect`}</h3>
             ${view.guest_name && html`<div class="muted" style="font-size:12px;margin-top:-4px;">Their network id: <code>${view.guest_chain}</code> — the name is just a label they chose; the code you check next is what proves it's really them.</div>`}
-            ${view.guest_scope && html`<${FedScopeSummary} scope=${view.guest_scope} heading="They'll let YOU reach:" />`}
-            <h4>What can they read on YOUR network?</h4>
-            <p class="muted">Conservative by default. Blank shares nothing.</p>
-            <${FedShareForm} value=${grant} onChange=${setGrant} />
+            <h4>This step establishes identity trust only</h4>
+            <p class="muted">No domain access is granted by approving this connection. After both codes match, each computer independently chooses which existing domains the other may Read or offer for Copy. Connection-bound Write is reserved but not active yet.</p>
             <div class="fed-step-actions">
                 <button class="btn btn-danger" onClick=${abort}>Ignore</button>
-                <button class="btn btn-primary" onClick=${() => setStep('compare')}>Next: check their code</button>
+                <button class="btn btn-primary" onClick=${() => setStep('compare')}>Next: verify their identity</button>
             </div>
         </div>`}
 
@@ -11974,11 +11935,9 @@ function HostJoinWizard({ onExit }) {
             title="Check their code"
             instruction="They'll read you a code. Type exactly what you hear. This is the moment that proves it's really them."
             expectedCode=${view.code_g}
-            scope=${grant}
             confirmLabel="Yes, they match - approve"
             busy=${busy}
             onConfirm=${doApprove}
-            onBack=${() => setStep('review')}
             onReject=${rejectStop} />`}
 
         ${step === 'readback' && html`<div class="fed-step">
@@ -11990,34 +11949,13 @@ function HostJoinWizard({ onExit }) {
             <${TwoOfTwoMeter} n=${1} />
         </div>`}
 
-        ${step === 'syncsetup' && html`<div class="fed-step fed-done">
+        ${step === 'done' && html`<div class="fed-step fed-done">
             <div class="fed-done-check">✓</div>
             <h2>Connected to ${view && view.guest_chain}</h2>
             <${TwoOfTwoMeter} n=${2} />
-            <h3>Synchronize memories too?</h3>
-            <p class="muted">Off by default. As the host, you choose which shared topics are copied onto both nodes. The guest cannot widen this list.</p>
-            ${(() => {
-                const hostAllowed = grant.allowed_domains || [];
-                const guestAllowed = (view && view.guest_scope && view.guest_scope.allowed_domains) || [];
-                const known = Array.from(new Set([...hostAllowed, ...guestAllowed]))
-                    .filter(d => d && d !== '*' && jsDomainAllowed(hostAllowed, d) && jsDomainAllowed(guestAllowed, d)).sort();
-                const add = () => {
-                    const d = syncAdd.trim(); if (!d || d === '*') return;
-                    if (!jsDomainAllowed(hostAllowed, d) || !jsDomainAllowed(guestAllowed, d)) { setErr(`"${d}" is not shared in both directions.`); return; }
-                    const n = new Set(syncSel); n.add(d); setSyncSel(n); setSyncAdd(''); setErr('');
-                };
-                const save = async () => {
-                    setBusy(true); setErr('');
-                    try { const r = await fedSyncSet(view.guest_chain, [...syncSel]); showToast(r.state === 'delivered' ? 'Memory sync enabled on both nodes' : 'Sync policy saved — waiting for the other node', r.state === 'delivered' ? 'success' : 'info'); onExit(); }
-                    catch (e) { fail(e); }
-                    setBusy(false);
-                };
-                return html`<div class="fed-sync-domains">
-                    ${known.map(d => html`<label class="fed-sync-row" key=${d}><input type="checkbox" checked=${syncSel.has(d)} onChange=${() => { const n = new Set(syncSel); n.has(d) ? n.delete(d) : n.add(d); setSyncSel(n); }} /><span class="fed-sync-dom">${d}</span></label>`)}
-                    <div class="fed-sync-add"><input class="fed-share-input" placeholder="Add a shared topic" value=${syncAdd} onInput=${e => setSyncAdd(e.target.value)} /><button class="btn" onClick=${add}>Add</button></div>
-                    <div class="fed-step-actions"><button class="btn" onClick=${onExit}>Not now</button><button class="btn" onClick=${() => setSyncSel(new Set(known))}>Select all eligible</button><button class="btn btn-primary" disabled=${busy || syncSel.size === 0} onClick=${save}>${busy ? 'Saving…' : 'Sync selected topics'}</button></div>
-                </div>`;
-            })()}
+            <h3>Trust is established</h3>
+            <p class="muted">Permissions are separate from trust. Open this connection from Federation to choose which existing domains they may Read or Copy. They manage what they share back from their own computer; connection-bound Write is reserved but not active yet.</p>
+            <button class="btn btn-primary" onClick=${onExit}>Done</button>
         </div>`}
 
         ${step === 'aborted' && html`<div class="fed-step">
@@ -12029,140 +11967,381 @@ function HostJoinWizard({ onExit }) {
     </div>`;
 }
 
-// jsDomainAllowed mirrors federation.DomainAllowed: "*" wildcard, exact match,
-// or dotted-ancestor coverage ("hr" covers "hr.public").
-function jsDomainAllowed(allowed, d) {
-    return (allowed || []).some(a => a === '*' || (a && d && (a === d || d.startsWith(a + '.'))));
+function fedCatalogMap(result) {
+    const out = {};
+    for (const item of (result && Array.isArray(result.domains) ? result.domains : [])) {
+        const domain = String((item && item.domain) || '').trim();
+        if (domain) out[domain] = { ...item, domain };
+    }
+    return out;
 }
 
-// prettySyncReason turns a sync reject/enum code into human copy.
-function prettySyncReason(code) {
-    const map = {
-        rejected_cross_domain_dup: 'already exists on their side under a different topic',
-        rejected_clearance: 'above the clearance limit for this connection',
-        rejected_not_consented: "they haven't turned on sync for this topic yet",
-        rejected_domain_scope: 'outside the shared scope',
-        rejected_write_access: "their node's federation agent can't write to this topic yet — they need to grant it access, then Resend",
-        'sender vault locked': 'waiting for this node to be unlocked',
-        'peer does not support sync': 'the other node is on an older SAGE without sync',
-    };
-    return map[code] || code || 'unknown';
+function normalizeFedPermissionList(items) {
+    const out = {};
+    for (const item of (Array.isArray(items) ? items : [])) {
+        const domain = String((item && item.domain) || '').trim();
+        if (!domain) continue;
+        const previous = out[domain] || { read: false, write: false, copy: false };
+        const copy = previous.copy || !!item.copy;
+        out[domain] = {
+            read: previous.read || !!item.read || copy,
+            // Preserve the versioned field shape without presenting an older
+            // peer's reusable AccessGrant as connection-scoped Write.
+            write: false,
+            copy,
+        };
+    }
+    for (const [domain, permission] of Object.entries(out)) {
+        if (!permission.read && !permission.copy) delete out[domain];
+    }
+    return out;
 }
 
-// FedSyncPanel - per-connection domain-sync control. New v11.6 connections are
-// host-controlled and default off; guests get a read-only view. Legacy links
-// retain bilateral consent until they re-pair.
-function FedSyncPanel({ conn }) {
+function fedPermissionSnapshot(permissionMap) {
+    return Object.entries(permissionMap || {})
+        .filter(([, p]) => p && (p.read || p.copy))
+        .map(([domain, p]) => ({ domain, read: !!p.read || !!p.copy, write: false, copy: !!p.copy }))
+        .sort((a, b) => a.domain.localeCompare(b.domain));
+}
+
+function fedPermissionMapsEqual(a, b) {
+    return JSON.stringify(fedPermissionSnapshot(a)) === JSON.stringify(fedPermissionSnapshot(b));
+}
+
+function normalizeFedDomainList(items) {
+    return Array.from(new Set((Array.isArray(items) ? items : [])
+        .map(value => String(value || '').trim())
+        .filter(Boolean)))
+        .sort((a, b) => a.localeCompare(b));
+}
+
+// A trailing star is a prefix search ("tii*" matches every existing TII
+// domain). Other searches remain forgiving substring matches.
+function fedDomainMatchesFilter(domain, filter) {
+    const name = String(domain || '').toLowerCase();
+    const query = String(filter || '').trim().toLowerCase();
+    if (!query) return true;
+    if (query.endsWith('*')) return name.startsWith(query.slice(0, -1));
+    return name.includes(query);
+}
+
+// FedPermissionsPanel keeps identity/trust separate from ongoing authorization.
+// Each node edits only its own grants and observes the peer's grants read-only.
+function FedPermissionsPanel({ conn }) {
     const chain = conn.remote_chain_id;
-    const allowed = (conn.allowed_domains || []).filter(d => d && d !== '*');
-    const wildcard = (conn.allowed_domains || []).includes('*');
-    const [saved, setSaved] = useState(null);      // saved sync_domains array
-    const [sel, setSel] = useState(null);          // working Set
-    const [status, setStatus] = useState(null);
-    const [addVal, setAddVal] = useState('');
+    const peerName = conn.peer_name || chain;
+    const [catalog, setCatalog] = useState(null);
+    const [saved, setSaved] = useState(null);
+    const [draft, setDraft] = useState(null);
+    const [remote, setRemote] = useState({});
+    const [remoteKnown, setRemoteKnown] = useState(false);
+    const [subscribeSaved, setSubscribeSaved] = useState([]);
+    const [subscribeDraft, setSubscribeDraft] = useState([]);
+    const [syncKnown, setSyncKnown] = useState(false);
+    const [filter, setFilter] = useState('');
     const [busy, setBusy] = useState(false);
+    const [syncBusy, setSyncBusy] = useState(false);
+    const [refreshing, setRefreshing] = useState(false);
     const [err, setErr] = useState('');
-    const [syncRole, setSyncRole] = useState('legacy');
+    const [reloadToken, setReloadToken] = useState(0);
 
-    const load = async () => {
-        try {
-            const g = await fedSyncGet(chain);
-            const ds = g.sync_domains || [];
-            setSaved(ds); setSel(new Set(ds)); setSyncRole(g.sync_role || 'legacy'); setErr('');
-        } catch (e) { setErr(String(e.message || e)); setSaved([]); setSel(new Set()); }
-        try { setStatus(await fedSyncStatus(chain)); } catch (e) {}
+    useEffect(() => {
+        let live = true;
+        setErr('');
+        const load = async () => {
+            const [catalogResult, permissionsResult, syncResult] = await Promise.allSettled([
+                fedShareableDomains(),
+                fedPermissionsGet(chain),
+                fedSyncGet(chain),
+            ]);
+            if (!live) return;
+            const errors = [];
+            if (catalogResult.status === 'fulfilled') setCatalog(fedCatalogMap(catalogResult.value));
+            else { setCatalog({}); errors.push(`domains: ${catalogResult.reason && catalogResult.reason.message ? catalogResult.reason.message : catalogResult.reason}`); }
+            if (permissionsResult.status === 'fulfilled') {
+                const p = permissionsResult.value || {};
+                const local = normalizeFedPermissionList(p.local_permissions);
+                setSaved(local); setDraft(local);
+                setRemote(normalizeFedPermissionList(p.remote_permissions));
+                setRemoteKnown(p.remote_known === true);
+            } else {
+                // PUT replaces the entire local snapshot. If GET failed, an
+                // editable empty draft could silently erase grants we never
+                // loaded, so fail closed until a retry succeeds.
+                setSaved(null); setDraft(null);
+                errors.push(`permissions: ${permissionsResult.reason && permissionsResult.reason.message ? permissionsResult.reason.message : permissionsResult.reason}`);
+            }
+            if (syncResult.status === 'fulfilled') {
+                const domains = normalizeFedDomainList(syncResult.value && syncResult.value.subscribe_domains);
+                setSubscribeSaved(domains); setSubscribeDraft(domains); setSyncKnown(true);
+            } else {
+                setSubscribeSaved([]); setSubscribeDraft([]); setSyncKnown(false);
+                errors.push(`copy choices: ${syncResult.reason && syncResult.reason.message ? syncResult.reason.message : syncResult.reason}`);
+            }
+            setErr(errors.length ? `Couldn't load ${errors.join('; ')}` : '');
+        };
+        load();
+        return () => { live = false; };
+    }, [chain, reloadToken]);
+
+    // Keep new local domains and the peer's latest grants visible while this
+    // panel is open. Never overwrite an unsaved local draft during polling.
+    useEffect(() => {
+        let live = true;
+        let timer = null;
+        const poll = async () => {
+            const [catalogResult, permissionsResult] = await Promise.allSettled([
+                fedShareableDomains(),
+                fedPermissionsGet(chain),
+            ]);
+            if (!live) return;
+            if (catalogResult.status === 'fulfilled') setCatalog(fedCatalogMap(catalogResult.value));
+            if (permissionsResult.status === 'fulfilled') {
+                const p = permissionsResult.value || {};
+                setRemote(normalizeFedPermissionList(p.remote_permissions));
+                setRemoteKnown(p.remote_known === true);
+            }
+            if (live) timer = setTimeout(poll, 8000);
+        };
+        timer = setTimeout(poll, 8000);
+        return () => { live = false; clearTimeout(timer); };
+    }, [chain]);
+
+    if (catalog === null || draft === null || saved === null) {
+        return html`<div class="fed-permissions-panel">
+            ${err
+                ? html`<div><div class="fed-err">${err}</div><button class="btn" onClick=${() => setReloadToken(n => n + 1)}>Retry</button></div>`
+                : html`<span class="muted">Loading domain permissions…</span>`}
+        </div>`;
+    }
+
+    // Include stale grants that disappeared from the catalog so an operator can
+    // still revoke them. They cannot be switched back on unless the domain is
+    // locally shareable again.
+    const localRows = Array.from(new Set([
+        ...Object.keys(catalog),
+        ...Object.keys(saved),
+        ...Object.keys(draft),
+    ])).sort((a, b) => a.localeCompare(b)).map(domain => {
+        const meta = catalog[domain];
+        return { domain, meta, canShare: !!meta && meta.can_share !== false };
+    });
+    const visibleRows = localRows.filter(row => fedDomainMatchesFilter(row.domain, filter));
+    // Keep stale subscriptions visible so the receiver can always turn them
+    // off even after the source withdraws its Copy grant.
+    const remoteRows = Array.from(new Set([
+        ...Object.keys(remote),
+        ...subscribeDraft,
+    ])).sort((a, b) => a.localeCompare(b)).map(domain => [
+        domain,
+        remote[domain] || { read: false, write: false, copy: false },
+    ]);
+    const dirty = !fedPermissionMapsEqual(saved, draft);
+    const subscribeDirty = JSON.stringify(subscribeSaved) !== JSON.stringify(subscribeDraft);
+
+    const togglePermission = (row, field) => {
+        if (field === 'write') return;
+        setDraft(current => {
+            const previous = current[row.domain] || { read: false, write: false, copy: false };
+            const enabling = !previous[field];
+            if (enabling && !row.canShare) return current;
+            const nextPermission = { ...previous, [field]: enabling };
+            if (enabling && field === 'copy') nextPermission.read = true;
+            if (field === 'read' && !enabling) {
+                nextPermission.write = false;
+                nextPermission.copy = false;
+            }
+            return { ...current, [row.domain]: nextPermission };
+        });
     };
-    useEffect(() => { load(); }, [chain]);
 
-    if (sel === null) return html`<div class="fed-sync-detail muted">Loading…</div>`;
-
-    const rows = Array.from(new Set([...allowed, ...sel])).sort();
-    const toggle = (d) => { const n = new Set(sel); n.has(d) ? n.delete(d) : n.add(d); setSel(n); };
-    const dirty = saved && (sel.size !== saved.length || [...sel].some(d => !saved.includes(d)));
-    const addDomain = () => {
-        const d = addVal.trim();
-        if (!d) return;
-        if (d === '*') { setErr('Use a concrete topic, not "*".'); return; }
-        if (!wildcard && !jsDomainAllowed(conn.allowed_domains, d)) { setErr(`"${d}" is outside this connection's shared topics.`); return; }
-        const n = new Set(sel); n.add(d); setSel(n); setAddVal(''); setErr('');
+    // Bulk operations are deliberately scoped to visibleRows, so filtering for
+    // "tii*" and clicking Allow copy cannot touch unrelated domains.
+    const allowVisible = (field) => {
+        if (field === 'write') return;
+        setDraft(current => {
+            const next = { ...current };
+            visibleRows.forEach(row => {
+                if (!row.canShare) return;
+                const permission = { ...(next[row.domain] || { read: false, write: false, copy: false }), [field]: true };
+                if (field === 'copy') permission.read = true;
+                next[row.domain] = permission;
+            });
+            return next;
+        });
     };
+    const clearVisible = () => {
+        setDraft(current => {
+            const next = { ...current };
+            visibleRows.forEach(row => { next[row.domain] = { read: false, write: false, copy: false }; });
+            return next;
+        });
+    };
+
     const save = async () => {
         setBusy(true); setErr('');
         try {
-            const r = await fedSyncSet(chain, [...sel]);
-            const ds = r.sync_domains || [];
-            setSaved(ds); setSel(new Set(ds));
-            showToast('Sync updated', 'success');
-            setStatus(await fedSyncStatus(chain));
+            const permissions = fedPermissionSnapshot(draft);
+            const response = await fedPermissionsSet(chain, permissions);
+            const nextLocal = normalizeFedPermissionList(
+                Array.isArray(response.local_permissions) ? response.local_permissions : permissions
+            );
+            setSaved(nextLocal); setDraft(nextLocal);
+            if (Array.isArray(response.remote_permissions)) setRemote(normalizeFedPermissionList(response.remote_permissions));
+            if (Object.prototype.hasOwnProperty.call(response, 'remote_known')) setRemoteKnown(response.remote_known === true);
+            showToast(`Permissions updated for ${peerName}`, 'success');
         } catch (e) { setErr(String(e.message || e)); }
         setBusy(false);
     };
 
-    const counts = (status && status.outbox_counts) || {};
-    const rejected = (status && status.rejected) || [];
-    const failed = (status && status.failed) || [];
-    const stuck = [...rejected.map(r => ({ ...r, kind: 'rejected' })), ...failed.map(r => ({ ...r, kind: 'failed' }))];
-    const resend = async (memoryId) => {
-        try {
-            const r = await fedSyncResend(chain, memoryId);
-            showToast(memoryId ? 'Resending…' : `Resending ${r.requeued || 0}…`, 'info');
-            setTimeout(async () => { try { setStatus(await fedSyncStatus(chain)); } catch (e) {} }, 1500);
-        } catch (e) { showToast(String(e.message || e), 'error'); }
+    const toggleSubscription = (domain, copyOffered) => {
+        setSubscribeDraft(current => {
+            const subscribed = current.includes(domain);
+            if (!subscribed && !copyOffered) return current;
+            return normalizeFedDomainList(subscribed
+                ? current.filter(item => item !== domain)
+                : [...current, domain]);
+        });
     };
-    const peerConsent = status && status.peer_consented_domains;
-    const peerUnsupported = status && status.peer_unsupported;
-    // Both-sides-consent gap: topics we share that the peer hasn't turned on.
-    const oneSided = syncRole === 'legacy' && peerConsent ? [...sel].filter(d => !jsDomainAllowed(peerConsent, d)) : [];
 
-    return html`<div class="fed-sync-detail">
-        <div class="fed-sync-explain">
-            <strong>Copying memories (sync) is off until you turn it on.</strong>
-            Connecting lets you borrow answers live. To actually <em>copy</em> a topic's memories to ${chain},
-            ${syncRole === 'guest' ? ' the host chooses the shared topics for this connection.' : syncRole === 'host' ? ' choose it below; SAGE securely applies the same policy to the guest.' : ' switch it on below — legacy connections still require the other side to enable the same topic.'}
+    const saveSubscriptions = async () => {
+        setSyncBusy(true); setErr('');
+        try {
+            const response = await fedSyncSet(chain, subscribeDraft);
+            const savedDomains = normalizeFedDomainList(
+                response && Array.isArray(response.subscribe_domains)
+                    ? response.subscribe_domains
+                    : subscribeDraft
+            );
+            setSubscribeSaved(savedDomains); setSubscribeDraft(savedDomains); setSyncKnown(true);
+            showToast(`Local copy choices updated for ${peerName}`, 'success');
+        } catch (e) { setErr(String(e.message || e)); }
+        setSyncBusy(false);
+    };
+
+    const refresh = async () => {
+        setRefreshing(true); setErr('');
+        try {
+            const [catalogResponse, permissionResponse, syncResponse] = await Promise.all([
+                fedShareableDomains(),
+                fedPermissionsGet(chain),
+                fedSyncGet(chain),
+            ]);
+            setCatalog(fedCatalogMap(catalogResponse));
+            setRemote(normalizeFedPermissionList(permissionResponse.remote_permissions));
+            setRemoteKnown(permissionResponse.remote_known === true);
+            if (!subscribeDirty) {
+                const domains = normalizeFedDomainList(syncResponse && syncResponse.subscribe_domains);
+                setSubscribeSaved(domains); setSubscribeDraft(domains); setSyncKnown(true);
+            }
+            // A manual refresh may adopt server-side local changes only when it
+            // cannot discard edits made in this panel.
+            if (!dirty) {
+                const local = normalizeFedPermissionList(permissionResponse.local_permissions);
+                setSaved(local); setDraft(local);
+            }
+        } catch (e) { setErr(String(e.message || e)); }
+        setRefreshing(false);
+    };
+
+    return html`<div class="fed-permissions-panel">
+        <div class="fed-permissions-intro">
+            <strong>Trust and permissions are separate.</strong> The connection proves who this computer is linked to. These domain permissions decide what may cross that trusted link, and either computer can change its own grants at any time.
         </div>
 
-        ${syncRole === 'guest' && html`<div class="fed-sync-note">Managed by the host. You can view the synchronized topics here, but only the host can add or remove them. Disconnecting always stops sharing.</div>`}
-
-        ${rows.length === 0 && !wildcard && html`<div class="muted">This connection shares no topics, so there's nothing to sync.</div>`}
-        ${(rows.length > 0 || wildcard) && html`<div class="fed-sync-domains">
-            ${rows.map(d => html`<label class="fed-sync-row" key=${d}>
-                <input type="checkbox" disabled=${syncRole === 'guest'} checked=${sel.has(d)} onChange=${() => toggle(d)} />
-                <span class="fed-sync-dom">${d}</span>
-                ${!allowed.includes(d) && html`<span class="fed-sync-tag muted">added</span>`}
-                ${oneSided.includes(d) && sel.has(d) && html`<span class="fed-sync-tag warn" title="They haven't turned this on yet">one-sided</span>`}
-            </label>`)}
-        </div>`}
-
-        ${syncRole !== 'guest' && html`<div class="fed-sync-add">
-            <input class="fed-share-input" placeholder=${wildcard ? 'Add a topic to sync (e.g. hr.public)' : 'Add a specific sub-topic'}
-                value=${addVal} onInput=${e => setAddVal(e.target.value)} onKeyDown=${e => { if (e.key === 'Enter') addDomain(); }} />
-            <button class="btn" onClick=${addDomain}>Add</button>
-        </div>`}
-
-        ${err && html`<div class="fed-warn">${err}</div>`}
-        ${oneSided.length > 0 && html`<div class="fed-sync-note">You're sharing <strong>${oneSided.join(', ')}</strong>, but ${chain} hasn't turned ${oneSided.length > 1 ? 'those' : 'that'} on their side yet — nothing will arrive there until they do.</div>`}
-        ${peerUnsupported && html`<div class="fed-sync-note">${chain} is on an older SAGE that doesn't support sync yet — anything you enable is queued and will deliver once they upgrade.</div>`}
-
-        <div class="fed-sync-actions">
-            ${syncRole !== 'guest' && html`<button class="btn btn-primary" disabled=${!dirty || busy} onClick=${save}>${busy ? 'Saving…' : 'Save sync topics'}</button>`}
-            ${status && html`<div class="fed-sync-status">
-                ${counts.delivered ? html`<span class="fed-sync-chip ok">${counts.delivered} copied</span>` : ''}
-                ${counts.pending ? html`<span class="fed-sync-chip pending">${counts.pending} pending</span>` : ''}
-                ${counts.rejected ? html`<span class="fed-sync-chip rejected">${counts.rejected} rejected</span>` : ''}
-                ${counts.failed ? html`<span class="fed-sync-chip failed">${counts.failed} failed</span>` : ''}
-                ${!counts.delivered && !counts.pending && !counts.rejected && !counts.failed ? html`<span class="muted">nothing queued yet</span>` : ''}
-            </div>`}
-        </div>
-        ${stuck.length > 0 && html`<div class="fed-sync-rejects">
-            <div class="fed-sync-rejects-head">
-                <span class="muted">${stuck.length} not delivered</span>
-                <button class="btn fed-sync-resend-all" onClick=${() => resend('')}>Resend all</button>
+        <section class="fed-perm-section">
+            <div class="fed-perm-section-head">
+                <div>
+                    <h4>What this computer shares with ${peerName}</h4>
+                    <p>Read allows live lookup. Copy offers synchronized local copies that the receiver may independently accept. Write remains unavailable until the chain can bind one exact submission to this trusted connection.</p>
+                </div>
             </div>
-            ${stuck.slice(0, 10).map(r => html`<div key=${r.memory_id} class="fed-sync-reject-row">
-                <span class="muted">• <code>${(r.memory_id || '').slice(0, 10)}</code> — ${prettySyncReason(r.reason)}</span>
-                <button class="btn fed-sync-resend" title="Try sending this again" onClick=${() => resend(r.memory_id)}>Resend</button>
-            </div>`)}
-        </div>`}
+            <div class="fed-perm-toolbar">
+                <input class="fed-share-input fed-perm-search" value=${filter}
+                    placeholder="Filter existing domains (try tii*)"
+                    aria-label="Filter existing domains"
+                    onInput=${e => setFilter(e.target.value)} />
+                <div class="fed-perm-bulk" aria-label="Apply permission to visible domains">
+                    <button class="btn" disabled=${visibleRows.every(row => !row.canShare)} onClick=${() => allowVisible('read')}>Allow read</button>
+                    <button class="btn" disabled title="Requires a consensus-bound federation ingress capability">Write unavailable</button>
+                    <button class="btn" disabled=${visibleRows.every(row => !row.canShare)} onClick=${() => allowVisible('copy')}>Allow copy</button>
+                    <button class="btn" disabled=${visibleRows.length === 0} onClick=${clearVisible}>Clear visible</button>
+                </div>
+            </div>
+            <div class="fed-perm-count muted">${visibleRows.length} of ${localRows.length} domains shown. Bulk actions affect only these visible rows.</div>
+            <div class="fed-perm-grid fed-perm-grid-head" role="row">
+                <span role="columnheader">Existing domain</span><span role="columnheader">Read</span><span role="columnheader">Write (not yet)</span><span role="columnheader">Copy offer</span>
+            </div>
+            ${visibleRows.length === 0 && html`<div class="fed-perm-empty muted">${localRows.length ? 'No existing domains match this filter.' : 'This SAGE has no domains available to share yet.'}</div>`}
+            ${visibleRows.map(row => {
+                const permission = draft[row.domain] || { read: false, write: false, copy: false };
+                const count = row.meta && Number.isFinite(Number(row.meta.memory_count)) ? Number(row.meta.memory_count) : null;
+                const authority = row.meta && row.meta.authority != null ? String(row.meta.authority) : '';
+                return html`<div class="fed-perm-grid fed-perm-row" role="row" key=${row.domain}>
+                    <div class="fed-perm-domain" role="rowheader">
+                        <strong>${row.domain}</strong>
+                        <span class="fed-perm-domain-meta muted">
+                            ${count != null ? `${count} ${count === 1 ? 'memory' : 'memories'}` : ''}
+                            ${authority ? html`<span title="Sharing authority">${authority}</span>` : ''}
+                            ${!row.meta ? html`<span class="fed-perm-tag stale">removed locally — revoke only</span>` : ''}
+                            ${row.meta && !row.canShare ? html`<span class="fed-perm-tag blocked">not shareable</span>` : ''}
+                        </span>
+                    </div>
+                    ${['read', 'write', 'copy'].map(field => html`<label class="fed-perm-cell" key=${field}>
+                        <input type="checkbox"
+                            aria-label="Allow ${peerName} to ${field} ${row.domain}"
+                            checked=${!!permission[field]}
+                            disabled=${field === 'write' || (!row.canShare && !permission[field])}
+                            title=${field === 'write' ? 'Write requires a consensus-bound federation ingress capability' : ''}
+                            onChange=${() => togglePermission(row, field)} />
+                    </label>`)}
+                </div>`;
+            })}
+            ${err && html`<div class="fed-err fed-perm-error">${err}</div>`}
+            <div class="fed-perm-actions">
+                <button class="btn btn-primary" disabled=${!dirty || busy} onClick=${save}>${busy ? 'Saving…' : 'Save what I share'}</button>
+                <span class="muted">${dirty ? 'Unsaved permission changes' : 'Saved'}</span>
+            </div>
+        </section>
+
+        <section class="fed-perm-section fed-perm-remote">
+            <div class="fed-perm-section-head">
+                <div>
+                    <h4>What ${peerName} shares with this computer</h4>
+                    <p>They control Read and Copy permission on their computer. Write is reserved but not active yet. When Copy is offered, you independently choose whether this computer should actually keep a synchronized local copy.</p>
+                </div>
+                <button class="btn" disabled=${refreshing} onClick=${refresh}>${refreshing ? 'Refreshing…' : 'Refresh'}</button>
+            </div>
+            ${!remoteKnown && html`<div class="fed-perm-empty muted">Their SAGE has not reported its permission set yet.</div>`}
+            ${remoteKnown && remoteRows.length === 0 && html`<div class="fed-perm-empty muted">They are not sharing any domains with this computer.</div>`}
+            ${remoteRows.length > 0 && html`<div>
+                <div class="fed-perm-grid fed-perm-grid-copy-choice fed-perm-grid-head" role="row">
+                    <span role="columnheader">Their domain</span><span role="columnheader">Read</span><span role="columnheader">Write (not yet)</span><span role="columnheader">Copy offered</span><span role="columnheader">Save here</span>
+                </div>
+                ${remoteRows.map(([domain, permission]) => {
+                    const subscribed = subscribeDraft.includes(domain);
+                    return html`<div class="fed-perm-grid fed-perm-grid-copy-choice fed-perm-row fed-perm-remote-row" role="row" key=${domain}>
+                    <div class="fed-perm-domain" role="rowheader">
+                        <strong>${domain}</strong>
+                        ${!permission.copy && subscribed && html`<span class="fed-perm-domain-meta"><span class="fed-perm-tag stale">copy no longer offered — remove only</span></span>`}
+                    </div>
+                    ${['read', 'write', 'copy'].map(field => html`<span class="fed-perm-cell" key=${field} aria-label="${field} ${permission[field] ? 'allowed' : 'not allowed'}">
+                        <span class="fed-perm-state ${permission[field] ? 'on' : 'off'}">${permission[field] ? '✓' : '—'}</span>
+                    </span>`)}
+                    <label class="fed-perm-cell">
+                        <input type="checkbox"
+                            aria-label="Save synchronized copies of ${domain} on this computer"
+                            checked=${subscribed}
+                            disabled=${!syncKnown || (!permission.copy && !subscribed)}
+                            onChange=${() => toggleSubscription(domain, permission.copy)} />
+                    </label>
+                </div>`;})}
+                <div class="fed-perm-actions">
+                    <button class="btn btn-primary" disabled=${!syncKnown || !subscribeDirty || syncBusy} onClick=${saveSubscriptions}>${syncBusy ? 'Saving…' : 'Save copy choices'}</button>
+                    <span class="muted">${!syncKnown ? 'Copy controls unavailable' : (subscribeDirty ? 'Unsaved copy choices' : 'Saved')}</span>
+                </div>
+            </div>`}
+        </section>
     </div>`;
 }
 
@@ -12395,8 +12574,8 @@ function FederationPage() {
             </div>`}
 
             ${(fedOn || (conns && conns.length > 0)) && html`<div class="fed-conns">
-                <h3>Your connections <${HelpTip} text="Each row is a treaty with another SAGE. The dot is green when the connection is active and unexpired. The domains listed are the only knowledge shared across the link - everything else stays private." /></h3>
-                ${conns && conns.length > 0 && html`<div class="fed-conns-explain muted">Connecting lets each side <strong>borrow answers</strong> live within the shared topics. To also <strong>copy</strong> memories, open a connection and choose sync topics. New connections are host-managed and default to off.</div>`}
+                <h3>Your connections <${HelpTip} text="Each row is a trusted link to another SAGE. Expanding it shows two directional permission sets: what this computer grants them, and what they grant this computer. Each side controls only its own domains." /></h3>
+                ${conns && conns.length > 0 && html`<div class="fed-conns-explain muted">The scan and spoken code establish <strong>trust</strong>. Open a connection to manage the separate <strong>domain permissions</strong>: each computer independently decides which existing domains the other may Read or offer for Copy. Connection-bound Write is reserved but not active yet.</div>`}
                 ${conns === null && html`<div class="muted">Loading…</div>`}
                 ${conns && conns.length === 0 && html`
                     <${EmptyState} icon="federation"
@@ -12413,12 +12592,12 @@ function FederationPage() {
                         <button class="fed-conn-main fed-conn-expand" onClick=${() => setOpenChain(openChain === c.remote_chain_id ? '' : c.remote_chain_id)} disabled=${!(c.status === 'active' && !c.expired)}>
                             <span class="fed-conn-status ${c.status === 'active' && !c.expired ? 'on' : 'off'}"></span>
                             <span class="fed-conn-name" title=${c.peer_name ? c.remote_chain_id : ''}>${c.peer_name || c.remote_chain_id}</span>
-                            <span class="fed-conn-meta muted">${c.expired ? 'expired' : c.status} · ${(c.allowed_domains || []).join(', ') || 'no domains'}</span>
+                            <span class="fed-conn-meta muted">${c.expired ? 'expired' : c.status} · ${c.status === 'active' && !c.expired ? 'manage domain permissions' : 'trust unavailable'}</span>
                             ${c.status === 'active' && !c.expired && html`<span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>`}
                         </button>
                         ${c.status === 'active' && html`<button class="btn btn-danger fed-conn-off" onClick=${() => revoke(c.remote_chain_id)}>Turn off</button>`}
                     </div>
-                    ${openChain === c.remote_chain_id && c.status === 'active' && !c.expired && html`<${FedSyncPanel} conn=${c} />`}
+                    ${openChain === c.remote_chain_id && c.status === 'active' && !c.expired && html`<${FedPermissionsPanel} conn=${c} />`}
                 </div>`)}
             </div>`}
         </div>

@@ -19,6 +19,7 @@ import (
 
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 // ceremonyNode is a fully-provisioned in-process node for the join e2e test:
@@ -72,7 +73,21 @@ func newCeremonyNode(t *testing.T, chainID string) *ceremonyNode {
 		MemStore:     sqlite,
 		Logger:       zerolog.Nop(),
 	})
-	node.mgr.broadcastFn = func(_ []byte) (string, int64, error) {
+	node.mgr.broadcastFn = func(txBytes []byte) (string, int64, error) {
+		// The production broadcast seam returns only after broadcast_tx_commit;
+		// mirror that contract so post-commit JOIN initialization can resolve the
+		// newly active trust-only agreement from consensus state.
+		parsed, decodeErr := tx.DecodeTx(txBytes)
+		if decodeErr != nil {
+			return "", 0, decodeErr
+		}
+		if parsed.Type == tx.TxTypeCrossFedSet && parsed.CrossFedTerms != nil {
+			terms := parsed.CrossFedTerms
+			if setErr := badger.SetCrossFed(terms.RemoteChainID, terms.Endpoint, terms.PeerPubKey,
+				uint8(terms.MaxClearance), terms.ExpiresAt, terms.AllowedDomains, terms.AllowedDepts, terms.Status); setErr != nil {
+				return "", 0, setErr
+			}
+		}
 		node.mu.Lock()
 		node.broadcasts++
 		node.mu.Unlock()
@@ -141,7 +156,7 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 	}
 
 	// Guest fires /join/request; both sides compute the codes.
-	scopeG := ScopeWire{MaxClearance: 1, AllowedDomains: []string{"*"}, Mode: "exchange", Direction: "both"}
+	scopeG := trustOnlyJoinScope
 	greq, err := guest.mgr.GuestRequest(ctx, create.SessionID, guestEndpoint, scopeG)
 	if err != nil {
 		t.Fatalf("GuestRequest: %v", err)
@@ -158,12 +173,13 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 	if view.CodeH != "" {
 		t.Fatalf("CODE_H leaked before approval")
 	}
-	if view.GuestScope == nil || len(view.GuestScope.AllowedDomains) != 1 || view.GuestScope.AllowedDomains[0] != "*" {
-		t.Fatalf("host status omitted the guest's selectable scope: %+v", view.GuestScope)
+	if view.GuestScope == nil || len(view.GuestScope.AllowedDomains) != 0 ||
+		view.GuestScope.MaxClearance != trustOnlyJoinScope.MaxClearance {
+		t.Fatalf("host status omitted the fixed trust-only scope: %+v", view.GuestScope)
 	}
 
 	// Approval #1: host types the code it heard, sets its grant, freezes E.
-	hostGrant := ScopeWire{MaxClearance: 2, AllowedDomains: []string{"*"}, Mode: "exchange", Direction: "both"}
+	hostGrant := trustOnlyJoinScope
 	if approveErr := host.mgr.HostApprove(create.SessionID, greq.CodeG, hostGrant); approveErr != nil {
 		t.Fatalf("HostApprove: %v", approveErr)
 	}
@@ -317,10 +333,10 @@ func TestJoinApproveWrongCodeRejected(t *testing.T) {
 	if scanErr := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); scanErr != nil {
 		t.Fatalf("HostScanReturn: %v", scanErr)
 	}
-	if _, err := guest.mgr.GuestRequest(ctx, create.SessionID, guestEndpoint, ScopeWire{AllowedDomains: []string{"*"}}); err != nil {
+	if _, err := guest.mgr.GuestRequest(ctx, create.SessionID, guestEndpoint, trustOnlyJoinScope); err != nil {
 		t.Fatalf("GuestRequest: %v", err)
 	}
-	grant := ScopeWire{MaxClearance: 0, AllowedDomains: []string{"*"}}
+	grant := trustOnlyJoinScope
 	if err := host.mgr.HostApprove(create.SessionID, "000000", grant); err == nil {
 		t.Fatal("HostApprove accepted a wrong code")
 	}
@@ -374,7 +390,7 @@ func TestJoinCeremonyConcurrentPolls(t *testing.T) {
 		}()
 	}
 
-	grant := ScopeWire{MaxClearance: 1, AllowedDomains: []string{"*"}, Mode: "exchange", Direction: "both"}
+	grant := trustOnlyJoinScope
 	greq, err := guest.mgr.GuestRequest(ctx, create.SessionID, guestEndpoint, grant)
 	if err != nil {
 		close(stop)

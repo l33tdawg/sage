@@ -109,3 +109,60 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 		})
 	}
 }
+
+func TestFederationSettingMutationRequiresOperator(t *testing.T) {
+	h, _ := newTestHandler(t)
+	operatorPub, operatorKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.NodeOperatorAgentID = hex.EncodeToString(operatorPub)
+	h.FederationEnabled = true
+	settingCalls := 0
+	restartCalls := 0
+	h.SetFederationEnabledFn = func(enabled bool) error {
+		settingCalls++
+		if enabled {
+			t.Fatal("test mutation unexpectedly enabled federation")
+		}
+		return nil
+	}
+	h.RequestRestart = func() error {
+		restartCalls++
+		return nil
+	}
+	router := testRouter(h)
+
+	_, otherKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/federation", strings.NewReader(`{"enabled":false}`))
+	signAgentRequest(t, req, otherKey, []byte(`{"enabled":false}`))
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("nonoperator setting mutation status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if settingCalls != 0 || restartCalls != 0 || !h.FederationEnabled {
+		t.Fatalf("nonoperator reached federation mutation: setting_calls=%d restart_calls=%d enabled=%v", settingCalls, restartCalls, h.FederationEnabled)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/federation", strings.NewReader(`{"enabled":false}`))
+	signAgentRequest(t, req, operatorKey, []byte(`{"enabled":false}`))
+	rr = httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	wantStatus := http.StatusAccepted
+	if !restartInProcessSupported() {
+		wantStatus = http.StatusOK
+	}
+	if rr.Code != wantStatus {
+		t.Fatalf("operator setting mutation status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if settingCalls != 1 || h.FederationEnabled {
+		t.Fatalf("operator mutation did not persist exactly once: setting_calls=%d enabled=%v", settingCalls, h.FederationEnabled)
+	}
+	if restartInProcessSupported() && restartCalls != 1 {
+		t.Fatalf("operator mutation did not request exactly one restart: restart_calls=%d", restartCalls)
+	}
+}

@@ -125,6 +125,44 @@ type StatusResponse struct {
 	// courtesy signal; the authoritative unsupported-peer detection is the
 	// 404/405/501 on the sync routes themselves (see CapabilitySync).
 	Capabilities []string `json:"capabilities,omitempty"`
+	// SharingGrant is this server's unilateral, outbound grant to the
+	// authenticated caller. It is intentionally optional: absent means an older
+	// peer that does not advertise its grant, while present with an empty domain
+	// list means this peer currently shares nothing.
+	SharingGrant *SharingGrant `json:"sharing_grant,omitempty"`
+	// PeerRBACGrant is advertised only to the exact chain+operator identity bound
+	// to the snapshot. Its absence preserves compatibility with legacy peers.
+	PeerRBACGrant *PeerRBACGrant `json:"peer_rbac_grant,omitempty"`
+}
+
+// SharingGrant is the serving node's current read envelope for one
+// authenticated peer. Sync/copy policy is deliberately separate.
+type SharingGrant struct {
+	AllowedDomains []string `json:"allowed_domains"`
+	MaxClearance   uint8    `json:"max_clearance"`
+}
+
+// SharingUpdateResult describes the full directional sharing snapshot that a
+// successful tx-33 update committed locally.
+type SharingUpdateResult struct {
+	Domains      []string `json:"domains"`
+	MaxClearance uint8    `json:"max_clearance"`
+	TxHash       string   `json:"tx_hash"`
+}
+
+// PeerRBACGrant is the serving node's independent capability snapshot for the
+// authenticated peer. Nil/omitted means a legacy peer; present with zero domain
+// rows is explicit deny-all.
+type PeerRBACGrant struct {
+	PolicyVersion int                   `json:"policy_version"`
+	Domains       []PeerRBACDomainGrant `json:"domains"`
+}
+
+type PeerRBACDomainGrant struct {
+	Domain string `json:"domain"`
+	Read   bool   `json:"read"`
+	Write  bool   `json:"write"`
+	Copy   bool   `json:"copy"`
 }
 
 // DeliveryResult is the per-peer outcome of a receipt fan-out.

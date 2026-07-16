@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.6.1. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.9.0. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -23,12 +23,12 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`environment-variables.md`](environment-variables.md) | Every env var SAGE reads (`SAGE_HOME`, embeddings, hybrid recall, TLS, snapshots, …), with defaults and the `file:line` that consumes each. |
 | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) | submit → proposed → committed/deprecated; node-local vs on-chain data; confidence decay; corroboration. |
 | [`concepts/clearance-classification.md`](concepts/clearance-classification.md) | Per-record classification (0–4), the REST-vs-wire default gotcha, and the per-record query gate. |
-| [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, the five-gate query pipeline, and the app-v20 one-chain quorum-scope boundary. |
+| [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, cross-chain peer Read/Copy RBAC, why peer Write is reserved but unavailable in v11.9, the five-gate query pipeline, and the app-v20 one-chain quorum-scope boundary. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
 | [`concepts/block-production-and-idle.md`](concepts/block-production-and-idle.md) | Why an idle chain mints **no** blocks (SAGE has no heartbeat), when a block *is* minted, and how to tell healthy-idle from actually-stuck. Read this before alarming on a frozen block height. |
 | [`concepts/voter-operations.md`](concepts/voter-operations.md) | How `proposed` memories become `committed` (the per-node auto-voter), how to *guarantee* auto-commit (`--require-voter` / `voter:` config), the stuck-memory alarm + triage, key safety, and the honest REST-vote caveat. |
 | [`concepts/content-validation-gate.md`](concepts/content-validation-gate.md) | The optional Layer-2 content-validation gate (`outcome_class`-keyed reject hook) and the deployment **arming seam** — both the stateless `contentvalidator.SetProvider` and the context-aware `SetProviderWithContext` (exposes the on-chain `RoleResolver` for signer-authority checks) — enabling it without patching the cmd entrypoints. |
-| [`federation-and-brain-api.md`](federation-and-brain-api.md) | The v11 HTTP surface: cross-network federation over direct HTTPS or v11.6 libp2p relay/NAT traversal (`/fed/v1/*`, including route exchange), host-controlled domain-sync policy and replication (`/fed/v1/sync/*`, operator/dashboard policy + status), and the memory train-of-thought endpoint. All transport and policy state is off-consensus; treaties use tx-33/34 and sync copies arrive as ordinary locally-signed tx-1 submits. |
+| [`federation-and-brain-api.md`](federation-and-brain-api.md) | The v11 HTTP surface: trust-only JOIN over direct HTTPS or libp2p relay/NAT traversal, independent per-peer Read/Copy grants over existing domains, receiver-controlled Copy subscriptions, the `/fed/v1/*` wire protocol, and the memory train-of-thought endpoint. Transport and peer-policy snapshots are off-consensus; tx-33/34 preserves agreement compatibility. The Write field/route is reserved but fails closed in v11.9 because an ordinary AccessGrant is not bound to one trusted connection; accepted copies enter through ordinary tx-1 submission. |
 | [`reranker-and-setup.md`](reranker-and-setup.md) | The v11 local-engine and setup surface: first-run onboarding, recall-tuning clamps, managed semantic memory setup (`/v1/dashboard/embeddings/*`, pinned Ollama runtime + readiness-gated model pull), the reranker config endpoint (`kind` field + verify-on-enable), the managed llama.cpp sidecar (`/v1/dashboard/reranker/setup/*`, pinned assets + sha256 + adopt-not-respawn), the TEI vs llama.cpp rerank dialects, and `embedding_provider` stamped at insert. All off-consensus. |
 
 ---
@@ -45,6 +45,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | Know if a memory will decay | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) |
 | Understand why your chain's block height isn't moving | [`concepts/block-production-and-idle.md`](concepts/block-production-and-idle.md) |
 | Make sure submitted memories actually get committed (not stuck at `proposed`) | [`concepts/voter-operations.md`](concepts/voter-operations.md) |
+| Pair two SAGE nodes, then change which existing domains they share without re-pairing | [`federation-and-brain-api.md`](federation-and-brain-api.md) — “Trust and directional peer RBAC” |
 | Distinguish internet federation, app-v20 quorum replication, and local-vs-network snapshot recovery | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) — “v11.9 quorum scopes are not cross-chain federation” |
 | Configure SAGE via environment variables | [`environment-variables.md`](environment-variables.md) |
 
@@ -83,9 +84,19 @@ The **memory record** meaning is the data-classification column. See [`concepts/
 ### Request signing
 All authenticated REST endpoints use an Ed25519 signed-request scheme. The signed message includes the **method, path, body, timestamp, and an 8-byte nonce**, with the nonce sent in the `X-Nonce` header. The SDK does this for you. If you sign by hand, **include the nonce** — the server still accepts the legacy nonce-less form for backward compatibility, but new integrations should send it. After app-v17 activation, consensus also binds delegated proofs to that exact signed action, block-time freshness, and a single-use on-chain marker; the REST process is not trusted to attest the action. See [`python-sdk.md`](python-sdk.md) (`auth.py`) and [`rest-api.md`](rest-api.md).
 
+After app-v20, governance adds a validator-and-chain session binding: the
+configured operator first signs `GET /v1/governance/context`, then includes its
+`validator_id` and `governance_domain` in the signed propose/vote/cancel body.
+Consensus validates both before claiming the proof, so a proof cannot be
+transplanted to another validator or chain. Current SDK and MCP clients perform
+this context fetch automatically. The authenticated response also reports
+`validator_active` and an exact sorted `active_validators` ID/power roster read
+from persisted ABCI state, allowing restart readiness to be checked against
+CometBFT without treating the consensus RPC as proof of application storage.
+
 ---
 
-## Related docs (reconciled through v11.3.0)
+## Related docs (reconciled through v11.9.0)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

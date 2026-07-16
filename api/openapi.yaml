@@ -1080,12 +1080,70 @@ components:
         and emits the canonical binary governance payload.
 
     # -- Governance (v8.0 payload-aware) ----------------------------------------
+    GovernanceContextResponse:
+      type: object
+      required:
+        - validator_id
+        - governance_domain
+        - app_v20_active
+        - validator_active
+        - active_validators
+      properties:
+        validator_id:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: This node's live CometBFT validator identity.
+        governance_domain:
+          type: string
+          pattern: '^$|^[0-9a-f]{64}$'
+          description: >-
+            SHA-256 chain-binding committed at app-v20 activation. Empty while
+            app-v20 is inactive.
+        app_v20_active:
+          type: boolean
+          description: Whether the following governance mutation must include this context.
+        validator_active:
+          type: boolean
+          description: >-
+            Whether this gateway's live private-validator identity is present
+            in the ABCI application's persisted validator roster.
+        active_validators:
+          type: array
+          description: >-
+            Exact AppHash-covered validator roster loaded from persisted ABCI
+            state. Entries are sorted by validator_id.
+          items:
+            type: object
+            required:
+              - validator_id
+              - voting_power
+            properties:
+              validator_id:
+                type: string
+                pattern: '^[0-9a-f]{64}$'
+              voting_power:
+                type: integer
+                format: int64
+                minimum: 1
+
     GovProposeRequest:
       type: object
       required:
         - operation
         - reason
       properties:
+        validator_id:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: >-
+            Copy from the immediately preceding authenticated
+            GET /v1/governance/context response when app_v20_active is true.
+        governance_domain:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: >-
+            Copy from the immediately preceding authenticated
+            GET /v1/governance/context response when app_v20_active is true.
         operation:
           type: string
           enum:
@@ -1150,12 +1208,24 @@ components:
       properties:
         proposal_id:
           type: string
-          description: Deterministic on-chain proposal identifier.
+          description: >-
+            Deterministic governance-engine identifier used by vote/cancel;
+            intentionally distinct from tx_hash.
         tx_hash:
           type: string
           description: CometBFT transaction hash.
         status:
           type: string
+          enum:
+            - voting
+            - executed
+            - rejected
+            - expired
+            - cancelled
+            - unknown
+          description: >-
+            Authoritative committed proposal status. `unknown` is used only
+            when an embedded server has no local governance state store.
           example: voting
 
     GovVoteRequest:
@@ -1164,6 +1234,14 @@ components:
         - proposal_id
         - decision
       properties:
+        validator_id:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Current app-v20 validator binding from GET /v1/governance/context.
+        governance_domain:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Current app-v20 chain binding from GET /v1/governance/context.
         proposal_id:
           type: string
           description: From the propose response.
@@ -1191,6 +1269,14 @@ components:
       required:
         - proposal_id
       properties:
+        validator_id:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Current app-v20 validator binding from GET /v1/governance/context.
+        governance_domain:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Current app-v20 chain binding from GET /v1/governance/context.
         proposal_id:
           type: string
 
@@ -1634,6 +1720,12 @@ components:
             $ref: "#/components/schemas/ProblemDetails"
     InternalError:
       description: Internal server error.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    ServiceUnavailable:
+      description: Required node runtime capability or configuration is unavailable.
       content:
         application/problem+json:
           schema:
@@ -3291,10 +3383,46 @@ paths:
           $ref: "#/components/responses/InternalError"
 
   # -- Governance ---------------------------------------------------------
+  /v1/governance/context:
+    get:
+      operationId: getGovernanceContext
+      summary: Read this node's validator-and-chain authorization binding.
+      description: >-
+        The configured governance operator calls this immediately before each
+        mutation. When app_v20_active is true, copy both returned identifiers
+        into the mutation body so the Ed25519 request signature binds the
+        delegated action to this exact validator and chain. A 409 from the
+        mutation means the context changed; fetch it again and re-sign. The
+        same response reports whether this gateway remains active and the exact
+        persisted ABCI validator roster, so restart readiness can be compared
+        with CometBFT's effective validator set.
+      tags:
+        - Governance
+      responses:
+        "200":
+          description: Current governance authorization context.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GovernanceContextResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
   /v1/governance/propose:
     post:
       operationId: proposeGovernance
-      summary: Submit a governance proposal (validator-set ops or v8.0 domain_reassign).
+      summary: Ask this node's validator to submit a governance proposal.
+      description: >-
+        Requires the configured governance-operator request signer and the
+        node's live CometBFT private-validator key. After app-v20, every
+        delegated proposal includes the fresh validator-and-chain context and
+        consensus binds the exact operator-signed request (including the
+        8-byte X-Nonce) as global-admin authorization. The outer validator
+        remains proposer, automatic voter, and proposal-ID actor.
       tags:
         - Governance
       requestBody:
@@ -3305,7 +3433,9 @@ paths:
               $ref: "#/components/schemas/GovProposeRequest"
       responses:
         "200":
-          description: Proposal submitted, voting open.
+          description: >-
+            Transaction committed. The returned status is the committed
+            governance-engine state and may already be terminal.
           content:
             application/json:
               schema:
@@ -3316,13 +3446,23 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
 
   /v1/governance/vote:
     post:
       operationId: voteGovernance
-      summary: Vote on a governance proposal. Only validators can cast effective votes.
+      summary: Ask this node's local validator to vote on a governance proposal.
+      description: >-
+        Only the configured governance operator can authorize the gateway.
+        The HTTP signer receives no voting power; the outer live validator key
+        is the sole on-chain voter. After app-v20 the signed body must carry
+        fresh validator/chain context. The node-local operator need not be a
+        global admin.
       tags:
         - Governance
       requestBody:
@@ -3342,13 +3482,24 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
 
   /v1/governance/cancel:
     post:
       operationId: cancelGovernance
-      summary: Cancel a pending governance proposal. Proposer or admin.
+      summary: Ask the proposing local validator to cancel a pending proposal.
+      description: >-
+        Requires the configured governance operator and live validator key.
+        Consensus attributes cancellation to the outer validator proposer.
+        After app-v20 the signed body must carry fresh validator/chain context;
+        the node-local operator need not be a global admin.
       tags:
         - Governance
       requestBody:
@@ -3370,6 +3521,10 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
         "500":
           $ref: "#/components/responses/InternalError"
 

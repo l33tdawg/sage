@@ -1,4 +1,4 @@
-.PHONY: build build-all test test-cometbft-patch lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism v119-chaos v119-multiprocess-app benchmark benchmark-k6 sdk-test clean help
+.PHONY: build build-all test test-cometbft-patch lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism v119-chaos v119-state-sync v119-multiprocess-app benchmark benchmark-k6 sdk-test clean help
 
 BINARY=bin/amid
 COMPOSE_FILE=deploy/docker-compose.yml
@@ -20,7 +20,7 @@ build-all: ## Build all binaries (amid, sage-gui, sage-cli)
 	go build -ldflags "$(LDFLAGS)" -o bin/sage-cli ./cmd/sage-cli
 
 test: ## Run unit tests
-	go test ./... -v -count=1 -race
+	go test ./... -v -count=1 -race -timeout 30m
 
 test-cometbft-patch: ## Run the local CometBFT state-sync hardening regression
 	cd third_party/cometbft && go test ./statesync ./blocksync ./node ./state ./store -run '^(TestReceiveOversizedSnapshotWithoutActiveSyncDoesNotPanic|TestStateSyncSealAbort.*|TestStateSyncBootstrapRestart.*|TestOfflineStateSyncHeight.*|TestLoadStateFromDBOrGenesisDocProviderCachesOnlyGenesisBeforeStateSync|TestRecoverStateSyncGenesisDocDBResidue.*|TestStateSyncGenesisDocDBResidue.*|TestPersistStateSyncBootstrap.*|TestCompleteStateSyncBootstrap.*|TestBootstrapAtomicallyPersistsEffectiveStateSyncHeight|TestStateSyncBootstrapComplete.*|TestRecoverIncompleteStateSyncBootstrap.*)$$' -count=1 -race
@@ -75,6 +75,9 @@ determinism: ## Stand up an isolated 4-node devnet and assert byte-identical App
 
 v119-chaos: ## Run isolated real Comet/ABCI SIGKILL and P2P-firewall fault gates
 	bash deploy/scripts/run-v11.9-chaos.sh
+
+v119-state-sync: ## Run integrated authorized sage-gui/Comet state-sync wire gate
+	bash deploy/scripts/run-v11.9-state-sync.sh
 
 v119-multiprocess-app: ## Run the bounded app-v20 subprocess replay/reconfiguration oracle
 	bash deploy/scripts/run-v11.9-multiprocess.sh

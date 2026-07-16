@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.8.5. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.9.0. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -12,6 +12,10 @@ Most core `/v1/*` REST endpoints require Ed25519 request signing (`api/rest/midd
 | `X-Signature` | hex-encoded Ed25519 sig | Signs the canonical payload |
 | `X-Timestamp` | unix epoch seconds | Prevents replay |
 | `X-Nonce` | hex bytes (optional) | Sub-second replay protection; include for concurrent requests |
+
+The REST CORS preflight allowlist includes all four signing headers, including
+`X-Nonce`; browser clients do not need to fall back to the legacy nonce-less
+signature shape (`api/rest/server.go`).
 
 **Signed message construction** (`auth.go:156-180`):
 
@@ -28,7 +32,7 @@ Include `X-Nonce` on current clients. If `X-Nonce` is absent, the server accepts
 - Body is capped at 1 MB before reading for signature verification (`auth.go:143`).
 - `X-Agent-ID` is the hex-encoded Ed25519 **public key** (32 bytes = 64 hex chars); it IS the agent identity on-chain.
 
-**Post-app-v17 consensus binding.** The REST process is not the trust boundary. Once app-v17 is active, a transaction whose outer node key differs from `X-Agent-ID` carries the exact `canonical` bytes above in the optional `ParsedTx.AgentRequest` wire tail. `FinalizeBlock` re-hashes those bytes to `AgentBodyHash`, re-verifies the Ed25519 proof, rejects proofs more than five minutes older than deterministic block time, and rebuilds the expected type-specific payload from the signed method, path, and JSON. It intentionally accepts a proof ahead of block time because SAGE mints no idle heartbeat blocks and the first block after a long idle period can lag the already wall-clock-validated REST request. For memory submissions, content/type/domain/confidence/classification/parent/task status stay action-bound while the embedding hash is node-derived and outer-signature-bound: v11.7.4 made the active node authoritative for vector generation after request authentication. A mismatch is rejected with code 109 before the action handler runs. A successful validation atomically claims an AppHash-folded proof fingerprint until its freshness window closes, so the same agent authorization cannot be wrapped in a second node transaction with a fresh outer nonce. Transactions where the same key signs both agent proof and outer transaction need no HTTP envelope: the outer signature already binds the full payload and app-v9's monotonic nonce prevents replay (`internal/abci/agent_proof.go`, `internal/store/badger.go`).
+**Post-app-v17 consensus binding.** The REST process is not the trust boundary. Once app-v17 is active, a transaction whose outer node key differs from `X-Agent-ID` carries the exact `canonical` bytes above in the optional `ParsedTx.AgentRequest` wire tail. `FinalizeBlock` re-hashes those bytes to `AgentBodyHash`, re-verifies the Ed25519 proof, rejects proofs more than five minutes older than deterministic block time, and rebuilds the expected type-specific payload from the signed method, path, and JSON. Historical non-governance proofs intentionally remain valid when ahead of block time because SAGE mints no idle heartbeat blocks and the first block after a long idle period can lag the already wall-clock-validated REST request. App-v20 governance is narrower: every governance envelope containing any agent-proof material, including one whose embedded signer equals the outer validator, must carry the complete request and 8-byte nonce and must fall within **±5 minutes** of deterministic block time. For memory submissions, content/type/domain/confidence/classification/parent/task status stay action-bound while the embedding hash is node-derived and outer-signature-bound: v11.7.4 made the active node authoritative for vector generation after request authentication. A mismatch is rejected with code 109 before the action handler runs. A successful validation atomically claims an AppHash-folded proof fingerprint until its freshness window closes, so the same agent authorization cannot be wrapped in a second node transaction with a fresh outer nonce. Ordinary same-key non-governance transactions and **truly proofless** direct governance/upgrade-auto-voter transactions need no HTTP envelope: the outer signature binds the payload and app-v9's monotonic nonce prevents same-chain replay (`internal/abci/agent_proof.go`, `internal/store/badger.go`).
 
 The optional tail is emitted only after the app-v17 activation block commits. Before activation it is absent, preserving the exact bytes older validators re-encode and every historical block's replay behavior (`internal/tx/codec.go`, `api/rest/server.go`).
 
@@ -884,30 +888,152 @@ List active federations for an org.
 
 ---
 
-### v11.6 host-controlled domain sync + status (`/v1/federation/cross/{chain_id}/sync*`)
+### Cross-chain peer Read/Copy control (Write reserved)
 
-Node-operator-only and off-consensus. Full wire protocol, controller binding, replication, and delivery semantics are documented in [`federation-and-brain-api.md`](federation-and-brain-api.md#v116-domain-sync-host-controlled-shared-domain-replication); this is the signed operator control surface. A v11.6 JOIN starts sync empty and freezes host/guest roles. The host owns the complete versioned policy; the guest may view it or disconnect but cannot widen it. Legacy agreements retain their bilateral consent behavior until they re-pair.
+Current v3 JOIN establishes node trust only: the Manager accepts only the fixed
+`{max_clearance:4, allowed_domains:[], mode:"exchange", direction:"both"}`
+compatibility scope, and the browser sends exactly that
+(`internal/federation/join_routes.go:75-91`, `257-280`, `730-740`,
+`1051-1055`, `1126-1149`). Afterwards each node independently grants the
+frozen peer Read and/or Copy over selected **existing** local domains. This is
+mutable per-peer RBAC, not a reason to re-pair. The versioned Write member is
+reserved but unavailable and must remain false in v11.9. The exact model and
+peer-facing wire protocol are documented in
+[`federation-and-brain-api.md`](federation-and-brain-api.md#trust-and-directional-peer-rbac).
 
-| Route | Purpose |
+The browser control plane is under `/v1/dashboard/federation/*`. Every route
+below has the dashboard's stricter federation-operator gate (local
+CEREBRUM operator or the exact node-operator signer), not merely ordinary
+dashboard-agent auth (`web/federation_join.go:71-102`, `1021-1037`).
+
+| Route | Request / response |
 |---|---|
-| `PUT /v1/federation/cross/{chain_id}/sync` | Host only: replace the complete set with `{"domains": ["hr","eng.public"]}`. Each entry must be concrete, covered by the treaty, and owned by/admin-authorized for the local operator. Returns `sync_domains`, `sync_role:"host"`, `revision`, and `state` (`delivered` or `pending`). A guest receives `409`; an empty list disables sync. |
-| `GET /v1/federation/cross/{chain_id}/sync` | Read back `sync_domains`, `sync_role` (`host`, `guest`, or `legacy`), `revision`, and `delivered_revision`. |
-| `GET /v1/federation/cross/{chain_id}/sync/status` | `outbox_counts` per state (`pending`/`delivering`/`delivered`/`rejected`/`failed`), `rejected` rows with reasons (the B-D1 cross-domain-dup surface), `pending` rows with `attempts`/`next_attempt_at` (vault-deferred rows show `reason: "sender vault locked"` and do not accrue attempts), plus anti-entropy bookkeeping: `last_reconcile`, the peer's advertised `peer_consented_domains`, and `peer_unsupported`. |
+| `GET /v1/dashboard/federation/shareable-domains` | Returns `{"domains":[{"domain","memory_count","authority","can_share"}]}` from registered plus observed local domains. It never creates a domain (`web/federation_permissions.go:30-111`). |
+| `GET /v1/dashboard/federation/connections/{chain_id}/permissions` | Returns `local_permissions`, `local_legacy`, authenticated read-only `remote_permissions`, `remote_known`, and `remote_legacy` (`web/federation_permissions.go:161-220`). |
+| `PUT /v1/dashboard/federation/connections/{chain_id}/permissions` | Full replacement body: `{"permissions":[{"domain":"tii.work","read":true,"copy":false}]}`. Omitted domains are revoked; `[]` is explicit deny-all. Copy implies Read. Every enabled domain must already exist and be controlled by this operator. A `write:true` member is rejected with `400` because no consensus-bound federation ingress capability exists (`web/federation_permissions.go:223-258`, `279-305`). |
+| `GET /v1/dashboard/federation/connections/{chain_id}/sync` | Returns `publish_domains`, `subscribe_domains`, `remote_publish_domains`, `remote_subscribe_domains`, and revision state. |
+| `PUT /v1/dashboard/federation/connections/{chain_id}/sync` | v3 accepts `publish_domains` and/or `subscribe_domains`; an omitted lane is preserved and an explicit empty lane is cleared. The UI uses `{"subscribe_domains":[...]}` for the receiver's independent “Save here” decision (`web/federation_join.go:414-527`). |
 
-Revoking an agreement atomically purges its sync policy, controller binding, and queued deliveries, then removes cached federation credentials and P2P routes. Domain sync is SQLite-only; on a Postgres-backed node these routes return `501` and the drainer is a no-op.
+`POST /v1/federation/cross/{chain_id}/write` is a reserved compatibility route,
+not an enabled peer capability. It requires the exact node operator, validates
+the chain id, and returns `501` before parsing a `RemoteWriteRequest` or calling
+the transport (`api/rest/federation_write_handler.go:11-25`). The separately
+reserved `WritePeer` method returns `ErrRemoteWriteCapabilityUnavailable`
+before agreement lookup or dialing (`internal/federation/remote_write.go:16-19`,
+`41-45`). The peer-facing
+`POST /fed/v1/write` is mounted behind peer authentication and likewise returns
+an authenticated `501` without parsing or dispatching the body. Status never
+advertises reserved `write-v1` (`internal/federation/remote_write.go:48-52`;
+`internal/federation/server.go:282-315`).
+
+An ordinary level-2 `AccessGrant` is agent/domain authorization usable through
+the normal submit API outside a particular federation link. It is therefore not
+a trust-bound A↔B Write permission. v11.9 keeps Write fail-closed until consensus
+provides an ingress capability bound to the active ceremony generation, frozen
+peer, domain, and exact submission. Tracked preview-era grants are revoked and
+verified synchronously before `sage-gui` binds application listeners; an
+incomplete cleanup aborts startup (`internal/federation/remote_write.go:10-19`;
+`cmd/sage-gui/node.go`).
+
+Copy is separately two-sided: the source must grant Copy and the receiver must
+subscribe. The effective v3 path is source Copy ∩ source Publish ∩ receiver
+Subscribe; neither Read nor trust silently enables retention
+(`internal/federation/sync_outbox.go:351-428`).
+
+### Signed directional sync and legacy compatibility (`/v1/federation/cross/{chain_id}/sync*`)
+
+The Ed25519-authenticated `PUT/GET .../sync` routes require the exact node
+operator. `PUT` accepts `domains`, `publish_domains`, and `subscribe_domains` as
+presence-sensitive arrays, but never mixes the two models
+(`api/rest/federation_handler.go:342-440`). On an active, frozen v3 connection:
+
+- `domains` is rejected;
+- either or both directional fields may be supplied;
+- an omitted lane is preserved and an explicit `[]` clears that lane; and
+- both the original host and guest may author their own local lanes
+  (`api/rest/federation_handler.go:447-518`).
+
+A true legacy v1/v2 link rejects directional fields and retains the old
+host-controlled `{"domains":[...]}` rules. A v3 marker whose frozen binding is
+not active fails closed rather than falling through to that legacy path
+(`api/rest/federation_handler.go:520-576`). Fresh trust-only links use v3.
+
+The v3 `GET` response returns local and remote Publish/Subscribe lanes plus the
+local and remote policy versions/revisions. It includes the legacy
+`sync_domains` alias only when the two local lanes are equal, so the alias never
+misrepresents a directional policy (`api/rest/federation_handler.go:656-719`).
+
+`GET .../sync/status` remains the operator observability surface for outbox
+counts, rejected/pending rows, retry timing, anti-entropy state, peer consent,
+and unsupported-peer status (`api/rest/federation_handler.go:578-654`).
+Revocation purges policy/controller/outbox state and cached credentials/routes.
+Domain Copy is SQLite-only; unsupported stores return `501` and the drainer is
+a no-op.
 
 ---
 
 ## 6. Governance / Voting
 
+### `GET /v1/governance/context`
+
+Return the validator-and-chain binding for the next governance mutation. This
+route is authenticated and restricted to the configured governance operator.
+Current SDK and MCP clients call it immediately before every propose, vote, or
+cancel request.
+
+```json
+{
+  "validator_id": "<this-node-validator-id>",
+  "governance_domain": "<64-lowercase-hex-chain-binding-or-empty>",
+  "app_v20_active": true,
+  "validator_active": true,
+  "active_validators": [
+    {"validator_id": "<validator-id>", "voting_power": 10}
+  ]
+}
+```
+
+Before app-v20, `governance_domain` is empty and clients retain the historical
+mutation body. After app-v20, clients copy both identifiers into the following
+request body before signing it. A mutation returns `409` when either value is
+stale or belongs to another validator/chain; fetch the context again and
+re-sign the complete request. Missing live validator/domain configuration is
+`503`; a valid signer that is not this node's operator receives `403`.
+
+`validator_active` and the bytewise-sorted `active_validators` roster are read
+directly from the AppHash-covered `validator:*` records in BadgerDB on every
+request. They are readiness/evidence fields, not caller-supplied authority. A
+removed validator's still-running gateway therefore remains identifiable while
+reporting `validator_active=false`, and operators can compare the exact
+persisted IDs/powers with CometBFT's effective validator set after an H+2
+transition or restart. An unavailable or malformed persisted roster fails the
+authenticated context request with `503` instead of returning a guessed view.
+
+The committed domain is
+`SHA-256("sage/governance-delegation-domain/v20\x00" || chain_id)`, encoded as
+64 lowercase hex characters. It is quorum-committed in the app-v20 upgrade
+proposal rather than accepted from the HTTP caller.
+
 ### `POST /v1/governance/propose`
 
-Submit a governance proposal. Broadcasts `TxTypeGovPropose`.
+Submit a governance proposal. Broadcasts `TxTypeGovPropose`. Only the
+configured governance operator may authorize this validator's proposal. The
+gateway must also have the live CometBFT private-validator key; otherwise it
+returns `503` before broadcasting. After app-v20, consensus binds every
+proof-bearing proposal's exact operator-signed request — including same-key
+envelopes — with an 8-byte `X-Nonce`, validator ID, chain domain, and ±5-minute
+deterministic block-time window as the global-admin authorization,
+while the outer validator remains the proposal actor and automatic voter. The
+configured operator must therefore be a registered global admin before it can
+authorize proposals; vote/cancel authorization does not require sharing that
+admin key across validators.
 
 **Request body** (`governance_handler.go:26-35`):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
+| `validator_id` | string | app-v20 | Exact value from the immediately preceding `GET /v1/governance/context`. Omit before app-v20. |
+| `governance_domain` | string | app-v20 | Exact value from the immediately preceding `GET /v1/governance/context`. Omit before app-v20. |
 | `operation` | string | yes | `add_validator`, `remove_validator`, `update_power`, `domain_reassign`, `memory_domain_repair`, `sync_group_action`, `scope_action` |
 | `target_id` | string | conditional | Hex validator pubkey for validator ops; operation key for other ops. May be omitted only when `scope_action` supplies `scope.scope_id`; otherwise it is required. |
 | `reason` | string | yes | |
@@ -947,24 +1073,44 @@ are mutually exclusive, and an explicit `target_id` must equal `scope_id`
 
 ```json
 {
-  "proposal_id": "<tx_hash>",
+  "proposal_id": "<deterministic-governance-id>",
   "tx_hash": "<tx_hash>",
   "status": "voting"
 }
 ```
 
-Note: `proposal_id` equals `tx_hash` in the response. ABCI derives the deterministic proposal ID internally.
+`proposal_id` is the deterministic ID recorded by the governance engine and is
+the value required by the vote and cancel endpoints. It is distinct from
+`tx_hash`, which identifies the CometBFT transaction. Governance mutations are
+validator-gateway operations: the signed HTTP caller must be the configured
+governance operator, while that node's validator key is the on-chain actor.
+`status` is loaded from committed governance state after
+`broadcast_tx_commit`; it can therefore already be a terminal state rather
+than the example `voting`. It is `unknown` only for an embedded server without
+an authoritative Badger governance store. A non-operator receives `403`; a
+missing operator or live validator key receives `503`, with no broadcast.
+Stale/mismatched app-v20 context receives `409` before broadcast. When a
+Badger governance store is configured, an absent, malformed, or mismatched
+proposal after commit is reported as `500` with the committed `tx_hash` called
+out for operator inspection; it is never masked as `unknown`.
 
 ---
 
 ### `POST /v1/governance/vote`
 
-Vote on a governance proposal. Only validators can cast effective votes.
+Vote on a governance proposal. Only the configured local node operator may
+authorize the local validator's vote; one operator cannot vote through another
+validator's node. After app-v20, consensus verifies the exact
+operator-signed vote request and its validator/chain context, but attributes
+voting power only to the outer validator key. This node-local operator need not
+be a global admin.
 
 **Request body:**
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
+| `validator_id` | string | app-v20 | From the immediately preceding governance context response |
+| `governance_domain` | string | app-v20 | From the immediately preceding governance context response |
 | `proposal_id` | string | yes | From the propose response |
 | `decision` | string | yes | `accept`, `reject`, or `abstain` |
 
@@ -974,12 +1120,17 @@ Vote on a governance proposal. Only validators can cast effective votes.
 
 ### `POST /v1/governance/cancel`
 
-Cancel a pending governance proposal. Proposer or admin.
+Cancel a pending governance proposal. The configured local node operator may
+authorize cancellation by the local validator that proposed it. The same
+`403` non-operator, `409` stale-context, and `503` missing-key/configuration
+behavior applies. The node-local operator need not be a global admin.
 
 **Request body:**
 
 | Field | Type | Required |
 |---|---|---|
+| `validator_id` | string | app-v20 |
+| `governance_domain` | string | app-v20 |
 | `proposal_id` | string | yes |
 
 **Response** (HTTP 200): `{"tx_hash": "...", "status": "cancelled"}`
@@ -1377,7 +1528,8 @@ If the server has `nodeOperatorID` configured (`server.go:50-57`), requests sign
 | Variable | Default | Effect |
 |---|---|---|
 | `SAGE_TX_COMMIT_TIMEOUT_MS` | 60000 | `broadcast_tx_commit` client timeout |
-| `VALIDATOR_KEY_FILE` | — | Path to CometBFT `priv_validator_key.json`; required for quorum voting |
+| `VALIDATOR_KEY_FILE` | — | Path to CometBFT `priv_validator_key.json`; `amid` injects this concrete key into REST in socket mode, while in-process runtimes inject the key under `--home`. Governance is disabled rather than using the compatibility random key when unavailable. |
+| `SAGE_GOVERNANCE_OPERATOR_ID` | — | `amid` only: canonical hex Ed25519 identity allowed to authorize this validator's REST governance mutations. Equivalent flag: `--governance-operator-id`. Empty disables governance mutations. `sage-gui` wires its local `agent.key` identity directly. |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
 
 ---

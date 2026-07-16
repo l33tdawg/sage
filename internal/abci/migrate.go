@@ -9,10 +9,13 @@ import (
 	"github.com/l33tdawg/sage/internal/store"
 )
 
-// MigrateAgentsOnChain ensures all agents from the offchain store are registered
-// in BadgerDB and have correct on_chain_height in SQLite.
-// This is a startup migration — subsequent boots skip already-migrated agents.
-func MigrateAgentsOnChain(ctx context.Context, agentStore store.AgentStore, badgerStore *store.BadgerStore, cometRPC string, signingKey ed25519.PrivateKey, logger zerolog.Logger) {
+// MigrateAgentsOnChain reconciles the SQLite agent projection with BadgerDB.
+// When allowRegistration is true, legacy personal-mode rows that are absent
+// from BadgerDB are registered directly for backwards compatibility. Quorum
+// callers must pass false: registrations there may only arrive through
+// consensus, while projection-only first_seen and on_chain_height repairs are
+// still safe on every node.
+func MigrateAgentsOnChain(ctx context.Context, agentStore store.AgentStore, badgerStore *store.BadgerStore, cometRPC string, signingKey ed25519.PrivateKey, allowRegistration bool, logger zerolog.Logger) {
 	if agentStore == nil || badgerStore == nil {
 		return
 	}
@@ -61,6 +64,14 @@ func MigrateAgentsOnChain(ctx context.Context, agentStore store.AgentStore, badg
 
 		// Skip if already has on_chain_height set (migrated by a previous run)
 		if agent.OnChainHeight > 0 {
+			skipped++
+			continue
+		}
+
+		// A quorum node's SQLite projection is node-local and can contain rows
+		// unknown to the replicated application. Never promote those rows into
+		// consensus state outside a transaction delivered by CometBFT.
+		if !allowRegistration {
 			skipped++
 			continue
 		}

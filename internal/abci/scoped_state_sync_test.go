@@ -29,6 +29,7 @@ func TestPrepareAppV20StateSyncBackupValidatesWithoutActivating(t *testing.T) {
 	source, err := store.NewBadgerStore(sourcePath)
 	require.NoError(t, err)
 	require.NoError(t, source.MarkUpgradeApplied(appV20UpgradeName, 20, 1))
+	seedTestGovernanceDelegationDomain(t, source)
 	projection, err := store.NewSQLiteStore(context.Background(), filepath.Join(root, "source.db"))
 	require.NoError(t, err)
 	app, err := NewSageAppWithStores(source, projection, zerolog.Nop())
@@ -113,6 +114,7 @@ func TestPrepareAppV20StateSyncBackupRejectsMalformedCanonicalScope(t *testing.T
 	bs, err := store.NewBadgerStore(path)
 	require.NoError(t, err)
 	require.NoError(t, bs.MarkUpgradeApplied(appV20UpgradeName, 20, 1))
+	seedTestGovernanceDelegationDomain(t, bs)
 	require.NoError(t, bs.DB().Update(func(txn *badger.Txn) error {
 		return txn.Set([]byte("state:scope-content:malformed"), []byte("not-a-canonical-envelope"))
 	}))
@@ -134,6 +136,12 @@ func TestPrepareAppV20StateSyncBackupRejectsMalformedCanonicalScope(t *testing.T
 
 	err = PrepareAppV20StateSyncBackup(context.Background(), backupPath, filepath.Join(root, "prepared"), 2, hash)
 	require.ErrorContains(t, err, "verify staged scoped state")
+}
+
+func seedTestGovernanceDelegationDomain(t *testing.T, badgerStore *store.BadgerStore) {
+	t.Helper()
+	require.NoError(t, badgerStore.SetState(governanceDelegationDomainStateKey, bytes.Repeat([]byte{0x5a}, sha256.Size)))
+	require.NoError(t, badgerStore.SetState(appV20LegacyResourceAuditStateKey, appV20LegacyResourceAuditValue))
 }
 
 func TestInspectStateSyncRecoveryDirectoryAcceptsCanonicalFreshStore(t *testing.T) {

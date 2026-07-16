@@ -173,7 +173,30 @@ func activatePreparedDirectoryAuthorized(
 // RecoverActivationDirectories resolves a durable activation journal before
 // the ABCI handshake. It either restores the store matching persisted CometBFT
 // state or seals the activated store; ambiguous layouts are left untouched.
-func RecoverActivationDirectories(root, journalPath string, cometHeight uint64, cometAppHash []byte, inspect ActivationDirectoryInspector) (RecoveryAction, error) {
+// When recovery keeps the activated directory, complete is
+// executed after the sealed journal is durable, but before quarantine and the
+// journal are removed. A crash or completion error therefore leaves
+// enough durable evidence to retry both recovery and role completion.
+func RecoverActivationDirectories(
+	root, journalPath string,
+	cometHeight uint64,
+	cometAppHash []byte,
+	inspect ActivationDirectoryInspector,
+	complete func() error,
+) (RecoveryAction, error) {
+	if complete == nil {
+		return 0, errors.New("activation recovery completion is required")
+	}
+	return recoverActivationDirectories(root, journalPath, cometHeight, cometAppHash, inspect, complete)
+}
+
+func recoverActivationDirectories(
+	root, journalPath string,
+	cometHeight uint64,
+	cometAppHash []byte,
+	inspect ActivationDirectoryInspector,
+	complete func() error,
+) (RecoveryAction, error) {
 	if inspect == nil {
 		return 0, errors.New("activation directory inspector is required")
 	}
@@ -197,9 +220,9 @@ func RecoverActivationDirectories(root, journalPath string, cometHeight uint64, 
 	case ActivationPrepared:
 		return recoverPreparedActivation(paths, layout, cometHeight, cometAppHash, inspect)
 	case ActivationPendingComet:
-		return recoverPendingActivation(paths, layout, journal, cometHeight, cometAppHash, inspect)
+		return recoverPendingActivation(paths, layout, journal, cometHeight, cometAppHash, inspect, complete)
 	case ActivationSealed:
-		return recoverSealedActivation(paths, layout, journal, cometHeight, cometAppHash, inspect)
+		return recoverSealedActivation(paths, layout, journal, cometHeight, cometAppHash, inspect, complete)
 	default:
 		return 0, errors.New("activation journal phase is invalid")
 	}
@@ -208,15 +231,31 @@ func RecoverActivationDirectories(root, journalPath string, cometHeight uint64, 
 // SealActivatedDirectory completes an activation while the promoted live
 // database is already open. It deliberately does not inspect or reopen live:
 // callers must first verify that persisted CometBFT and the active application
-// report activeHeight/activeAppHash exactly. The durable PendingComet journal
-// and directory layout remain the independent evidence that quarantine can be
-// removed. A crash after the sealed write is resolved by boot recovery.
+// report activeHeight/activeAppHash exactly. It runs complete after the sealed
+// journal is durable and before removing quarantine or the journal. Callers
+// use this idempotent boundary to persist the receiver's ordinary-node role;
+// boot recovery retries it after a crash.
 func SealActivatedDirectory(
 	root, journalPath string,
 	cometHeight uint64,
 	cometAppHash []byte,
 	activeHeight uint64,
 	activeAppHash []byte,
+	complete func() error,
+) error {
+	if complete == nil {
+		return errors.New("activation seal completion is required")
+	}
+	return sealActivatedDirectoryWithCompletion(root, journalPath, cometHeight, cometAppHash, activeHeight, activeAppHash, complete)
+}
+
+func sealActivatedDirectoryWithCompletion(
+	root, journalPath string,
+	cometHeight uint64,
+	cometAppHash []byte,
+	activeHeight uint64,
+	activeAppHash []byte,
+	complete func() error,
 ) error {
 	if !validPersistedState(cometHeight, cometAppHash) || !validPersistedState(activeHeight, activeAppHash) {
 		return errors.New("activation seal state hash is invalid")
@@ -248,7 +287,7 @@ func SealActivatedDirectory(
 	if cometHeight == j.Height && !bytes.Equal(cometAppHash, j.AppHash) {
 		return errors.New("persisted CometBFT state conflicts with pending activation")
 	}
-	return sealActivationDirectory(paths, j, true)
+	return sealActivationDirectory(paths, j, true, complete)
 }
 
 func recoverPreparedActivation(paths activationDirectoryPaths, layout activationDirectoryLayout, cometHeight uint64, cometAppHash []byte, inspect ActivationDirectoryInspector) (RecoveryAction, error) {
@@ -299,7 +338,7 @@ func recoverPreparedActivation(paths activationDirectoryPaths, layout activation
 	}
 }
 
-func recoverPendingActivation(paths activationDirectoryPaths, layout activationDirectoryLayout, journal ActivationJournal, cometHeight uint64, cometAppHash []byte, inspect ActivationDirectoryInspector) (RecoveryAction, error) {
+func recoverPendingActivation(paths activationDirectoryPaths, layout activationDirectoryLayout, journal ActivationJournal, cometHeight uint64, cometAppHash []byte, inspect ActivationDirectoryInspector, complete func() error) (RecoveryAction, error) {
 	if cometHeight < journal.Height {
 		switch {
 		case layout.live && !layout.prepared && layout.quarantine:
@@ -360,13 +399,13 @@ func recoverPendingActivation(paths activationDirectoryPaths, layout activationD
 	if action != RecoveryKeepActivated {
 		return 0, errors.New("pending activation cannot be sealed")
 	}
-	if err := sealActivationDirectory(paths, journal, true); err != nil {
+	if err := sealActivationDirectory(paths, journal, true, complete); err != nil {
 		return 0, err
 	}
 	return RecoveryKeepActivated, nil
 }
 
-func recoverSealedActivation(paths activationDirectoryPaths, layout activationDirectoryLayout, journal ActivationJournal, cometHeight uint64, cometAppHash []byte, inspect ActivationDirectoryInspector) (RecoveryAction, error) {
+func recoverSealedActivation(paths activationDirectoryPaths, layout activationDirectoryLayout, journal ActivationJournal, cometHeight uint64, cometAppHash []byte, inspect ActivationDirectoryInspector, complete func() error) (RecoveryAction, error) {
 	if !layout.live || layout.prepared {
 		return 0, errors.New("sealed activation directory layout is ambiguous")
 	}
@@ -381,17 +420,22 @@ func recoverSealedActivation(paths activationDirectoryPaths, layout activationDi
 	if action != RecoveryKeepActivated {
 		return 0, errors.New("sealed activation cannot be kept")
 	}
-	if err := sealActivationDirectory(paths, journal, layout.quarantine); err != nil {
+	if err := sealActivationDirectory(paths, journal, layout.quarantine, complete); err != nil {
 		return 0, err
 	}
 	return RecoveryKeepActivated, nil
 }
 
-func sealActivationDirectory(paths activationDirectoryPaths, journal ActivationJournal, removeQuarantine bool) error {
+func sealActivationDirectory(paths activationDirectoryPaths, journal ActivationJournal, removeQuarantine bool, complete func() error) error {
 	if journal.Phase != ActivationSealed {
 		journal.Phase = ActivationSealed
 		if err := WriteActivationJournal(paths.journal, journal); err != nil {
 			return fmt.Errorf("write sealed activation journal: %w", err)
+		}
+	}
+	if complete != nil {
+		if err := complete(); err != nil {
+			return fmt.Errorf("complete sealed activation: %w", err)
 		}
 	}
 	if removeQuarantine {

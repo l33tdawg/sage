@@ -77,12 +77,13 @@ type v119BallotSummary struct {
 }
 
 type v119WorkerResult struct {
-	Blocks        []v119BlockResult   `json:"blocks,omitempty"`
-	Height        int64               `json:"height"`
-	AppHash       string              `json:"app_hash"`
-	AppVersion    uint64              `json:"app_version"`
-	ScopeRevision uint64              `json:"scope_revision"`
-	Ballots       []v119BallotSummary `json:"ballots,omitempty"`
+	Blocks         []v119BlockResult   `json:"blocks,omitempty"`
+	Height         int64               `json:"height"`
+	AppHash        string              `json:"app_hash"`
+	AppVersion     uint64              `json:"app_version"`
+	ValidatorCount int                 `json:"validator_count"`
+	ScopeRevision  uint64              `json:"scope_revision"`
+	Ballots        []v119BallotSummary `json:"ballots,omitempty"`
 }
 
 func v119Validators() []agentKey {
@@ -94,6 +95,13 @@ func v119Validators() []agentKey {
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i].id < keys[j].id })
 	return keys
+}
+
+// v119Operator is deliberately not a validator. It supplies the embedded
+// app-v20 request authorization while each outer validator key independently
+// owns proposal identity, nonce, and voting power.
+func v119Operator() agentKey {
+	return deterministicScopedAgent(161)
 }
 
 func v119OpenWorkerApp(t *testing.T, dataDir string) *SageApp {
@@ -126,13 +134,17 @@ func v119OpenWorkerApp(t *testing.T, dataDir string) *SageApp {
 
 	keys := v119Validators()
 	for i, key := range keys {
-		register := makeAgentRegisterTx(t, key, fmt.Sprintf("validator-%d", i), "admin", "v11.9 fault worker", "test", "")
+		register := makeAgentRegisterTx(t, key, fmt.Sprintf("validator-%d", i), "member", "v11.9 fault worker", "test", "")
 		result := app.processAgentRegister(register, 1, time.Unix(1, 0).UTC())
 		require.Zero(t, result.Code, result.Log)
 		require.NoError(t, app.validators.AddValidator(&validator.ValidatorInfo{
 			ID: key.id, PublicKey: key.pub, Power: 10,
 		}))
 	}
+	operator := v119Operator()
+	operatorRegister := makeAgentRegisterTx(t, operator, "operator-admin", "admin", "v11.9 fault worker", "test", "")
+	operatorResult := app.processAgentRegister(operatorRegister, 1, time.Unix(1, 0).UTC())
+	require.Zero(t, operatorResult.Code, operatorResult.Log)
 	powers := make(map[string]int64, len(keys))
 	for _, key := range keys {
 		powers[key.id] = 10
@@ -140,8 +152,8 @@ func v119OpenWorkerApp(t *testing.T, dataDir string) *SageApp {
 	require.NoError(t, app.badgerStore.SaveValidators(powers))
 	require.NoError(t, app.badgerStore.RegisterDomain(v119Domain, keys[0].id, "", 1))
 	require.NoError(t, app.badgerStore.SetAccessGrant(v119Domain, keys[0].id, 2, 0, keys[0].id))
-	installScopeForValidators(t, app, v119ScopeID, v119Domain, 1, scope.StateActive, keys)
 	require.NoError(t, app.badgerStore.MarkUpgradeApplied(appV20UpgradeName, 20, 1))
+	seedTestGovernanceDelegationDomain(t, app.badgerStore)
 	app.appV20AppliedHeight = 1
 
 	// Initialization is deterministic consensus seed state. Do not carry its
@@ -166,6 +178,7 @@ func v119SummarizeWorker(t *testing.T, app *SageApp, result *v119WorkerResult, m
 	result.Height = info.LastBlockHeight
 	result.AppHash = hex.EncodeToString(info.LastBlockAppHash)
 	result.AppVersion = info.AppVersion
+	result.ValidatorCount = app.validators.Size()
 	record, err := app.badgerStore.GetScopeRecord(v119ScopeID)
 	require.NoError(t, err)
 	if record != nil {
@@ -198,8 +211,9 @@ func v119WriteWorkerResult(t *testing.T, path string, result v119WorkerResult) {
 
 // TestV119MultiProcessWorker is invoked only as a subprocess by the parent
 // harness. A Hold worker remains alive with its database open while the parent
-// withholds blocks. A crash worker fsyncs the post-FinalizeBlock Badger state,
-// publishes its marker, and waits for the parent to SIGKILL it before Commit.
+// withholds blocks. A crash worker publishes the speculative FinalizeBlock
+// response alongside a summary of the still-committed app graph, then waits for
+// the parent to SIGKILL it before the atomic Commit.
 func TestV119MultiProcessWorker(t *testing.T) {
 	planPath := os.Getenv(v119WorkerPlanEnv)
 	if planPath == "" {
@@ -240,9 +254,9 @@ func TestV119MultiProcessWorker(t *testing.T) {
 		}
 		result.Blocks = append(result.Blocks, blockResult)
 		if plan.CrashAfterBlock == block.Height {
-			// Pin the crash point after canonical writes are durable but before
-			// Commit records the height or flushes the projection.
-			require.NoError(t, app.badgerStore.DB().Sync())
+			// The block result above is speculative. The summary deliberately
+			// reads the committed root app, whose height/validators/ballots must
+			// remain unchanged until Commit publishes the cloned graph.
 			v119SummarizeWorker(t, app, &result, plan.InspectMemoryIDs)
 			v119WriteWorkerResult(t, plan.ResultPath, result)
 			for {
@@ -375,6 +389,7 @@ func v119RequireSameFinalState(t *testing.T, results []v119WorkerResult) {
 		assert.Equal(t, want.Height, results[i].Height, "replica %d height", i)
 		assert.Equal(t, want.AppHash, results[i].AppHash, "replica %d AppHash", i)
 		assert.Equal(t, want.AppVersion, results[i].AppVersion, "replica %d app version", i)
+		assert.Equal(t, want.ValidatorCount, results[i].ValidatorCount, "replica %d validator count", i)
 	}
 }
 
@@ -413,14 +428,124 @@ func v119SignedMemoryVote(t *testing.T, signer agentKey, nonce uint64, memoryID 
 	}, signer)
 }
 
-// TestV119MultiProcessFaultHarness proves the application-level release-gate
-// invariants with real OS processes and independent databases:
+func v119ScopeProposalTemplate(keys []agentKey, revision uint64, memberCount int) scope.ProposalTemplate {
+	members := make([]scope.ProposalMember, 0, memberCount)
+	for _, key := range keys[:memberCount] {
+		members = append(members, scope.ProposalMember{
+			ValidatorID: key.id, AssignedWeight: 1, JoinedRevision: 1,
+		})
+	}
+	return scope.ProposalTemplate{
+		ScopeID: v119ScopeID, Revision: revision, State: "active",
+		ControllerValidatorID: keys[0].id,
+		Domains:               []string{v119Domain},
+		Members:               members,
+	}
+}
+
+func v119DelegatedScopeProposal(
+	t *testing.T,
+	authorizer, outer agentKey,
+	template scope.ProposalTemplate,
+	nonce uint64,
+	height int64,
+	proofNonce string,
+) []byte {
+	t.Helper()
+	blockTime := time.Unix(1_000+height, 0).UTC()
+	reason := "multiprocess signed scope formation or revision"
+	payload, err := scope.EncodeProposalTemplate(template)
+	require.NoError(t, err)
+	body, err := json.Marshal(struct {
+		ValidatorID      string                  `json:"validator_id"`
+		GovernanceDomain string                  `json:"governance_domain"`
+		Operation        string                  `json:"operation"`
+		Reason           string                  `json:"reason"`
+		Scope            *scope.ProposalTemplate `json:"scope"`
+	}{
+		ValidatorID: outer.id, GovernanceDomain: governanceReplayTestDomain,
+		Operation: "scope_action", Reason: reason, Scope: &template,
+	})
+	require.NoError(t, err)
+	parsed := &tx.ParsedTx{
+		Type: tx.TxTypeGovPropose, Nonce: nonce, Timestamp: blockTime,
+		GovPropose: &tx.GovPropose{
+			Operation: tx.GovOpScopeAction, TargetID: template.ScopeID,
+			Reason: reason, Payload: payload,
+		},
+	}
+	attachGovernanceRequestProof(
+		t, parsed, authorizer, outer, "POST", "/v1/governance/propose",
+		body, blockTime, []byte(proofNonce),
+	)
+	encoded, err := tx.EncodeTx(parsed)
+	require.NoError(t, err)
+	return encoded
+}
+
+func v119DelegatedAddValidator(t *testing.T, authorizer, outer, candidate agentKey, nonce uint64, height int64, proofNonce string) []byte {
+	t.Helper()
+	blockTime := time.Unix(1_000+height, 0).UTC()
+	reason := "multiprocess delegated validator addition"
+	body, err := json.Marshal(map[string]any{
+		"validator_id":      outer.id,
+		"governance_domain": governanceReplayTestDomain,
+		"operation":         "add_validator",
+		"target_id":         candidate.id,
+		"target_pubkey":     candidate.id,
+		"target_power":      5,
+		"reason":            reason,
+	})
+	require.NoError(t, err)
+	parsed := &tx.ParsedTx{
+		Type: tx.TxTypeGovPropose, Nonce: nonce, Timestamp: blockTime,
+		GovPropose: &tx.GovPropose{
+			Operation: tx.GovOpAddValidator, TargetID: candidate.id,
+			TargetPubKey: candidate.pub, TargetPower: 5, Reason: reason,
+		},
+	}
+	attachGovernanceRequestProof(
+		t, parsed, authorizer, outer, "POST", "/v1/governance/propose",
+		body, blockTime, []byte(proofNonce),
+	)
+	encoded, err := tx.EncodeTx(parsed)
+	require.NoError(t, err)
+	return encoded
+}
+
+func v119DelegatedGovernanceVote(t *testing.T, authorizer, outer agentKey, proposalID string, nonce uint64, height int64, proofNonce string) []byte {
+	t.Helper()
+	blockTime := time.Unix(1_000+height, 0).UTC()
+	body, err := json.Marshal(map[string]any{
+		"validator_id":      outer.id,
+		"governance_domain": governanceReplayTestDomain,
+		"proposal_id":       proposalID,
+		"decision":          "accept",
+	})
+	require.NoError(t, err)
+	parsed := &tx.ParsedTx{
+		Type: tx.TxTypeGovVote, Nonce: nonce, Timestamp: blockTime,
+		GovVote: &tx.GovVote{ProposalID: proposalID, Decision: tx.VoteDecisionAccept},
+	}
+	attachGovernanceRequestProof(
+		t, parsed, authorizer, outer, "POST", "/v1/governance/vote",
+		body, blockTime, []byte(proofNonce),
+	)
+	encoded, err := tx.EncodeTx(parsed)
+	require.NoError(t, err)
+	return encoded
+}
+
+// TestV119SignedScopeReconfigurationFaultHarness proves the application-level
+// release-gate invariants with real OS processes and independent databases:
 //   - a live replica can miss a bounded block interval and catch up exactly;
 //   - SIGKILL after FinalizeBlock/fsync but before Commit replays cleanly;
+//   - a non-validator operator and outer validator keys form and revise the
+//     scope through real app-v20 dual-principal governance envelopes;
 //   - a 4-member ballot keeps its denominator across a prospective 3-member
 //     scope revision, while new ballots use only the new revision;
 //   - 3/4 commits and 2/3 remains pending until the final vote.
-func TestV119MultiProcessFaultHarness(t *testing.T) {
+func TestV119SignedScopeReconfigurationFaultHarness(t *testing.T) {
 	if os.Getenv(v119WorkerPlanEnv) != "" {
 		t.Skip("parent harness only")
 	}
@@ -435,11 +560,38 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 	v119RequireSameFinalState(t, initialized)
 	require.Equal(t, int64(1), initialized[0].Height)
 	require.Equal(t, uint64(20), initialized[0].AppVersion)
+	require.Zero(t, initialized[0].ScopeRevision, "scope must be formed by signed governance, not fixture seeding")
+	require.Equal(t, 4, initialized[0].ValidatorCount)
 
-	oldSubmit := v119SignedMemorySubmit(t, keys[0], 1, "four-member ballot survives a partition and reconfiguration")
+	operator := v119Operator()
+	formationTemplate := v119ScopeProposalTemplate(keys, 1, 4)
+	formationProposal := v119DelegatedScopeProposal(t, operator, keys[0], formationTemplate, 1, 2, "scopef01")
+	formationProposalID := governance.ComputeProposalID(keys[0].id, 2, governance.OpScopeAction, v119ScopeID)
+	formationVote1 := v119DelegatedGovernanceVote(t, operator, keys[1], formationProposalID, 1, 3, "scopef02")
+	formationVote2 := v119DelegatedGovernanceVote(t, operator, keys[2], formationProposalID, 1, 4, "scopef03")
+	formationBlocks := []v119FaultBlock{
+		v119Block(2, formationProposal),
+		v119Block(3, formationVote1),
+		v119Block(4, formationVote2),
+		v119Block(5), v119Block(6), v119Block(7), v119Block(8),
+		v119Block(9), v119Block(10), v119Block(11), v119Block(12),
+	}
+	formationPlans := make([]v119WorkerPlan, 4)
+	for i := range formationPlans {
+		formationPlans[i] = v119WorkerPlan{DataDir: replicaDirs[i], Blocks: formationBlocks}
+	}
+	formed := v119RunBatch(t, formationPlans)
+	v119RequireSameFinalState(t, formed)
+	for _, result := range formed {
+		v119RequireBlockCodesZero(t, result)
+		require.Equal(t, uint64(1), result.ScopeRevision)
+		require.Equal(t, 4, result.ValidatorCount, "the embedded operator must not gain validator power")
+	}
+
+	oldSubmit := v119SignedMemorySubmit(t, keys[0], 2, "four-member ballot survives a partition and reconfiguration")
 	stageOnePlans := make([]v119WorkerPlan, 4)
 	for i := range stageOnePlans {
-		stageOnePlans[i] = v119WorkerPlan{DataDir: replicaDirs[i], Blocks: []v119FaultBlock{v119Block(2, oldSubmit)}}
+		stageOnePlans[i] = v119WorkerPlan{DataDir: replicaDirs[i], Blocks: []v119FaultBlock{v119Block(13, oldSubmit)}}
 	}
 	stageOne := v119RunBatch(t, stageOnePlans)
 	v119RequireSameFinalState(t, stageOne)
@@ -451,9 +603,9 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 	oldMemoryID := string(stageOne[0].Blocks[0].TxData[0])
 	require.NotEmpty(t, oldMemoryID)
 
-	oldVote0 := v119SignedMemoryVote(t, keys[0], 2, oldMemoryID)
-	oldVote1 := v119SignedMemoryVote(t, keys[1], 1, oldMemoryID)
-	stageTwoBlocks := []v119FaultBlock{v119Block(3, oldVote0), v119Block(4, oldVote1)}
+	oldVote0 := v119SignedMemoryVote(t, keys[0], 3, oldMemoryID)
+	oldVote1 := v119SignedMemoryVote(t, keys[1], 2, oldMemoryID)
+	stageTwoBlocks := []v119FaultBlock{v119Block(14, oldVote0), v119Block(15, oldVote1)}
 	stageTwoPlans := make([]v119WorkerPlan, 4)
 	for i := range stageTwoPlans {
 		stageTwoPlans[i] = v119WorkerPlan{DataDir: replicaDirs[i], Blocks: stageTwoBlocks, InspectMemoryIDs: []string{oldMemoryID}}
@@ -484,24 +636,18 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	nextMembers := make([]scope.Member, 0, 3)
-	for _, key := range keys[:3] {
-		nextMembers = append(nextMembers, scope.Member{
-			ValidatorID: key.id, AssignedWeight: 1, JoinedRevision: 1, Active: true,
-		})
-	}
-	nextScope := scopeTemplate(v119ScopeID, keys[0].id, v119Domain, 2, scope.StateActive, nextMembers...)
-	proposeHeight := int64(5)
-	propose := makeScopeGovProposeTx(t, keys[0], nextScope, v119ScopeID, 3)
-	proposalID := governance.ComputeProposalID(keys[0].id, proposeHeight, governance.OpScopeAction, v119ScopeID)
-	voteProposal1 := makeGovVoteTx(t, keys[1], proposalID, tx.VoteDecisionAccept, 2)
-	voteProposal2 := makeGovVoteTx(t, keys[2], proposalID, tx.VoteDecisionAccept, 1)
+	nextScope := v119ScopeProposalTemplate(keys, 2, 3)
+	proposeHeight := int64(16)
+	propose := v119DelegatedScopeProposal(t, operator, keys[1], nextScope, 3, proposeHeight, "scoper01")
+	proposalID := governance.ComputeProposalID(keys[1].id, proposeHeight, governance.OpScopeAction, v119ScopeID)
+	voteProposal1 := v119DelegatedGovernanceVote(t, operator, keys[0], proposalID, 4, 17, "scoper02")
+	voteProposal2 := v119DelegatedGovernanceVote(t, operator, keys[2], proposalID, 2, 18, "scoper03")
 	throughReconfiguration := []v119FaultBlock{
-		v119Block(5, propose),
-		v119Block(6, voteProposal1),
-		v119Block(7), v119Block(8), v119Block(9), v119Block(10),
-		v119Block(11), v119Block(12), v119Block(13), v119Block(14),
-		v119Block(15, voteProposal2),
+		v119Block(16, propose),
+		v119Block(17, voteProposal1),
+		v119Block(18, voteProposal2),
+		v119Block(19), v119Block(20), v119Block(21), v119Block(22),
+		v119Block(23), v119Block(24), v119Block(25), v119Block(26),
 	}
 	onlinePlans := make([]v119WorkerPlan, 3)
 	for i := range onlinePlans {
@@ -515,15 +661,16 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 	for _, result := range online {
 		v119RequireBlockCodesZero(t, result)
 		require.Equal(t, uint64(2), result.ScopeRevision)
+		require.Equal(t, 4, result.ValidatorCount)
 		pinned := v119Ballot(t, result, oldMemoryID)
 		assert.Equal(t, uint64(1), pinned.ScopeRevision)
 		assert.Equal(t, 4, pinned.MemberCount)
 	}
 
-	newSubmit := v119SignedMemorySubmit(t, keys[0], 4, "new ballot uses the prospective three-member roster")
+	newSubmit := v119SignedMemorySubmit(t, keys[0], 5, "new ballot uses the prospective three-member roster")
 	newSubmitPlans := []v119WorkerPlan{
-		{DataDir: replicaDirs[0], Blocks: []v119FaultBlock{v119Block(16, newSubmit)}},
-		{DataDir: replicaDirs[1], Blocks: []v119FaultBlock{v119Block(16, newSubmit)}},
+		{DataDir: replicaDirs[0], Blocks: []v119FaultBlock{v119Block(27, newSubmit)}},
+		{DataDir: replicaDirs[1], Blocks: []v119FaultBlock{v119Block(27, newSubmit)}},
 	}
 	newSubmitResults := v119RunBatch(t, newSubmitPlans)
 	v119RequireSameFinalState(t, newSubmitResults)
@@ -534,29 +681,29 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 	require.NotEmpty(t, newMemoryID)
 
 	// Replica 2 reaches the same FinalizeBlock result, then the parent sends a
-	// real SIGKILL before Commit. Restarting it must replay height 16 exactly.
+	// real SIGKILL before Commit. Restarting it must replay height 27 exactly.
 	crashing := v119StartChild(t, v119WorkerPlan{
-		DataDir: replicaDirs[2], Blocks: []v119FaultBlock{v119Block(16, newSubmit)},
-		CrashAfterBlock: 16,
+		DataDir: replicaDirs[2], Blocks: []v119FaultBlock{v119Block(27, newSubmit)},
+		CrashAfterBlock: 27,
 	})
 	crashResult := v119WaitReadyAndKill(t, crashing)
 	require.Len(t, crashResult.Blocks, 1)
 	assert.Equal(t, newSubmitResults[0].Blocks[0].AppHash, crashResult.Blocks[0].AppHash)
 	// The killed process's in-memory Info already reflects FinalizeBlock. A
-	// fresh process must reload the durable Commit height (15), which is the
-	// signal that makes Comet replay height 16.
+	// fresh process must reload the durable Commit height (26), which is the
+	// signal that makes Comet replay height 27.
 	reopenedBeforeReplay := v119RunBatch(t, []v119WorkerPlan{{DataDir: replicaDirs[2]}})[0]
-	assert.Equal(t, int64(15), reopenedBeforeReplay.Height, "durable Commit height must remain behind after SIGKILL")
+	assert.Equal(t, int64(26), reopenedBeforeReplay.Height, "durable Commit height must remain behind after SIGKILL")
 	replayed := v119RunBatch(t, []v119WorkerPlan{{
-		DataDir: replicaDirs[2], Blocks: []v119FaultBlock{v119Block(16, newSubmit)},
+		DataDir: replicaDirs[2], Blocks: []v119FaultBlock{v119Block(27, newSubmit)},
 	}})[0]
 	v119RequireBlockCodesZero(t, replayed)
 	assert.Equal(t, newSubmitResults[0].AppHash, replayed.AppHash)
-	assert.Equal(t, int64(16), replayed.Height)
+	assert.Equal(t, int64(27), replayed.Height)
 
-	newVote0 := v119SignedMemoryVote(t, keys[0], 5, newMemoryID)
-	newVote1 := v119SignedMemoryVote(t, keys[1], 3, newMemoryID)
-	twoOfThree := []v119FaultBlock{v119Block(17, newVote0), v119Block(18, newVote1)}
+	newVote0 := v119SignedMemoryVote(t, keys[0], 6, newMemoryID)
+	newVote1 := v119SignedMemoryVote(t, keys[1], 4, newMemoryID)
+	twoOfThree := []v119FaultBlock{v119Block(28, newVote0), v119Block(29, newVote1)}
 	twoOfThreePlans := make([]v119WorkerPlan, 3)
 	for i := range twoOfThreePlans {
 		twoOfThreePlans[i] = v119WorkerPlan{
@@ -578,11 +725,11 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 		assert.Equal(t, byte(scope.BallotPending), newBallot.State, "exactly 2/3 must remain pending")
 	}
 
-	oldVote2 := v119SignedMemoryVote(t, keys[2], 2, oldMemoryID)
+	oldVote2 := v119SignedMemoryVote(t, keys[2], 3, oldMemoryID)
 	threeOfFourPlans := make([]v119WorkerPlan, 3)
 	for i := range threeOfFourPlans {
 		threeOfFourPlans[i] = v119WorkerPlan{
-			DataDir: replicaDirs[i], Blocks: []v119FaultBlock{v119Block(19, oldVote2)},
+			DataDir: replicaDirs[i], Blocks: []v119FaultBlock{v119Block(30, oldVote2)},
 			InspectMemoryIDs: []string{oldMemoryID, newMemoryID},
 		}
 	}
@@ -594,11 +741,11 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 		assert.Equal(t, byte(scope.BallotPending), v119Ballot(t, result, newMemoryID).State)
 	}
 
-	newVote2 := v119SignedMemoryVote(t, keys[2], 3, newMemoryID)
+	newVote2 := v119SignedMemoryVote(t, keys[2], 4, newMemoryID)
 	finalPlans := make([]v119WorkerPlan, 3)
 	for i := range finalPlans {
 		finalPlans[i] = v119WorkerPlan{
-			DataDir: replicaDirs[i], Blocks: []v119FaultBlock{v119Block(20, newVote2)},
+			DataDir: replicaDirs[i], Blocks: []v119FaultBlock{v119Block(31, newVote2)},
 			InspectMemoryIDs: []string{oldMemoryID, newMemoryID},
 		}
 	}
@@ -614,16 +761,16 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 	// same replica, and replay every exact missed block. Compare every AppHash
 	// against the canonical online sequence, not only the final state.
 	partitionResult := v119ReadResult(t, partitioned.resultPath)
-	assert.Equal(t, int64(4), partitionResult.Height)
+	assert.Equal(t, int64(15), partitionResult.Height)
 	require.NoError(t, partitioned.cmd.Process.Kill())
 	require.Error(t, partitioned.cmd.Wait())
 	catchupBlocks := append([]v119FaultBlock{}, throughReconfiguration...)
 	catchupBlocks = append(catchupBlocks,
-		v119Block(16, newSubmit),
-		v119Block(17, newVote0),
-		v119Block(18, newVote1),
-		v119Block(19, oldVote2),
-		v119Block(20, newVote2),
+		v119Block(27, newSubmit),
+		v119Block(28, newVote0),
+		v119Block(29, newVote1),
+		v119Block(30, oldVote2),
+		v119Block(31, newVote2),
 	)
 	catchup := v119RunBatch(t, []v119WorkerPlan{{
 		DataDir: replicaDirs[3], Blocks: catchupBlocks,
@@ -646,4 +793,85 @@ func TestV119MultiProcessFaultHarness(t *testing.T) {
 	for _, block := range catchup.Blocks {
 		assert.Equal(t, canonicalHashes[block.Height], block.AppHash, "catch-up AppHash at height %d", block.Height)
 	}
+}
+
+// TestV119DelegatedGovernanceReconfigurationCrashReplay drives the real
+// app-v20 dual-principal envelope through independent OS processes. The final
+// quorum vote speculatively adds a validator during FinalizeBlock, the worker
+// is SIGKILLed before Commit, and a fresh process must start from the old set,
+// replay the whole block, and re-emit the identical ValidatorUpdate.
+func TestV119DelegatedGovernanceReconfigurationCrashReplay(t *testing.T) {
+	if os.Getenv(v119WorkerPlanEnv) != "" {
+		t.Skip("parent harness only")
+	}
+	keys := v119Validators()
+	candidate := deterministicScopedAgent(129)
+	authorizer := v119Operator()
+
+	healthyDir := filepath.Join(t.TempDir(), "healthy")
+	crashDir := filepath.Join(t.TempDir(), "crash")
+	initialized := v119RunBatch(t, []v119WorkerPlan{
+		{DataDir: healthyDir},
+		{DataDir: crashDir},
+	})
+	v119RequireSameFinalState(t, initialized)
+	require.Equal(t, 4, initialized[0].ValidatorCount)
+
+	propose := v119DelegatedAddValidator(t, authorizer, keys[0], candidate, 1, 2, "mprop001")
+	proposalID := governance.ComputeProposalID(keys[0].id, 2, governance.OpAddValidator, candidate.id)
+	firstVote := v119DelegatedGovernanceVote(t, authorizer, keys[1], proposalID, 1, 12, "mvote001")
+	quorumVote := v119DelegatedGovernanceVote(t, authorizer, keys[2], proposalID, 1, 13, "mvote002")
+
+	prefix := []v119FaultBlock{v119Block(2, propose)}
+	for height := int64(3); height < 12; height++ {
+		prefix = append(prefix, v119Block(height))
+	}
+	prefix = append(prefix, v119Block(12, firstVote))
+	prefixResults := v119RunBatch(t, []v119WorkerPlan{
+		{DataDir: healthyDir, Blocks: prefix},
+		{DataDir: crashDir, Blocks: prefix},
+	})
+	v119RequireSameFinalState(t, prefixResults)
+	for _, result := range prefixResults {
+		v119RequireBlockCodesZero(t, result)
+		require.Equal(t, int64(12), result.Height)
+		require.Equal(t, 4, result.ValidatorCount)
+	}
+
+	healthy := v119RunBatch(t, []v119WorkerPlan{{
+		DataDir: healthyDir, Blocks: []v119FaultBlock{v119Block(13, quorumVote)},
+	}})[0]
+	v119RequireBlockCodesZero(t, healthy)
+	require.Len(t, healthy.Blocks, 1)
+	require.Equal(t, 1, healthy.Blocks[0].ValidatorUpdates)
+	require.Equal(t, 5, healthy.ValidatorCount)
+
+	crashing := v119StartChild(t, v119WorkerPlan{
+		DataDir: crashDir, Blocks: []v119FaultBlock{v119Block(13, quorumVote)},
+		CrashAfterBlock: 13,
+	})
+	crashed := v119WaitReadyAndKill(t, crashing)
+	v119RequireBlockCodesZero(t, crashed)
+	require.Len(t, crashed.Blocks, 1)
+	assert.Equal(t, healthy.Blocks[0].AppHash, crashed.Blocks[0].AppHash)
+	assert.Equal(t, 1, crashed.Blocks[0].ValidatorUpdates)
+	assert.Equal(t, 4, crashed.ValidatorCount, "the worker summary is committed state, not the speculative response")
+
+	// Neither the validator mutation nor the height survived: both belong to the
+	// discarded app-v20 transaction. Replay therefore executes governance from
+	// the same four-validator committed state and reproduces the update.
+	reopened := v119RunBatch(t, []v119WorkerPlan{{DataDir: crashDir}})[0]
+	assert.Equal(t, int64(12), reopened.Height)
+	assert.Equal(t, 4, reopened.ValidatorCount)
+
+	replayed := v119RunBatch(t, []v119WorkerPlan{{
+		DataDir: crashDir, Blocks: []v119FaultBlock{v119Block(13, quorumVote)},
+	}})[0]
+	v119RequireBlockCodesZero(t, replayed)
+	require.Len(t, replayed.Blocks, 1)
+	assert.Equal(t, 1, replayed.Blocks[0].ValidatorUpdates)
+	assert.Equal(t, healthy.Blocks[0].AppHash, replayed.Blocks[0].AppHash)
+	assert.Equal(t, healthy.AppHash, replayed.AppHash)
+	assert.Equal(t, healthy.Height, replayed.Height)
+	assert.Equal(t, healthy.ValidatorCount, replayed.ValidatorCount)
 }

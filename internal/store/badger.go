@@ -9,12 +9,15 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 
+	"github.com/l33tdawg/sage/internal/consensuskeys"
 	"github.com/l33tdawg/sage/internal/poe"
 )
 
@@ -31,11 +34,203 @@ var ErrDomainPathTooDeep = errors.New("domain path exceeds 16 segments")
 // in-memory replay cache, so a Byzantine proposer cannot bypass it.
 var ErrAgentProofReplayed = errors.New("agent proof already consumed")
 
+// ErrAccessGrantNotFound distinguishes a genuinely absent exact grant from a
+// storage/corruption failure. Cleanup code must never treat an arbitrary read
+// error as proof that a security-sensitive grant was revoked.
+var ErrAccessGrantNotFound = errors.New("access grant not found")
+
 var agentProofPrefix = []byte("agentproof:")
+
+// A strict post-app-v20 block is one bounded Badger transaction. Limit
+// opportunistic proof-marker GC on a transaction-scoped store so an old marker
+// backlog cannot exhaust that transaction independently of the block byte/count
+// budget. Later claims and blocks continue deterministic expiry-order pruning.
+const maxScopedAgentProofPrunePerClaim = 8
 
 // BadgerStore manages on-chain state in BadgerDB.
 type BadgerStore struct {
 	db *badger.DB
+
+	// Startup index repair is constructor-local, but the exported Ensure
+	// methods remain safe if an operator tool calls them concurrently. The
+	// first migration under this lock scrubs the short-lived dirty-tree Badger
+	// progress keys before either sidecar is trusted.
+	indexBackfillMu                    sync.Mutex
+	legacyIndexBackfillMarkersScrubbed bool
+
+	// txn is non-nil only on a transaction-scoped clone returned by
+	// BeginConsensusTransaction. Keeping the transaction on a clone (rather
+	// than the process-wide store) prevents concurrent CheckTx/query readers
+	// from observing or joining an uncommitted FinalizeBlock.
+	txn *badger.Txn
+
+	// mutationHook is an unexported deterministic fault-injection seam owned by
+	// the ABCI tests. Production callers always pass nil. It runs after each
+	// successful typed Update boundary while the write is still uncommitted.
+	mutationHook  func(int)
+	mutationCount int
+
+	// updateMutated/writeFailed describe the currently executing typed update
+	// boundary. All Set/Delete calls go through txnSet/txnDelete, allowing an
+	// error after an earlier staged write (or a failed Badger write such as
+	// ErrTxnTooBig) to poison the outer transaction. Validation/read errors that
+	// happen before any mutation remain ordinary transaction rejections.
+	updateMutated  bool
+	writeFailed    bool
+	poisoned       error
+	writeFaultHook func(int) error
+	writeAttempts  int
+}
+
+// view executes fn against the transaction snapshot when this is a scoped
+// consensus store, otherwise it retains the ordinary one-shot Badger view.
+func (s *BadgerStore) view(fn func(*badger.Txn) error) error {
+	if s.txn != nil {
+		return fn(s.txn)
+	}
+	return s.db.View(fn)
+}
+
+// update stages fn in the long-lived consensus transaction when present. Each
+// typed store method remains its own deterministic mutation boundary, but none
+// of those boundaries becomes durable until CommitConsensusTransaction.
+func (s *BadgerStore) update(fn func(*badger.Txn) error) error {
+	if s.txn == nil {
+		return s.db.Update(fn)
+	}
+	if s.poisoned != nil {
+		return s.poisoned
+	}
+	s.updateMutated = false
+	s.writeFailed = false
+	err := fn(s.txn)
+	mutated := s.updateMutated
+	writeFailed := s.writeFailed
+	s.updateMutated = false
+	s.writeFailed = false
+	if err != nil {
+		if mutated || writeFailed {
+			s.poisoned = fmt.Errorf("store: consensus transaction poisoned after partial mutation: %w", err)
+		}
+		return err
+	}
+	s.mutationCount++
+	if s.mutationHook != nil {
+		s.mutationHook(s.mutationCount)
+	}
+	return nil
+}
+
+// txnSet and txnDelete are the only mutation primitives used inside typed
+// update closures. Tracking successful and failed attempts gives update a
+// savepoint-like safety property: Badger has no rollback-to-savepoint, so a
+// boundary that errors after touching the transaction poisons the whole outer
+// transaction and Commit is refused.
+func (s *BadgerStore) txnSet(txn *badger.Txn, key, value []byte) error {
+	if s.txn != nil {
+		s.writeAttempts++
+		if s.writeFaultHook != nil {
+			if err := s.writeFaultHook(s.writeAttempts); err != nil {
+				s.writeFailed = true
+				return err
+			}
+		}
+	}
+	err := txn.Set(key, value)
+	if s.txn != nil {
+		if err != nil {
+			s.writeFailed = true
+		} else {
+			s.updateMutated = true
+		}
+	}
+	return err
+}
+
+func (s *BadgerStore) txnDelete(txn *badger.Txn, key []byte) error {
+	if s.txn != nil {
+		s.writeAttempts++
+		if s.writeFaultHook != nil {
+			if err := s.writeFaultHook(s.writeAttempts); err != nil {
+				s.writeFailed = true
+				return err
+			}
+		}
+	}
+	err := txn.Delete(key)
+	if s.txn != nil {
+		if err != nil {
+			s.writeFailed = true
+		} else {
+			s.updateMutated = true
+		}
+	}
+	return err
+}
+
+// BeginConsensusTransaction returns a clone whose complete typed read/write
+// surface shares one Badger write transaction. The caller must eventually call
+// CommitConsensusTransaction or DiscardConsensusTransaction on the clone.
+func (s *BadgerStore) BeginConsensusTransaction(mutationHook func(int)) *BadgerStore {
+	if s.txn != nil {
+		panic("store: nested consensus transaction")
+	}
+	return &BadgerStore{
+		db:           s.db,
+		txn:          s.db.NewTransaction(true),
+		mutationHook: mutationHook,
+	}
+}
+
+// InConsensusTransaction reports whether this handle is the transaction-scoped
+// clone used by the app-v20 FinalizeBlock/Commit boundary. It lets the ABCI layer
+// apply post-fork full-record limits without changing historical store behavior.
+func (s *BadgerStore) InConsensusTransaction() bool {
+	return s != nil && s.txn != nil
+}
+
+// CommitConsensusTransaction atomically publishes every staged mutation.
+func (s *BadgerStore) CommitConsensusTransaction() error {
+	if s.txn == nil {
+		return errors.New("store: no consensus transaction to commit")
+	}
+	if s.poisoned != nil {
+		err := s.poisoned
+		s.DiscardConsensusTransaction()
+		return err
+	}
+	if err := s.txn.Commit(); err != nil {
+		return err
+	}
+	s.txn = nil
+	// The normal SaveState path has the same durability contract. A successful
+	// app-v20 Commit must not return until the transaction containing every
+	// FinalizeBlock mutation and the handshake tuple has crossed Badger's Sync
+	// boundary.
+	if err := s.db.Sync(); err != nil {
+		return fmt.Errorf("sync consensus transaction: %w", err)
+	}
+	return nil
+}
+
+// ConsensusTransactionError reports whether a typed update partially mutated
+// the transaction before failing. Callers must discard rather than publish a
+// FinalizeBlock response in this state.
+func (s *BadgerStore) ConsensusTransactionError() error {
+	if s == nil {
+		return nil
+	}
+	return s.poisoned
+}
+
+// DiscardConsensusTransaction drops every staged mutation. It is idempotent so
+// panic/error cleanup may call it unconditionally.
+func (s *BadgerStore) DiscardConsensusTransaction() {
+	if s == nil || s.txn == nil {
+		return
+	}
+	s.txn.Discard()
+	s.txn = nil
 }
 
 // DB returns the underlying *badger.DB handle. Intended for the v7.5
@@ -167,7 +362,7 @@ func (s *BadgerStore) HasAgentProof(fingerprint []byte, consensusTime time.Time,
 		return false, nil
 	}
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		_, err := txn.Get(agentProofKey(fingerprint, expiresAt))
 		return err
 	})
@@ -192,13 +387,23 @@ func (s *BadgerStore) ClaimAgentProof(fingerprint []byte, consensusTime time.Tim
 	}
 
 	key := agentProofKey(fingerprint, expiresAt)
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
+		// Validate the replay outcome before opportunistic pruning. A duplicate
+		// proof is an ordinary invalid transaction and must not mutate (or poison)
+		// the surrounding app-v20 block transaction.
+		if _, err := txn.Get(key); err == nil {
+			return ErrAgentProofReplayed
+		} else if !errors.Is(err, badger.ErrKeyNotFound) {
+			return err
+		}
+
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = agentProofPrefix
 		opts.PrefetchValues = false
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
+		pruned := 0
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
 			expiry, err := agentProofKeyExpiry(item.Key())
@@ -208,18 +413,16 @@ func (s *BadgerStore) ClaimAgentProof(fingerprint []byte, consensusTime time.Tim
 			if expiry >= consensusTime.Unix() {
 				break // keys are expiry-sorted; every remaining marker is live
 			}
-			if err := txn.Delete(item.KeyCopy(nil)); err != nil {
+			if s.txn != nil && pruned >= maxScopedAgentProofPrunePerClaim {
+				break
+			}
+			if err := s.txnDelete(txn, item.KeyCopy(nil)); err != nil {
 				return err
 			}
+			pruned++
 		}
 
-		if _, err := txn.Get(key); err == nil {
-			return ErrAgentProofReplayed
-		} else if !errors.Is(err, badger.ErrKeyNotFound) {
-			return err
-		}
-
-		return txn.Set(key, []byte{1})
+		return s.txnSet(txn, key, []byte{1})
 	})
 }
 
@@ -258,8 +461,8 @@ type MemoryHashEntry struct {
 
 // SetMemoryHash stores or updates a memory's on-chain hash and status.
 func (s *BadgerStore) SetMemoryHash(memoryID string, contentHash []byte, status string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(memoryKey(memoryID), encodeMemoryHashEntry(contentHash, status))
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, memoryKey(memoryID), encodeMemoryHashEntry(contentHash, status))
 	})
 }
 
@@ -275,7 +478,7 @@ func encodeMemoryHashEntry(contentHash []byte, status string) []byte {
 
 // GetMemoryHash retrieves a memory's on-chain hash and status.
 func (s *BadgerStore) GetMemoryHash(memoryID string) (contentHash []byte, status string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(memoryKey(memoryID))
 		if err != nil {
@@ -303,17 +506,17 @@ func (s *BadgerStore) GetMemoryHash(memoryID string) (contentHash []byte, status
 
 // SetNonce stores or updates an agent's nonce.
 func (s *BadgerStore) SetNonce(agentID string, nonce uint64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		val := make([]byte, 8)
 		binary.BigEndian.PutUint64(val, nonce)
-		return txn.Set(nonceKey(agentID), val)
+		return s.txnSet(txn, nonceKey(agentID), val)
 	})
 }
 
 // GetNonce retrieves an agent's current nonce.
 func (s *BadgerStore) GetNonce(agentID string) (uint64, error) {
 	var nonce uint64
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(nonceKey(agentID))
 		if getErr != nil {
 			return getErr
@@ -334,15 +537,15 @@ func (s *BadgerStore) GetNonce(agentID string) (uint64, error) {
 
 // SetState stores a key-value pair in the state namespace.
 func (s *BadgerStore) SetState(key string, value []byte) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(stateKey(key), value)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, stateKey(key), value)
 	})
 }
 
 // GetState retrieves a value from the state namespace.
 func (s *BadgerStore) GetState(key string) ([]byte, error) {
 	var val []byte
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(stateKey(key))
 		if getErr != nil {
 			return getErr
@@ -359,12 +562,21 @@ func (s *BadgerStore) GetState(key string) ([]byte, error) {
 	return val, err
 }
 
-// ComputeAppHash computes a deterministic SHA-256 hash over all state.
+// isIndexBackfillProgressKey identifies the two legacy dirty-tree migration
+// markers. Current progress lives in local sidecars and startup scrubs these
+// keys, but exact exclusion remains defence in depth for verification/recovery
+// paths that inspect bytes before an ordinary writable constructor runs.
+func isIndexBackfillProgressKey(key []byte) bool {
+	return consensuskeys.IsAppHashExcludedLocalKey(key)
+}
+
+// ComputeAppHash computes a deterministic SHA-256 hash over all consensus
+// state. Exact legacy startup-migration marker keys are skipped defensively.
 // CRITICAL: This must be deterministic — sorted key iteration.
 func (s *BadgerStore) ComputeAppHash() ([]byte, error) {
 	h := sha256.New()
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		// PrefetchValues=false: the loop consumes each value immediately via
 		// h.Write inside the .Value() callback, so Badger's prefetch buffer
@@ -388,6 +600,9 @@ func (s *BadgerStore) ComputeAppHash() ([]byte, error) {
 		// iterator's borrowed slices stay valid for the duration of the call.
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
+			if isIndexBackfillProgressKey(item.Key()) {
+				continue
+			}
 			h.Write(item.Key())
 			if valErr := item.Value(func(v []byte) error {
 				h.Write(v)
@@ -431,7 +646,7 @@ func (s *BadgerStore) ComputeAppHashExcludingState() ([]byte, error) {
 	statePrefix := []byte("state:")
 	h := sha256.New()
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		// Same lazy-read iteration as ComputeAppHash (see the rationale there);
 		// the only difference is the state:-prefix skip.
@@ -441,7 +656,7 @@ func (s *BadgerStore) ComputeAppHashExcludingState() ([]byte, error) {
 
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
-			if bytes.HasPrefix(item.Key(), statePrefix) {
+			if bytes.HasPrefix(item.Key(), statePrefix) || isIndexBackfillProgressKey(item.Key()) {
 				continue
 			}
 			h.Write(item.Key())
@@ -493,7 +708,7 @@ var appHashBookkeepingKeys = [][]byte{
 func (s *BadgerStore) ComputeAppHashExcludingBookkeeping() ([]byte, error) {
 	h := sha256.New()
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		// Same lazy-read iteration as ComputeAppHash (see the rationale there);
 		// the only difference is the exact-key bookkeeping skip.
@@ -504,6 +719,9 @@ func (s *BadgerStore) ComputeAppHashExcludingBookkeeping() ([]byte, error) {
 	scan:
 		for it.Rewind(); it.Valid(); it.Next() {
 			item := it.Item()
+			if isIndexBackfillProgressKey(item.Key()) {
+				continue
+			}
 			for _, bk := range appHashBookkeepingKeys {
 				if bytes.Equal(item.Key(), bk) {
 					continue scan
@@ -616,7 +834,7 @@ func decodeValidatorStats(data []byte) (*ValidatorStats, error) {
 // decodes whatever length is present and re-encodes at the requested length —
 // a lazy per-validator migration from 24 → 56 bytes on the first post-fork vote).
 func (s *BadgerStore) IncrementVoteStats(validatorID string, accepted bool, blockHeight uint64, v83 bool) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		stats := &ValidatorStats{}
 
 		// Try to read existing stats
@@ -643,7 +861,7 @@ func (s *BadgerStore) IncrementVoteStats(validatorID string, accepted bool, bloc
 		}
 		stats.LastBlockHeight = blockHeight
 
-		return txn.Set(validatorStatsKey(validatorID), encodeValidatorStats(stats, v83))
+		return s.txnSet(txn, validatorStatsKey(validatorID), encodeValidatorStats(stats, v83))
 	})
 }
 
@@ -670,7 +888,7 @@ func (s *BadgerStore) UpdateVerdictStats(matches map[string]bool) error {
 	}
 	sort.Strings(ids)
 
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		for _, id := range ids {
 			stats := &ValidatorStats{}
 			item, getErr := txn.Get(validatorStatsKey(id))
@@ -705,7 +923,7 @@ func (s *BadgerStore) UpdateVerdictStats(matches map[string]bool) error {
 			stats.EWMAWeightDenom = tracker.WeightDenom
 			stats.EWMACount = uint64(tracker.Count) // #nosec G115 -- Count is monotonic non-negative
 
-			if err := txn.Set(validatorStatsKey(id), encodeValidatorStats(stats, true)); err != nil {
+			if err := s.txnSet(txn, validatorStatsKey(id), encodeValidatorStats(stats, true)); err != nil {
 				return err
 			}
 		}
@@ -716,7 +934,7 @@ func (s *BadgerStore) UpdateVerdictStats(matches map[string]bool) error {
 // GetValidatorStats retrieves a validator's on-chain vote stats.
 func (s *BadgerStore) GetValidatorStats(validatorID string) (*ValidatorStats, error) {
 	var stats *ValidatorStats
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(validatorStatsKey(validatorID))
 		if getErr != nil {
 			return getErr
@@ -744,7 +962,7 @@ func (s *BadgerStore) GetAllValidatorStats() (map[string]*ValidatorStats, error)
 	result := make(map[string]*ValidatorStats)
 	prefix := []byte("vstats:")
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = true
 		opts.Prefix = prefix
@@ -800,8 +1018,8 @@ func memoryDomainKey(memoryID string) []byte {
 // write on post-v8.4 or post-app-v16 rules so older blocks never gain this key
 // during replay.
 func (s *BadgerStore) SetMemoryDomain(memoryID, domain string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(memoryDomainKey(memoryID), []byte(domain))
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, memoryDomainKey(memoryID), []byte(domain))
 	})
 }
 
@@ -811,7 +1029,7 @@ func (s *BadgerStore) SetMemoryDomain(memoryID, domain string) error {
 // "unknown domain" and falls back to the v8.2 scalar weight.
 func (s *BadgerStore) GetMemoryDomain(memoryID string) (string, error) {
 	var domain string
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(memoryDomainKey(memoryID))
 		if getErr != nil {
 			return getErr
@@ -859,16 +1077,16 @@ func cocommitAnchorKey(sharedID, peerChainID string) []byte {
 func (s *BadgerStore) SetCoCommitShared(sharedID string, schemaVersion uint32) error {
 	v := make([]byte, 4)
 	binary.BigEndian.PutUint32(v, schemaVersion)
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(cocommitSharedKey(sharedID), v)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, cocommitSharedKey(sharedID), v)
 	})
 }
 
 // SetCoCommitCore records the shared CoreHash for a co-committed memory. The
 // attest path binds a peer receipt's CoreHash against this value (fail-closed).
 func (s *BadgerStore) SetCoCommitCore(sharedID string, coreHash []byte) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(cocommitCoreKey(sharedID), coreHash)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, cocommitCoreKey(sharedID), coreHash)
 	})
 }
 
@@ -877,7 +1095,7 @@ func (s *BadgerStore) SetCoCommitCore(sharedID string, coreHash []byte) error {
 // unknown SharedID fails the fail-closed bind).
 func (s *BadgerStore) GetCoCommitCore(sharedID string) ([]byte, error) {
 	var core []byte
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(cocommitCoreKey(sharedID))
 		if getErr != nil {
 			return getErr
@@ -899,8 +1117,8 @@ func (s *BadgerStore) GetCoCommitCore(sharedID string) ([]byte, error) {
 // SetCoCommitCoauthors stores the deterministic (sorted) coauthor blob for a
 // SharedID, produced by tx.EncodeCoauthorsCanonical (a pure function of tx bytes).
 func (s *BadgerStore) SetCoCommitCoauthors(sharedID string, blob []byte) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(cocommitCoauthorsKey(sharedID), blob)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, cocommitCoauthorsKey(sharedID), blob)
 	})
 }
 
@@ -908,7 +1126,7 @@ func (s *BadgerStore) SetCoCommitCoauthors(sharedID string, blob []byte) error {
 // none (a missing key is not an error). Decode with tx.DecodeCoauthorsCanonical.
 func (s *BadgerStore) GetCoCommitCoauthors(sharedID string) ([]byte, error) {
 	var blob []byte
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(cocommitCoauthorsKey(sharedID))
 		if getErr != nil {
 			return getErr
@@ -931,8 +1149,8 @@ func (s *BadgerStore) GetCoCommitCoauthors(sharedID string) ([]byte, error) {
 // (sha256(canonical(receipt))) for a SharedID. Idempotent (re-attest overwrites
 // identical bytes) and late-bindable (a missing anchor = "unconfirmed").
 func (s *BadgerStore) SetCoCommitAnchor(sharedID, peerChainID string, anchorHash []byte) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(cocommitAnchorKey(sharedID, peerChainID), anchorHash)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, cocommitAnchorKey(sharedID, peerChainID), anchorHash)
 	})
 }
 
@@ -942,7 +1160,7 @@ func (s *BadgerStore) SetCoCommitAnchor(sharedID, peerChainID string, anchorHash
 // delivery and confirmation status.
 func (s *BadgerStore) GetCoCommitAnchor(sharedID, peerChainID string) ([]byte, error) {
 	var anchor []byte
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(cocommitAnchorKey(sharedID, peerChainID))
 		if getErr != nil {
 			return getErr
@@ -967,7 +1185,7 @@ func (s *BadgerStore) GetCoCommitAnchor(sharedID, peerChainID string) ([]byte, e
 func (s *BadgerStore) ListCoCommitAnchors(sharedID string) (map[string][]byte, error) {
 	anchors := make(map[string][]byte)
 	prefix := []byte("cocommit:anchor:" + sharedID + ":")
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
 		it := txn.NewIterator(opts)
@@ -1102,8 +1320,8 @@ func decodeStringSliceBlob(val []byte, offset int) ([]string, int, error) {
 // No height/clock input — the value is a pure function of the arguments.
 func (s *BadgerStore) SetCrossFed(remoteChainID, endpoint string, peerPubKey []byte, maxClearance uint8, expiresAt int64, allowedDomains, allowedDepts []string, status string) error {
 	blob := encodeCrossFedBlob(endpoint, peerPubKey, maxClearance, expiresAt, status, allowedDomains, allowedDepts)
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(crossFedKey(remoteChainID), blob)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, crossFedKey(remoteChainID), blob)
 	})
 }
 
@@ -1111,7 +1329,7 @@ func (s *BadgerStore) SetCrossFed(remoteChainID, endpoint string, peerPubKey []b
 // coordinates endpoint/peerPubKey, unlike GetFederation). Returns an error if the
 // agreement does not exist.
 func (s *BadgerStore) GetCrossFed(remoteChainID string) (endpoint string, peerPubKey []byte, maxClearance uint8, expiresAt int64, allowedDomains, allowedDepts []string, status string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(crossFedKey(remoteChainID))
 		if getErr != nil {
 			return getErr
@@ -1132,7 +1350,7 @@ func (s *BadgerStore) GetCrossFed(remoteChainID string) (endpoint string, peerPu
 // (mirrors UpdateFederationStatus; truncating the extended fields would drop the
 // transport coordinates).
 func (s *BadgerStore) UpdateCrossFedStatus(remoteChainID, newStatus string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		item, err := txn.Get(crossFedKey(remoteChainID))
 		if err != nil {
 			return err
@@ -1151,7 +1369,7 @@ func (s *BadgerStore) UpdateCrossFedStatus(remoteChainID, newStatus string) erro
 		}
 		_ = status // replaced below
 		blob := encodeCrossFedBlob(endpoint, peerPubKey, maxClearance, expiresAt, newStatus, allowedDomains, allowedDepts)
-		return txn.Set(crossFedKey(remoteChainID), blob)
+		return s.txnSet(txn, crossFedKey(remoteChainID), blob)
 	})
 }
 
@@ -1175,7 +1393,7 @@ type CrossFedRecord struct {
 func (s *BadgerStore) ListCrossFed() ([]CrossFedRecord, error) {
 	var records []CrossFedRecord
 	prefix := []byte("cross_fed:")
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
 		it := txn.NewIterator(opts)
@@ -1203,8 +1421,8 @@ func (s *BadgerStore) ListCrossFed() ([]CrossFedRecord, error) {
 // (byte-identical replay). This is the consensus-authoritative author field, and
 // the source the app-v10 corroboration guard checks to reject self-corroboration.
 func (s *BadgerStore) SetMemoryAuthor(memoryID, agentID string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(memoryAuthorKey(memoryID), []byte(agentID))
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, memoryAuthorKey(memoryID), []byte(agentID))
 	})
 }
 
@@ -1214,7 +1432,7 @@ func (s *BadgerStore) SetMemoryAuthor(memoryID, agentID string) error {
 // unknown on-chain" and does NOT reject (the forward-looking boundary).
 func (s *BadgerStore) GetMemoryAuthor(memoryID string) (string, error) {
 	var author string
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(memoryAuthorKey(memoryID))
 		if getErr != nil {
 			return getErr
@@ -1243,8 +1461,8 @@ func corroborationKey(memoryID, agentID string) []byte {
 // SetCorroborated marks on-chain that agentID has corroborated memoryID. Caller
 // gates on postAppV10Fork so pre-fork blocks never write this key.
 func (s *BadgerStore) SetCorroborated(memoryID, agentID string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(corroborationKey(memoryID, agentID), []byte{1})
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, corroborationKey(memoryID, agentID), []byte{1})
 	})
 }
 
@@ -1253,7 +1471,7 @@ func (s *BadgerStore) SetCorroborated(memoryID, agentID string) error {
 // cannot inflate a memory's corroboration count by corroborating it twice.
 func (s *BadgerStore) HasCorroborated(memoryID, agentID string) (bool, error) {
 	found := false
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		_, getErr := txn.Get(corroborationKey(memoryID, agentID))
 		if getErr == badger.ErrKeyNotFound {
 			return nil
@@ -1274,7 +1492,7 @@ func (s *BadgerStore) HasCorroborated(memoryID, agentID string) (bool, error) {
 // v8.3 24/56-byte codec; the key prefix is the only difference from vstats:.
 func (s *BadgerStore) GetValidatorDomainStats(validatorID, domain string) (*ValidatorStats, error) {
 	var stats *ValidatorStats
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(validatorDomainStatsKey(validatorID, domain))
 		if getErr != nil {
 			return getErr
@@ -1311,7 +1529,7 @@ func (s *BadgerStore) UpdateDomainVerdictStats(domain string, matches map[string
 	}
 	sort.Strings(ids)
 
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		for _, id := range ids {
 			key := validatorDomainStatsKey(id, domain)
 			stats := &ValidatorStats{}
@@ -1347,7 +1565,7 @@ func (s *BadgerStore) UpdateDomainVerdictStats(domain string, matches map[string
 			stats.EWMAWeightDenom = tracker.WeightDenom
 			stats.EWMACount = uint64(tracker.Count) // #nosec G115 -- Count is monotonic non-negative
 
-			if err := txn.Set(key, encodeValidatorStats(stats, true)); err != nil {
+			if err := s.txnSet(txn, key, encodeValidatorStats(stats, true)); err != nil {
 				return err
 			}
 		}
@@ -1402,7 +1620,7 @@ func (s *BadgerStore) SetEpochWeights(epoch uint64, weights map[string]float64) 
 	}
 	sort.Strings(ids)
 
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		// 1. Collect existing poew:<id> keys so we can drop any that aren't
 		//    in the new weight set (stale-validator pruning, test W3).
 		stale := make(map[string]struct{})
@@ -1425,7 +1643,7 @@ func (s *BadgerStore) SetEpochWeights(epoch uint64, weights map[string]float64) 
 		// 2. Write poew:current — uvarint epoch number.
 		epochBuf := make([]byte, binary.MaxVarintLen64)
 		n := binary.PutUvarint(epochBuf, epoch)
-		if err := txn.Set(append([]byte(nil), poeWeightsCurrentKey...), epochBuf[:n]); err != nil {
+		if err := s.txnSet(txn, append([]byte(nil), poeWeightsCurrentKey...), epochBuf[:n]); err != nil {
 			return err
 		}
 
@@ -1435,7 +1653,7 @@ func (s *BadgerStore) SetEpochWeights(epoch uint64, weights map[string]float64) 
 		for _, id := range ids {
 			buf := make([]byte, 8)
 			binary.BigEndian.PutUint64(buf, math.Float64bits(weights[id]))
-			if err := txn.Set(poeWeightKey(id), buf); err != nil {
+			if err := s.txnSet(txn, poeWeightKey(id), buf); err != nil {
 				return err
 			}
 			delete(stale, id)
@@ -1444,7 +1662,7 @@ func (s *BadgerStore) SetEpochWeights(epoch uint64, weights map[string]float64) 
 		// 4. Delete any validator entries that survived from a prior epoch
 		//    but are absent from the new set.
 		for id := range stale {
-			if err := txn.Delete(poeWeightKey(id)); err != nil {
+			if err := s.txnDelete(txn, poeWeightKey(id)); err != nil {
 				return err
 			}
 		}
@@ -1462,7 +1680,7 @@ func (s *BadgerStore) SetEpochWeights(epoch uint64, weights map[string]float64) 
 // only needs the weight map. Tests and operators that want the epoch number
 // use GetEpochNumber.
 func (s *BadgerStore) GetEpochWeights() (weights map[string]float64, ok bool, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		// Marker check — if poew:current is absent, no epoch has run.
 		if _, getErr := txn.Get(poeWeightsCurrentKey); getErr != nil {
 			if errors.Is(getErr, badger.ErrKeyNotFound) {
@@ -1512,7 +1730,7 @@ func (s *BadgerStore) GetEpochWeights() (weights map[string]float64, ok bool, er
 // for tests and operator tooling (`badger get poew:current` equivalent);
 // boot-time hydration only needs the weight map and uses GetEpochWeights.
 func (s *BadgerStore) GetEpochNumber() (epoch uint64, ok bool, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(poeWeightsCurrentKey)
 		if getErr != nil {
 			if errors.Is(getErr, badger.ErrKeyNotFound) {
@@ -1538,12 +1756,12 @@ func (s *BadgerStore) GetEpochNumber() (epoch uint64, ok bool, err error) {
 
 // SaveValidators persists the validator set to BadgerDB.
 func (s *BadgerStore) SaveValidators(validators map[string]int64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		for id, power := range validators {
 			key := []byte("validator:" + id)
 			val := make([]byte, 8)
 			binary.BigEndian.PutUint64(val, uint64(power)) // #nosec G115 -- validator power is always non-negative
-			if err := txn.Set(key, val); err != nil {
+			if err := s.txnSet(txn, key, val); err != nil {
 				return err
 			}
 		}
@@ -1563,7 +1781,7 @@ func (s *BadgerStore) ReplaceValidators(validators map[string]int64) error {
 	// Single atomic Update txn: collect existing validator:* keys, delete them, then
 	// write the new set — so the delete-old + write-new is all-or-nothing and cannot
 	// interleave with another writer.
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
 		opts.Prefix = prefix
@@ -1575,14 +1793,14 @@ func (s *BadgerStore) ReplaceValidators(validators map[string]int64) error {
 		it.Close() // must close before mutating within the same txn
 
 		for _, k := range existing {
-			if err := txn.Delete(k); err != nil {
+			if err := s.txnDelete(txn, k); err != nil {
 				return err
 			}
 		}
 		for id, power := range validators {
 			val := make([]byte, 8)
 			binary.BigEndian.PutUint64(val, uint64(power)) // #nosec G115 -- validator power is always non-negative
-			if err := txn.Set([]byte("validator:"+id), val); err != nil {
+			if err := s.txnSet(txn, []byte("validator:"+id), val); err != nil {
 				return err
 			}
 		}
@@ -1595,7 +1813,7 @@ func (s *BadgerStore) LoadValidators() (map[string]int64, error) {
 	result := make(map[string]int64)
 	prefix := []byte("validator:")
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = true
 		opts.Prefix = prefix
@@ -1677,18 +1895,18 @@ func decodeString(buf []byte, offset int) (string, int, error) {
 // SetAccessGrant stores an access grant in BadgerDB.
 // Encoding: level (1 byte) + expiresAt (8 bytes) + granterID (length-prefixed).
 func (s *BadgerStore) SetAccessGrant(domain, agentID string, level uint8, expiresAt int64, granterID string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		val := make([]byte, 1+8+4+len(granterID))
 		val[0] = level
 		binary.BigEndian.PutUint64(val[1:9], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
 		encodeString(val, 9, granterID)
-		return txn.Set(grantKey(domain, agentID), val)
+		return s.txnSet(txn, grantKey(domain, agentID), val)
 	})
 }
 
 // GetAccessGrant retrieves an access grant from BadgerDB.
 func (s *BadgerStore) GetAccessGrant(domain, agentID string) (level uint8, expiresAt int64, granterID string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(grantKey(domain, agentID))
 		if err != nil {
@@ -1705,16 +1923,16 @@ func (s *BadgerStore) GetAccessGrant(domain, agentID string) (level uint8, expir
 			return decErr
 		})
 	})
-	if err == badger.ErrKeyNotFound {
-		return 0, 0, "", fmt.Errorf("grant not found: %s/%s", domain, agentID)
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return 0, 0, "", fmt.Errorf("%w: %s/%s", ErrAccessGrantNotFound, domain, agentID)
 	}
 	return
 }
 
 // DeleteAccessGrant removes an access grant from BadgerDB.
 func (s *BadgerStore) DeleteAccessGrant(domain, agentID string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(grantKey(domain, agentID))
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnDelete(txn, grantKey(domain, agentID))
 	})
 }
 
@@ -1733,7 +1951,7 @@ func (s *BadgerStore) DeleteAccessGrant(domain, agentID string) error {
 func (s *BadgerStore) DeleteGrantsByDomain(domain string) (int, error) {
 	var keys [][]byte
 	prefix := []byte("grant:" + domain + ":")
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
 		it := txn.NewIterator(opts)
@@ -1746,15 +1964,41 @@ func (s *BadgerStore) DeleteGrantsByDomain(domain string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	err = s.db.Update(func(txn *badger.Txn) error {
+	err = s.update(func(txn *badger.Txn) error {
 		for _, k := range keys {
-			if dErr := txn.Delete(k); dErr != nil {
+			if dErr := s.txnDelete(txn, k); dErr != nil {
 				return dErr
 			}
 		}
 		return nil
 	})
 	return len(keys), err
+}
+
+// CountGrantsByDomainUpTo counts a deterministic prefix up to limit+1. The
+// boolean reports that the real count exceeded the supplied safety limit
+// without allocating or scanning the rest of an adversarial grant set.
+func (s *BadgerStore) CountGrantsByDomainUpTo(domain string, limit int) (count int, exceeded bool, err error) {
+	if limit < 0 {
+		return 0, false, errors.New("grant count limit must be non-negative")
+	}
+	prefix := []byte("grant:" + domain + ":")
+	err = s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			count++
+			if count > limit {
+				exceeded = true
+				break
+			}
+		}
+		return nil
+	})
+	return count, exceeded, err
 }
 
 // SetSharedDomain marks a domain as shared by writing the on-chain
@@ -1772,7 +2016,7 @@ func (s *BadgerStore) SetSharedDomain(name string) error {
 // Uses blockTime for deterministic expiry checks (not time.Now()).
 func (s *BadgerStore) HasAccess(domain, agentID string, requiredLevel uint8, blockTime time.Time) (bool, error) {
 	var has bool
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(grantKey(domain, agentID))
 		if getErr != nil {
 			return getErr
@@ -1841,7 +2085,7 @@ func (s *BadgerStore) HasAccessOrAncestor(domain, agentID string, requiredLevel 
 
 	now := blockTime.Unix()
 	var walkErr error
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		for i := len(segments); i >= 1; i-- {
 			candidate := strings.Join(segments[:i], ".")
 			if candidate == "" {
@@ -1971,7 +2215,7 @@ func (s *BadgerStore) ResolveOwningAncestor(domain string) (owner, ownedDomain s
 // This is intentionally check-and-set to prevent ownership "capture" when a prior registration
 // record is present but unexpectedly read as empty during the submit path.
 func (s *BadgerStore) RegisterDomain(name, ownerID, parentDomain string, height int64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		if item, getErr := txn.Get(domainKey(name)); getErr == nil {
 			var existingOwner string
 			if err := item.Value(func(val []byte) error {
@@ -1988,7 +2232,7 @@ func (s *BadgerStore) RegisterDomain(name, ownerID, parentDomain string, height 
 		offset := encodeString(val, 0, ownerID)
 		offset = encodeString(val, offset, parentDomain)
 		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return txn.Set(domainKey(name), val)
+		return s.txnSet(txn, domainKey(name), val)
 	})
 }
 
@@ -1996,19 +2240,19 @@ func (s *BadgerStore) RegisterDomain(name, ownerID, parentDomain string, height 
 // authorization (e.g. current owner consent or admin role). Do NOT call from
 // transaction processing paths that should use RegisterDomain's check-and-set semantics.
 func (s *BadgerStore) TransferDomain(name, newOwnerID, parentDomain string, height int64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		val := make([]byte, 4+len(newOwnerID)+4+len(parentDomain)+8)
 		offset := encodeString(val, 0, newOwnerID)
 		offset = encodeString(val, offset, parentDomain)
 		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return txn.Set(domainKey(name), val)
+		return s.txnSet(txn, domainKey(name), val)
 	})
 }
 
 // GetDomainOwner retrieves the owner of a domain.
 func (s *BadgerStore) GetDomainOwner(name string) (string, error) {
 	var ownerID string
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(domainKey(name))
 		if getErr != nil {
 			return getErr
@@ -2031,7 +2275,7 @@ func (s *BadgerStore) GetDomainOwner(name string) (string, error) {
 // so off-chain mirrors that disagree (e.g. chain reset without dropping
 // the accessStore tables) will mislead callers into Code-34 rejections.
 func (s *BadgerStore) GetDomainOwnerAndMeta(name string) (ownerID, parent string, height int64, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(domainKey(name))
 		if getErr != nil {
 			return getErr
@@ -2116,7 +2360,7 @@ func (s *BadgerStore) ModifyVerbHolders(domain string, blockTime time.Time) ([]s
 	}
 	now := blockTime.Unix()
 	set := make(map[string]struct{})
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		for i := len(segments); i >= 1; i-- {
 			candidate := strings.Join(segments[:i], ".")
 			if candidate == "" || IsSharedDomainName(candidate) {
@@ -2234,11 +2478,11 @@ func (s *BadgerStore) OpenChallenge(memoryID string, contentHash []byte, status 
 	}
 	memVal := encodeMemoryHashEntry(contentHash, status)
 	recVal := encodeChallengeRecord(rec)
-	return s.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(memoryKey(memoryID), memVal); err != nil {
+	return s.update(func(txn *badger.Txn) error {
+		if err := s.txnSet(txn, memoryKey(memoryID), memVal); err != nil {
 			return err
 		}
-		return txn.Set(stateKey(challengeStateKey(memoryID)), recVal)
+		return s.txnSet(txn, stateKey(challengeStateKey(memoryID)), recVal)
 	})
 }
 
@@ -2248,11 +2492,11 @@ func (s *BadgerStore) OpenChallenge(memoryID string, contentHash []byte, status 
 // the write fails midway.
 func (s *BadgerStore) ResolveChallenge(memoryID string, contentHash []byte, status string) error {
 	memVal := encodeMemoryHashEntry(contentHash, status)
-	return s.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Set(memoryKey(memoryID), memVal); err != nil {
+	return s.update(func(txn *badger.Txn) error {
+		if err := s.txnSet(txn, memoryKey(memoryID), memVal); err != nil {
 			return err
 		}
-		return txn.Delete(stateKey(challengeStateKey(memoryID)))
+		return s.txnDelete(txn, stateKey(challengeStateKey(memoryID)))
 	})
 }
 
@@ -2309,19 +2553,19 @@ func (s *BadgerStore) DeleteChallengeRecord(memoryID string) error {
 // SetAccessRequest stores an access request in BadgerDB.
 // Encoding: requesterID (length-prefixed) + targetDomain (length-prefixed) + status (length-prefixed) + createdHeight (8 bytes).
 func (s *BadgerStore) SetAccessRequest(requestID string, requesterID, targetDomain, status string, createdHeight int64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		val := make([]byte, 4+len(requesterID)+4+len(targetDomain)+4+len(status)+8)
 		offset := encodeString(val, 0, requesterID)
 		offset = encodeString(val, offset, targetDomain)
 		offset = encodeString(val, offset, status)
 		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(createdHeight)) // #nosec G115 -- block height is always non-negative
-		return txn.Set(accessReqKey(requestID), val)
+		return s.txnSet(txn, accessReqKey(requestID), val)
 	})
 }
 
 // GetAccessRequest retrieves an access request from BadgerDB.
 func (s *BadgerStore) GetAccessRequest(requestID string) (requesterID, targetDomain, status string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(accessReqKey(requestID))
 		if err != nil {
@@ -2350,7 +2594,7 @@ func (s *BadgerStore) GetAccessRequest(requestID string) (requesterID, targetDom
 
 // UpdateAccessRequestStatus updates the status of an access request in BadgerDB.
 func (s *BadgerStore) UpdateAccessRequestStatus(requestID, status string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		item, err := txn.Get(accessReqKey(requestID))
 		if err != nil {
 			return err
@@ -2389,7 +2633,7 @@ func (s *BadgerStore) UpdateAccessRequestStatus(requestID, status string) error 
 		offset = encodeString(newVal, offset, targetDomain)
 		offset = encodeString(newVal, offset, status)
 		binary.BigEndian.PutUint64(newVal[offset:offset+8], uint64(createdHeight)) // #nosec G115 -- block height is always non-negative
-		return txn.Set(accessReqKey(requestID), newVal)
+		return s.txnSet(txn, accessReqKey(requestID), newVal)
 	})
 }
 
@@ -2462,23 +2706,23 @@ func memClassKey(memoryID string) []byte {
 // scanning every org entry on-chain. Names are not unique — see
 // orgNameKey for why the index is one-to-many.
 func (s *BadgerStore) RegisterOrg(orgID, name, description, adminAgent string, height int64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		val := make([]byte, 4+len(name)+4+len(description)+4+len(adminAgent)+8)
 		offset := encodeString(val, 0, name)
 		offset = encodeString(val, offset, description)
 		offset = encodeString(val, offset, adminAgent)
 		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
-		if err := txn.Set(orgKey(orgID), val); err != nil {
+		if err := s.txnSet(txn, orgKey(orgID), val); err != nil {
 			return err
 		}
 		// Reverse index — empty value, suffix is the orgID marker.
-		return txn.Set(orgNameKey(name, orgID), nil)
+		return s.txnSet(txn, orgNameKey(name, orgID), nil)
 	})
 }
 
 // GetOrg retrieves an organization's name and admin agent from BadgerDB.
 func (s *BadgerStore) GetOrg(orgID string) (name, adminAgent string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(orgKey(orgID))
 		if err != nil {
@@ -2512,7 +2756,7 @@ func (s *BadgerStore) GetOrg(orgID string) (name, adminAgent string, err error) 
 // so off-chain mirrors that disagree (mirror has org row, chain doesn't)
 // produce false "I'm org admin" answers and Code-54 rejections.
 func (s *BadgerStore) GetOrgWithMeta(orgID string) (name, description, adminAgent string, height int64, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(orgKey(orgID))
 		if getErr != nil {
 			return getErr
@@ -2554,7 +2798,7 @@ func (s *BadgerStore) GetOrgWithMeta(orgID string) (name, description, adminAgen
 func (s *BadgerStore) ListOrgMembers(orgID string) ([]OrgMemberEntry, error) {
 	prefix := []byte("org_member:" + orgID + ":")
 	var out []OrgMemberEntry
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
 		it := txn.NewIterator(opts)
@@ -2595,20 +2839,20 @@ func (s *BadgerStore) ListOrgMembers(orgID string) ([]OrgMemberEntry, error) {
 // wins, for backward compat) and the one-to-many agent_orgs reverse index
 // that supports multi-org membership.
 func (s *BadgerStore) AddOrgMember(orgID, agentID string, clearance uint8, role string, height int64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		val := make([]byte, 1+4+len(role)+8)
 		val[0] = clearance
 		encodeString(val, 1, role)
 		binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
-		if err := txn.Set(orgMemberKey(orgID, agentID), val); err != nil {
+		if err := s.txnSet(txn, orgMemberKey(orgID, agentID), val); err != nil {
 			return err
 		}
 		// Multi-org reverse index — additive, supports membership in N orgs.
-		if err := txn.Set(agentOrgsMemberKey(agentID, orgID), nil); err != nil {
+		if err := s.txnSet(txn, agentOrgsMemberKey(agentID, orgID), nil); err != nil {
 			return err
 		}
 		// Legacy single-slot reverse lookup — last add wins.
-		return txn.Set(agentOrgKey(agentID), []byte(orgID))
+		return s.txnSet(txn, agentOrgKey(agentID), []byte(orgID))
 	})
 }
 
@@ -2617,11 +2861,11 @@ func (s *BadgerStore) AddOrgMember(orgID, agentID string, clearance uint8, role 
 // and updates the legacy single-slot reverse lookup deterministically (points
 // at any remaining membership in lexical order, or is deleted if none remain).
 func (s *BadgerStore) RemoveOrgMember(orgID, agentID string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Delete(orgMemberKey(orgID, agentID)); err != nil {
+	return s.update(func(txn *badger.Txn) error {
+		if err := s.txnDelete(txn, orgMemberKey(orgID, agentID)); err != nil {
 			return err
 		}
-		if err := txn.Delete(agentOrgsMemberKey(agentID, orgID)); err != nil {
+		if err := s.txnDelete(txn, agentOrgsMemberKey(agentID, orgID)); err != nil {
 			return err
 		}
 		// Recompute the legacy single-slot from remaining memberships so
@@ -2631,11 +2875,11 @@ func (s *BadgerStore) RemoveOrgMember(orgID, agentID string) error {
 			return err
 		}
 		if len(remaining) == 0 {
-			return txn.Delete(agentOrgKey(agentID))
+			return s.txnDelete(txn, agentOrgKey(agentID))
 		}
 		// Deterministic: lexically smallest orgID wins.
 		sort.Strings(remaining)
-		return txn.Set(agentOrgKey(agentID), []byte(remaining[0]))
+		return s.txnSet(txn, agentOrgKey(agentID), []byte(remaining[0]))
 	})
 }
 
@@ -2661,7 +2905,7 @@ func scanAgentOrgs(txn *badger.Txn, agentID string) ([]string, error) {
 // Used by multi-org access checks (HasAccessMultiOrg, agentHasTopSecretClearance).
 func (s *BadgerStore) ListAgentOrgs(agentID string) ([]string, error) {
 	var orgs []string
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		var scanErr error
 		orgs, scanErr = scanAgentOrgs(txn, agentID)
 		return scanErr
@@ -2673,7 +2917,7 @@ func (s *BadgerStore) ListAgentOrgs(agentID string) ([]string, error) {
 // Cheaper than ListAgentOrgs when only one org needs to be verified.
 func (s *BadgerStore) IsAgentInOrg(agentID, orgID string) (bool, error) {
 	var found bool
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		_, getErr := txn.Get(agentOrgsMemberKey(agentID, orgID))
 		if getErr == nil {
 			found = true
@@ -2687,33 +2931,254 @@ func (s *BadgerStore) IsAgentInOrg(agentID, orgID string) (bool, error) {
 	return found, err
 }
 
-// EnsureAgentOrgsIndex backfills the one-to-many agent_orgs reverse index from
-// the authoritative org_member forward index. Idempotent — safe to call on
-// every store open. Required for upgrades from versions where the reverse
-// lookup was a single-slot agent_org:<agent> and multi-org members existed
-// only in the forward index.
-func (s *BadgerStore) EnsureAgentOrgsIndex() error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		prefix := []byte("org_member:")
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefix
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			suffix := string(it.Item().Key()[len(prefix):])
-			colon := strings.IndexByte(suffix, ':')
-			if colon < 0 {
-				continue
+const (
+	// Startup index backfills must stay far below Badger's transaction ceiling.
+	// The byte budget includes a conservative per-derived-entry allowance. The
+	// count budget is a second, independent bound for databases containing many
+	// tiny keys; the bounded cursor is persisted separately in the sidecar.
+	defaultIndexBackfillMaxEntries = 512
+	defaultIndexBackfillMaxBytes   = 1 << 20
+	indexBackfillEntryOverhead     = 64
+
+	indexBackfillInProgress byte = 0
+	indexBackfillComplete   byte = 1
+)
+
+var (
+	agentOrgsIndexBackfillProgressKey = []byte(consensuskeys.AgentOrgsIndexBackfillProgress)
+	orgNameIndexBackfillProgressKey   = []byte(consensuskeys.OrgNameIndexBackfillProgress)
+)
+
+// indexBackfillOptions is deliberately private: production always uses the
+// conservative defaults above, while store tests use small limits and an
+// afterBatch hook to prove crash/restart behavior without a huge fixture.
+type indexBackfillOptions struct {
+	maxEntries  int
+	maxBytes    int
+	afterDBSync func(batch int, complete bool) error
+	afterBatch  func(batch int, complete bool) error
+}
+
+type indexBackfillSpec struct {
+	name         string
+	sourcePrefix []byte
+	progressFile string
+	derive       func(item *badger.Item) (key, value []byte, skip bool, err error)
+}
+
+// ensureIndexBackfill rebuilds a derived index in bounded, durable batches.
+// Every batch commits its derived rows, explicitly Syncs Badger, and only then
+// atomically replaces a fsynced local sidecar cursor. A crash can therefore
+// leave an old cursor with newer idempotent index rows (which are replayed), but
+// can never expose a cursor that skipped an unsynced index row. The sidecar
+// lives inside the Badger directory but outside its logical key/value space, so
+// it cannot alter historical AppHash, snapshots, or Internet state-sync images.
+func (s *BadgerStore) ensureIndexBackfill(spec indexBackfillSpec, options indexBackfillOptions) error {
+	if s.txn != nil {
+		// Joining the app-v20 block transaction would turn the loop below back
+		// into one unbounded transaction and make a startup migration part of
+		// FinalizeBlock. These migrations are constructor-only maintenance.
+		return fmt.Errorf("%s index backfill cannot run in a consensus transaction", spec.name)
+	}
+	s.indexBackfillMu.Lock()
+	defer s.indexBackfillMu.Unlock()
+	if !s.legacyIndexBackfillMarkersScrubbed {
+		// Two short-lived v11.9 development builds wrote progress into Badger.
+		// Delete both exact keys in one transaction and cross the durability
+		// boundary before trusting a sidecar or scanning a source namespace. This
+		// restores byte-for-byte compatibility with v11.8's AppHash while the
+		// exact hash/export exclusions remain as defence in depth.
+		legacyMarkerFound := false
+		if err := s.db.View(func(txn *badger.Txn) error {
+			for _, key := range [][]byte{agentOrgsIndexBackfillProgressKey, orgNameIndexBackfillProgressKey} {
+				if _, err := txn.Get(key); err == nil {
+					legacyMarkerFound = true
+				} else if !errors.Is(err, badger.ErrKeyNotFound) {
+					return err
+				}
 			}
-			orgID := suffix[:colon]
-			agentID := suffix[colon+1:]
-			if err := txn.Set(agentOrgsMemberKey(agentID, orgID), nil); err != nil {
+			return nil
+		}); err != nil {
+			return fmt.Errorf("inspect legacy index backfill markers: %w", err)
+		}
+		if legacyMarkerFound {
+			if err := s.db.Update(func(txn *badger.Txn) error {
+				if err := txn.Delete(agentOrgsIndexBackfillProgressKey); err != nil {
+					return err
+				}
+				return txn.Delete(orgNameIndexBackfillProgressKey)
+			}); err != nil {
+				return fmt.Errorf("scrub legacy index backfill markers: %w", err)
+			}
+			if err := s.db.Sync(); err != nil {
+				return fmt.Errorf("sync legacy index backfill marker scrub: %w", err)
+			}
+		}
+		s.legacyIndexBackfillMarkersScrubbed = true
+	}
+	if options.maxEntries <= 0 {
+		options.maxEntries = defaultIndexBackfillMaxEntries
+	}
+	if options.maxBytes <= 0 {
+		options.maxBytes = defaultIndexBackfillMaxBytes
+	}
+	badgerDir := filepath.Clean(s.db.Opts().Dir)
+	progress, err := readIndexBackfillProgress(badgerDir, spec.progressFile, spec.sourcePrefix)
+	if err != nil {
+		return fmt.Errorf("read %s index backfill progress: %w", spec.name, err)
+	}
+	if progress.complete {
+		// If an earlier rename became visible but its parent-directory fsync
+		// reported failure, a retry must re-establish the full durability barrier
+		// before treating completion as successful. Replacing one bounded file is
+		// still O(1) and works on both POSIX and Windows.
+		if err := writeIndexBackfillProgress(badgerDir, spec.progressFile, progress); err != nil {
+			return fmt.Errorf("reconfirm completed %s index backfill progress: %w", spec.name, err)
+		}
+		return nil
+	}
+	cursor := progress.cursor
+
+	for batch := 1; ; batch++ {
+		var (
+			batchComplete bool
+			lastSourceKey []byte
+		)
+
+		err := s.db.Update(func(txn *badger.Txn) error {
+			if len(cursor) > 0 {
+				// A checksummed but nonsensical cursor must never skip earlier rows.
+				// Requiring its authoritative source entry to remain present makes
+				// corruption/deletion fail closed instead of seeking past it.
+				if _, getErr := txn.Get(cursor); getErr != nil {
+					return fmt.Errorf("%s index backfill cursor source is unavailable: %w", spec.name, getErr)
+				}
+			}
+
+			iteratorOptions := badger.DefaultIteratorOptions
+			iteratorOptions.Prefix = spec.sourcePrefix
+			iteratorOptions.PrefetchValues = false
+			it := txn.NewIterator(iteratorOptions)
+			defer it.Close()
+
+			seek := spec.sourcePrefix
+			if len(cursor) > 0 {
+				seek = cursor
+			}
+			it.Seek(seek)
+			// The cursor is the last fully indexed source key. Seek is inclusive,
+			// so advance once; the existence check above rejects deletion or a
+			// forged within-prefix cursor instead of silently skipping past it.
+			if len(cursor) > 0 && it.ValidForPrefix(spec.sourcePrefix) && bytes.Equal(it.Item().Key(), cursor) {
+				it.Next()
+			}
+
+			processed := 0
+			derivedBytes := 0
+			for it.ValidForPrefix(spec.sourcePrefix) {
+				if processed >= options.maxEntries {
+					break
+				}
+				item := it.Item()
+				sourceKey := item.KeyCopy(nil)
+				indexKey, indexValue, skip, deriveErr := spec.derive(item)
+				if deriveErr != nil {
+					return fmt.Errorf("%s index backfill source %q: %w", spec.name, sourceKey, deriveErr)
+				}
+
+				entryBytes := 0
+				if !skip {
+					entryBytes = len(indexKey) + len(indexValue) + indexBackfillEntryOverhead
+				}
+				if derivedBytes+entryBytes > options.maxBytes {
+					if processed == 0 {
+						return fmt.Errorf("%s index backfill source %q exceeds %d-byte batch limit", spec.name, sourceKey, options.maxBytes)
+					}
+					break
+				}
+
+				if !skip {
+					if setErr := txn.Set(indexKey, indexValue); setErr != nil {
+						return setErr
+					}
+				}
+				processed++
+				derivedBytes += entryBytes
+				lastSourceKey = sourceKey
+				it.Next()
+			}
+
+			if !it.ValidForPrefix(spec.sourcePrefix) {
+				batchComplete = true
+				return nil
+			}
+			if len(lastSourceKey) == 0 {
+				return fmt.Errorf("%s index backfill made no progress", spec.name)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		// Badger's default SyncWrites setting is false. Explicitly crossing the
+		// Sync boundary before advancing the external cursor makes its claim real.
+		// A power loss still yields the preceding sidecar or a replayable set of
+		// newer idempotent derived rows.
+		if err := s.db.Sync(); err != nil {
+			return fmt.Errorf("sync %s index backfill batch %d: %w", spec.name, batch, err)
+		}
+		if options.afterDBSync != nil {
+			if err := options.afterDBSync(batch, batchComplete); err != nil {
 				return err
 			}
 		}
-		return nil
-	})
+		nextProgress := indexBackfillProgress{complete: batchComplete}
+		if !batchComplete {
+			nextProgress.cursor = lastSourceKey
+		}
+		if err := writeIndexBackfillProgress(badgerDir, spec.progressFile, nextProgress); err != nil {
+			return fmt.Errorf("write %s index backfill progress for batch %d: %w", spec.name, batch, err)
+		}
+		cursor = nextProgress.cursor
+		if options.afterBatch != nil {
+			if err := options.afterBatch(batch, batchComplete); err != nil {
+				return err
+			}
+		}
+		if batchComplete {
+			return nil
+		}
+	}
+}
+
+// EnsureAgentOrgsIndex backfills the one-to-many agent_orgs reverse index from
+// the authoritative org_member forward index. The durable completion sidecar
+// makes subsequent opens O(1). Required for upgrades from versions where the
+// reverse lookup was a single-slot agent_org:<agent> and multi-org members
+// existed only in the forward index.
+func (s *BadgerStore) EnsureAgentOrgsIndex() error {
+	return s.ensureAgentOrgsIndex(indexBackfillOptions{})
+}
+
+func (s *BadgerStore) ensureAgentOrgsIndex(options indexBackfillOptions) error {
+	prefix := []byte("org_member:")
+	return s.ensureIndexBackfill(indexBackfillSpec{
+		name:         "agent_orgs",
+		sourcePrefix: prefix,
+		progressFile: agentOrgsIndexBackfillSidecar,
+		derive: func(item *badger.Item) (key, value []byte, skip bool, err error) {
+			suffix := string(item.Key()[len(prefix):])
+			colon := strings.IndexByte(suffix, ':')
+			if colon < 0 {
+				// Preserve the historical backfill behavior for malformed source
+				// keys: ignore them, but advance the cursor so restart can finish.
+				return nil, nil, true, nil
+			}
+			orgID := suffix[:colon]
+			agentID := suffix[colon+1:]
+			return agentOrgsMemberKey(agentID, orgID), nil, false, nil
+		},
+	}, options)
 }
 
 // ListOrgsByName returns every organization registered with the given
@@ -2728,7 +3193,7 @@ func (s *BadgerStore) ListOrgsByName(name string) ([]OrgEntry, error) {
 		return nil, fmt.Errorf("org name is required")
 	}
 	var entries []OrgEntry
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		prefix := orgNamePrefix(name)
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
@@ -2789,46 +3254,45 @@ func (s *BadgerStore) ListOrgsByName(name string) ([]OrgEntry, error) {
 	return entries, err
 }
 
-// EnsureOrgNameIndex backfills the one-to-many name→orgIDs reverse index
-// from the authoritative org:* forward entries. Idempotent — safe to call
-// on every store open. Required for in-place upgrades from pre-v6.6.9
-// binaries that didn't maintain it, so GET /v1/org/by-name resolves
-// existing chain state without a reset.
+// EnsureOrgNameIndex backfills the one-to-many name→orgIDs reverse index from
+// the authoritative org:* forward entries. The versioned completion sidecar
+// makes subsequent opens O(1). Required for in-place upgrades from pre-v6.6.9
+// binaries that didn't maintain it, so GET /v1/org/by-name resolves existing
+// chain state without a reset.
 func (s *BadgerStore) EnsureOrgNameIndex() error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		prefix := []byte("org:")
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefix
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			orgID := string(it.Item().Key()[len(prefix):])
+	return s.ensureOrgNameIndex(indexBackfillOptions{})
+}
+
+func (s *BadgerStore) ensureOrgNameIndex(options indexBackfillOptions) error {
+	prefix := []byte("org:")
+	return s.ensureIndexBackfill(indexBackfillSpec{
+		name:         "org_name",
+		sourcePrefix: prefix,
+		progressFile: orgNameIndexBackfillSidecar,
+		derive: func(item *badger.Item) (key, value []byte, skip bool, err error) {
+			orgID := string(item.Key()[len(prefix):])
 			var orgName string
-			err := it.Item().Value(func(val []byte) error {
-				name, _, decErr := decodeString(val, 0)
-				if decErr != nil {
-					return decErr
+			if err := item.Value(func(val []byte) error {
+				name, _, decodeErr := decodeString(val, 0)
+				if decodeErr != nil {
+					return decodeErr
 				}
 				orgName = name
 				return nil
-			})
-			if err != nil {
-				return err
+			}); err != nil {
+				return nil, nil, false, err
 			}
 			if orgName == "" {
-				continue
+				return nil, nil, true, nil
 			}
-			if err := txn.Set(orgNameKey(orgName, orgID), nil); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+			return orgNameKey(orgName, orgID), nil, false, nil
+		},
+	}, options)
 }
 
 // GetMemberClearance retrieves a member's clearance level and role.
 func (s *BadgerStore) GetMemberClearance(orgID, agentID string) (clearance uint8, role string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(orgMemberKey(orgID, agentID))
 		if err != nil {
@@ -2852,7 +3316,7 @@ func (s *BadgerStore) GetMemberClearance(orgID, agentID string) (clearance uint8
 
 // SetMemberClearance updates a member's clearance level in BadgerDB.
 func (s *BadgerStore) SetMemberClearance(orgID, agentID string, clearance uint8) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		item, err := txn.Get(orgMemberKey(orgID, agentID))
 		if err != nil {
 			return err
@@ -2883,13 +3347,13 @@ func (s *BadgerStore) SetMemberClearance(orgID, agentID string, clearance uint8)
 		newVal[0] = clearance
 		encodeString(newVal, 1, role)
 		binary.BigEndian.PutUint64(newVal[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return txn.Set(orgMemberKey(orgID, agentID), newVal)
+		return s.txnSet(txn, orgMemberKey(orgID, agentID), newVal)
 	})
 }
 
 // GetAgentOrg retrieves the organization an agent belongs to (reverse lookup).
 func (s *BadgerStore) GetAgentOrg(agentID string) (orgID string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(agentOrgKey(agentID))
 		if err != nil {
@@ -2912,7 +3376,7 @@ func (s *BadgerStore) GetAgentOrg(agentID string) (orgID string, err error) {
 //   - allowedDomains count (4 bytes) + each domain (length-prefixed)
 //   - allowedDepts count (4 bytes) + each dept (length-prefixed).
 func (s *BadgerStore) SetFederation(fedID string, proposerOrg, targetOrg string, allowedDomains []string, maxClearance uint8, expiresAt int64, requiresApproval bool, status string, allowedDepts ...[]string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		var depts []string
 		if len(allowedDepts) > 0 {
 			depts = allowedDepts[0]
@@ -2950,13 +3414,13 @@ func (s *BadgerStore) SetFederation(fedID string, proposerOrg, targetOrg string,
 		for _, d := range depts {
 			offset = encodeString(val, offset, d)
 		}
-		return txn.Set(federationKey(fedID), val)
+		return s.txnSet(txn, federationKey(fedID), val)
 	})
 }
 
 // GetFederation retrieves a federation entry from BadgerDB.
 func (s *BadgerStore) GetFederation(fedID string) (proposerOrg, targetOrg string, maxClearance uint8, expiresAt int64, status string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(federationKey(fedID))
 		if err != nil {
@@ -2997,7 +3461,7 @@ func (s *BadgerStore) GetFederation(fedID string) (proposerOrg, targetOrg string
 
 // UpdateFederationStatus updates the status field of a federation entry.
 func (s *BadgerStore) UpdateFederationStatus(fedID, status string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		item, err := txn.Get(federationKey(fedID))
 		if err != nil {
 			return err
@@ -3097,14 +3561,14 @@ func (s *BadgerStore) UpdateFederationStatus(fedID, status string) error {
 		for _, d := range allowedDepts {
 			offset = encodeString(newVal, offset, d)
 		}
-		return txn.Set(federationKey(fedID), newVal)
+		return s.txnSet(txn, federationKey(fedID), newVal)
 	})
 }
 
 // FindFederation scans for an active federation between two orgs (either direction).
 func (s *BadgerStore) FindFederation(orgA, orgB string) (fedID string, err error) {
 	prefix := []byte("federation:")
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = true
 		opts.Prefix = prefix
@@ -3164,15 +3628,15 @@ func (s *BadgerStore) FindFederation(orgA, orgB string) (fedID string, err error
 
 // SetMemoryClassification stores a memory's classification level in BadgerDB.
 func (s *BadgerStore) SetMemoryClassification(memoryID string, classification uint8) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(memClassKey(memoryID), []byte{classification})
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, memClassKey(memoryID), []byte{classification})
 	})
 }
 
 // GetMemoryClassification retrieves a memory's classification level.
 func (s *BadgerStore) GetMemoryClassification(memoryID string) (uint8, error) {
 	var classification uint8
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(memClassKey(memoryID))
 		if getErr != nil {
 			return getErr
@@ -3212,19 +3676,19 @@ func agentDeptKey(agentID string) []byte {
 // RegisterDept registers a department within an organization in BadgerDB.
 // Encoding: name (length-prefixed) + description (length-prefixed) + parentDept (length-prefixed) + height (8 bytes).
 func (s *BadgerStore) RegisterDept(orgID, deptID, name, description, parentDept string, height int64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		val := make([]byte, 4+len(name)+4+len(description)+4+len(parentDept)+8)
 		offset := encodeString(val, 0, name)
 		offset = encodeString(val, offset, description)
 		offset = encodeString(val, offset, parentDept)
 		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return txn.Set(deptKey(orgID, deptID), val)
+		return s.txnSet(txn, deptKey(orgID, deptID), val)
 	})
 }
 
 // GetDept retrieves a department's name and description from BadgerDB.
 func (s *BadgerStore) GetDept(orgID, deptID string) (name, description string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(deptKey(orgID, deptID))
 		if err != nil {
@@ -3252,7 +3716,7 @@ func (s *BadgerStore) GetOrgDepts(orgID string) ([]string, error) {
 	var deptIDs []string
 	prefix := []byte("dept:" + orgID + ":")
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
 		opts.Prefix = prefix
@@ -3277,32 +3741,32 @@ func (s *BadgerStore) GetOrgDepts(orgID string) ([]string, error) {
 // Encoding: clearance (1 byte) + role (length-prefixed) + height (8 bytes).
 // Also sets the agent→dept reverse lookup.
 func (s *BadgerStore) AddDeptMember(orgID, deptID, agentID string, clearance uint8, role string, height int64) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		val := make([]byte, 1+4+len(role)+8)
 		val[0] = clearance
 		encodeString(val, 1, role)
 		binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
-		if err := txn.Set(deptMemberKey(orgID, deptID, agentID), val); err != nil {
+		if err := s.txnSet(txn, deptMemberKey(orgID, deptID, agentID), val); err != nil {
 			return err
 		}
 		// Reverse lookup: agent→dept (value = "orgID:deptID")
-		return txn.Set(agentDeptKey(agentID), []byte(orgID+":"+deptID))
+		return s.txnSet(txn, agentDeptKey(agentID), []byte(orgID+":"+deptID))
 	})
 }
 
 // RemoveDeptMember removes a member from a department in BadgerDB.
 func (s *BadgerStore) RemoveDeptMember(orgID, deptID, agentID string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		if err := txn.Delete(deptMemberKey(orgID, deptID, agentID)); err != nil {
+	return s.update(func(txn *badger.Txn) error {
+		if err := s.txnDelete(txn, deptMemberKey(orgID, deptID, agentID)); err != nil {
 			return err
 		}
-		return txn.Delete(agentDeptKey(agentID))
+		return s.txnDelete(txn, agentDeptKey(agentID))
 	})
 }
 
 // GetDeptMemberClearance retrieves a department member's clearance level and role.
 func (s *BadgerStore) GetDeptMemberClearance(orgID, deptID, agentID string) (clearance uint8, role string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(deptMemberKey(orgID, deptID, agentID))
 		if err != nil {
@@ -3326,7 +3790,7 @@ func (s *BadgerStore) GetDeptMemberClearance(orgID, deptID, agentID string) (cle
 
 // SetDeptMemberClearance updates a department member's clearance level in BadgerDB.
 func (s *BadgerStore) SetDeptMemberClearance(orgID, deptID, agentID string, clearance uint8) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		item, err := txn.Get(deptMemberKey(orgID, deptID, agentID))
 		if err != nil {
 			return err
@@ -3357,14 +3821,14 @@ func (s *BadgerStore) SetDeptMemberClearance(orgID, deptID, agentID string, clea
 		newVal[0] = clearance
 		encodeString(newVal, 1, role)
 		binary.BigEndian.PutUint64(newVal[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return txn.Set(deptMemberKey(orgID, deptID, agentID), newVal)
+		return s.txnSet(txn, deptMemberKey(orgID, deptID, agentID), newVal)
 	})
 }
 
 // GetAgentDept retrieves the department an agent belongs to (reverse lookup).
 // Returns orgID and deptID by splitting the stored value on ":".
 func (s *BadgerStore) GetAgentDept(agentID string) (orgID, deptID string, err error) {
-	err = s.db.View(func(txn *badger.Txn) error {
+	err = s.view(func(txn *badger.Txn) error {
 		var item *badger.Item
 		item, err = txn.Get(agentDeptKey(agentID))
 		if err != nil {
@@ -3389,7 +3853,7 @@ func (s *BadgerStore) GetAgentDept(agentID string) (orgID, deptID string, err er
 // GetFederationAllowedDepts retrieves the allowed departments for a federation.
 func (s *BadgerStore) GetFederationAllowedDepts(fedID string) ([]string, error) {
 	var allowedDepts []string
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(federationKey(fedID))
 		if getErr != nil {
 			return getErr
@@ -3638,7 +4102,7 @@ func (s *BadgerStore) checkFederationAccess(agentOrg, domainOrg, agentID string,
 // AppendAccessLog appends an audit log entry to BadgerDB.
 // Encoding: agentID (length-prefixed) + domain (length-prefixed) + action (length-prefixed).
 func (s *BadgerStore) AppendAccessLog(height int64, agentID, domain, action string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		// Find next sequence number for this height by scanning prefix
 		prefix := []byte(fmt.Sprintf("access_log:%016d:", height))
 		opts := badger.DefaultIteratorOptions
@@ -3657,7 +4121,7 @@ func (s *BadgerStore) AppendAccessLog(height int64, agentID, domain, action stri
 		offset = encodeString(val, offset, domain)
 		encodeString(val, offset, action)
 
-		return txn.Set(accessLogKey(height, seq), val)
+		return s.txnSet(txn, accessLogKey(height, seq), val)
 	})
 }
 
@@ -3678,15 +4142,15 @@ func (s *BadgerStore) RegisterAgent(agentID, name, role, bio, provider, p2pAddre
 	if err != nil {
 		return fmt.Errorf("marshal agent: %w", err)
 	}
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(agentOnChainKey(agentID), data)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, agentOnChainKey(agentID), data)
 	})
 }
 
 // GetRegisteredAgent retrieves an agent's on-chain state.
 func (s *BadgerStore) GetRegisteredAgent(agentID string) (*OnChainAgent, error) {
 	var agent OnChainAgent
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, err := txn.Get(agentOnChainKey(agentID))
 		if err != nil {
 			return err
@@ -3707,7 +4171,7 @@ func (s *BadgerStore) GetRegisteredAgent(agentID string) (*OnChainAgent, error) 
 
 // IsAgentRegistered checks if an agent exists on-chain.
 func (s *BadgerStore) IsAgentRegistered(agentID string) bool {
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		_, err := txn.Get(agentOnChainKey(agentID))
 		return err
 	})
@@ -3717,7 +4181,7 @@ func (s *BadgerStore) IsAgentRegistered(agentID string) bool {
 // UpdateAgentMeta updates an agent's mutable display name and bio on-chain.
 // RegisteredName is the permanent on-chain identity and is NEVER modified here.
 func (s *BadgerStore) UpdateAgentMeta(agentID, name, bio string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		item, err := txn.Get(agentOnChainKey(agentID))
 		if err != nil {
 			return fmt.Errorf("agent not found: %w", err)
@@ -3739,7 +4203,7 @@ func (s *BadgerStore) UpdateAgentMeta(agentID, name, bio string) error {
 		if err != nil {
 			return err
 		}
-		return txn.Set(agentOnChainKey(agentID), data)
+		return s.txnSet(txn, agentOnChainKey(agentID), data)
 	})
 }
 
@@ -3753,18 +4217,24 @@ type ValidatorPersist struct {
 
 // DeleteState removes a key from the state namespace.
 func (s *BadgerStore) DeleteState(key string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Delete(stateKey(key))
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnDelete(txn, stateKey(key))
 	})
 }
 
 // PrefixKeys returns all keys in the state namespace matching the given prefix,
 // sorted lexicographically. Keys are returned WITHOUT the "state:" prefix.
 func (s *BadgerStore) PrefixKeys(prefix string) ([]string, error) {
+	return s.PrefixKeysLimit(prefix, 0)
+}
+
+// PrefixKeysLimit is PrefixKeys with an optional deterministic upper bound.
+// A non-positive limit preserves the historical unbounded behavior.
+func (s *BadgerStore) PrefixKeysLimit(prefix string, limit int) ([]string, error) {
 	fullPrefix := stateKey(prefix)
 	var keys []string
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false // keys only
 		opts.Prefix = fullPrefix
@@ -3776,12 +4246,146 @@ func (s *BadgerStore) PrefixKeys(prefix string) ([]string, error) {
 			// Strip the "state:" prefix to return the logical key
 			if len(key) > 6 {
 				keys = append(keys, key[6:])
+				if limit > 0 && len(keys) >= limit {
+					break
+				}
 			}
 		}
 		return nil
 	})
 
 	return keys, err
+}
+
+// ValidateAppV20ResourceBounds audits legacy consensus state before app-v20 is
+// allowed to activate. New app-v20 transactions enforce the same identifier
+// ceiling at decode time; this scan prevents a short valid reference from
+// loading an oversized pre-fork domain/identifier and multiplying it across
+// validator-stat keys inside the block-wide Badger transaction.
+func (s *BadgerStore) ValidateAppV20ResourceBounds(maxIdentifierBytes, maxMetadataBytes, maxRecordBytes, maxValidatorRecords int) error {
+	if maxIdentifierBytes <= 0 || maxMetadataBytes <= 0 || maxRecordBytes <= 0 || maxValidatorRecords <= 0 {
+		return errors.New("app-v20 resource bounds must be positive")
+	}
+	singleSuffixPrefixes := [][]byte{
+		[]byte("memory:"), []byte("memdomain:"), []byte("memauthor:"), []byte("memclass:"),
+		[]byte("nonce:"), []byte("agent:"), []byte("validator:"), []byte("vstats:"),
+		[]byte("domain:"), []byte("org:"), []byte("access_req:"), []byte("federation:"),
+		[]byte("cross_fed:"), []byte("poew:"), []byte("cocommit:core:"),
+		[]byte("cocommit:shared:"), []byte("cocommit:coauthors:"),
+	}
+	fullRecordPrefixes := [][]byte{
+		[]byte("agent:"), []byte("org:"), []byte("org_member:"),
+		[]byte("dept:"), []byte("dept_member:"), []byte("access_req:"),
+		[]byte("federation:"), []byte("cross_fed:"),
+	}
+	return s.view(func(txn *badger.Txn) error {
+		validatorRecords := 0
+		poeWeightRecords := 0
+		it := txn.NewIterator(badger.DefaultIteratorOptions)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			item := it.Item()
+			key := item.Key()
+			if bytes.HasPrefix(key, []byte("validator:")) {
+				validatorRecords++
+				if validatorRecords > maxValidatorRecords {
+					return fmt.Errorf("legacy persisted validator set has more than %d records", maxValidatorRecords)
+				}
+			}
+			if bytes.HasPrefix(key, []byte(poeWeightsPrefix)) && !bytes.Equal(key, poeWeightsCurrentKey) {
+				poeWeightRecords++
+				if poeWeightRecords > maxValidatorRecords {
+					return fmt.Errorf("legacy persisted PoE weight set has more than %d records", maxValidatorRecords)
+				}
+			}
+			if len(key) > 3*maxIdentifierBytes+128 {
+				return fmt.Errorf("legacy consensus key has %d bytes, app-v20 limit %d: %q", len(key), 3*maxIdentifierBytes+128, key)
+			}
+			for _, prefix := range singleSuffixPrefixes {
+				if bytes.HasPrefix(key, prefix) && len(key)-len(prefix) > maxIdentifierBytes {
+					return fmt.Errorf("legacy consensus identifier has %d bytes, app-v20 limit %d: %q", len(key)-len(prefix), maxIdentifierBytes, key)
+				}
+			}
+			for _, prefix := range fullRecordPrefixes {
+				if !bytes.HasPrefix(key, prefix) {
+					continue
+				}
+				if err := item.Value(func(value []byte) error {
+					if len(value) > maxRecordBytes {
+						return fmt.Errorf("legacy consensus record %q has %d bytes, app-v20 limit %d", key, len(value), maxRecordBytes)
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				break
+			}
+
+			switch {
+			case bytes.HasPrefix(key, []byte("memory:")):
+				if err := item.Value(func(value []byte) error {
+					hash, _, err := decodeMemoryEntry(value)
+					if err != nil {
+						return err
+					}
+					if len(hash) != 0 && len(hash) != sha256.Size {
+						return fmt.Errorf("legacy memory %q has content hash length %d, app-v20 requires 0 or %d", key, len(hash), sha256.Size)
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+			case bytes.HasPrefix(key, []byte("memdomain:")), bytes.HasPrefix(key, []byte("memauthor:")):
+				if err := item.Value(func(value []byte) error {
+					if len(value) > maxIdentifierBytes {
+						return fmt.Errorf("legacy consensus identifier value for %q has %d bytes, app-v20 limit %d", key, len(value), maxIdentifierBytes)
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+			case bytes.HasPrefix(key, []byte("domain:")):
+				if err := item.Value(func(value []byte) error {
+					owner, off, err := decodeString(value, 0)
+					if err != nil {
+						return err
+					}
+					parent, _, err := decodeString(value, off)
+					if err != nil {
+						return err
+					}
+					if len(owner) > maxIdentifierBytes || len(parent) > maxIdentifierBytes {
+						return fmt.Errorf("legacy domain %q contains an oversized owner or parent", key)
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+			case bytes.HasPrefix(key, []byte("agent:")):
+				if err := item.Value(func(value []byte) error {
+					var agent OnChainAgent
+					if err := json.Unmarshal(value, &agent); err != nil {
+						return err
+					}
+					if len(agent.AgentID) > maxIdentifierBytes || len(agent.Name) > maxIdentifierBytes ||
+						len(agent.RegisteredName) > maxIdentifierBytes || len(agent.Role) > maxIdentifierBytes ||
+						len(agent.Provider) > maxIdentifierBytes || len(agent.OrgID) > maxIdentifierBytes ||
+						len(agent.DeptID) > maxIdentifierBytes {
+						return fmt.Errorf("legacy agent %q contains an oversized identifier", key)
+					}
+					if len(agent.BootBio) > maxMetadataBytes || len(agent.P2PAddress) > maxMetadataBytes ||
+						len(agent.DomainAccess) > maxMetadataBytes ||
+						len(agent.VisibleAgents) > maxMetadataBytes {
+						return fmt.Errorf("legacy agent %q contains oversized metadata", key)
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // SetGovProposal stores a governance proposal in BadgerDB.
@@ -3819,7 +4423,7 @@ func (s *BadgerStore) GetGovVotes(proposalID string) (map[string]string, error) 
 	result := make(map[string]string)
 	prefix := []byte("state:gov:vote:" + proposalID + ":")
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = true
 		opts.Prefix = prefix
@@ -3891,14 +4495,14 @@ func (s *BadgerStore) GetGovCooldown(proposerID string) (int64, error) {
 
 // SaveValidatorsV2 persists validators with both power and public key.
 func (s *BadgerStore) SaveValidatorsV2(validators map[string]ValidatorPersist) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		for id, vp := range validators {
 			key := []byte("validator:" + id)
 			data, err := json.Marshal(vp)
 			if err != nil {
 				return fmt.Errorf("marshal validator %s: %w", id, err)
 			}
-			if err := txn.Set(key, data); err != nil {
+			if err := s.txnSet(txn, key, data); err != nil {
 				return err
 			}
 		}
@@ -3913,7 +4517,7 @@ func (s *BadgerStore) LoadValidatorsV2() (map[string]ValidatorPersist, error) {
 	result := make(map[string]ValidatorPersist)
 	prefix := []byte("validator:")
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = true
 		opts.Prefix = prefix
@@ -3955,14 +4559,14 @@ func (s *BadgerStore) LoadValidatorsV2() (map[string]ValidatorPersist, error) {
 
 // SetRawForTest writes a raw key-value pair to BadgerDB. Test-only.
 func (s *BadgerStore) SetRawForTest(key, value []byte) error {
-	return s.db.Update(func(txn *badger.Txn) error {
-		return txn.Set(key, value)
+	return s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, key, value)
 	})
 }
 
 // SetAgentPermission updates an agent's permissions on-chain.
 func (s *BadgerStore) SetAgentPermission(agentID string, clearance uint8, domainAccess, visibleAgents, orgID, deptID string) error {
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		item, err := txn.Get(agentOnChainKey(agentID))
 		if err != nil {
 			return fmt.Errorf("agent not found: %w", err)
@@ -3986,7 +4590,7 @@ func (s *BadgerStore) SetAgentPermission(agentID string, clearance uint8, domain
 		if err != nil {
 			return err
 		}
-		return txn.Set(agentOnChainKey(agentID), data)
+		return s.txnSet(txn, agentOnChainKey(agentID), data)
 	})
 }
 
@@ -3994,7 +4598,7 @@ func (s *BadgerStore) SetAgentPermission(agentID string, clearance uint8, domain
 func (s *BadgerStore) ListRegisteredAgents() ([]OnChainAgent, error) {
 	var agents []OnChainAgent
 	prefix := []byte("agent:")
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
 		it := txn.NewIterator(opts)

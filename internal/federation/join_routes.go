@@ -72,6 +72,26 @@ type ScopeWire struct {
 	Direction      string   `json:"direction"`
 }
 
+// trustOnlyJoinScope is the sole scope accepted by the v3 JOIN ceremony.
+// tx-33 still carries a legacy envelope for consensus/wire compatibility, but
+// its empty domain set grants no data access; mutable Read/Copy policy is
+// installed only after the two identities and CA pins have been confirmed.
+// Write remains reserved until consensus can bind ingress to this ceremony.
+var trustOnlyJoinScope = ScopeWire{
+	MaxClearance:   4,
+	AllowedDomains: []string{},
+	Mode:           "exchange",
+	Direction:      "both",
+}
+
+func validateTrustOnlyJoinScope(scope ScopeWire) error {
+	if scope.MaxClearance != trustOnlyJoinScope.MaxClearance || len(scope.AllowedDomains) != 0 ||
+		scope.Mode != trustOnlyJoinScope.Mode || scope.Direction != trustOnlyJoinScope.Direction {
+		return fmt.Errorf("JOIN establishes trust only; domain access must be configured after pairing")
+	}
+	return nil
+}
+
 func (s ScopeWire) digest() [32]byte {
 	cl := s.MaxClearance
 	if cl < 0 {
@@ -255,6 +275,10 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "refusing self-federation")
 		return
 	}
+	if err := validateTrustOnlyJoinScope(req.Scope); err != nil {
+		httpError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	guestNonce, err := hex.DecodeString(req.GuestNonce)
 	if err != nil || len(guestNonce) != 16 {
 		httpError(w, http.StatusBadRequest, "invalid guest nonce")
@@ -424,11 +448,18 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	if err != nil {
 		return "", "", err
 	}
+	// One lease owns this agreement generation from local preparation through
+	// tx-33 and every activation artifact (or the matching tx-34 rollback).
+	// PrepareSyncControl is still pending/non-authoritative here; activation and
+	// RBAC persistence take policy W internally. Only the tx helper below takes
+	// the nested gate explicitly around the consensus generation change.
+	agreementUnlock := m.LockAgreementMutation()
+	defer agreementUnlock()
 	epoch := syncPolicyEpoch(ctx.ApprovedE)
 	if ss := m.syncStore(); ss != nil {
 		if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
 			RemoteChainID: ctx.GuestChain, Role: "host", ControllerChainID: m.localChainID,
-			ControllerAgentID: hex.EncodeToString(m.agentPub), PolicyEpoch: epoch,
+			ControllerAgentID: hex.EncodeToString(m.agentPub), PeerAgentID: hex.EncodeToString(ctx.GuestAgentID), PolicyEpoch: epoch,
 			RemoteCAPin: hex.EncodeToString(ctx.GuestPin),
 		}); prepareErr != nil {
 			ctx.RollbackGuestCA()
@@ -456,7 +487,7 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	}
 	// Broadcast the host's own tx-33 CrossFedSet(remote=guest) with the operator
 	// key. crossFedAuthorized re-checks authority on-chain.
-	txHash, err := m.broadcastCrossFedSet(&tx.CrossFedTerms{
+	txHash, err := m.broadcastCrossFedSetAgreementLocked(&tx.CrossFedTerms{
 		RemoteChainID:  ctx.GuestChain,
 		Endpoint:       ctx.GuestEndpoint,
 		PeerPubKey:     ctx.GuestPin,
@@ -487,16 +518,19 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	// makes its seed-scrub safe.
 	if cErr := ctx.CommitGuestCA(); cErr != nil {
 		m.logger.Error().Err(cErr).Str("guest", ctx.GuestChain).Msg("guest CA commit failed post-broadcast; revoking agreement")
-		return m.undoPartialHostConfirm(sessionID, ctx, "guest CA commit failed", cErr)
+		return m.undoPartialHostConfirmLocked(sessionID, ctx, "guest CA commit failed", cErr)
 	}
 	if sErr := m.commitPairSeed(ctx.GuestChain, ctx.GuestPin, ctx.Seed); sErr != nil {
 		m.logger.Error().Err(sErr).Str("guest", ctx.GuestChain).Msg("host seed commit failed post-broadcast; revoking agreement")
-		return m.undoPartialHostConfirm(sessionID, ctx, "host seed commit failed", sErr)
+		return m.undoPartialHostConfirmLocked(sessionID, ctx, "host seed commit failed", sErr)
 	}
 	if ss := m.syncStore(); ss != nil {
 		if aErr := ss.ActivateSyncControl(context.Background(), ctx.GuestChain, epoch); aErr != nil {
-			return m.undoPartialHostConfirm(sessionID, ctx, "sync control activation failed", aErr)
+			return m.undoPartialHostConfirmLocked(sessionID, ctx, "sync control activation failed", aErr)
 		}
+	}
+	if err := m.initializePeerRBACPolicy(context.Background(), ctx.GuestChain); err != nil {
+		return m.undoPartialHostConfirmLocked(sessionID, ctx, "peer RBAC initialization failed", err)
 	}
 	m.joins.MarkActive(sessionID)
 	if hooks.End != nil {
@@ -539,12 +573,12 @@ func (m *Manager) rememberPeerName(remoteChainID, name string) {
 	}
 }
 
-// undoPartialHostConfirm rolls back a host confirm that broadcast tx-33 but then
-// failed to persist the guest CA or seed: it revokes the on-chain agreement
-// (tx-34, best-effort), discards the staged CA, and aborts the session - leaving
-// no half-active agreement behind.
-func (m *Manager) undoPartialHostConfirm(sessionID string, ctx *ConfirmContext, what string, cause error) (string, string, error) {
-	if _, rErr := m.RevokeAgreement(ctx.GuestChain); rErr != nil {
+// undoPartialHostConfirmLocked rolls back a host confirm that broadcast tx-33
+// but then failed to persist the guest CA or seed. The caller owns
+// agreementMutationMu, so the tx-34 + purge use the non-reentrant locked helper
+// and remain in the same generation critical section.
+func (m *Manager) undoPartialHostConfirmLocked(sessionID string, ctx *ConfirmContext, what string, cause error) (string, string, error) {
+	if _, rErr := m.revokeAgreementLocked(ctx.GuestChain); rErr != nil {
 		m.logger.Error().Err(rErr).Str("guest", ctx.GuestChain).Msg("revoke after partial host confirm failed - manual cleanup may be needed")
 	}
 	ctx.RollbackGuestCA()
@@ -698,9 +732,9 @@ func (m *Manager) HostSessionStatus(sessionID string) (*HostSessionView, error) 
 }
 
 // HostApprove is approval #1: the host operator types the code they heard; on a
-// match it sets the host grant terms, freezes E (RT-6), and moves to
-// HOST_APPROVED. The grant's allowed_domains must be non-empty (a cross_fed
-// record requires a scope; "*" is a chain-admin treaty).
+// match it freezes the peer identity and ceremony transcript (RT-6), then moves
+// to HOST_APPROVED. JOIN carries the fixed trust-only compatibility scope;
+// mutable per-domain Read/Write/Copy permissions are configured after pairing.
 func (m *Manager) HostApprove(sessionID, typedCode string, grant ScopeWire) error {
 	now := time.Now()
 	js, ok := m.joins.Get(sessionID, now)
@@ -710,15 +744,8 @@ func (m *Manager) HostApprove(sessionID, typedCode string, grant ScopeWire) erro
 	if js.GuestChain == "" {
 		return fmt.Errorf("no guest request to approve yet")
 	}
-	// Empty AllowedDomains is a legitimate "connect but share nothing" grant: the
-	// record is active (so the peer authenticates + reciprocity works) but the
-	// guest can read nothing. It is accepted on-chain for a chain-admin operator
-	// (the common solo/family case); a non-admin gets a clear on-chain authz
-	// error at broadcast, which the wizard surfaces recoverably. So do NOT block
-	// it here (blocking it stranded the ceremony at the irreversible compare step
-	// for exactly the conservative default the UI encourages).
-	if grant.MaxClearance < 0 || grant.MaxClearance > 4 {
-		return fmt.Errorf("max_clearance must be 0..4")
+	if err := validateTrustOnlyJoinScope(grant); err != nil {
+		return err
 	}
 	// The code compare AND the E freeze happen atomically inside ApproveWithCode
 	// (one locked critical section over the session), so a concurrent re-request
@@ -1032,6 +1059,9 @@ type GuestRequestResult struct {
 // GuestRequest fires POST /fed/v1/join/request against the host, records the
 // exchanged nonces, and computes CODE_G/CODE_H. scope is the guest's scope_G.
 func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint string, scope ScopeWire) (*GuestRequestResult, error) {
+	if err := validateTrustOnlyJoinScope(scope); err != nil {
+		return nil, err
+	}
 	d, _, ok := m.claimGuestDraft(sessionID, []guestDraftState{guestDraftScanned}, guestDraftRequesting)
 	if !ok {
 		return nil, fmt.Errorf("connection request is already in progress or completed")
@@ -1111,6 +1141,11 @@ func (m *Manager) GuestPollStatus(ctx context.Context, sessionID string) (*JoinS
 	if err := m.guestCall(ctx, d, http.MethodGet, path, nil, &resp); err != nil {
 		return nil, err
 	}
+	if resp.HostScope != nil {
+		if err := validateTrustOnlyJoinScope(*resp.HostScope); err != nil {
+			return nil, fmt.Errorf("host offered a legacy data scope during trust pairing: %w", err)
+		}
+	}
 	return &resp, nil
 }
 
@@ -1118,6 +1153,9 @@ func (m *Manager) GuestPollStatus(ctx context.Context, sessionID string) (*JoinS
 // first (guest-first activation, RT-7), then POSTs /fed/v1/join/confirm so the
 // host activates its side. hostScope is what the guest polled from /join/status.
 func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint string, hostScope ScopeWire) (string, error) {
+	if err := validateTrustOnlyJoinScope(hostScope); err != nil {
+		return "", err
+	}
 	m.guestConfirmMu.Lock()
 	defer m.guestConfirmMu.Unlock()
 	d, previousState, ok := m.claimGuestDraft(sessionID,
@@ -1185,71 +1223,90 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 	hooks := m.joinP2PHooks()
 	txHash := d.txHash
 	if !localActive {
-		if ss := m.syncStore(); ss != nil {
-			if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
-				RemoteChainID: d.hostChain, Role: "guest", ControllerChainID: d.hostChain,
-				ControllerAgentID: hex.EncodeToString(d.hostAgentPub), PolicyEpoch: epoch,
-				RemoteCAPin: hex.EncodeToString(d.hostPin),
-			}); prepareErr != nil {
-				return "", fmt.Errorf("prepare guest sync policy: %w", prepareErr)
-			}
-		}
+		// The local activation is one agreement generation. Release the lease
+		// before the outbound /join/confirm network call below, but not between
+		// tx-33 and CA/seed/control/RBAC persistence. Activation/RBAC helpers
+		// acquire policy W internally; the tx helper owns the only explicit
+		// nested lease around the consensus generation change.
+		txHash, err = func() (string, error) {
+			agreementUnlock := m.LockAgreementMutation()
+			defer agreementUnlock()
 
-		routePrepared := false
-		if len(d.hostP2PAddrs) > 0 {
-			if hooks.Persist == nil {
+			if ss := m.syncStore(); ss != nil {
+				if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
+					RemoteChainID: d.hostChain, Role: "guest", ControllerChainID: d.hostChain,
+					ControllerAgentID: hex.EncodeToString(d.hostAgentPub), PeerAgentID: hex.EncodeToString(d.hostAgentPub), PolicyEpoch: epoch,
+					RemoteCAPin: hex.EncodeToString(d.hostPin),
+				}); prepareErr != nil {
+					return "", fmt.Errorf("prepare guest sync policy: %w", prepareErr)
+				}
+			}
+
+			routePrepared := false
+			if len(d.hostP2PAddrs) > 0 {
+				if hooks.Persist == nil {
+					if ss := m.syncStore(); ss != nil {
+						_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
+					}
+					return "", fmt.Errorf("internet peer route persistence is unavailable")
+				}
+				if persistErr := hooks.Persist(d.hostChain, d.hostP2PAddrs); persistErr != nil {
+					if ss := m.syncStore(); ss != nil {
+						_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
+					}
+					return "", fmt.Errorf("persist host internet route: %w", persistErr)
+				}
+				routePrepared = true
+			}
+			// Guest-first: broadcast our own tx-33 (remote=host), then commit
+			// every local artifact before another set/revoke generation may run.
+			activatedHash, activateErr := m.broadcastCrossFedSetAgreementLocked(&tx.CrossFedTerms{
+				RemoteChainID:  d.hostChain,
+				Endpoint:       d.hostEndpoint,
+				PeerPubKey:     d.hostPin,
+				MaxClearance:   tx.ClearanceLevel(clampClearance(d.scope.MaxClearance)),
+				AllowedDomains: d.scope.AllowedDomains,
+				Status:         "active",
+			})
+			if activateErr != nil {
+				if routePrepared && hooks.Remove != nil {
+					_ = hooks.Remove(d.hostChain)
+				}
 				if ss := m.syncStore(); ss != nil {
 					_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
 				}
-				return "", fmt.Errorf("internet peer route persistence is unavailable")
+				return "", fmt.Errorf("your agreement broadcast failed: %w", activateErr)
 			}
-			if persistErr := hooks.Persist(d.hostChain, d.hostP2PAddrs); persistErr != nil {
-				if ss := m.syncStore(); ss != nil {
-					_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
-				}
-				return "", fmt.Errorf("persist host internet route: %w", persistErr)
+			d.txHash = activatedHash
+			m.guestMu.Lock()
+			if current := m.guestDrafts[sessionID]; current != nil && current.generation == d.generation && current.state == guestDraftConfirming {
+				current.txHash = activatedHash
 			}
-			routePrepared = true
-		}
-		// Guest-first: broadcast our own tx-33 (remote=host) + commit host CA + seed.
-		txHash, err = m.broadcastCrossFedSet(&tx.CrossFedTerms{
-			RemoteChainID:  d.hostChain,
-			Endpoint:       d.hostEndpoint,
-			PeerPubKey:     d.hostPin,
-			MaxClearance:   tx.ClearanceLevel(clampClearance(d.scope.MaxClearance)),
-			AllowedDomains: d.scope.AllowedDomains,
-			Status:         "active",
-		})
-		if err != nil {
-			if routePrepared && hooks.Remove != nil {
-				_ = hooks.Remove(d.hostChain)
+			m.guestMu.Unlock()
+			if _, cErr := m.StoreRemoteCA(d.hostChain, d.hostCAPEM); cErr != nil {
+				m.logger.Error().Err(cErr).Str("host", d.hostChain).Msg("host CA commit failed post-broadcast")
+				_, _ = m.revokeAgreementLocked(d.hostChain)
+				return "", fmt.Errorf("host CA persistence failed; agreement rolled back: %w", cErr)
+			}
+			if sErr := m.commitPairSeed(d.hostChain, d.hostPin, d.seed); sErr != nil {
+				m.logger.Error().Err(sErr).Str("host", d.hostChain).Msg("guest seed commit failed post-broadcast")
+				_, _ = m.revokeAgreementLocked(d.hostChain)
+				return "", fmt.Errorf("federation seed persistence failed; agreement rolled back: %w", sErr)
 			}
 			if ss := m.syncStore(); ss != nil {
-				_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
+				if activateErr := ss.ActivateSyncControl(context.Background(), d.hostChain, epoch); activateErr != nil {
+					_, _ = m.revokeAgreementLocked(d.hostChain)
+					return "", fmt.Errorf("sync controller activation failed; agreement rolled back: %w", activateErr)
+				}
 			}
-			return "", fmt.Errorf("your agreement broadcast failed: %w", err)
-		}
-		d.txHash = txHash
-		m.guestMu.Lock()
-		if current := m.guestDrafts[sessionID]; current != nil && current.generation == d.generation && current.state == guestDraftConfirming {
-			current.txHash = txHash
-		}
-		m.guestMu.Unlock()
-		if _, cErr := m.StoreRemoteCA(d.hostChain, d.hostCAPEM); cErr != nil {
-			m.logger.Error().Err(cErr).Str("host", d.hostChain).Msg("host CA commit failed post-broadcast")
-			_, _ = m.RevokeAgreement(d.hostChain)
-			return "", fmt.Errorf("host CA persistence failed; agreement rolled back: %w", cErr)
-		}
-		if sErr := m.commitPairSeed(d.hostChain, d.hostPin, d.seed); sErr != nil {
-			m.logger.Error().Err(sErr).Str("host", d.hostChain).Msg("guest seed commit failed post-broadcast")
-			_, _ = m.RevokeAgreement(d.hostChain)
-			return "", fmt.Errorf("federation seed persistence failed; agreement rolled back: %w", sErr)
-		}
-		if ss := m.syncStore(); ss != nil {
-			if activateErr := ss.ActivateSyncControl(context.Background(), d.hostChain, epoch); activateErr != nil {
-				_, _ = m.RevokeAgreement(d.hostChain)
-				return "", fmt.Errorf("sync controller activation failed; agreement rolled back: %w", activateErr)
+			if initErr := m.initializePeerRBACPolicy(context.Background(), d.hostChain); initErr != nil {
+				_, _ = m.revokeAgreementLocked(d.hostChain)
+				return "", fmt.Errorf("peer RBAC initialization failed; agreement rolled back: %w", initErr)
 			}
+			return activatedHash, nil
+		}()
+		if err != nil {
+			return "", err
 		}
 		localActive = true
 	}
@@ -1329,6 +1386,33 @@ func (m *Manager) guestConfirmCodes(d *guestDraft, ownPin []byte) (string, strin
 // originated - used for both operators' ceremony activations. Determinism/authz
 // are re-checked on-chain (crossFedAuthorized).
 func (m *Manager) broadcastCrossFedSet(terms *tx.CrossFedTerms) (string, error) {
+	agreementUnlock := m.LockAgreementMutation()
+	defer agreementUnlock()
+	return m.broadcastCrossFedSetAgreementLocked(terms)
+}
+
+// broadcastCrossFedSetAgreementLocked commits tx-33 while the caller already
+// owns agreementMutationMu. It takes policy W only for the consensus generation
+// change; JOIN callers retain the outer agreement lease while they subsequently
+// commit CA/seed/control artifacts whose authoritative SQLite mutations take
+// policy W internally. Lock order is always agreement mutation -> policy.
+func (m *Manager) broadcastCrossFedSetAgreementLocked(terms *tx.CrossFedTerms) (string, error) {
+	// A tx-33 upsert can replace a live legacy agreement, including narrowing
+	// its domains or clearance. Serialize that committed mutation with peer
+	// handlers' read leases so no caller can observe the mutation returning
+	// while a response still serves the superseded generation.
+	if ss := m.syncStore(); ss != nil {
+		policyUnlock := ss.LockSyncPolicyWrite()
+		defer policyUnlock()
+	}
+	return m.broadcastCrossFedSetLocked(terms)
+}
+
+// broadcastCrossFedSetLocked is the tx-33 encoder/broadcaster. The caller must
+// hold agreementMutationMu and, when SQLite sync policy is available, its
+// write lease. This lower-level form prevents UpdateAgreementSharing from
+// recursively taking the non-reentrant policy gate after reading current terms.
+func (m *Manager) broadcastCrossFedSetLocked(terms *tx.CrossFedTerms) (string, error) {
 	body := []byte("cross_fed:" + terms.RemoteChainID)
 	bodyHash := sha256.Sum256(body)
 	ts := time.Now().Unix()
@@ -1363,6 +1447,15 @@ func (m *Manager) broadcastCrossFedSet(terms *tx.CrossFedTerms) (string, error) 
 // nothing on disk (consensus cannot touch node-local files); the purge is the
 // off-consensus half.
 func (m *Manager) RevokeAgreement(remoteChainID string) (string, error) {
+	agreementUnlock := m.LockAgreementMutation()
+	defer agreementUnlock()
+	return m.revokeAgreementLocked(remoteChainID)
+}
+
+// revokeAgreementLocked commits tx-34 and purges all matching node-local
+// capabilities while the caller owns agreementMutationMu. JOIN rollback uses
+// this form to avoid recursively acquiring the non-reentrant agreement lease.
+func (m *Manager) revokeAgreementLocked(remoteChainID string) (string, error) {
 	if err := ValidateChainID(remoteChainID); err != nil {
 		return "", err
 	}

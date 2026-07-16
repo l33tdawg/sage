@@ -17,9 +17,11 @@ package federation
 //     origin chain must equal the authenticated peer (a peer may only push
 //     its OWN memories; kills third-chain laundering at the door), content
 //     hash must verify, caps respected.
-//  3. Treaty scope: item domain covered by the agreement's AllowedDomains.
-//  4. Receiver consent: item domain covered by the receiver's OWN
-//     sync_domains rows for this peer (asymmetric consent narrows).
+//  3. Publisher scope: legacy uses treaty AllowedDomains; active v3 uses the
+//     authenticated peer's Copy publication instead of tx-33 ceremony scope.
+//     Relays additionally require an exact shared-group route.
+//  4. Receiver consent: v3 also requires this node's local Subscribe; legacy
+//     uses sync_domains. Group membership never replaces either data-plane gate.
 //  5. Clearance: sender-asserted classification <= agreement MaxClearance
 //     (no admission path checks clearance today; this is the enforcement).
 //  6. Idempotency: a recorded sync_origin decision replays verbatim.
@@ -90,18 +92,21 @@ func (m *Manager) originVerifyKey(ctx context.Context, ss *store.SQLiteStore, pe
 	if item.OriginChainID == peer.ChainID {
 		return auth.AgentIDToPublicKey(peer.AgentID)
 	}
-	groupID, ok, err := ss.ResolveGroupRelay(ctx, m.localChainID, peer.ChainID, item.OriginChainID, item.Domain)
+	routes, err := ss.ListGroupRelayRoutesForAgents(ctx,
+		m.localChainID, hex.EncodeToString(m.agentPub), peer.ChainID, peer.AgentID, item.OriginChainID, item.Domain)
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
+	for _, route := range routes {
+		originPub, decodeErr := decodePub(route.OriginAgentPubkey)
+		if decodeErr == nil && verifyOriginSig(originPub, item) {
+			return originPub, nil
+		}
+	}
+	if len(routes) == 0 {
 		return nil, fmt.Errorf("origin %q relayed by peer %q is not authorized by any group in which this node, the relayer, and the origin all share domain %q", item.OriginChainID, peer.ChainID, item.Domain)
 	}
-	hexKey, err := ss.GetGroupMemberAgentPubkey(ctx, groupID, item.OriginChainID)
-	if err != nil {
-		return nil, err
-	}
-	return decodePub(hexKey)
+	return nil, fmt.Errorf("origin signature matches no exact group roster identity")
 }
 
 // handleSyncPush implements POST /fed/v1/sync/push (behind peerAuth).
@@ -129,19 +134,48 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, fmt.Sprintf("batch exceeds %d items", SyncPushMaxItems))
 		return
 	}
+	// Linearize inbound policy with group removal and revoke cleanup before any
+	// group lookup. Besides closing the mutation race, the v3 policy lookup below
+	// binds the live request to the exact operator frozen by JOIN before a caller
+	// can use relay errors as a group-membership oracle.
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
+	currentAgreement, agreementErr := m.currentRequestAgreementBound(r.Context(), peer)
+	if agreementErr != nil {
+		httpError(w, http.StatusForbidden, "sync peer binding or consent lookup failed")
+		return
+	}
+	currentPeer := *peer
+	currentPeer.Agreement = currentAgreement
+	peer = &currentPeer
+	pairwiseConsented, peerRBAC, err := m.pairwiseIngressPolicy(r.Context(), ss, peer.Agreement, peer.AgentID)
+	if err != nil {
+		httpError(w, http.StatusForbidden, "sync peer binding or consent lookup failed")
+		return
+	}
+	groupEdgeBound, groupEdgeErr := m.inboundGroupPeerBound(r.Context(), ss, peer)
+	if groupEdgeErr != nil {
+		httpError(w, http.StatusForbidden, "sync peer binding or consent lookup failed")
+		return
+	}
+
 	// Structural validation is all-or-nothing: violations are sender bugs (or
 	// malice), not policy outcomes, and rejecting the batch keeps the per-item
 	// outcome enum small and honest. An item whose origin chain != the
-	// authenticated peer is a RELAY: allowed ONLY when a shared group authorizes
-	// it (peer + origin both active members, domain shared). Otherwise the
-	// third-chain-laundering door stays shut (whole-batch 400). When authorized,
-	// the item is validated against its OWN origin chain; Gate 5.5 then verifies
-	// its origin_sig against the origin's roster key.
+	// authenticated peer is a RELAY: allowed ONLY when the receiver, relayer and
+	// origin share this exact domain in one active group. When authorized, Gate
+	// 5.5 later verifies origin_sig against the origin's roster key.
+	relayAuthorized := make([]bool, len(req.Items))
 	for i := range req.Items {
 		item := &req.Items[i]
 		expectedOrigin := peer.ChainID
 		if item.OriginChainID != "" && item.OriginChainID != peer.ChainID {
-			groupID, ok, aErr := ss.ResolveGroupRelay(r.Context(), m.localChainID, peer.ChainID, item.OriginChainID, item.Domain)
+			if !groupEdgeBound {
+				httpError(w, http.StatusBadRequest, fmt.Sprintf("item %d: no exact trusted group edge authorizes relay", i))
+				return
+			}
+			_, ok, aErr := ss.ResolveGroupRelayForAgents(r.Context(),
+				m.localChainID, hex.EncodeToString(m.agentPub), peer.ChainID, peer.AgentID, item.OriginChainID, item.Domain)
 			if aErr != nil {
 				httpError(w, http.StatusInternalServerError, "relay authorization failed")
 				return
@@ -150,36 +184,47 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 				httpError(w, http.StatusBadRequest, fmt.Sprintf("item %d: origin chain %q does not match authenticated peer %q and no group with this node as a member authorizes relay", i, item.OriginChainID, peer.ChainID))
 				return
 			}
-			_ = groupID
+			relayAuthorized[i] = true
 			expectedOrigin = item.OriginChainID
 		}
-		if err := validateSyncItem(expectedOrigin, item); err != nil {
-			httpError(w, http.StatusBadRequest, fmt.Sprintf("item %d: %v", i, err))
+		if validationErr := validateSyncItem(expectedOrigin, item); validationErr != nil {
+			httpError(w, http.StatusBadRequest, fmt.Sprintf("item %d: %v", i, validationErr))
 			return
 		}
 	}
-	// Linearize inbound policy with host removal and revoke cleanup. Lock order
-	// is policy -> origin, matching PurgeSyncPeerState and preventing a request
-	// authenticated just before revoke from resuming with stale consent after
-	// the revoke API has returned.
-	policyUnlock := ss.LockSyncPolicyRead()
-	defer policyUnlock()
-
-	// Receiver-side consent for this peer, loaded once per batch: the union of
-	// pairwise sync_domains rows AND the active group domains this node and the
-	// peer both share (docs §9.1). Group membership is the consent for a group
-	// domain, so a group-only member (no pairwise sync_domains row) is admitted
-	// for its shared domains without a spurious rejected_not_consented.
-	consented, err := ss.GetSyncDomains(r.Context(), peer.ChainID)
-	if err != nil {
-		httpError(w, http.StatusInternalServerError, "consent lookup failed")
-		return
+	// The symmetric shared set is visibility authority for group domains. Direct
+	// group-origin pushes use the narrower owner->recipient projection so a
+	// non-owner member cannot originate bytes merely because it also holds them.
+	var groupConsent, groupOwnedByPeer []string
+	if groupEdgeBound {
+		groupConsent, err = ss.GroupSharedDomainsForAgents(r.Context(),
+			m.localChainID, hex.EncodeToString(m.agentPub), peer.ChainID, peer.AgentID)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, "group visibility lookup failed")
+			return
+		}
+		groupOwnedByPeer, err = sharedGroupOwnedDomainsForAgents(r.Context(), ss,
+			peer.ChainID, peer.AgentID, m.localChainID, hex.EncodeToString(m.agentPub))
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, "group owner authorization lookup failed")
+			return
+		}
 	}
-	if groupConsent, gErr := ss.GroupSharedDomains(r.Context(), m.localChainID, peer.ChainID); gErr != nil {
-		httpError(w, http.StatusInternalServerError, "consent lookup failed")
-		return
-	} else {
-		consented = unionDomains(consented, groupConsent)
+	peerVisibleDomains := append([]string(nil), peer.Agreement.AllowedDomains...)
+	if peerRBAC {
+		peerVisibleDomains = append([]string(nil), groupConsent...)
+		policy, policyErr := m.getPeerRBACPolicyForAgreement(r.Context(), peer.Agreement)
+		if policyErr != nil {
+			httpError(w, http.StatusInternalServerError, "peer RBAC visibility lookup failed")
+			return
+		}
+		if policy != nil {
+			for _, grant := range policy.Domains {
+				if grant.Read {
+					peerVisibleDomains = append(peerVisibleDomains, grant.Domain)
+				}
+			}
+		}
 	}
 
 	deadline := time.Now().Add(syncPushBudget)
@@ -191,7 +236,36 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 			results = append(results, SyncItemResult{OriginMemoryID: item.OriginMemoryID, Outcome: SyncOutcomeRetry})
 			continue
 		}
-		res := m.admitSyncItem(r, ss, peer, consented, item)
+		pairwiseAllowed := DomainAllowed(pairwiseConsented, item.Domain)
+		relayed := item.OriginChainID != peer.ChainID
+		groupAllowed := DomainAllowed(groupOwnedByPeer, item.Domain)
+		if relayed {
+			groupAllowed = relayAuthorized[i]
+		}
+
+		// Direct and group traffic are independent capabilities on the same exact
+		// trusted edge. Direct v3 uses Copy+Subscribe. A native group item uses the
+		// owner->member journal projection, while a relay uses only the exact group
+		// triple above. Neither group lane falls back to broad pairwise scope.
+		publisherScopeAllowed := DomainAllowed(peer.Agreement.AllowedDomains, item.Domain)
+		receiverConsentAllowed := pairwiseAllowed || groupAllowed
+		useDirectionalVisibility := peerRBAC
+		if !relayed && peerRBAC {
+			// Exact v3 trust replaces tx-33 at Gate 3. Gate 4 independently
+			// selects direct Copy+Subscribe or exact group-owner authority.
+			publisherScopeAllowed = true
+		}
+		if relayed {
+			if peerRBAC {
+				publisherScopeAllowed = groupAllowed
+				receiverConsentAllowed = groupAllowed
+			} else {
+				publisherScopeAllowed = publisherScopeAllowed && groupAllowed
+				receiverConsentAllowed = groupAllowed
+			}
+		}
+		res := m.admitSyncItem(r, ss, peer, peerVisibleDomains, useDirectionalVisibility,
+			publisherScopeAllowed, receiverConsentAllowed, item)
 		// I5: collapse the sovereign-delete outcome to a generic terminal reason on
 		// the wire so the pushing peer cannot distinguish "you deleted this" from an
 		// ordinary durable reject. The receiver-internal suppression already happened
@@ -206,10 +280,10 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 
 // handleSyncDigest implements POST /fed/v1/sync/digest (behind peerAuth):
 // the authenticated peer asks what we have already decided about ITS
-// memories in a domain subtree. Answered from the sync_origin admission
-// ledger — including terminal rejections (never re-offer refused items),
-// deliberately NOT from the committed set (sovereign lifecycle: a later
-// local deprecation must not re-open delivery). Consent asymmetry is
+// memories in a domain subtree. Answered from admitted sync_origin decisions,
+// deliberately NOT from the committed set (sovereign lifecycle: a later local
+// deprecation must not re-open delivery). Rejections are not ledgered, so they
+// remain retryable after policy or authorization changes. Consent asymmetry is
 // surfaced, not silently dropped.
 func (m *Manager) handleSyncDigest(w http.ResponseWriter, r *http.Request) {
 	peer := peerFromCtx(r.Context())
@@ -235,13 +309,27 @@ func (m *Manager) handleSyncDigest(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > SyncDigestMaxIDs {
 		limit = SyncDigestMaxIDs
 	}
+	// Lease both pairwise and group digest authorization through the response.
+	// A completed Copy/Subscribe or group-membership revoke is therefore a hard
+	// metadata response barrier, just like query and journal serving.
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
+	currentAgreement, agreementErr := m.currentRequestAgreementBound(r.Context(), peer)
+	if agreementErr != nil {
+		httpError(w, http.StatusForbidden, "not_admitted")
+		return
+	}
+	currentPeer := *peer
+	currentPeer.Agreement = currentAgreement
+	peer = &currentPeer
 	if req.GroupID != "" {
 		m.handleSyncDigestGroup(w, r, ss, peer, &req, limit)
 		return
 	}
-	// Pairwise (2-node) path — unchanged: serve the requester's OWN admitted
-	// origin ids (origin_chain_id = requester) and surface asymmetric consent.
-	consented, err := ss.GetSyncDomains(r.Context(), peer.ChainID)
+	// Pairwise path: serve the requester's OWN admitted origin ids and surface
+	// the current receiver-side intersection. For v3 this is remote Publish(Copy)
+	// AND local Subscribe; legacy links retain sync_domains.
+	consented, _, err := m.pairwiseIngressPolicy(r.Context(), ss, peer.Agreement, peer.AgentID)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "consent lookup failed")
 		return
@@ -277,14 +365,22 @@ func (m *Manager) handleSyncDigest(w http.ResponseWriter, r *http.Request) {
 // non-owner relayer refuses backfill for them (docs §9.2 must-fix #12).
 func (m *Manager) handleSyncDigestGroup(w http.ResponseWriter, r *http.Request, ss *store.SQLiteStore, peer *peerIdentity, req *SyncDigestRequest, limit int) {
 	ctx := r.Context()
-	// Group membership/domain projections are effective serve policy. Hold a
-	// read lease from the first authorization read through the completed response
-	// write. A removal/narrowing takes the write side, so once it returns no
-	// response can still be emitted from the stale snapshot.
-	policyUnlock := ss.LockSyncPolicyRead()
-	defer policyUnlock()
+	// The outer digest handler holds the policy read lease through this response.
+	if bound, err := m.inboundGroupPeerBound(ctx, ss, peer); err != nil || !bound {
+		httpError(w, http.StatusForbidden, "not_admitted")
+		return
+	}
+	// The group journal is the domain authority, but it still rides an exact
+	// trusted transport edge. Fresh v3 links validate the frozen peer operator and
+	// intentionally ignore their empty tx-33 scope here. Legacy links retain the
+	// historical treaty gate in addition to group membership.
+	_, v3, edgeErr := m.pairwiseIngressPolicy(ctx, ss, peer.Agreement, peer.AgentID)
+	if edgeErr != nil || (!v3 && !DomainAllowed(peer.Agreement.AllowedDomains, req.Domain)) {
+		httpError(w, http.StatusForbidden, "not_admitted")
+		return
+	}
 	// Precondition: the requester must actively share req.Domain in this group.
-	shares, err := ss.MemberSharesGroupDomain(ctx, req.GroupID, peer.ChainID, req.Domain)
+	shares, err := ss.MemberSharesGroupDomainForAgent(ctx, req.GroupID, peer.ChainID, peer.AgentID, req.Domain)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "authorization failed")
 		return
@@ -292,6 +388,16 @@ func (m *Manager) handleSyncDigestGroup(w http.ResponseWriter, r *http.Request, 
 	if !shares {
 		// Generic — one reason for "not a member", "domain not shared", and
 		// "group unknown", so the response is not a group/domain existence oracle.
+		httpError(w, http.StatusForbidden, "not_admitted")
+		return
+	}
+	localShares, err := ss.MemberSharesGroupDomainForAgent(ctx, req.GroupID,
+		m.localChainID, hex.EncodeToString(m.agentPub), req.Domain)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "authorization failed")
+		return
+	}
+	if !localShares {
 		httpError(w, http.StatusForbidden, "not_admitted")
 		return
 	}
@@ -425,9 +531,13 @@ func validateSyncItem(peerChainID string, item *SyncItem) error {
 // they are returned on the wire and NOT recorded; a subsequent push re-runs
 // the gates fresh. The sender keeps such rows retryable (config-dependent) or
 // terminally rejected (content-derived) on its own side.
-func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *peerIdentity, consented []string, item *SyncItem) SyncItemResult {
+func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *peerIdentity,
+	peerVisibleDomains []string, directionalVisibility, publisherScopeAllowed, receiverConsentAllowed bool,
+	item *SyncItem,
+) SyncItemResult {
 	ctx := r.Context()
 	out := SyncItemResult{OriginMemoryID: item.OriginMemoryID}
+	originAgentPubkey := peer.AgentID
 
 	// recordAdmitted persists an admission with a NON-CANCELABLE context: the
 	// on-chain copy (or the pre-existing match) is irreversible, so the
@@ -436,12 +546,13 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 	// let the copy be re-forwarded (loop-prevention bypass).
 	recordAdmitted := func(localID string) error {
 		if err := ss.RecordSyncOrigin(context.Background(), store.SyncOrigin{
-			OriginChainID:   item.OriginChainID,
-			OriginMemoryID:  item.OriginMemoryID,
-			OriginCreatedAt: item.OriginCreatedAt,
-			LocalMemoryID:   localID,
-			DomainTag:       item.Domain,
-			Outcome:         store.SyncOutcomeAdmitted,
+			OriginChainID:     item.OriginChainID,
+			OriginMemoryID:    item.OriginMemoryID,
+			OriginCreatedAt:   item.OriginCreatedAt,
+			OriginAgentPubkey: originAgentPubkey,
+			LocalMemoryID:     localID,
+			DomainTag:         item.Domain,
+			Outcome:           store.SyncOutcomeAdmitted,
 			// Persist the origin's signature so THIS node can later relay the copy
 			// authentically (v11.8 mesh, docs §9.2): a relayer re-serves this sig
 			// verbatim and the receiver verifies it against the origin's roster key.
@@ -455,14 +566,17 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 		return nil
 	}
 
-	// Gate 3 — treaty scope.
-	if !DomainAllowed(peer.Agreement.AllowedDomains, item.Domain) {
+	// Gate 3 — publisher scope. The batch handler has already selected the one
+	// authoritative policy lane for this item: directional v2/v3, or legacy
+	// tx-33. Relayed v3 traffic also requires exact shared-group authorization.
+	if !publisherScopeAllowed {
 		out.Outcome = SyncOutcomeRejectedScope
 		return out
 	}
-	// Gate 4 — receiver consent (concrete rows only; DomainAllowed gives the
-	// same subtree semantics: consented "hr" covers item domain "hr.public").
-	if !DomainAllowed(consented, item.Domain) {
+	// Gate 4 — receiver consent. For v3 this is the authenticated publisher's
+	// Publish(Copy) intersected with local Subscribe; relays also require the
+	// exact shared-group intersection. No policy miss falls back to tx-33.
+	if !receiverConsentAllowed {
 		out.Outcome = SyncOutcomeRejectedConsent
 		return out
 	}
@@ -490,6 +604,7 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 			out.Outcome = SyncOutcomeRejectedOriginSig
 			return out
 		}
+		originAgentPubkey = hex.EncodeToString(originPub)
 	}
 	localID := syncMemoryID(item.OriginChainID, item.OriginMemoryID)
 
@@ -579,9 +694,10 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 		out.Outcome = SyncOutcomeRetry
 		return out
 	}
-	// Gate 7 — B-D1 cross-domain duplicate, SCOPED to the treaty. Only
+	// Gate 7 — B-D1 cross-domain duplicate, scoped to what the peer can read.
+	// Active direct v3 uses PeerRBAC Read; legacy/group uses the treaty. Only
 	// consider committed matches in domains this peer is already allowed to
-	// see: a match in a NON-treaty domain must not influence the outcome, or
+	// see: a match in a non-visible domain must not influence the outcome, or
 	// the reject/accept split becomes a presence oracle for content the peer
 	// can never read (cross-domain leak).
 	matches, err := ss.FindCommittedByContentHashDomains(ctx, item.ContentHash)
@@ -591,7 +707,11 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 	}
 	visibleDup := false
 	for _, mt := range matches {
-		if !DomainAllowed(peer.Agreement.AllowedDomains, mt.DomainTag) {
+		visibleDomains := peer.Agreement.AllowedDomains
+		if directionalVisibility {
+			visibleDomains = peerVisibleDomains
+		}
+		if !DomainAllowed(visibleDomains, mt.DomainTag) {
 			continue // invisible to the peer — must not leak via the outcome
 		}
 		if mt.DomainTag == item.Domain {

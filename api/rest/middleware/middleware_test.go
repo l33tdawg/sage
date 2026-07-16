@@ -58,6 +58,18 @@ func TestAuthMiddleware_ValidSignature(t *testing.T) {
 	assert.Equal(t, agentID, rr.Header().Get("X-Test-Agent-ID"))
 }
 
+func TestAuthMiddleware_FederationWriteUsesDefaultBodyLimit(t *testing.T) {
+	handler := Ed25519AuthMiddleware(okHandler)
+	body := bytes.Repeat([]byte{'x'}, defaultAuthenticatedBodyLimit+1)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/federation/cross/chain-peer/write", body)
+
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Request body too large")
+}
+
 func TestAuthMiddleware_MissingHeaders(t *testing.T) {
 	handler := Ed25519AuthMiddleware(okHandler)
 

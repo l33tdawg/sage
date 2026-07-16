@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -82,6 +83,7 @@ func newSyncTestManager(t *testing.T, comet *scriptedComet) (*Manager, *store.SQ
 // (peerAuth is exercised by the transport tests; these tests target the gates).
 func pushAs(t *testing.T, m *Manager, peer *peerIdentity, req SyncPushRequest) (*httptest.ResponseRecorder, *SyncPushResponse) {
 	t.Helper()
+	bindTestPeerAgreement(t, m, peer)
 	body, err := json.Marshal(req)
 	require.NoError(t, err)
 	httpReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/push", bytes.NewReader(body))
@@ -106,6 +108,47 @@ func testPeer(maxClearance int, allowed ...string) *peerIdentity {
 			AllowedDomains: allowed,
 			Status:         "active",
 		},
+	}
+}
+
+func TestLegacySyncPushReleasedAfterCompletedRevokeCannotAdmit(t *testing.T) {
+	ctx := context.Background()
+	comet := &scriptedComet{responses: []string{cometOK}}
+	m, ms := newSyncTestManager(t, comet)
+	peer := testPeer(2, "hr")
+	bindTestPeerAgreement(t, m, peer)
+	require.NoError(t, ms.SetSyncDomains(ctx, peer.ChainID, []string{"hr"}))
+	item := syncItem("revoked-push", "hr", "must not be admitted after revoke")
+	body, err := json.Marshal(SyncPushRequest{Items: []SyncItem{item}})
+	require.NoError(t, err)
+	blocked := &blockingPeerValueContext{
+		Context: context.Background(), peer: peer,
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/push", bytes.NewReader(body)).WithContext(blocked)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		m.handleSyncPush(rec, req)
+		close(done)
+	}()
+	select {
+	case <-blocked.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sync push did not pause at its authenticated peer context")
+	}
+	require.NoError(t, m.badger.UpdateCrossFedStatus(peer.ChainID, "revoked"))
+	require.NoError(t, ms.PurgeSyncPeerState(ctx, peer.ChainID))
+	close(blocked.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("released stale sync push did not finish")
+	}
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Zero(t, comet.calls.Load(), "revoked request reached consensus broadcast")
+	if origin, getErr := ms.GetSyncOrigin(ctx, peer.ChainID, item.OriginMemoryID); !errors.Is(getErr, sql.ErrNoRows) || origin != nil {
+		t.Fatalf("revoked request persisted origin: origin=%+v err=%v", origin, getErr)
 	}
 }
 
@@ -184,6 +227,63 @@ func TestSyncPushGateOrder(t *testing.T) {
 	assert.Equal(t, SyncOutcomeDuplicate, resp.Results[1].Outcome)
 	assert.Equal(t, syncMemoryID("chain-b", "m-ok"), resp.Results[1].LocalMemoryID)
 	assert.Equal(t, broadcastsBefore, comet.calls.Load(), "replay must not broadcast")
+}
+
+func TestSyncPushV3RequiresRemoteCopyAndLocalSubscription(t *testing.T) {
+	ctx := context.Background()
+	comet := &scriptedComet{responses: []string{cometOK}}
+	m, ms := newSyncTestManager(t, comet)
+	peer := testPeer(2, "legacy-only")
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	peer.AgentID = hex.EncodeToString(peerPub)
+	peer.Agreement.PeerPubKey = []byte("pin-bytes-32-aaaaaaaaaaaaaaaaaaaa")
+	require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: peer.ChainID, Role: "guest", ControllerChainID: peer.ChainID,
+		ControllerAgentID: peer.AgentID, PeerAgentID: peer.AgentID,
+		PolicyEpoch: "epoch-v3", RemoteCAPin: hex.EncodeToString(peer.Agreement.PeerPubKey),
+	}))
+	require.NoError(t, ms.ActivateSyncControl(ctx, peer.ChainID, "epoch-v3"))
+	_, err = ms.ApplyLocalDirectionalSyncPolicy(ctx, peer.ChainID, "epoch-v3",
+		SyncPolicyVersionPeerRBAC, 1, "local-1", nil, []string{"tii"})
+	require.NoError(t, err)
+	_, err = ms.ApplyRemoteDirectionalSyncPolicy(ctx, peer.ChainID, "epoch-v3",
+		SyncPolicyVersionPeerRBAC, 1, "remote-1", []string{"tii"}, nil)
+	require.NoError(t, err)
+
+	allowed := syncItem("m-v3-allowed", "tii.project", "v3 copy outside legacy treaty")
+	seedCommitted(t, ms, "local-legacy-duplicate", "legacy-only", allowed.Content)
+	comet.after = func() {
+		localID := syncMemoryID(peer.ChainID, allowed.OriginMemoryID)
+		sum := sha256.Sum256([]byte(allowed.Content))
+		_ = seedCommittedMemory(ctx, ms, localID, allowed.Domain, allowed.Content, sum[:])
+	}
+	_, resp := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{allowed}})
+	require.NotNil(t, resp)
+	assert.Equal(t, SyncOutcomeAccepted, resp.Results[0].Outcome,
+		"active direct v3 must not be gated by legacy tx-33 domains")
+	assert.NotEqual(t, SyncOutcomeRejectedXDomainDup, resp.Results[0].Outcome,
+		"without an explicit local PeerRBAC Read policy, legacy treaty domains must not be a duplicate-presence oracle")
+
+	_, err = ms.ApplyLocalDirectionalSyncPolicy(ctx, peer.ChainID, "epoch-v3",
+		SyncPolicyVersionPeerRBAC, 2, "local-2", nil, nil)
+	require.NoError(t, err)
+	noSubscription := syncItem("m-v3-no-sub", "tii.project", "receiver did not subscribe")
+	_, resp = pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{noSubscription}})
+	require.NotNil(t, resp)
+	assert.Equal(t, SyncOutcomeRejectedConsent, resp.Results[0].Outcome)
+
+	_, err = ms.ApplyLocalDirectionalSyncPolicy(ctx, peer.ChainID, "epoch-v3",
+		SyncPolicyVersionPeerRBAC, 3, "local-3", nil, []string{"tii"})
+	require.NoError(t, err)
+	_, err = ms.ApplyRemoteDirectionalSyncPolicy(ctx, peer.ChainID, "epoch-v3",
+		SyncPolicyVersionPeerRBAC, 2, "remote-2", nil, nil)
+	require.NoError(t, err)
+	noCopy := syncItem("m-v3-no-copy", "tii.project", "publisher did not grant copy")
+	_, resp = pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{noCopy}})
+	require.NotNil(t, resp)
+	assert.Equal(t, SyncOutcomeRejectedConsent, resp.Results[0].Outcome)
+	assert.Equal(t, int32(1), comet.calls.Load(), "denied v3 items must never reach consensus")
 }
 
 // TestSyncPushOriginSig exercises Gate 5.5: an origin-signed item is admitted;

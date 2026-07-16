@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,9 +20,15 @@ import (
 // fakeFederation implements FederationService with canned outcomes so the
 // merge path is testable without TLS or a peer chain.
 type fakeFederation struct {
-	outcomes []federation.PeerRecallOutcome
-	calls    int
-	lastReq  *federation.QueryRequest
+	outcomes    []federation.PeerRecallOutcome
+	calls       int
+	lastReq     *federation.QueryRequest
+	agreementMu sync.Mutex
+}
+
+func (f *fakeFederation) LockAgreementMutation() func() {
+	f.agreementMu.Lock()
+	return f.agreementMu.Unlock
 }
 
 func (f *fakeFederation) FanOutRecall(_ context.Context, _ []string, qr *federation.QueryRequest) []federation.PeerRecallOutcome {

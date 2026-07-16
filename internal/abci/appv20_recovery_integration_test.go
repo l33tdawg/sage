@@ -163,6 +163,7 @@ func TestAppV20LocalSnapshotRestoresCanonicalScopeAndRebuildsLostProjection(t *t
 	badgerStore, err := store.NewBadgerStore(filepath.Join(sourceData, "badger"))
 	require.NoError(t, err)
 	require.NoError(t, badgerStore.MarkUpgradeApplied(appV20UpgradeName, 20, 1))
+	seedTestGovernanceDelegationDomain(t, badgerStore)
 	sqliteStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(sourceData, "sage.db"))
 	require.NoError(t, err)
 	app, err := NewSageAppWithStores(badgerStore, sqliteStore, zerolog.Nop())
@@ -298,6 +299,7 @@ func TestAppV20ScopedCrashBetweenFinalizeAndCommitReplaysProjection(t *testing.T
 	badgerStore, err := store.NewBadgerStore(badgerPath)
 	require.NoError(t, err)
 	require.NoError(t, badgerStore.MarkUpgradeApplied(appV20UpgradeName, 20, 1))
+	seedTestGovernanceDelegationDomain(t, badgerStore)
 	sqliteStore, err := store.NewSQLiteStore(context.Background(), sqlitePath)
 	require.NoError(t, err)
 	app, err := NewSageAppWithStores(badgerStore, sqliteStore, zerolog.Nop())
@@ -333,8 +335,9 @@ func TestAppV20ScopedCrashBetweenFinalizeAndCommitReplaysProjection(t *testing.T
 	submitBlock := &abcitypes.RequestFinalizeBlock{
 		Height: 2, Time: time.Unix(3_002, 0).UTC(), Txs: [][]byte{rawSubmit},
 	}
-	// Inject a permanent SQL failure only after construction. FinalizeBlock
-	// writes canonical Badger state; Commit must panic before SaveState.
+	// Inject a permanent SQL failure only after construction. FinalizeBlock is
+	// wholly speculative; Commit must panic before publishing either Badger state
+	// or the handshake tuple.
 	app.offchainStore = &busyInjectingStore{OffchainStore: sqliteStore, alwaysFail: true}
 	app.flushMaxRetries = 1
 	firstSubmitResp, err := app.FinalizeBlock(context.Background(), submitBlock)
@@ -361,7 +364,7 @@ func TestAppV20ScopedCrashBetweenFinalizeAndCommitReplaysProjection(t *testing.T
 	assert.Equal(t, int64(0), app.state.Height, "failed Commit must leave persisted height behind")
 	rebuilt, err := app.RebuildScopedProjection(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 1, rebuilt)
+	assert.Zero(t, rebuilt, "failed Commit discarded the speculative submit, so there is no canonical row to rebuild")
 	replayedSubmitResp := finalizeAndCommitV20Block(t, app, submitBlock)
 	require.Zero(t, replayedSubmitResp.TxResults[0].Code, replayedSubmitResp.TxResults[0].Log)
 	assert.Equal(t, firstSubmitResp.TxResults[0].Data, replayedSubmitResp.TxResults[0].Data)
@@ -371,8 +374,8 @@ func TestAppV20ScopedCrashBetweenFinalizeAndCommitReplaysProjection(t *testing.T
 	assert.Equal(t, memory.StatusProposed, projected.Status)
 
 	// Two votes commit normally. The quorum-reaching third vote then crashes in
-	// the same FinalizeBlock→Commit gap and must recover from its immutable
-	// decision+height witness without re-crediting validator statistics.
+	// the same FinalizeBlock→Commit gap; the complete vote transition is discarded
+	// and replayed from the two-vote state without re-crediting statistics.
 	for i := 0; i < 2; i++ {
 		nonce := uint64(1)
 		if i == 0 {
@@ -411,10 +414,13 @@ func TestAppV20ScopedCrashBetweenFinalizeAndCommitReplaysProjection(t *testing.T
 	assert.Equal(t, 1, rebuilt)
 	projected, err = sqliteStore.GetMemory(context.Background(), memoryID)
 	require.NoError(t, err)
-	assert.Equal(t, memory.StatusCommitted, projected.Status)
+	assert.Equal(t, memory.StatusProposed, projected.Status)
 	replayedFinalVoteResp := finalizeAndCommitV20Block(t, app, finalVoteBlock)
 	require.Zero(t, replayedFinalVoteResp.TxResults[0].Code, replayedFinalVoteResp.TxResults[0].Log)
 	assert.Equal(t, firstFinalVoteResp.AppHash, replayedFinalVoteResp.AppHash)
+	projected, err = sqliteStore.GetMemory(context.Background(), memoryID)
+	require.NoError(t, err)
+	assert.Equal(t, memory.StatusCommitted, projected.Status)
 	votes, err := sqliteStore.GetVotes(context.Background(), memoryID)
 	require.NoError(t, err)
 	assert.Len(t, votes, 3)

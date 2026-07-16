@@ -164,9 +164,10 @@ func TestV75_MultiValidatorDrift_StaggeredBoot(t *testing.T) {
 		AgentBodyHash:  bodyHash,
 		AgentTimestamp: ts,
 		UpgradePropose: &tx.UpgradePropose{
-			Name:             proposalName,
-			TargetAppVersion: targetAppVersion,
-			ProposerID:       ak.id,
+			Name:               proposalName,
+			TargetAppVersion:   targetAppVersion,
+			ProposerID:         ak.id,
+			UpgradeDelayBlocks: defaultUpgradeDelayBlocks,
 		},
 	}
 	encoded, err := tx.EncodeTx(parsedTx)

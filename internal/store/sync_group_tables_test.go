@@ -379,9 +379,9 @@ func TestGroupStep6ReadModels(t *testing.T) {
 		t.Fatalf("UpsertSyncGroupDomain(secret): %v", err)
 	}
 	for _, o := range []SyncOrigin{
-		{OriginChainID: "chain-a", OriginMemoryID: "a1", DomainTag: "studio", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l1"},
-		{OriginChainID: "chain-x", OriginMemoryID: "x1", DomainTag: "studio.public", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l2"},
-		{OriginChainID: "chain-b", OriginMemoryID: "s1", DomainTag: "studio.secret", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l3"},
+		{OriginChainID: "chain-a", OriginAgentPubkey: "aa", OriginMemoryID: "a1", DomainTag: "studio", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l1", OriginSig: make([]byte, 64)},
+		{OriginChainID: "chain-x", OriginAgentPubkey: "xx", OriginMemoryID: "x1", DomainTag: "studio.public", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l2", OriginSig: make([]byte, 64)},
+		{OriginChainID: "chain-b", OriginAgentPubkey: "bb", OriginMemoryID: "s1", DomainTag: "studio.secret", Outcome: SyncOutcomeAdmitted, LocalMemoryID: "l3", OriginSig: make([]byte, 64)},
 	} {
 		if err = s.RecordSyncOrigin(ctx, o); err != nil {
 			t.Fatalf("RecordSyncOrigin: %v", err)

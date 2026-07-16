@@ -40,7 +40,7 @@ jobs:
           go-version: '1.25'
           cache: true
       - name: Run tests
-        run: go test ./... -v -count=1 -race
+        run: go test ./... -v -count=1 -race -timeout 30m
       - name: Test local CometBFT hardening
         run: make test-cometbft-patch
       - name: Run natter tests
@@ -52,6 +52,11 @@ jobs:
     name: v11.9 Multi-Process Fault Gates
     needs: test
     uses: ./.github/workflows/v11.9-fault-gates.yml
+    with:
+      # PR/main green must carry the same evidence required before a release
+      # tag can publish artifacts.
+      require_scoped_reconfiguration: true
+      require_authorized_state_sync: true
 
   frontend-static:
     name: Frontend Static Checks

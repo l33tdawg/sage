@@ -23,9 +23,13 @@ with raw exact-lone-residue recovery. The standalone Docker node copies the
 same six source files from exact v0.38.23 source commit
 `feb2aea4dc271d612129afc958cb844713ec792b`. The source still declares core
 semver `0.38.22`, so its commit-stamped runtime reports
-`0.38.22+feb2aea4dc271d612129afc958cb844713ec792b`. Its current topology
-harness does not yet perform the authorized state-sync transfer. A memory
-transaction is not
+`0.38.22+feb2aea4dc271d612129afc958cb844713ec792b`. The split four-validator
+topology harness intentionally proves Comet crash/partition/heal behavior, not
+state sync. A separate integrated `sage-gui serve` harness owns the authorized
+provider/observer/unauthorized/two-receiver transfer, durable-prepublication
+crash recovery, `session < seal < REST` order, provider restart, and exact
+projection/AppHash convergence. Its final exact-source cold pass remains
+pending and gates publication. A memory transaction is not
 "committed" in the SAGE sense until it has survived BFT
 consensus **and** validator vote quorum. These are separate stages: CometBFT
 provides ordered, non-equivocal block inclusion; validator votes provide
@@ -43,13 +47,19 @@ Agent REST submit
 REST handler builds signed tx → broadcasts via /broadcast_tx_sync (CometBFT RPC)
        │
        ▼
-CometBFT mempool (CheckTx validates signature + nonce)
+CometBFT mempool (CheckTx validates signature + nonce; app-v20 also applies
+advisory static resource hygiene and a 1 MiB raw-transaction ceiling)
        │
        ▼
-Block proposer includes tx in block proposal (PrepareProposal — pass-through)
+Block proposer includes tx in block proposal (PrepareProposal — legacy
+pass-through before app-v20 except exact authenticated bootstrap isolation;
+app-v20 enforces 64 tx / 1 MiB proposal bounds and seats bounded stale entries
+so FinalizeBlock can drain them deterministically)
        │
        ▼
-Other validators receive proposal (ProcessProposal — ACCEPT pass-through)
+Other validators receive proposal (ProcessProposal — rejects a mixed exact
+bootstrap or a proposal over the app-v20 bounds; bounded resource-invalid
+entries remain acceptable here and return Code 111 in FinalizeBlock)
        │
        ▼
 2/3+ validators prevote → precommit → block committed by CometBFT

@@ -80,6 +80,12 @@ func resolveRetainBlocks(configured int64, quorumEnabled bool) int64 {
 
 var errCoordinatedRestart = errors.New("coordinated restart requested")
 
+// Authenticated federation operations may include bounded consensus waits.
+// Keep the peer listener above the ordinary 60-second broadcast ceiling.
+// Peer Write itself is deliberately fail-closed in v11.9 until a scoped
+// consensus ingress capability exists.
+const federationListenerWriteTimeout = 70 * time.Second
+
 func runServe() (rerr error) {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -112,13 +118,24 @@ func runServe() (rerr error) {
 			return fmt.Errorf("create dir %s: %w", dir, mkErr)
 		}
 	}
-	recoveryAction, recoveryFound, recoveryErr := recoverPendingStateSyncActivation(context.Background(), cfg.DataDir, cometHome, badgerPath)
+	recoveredReceiverCompleted := false
+	recoveryAction, recoveryFound, recoveryErr := recoverPendingStateSyncActivation(
+		context.Background(), cfg.DataDir, cometHome, badgerPath,
+		func() error {
+			wasReceiving := cfg.Quorum.StateSync.Receiving
+			if completeErr := completeStateSyncReceivingRole(cfg); completeErr != nil {
+				return completeErr
+			}
+			recoveredReceiverCompleted = recoveredReceiverCompleted || wasReceiving
+			return nil
+		},
+	)
 	if recoveryErr != nil {
 		return fmt.Errorf("recover state sync activation before ABCI handshake: %w", recoveryErr)
 	} else if recoveryFound {
 		logger.Warn().Str("action", stateSyncRecoveryActionName(recoveryAction)).Msg("recovered interrupted state sync activation before opening Badger")
 	}
-	if finishRecoveredStateSyncRole(cfg, recoveryFound, recoveryAction) {
+	if recoveredReceiverCompleted {
 		logger.Info().Msg("completed recovered one-shot state sync as an ordinary synchronized node")
 	}
 	stateSyncRecoveryComplete := true
@@ -394,6 +411,9 @@ func runServe() (rerr error) {
 		return fmt.Errorf("create SAGE app: %w", err)
 	}
 	app.Version = version
+	if domainErr := app.SetExpectedGovernanceDelegationDomain(cfg.ChainID); domainErr != nil {
+		return fmt.Errorf("configure app-v20 governance domain from genesis chain_id: %w", domainErr)
+	}
 	retainBlocks := resolveRetainBlocks(cfg.RetainBlocks, cfg.Quorum.Enabled)
 	if retainBlocks > 0 {
 		app.SetRetainBlocks(retainBlocks)
@@ -479,13 +499,7 @@ func runServe() (rerr error) {
 		return fmt.Errorf("create boot state-sync runtime: %w", err)
 	}
 	if err := bootRuntime.ConfigureApplicationBundles(func(application abcitypes.Application) error {
-		configuredApp, ok := application.(*sageabci.SageApp)
-		if !ok {
-			return fmt.Errorf("expected *abci.SageApp, got %T", application)
-		}
-		configuredApp.Version = version
-		configuredApp.SetRetainBlocks(retainBlocks)
-		return nil
+		return configureStateSyncApplicationBundle(application, version, retainBlocks, cfg.ChainID)
 	}); err != nil {
 		return fmt.Errorf("configure state-sync application bundles: %w", err)
 	}
@@ -524,12 +538,35 @@ func runServe() (rerr error) {
 	if timeoutErr != nil {
 		return fmt.Errorf("resolve state-sync startup timeout: %w", timeoutErr)
 	}
-	cometStateReader, readerErr := newRunningCometStateReader(cometNode)
+	var receiverValidatorPublicKey []byte
+	if cfg.Quorum.StateSync.Receiving {
+		receiverPublicKey, publicKeyErr := pv.GetPubKey()
+		if publicKeyErr != nil || receiverPublicKey == nil {
+			return errors.New("read state-sync receiver validator public key before Comet seal")
+		}
+		receiverValidatorPublicKey = append([]byte(nil), receiverPublicKey.Bytes()...)
+	}
+	cometStateReader, readerErr := newRunningCometStateReader(cometNode, receiverValidatorPublicKey)
 	if readerErr != nil {
 		return fmt.Errorf("prepare running CometBFT state reader: %w", readerErr)
 	}
+	durableSeal := func(height int64, appHash []byte, _ uint64) error {
+		if height <= 0 {
+			return errors.New("state-sync activation seal has a non-positive height")
+		}
+		sealedHeight := uint64(height) // #nosec G115 -- positive height checked above
+		return statesync.SealActivatedDirectory(
+			cfg.DataDir,
+			filepath.Join(cfg.DataDir, stateSyncActivationJournalName),
+			sealedHeight,
+			appHash,
+			sealedHeight,
+			appHash,
+			func() error { return completeStateSyncReceivingRole(cfg) },
+		)
+	}
 	sealCtx, cancelSeal := context.WithTimeout(ctx, stateSyncStartupTimeout)
-	sealResult, sealErr := waitForBootStateSyncSeal(sealCtx, bootRuntime, cometStateReader)
+	sealResult, sealErr := waitForBootStateSyncSeal(sealCtx, bootRuntime, cometStateReader, durableSeal)
 	cancelSeal()
 	if sealErr != nil {
 		// A post-switch block-sync call may be waiting behind the PendingComet
@@ -544,20 +581,10 @@ func runServe() (rerr error) {
 		return fmt.Errorf("seal boot state sync before normal serving: %w", sealErr)
 	}
 	if sealResult.activated {
-		if sealResult.height <= 0 {
-			return errors.New("sealed state-sync activation has a non-positive height")
-		}
-		sealedHeight := uint64(sealResult.height) // #nosec G115 -- positive height checked above
-		if sealErr := statesync.SealActivatedDirectory(
-			cfg.DataDir,
-			filepath.Join(cfg.DataDir, stateSyncActivationJournalName),
-			sealedHeight,
-			sealResult.appHash,
-			sealedHeight,
-			sealResult.appHash,
-		); sealErr != nil {
-			return fmt.Errorf("seal state-sync activation directories: %w", sealErr)
-		}
+		logger.Info().
+			Int64("height", sealResult.height).
+			Str("app_hash", hex.EncodeToString(sealResult.appHash)).
+			Msg("authorized validator state-sync activation sealed before service admission")
 	}
 	servingApplication, gateErr := acquireNormalServingAfterStateSyncRecovery(stateSyncRecoveryComplete, bootRuntime)
 	if gateErr != nil {
@@ -729,7 +756,15 @@ func runServe() (rerr error) {
 	// Backfill on_chain_height and first_seen for agents already registered on-chain
 	// but missing these fields in SQLite (upgrade path from v3.5 → v3.7.6+)
 	signingKeyForMigrate := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger)
-	sageabci.MigrateAgentsOnChain(ctx, sqliteStore, badgerStore, cometRPC, signingKeyForMigrate, logger)
+	migrateAgentsOnChainAtStartup(
+		ctx,
+		sqliteStore,
+		badgerStore,
+		cometRPC,
+		signingKeyForMigrate,
+		cfg.Quorum.Enabled,
+		logger,
+	)
 
 	// v7.5 upgrade watchdog: auto-propose an UpgradePlan when the
 	// running binary's embedded TargetAppVersion exceeds the chain's
@@ -737,6 +772,7 @@ func runServe() (rerr error) {
 	// state for releases that don't change consensus rules).
 	startUpgradeWatchdog(ctx, upgradeWatchdogConfig{
 		BinaryVersion: version,
+		ChainID:       cfg.ChainID,
 		AgentKey:      loadOperatorAgentKeyAt(cfg.AgentKey, logger),
 		CometRPC:      cometRPC,
 		Logger:        logger,
@@ -755,6 +791,16 @@ func runServe() (rerr error) {
 
 	// Create REST server
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
+	// This runtime's Comet home is authoritative. Close the legacy env-loaded
+	// gateway before attempting that explicit key so a stale VALIDATOR_KEY_FILE
+	// can never survive a failed home-key load.
+	restServer.DisableValidatorSigningKey()
+	validatorSigningKey := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger)
+	if validatorSigningKey == nil {
+		logger.Error().Str("key_file", cometCfg.PrivValidatorKeyFile()).Msg("REST governance disabled: live validator signing key unavailable")
+	} else if keyErr := restServer.SetValidatorSigningKey(validatorSigningKey); keyErr != nil {
+		logger.Error().Err(keyErr).Msg("REST governance disabled: invalid validator signing key")
+	}
 	restServer.SetSuppCache(app.SuppCache)
 	// Backpressure signals: hand the REST layer the REAL runtime mempool cap.
 	// cometCfg comes from config.DefaultConfig() above with Mempool.Size never
@@ -768,6 +814,7 @@ func runServe() (rerr error) {
 	restServer.SetPostV8ForkAccessor(app.IsPostV8Fork)
 	restServer.SetPostV17ForNextTxAccessor(app.IsAppV17ActiveForNextTx)
 	restServer.SetPostV20ForNextTxAccessor(app.IsAppV20ActiveForNextTx)
+	restServer.SetGovernanceDomainAccessor(app.GovernanceDelegationDomain)
 
 	// v7.1: tell the REST layer which ed25519 public key identifies the local
 	// node operator. Requests signed with this key bypass the cross-agent
@@ -777,6 +824,9 @@ func runServe() (rerr error) {
 	operatorAgentID, operatorIDErr := readNodeOperatorKey(cfg.AgentKey)
 	if operatorIDErr == nil && operatorAgentID != "" {
 		restServer.SetNodeOperatorID(operatorAgentID)
+		if governanceErr := restServer.SetGovernanceOperatorID(operatorAgentID); governanceErr != nil {
+			logger.Error().Err(governanceErr).Msg("REST governance disabled: invalid operator identity")
+		}
 		// One registrar backs direct REST, OAuth, and wizard token issuance.
 		// Vault-backed bearers remain pending (and cannot authenticate) until
 		// their standard AgentRegister transaction is confirmed on-chain.
@@ -897,6 +947,7 @@ func runServe() (rerr error) {
 	dashboard.AppV18ActiveFn = app.IsAppV18ActiveForNextTx
 	dashboard.AppV19ActiveFn = app.IsAppV19ActiveForNextTx // app-v19: local-agents-default-READ flip (off-consensus)
 	dashboard.AppV20ActiveFn = app.IsAppV20ActiveForNextTx
+	dashboard.GovernanceDomainFn = app.GovernanceDelegationDomain
 	dashboard.StrictRBAC = cfg.RBAC.Strict // opt-out of the app-v19 default-read flip
 	// Embeddings setup: flip the config to the bundled Ollama + nomic-embed-text
 	// provider (the node re-reads it on restart). The embedder is locked to this.
@@ -944,14 +995,15 @@ func runServe() (rerr error) {
 	}
 	dashboard.WritePendingJoinFn = WritePendingJoin
 	dashboard.RemovePendingJoinFn = RemovePendingJoin
-	if sk := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger); sk != nil {
-		dashboard.SigningKey = sk
+	if validatorSigningKey != nil {
+		dashboard.SigningKey = validatorSigningKey
 	}
-	// v11.3 RBAC reassign + access-control: the validator key above is not a
-	// registered admin, so admin-gated txs (GovPropose, DomainReassign) are
-	// signed with the operator/admin key (~/.sage/agent.key), and owner-scoped
-	// AccessGrant/AccessRevoke are signed as the resolved domain owner. Neither
-	// touches consensus; memory submits still sign with the validator key so
+	// The operator/admin key (~/.sage/agent.key) authorizes admin-gated actions.
+	// After app-v20 governance keeps this key as an embedded exact-action proof
+	// while the live validator key above remains the outer proposer/voter;
+	// pre-v20 GovPropose and non-governance DomainReassign retain their direct
+	// historical signing path. Owner-scoped AccessGrant/AccessRevoke resolve the
+	// domain-owner key. Memory submits still use the validator outer key so
 	// authorship (submitting_agent) stays immutable.
 	if adminKey := adminSigningKeyAt(cfg.AgentKey); adminKey != nil {
 		dashboard.AdminSigningKey = adminKey
@@ -1075,6 +1127,16 @@ func runServe() (rerr error) {
 	// registry (sage_voter_running, sage_proposed_oldest_age_seconds, …) is
 	// exposed on the same loopback-bound dashboard mux as everything else here.
 	r.Method(http.MethodGet, "/metrics", promhttp.Handler())
+
+	// Preview builds represented peer Write with an ordinary AccessGrant. That
+	// credential is reusable through public REST or raw Comet even when the
+	// federation Manager cannot start, so retirement cannot be conditional on
+	// transport availability. Revoke every recorded preview grant before even
+	// binding an API listener and refuse to serve if consensus cannot confirm it.
+	if cleanupErr := dashboard.ReconcileFederationManagedGrants(ctx); cleanupErr != nil {
+		return fmt.Errorf("retire unsafe federation Write grants before serving: %w", cleanupErr)
+	}
+	dashboard.StartFederationManagedGrantReconciler()
 
 	httpServer := &http.Server{
 		Addr:         cfg.RESTAddr,
@@ -1392,7 +1454,7 @@ func runServe() (rerr error) {
 				Handler:      fedMgr.Router(),
 				TLSConfig:    fedTLS,
 				ReadTimeout:  15 * time.Second,
-				WriteTimeout: 15 * time.Second,
+				WriteTimeout: federationListenerWriteTimeout,
 				IdleTimeout:  60 * time.Second,
 			}
 			plainFedListener, listenErr := (&net.ListenConfig{}).Listen(ctx, "tcp", fedAddr)
@@ -1419,7 +1481,7 @@ func runServe() (rerr error) {
 					Handler:      fedMgr.Router(),
 					TLSConfig:    fedTLS.Clone(),
 					ReadTimeout:  15 * time.Second,
-					WriteTimeout: 15 * time.Second,
+					WriteTimeout: federationListenerWriteTimeout,
 					IdleTimeout:  60 * time.Second,
 				}
 				startListener(func() {

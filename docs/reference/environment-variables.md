@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.8.5. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
+<!-- Reconciled through SAGE v11.9.0. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
 
 # SAGE Reference — Environment Variables
 
@@ -57,7 +57,22 @@ disarming the flag. `sage-gui` also reads these from a `voter:` block in `config
 | `SAGE_VOTER_POLL_INTERVAL` | Voter poll cadence (Go duration, e.g. `2s`). Unset/invalid falls back to `2s`. | `2s` | sage-gui | `cmd/sage-gui/config.go` |
 | `SAGE_VOTER_REQUIRED` | If `true`, the node **refuses to boot** when no usable consensus key is available, instead of serving voterless. Guards a deployment that needs guaranteed auto-commit. | `false` | sage-gui | `cmd/sage-gui/config.go` |
 | `VOTER_REQUIRED` | `amid` equivalent of `SAGE_VOTER_REQUIRED` — sets the default for the `--require-voter` flag (fatal-exit when the validator key is missing/unreadable). | `false` | amid | `cmd/amid/main.go` |
-| `VALIDATOR_KEY_FILE` | `amid` socket mode: `priv_validator_key.json` for the auto-voter (in-process mode uses the key under `--home`). Without it in socket mode, no voter runs unless `--require-voter` forces a failure. | (none) | amid, REST | `cmd/amid/main.go`, `api/rest/server.go` |
+| `VALIDATOR_KEY_FILE` | `amid` socket mode: concrete `priv_validator_key.json` for both the auto-voter and REST governance gateway (in-process mode injects the key under `--home`). Without a usable live key, REST governance fails closed with 503; the random compatibility key is never accepted for governance. | (none) | amid, REST | `cmd/amid/main.go`, `api/rest/server.go` |
+| `SAGE_GOVERNANCE_OPERATOR_ID` | `amid` governance gateway allowlist: one hex Ed25519 identity permitted to authorize this validator's REST propose/vote/cancel calls. Equivalent flag: `--governance-operator-id`. Empty disables governance mutations. `sage-gui` wires its local operator identity without this env variable. | (none) | amid | `cmd/amid/main.go`, `api/rest/server.go` |
+
+### External Comet settings for app-v20
+
+These are CometBFT `config.toml` settings, not SAGE environment variables. Before
+the tagged app-v20 ceremony, every validator must run the exact v11.9 binary. A
+split `amid`/external-Comet deployment must also set
+`[mempool] max_tx_bytes = 1048576`; `recheck = true` is the supported release
+profile. Restart external Comet after changing either setting so no entry admitted
+under an older, larger bound remains in memory. SAGE deliberately drains bounded
+stale entries through deterministic FinalizeBlock Code 111, so liveness does not
+depend on recheck alone. Standard Comet RPC does not expose enough effective
+configuration to verify this remotely; operators must verify each local file and
+restart. `deploy/init-testnet.sh` and the v11.9 fault gate generate and validate
+this exact profile, including an empty WAL directory for the crash oracle.
 
 ---
 
@@ -157,5 +172,5 @@ These are read by the code but are **test-only or OS-provided** — don't rely o
 |----------|-------------------|--------|
 | `SAGE_CLOUDFLARED_BIN` | Honored **only under `go test`** (fake `cloudflared`). | `web/wizard_chatgpt.go:49` |
 | `SAGE_BROWSER_OPEN_BIN` | Honored **only under `go test`** (fake browser opener). | `web/wizard_chatgpt.go:60` |
-| `SAGE_TEST_POSTGRES_DSN`, `VALIDATOR_KEY_FILE`, `CI` | Test / CI harness internals. | various `*_test`-adjacent paths |
+| `SAGE_TEST_POSTGRES_DSN`, `CI` | Test / CI harness internals. | various `*_test`-adjacent paths |
 | `PATH`, `HOME`, `APPDATA` | OS-provided; SAGE reads them only to locate binaries / the home directory. | various |

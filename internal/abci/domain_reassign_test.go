@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -199,6 +200,30 @@ func TestDomainReassign_HappyPath(t *testing.T) {
 	consumed, err := app.badgerStore.GetState("gov:proposal:" + proposalID + ":consumed")
 	require.NoError(t, err)
 	assert.NotEmpty(t, consumed)
+}
+
+func TestAppV20DomainReassignRejectsOversizedGrantInvalidationBeforeTransfer(t *testing.T) {
+	app, admin, capturedOwner, newOwner := setupReassignTestApp(t)
+	app.appV20AppliedHeight = 50
+	for i := 0; i <= maxAppV20DomainReassignGrantPurge; i++ {
+		require.NoError(t, app.badgerStore.SetAccessGrant(
+			"protocol.lending_pool", fmt.Sprintf("agent-%04d", i), 2, 0, capturedOwner,
+		))
+	}
+	body := tx.DomainReassign{
+		Domain: "protocol.lending_pool", NewOwnerID: newOwner,
+	}
+	proposalID := seedExecutedReassignProposal(t, app, admin.id, body, 80)
+	body.ProposalID = proposalID
+
+	res := app.processDomainReassign(makeDomainReassignTx(t, admin, &body, 1), 100, time.Unix(1_700_000_000, 0))
+	assert.Equal(t, uint32(89), res.Code)
+	assert.Contains(t, res.Log, "revoke grants before retrying")
+	owner, err := app.badgerStore.GetDomainOwner(body.Domain)
+	require.NoError(t, err)
+	assert.Equal(t, capturedOwner, owner, "security-sensitive invalidation is preflighted before ownership changes")
+	_, _, _, err = app.badgerStore.GetAccessGrant(body.Domain, "agent-0000")
+	require.NoError(t, err, "an oversized set is rejected, never partially truncated")
 }
 
 // TestDomainReassign_Code82_ProposalNotExecuted

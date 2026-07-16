@@ -1,15 +1,20 @@
 package web
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/store"
@@ -130,23 +135,32 @@ func (h *DashboardHandler) handleGetProposal(govStore store.GovernanceStore) htt
 
 // handleDashboardGovPropose handles POST /v1/dashboard/governance/propose.
 func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDashboardGovernanceOperator(w, r) {
+		return
+	}
 	if h.CometBFTRPC == "" || h.SigningKey == nil {
 		writeError(w, http.StatusServiceUnavailable, "CometBFT consensus not configured")
 		return
 	}
 
 	var req struct {
-		Operation    string                  `json:"operation"`
-		TargetID     string                  `json:"target_id"`
-		TargetPubkey string                  `json:"target_pubkey,omitempty"`
-		TargetPower  int64                   `json:"target_power,omitempty"`
-		ExpiryBlocks int64                   `json:"expiry_blocks,omitempty"`
-		Reason       string                  `json:"reason"`
-		Payload      string                  `json:"payload,omitempty"`
-		Scope        *scope.ProposalTemplate `json:"scope,omitempty"`
+		ValidatorID      string                  `json:"validator_id,omitempty"`
+		GovernanceDomain string                  `json:"governance_domain,omitempty"`
+		Operation        string                  `json:"operation"`
+		TargetID         string                  `json:"target_id"`
+		TargetPubkey     string                  `json:"target_pubkey,omitempty"`
+		TargetPower      int64                   `json:"target_power,omitempty"`
+		ExpiryBlocks     int64                   `json:"expiry_blocks,omitempty"`
+		Reason           string                  `json:"reason"`
+		Payload          string                  `json:"payload,omitempty"`
+		Scope            *scope.ProposalTemplate `json:"scope,omitempty"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := decodeJSONBody(r, &req); err != nil {
+	rawBody, err := readDashboardGovernanceBody(w, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if err = json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -165,7 +179,8 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if op == tx.GovOpScopeAction && (h.AppV20ActiveFn == nil || !h.AppV20ActiveFn()) {
+	postAppV20 := h.AppV20ActiveFn != nil && h.AppV20ActiveFn()
+	if op == tx.GovOpScopeAction && !postAppV20 {
 		writeError(w, http.StatusConflict, "scope_action requires app-v20 activation")
 		return
 	}
@@ -185,9 +200,32 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 		return
 	}
 
+	outerKey := h.AdminSigningKey
+	proofBody := rawBody
+	if postAppV20 {
+		outerKey = h.SigningKey
+		if len(h.AdminSigningKey) != ed25519.PrivateKeySize {
+			writeError(w, http.StatusServiceUnavailable, "governance operator key not configured")
+			return
+		}
+		req.ValidatorID, req.GovernanceDomain, err = h.dashboardGovernanceAuthorizationContext()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		proofBody, err = json.Marshal(req)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to encode governance authorization")
+			return
+		}
+	} else if len(outerKey) != ed25519.PrivateKeySize {
+		writeError(w, http.StatusServiceUnavailable, "governance admin signing key not configured")
+		return
+	}
+
 	proposeTx := &tx.ParsedTx{
 		Type:      tx.TxTypeGovPropose,
-		Nonce:     tx.MonotonicNonce(h.SigningKey),
+		Nonce:     tx.MonotonicNonce(outerKey),
 		Timestamp: time.Now(),
 		GovPropose: &tx.GovPropose{
 			Operation:    op,
@@ -200,8 +238,15 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 		},
 	}
 
-	embedDashboardAgentProof(proposeTx, h.SigningKey)
-	if err = tx.SignTx(proposeTx, h.SigningKey); err != nil {
+	if postAppV20 {
+		if err = embedDashboardGovernanceProof(proposeTx, h.AdminSigningKey, r.Method, r.URL.RequestURI(), proofBody); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to authorize transaction")
+			return
+		}
+	} else {
+		embedDashboardAgentProof(proposeTx, outerKey)
+	}
+	if err = tx.SignTx(proposeTx, outerKey); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to sign transaction")
 		return
 	}
@@ -211,8 +256,16 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 		return
 	}
 
-	if err = broadcastTxSync(h.CometBFTRPC, encoded); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to broadcast: "+err.Error())
+	txHash, committedHeight, _, err := broadcastTxCommitWeb(h.CometBFTRPC, encoded)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "governance proposal rejected: "+err.Error())
+		return
+	}
+	validatorID := auth.PublicKeyToAgentID(ed25519.PublicKey(proposeTx.PublicKey))
+	proposalID := governance.ComputeProposalID(validatorID, committedHeight, governance.ProposalOp(op), req.TargetID)
+	proposalStatus, err := h.dashboardCommittedGovernanceStatus(proposalID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "proposal committed but authoritative state verification failed: "+err.Error())
 		return
 	}
 
@@ -222,16 +275,19 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 			Type:    EventGovernance,
 			Content: fmt.Sprintf("Proposal submitted: %s %s", req.Operation, req.TargetID),
 			Data: map[string]any{
-				"action":    "propose",
-				"operation": req.Operation,
-				"target_id": req.TargetID,
+				"action":      "propose",
+				"proposal_id": proposalID,
+				"tx_hash":     txHash,
+				"operation":   req.Operation,
+				"target_id":   req.TargetID,
 			},
 		})
 	}
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"status":  "submitted",
-		"message": "Governance proposal submitted for consensus.",
+		"proposal_id": proposalID,
+		"tx_hash":     txHash,
+		"status":      proposalStatus,
 	})
 }
 
@@ -274,17 +330,26 @@ func resolveDashboardGovProposalPayload(op tx.GovProposalOp, targetID, rawPayloa
 
 // handleDashboardGovVote handles POST /v1/dashboard/governance/vote.
 func (h *DashboardHandler) handleDashboardGovVote(w http.ResponseWriter, r *http.Request) {
+	if !h.requireDashboardGovernanceOperator(w, r) {
+		return
+	}
 	if h.CometBFTRPC == "" || h.SigningKey == nil {
 		writeError(w, http.StatusServiceUnavailable, "CometBFT consensus not configured")
 		return
 	}
 
 	var req struct {
-		ProposalID string `json:"proposal_id"`
-		Decision   string `json:"decision"`
+		ValidatorID      string `json:"validator_id,omitempty"`
+		GovernanceDomain string `json:"governance_domain,omitempty"`
+		ProposalID       string `json:"proposal_id"`
+		Decision         string `json:"decision"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := decodeJSONBody(r, &req); err != nil {
+	rawBody, err := readDashboardGovernanceBody(w, r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if err = json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
@@ -310,7 +375,28 @@ func (h *DashboardHandler) handleDashboardGovVote(w http.ResponseWriter, r *http
 		},
 	}
 
-	embedDashboardAgentProof(voteTx, h.SigningKey)
+	if h.AppV20ActiveFn != nil && h.AppV20ActiveFn() {
+		if len(h.AdminSigningKey) != ed25519.PrivateKeySize {
+			writeError(w, http.StatusServiceUnavailable, "governance operator key not configured")
+			return
+		}
+		req.ValidatorID, req.GovernanceDomain, err = h.dashboardGovernanceAuthorizationContext()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		proofBody, marshalErr := json.Marshal(req)
+		if marshalErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to encode governance authorization")
+			return
+		}
+		if err = embedDashboardGovernanceProof(voteTx, h.AdminSigningKey, r.Method, r.URL.RequestURI(), proofBody); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to authorize transaction")
+			return
+		}
+	} else {
+		embedDashboardAgentProof(voteTx, h.SigningKey)
+	}
 	if err = tx.SignTx(voteTx, h.SigningKey); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to sign transaction")
 		return
@@ -321,8 +407,9 @@ func (h *DashboardHandler) handleDashboardGovVote(w http.ResponseWriter, r *http
 		return
 	}
 
-	if err = broadcastTxSync(h.CometBFTRPC, encoded); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to broadcast: "+err.Error())
+	txHash, _, _, err := broadcastTxCommitWeb(h.CometBFTRPC, encoded)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "governance vote rejected: "+err.Error())
 		return
 	}
 
@@ -335,17 +422,99 @@ func (h *DashboardHandler) handleDashboardGovVote(w http.ResponseWriter, r *http
 				"action":      "vote",
 				"proposal_id": req.ProposalID,
 				"decision":    req.Decision,
+				"tx_hash":     txHash,
 			},
 		})
 	}
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"status":  "submitted",
-		"message": "Governance vote submitted for consensus.",
+		"tx_hash": txHash,
+		"status":  "recorded",
 	})
 }
 
 // --- Helpers -----------------------------------------------------------------
+
+func (h *DashboardHandler) requireDashboardGovernanceOperator(w http.ResponseWriter, r *http.Request) bool {
+	if !h.isCEREBRUMOperatorRequest(r) {
+		writeError(w, http.StatusForbidden, "only the authenticated local node operator may mutate governance")
+		return false
+	}
+	return true
+}
+
+func (h *DashboardHandler) dashboardGovernanceAuthorizationContext() (string, string, error) {
+	if len(h.SigningKey) != ed25519.PrivateKeySize {
+		return "", "", fmt.Errorf("live validator signing key not configured")
+	}
+	pub, ok := h.SigningKey.Public().(ed25519.PublicKey)
+	if !ok || len(pub) != ed25519.PublicKeySize {
+		return "", "", fmt.Errorf("live validator identity is invalid")
+	}
+	if h.GovernanceDomainFn == nil {
+		return "", "", fmt.Errorf("app-v20 governance chain domain not configured")
+	}
+	domain := h.GovernanceDomainFn()
+	decoded, err := hex.DecodeString(domain)
+	if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != domain {
+		return "", "", fmt.Errorf("app-v20 governance chain domain is unavailable")
+	}
+	return auth.PublicKeyToAgentID(pub), domain, nil
+}
+
+func (h *DashboardHandler) dashboardCommittedGovernanceStatus(proposalID string) (string, error) {
+	if h.BadgerStore == nil {
+		return "unknown", nil
+	}
+	data, err := h.BadgerStore.GetGovProposal(proposalID)
+	if err != nil {
+		return "", fmt.Errorf("load proposal: %w", err)
+	}
+	if len(data) == 0 {
+		return "", fmt.Errorf("proposal is absent after successful commit")
+	}
+	var proposal governance.ProposalState
+	if err = json.Unmarshal(data, &proposal); err != nil {
+		return "", fmt.Errorf("decode proposal: %w", err)
+	}
+	if proposal.ProposalID != proposalID {
+		return "", fmt.Errorf("proposal id mismatch: got %q", proposal.ProposalID)
+	}
+	return string(proposal.Status), nil
+}
+
+func readDashboardGovernanceBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	return io.ReadAll(r.Body)
+}
+
+// embedDashboardGovernanceProof records the operator/admin as an action-bound
+// authorizer while leaving the outer ParsedTx signature to the validator. This
+// mirrors the signed REST gateway envelope and gives consensus exact
+// method/path/body, freshness, and single-use nonce evidence.
+func embedDashboardGovernanceProof(ptx *tx.ParsedTx, operatorKey ed25519.PrivateKey, method, path string, body []byte) error {
+	if len(operatorKey) != ed25519.PrivateKeySize {
+		return fmt.Errorf("operator key has length %d", len(operatorKey))
+	}
+	nonce := make([]byte, 8)
+	if _, err := rand.Read(nonce); err != nil {
+		return fmt.Errorf("generate governance proof nonce: %w", err)
+	}
+	timestamp := time.Now().Unix()
+	canonical := append([]byte(method+" "+path+"\n"), body...)
+	bodyHash := sha256.Sum256(canonical)
+	pub, ok := operatorKey.Public().(ed25519.PublicKey)
+	if !ok {
+		return fmt.Errorf("operator key has no Ed25519 public key")
+	}
+	ptx.AgentPubKey = append([]byte(nil), pub...)
+	ptx.AgentSig = auth.SignRequestWithNonce(operatorKey, method, path, body, timestamp, nonce)
+	ptx.AgentTimestamp = timestamp
+	ptx.AgentBodyHash = append([]byte(nil), bodyHash[:]...)
+	ptx.AgentNonce = append([]byte(nil), nonce...)
+	ptx.AgentRequest = canonical
+	return nil
+}
 
 // decodeJSONBody decodes JSON from the request body into the target.
 func decodeJSONBody(r *http.Request, v any) error {

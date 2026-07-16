@@ -2,6 +2,8 @@ package tx
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +51,16 @@ func TestEncodeDecodeUpgradePropose(t *testing.T) {
 			},
 		},
 		{
+			name: "app_v20_governance_domain",
+			body: &UpgradePropose{
+				Name:               "app-v20",
+				TargetAppVersion:   20,
+				ProposerID:         "agent-v20",
+				UpgradeDelayBlocks: 200,
+				GovernanceDomain:   "abababababababababababababababababababababababababababababababab",
+			},
+		},
+		{
 			name: "max_app_version",
 			body: &UpgradePropose{
 				Name:               "v999.0.0",
@@ -86,6 +98,70 @@ func TestEncodeDecodeUpgradePropose(t *testing.T) {
 			assert.Equal(t, tt.body.BinarySHA256, decoded.UpgradePropose.BinarySHA256)
 			assert.Equal(t, tt.body.ProposerID, decoded.UpgradePropose.ProposerID)
 			assert.Equal(t, tt.body.UpgradeDelayBlocks, decoded.UpgradePropose.UpgradeDelayBlocks)
+			assert.Equal(t, tt.body.GovernanceDomain, decoded.UpgradePropose.GovernanceDomain)
+		})
+	}
+}
+
+// TestDecodeUpgradeProposeLegacyMalformedAppV20Tail pins replay compatibility
+// with the pre-app-v20 decoder, which ignored every payload byte after
+// UpgradeDelayBlocks. A malformed optional tail must still decode and verify
+// under the legacy no-domain signing form; post-app-v15 consensus rejects the
+// distinct raw bytes through its canonical re-encode check.
+func TestDecodeUpgradeProposeLegacyMalformedAppV20Tail(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	legacy := &ParsedTx{
+		Type:      TxTypeUpgradePropose,
+		Nonce:     7,
+		Timestamp: time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC),
+		UpgradePropose: &UpgradePropose{
+			Name:               "app-v20",
+			TargetAppVersion:   20,
+			ProposerID:         "legacy-proposer",
+			UpgradeDelayBlocks: 200,
+		},
+	}
+	require.NoError(t, SignTx(legacy, privateKey))
+	canonicalLegacy, err := EncodeTx(legacy)
+	require.NoError(t, err)
+
+	payloadLen := int(binary.BigEndian.Uint32(canonicalLegacy[1:5]))
+	payloadEnd := 5 + payloadLen
+	require.LessOrEqual(t, payloadEnd, len(canonicalLegacy))
+
+	for _, tc := range []struct {
+		name string
+		tail []byte
+	}{
+		{name: "truncated length prefix", tail: []byte{0x00, 0x00, 0x00}},
+		{name: "truncated declared value", tail: []byte{0x00, 0x00, 0x00, 0x40, 0x01}},
+		{name: "uppercase domain", tail: appendBytes(nil, []byte(strings.Repeat("AB", 32)))},
+		{name: "non-hex domain", tail: appendBytes(nil, []byte(strings.Repeat("g", 64)))},
+		{
+			name: "canonical field plus extra byte",
+			tail: append(appendBytes(nil, []byte(strings.Repeat("ab", 32))), 0x01),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withTail := make([]byte, 0, len(canonicalLegacy)+len(tc.tail))
+			withTail = append(withTail, canonicalLegacy[:payloadEnd]...)
+			withTail = append(withTail, tc.tail...)
+			withTail = append(withTail, canonicalLegacy[payloadEnd:]...)
+			binary.BigEndian.PutUint32(withTail[1:5], uint32(payloadLen+len(tc.tail))) // #nosec G115 -- test payload is tiny
+
+			decoded, decodeErr := DecodeTx(withTail)
+			require.NoError(t, decodeErr)
+			require.NotNil(t, decoded.UpgradePropose)
+			assert.Empty(t, decoded.UpgradePropose.GovernanceDomain)
+			valid, verifyErr := VerifyTx(decoded)
+			require.NoError(t, verifyErr)
+			assert.True(t, valid, "legacy signature must retain its historical meaning")
+
+			reencoded, encodeErr := EncodeTx(decoded)
+			require.NoError(t, encodeErr)
+			assert.Equal(t, canonicalLegacy, reencoded)
+			assert.NotEqual(t, withTail, reencoded, "post-app-v15 canonical encoding gate must detect the ignored tail")
 		})
 	}
 }

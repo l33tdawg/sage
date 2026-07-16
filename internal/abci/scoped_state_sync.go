@@ -301,6 +301,9 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 		return 0, nil, fmt.Errorf("%s persisted AppHash does not match Badger state", label)
 	}
 	probe := &SageApp{badgerStore: badgerStore}
+	if _, err := probe.governanceDelegationDomain(); err != nil {
+		return 0, nil, fmt.Errorf("verify %s governance delegation domain: %w", label, err)
+	}
 	if _, err := probe.VerifyScopedCanonicalState(); err != nil {
 		return 0, nil, fmt.Errorf("verify %s scoped state: %w", label, err)
 	}

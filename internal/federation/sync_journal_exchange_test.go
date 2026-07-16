@@ -44,15 +44,60 @@ func (w *blockingResponseWriter) Write(p []byte) (int, error) {
 	return w.body.Write(p)
 }
 
-// journalAs drives handleSyncJournal with an injected authenticated peer.
+// journalAs drives handleSyncJournal with the exact roster key. Older fixtures
+// that predate member-key enforcement omitted the key; fill only that empty test
+// field so they model the signed invitation invariant production always has.
 func journalAs(t *testing.T, m *Manager, peerChain string, req SyncJournalRequest) (*httptest.ResponseRecorder, *SyncJournalResponse) {
+	t.Helper()
+	agentID := ""
+	if ss := m.syncStore(); ss != nil && req.GroupID != "" {
+		member, err := ss.GetSyncGroupMember(context.Background(), req.GroupID, peerChain)
+		if err == nil && member != nil {
+			if member.MemberAgentPubkey == "" {
+				pub, _, keyErr := ed25519.GenerateKey(nil)
+				if keyErr != nil {
+					t.Fatal(keyErr)
+				}
+				member.MemberAgentPubkey = hex.EncodeToString(pub)
+				if err := ss.UpsertSyncGroupMember(context.Background(), *member); err != nil {
+					t.Fatal(err)
+				}
+			}
+			agentID = member.MemberAgentPubkey
+		}
+	}
+	if agentID == "" {
+		pub, _, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		agentID = hex.EncodeToString(pub)
+	}
+	return journalAsAgent(t, m, peerChain, agentID, req)
+}
+
+func journalAsAgent(t *testing.T, m *Manager, peerChain, peerAgent string, req SyncJournalRequest) (*httptest.ResponseRecorder, *SyncJournalResponse) {
 	t.Helper()
 	if req.Version == 0 {
 		req.Version = JournalWireVersion
 	}
 	body, _ := json.Marshal(req)
 	httpReq := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/journal", bytes.NewReader(body))
-	httpReq = httpReq.WithContext(context.WithValue(httpReq.Context(), peerCtxKey{}, &peerIdentity{ChainID: peerChain}))
+	peer := &peerIdentity{ChainID: peerChain, AgentID: peerAgent, Agreement: &store.CrossFedRecord{
+		RemoteChainID: peerChain, AllowedDomains: []string{"*"}, Status: "active",
+	}}
+	if ss := m.syncStore(); ss != nil {
+		control, err := ss.GetSyncControl(context.Background(), peerChain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if control == nil {
+			bindInboundGroupPeer(t, m, ss, peer, "guest")
+		} else {
+			peer.Agreement.PeerPubKey, _ = hex.DecodeString(control.RemoteCAPin)
+		}
+	}
+	httpReq = httpReq.WithContext(context.WithValue(httpReq.Context(), peerCtxKey{}, peer))
 	rr := httptest.NewRecorder()
 	m.handleSyncJournal(rr, httpReq)
 	if rr.Code != http.StatusOK {
@@ -74,6 +119,47 @@ func seedGroup(t *testing.T, ms *store.SQLiteStore, groupID, controllerChain str
 		t.Fatalf("seed group: %v", err)
 	}
 	return pub, key
+}
+
+// bindPullJournalPeer gives PullGroupJournal the same exact, currently-active
+// trust edge production reconciliation requires. A fetched page is not authority
+// by itself: its serving chain must still be the JOIN-frozen operator and an
+// active exact-key group member when the local append transaction begins.
+func bindPullJournalPeer(t *testing.T, m *Manager, ms *store.SQLiteStore, groupID, remoteChain string, remotePub ed25519.PublicKey) {
+	t.Helper()
+	if m.badger == nil {
+		attachBadger(t, m)
+	}
+	peer := &peerIdentity{
+		ChainID: remoteChain,
+		AgentID: hex.EncodeToString(remotePub),
+		Agreement: &store.CrossFedRecord{
+			RemoteChainID:  remoteChain,
+			AllowedDomains: []string{"*"},
+			Status:         "active",
+		},
+	}
+	bindInboundGroupPeer(t, m, ms, peer, "guest")
+
+	upsertExactActive := func(chain, agentID string) {
+		member, err := ms.GetSyncGroupMember(context.Background(), groupID, chain)
+		if err != nil {
+			t.Fatalf("read pull member %s: %v", chain, err)
+		}
+		if member == nil {
+			member = &store.SyncGroupMember{GroupID: groupID, MemberChainID: chain, Role: store.GroupRoleFullSync}
+		}
+		if member.Role == "" {
+			member.Role = store.GroupRoleFullSync
+		}
+		member.MemberState = store.GroupMemberActive
+		member.MemberAgentPubkey = agentID
+		if err := ms.UpsertSyncGroupMember(context.Background(), *member); err != nil {
+			t.Fatalf("seed pull member %s: %v", chain, err)
+		}
+	}
+	upsertExactActive(remoteChain, peer.AgentID)
+	upsertExactActive(m.localChainID, hex.EncodeToString(m.agentPub))
 }
 
 // TestJournalSubchainAuthorization is the metadata-isolation gate (§5.2).
@@ -121,12 +207,15 @@ func TestPullGroupJournalIngest(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	peerPub, _, _ := ed25519.GenerateKey(nil)
+	bindPullJournalPeer(t, m, ms, "g1", "chain-peer", peerPub)
 	memPub, memKey, _ := ed25519.GenerateKey(nil)
-	// chain-peer is NOT pre-seeded — the pulled member_invite CREATES it (apply).
+	// The serving peer is already an exact active member. The pulled journal may
+	// expand the roster, but it cannot bootstrap its own transport authority.
 
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
 	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
-		signedMemberInvitePayload(t, "g1", "chain-peer", memPub, memKey, store.GroupRoleFullSync, "pinP"))
+		signedMemberInvitePayload(t, "g1", "chain-new", memPub, memKey, store.GroupRoleFullSync, "pinP"))
 	peerChain := []store.SyncGroupLogEntry{e0, e1}
 	m.syncJournalFn = func(_ context.Context, _ string, req *SyncJournalRequest) (*SyncJournalResponse, error) {
 		resp := &SyncJournalResponse{Version: JournalWireVersion, NextCursor: req.AfterSeq, RosterHead: e1.EntryHash}
@@ -153,14 +242,15 @@ func TestPullGroupJournalIngest(t *testing.T) {
 	if n2, err := m.PullGroupJournal(ctx, "chain-peer", "g1", RosterSubchain); err != nil || n2 != 0 {
 		t.Fatalf("idempotent re-pull: n=%d err=%v", n2, err)
 	}
-	// APPLY created chain-peer as an invited member with its signed pubkey.
-	mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-peer")
+	// APPLY created chain-new as an invited member with its signed pubkey.
+	mem, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-new")
 	if mem == nil || mem.MemberState != store.GroupMemberInvited || mem.MemberAgentPubkey != hex.EncodeToString(memPub) {
 		t.Fatalf("member_invite not applied: %+v", mem)
 	}
 	// Convergence tracking recorded the peer's head without disturbing last_acked.
-	if mem.LastSeenJournalHead != e1.EntryHash || mem.LastAckedRosterRevision != 0 {
-		t.Fatalf("convergence not tracked cleanly: %+v", mem)
+	peer, _ := ms.GetSyncGroupMember(ctx, "g1", "chain-peer")
+	if peer == nil || peer.LastSeenJournalHead != e1.EntryHash || peer.LastAckedRosterRevision != 0 {
+		t.Fatalf("convergence not tracked cleanly: %+v", peer)
 	}
 }
 
@@ -228,6 +318,7 @@ func TestPullGroupJournalDomainAddRequiresAndPreservesControllerApproval(t *test
 		}); err != nil {
 			t.Fatalf("owner: %v", err)
 		}
+		bindPullJournalPeer(t, m, ms, "g1", "chain-owner", ownerPub)
 		return m, ms
 	}
 
@@ -235,7 +326,7 @@ func TestPullGroupJournalDomainAddRequiresAndPreservesControllerApproval(t *test
 	m.syncJournalFn = func(context.Context, string, *SyncJournalRequest) (*SyncJournalResponse, error) {
 		return &SyncJournalResponse{Version: JournalWireVersion, Entries: []JournalEntryWire{storeToWire(entry)}, NextCursor: 0}, nil
 	}
-	if n, err := m.PullGroupJournal(ctx, "chain-peer", "g1", DomainSubchain("hr")); err != nil || n != 1 {
+	if n, err := m.PullGroupJournal(ctx, "chain-owner", "g1", DomainSubchain("hr")); err != nil || n != 1 {
 		t.Fatalf("approved remote domain_add: n=%d err=%v", n, err)
 	}
 	if domains, err := ms.ListSyncGroupDomains(ctx, "g1", true); err != nil || len(domains) != 1 || domains[0].DomainTag != "hr" {
@@ -251,7 +342,7 @@ func TestPullGroupJournalDomainAddRequiresAndPreservesControllerApproval(t *test
 	m2.syncJournalFn = func(context.Context, string, *SyncJournalRequest) (*SyncJournalResponse, error) {
 		return &SyncJournalResponse{Version: JournalWireVersion, Entries: []JournalEntryWire{storeToWire(ownerOnly)}, NextCursor: 0}, nil
 	}
-	if n, err := m2.PullGroupJournal(ctx, "chain-peer", "g1", DomainSubchain("hr")); err == nil || n != 0 {
+	if n, err := m2.PullGroupJournal(ctx, "chain-owner", "g1", DomainSubchain("hr")); err == nil || n != 0 {
 		t.Fatalf("owner-only remote domain_add must fail closed: n=%d err=%v", n, err)
 	}
 }
@@ -376,10 +467,12 @@ func TestPullGroupJournalRejectsReplaySpin(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	peerPub, _, _ := ed25519.GenerateKey(nil)
+	bindPullJournalPeer(t, m, ms, "g1", "chain-peer", peerPub)
 	memPub, memKey, _ := ed25519.GenerateKey(nil)
 	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
 	e1 := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "member_invite", "chain-ctl", ctlPub, ctlKey,
-		signedMemberInvitePayload(t, "g1", "chain-peer", memPub, memKey, store.GroupRoleFullSync, "pinP"))
+		signedMemberInvitePayload(t, "g1", "chain-new", memPub, memKey, store.GroupRoleFullSync, "pinP"))
 
 	calls := 0
 	// ALWAYS returns [e0,e1] regardless of after_seq, with a cursor claiming
@@ -449,6 +542,16 @@ func TestHandleSyncJournalAuthzNonOracle(t *testing.T) {
 	if rrNonMember.Body.String() != rrAbsentGroup.Body.String() || rrNonMember.Body.String() != rrNonActive.Body.String() {
 		t.Fatalf("403 bodies differ -> existence oracle:\n non-member=%q\n absent=%q\n non-active=%q",
 			rrNonMember.Body.String(), rrAbsentGroup.Body.String(), rrNonActive.Body.String())
+	}
+	wrongPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rrWrongKey, _ := journalAsAgent(t, m, "chain-a", hex.EncodeToString(wrongPub), SyncJournalRequest{
+		GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1,
+	})
+	if rrWrongKey.Code != http.StatusForbidden || rrWrongKey.Body.String() != rrNonMember.Body.String() {
+		t.Fatalf("same-chain wrong operator leaked group journal: code=%d body=%q", rrWrongKey.Code, rrWrongKey.Body.String())
 	}
 
 	// Malformed request -> 400.
@@ -546,6 +649,7 @@ func TestPullTerminalRemovalSuffixConvergesWithoutOldDomainJournal(t *testing.T)
 			t.Fatalf("member: %v", err)
 		}
 	}
+	bindPullJournalPeer(t, m, ms, "g1", "chain-owner", ownerPub)
 	if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{GroupID: "g1", DomainTag: "hr", OwnerChainID: "chain-owner", AddedRevision: 3}); err != nil {
 		t.Fatalf("domain: %v", err)
 	}
@@ -573,6 +677,97 @@ func TestPullTerminalRemovalSuffixConvergesWithoutOldDomainJournal(t *testing.T)
 	}
 	if got, _ := ms.GetSyncGroupSubchainHead(ctx, "g1", DomainSubchain("hr")); got == nil || got.EntryHash != d1.EntryHash {
 		t.Fatalf("terminal suffix did not advance local head: %+v", got)
+	}
+}
+
+func TestPullGroupJournalDelayedResponseCannotCommitAfterRevoke(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		terminalOnly bool
+	}{
+		{name: "normal-page"},
+		{name: "terminal-sparse-page", terminalOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+			peerPub, peerKey, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{
+				GroupID: "g-race", ControllerChainID: "chain-peer", ControllerAgentPubkey: hex.EncodeToString(peerPub),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			bindPullJournalPeer(t, m, ms, "g-race", "chain-peer", peerPub)
+
+			subchain := RosterSubchain
+			entry := mustEntry(t, "g-race", subchain, 0, "", "group_create", "chain-peer", peerPub, peerKey, nil)
+			if tc.terminalOnly {
+				subchain = DomainSubchain("hr")
+				if err := ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
+					GroupID: "g-race", DomainTag: "hr", OwnerChainID: "chain-peer", AddedRevision: 1,
+				}); err != nil {
+					t.Fatal(err)
+				}
+				entry = mustEntry(t, "g-race", subchain, 1, "withheld-predecessor", "domain_remove", "chain-peer", peerPub, peerKey, domainRemovePayload("hr"))
+			}
+
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			var enteredOnce sync.Once
+			m.syncJournalFn = func(context.Context, string, *SyncJournalRequest) (*SyncJournalResponse, error) {
+				enteredOnce.Do(func() { close(entered) })
+				<-release
+				return &SyncJournalResponse{
+					Version: JournalWireVersion, Entries: []JournalEntryWire{storeToWire(entry)},
+					NextCursor: entry.Seq, TerminalOnly: tc.terminalOnly,
+				}, nil
+			}
+
+			type pullResult struct {
+				n   int
+				err error
+			}
+			pulled := make(chan pullResult, 1)
+			go func() {
+				n, pullErr := m.PullGroupJournal(ctx, "chain-peer", "g-race", subchain)
+				pulled <- pullResult{n: n, err: pullErr}
+			}()
+			<-entered
+
+			// Complete revocation while the peer still withholds its response. This
+			// also proves the network fetch owns neither journalMu nor policy WRITE.
+			revoked := make(chan error, 1)
+			go func() {
+				if revokeErr := m.badger.UpdateCrossFedStatus("chain-peer", "revoked"); revokeErr != nil {
+					revoked <- revokeErr
+					return
+				}
+				revoked <- ms.PurgeSyncPeerState(ctx, "chain-peer")
+			}()
+			select {
+			case revokeErr := <-revoked:
+				if revokeErr != nil {
+					close(release)
+					t.Fatalf("complete revoke: %v", revokeErr)
+				}
+			case <-time.After(2 * time.Second):
+				close(release)
+				t.Fatal("revoke blocked behind the lock-free journal fetch")
+			}
+			close(release)
+
+			result := <-pulled
+			if result.n != 0 || result.err == nil || !strings.Contains(result.err.Error(), "no longer an active frozen member") {
+				t.Fatalf("post-revoke delayed pull = n=%d err=%v", result.n, result.err)
+			}
+			entries, listErr := ms.ListSyncGroupLog(ctx, "g-race", subchain, -1, 10)
+			if listErr != nil || len(entries) != 0 {
+				t.Fatalf("delayed response committed after revoke: entries=%+v err=%v", entries, listErr)
+			}
+		})
 	}
 }
 
@@ -648,16 +843,23 @@ func TestSyncJournalServeLeaseLinearizesMemberRemoval(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	seedGroup(t, ms, "g1", "chain-ctl")
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerID := hex.EncodeToString(peerPub)
 	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
 		GroupID: "g1", MemberChainID: "chain-peer", Role: store.GroupRoleFullSync,
-		MemberState: store.GroupMemberActive,
+		MemberState: store.GroupMemberActive, MemberAgentPubkey: peerID,
 	}); err != nil {
 		t.Fatalf("member: %v", err)
 	}
 
 	body, _ := json.Marshal(SyncJournalRequest{Version: JournalWireVersion, GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
 	req := httptest.NewRequest(http.MethodPost, "/fed/v1/sync/journal", bytes.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{ChainID: "chain-peer"}))
+	peer := &peerIdentity{ChainID: "chain-peer", AgentID: peerID, Agreement: &store.CrossFedRecord{RemoteChainID: "chain-peer", Status: "active"}}
+	bindInboundGroupPeer(t, m, ms, peer, "guest")
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, peer))
 	bw := newBlockingResponseWriter()
 	served := make(chan struct{})
 	go func() { m.handleSyncJournal(bw, req); close(served) }()

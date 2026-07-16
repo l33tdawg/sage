@@ -1,11 +1,14 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -83,6 +86,14 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 	if err := s.ensureMemoriesSchema(ctx); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("ensure memories schema: %w", err)
+	}
+
+	// The off-chain projection commits before Badger's consensus transaction.
+	// Persist an exactly-once block receipt in that same SQL transaction so a
+	// crash in between cannot duplicate append-only mirror rows on replay.
+	if err := s.ensureProjectionSchema(ctx); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ensure projection schema: %w", err)
 	}
 
 	return s, nil
@@ -224,6 +235,28 @@ func (s *PostgresStore) ensureGovSchema(ctx context.Context) error {
 			if _, err := ps.db.Exec(ctx, stmt); err != nil {
 				return fmt.Errorf("create governance schema: %w", err)
 			}
+		}
+		return nil
+	})
+}
+
+// projectionSchemaLockKey serializes the projection-receipt migration across
+// quorum nodes sharing one PostgreSQL deployment.
+const projectionSchemaLockKey int64 = 0x5341_4745_5052_4A54 // "SAGEPRJT"
+
+func (s *PostgresStore) ensureProjectionSchema(ctx context.Context) error {
+	return s.RunInTx(ctx, func(tx OffchainStore) error {
+		ps := tx.(*PostgresStore)
+		if _, err := ps.db.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, projectionSchemaLockKey); err != nil {
+			return fmt.Errorf("acquire projection schema lock: %w", err)
+		}
+		if _, err := ps.db.Exec(ctx, `
+			CREATE TABLE IF NOT EXISTS abci_projection_batches (
+				block_height BIGINT PRIMARY KEY,
+				app_hash     BYTEA NOT NULL CHECK (octet_length(app_hash) = 32),
+				created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			)`); err != nil {
+			return fmt.Errorf("create projection batch table: %w", err)
 		}
 		return nil
 	})
@@ -371,6 +404,70 @@ func (s *PostgresStore) InsertMemory(ctx context.Context, record *memory.MemoryR
 	)
 	if err != nil {
 		return fmt.Errorf("insert memory: %w", err)
+	}
+	return nil
+}
+
+// MergeProjectionSupplementary fills only off-consensus fields that can differ
+// across validators because SupplementaryCache is process-local. It is used
+// after another validator has already claimed the block's projection receipt.
+// Existing non-empty values win, making the first accepted enrichment stable.
+// Embedding/vector hash/embedder are one group: a complete incoming group fills
+// an empty vector slot only when the pre-staged hash is empty or matches, and it
+// may fill missing embedder metadata only when that same hash already binds the
+// existing vector. This prevents composing node A's vector with node B's hash.
+// Consensus-derived lifecycle/status/history columns are structurally absent
+// from this UPDATE. The content-hash predicate also prevents an enrichment from
+// being attached to a corrupt or unrelated projection row.
+func (s *PostgresStore) MergeProjectionSupplementary(ctx context.Context, record *memory.MemoryRecord) error {
+	if s.pool != nil {
+		return errors.New("merge projection supplementary must run inside RunInTx")
+	}
+	if record == nil || record.MemoryID == "" || len(record.ContentHash) == 0 {
+		return errors.New("merge projection supplementary requires memory ID and content hash")
+	}
+
+	var emb *pgvector.Vector
+	if len(record.Embedding) > 0 {
+		v := pgvector.NewVector(record.Embedding)
+		emb = &v
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE memories SET
+		content = COALESCE(NULLIF(content, ''), NULLIF($2, ''), ''),
+		embedding = CASE
+			WHEN $3::vector IS NOT NULL AND octet_length($4::bytea) > 0 AND NULLIF($6::text, '') IS NOT NULL
+			 AND embedding IS NULL AND COALESCE(embedding_provider, '') = ''
+			 AND (embedding_hash IS NULL OR octet_length(embedding_hash) = 0 OR embedding_hash = $4)
+			THEN $3 ELSE embedding
+		END,
+		embedding_hash = CASE
+			WHEN $3::vector IS NOT NULL AND octet_length($4::bytea) > 0 AND NULLIF($6::text, '') IS NOT NULL
+			 AND embedding IS NULL AND COALESCE(embedding_provider, '') = ''
+			 AND (embedding_hash IS NULL OR octet_length(embedding_hash) = 0 OR embedding_hash = $4)
+			THEN $4 ELSE embedding_hash
+		END,
+		provider = COALESCE(NULLIF(provider, ''), NULLIF($5, ''), ''),
+		embedding_provider = CASE
+			WHEN $3::vector IS NOT NULL AND octet_length($4::bytea) > 0 AND NULLIF($6::text, '') IS NOT NULL
+			 AND COALESCE(embedding_provider, '') = ''
+			 AND ((embedding IS NULL AND (embedding_hash IS NULL OR octet_length(embedding_hash) = 0 OR embedding_hash = $4))
+			   OR (embedding IS NOT NULL AND embedding_hash = $4))
+			THEN $6 ELSE embedding_provider
+		END,
+		assignee = CASE
+			WHEN assignee = '' AND task_assignment_version = 0
+			 AND COALESCE(task_status, '') IN ('', 'planned') AND NOT task_requires_handoff
+			THEN COALESCE(NULLIF($7, ''), assignee)
+			ELSE assignee
+		END
+		WHERE memory_id = $1 AND content_hash = $8`,
+		record.MemoryID, record.Content, emb, record.EmbeddingHash,
+		record.Provider, record.EmbeddingProvider, record.Assignee, record.ContentHash)
+	if err != nil {
+		return fmt.Errorf("merge projection supplementary for memory %s: %w", record.MemoryID, err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("merge projection supplementary for memory %s: row missing or content hash mismatch", record.MemoryID)
 	}
 	return nil
 }
@@ -647,7 +744,12 @@ func (s *PostgresStore) SearchHybrid(ctx context.Context, _ string, embedding []
 func (s *PostgresStore) InsertTriples(ctx context.Context, memoryID string, triples []memory.KnowledgeTriple) error {
 	batch := &pgx.Batch{}
 	for _, t := range triples {
-		batch.Queue("INSERT INTO knowledge_triples (memory_id, subject, predicate, object) VALUES ($1, $2, $3, $4)",
+		batch.Queue(`INSERT INTO knowledge_triples (memory_id, subject, predicate, object)
+			SELECT $1, $2, $3, $4
+			WHERE NOT EXISTS (
+				SELECT 1 FROM knowledge_triples
+				WHERE memory_id = $1 AND subject = $2 AND predicate = $3 AND object = $4
+			)`,
 			memoryID, t.Subject, t.Predicate, t.Object)
 	}
 
@@ -698,7 +800,13 @@ func (s *PostgresStore) GetVotes(ctx context.Context, memoryID string) ([]*Valid
 func (s *PostgresStore) InsertChallenge(ctx context.Context, challenge *ChallengeEntry) error {
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO challenges (memory_id, challenger_id, reason, evidence, block_height, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)`,
+		 SELECT $1, $2, $3, $4, $5, $6
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM challenges
+			WHERE memory_id = $1 AND challenger_id = $2 AND reason = $3
+			  AND COALESCE(evidence, '') = $4 AND COALESCE(block_height, 0) = $5
+			  AND created_at = $6
+		 )`,
 		challenge.MemoryID, challenge.ChallengerID, challenge.Reason, challenge.Evidence, challenge.BlockHeight, challenge.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert challenge: %w", err)
@@ -709,7 +817,12 @@ func (s *PostgresStore) InsertChallenge(ctx context.Context, challenge *Challeng
 func (s *PostgresStore) InsertCorroboration(ctx context.Context, corr *Corroboration) error {
 	_, err := s.db.Exec(ctx,
 		`INSERT INTO corroborations (memory_id, agent_id, evidence, created_at)
-		VALUES ($1, $2, $3, $4)`,
+		 SELECT $1, $2, $3, $4
+		 WHERE NOT EXISTS (
+			SELECT 1 FROM corroborations
+			WHERE memory_id = $1 AND agent_id = $2
+			  AND COALESCE(evidence, '') = $3 AND created_at = $4
+		 )`,
 		corr.MemoryID, corr.AgentID, corr.Evidence, corr.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("insert corroboration: %w", err)
@@ -2157,6 +2270,52 @@ func (s *PostgresStore) Ping(ctx context.Context) error {
 		return s.pool.Ping(ctx)
 	}
 	return nil
+}
+
+// ClaimProjectionBatch is the PostgreSQL counterpart to SQLite's receipt.
+// ON CONFLICT avoids poisoning a pgx transaction during an exact replay; a
+// conflicting AppHash at the same consensus height is a fail-closed database/
+// chain mismatch rather than something the mirror may silently overwrite.
+// Receipts deliberately cost one indexed row per block and are never pruned,
+// because a validator may return after an arbitrarily long Internet partition.
+// Paired Badger/SQL/CometBFT restore remains required for operator rollbacks.
+func (s *PostgresStore) ClaimProjectionBatch(ctx context.Context, height int64, appHash []byte) (bool, error) {
+	if s.pool != nil {
+		return false, fmt.Errorf("claim projection batch must run inside RunInTx")
+	}
+	if height <= 0 {
+		return false, fmt.Errorf("claim projection batch: invalid height %d", height)
+	}
+	if len(appHash) != sha256.Size {
+		return false, fmt.Errorf("claim projection batch at height %d: AppHash must be %d bytes, got %d", height, sha256.Size, len(appHash))
+	}
+	// All validators in the cluster may share one PostgreSQL projection. Keep
+	// same-height claim/replay/enrichment transactions in a total order so two
+	// enriched receivers cannot race the exact-triple NOT EXISTS guard.
+	if _, err := s.db.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, height); err != nil {
+		return false, fmt.Errorf("lock projection batch at height %d: %w", height, err)
+	}
+	tag, err := s.db.Exec(ctx, `
+		INSERT INTO abci_projection_batches (block_height, app_hash)
+		VALUES ($1, $2)
+		ON CONFLICT (block_height) DO NOTHING`, height, appHash)
+	if err != nil {
+		return false, fmt.Errorf("claim projection batch at height %d: %w", height, err)
+	}
+	if tag.RowsAffected() == 0 {
+		var existing []byte
+		if err := s.db.QueryRow(ctx,
+			`SELECT app_hash FROM abci_projection_batches WHERE block_height = $1`, height,
+		).Scan(&existing); err != nil {
+			return false, fmt.Errorf("read projection batch at height %d: %w", height, err)
+		}
+		if !bytes.Equal(existing, appHash) {
+			return false, fmt.Errorf("projection batch height %d already belongs to AppHash %x, refusing %x", height, existing, appHash)
+		}
+		return false, nil
+	}
+
+	return true, nil
 }
 
 // RunInTx executes fn within a PostgreSQL transaction. All writes through

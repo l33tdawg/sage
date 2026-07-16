@@ -90,6 +90,21 @@ func newBootRuntimeTestRuntime(t *testing.T, app *bootRuntimeTestApp) *BootState
 	return runtime
 }
 
+func bootRuntimeTestDurableSeal(int64, []byte, uint64) error { return nil }
+
+func sealBootRuntimeTest(
+	runtime *BootStateSyncRuntime,
+	height int64,
+	appHash []byte,
+	appVersion uint64,
+	durableSeal func(int64, []byte, uint64) error,
+) (bool, error) {
+	sealed, _, _, _, err := runtime.SealActivatedBundleFromComet(context.Background(), func() (int64, []byte, uint64, error) {
+		return height, appHash, appVersion, nil
+	}, durableSeal)
+	return sealed, err
+}
+
 func TestBootStateSyncRuntimeDelegatesNormalABCI(t *testing.T) {
 	hash := sha256.Sum256([]byte("state"))
 	app := &bootRuntimeTestApp{height: 7, appHash: hash[:], queryValue: []byte("old bundle")}
@@ -171,9 +186,29 @@ func TestBootStateSyncRuntimeHoldsPendingBlockExecutionUntilSeal(t *testing.T) {
 	_, queryErr := runtime.Query(context.Background(), &abcitypes.RequestQuery{Path: "/pending"})
 	require.ErrorIs(t, queryErr, ErrBootStateSyncConsensusServingBlocked)
 
-	sealed, err := runtime.SealActivatedBundle(context.Background(), 42, newHash[:], 20)
-	require.NoError(t, err)
-	require.True(t, sealed)
+	durableEntered := make(chan struct{})
+	durableRelease := make(chan struct{})
+	sealDone := make(chan error, 1)
+	go func() {
+		sealed, err := sealBootRuntimeTest(runtime, 42, newHash[:], 20, func(int64, []byte, uint64) error {
+			close(durableEntered)
+			<-durableRelease
+			return nil
+		})
+		if err == nil && !sealed {
+			err = errors.New("armed runtime was not sealed")
+		}
+		sealDone <- err
+	}()
+	<-durableEntered
+	select {
+	case err := <-finalized:
+		t.Fatalf("block execution escaped during the durable state-sync seal: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(durableRelease)
+	require.NoError(t, <-sealDone)
+	assert.Equal(t, BootStateSyncSealed, runtime.Phase())
 	select {
 	case err := <-finalized:
 		require.NoError(t, err)
@@ -289,7 +324,9 @@ func TestBootStateSyncRuntimeNormalServingRequiresDisabledOrSealed(t *testing.T)
 		return NewConsensusBundleWithCleanup(context.Background(), newApp, newApp.Close)
 	}))
 	require.Error(t, runtime.RequireNormalServingReady(), "pending Comet persistence must not serve")
-	require.NoError(t, runtime.sealActivatedBundle(context.Background(), 42, newHash[:], 20))
+	sealed, err := sealBootRuntimeTest(runtime, 42, newHash[:], 20, bootRuntimeTestDurableSeal)
+	require.NoError(t, err)
+	require.True(t, sealed)
 	require.NoError(t, runtime.RequireNormalServingReady(), "sealed runtime may admit ordinary serving")
 }
 
@@ -328,7 +365,7 @@ func TestBootStateSyncRuntimeConfiguresInitialAndReplacementBeforePublication(t 
 
 func TestBootStateSyncRuntimeObservableSeal(t *testing.T) {
 	runtime := newBootRuntimeTestRuntime(t, &bootRuntimeTestApp{})
-	sealed, err := runtime.SealActivatedBundle(context.Background(), 0, nil, 20)
+	sealed, err := sealBootRuntimeTest(runtime, 0, nil, 20, nil)
 	require.NoError(t, err)
 	assert.False(t, sealed, "dormant boot has no activation directory to seal")
 
@@ -342,7 +379,7 @@ func TestBootStateSyncRuntimeObservableSeal(t *testing.T) {
 	require.NoError(t, runtime.activatePreparedBundle(42, newHash[:], 20, func(*ConsensusBundle) (*ConsensusBundle, error) {
 		return NewConsensusBundleWithCleanup(context.Background(), newApp, newApp.Close)
 	}))
-	sealed, err = runtime.SealActivatedBundle(context.Background(), 42, newHash[:], 20)
+	sealed, err = sealBootRuntimeTest(runtime, 42, newHash[:], 20, bootRuntimeTestDurableSeal)
 	require.NoError(t, err)
 	assert.True(t, sealed)
 	got, err := runtime.AcquireNormalServingApplication()
@@ -367,27 +404,61 @@ func TestBootStateSyncRuntimeWaitsForCometPersistenceWithoutFailing(t *testing.T
 
 	sealed, _, _, _, err := runtime.SealActivatedBundleFromComet(context.Background(), func() (int64, []byte, uint64, error) {
 		return 0, nil, 0, nil
-	})
+	}, bootRuntimeTestDurableSeal)
 	assert.ErrorIs(t, err, ErrBootStateSyncPersistencePending)
 	assert.False(t, sealed)
 	assert.Equal(t, BootStateSyncPendingComet, runtime.Phase(), "canonical empty Comet state is ordinary bootstrap lag")
 
 	sealed, _, _, _, err = runtime.SealActivatedBundleFromComet(context.Background(), func() (int64, []byte, uint64, error) {
 		return 42, snapshotHash[:], 20, nil
-	})
+	}, bootRuntimeTestDurableSeal)
 	assert.ErrorIs(t, err, ErrBootStateSyncPersistencePending)
 	assert.False(t, sealed)
 	assert.Equal(t, BootStateSyncPendingComet, runtime.Phase())
 
 	sealed, height, appHash, appVersion, err := runtime.SealActivatedBundleFromComet(context.Background(), func() (int64, []byte, uint64, error) {
 		return 43, catchupHash[:], 20, nil
-	})
+	}, bootRuntimeTestDurableSeal)
 	require.NoError(t, err)
 	assert.True(t, sealed)
 	assert.Equal(t, int64(43), height)
 	assert.Equal(t, catchupHash[:], appHash)
 	assert.Equal(t, uint64(20), appVersion)
 	assert.Equal(t, BootStateSyncSealed, runtime.Phase())
+}
+
+func TestBootStateSyncRuntimeDurableSealFailureNeverPublishes(t *testing.T) {
+	oldHash := sha256.Sum256([]byte("old durable-failure state"))
+	newHash := sha256.Sum256([]byte("new durable-failure state"))
+	runtime := newBootRuntimeTestRuntime(t, &bootRuntimeTestApp{height: 40, appHash: oldHash[:], appVersion: 19})
+	require.NoError(t, runtime.transitionBootStateSync(BootStateSyncDiscovering))
+	require.NoError(t, runtime.transitionBootStateSync(BootStateSyncAssembling))
+	require.NoError(t, runtime.transitionBootStateSync(BootStateSyncPrepared))
+	newApp := &bootRuntimeTestApp{height: 42, appHash: newHash[:], appVersion: 20}
+	require.NoError(t, runtime.activatePreparedBundle(42, newHash[:], 20, func(*ConsensusBundle) (*ConsensusBundle, error) {
+		return NewConsensusBundleWithCleanup(context.Background(), newApp, newApp.Close)
+	}))
+
+	finalized := make(chan error, 1)
+	go func() {
+		_, err := runtime.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{Height: 43})
+		finalized <- err
+	}()
+	durableErr := errors.New("receiver config fsync failed")
+	sealed, err := sealBootRuntimeTest(runtime, 42, newHash[:], 20, func(int64, []byte, uint64) error {
+		return durableErr
+	})
+	require.ErrorIs(t, err, durableErr)
+	assert.False(t, sealed)
+	assert.Equal(t, BootStateSyncFailed, runtime.Phase())
+	select {
+	case finalizeErr := <-finalized:
+		require.ErrorIs(t, finalizeErr, ErrBootStateSyncConsensusServingBlocked)
+	case <-time.After(time.Second):
+		t.Fatal("pending block execution did not wake after durable seal failure")
+	}
+	_, err = runtime.AcquireNormalServingApplication()
+	require.ErrorContains(t, err, "disabled or sealed")
 }
 
 func TestBootStateSyncRuntimeReplacementWaitsForReaders(t *testing.T) {
@@ -445,7 +516,9 @@ func TestBootStateSyncRuntimeReplacementWaitsForReaders(t *testing.T) {
 	newResponse, err := runtime.Query(context.Background(), &abcitypes.RequestQuery{})
 	assert.ErrorIs(t, err, ErrBootStateSyncConsensusServingBlocked)
 	assert.Nil(t, newResponse)
-	require.NoError(t, runtime.sealActivatedBundle(context.Background(), 42, newHash[:], 20))
+	sealed, err := sealBootRuntimeTest(runtime, 42, newHash[:], 20, bootRuntimeTestDurableSeal)
+	require.NoError(t, err)
+	require.True(t, sealed)
 	assert.Equal(t, BootStateSyncSealed, runtime.Phase())
 	newResponse, err = runtime.Query(context.Background(), &abcitypes.RequestQuery{})
 	require.NoError(t, err)
@@ -549,8 +622,9 @@ func TestBootStateSyncRuntimeSealAnchorsTrustedSnapshotAndVersion(t *testing.T) 
 		cometHeight  int64
 		cometHash    []byte
 		cometVersion uint64
+		pending      bool
 	}{
-		{name: "below snapshot", cometHeight: 41, cometHash: bytes.Repeat([]byte{0x41}, sha256.Size), cometVersion: 20},
+		{name: "below snapshot", cometHeight: 41, cometHash: bytes.Repeat([]byte{0x41}, sha256.Size), cometVersion: 20, pending: true},
 		{name: "equal wrong hash", cometHeight: 42, cometHash: bytes.Repeat([]byte{0x42}, sha256.Size), cometVersion: 20},
 		{name: "equal wrong version", cometHeight: 42, cometHash: nil, cometVersion: 19},
 	}
@@ -569,9 +643,14 @@ func TestBootStateSyncRuntimeSealAnchorsTrustedSnapshotAndVersion(t *testing.T) 
 			require.NoError(t, runtime.activatePreparedBundle(42, trustedHash[:], 20, func(*ConsensusBundle) (*ConsensusBundle, error) {
 				return NewConsensusBundleWithCleanup(context.Background(), newApp, newApp.Close)
 			}))
-			err := runtime.sealActivatedBundle(context.Background(), tc.cometHeight, tc.cometHash, tc.cometVersion)
-			assert.ErrorContains(t, err, "below or conflicts")
-			assert.Equal(t, BootStateSyncFailed, runtime.Phase())
+			_, err := sealBootRuntimeTest(runtime, tc.cometHeight, tc.cometHash, tc.cometVersion, bootRuntimeTestDurableSeal)
+			if tc.pending {
+				assert.ErrorIs(t, err, ErrBootStateSyncPersistencePending)
+				assert.Equal(t, BootStateSyncPendingComet, runtime.Phase())
+			} else {
+				assert.ErrorContains(t, err, "conflicts with the active application")
+				assert.Equal(t, BootStateSyncFailed, runtime.Phase())
+			}
 		})
 	}
 }

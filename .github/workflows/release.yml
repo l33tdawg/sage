@@ -6,15 +6,109 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# The newest tag may be re-run to finish a failed publication step, but release
+# writers for different tags must never race each other for the mutable
+# `latest` pointers. The metadata gate rejects a stale stable tag before any
+# package is built or published.
+concurrency:
+  group: sage-release-publication
+  cancel-in-progress: false
+
 # Note: the landing page is served from the `gh-pages` branch (GitHub Pages,
 # legacy branch build). It is NOT deployed from this workflow — edit gh-pages
 # directly to update the site. This workflow only builds release artifacts.
+#
+# Publication is deliberately two-phase:
+#   1. validate, build, package, and checksum everything into private Actions
+#      artifacts, then converge at `publication-gate`;
+#   2. stage a private GitHub draft and publish each public channel serially.
+# A failed public step can therefore be resumed without rebuilding or racing a
+# second publisher, and the GitHub release plus mutable Docker `latest` pointer
+# remain hidden until the immutable versioned channels have succeeded.
 permissions:
-  contents: write
-  packages: write
-  id-token: write
+  contents: read
 
 jobs:
+  release-metadata:
+    name: Release Metadata Gate
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and lockstep package metadata
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::Release workflow_dispatch runs must select an existing tag ref"
+            exit 1
+          fi
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+            echo "::error::Release tag must be canonical SemVer (vMAJOR.MINOR.PATCH with an optional prerelease)"
+            exit 1
+          fi
+
+          TAG_COMMIT=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
+          if [ "${TAG_COMMIT}" != "${GITHUB_SHA}" ]; then
+            echo "::error::Checked-out commit does not match ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          git fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" refs/remotes/origin/main; then
+            echo "::error::Release tag commit must be reachable from protected main"
+            exit 1
+          fi
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          SDK_VERSION=$(sed -nE 's/^version = "([^"]+)"$/\1/p' sdk/python/pyproject.toml | head -1)
+          INIT_VERSION=$(sed -nE 's/^__version__ = "([^"]+)"$/\1/p' sdk/python/src/sage_sdk/__init__.py | head -1)
+          SERVER_VERSION=$(jq -er '.version' server.json)
+          SERVER_IMAGE_COUNT=$(jq -er '[.packages[] | select(.registryType == "oci")] | length' server.json)
+          SERVER_IMAGE=$(jq -er '.packages[] | select(.registryType == "oci") | .identifier' server.json)
+          DASHBOARD_VERSION=$(sed -nE "s/^const SAGE_VERSION = 'v([^']+)';$/\1/p" web/static/js/app.js | head -1)
+
+          echo "tag=${VERSION} pyproject=${SDK_VERSION} __init__=${INIT_VERSION} server=${SERVER_VERSION} dashboard=${DASHBOARD_VERSION}"
+          if [ "${VERSION}" != "${SDK_VERSION}" ] ||
+             [ "${VERSION}" != "${INIT_VERSION}" ] ||
+             [ "${VERSION}" != "${SERVER_VERSION}" ] ||
+             [ "${VERSION}" != "${DASHBOARD_VERSION}" ]; then
+            echo "::error::Release metadata drift — bump the Python SDK, server.json, and dashboard fallback to ${VERSION} before tagging"
+            exit 1
+          fi
+          if [ "${SERVER_IMAGE_COUNT}" -ne 1 ] ||
+             [ "${SERVER_IMAGE}" != "ghcr.io/l33tdawg/sage:${VERSION}" ]; then
+            echo "::error::server.json must contain exactly the release image ghcr.io/l33tdawg/sage:${VERSION}"
+            exit 1
+          fi
+
+          PRERELEASE=false
+          if [[ "${VERSION}" == *-* ]]; then
+            PRERELEASE=true
+          fi
+          if [ "${PRERELEASE}" = false ]; then
+            NEWEST_STABLE_TAG=$(
+              git tag --merged refs/remotes/origin/main |
+                grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' |
+                sort -V |
+                tail -1 || true
+            )
+            if [ -n "${NEWEST_STABLE_TAG}" ] &&
+               [ "${GITHUB_REF_NAME}" != "${NEWEST_STABLE_TAG}" ]; then
+              echo "::error::Refusing stale stable release ${GITHUB_REF_NAME}; newest protected-main tag is ${NEWEST_STABLE_TAG}"
+              exit 1
+            fi
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${PRERELEASE}" >> "${GITHUB_OUTPUT}"
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -43,7 +137,7 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
-      - run: go test ./... -count=1 -race
+      - run: go test ./... -count=1 -race -timeout 30m
       - name: Test local CometBFT hardening
         run: make test-cometbft-patch
       - name: Run natter tests
@@ -56,8 +150,10 @@ jobs:
     needs: test
     uses: ./.github/workflows/v11.9-fault-gates.yml
     with:
-      require_scoped_reconfiguration: ${{ startsWith(github.ref_name, 'v11.9') }}
-      require_authorized_state_sync: ${{ startsWith(github.ref_name, 'v11.9') }}
+      # These became permanent release invariants when app-v20/state-sync
+      # shipped; later minors and majors must not silently drop the proofs.
+      require_scoped_reconfiguration: true
+      require_authorized_state_sync: true
 
   frontend-static:
     name: Frontend Static Checks
@@ -69,10 +165,17 @@ jobs:
           node-version: '24'
       - run: npm test
 
-  goreleaser:
-    name: GoReleaser (tarballs)
+  quality-gate:
+    name: Quality and Chaos Fan-In
     runs-on: ubuntu-latest
-    needs: [lint, test, frontend-static, v119-fault-gates]
+    needs: [release-metadata, lint, test, frontend-static, v119-fault-gates]
+    steps:
+      - run: echo "All source, race, lint, frontend, and v11.9 fault gates passed."
+
+  goreleaser-prepare:
+    name: Prepare GoReleaser Tarballs
+    runs-on: ubuntu-latest
+    needs: [quality-gate, release-metadata]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -81,27 +184,42 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
-      - name: GoReleaser
+
+      - name: Build release archives without publishing
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           version: 'v2.8.2'
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          args: release --clean --skip=publish
 
-      - name: Upload stable-named Linux tarball for direct download links
+      - name: Verify module metadata and stage stable Linux archive
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          cp "dist/sage-gui_${VERSION}_linux_amd64.tar.gz" "dist/sage-gui-linux-amd64.tar.gz"
-          gh release upload "${GITHUB_REF_NAME}" "dist/sage-gui-linux-amd64.tar.gz" --clobber
-        shell: bash
+          set -euo pipefail
+          git diff --exit-code -- go.mod go.sum
+          cp "dist/sage-gui_${RELEASE_VERSION}_linux_amd64.tar.gz" \
+             "dist/sage-gui-linux-amd64.tar.gz"
+          cd dist
+          sha256sum sage-gui-linux-amd64.tar.gz > sage-gui-linux-amd64.tar.gz.sha256
+          sha256sum -c checksums.txt
+          sha256sum -c sage-gui-linux-amd64.tar.gz.sha256
+
+      - name: Upload private GoReleaser assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-goreleaser
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+            dist/sage-gui-linux-amd64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   linux-desktop:
-    name: Linux Desktop Bundle
+    name: Prepare Linux Desktop Bundle
     runs-on: ubuntu-latest
-    needs: goreleaser
+    needs: [quality-gate, release-metadata]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -116,40 +234,36 @@ jobs:
           SAGE_VERSION: ${{ github.ref_name }}
         run: ./installer/linux/build-linux.sh
 
-      - name: Create stable-name copy for direct download links
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          cp "dist/linux-amd64/sage-desktop_${VERSION}_linux_amd64.tar.gz" \
-             "dist/linux-amd64/sage-desktop-linux-amd64.tar.gz"
-
-      - name: Upload Linux desktop bundle to release
+      - name: Stage stable name and checksums
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
-          # The desktop bundle is built outside goreleaser → absent from its
-          # checksums.txt; publish a sibling .sha256 per asset (bare filenames,
-          # so `sha256sum -c sage-desktop-….tar.gz.sha256` works from a download
-          # dir), matching the DMG/EXE jobs. The bundle is uploaded ONLY under the
-          # sage-desktop_* namespace so it can never clobber the goreleaser
-          # sage-gui_* tarball that checksums.txt certifies.
-          VERSION="${GITHUB_REF_NAME#v}"
+          set -euo pipefail
           cd dist/linux-amd64
-          for f in "sage-desktop_${VERSION}_linux_amd64.tar.gz" \
-                   "sage-desktop-linux-amd64.tar.gz"; do
-            sha256sum "$f" > "$f.sha256"
+          cp "sage-desktop_${RELEASE_VERSION}_linux_amd64.tar.gz" \
+             "sage-desktop-linux-amd64.tar.gz"
+          for file in "sage-desktop_${RELEASE_VERSION}_linux_amd64.tar.gz" \
+                      "sage-desktop-linux-amd64.tar.gz"; do
+            sha256sum "${file}" > "${file}.sha256"
+            sha256sum -c "${file}.sha256"
           done
-          gh release upload "${{ github.ref_name }}" \
-            "sage-desktop_${VERSION}_linux_amd64.tar.gz" \
-            "sage-desktop_${VERSION}_linux_amd64.tar.gz.sha256" \
-            "sage-desktop-linux-amd64.tar.gz" \
-            "sage-desktop-linux-amd64.tar.gz.sha256" \
-            --clobber
+
+      - name: Upload private Linux assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-linux-desktop
+          path: |
+            dist/linux-amd64/*.tar.gz
+            dist/linux-amd64/*.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   macos-dmg:
-    name: macOS DMG (${{ matrix.arch }})
+    name: Prepare macOS DMG (${{ matrix.arch }})
     runs-on: macos-latest
-    needs: goreleaser
+    needs: [quality-gate, release-metadata]
     strategy:
+      fail-fast: false
       matrix:
         arch: [arm64, amd64]
     steps:
@@ -165,65 +279,94 @@ jobs:
         env:
           SAGE_VERSION: ${{ github.ref_name }}
           SAGE_ARCH: ${{ matrix.arch }}
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
-          NOTARIZE: ${{ secrets.APPLE_ID != '' && '1' || '0' }}
+          NOTARIZE: '1'
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
         run: |
-          # Import signing certificate if provided
-          if [ -n "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ]; then
-            echo "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" | base64 --decode > /tmp/cert.p12
-            KEYCHAIN_PASSWORD=$(openssl rand -hex 12)
-            security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-            security default-keychain -s build.keychain
-            security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
-            security import /tmp/cert.p12 -k build.keychain \
-              -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" \
-              -T /usr/bin/codesign
-            security set-key-partition-list -S apple-tool:,apple:,codesign: \
-              -s -k "$KEYCHAIN_PASSWORD" build.keychain
-            rm /tmp/cert.p12
-          fi
+          set -euo pipefail
+          for required in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD \
+                          SIGN_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_PASSWORD; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::Required macOS signing/notarization secret is missing: ${required}"
+              exit 1
+            fi
+          done
+          printf '%s' "${APPLE_CERTIFICATE_BASE64}" | base64 --decode > /tmp/cert.p12
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 12)
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" build.keychain
+          security import /tmp/cert.p12 -k build.keychain \
+            -P "${APPLE_CERTIFICATE_PASSWORD}" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "${KEYCHAIN_PASSWORD}" build.keychain
+          rm /tmp/cert.p12
           ./installer/macos/build-dmg.sh
 
-      - name: Determine arch label
+          if [ "${SAGE_ARCH}" = amd64 ]; then
+            ARCH_LABEL=x86_64
+          else
+            ARCH_LABEL=arm64
+          fi
+          APP_PATH="dist/macos-${ARCH_LABEL}/SAGE.app"
+          DMG_PATH="dist/macos-${ARCH_LABEL}/SAGE-${SAGE_VERSION}-macOS-${ARCH_LABEL}.dmg"
+          codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+          xcrun stapler validate "${DMG_PATH}"
+
+          MOUNT_POINT=$(mktemp -d)
+          cleanup_mount() {
+            hdiutil detach "${MOUNT_POINT}" >/dev/null 2>&1 || true
+            rmdir "${MOUNT_POINT}" >/dev/null 2>&1 || true
+          }
+          trap cleanup_mount EXIT
+          hdiutil attach -readonly -nobrowse -mountpoint "${MOUNT_POINT}" "${DMG_PATH}"
+          codesign --verify --deep --strict --verbose=2 "${MOUNT_POINT}/SAGE.app"
+          spctl --assess --type execute --verbose=4 "${MOUNT_POINT}/SAGE.app"
+          cleanup_mount
+          trap - EXIT
+
+      - name: Determine architecture label
         id: arch
         run: |
           if [ "${{ matrix.arch }}" = "amd64" ]; then
-            echo "label=x86_64" >> "$GITHUB_OUTPUT"
+            echo "label=x86_64" >> "${GITHUB_OUTPUT}"
           else
-            echo "label=arm64" >> "$GITHUB_OUTPUT"
+            echo "label=arm64" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Create stable-name copy for direct download links
-        run: |
-          cp "dist/macos-${{ steps.arch.outputs.label }}/SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg" \
-             "dist/macos-${{ steps.arch.outputs.label }}/SAGE-macOS-${{ steps.arch.outputs.label }}.dmg"
-
-      - name: Upload DMG to release
+      - name: Stage stable name and checksums
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARCH_LABEL: ${{ steps.arch.outputs.label }}
         run: |
-          # The DMGs are uploaded outside goreleaser, so they never appear in its
-          # checksums.txt — publish a sibling .sha256 per asset (bare filenames,
-          # so `shasum -a 256 -c SAGE-….dmg.sha256` works from a download dir).
-          cd "dist/macos-${{ steps.arch.outputs.label }}"
-          for f in "SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg" \
-                   "SAGE-macOS-${{ steps.arch.outputs.label }}.dmg"; do
-            shasum -a 256 "$f" > "$f.sha256"
+          set -euo pipefail
+          cd "dist/macos-${ARCH_LABEL}"
+          cp "SAGE-${GITHUB_REF_NAME}-macOS-${ARCH_LABEL}.dmg" \
+             "SAGE-macOS-${ARCH_LABEL}.dmg"
+          for file in "SAGE-${GITHUB_REF_NAME}-macOS-${ARCH_LABEL}.dmg" \
+                      "SAGE-macOS-${ARCH_LABEL}.dmg"; do
+            shasum -a 256 "${file}" > "${file}.sha256"
+            shasum -a 256 -c "${file}.sha256"
           done
-          gh release upload "${{ github.ref_name }}" \
-            "SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg" \
-            "SAGE-${{ github.ref_name }}-macOS-${{ steps.arch.outputs.label }}.dmg.sha256" \
-            "SAGE-macOS-${{ steps.arch.outputs.label }}.dmg" \
-            "SAGE-macOS-${{ steps.arch.outputs.label }}.dmg.sha256" \
-            --clobber
+
+      - name: Upload private macOS assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-macos-${{ steps.arch.outputs.label }}
+          path: |
+            dist/macos-${{ steps.arch.outputs.label }}/*.dmg
+            dist/macos-${{ steps.arch.outputs.label }}/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   windows-exe:
-    name: Windows Installer
+    name: Prepare Windows Installer
     runs-on: ubuntu-latest
-    needs: goreleaser
+    needs: [quality-gate, release-metadata]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -238,7 +381,6 @@ jobs:
 
       - name: Install EnVar plugin for NSIS
         run: |
-          # Download EnVar plugin for PATH manipulation
           wget -q https://nsis.sourceforge.io/mediawiki/images/7/7f/EnVar_plugin.zip -O /tmp/envar.zip
           echo "e9aa92de351345ed82795251d838f1ae9041ba35af9d381a5780c7843b01f56a  /tmp/envar.zip" | sha256sum -c -
           sudo unzip -o /tmp/envar.zip -d /usr/share/nsis/
@@ -248,47 +390,302 @@ jobs:
           SAGE_VERSION: ${{ github.ref_name }}
         run: ./installer/windows/build-exe.sh
 
-      - name: Create stable-name copy for direct download links
+      - name: Stage stable name and checksums
         run: |
-          cp "dist/windows-amd64/SAGE-${{ github.ref_name }}-Windows-Setup.exe" \
-             "dist/windows-amd64/SAGE-Windows-Setup.exe"
-
-      - name: Upload EXE to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Installer built outside goreleaser → absent from its checksums.txt;
-          # publish a sibling .sha256 per asset (bare filenames so
-          # `sha256sum -c` works from a download dir).
+          set -euo pipefail
           cd dist/windows-amd64
-          for f in "SAGE-${{ github.ref_name }}-Windows-Setup.exe" \
-                   "SAGE-Windows-Setup.exe"; do
-            sha256sum "$f" > "$f.sha256"
+          cp "SAGE-${GITHUB_REF_NAME}-Windows-Setup.exe" "SAGE-Windows-Setup.exe"
+          for file in "SAGE-${GITHUB_REF_NAME}-Windows-Setup.exe" \
+                      "SAGE-Windows-Setup.exe"; do
+            sha256sum "${file}" > "${file}.sha256"
+            sha256sum -c "${file}.sha256"
           done
-          gh release upload "${{ github.ref_name }}" \
-            "SAGE-${{ github.ref_name }}-Windows-Setup.exe" \
-            "SAGE-${{ github.ref_name }}-Windows-Setup.exe.sha256" \
-            "SAGE-Windows-Setup.exe" \
-            "SAGE-Windows-Setup.exe.sha256" \
-            --clobber
 
-  docker-mcp:
-    name: Docker Image + MCP Registry
+      - name: Upload private Windows assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-windows
+          path: |
+            dist/windows-amd64/*.exe
+            dist/windows-amd64/*.exe.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  docker-image:
+    name: Prepare Multi-Architecture Docker Image
     runs-on: ubuntu-latest
-    needs: [lint, test, frontend-static, v119-fault-gates]
+    needs: [quality-gate, release-metadata]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build private OCI archive
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          build-args: |
+            VERSION=${{ needs.release-metadata.outputs.version }}
+            COMMIT=${{ github.sha }}
+          tags: ghcr.io/l33tdawg/sage:${{ needs.release-metadata.outputs.version }}
+          outputs: type=oci,dest=${{ runner.temp }}/sage-image.tar
+
+      - name: Inspect private OCI archive
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+          skopeo inspect --raw "oci-archive:${RUNNER_TEMP}/sage-image.tar" > "${RUNNER_TEMP}/sage-image-index.json"
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length >= 1' \
+             "${RUNNER_TEMP}/sage-image-index.json"
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length >= 1' \
+             "${RUNNER_TEMP}/sage-image-index.json"
+          test -s "${RUNNER_TEMP}/sage-image.tar"
+
+      - name: Upload private Docker image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-image-docker
+          path: ${{ runner.temp }}/sage-image.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  python-package:
+    name: Prepare and Test Python SDK Package
+    runs-on: ubuntu-latest
+    needs: [quality-gate, release-metadata]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Test SDK and build wheel plus sdist
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd sdk/python
+          python -m pip install --upgrade build twine
+          python -m pip install -e ".[dev]"
+          pytest -v
+          python -m build
+          python -m twine check dist/*
+          test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          python -m venv "${RUNNER_TEMP}/sage-wheel-smoke"
+          "${RUNNER_TEMP}/sage-wheel-smoke/bin/pip" install --no-deps dist/*.whl
+          "${RUNNER_TEMP}/sage-wheel-smoke/bin/python" -c \
+            "import sage_sdk; assert sage_sdk.__version__ == '${RELEASE_VERSION}'"
+
+      - name: Upload private Python package
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-package-python
+          path: sdk/python/dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  mcp-package:
+    name: Prepare MCP Registry Manifest and Publisher
+    runs-on: ubuntu-latest
+    needs: [quality-gate, release-metadata]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Update server.json version
+      - name: Verify manifest and fetch pinned publisher
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          sed -i "s/\"version\": \".*\"/\"version\": \"${VERSION}\"/" server.json
-          sed -i "s|ghcr.io/l33tdawg/sage:[^\"]*|ghcr.io/l33tdawg/sage:${VERSION}|" server.json
-          cat server.json
+          set -euo pipefail
+          jq -e --arg version "${RELEASE_VERSION}" '.version == $version' server.json
+          jq -e --arg image "ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+             '[.packages[] | select(.registryType == "oci" and .identifier == $image)] | length == 1' \
+             server.json
+          curl --fail --location --silent --show-error --retry 3 \
+            --output mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v1.7.9/mcp-publisher_linux_amd64.tar.gz"
+          echo "ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          test -x mcp-publisher
+
+      - name: Upload private MCP publication inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-package-mcp
+          path: |
+            server.json
+            mcp-publisher
+          if-no-files-found: error
+          retention-days: 7
+
+  publication-gate:
+    name: Artifact and Package Publication Gate
+    runs-on: ubuntu-latest
+    needs:
+      - release-metadata
+      - goreleaser-prepare
+      - linux-desktop
+      - macos-dmg
+      - windows-exe
+      - docker-image
+      - python-package
+      - mcp-package
+    steps:
+      - name: Download every private release input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: staged
+
+      - name: Verify complete artifact inventory and checksums
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          test -n "${PYPI_API_TOKEN}"
+          if find staged -type f -empty -print -quit | grep -q .; then
+            echo "::error::Release staging contains an empty artifact"
+            exit 1
+          fi
+
+          test -f "staged/release-assets-goreleaser/checksums.txt"
+          test -f "staged/release-assets-goreleaser/sage-gui_${RELEASE_VERSION}_linux_amd64.tar.gz"
+          test -f "staged/release-assets-goreleaser/sage-gui-linux-amd64.tar.gz"
+          test -f "staged/release-assets-linux-desktop/sage-desktop_${RELEASE_VERSION}_linux_amd64.tar.gz"
+          test -f "staged/release-assets-macos-arm64/SAGE-${GITHUB_REF_NAME}-macOS-arm64.dmg"
+          test -f "staged/release-assets-macos-x86_64/SAGE-${GITHUB_REF_NAME}-macOS-x86_64.dmg"
+          test -f "staged/release-assets-windows/SAGE-${GITHUB_REF_NAME}-Windows-Setup.exe"
+          test "$(find staged/release-package-python -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
+          test "$(find staged/release-package-python -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
+          test -s staged/release-image-docker/sage-image.tar
+          test -s staged/release-package-mcp/mcp-publisher
+          jq -e --arg version "${RELEASE_VERSION}" '.version == $version' \
+             staged/release-package-mcp/server.json
+
+          # PyPI is immutable. If this is a recovery run and the version is
+          # already present, require every public digest to match the exact
+          # staged wheel/sdist before any other public channel is touched.
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          from urllib.error import HTTPError
+          from urllib.parse import quote
+          from urllib.request import urlopen
+
+          version = os.environ["RELEASE_VERSION"]
+          package_dir = Path("staged/release-package-python")
+          local = {
+              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+              for path in package_dir.iterdir()
+              if path.is_file()
+          }
+          url = f"https://pypi.org/pypi/sage-agent-sdk/{quote(version, safe='')}/json"
+          try:
+              with urlopen(url, timeout=20) as response:  # noqa: S310 - fixed PyPI origin
+                  payload = json.load(response)
+          except HTTPError as exc:
+              if exc.code == 404:
+                  print(f"PyPI version {version} is not published yet")
+                  raise SystemExit(0)
+              raise
+
+          remote = {
+              item["filename"]: item["digests"]["sha256"]
+              for item in payload["urls"]
+          }
+          if remote != local:
+              raise SystemExit(
+                  f"PyPI {version} already exists with different files or digests: "
+                  f"local={local!r} remote={remote!r}"
+              )
+          print(f"PyPI version {version} already contains the exact staged files")
+          PY
+
+          (
+            cd staged/release-assets-goreleaser
+            sha256sum -c checksums.txt
+          )
+          while IFS= read -r checksum; do
+            (
+              cd "$(dirname "${checksum}")"
+              sha256sum -c "$(basename "${checksum}")"
+            )
+          done < <(find staged/release-assets-* -type f -name '*.sha256' -print | sort)
+          tar tf staged/release-image-docker/sage-image.tar > /dev/null
+
+  stage-github-release:
+    name: Stage Private GitHub Draft
+    runs-on: ubuntu-latest
+    needs: [publication-gate, release-metadata]
+    permissions:
+      contents: write
+    steps:
+      - name: Download public release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-assets-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create or resume private draft and upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+          RELEASE_PRERELEASE: ${{ needs.release-metadata.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+
+          if RELEASE_JSON=$(gh release view "${GITHUB_REF_NAME}" --json isDraft,isPrerelease 2>/dev/null); then
+            if [ "$(jq -r '.isDraft' <<< "${RELEASE_JSON}")" != "true" ]; then
+              echo "::error::A public GitHub release already exists for ${GITHUB_REF_NAME}"
+              exit 1
+            fi
+            if [ "$(jq -r '.isPrerelease' <<< "${RELEASE_JSON}")" != "${RELEASE_PRERELEASE}" ]; then
+              echo "::error::Existing draft prerelease state does not match the tag"
+              exit 1
+            fi
+          else
+            CREATE_ARGS=(
+              "${GITHUB_REF_NAME}"
+              --draft
+              --verify-tag
+              --generate-notes
+              --title "SAGE v${RELEASE_VERSION}"
+              --notes "Sovereign Agent Governed Experience — persistent, governed memory for AI agents."
+            )
+            if [ "${RELEASE_PRERELEASE}" = "true" ]; then
+              CREATE_ARGS+=(--prerelease --latest=false)
+            fi
+            gh release create "${CREATE_ARGS[@]}"
+          fi
+
+          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+          find release-assets -maxdepth 1 -type f -exec basename {} \; | sort > /tmp/local-assets.txt
+          gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort > /tmp/remote-assets.txt
+          diff -u /tmp/local-assets.txt /tmp/remote-assets.txt
+
+  publish-docker-version:
+    name: Publish Immutable Docker Version
+    runs-on: ubuntu-latest
+    needs: [stage-github-release, release-metadata]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download private OCI archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-image-docker
+          path: docker-image
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -297,83 +694,195 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Publish and verify versioned multi-architecture image
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+          skopeo inspect --raw oci-archive:docker-image/sage-image.tar > /tmp/local-index.json
+          # Listing tags distinguishes a genuinely absent version from an auth,
+          # registry, or network error. Any failure here is fatal and cannot
+          # fall through to a potentially destructive copy.
+          skopeo list-tags docker://ghcr.io/l33tdawg/sage > /tmp/remote-tags.json
+          jq -e '.Tags | type == "array"' /tmp/remote-tags.json > /dev/null
+          if jq -e --arg version "${RELEASE_VERSION}" \
+             '.Tags | index($version) != null' /tmp/remote-tags.json > /dev/null; then
+            skopeo inspect --raw "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" > /tmp/existing-index.json
+            if ! cmp -s /tmp/local-index.json /tmp/existing-index.json; then
+              echo "::error::Docker version ${RELEASE_VERSION} already exists with a different manifest digest"
+              exit 1
+            fi
+            echo "Docker version ${RELEASE_VERSION} already contains the exact staged manifest"
+          else
+            skopeo copy --all --preserve-digests \
+              oci-archive:docker-image/sage-image.tar \
+              "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}"
+          fi
+          skopeo inspect --raw "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" > /tmp/remote-index.json
+          test "$(sha256sum /tmp/local-index.json | cut -d' ' -f1)" = \
+               "$(sha256sum /tmp/remote-index.json | cut -d' ' -f1)"
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length >= 1' \
+             /tmp/remote-index.json
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length >= 1' \
+             /tmp/remote-index.json
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+  publish-mcp:
+    name: Publish MCP Registry Version
+    runs-on: ubuntu-latest
+    needs: [publish-docker-version, release-metadata]
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+    steps:
+      - name: Download validated MCP inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ steps.version.outputs.version }}
-            COMMIT=${{ github.sha }}
-          tags: |
-            ghcr.io/l33tdawg/sage:${{ steps.version.outputs.version }}
-            ghcr.io/l33tdawg/sage:latest
+          name: release-package-mcp
+          path: mcp-package
 
-      - name: Publish to MCP Registry
+      - name: Publish manifest that references the live versioned image
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
-          curl -sSL -o mcp-publisher.tar.gz \
-            "https://github.com/modelcontextprotocol/registry/releases/download/v1.7.9/mcp-publisher_linux_amd64.tar.gz"
-          echo "ab128162b0616090b47cf245afe0a23f3ef08936fdce19074f5ba0a4469281ac  mcp-publisher.tar.gz" | sha256sum -c -
-          tar xzf mcp-publisher.tar.gz mcp-publisher
-          ./mcp-publisher login github-oidc
-          ./mcp-publisher publish
+          set -euo pipefail
+          cd mcp-package
+          chmod +x mcp-publisher
+          jq -e --arg version "${RELEASE_VERSION}" '.version == $version' server.json
+          jq -e --arg image "ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+             '[.packages[] | select(.registryType == "oci" and .identifier == $image)] | length == 1' \
+             server.json
+          STATUS=$(curl --location --silent --show-error \
+            --output /tmp/mcp-existing.json \
+            --write-out '%{http_code}' \
+            "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.l33tdawg%2Fsage/versions/${RELEASE_VERSION}")
+          case "${STATUS}" in
+            200)
+              jq -S '.server' /tmp/mcp-existing.json > /tmp/mcp-existing-server.json
+              jq -S '.' server.json > /tmp/mcp-staged-server.json
+              diff -u /tmp/mcp-existing-server.json /tmp/mcp-staged-server.json
+              echo "MCP version ${RELEASE_VERSION} already contains the exact staged manifest"
+              ;;
+            404)
+              ./mcp-publisher login github-oidc
+              ./mcp-publisher publish
+              ;;
+            *)
+              echo "::error::MCP Registry preflight returned HTTP ${STATUS}"
+              exit 1
+              ;;
+          esac
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 2 \
+            --output /tmp/mcp-published.json \
+            "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.l33tdawg%2Fsage/versions/${RELEASE_VERSION}"
+          jq -S '.server' /tmp/mcp-published.json > /tmp/mcp-published-server.json
+          jq -S '.' server.json > /tmp/mcp-staged-server.json
+          diff -u /tmp/mcp-staged-server.json /tmp/mcp-published-server.json
 
-      - name: Commit updated server.json back to repo
-        continue-on-error: true  # Branch protection may block bot pushes
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add server.json
-          git diff --cached --quiet && exit 0
-          git commit -m "ci: update server.json to v${{ steps.version.outputs.version }}"
-          git push origin HEAD:main
-
-  pypi-publish:
+  publish-pypi:
     name: Publish Python SDK to PyPI
     runs-on: ubuntu-latest
-    needs: [lint, test, frontend-static, v119-fault-gates]
+    needs: [publish-mcp, release-metadata]
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Verify SDK version matches tag
-        # Drift guard: the SDK must be bumped in lockstep (the chore commit
-        # that normally follows the fix). If pyproject.toml still reads the
-        # prior version the publish would either collide or ship stale code.
-        # Fail fast here so the release pipeline doesn't partially-land.
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          SDK_VERSION=$(grep '^version =' sdk/python/pyproject.toml | head -1 | sed -E 's/version = "(.+)"/\1/')
-          INIT_VERSION=$(grep '^__version__' sdk/python/src/sage_sdk/__init__.py | sed -E 's/__version__ = "(.+)"/\1/')
-          echo "tag=${VERSION} pyproject=${SDK_VERSION} __init__=${INIT_VERSION}"
-          if [ "${VERSION}" != "${SDK_VERSION}" ] || [ "${VERSION}" != "${INIT_VERSION}" ]; then
-            echo "::error::SDK version drift — bump sdk/python/pyproject.toml and sdk/python/src/sage_sdk/__init__.py to ${VERSION} before tagging"
-            exit 1
-          fi
-
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - name: Download validated Python package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          python-version: '3.12'
+          name: release-package-python
+          path: python-dist
 
-      - name: Install build backend
-        run: python -m pip install --upgrade build
-
-      - name: Build wheel + sdist
-        run: |
-          cd sdk/python
-          rm -rf dist
-          python -m build
-
-      - name: Publish to PyPI
+      - name: Publish exact staged wheel and sdist
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
-          packages-dir: sdk/python/dist
+          packages-dir: python-dist
           password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
+
+      - name: Verify exact public PyPI digests
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 2 \
+            --output /tmp/pypi-release.json \
+            "https://pypi.org/pypi/sage-agent-sdk/${RELEASE_VERSION}/json"
+          test "$(find python-dist -maxdepth 1 -type f | wc -l)" -eq \
+               "$(jq '.urls | length' /tmp/pypi-release.json)"
+          for file in python-dist/*; do
+            filename=$(basename "${file}")
+            local_digest=$(sha256sum "${file}" | cut -d' ' -f1)
+            remote_digest=$(jq -er --arg filename "${filename}" \
+              '.urls[] | select(.filename == $filename) | .digests.sha256' \
+              /tmp/pypi-release.json)
+            test "${local_digest}" = "${remote_digest}"
+          done
+
+  publish-docker-latest:
+    name: Promote Docker Latest Pointer
+    runs-on: ubuntu-latest
+    needs: [publish-pypi, release-metadata]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Leave latest unchanged for prereleases
+        if: needs.release-metadata.outputs.prerelease == 'true'
+        run: echo "Prerelease tag; ghcr.io/l33tdawg/sage:latest remains unchanged."
+
+      - name: Log in to GitHub Container Registry
+        if: needs.release-metadata.outputs.prerelease == 'false'
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote and verify latest
+        if: needs.release-metadata.outputs.prerelease == 'false'
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+          skopeo copy --all --preserve-digests \
+            "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+            docker://ghcr.io/l33tdawg/sage:latest
+          skopeo inspect --raw "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" > /tmp/version-index.json
+          skopeo inspect --raw docker://ghcr.io/l33tdawg/sage:latest > /tmp/latest-index.json
+          test "$(sha256sum /tmp/version-index.json | cut -d' ' -f1)" = \
+               "$(sha256sum /tmp/latest-index.json | cut -d' ' -f1)"
+
+  publish-github-release:
+    name: Publish GitHub Release Last
+    runs-on: ubuntu-latest
+    needs: [publish-docker-latest, release-metadata]
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the complete draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_PRERELEASE: ${{ needs.release-metadata.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq '.isDraft')" = "true" ]; then
+            if [ "${RELEASE_PRERELEASE}" = "true" ]; then
+              gh release edit "${GITHUB_REF_NAME}" --draft=false --latest=false
+            else
+              gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
+            fi
+          fi
+          test "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq '.isDraft')" = "false"
+          test "$(gh release view "${GITHUB_REF_NAME}" --json isPrerelease --jq '.isPrerelease')" = \
+               "${RELEASE_PRERELEASE}"
+          if [ "${RELEASE_PRERELEASE}" = "false" ]; then
+            test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')" = \
+                 "${GITHUB_REF_NAME}"
+          fi

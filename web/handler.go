@@ -171,6 +171,10 @@ type DashboardHandler struct {
 	// dashboard session, not the operator's signing key, so it cannot hit the
 	// agent-signed REST endpoints; this proxy IS the operator half).
 	Federation FederationJoinDriver
+	// federationPolicyMu serializes the multi-step deny-overlay -> consensus
+	// grant/revoke -> final-policy transition. SQLite snapshots are individually
+	// atomic, but two overlapping replacements must not interleave those phases.
+	federationPolicyMu sync.Mutex
 
 	// pendingImports holds parsed records from preview, keyed by import ID.
 	pendingImports sync.Map // string -> *pendingImport
@@ -242,6 +246,9 @@ type DashboardHandler struct {
 	// AppV20ActiveFn reports whether a newly broadcast scope_action can execute
 	// under app-v20. nil/false keeps the dashboard construction path disabled.
 	AppV20ActiveFn func() bool
+	// GovernanceDomainFn returns the committed app-v20 chain authorization
+	// domain. Post-v20 dashboard governance fails closed when it is unavailable.
+	GovernanceDomainFn func() string
 	// StrictRBAC, when true, opts the operator out of the app-v19 default-read
 	// flip: even with app-v19 active, a non-admin agent is confined to its explicit
 	// DomainAccess allowlist. Sourced from cfg.RBAC.Strict; default false = local
@@ -537,7 +544,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Get("/v1/dashboard/settings/onboarding", h.handleGetOnboarding)
 			r.Post("/v1/dashboard/settings/onboarding", h.handleSaveOnboarding)
 			r.Get("/v1/dashboard/settings/federation", h.handleGetFederationSetting)
-			r.Post("/v1/dashboard/settings/federation", h.handleSetFederationSetting)
+			r.With(h.federationOperatorGate).Post("/v1/dashboard/settings/federation", h.handleSetFederationSetting)
 			r.Get("/v1/dashboard/settings/cleanup", h.handleGetCleanupSettings)
 			r.Post("/v1/dashboard/settings/cleanup", h.handleSaveCleanupSettings)
 			r.Post("/v1/dashboard/cleanup/run", h.handleRunCleanup)

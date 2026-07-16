@@ -84,6 +84,11 @@ const (
 // GovProposalOp identifies the governance operation being proposed.
 type GovProposalOp uint8
 
+// GovOperationNameSyncGroupAction is the REST wire spelling for the historical
+// governance operation. It lives outside consensus packages so merely parsing
+// the action cannot be mistaken for consulting inert sync-group quorum state.
+const GovOperationNameSyncGroupAction = "sync_group_action"
+
 const (
 	GovOpAddValidator    GovProposalOp = 1
 	GovOpRemoveValidator GovProposalOp = 2
@@ -497,6 +502,10 @@ type UpgradePropose struct {
 	BinarySHA256       string // optional, may be empty — pinned digest for verification
 	ProposerID         string // agent_id of the validator that seeded this proposal
 	UpgradeDelayBlocks int64  // suggested delay before activation; chain may override
+	// GovernanceDomain is required exactly for app-v20. It is the 32-byte
+	// lowercase-hex domain derived from the CometBFT chain_id and explicitly
+	// approved by the upgrade quorum before delegated governance turns on.
+	GovernanceDomain string
 }
 
 // CanonicalUpgradeName is the single source of truth for the name an

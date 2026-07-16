@@ -2,10 +2,12 @@ package governance
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"testing"
 
+	cmttypes "github.com/cometbft/cometbft/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -127,6 +129,86 @@ func TestFullProposalLifecycle(t *testing.T) {
 	assert.Nil(t, active)
 }
 
+func TestValidateValidatorOperationV20(t *testing.T) {
+	tests := []struct {
+		name    string
+		vals    map[string]int64
+		op      ProposalOp
+		target  string
+		power   int64
+		wantErr string
+	}{
+		{name: "add boundary", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpAddValidator, target: "new", power: 10},
+		{name: "add existing", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpAddValidator, target: "a", power: 10, wantErr: "already exists"},
+		{name: "add zero", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpAddValidator, target: "new", power: 0, wantErr: "must be positive"},
+		{name: "add negative", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpAddValidator, target: "new", power: -1, wantErr: "must be positive"},
+		{name: "add over third", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpAddValidator, target: "new", power: 11, wantErr: "exceeds 1/3"},
+		{name: "remove existing", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpRemoveValidator, target: "c", power: 0},
+		{name: "remove nonzero", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpRemoveValidator, target: "c", power: 1, wantErr: "must be 0"},
+		{name: "remove missing", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpRemoveValidator, target: "missing", power: 0, wantErr: "does not exist"},
+		{name: "remove minimum", vals: map[string]int64{"a": 10, "b": 10}, op: OpRemoveValidator, target: "b", power: 0, wantErr: "minimum 2"},
+		{name: "update boundary", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpUpdatePower, target: "b", power: 20},
+		{name: "update over third", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpUpdatePower, target: "b", power: 21, wantErr: "exceeds max allowed"},
+		{name: "update zero", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpUpdatePower, target: "b", power: 0, wantErr: "must be positive"},
+		{name: "update missing", vals: map[string]int64{"a": 10, "b": 10, "c": 10}, op: OpUpdatePower, target: "missing", power: 10, wantErr: "does not exist"},
+		{name: "invalid operation", vals: map[string]int64{"a": 10}, op: OpDomainReassign, target: "a", power: 0, wantErr: "not a validator-set operation"},
+		{name: "negative existing power", vals: map[string]int64{"a": -1, "b": 10, "c": 10}, op: OpUpdatePower, target: "b", power: 11, wantErr: "negative power"},
+		{name: "total overflow", vals: map[string]int64{"a": math.MaxInt64, "b": 1}, op: OpAddValidator, target: "new", power: 1, wantErr: "overflows int64"},
+		{name: "add exceeds Comet total", vals: map[string]int64{"a": cmttypes.MaxTotalVotingPower}, op: OpAddValidator, target: "new", power: 1, wantErr: "CometBFT maximum"},
+		{name: "update exceeds Comet total", vals: map[string]int64{"a": cmttypes.MaxTotalVotingPower - 10, "b": 10}, op: OpUpdatePower, target: "b", power: 11, wantErr: "CometBFT maximum"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			eng, _, _ := makeEngine(tt.vals)
+			err := eng.ValidateValidatorOperationV20(tt.op, tt.target, tt.power)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestValidateValidatorOperationV20AvoidsAddPowerMultiplicationOverflow(t *testing.T) {
+	largeSafeTotal := (cmttypes.MaxTotalVotingPower / 4) * 3
+	eng, _, _ := makeEngine(map[string]int64{"a": largeSafeTotal})
+	require.NoError(t, eng.ValidateValidatorOperationV20(
+		OpAddValidator,
+		"new",
+		largeSafeTotal/3,
+	))
+	err := eng.ValidateValidatorOperationV20(OpAddValidator, "new", math.MaxInt64)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds 1/3")
+}
+
+func TestProcessBlockValidatedLeavesFailedExecutionRecoverable(t *testing.T) {
+	eng, _, _ := makeEngine(map[string]int64{"val-a": 10})
+	proposalID, err := eng.Propose(
+		"val-a", OpAddValidator, "new-val", []byte("bad-key"), 3,
+		0, "malformed execution", 100, nil,
+	)
+	require.NoError(t, err)
+
+	executed, err := eng.ProcessBlockValidated(100, func(*ProposalState) error {
+		return fmt.Errorf("target key mismatch")
+	})
+	require.Error(t, err)
+	assert.Nil(t, executed)
+	assert.Contains(t, err.Error(), "target key mismatch")
+
+	proposal, err := eng.LoadProposal(proposalID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusVoting, proposal.Status)
+	active, err := eng.GetActiveProposal()
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	assert.Equal(t, proposalID, active.ProposalID)
+}
+
 func TestSingleNodeAutoApprove(t *testing.T) {
 	eng, _, _ := makeEngine(map[string]int64{
 		"sole-val": 10,
@@ -198,27 +280,27 @@ func TestProposalRejection(t *testing.T) {
 func TestProposerCooldown(t *testing.T) {
 	eng, _, _ := makeEngine(map[string]int64{
 		"val-a": 10,
-		"val-b": 10,
-		"val-c": 10,
 	})
+	const proposalHeight = int64(100)
+	cooldown := effectiveCooldownBlocks()
 
 	// First proposal succeeds.
-	proposalID, err := eng.Propose("val-a", OpAddValidator, "new-val", []byte("pk"), 5, 0, "first", 100, nil)
+	_, err := eng.Propose("val-a", OpAddValidator, "new-val", []byte("pk"), 3, 0, "first", proposalHeight, nil)
 	require.NoError(t, err)
 
-	// Execute it so we can try another.
-	require.NoError(t, eng.Vote(proposalID, "val-b", "accept", 105))
-	executed, err := eng.ProcessBlock(111)
+	// A single validator's auto-vote executes immediately, keeping the
+	// cooldown boundary independent of the multi-validator voting period.
+	executed, err := eng.ProcessBlock(proposalHeight)
 	require.NoError(t, err)
 	require.NotNil(t, executed)
 
-	// Second proposal within cooldown (100 + 50 = 150). Height 140 < 150.
-	_, err = eng.Propose("val-a", OpAddValidator, "another-val", []byte("pk2"), 5, 0, "too soon", 140, nil)
-	assert.Error(t, err)
+	// The block immediately before the effective cooldown boundary rejects.
+	_, err = eng.Propose("val-a", OpAddValidator, "another-val", []byte("pk2"), 3, 0, "too soon", proposalHeight+cooldown-1, nil)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cooldown")
 
-	// After cooldown expires: height 150 >= 100 + 50.
-	_, err = eng.Propose("val-a", OpAddValidator, "another-val", []byte("pk2"), 5, 0, "after cooldown", 150, nil)
+	// The exact effective cooldown boundary succeeds.
+	_, err = eng.Propose("val-a", OpAddValidator, "another-val", []byte("pk2"), 3, 0, "after cooldown", proposalHeight+cooldown, nil)
 	require.NoError(t, err)
 }
 
@@ -516,16 +598,17 @@ func TestCancelSetsCooldown(t *testing.T) {
 	proposalID, err := eng.Propose("val-a", OpAddValidator, "new-val", []byte("pk"), 5, 0, "to cancel", 100, nil)
 	require.NoError(t, err)
 
-	// Cancel at height 110.
-	require.NoError(t, eng.Cancel(proposalID, "val-a", 110))
+	const cancelHeight = int64(110)
+	cooldown := effectiveCooldownBlocks()
+	require.NoError(t, eng.Cancel(proposalID, "val-a", cancelHeight))
 
-	// Try to propose again within cooldown (110 + 50 = 160). Height 150 < 160.
-	_, err = eng.Propose("val-a", OpAddValidator, "new-val2", []byte("pk2"), 5, 0, "too soon", 150, nil)
-	assert.Error(t, err)
+	// The block immediately before the effective cooldown boundary rejects.
+	_, err = eng.Propose("val-a", OpAddValidator, "new-val2", []byte("pk2"), 5, 0, "too soon", cancelHeight+cooldown-1, nil)
+	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cooldown")
 
-	// After cooldown: height 160 >= 110 + 50.
-	_, err = eng.Propose("val-a", OpAddValidator, "new-val2", []byte("pk2"), 5, 0, "ok now", 160, nil)
+	// The exact effective cooldown boundary succeeds.
+	_, err = eng.Propose("val-a", OpAddValidator, "new-val2", []byte("pk2"), 5, 0, "ok now", cancelHeight+cooldown, nil)
 	require.NoError(t, err)
 }
 

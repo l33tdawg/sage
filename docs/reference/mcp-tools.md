@@ -1,4 +1,4 @@
-Reconciled against internal/mcp at SAGE v11.8.5.
+Reconciled against internal/mcp for SAGE v11.9.0.
 
 # SAGE MCP Tools Reference
 
@@ -668,7 +668,12 @@ otherwise.
 
 **Purpose:** Submit a governance proposal, including validator operations,
 Synchronization Group decisions, and app-v20 canonical scope actions. Requires
-admin role.
+the target node's configured governance-operator identity. The node's live
+validator key remains the on-chain proposal actor. After app-v20, the MCP
+bridge first makes a signed `GET /v1/governance/context`, adds the returned
+validator ID and chain domain, and consensus verifies every exact
+operator-signed proposal as global-admin authorization. The operator must be a
+registered global admin before it can propose.
 
 **Source:** `tools.go:287-328` (definition), `tools.go:2377-2444` (handler)
 
@@ -693,6 +698,14 @@ contain `/`, ambiguous `payload` + `scope`, and target/scope ID mismatches.
 **Returns:**
 - `proposal_id`, `tx_hash`, `status`, `operation`, `target_id`, `reason`.
 
+`proposal_id` is the deterministic governance-engine ID used for later
+vote/cancel calls and is distinct from the CometBFT `tx_hash`.
+
+The context route is a compatibility probe: pre-v20 `404` or an inactive
+context keeps the legacy body; other failures fail closed. A `409` mutation
+response means the validator/domain binding changed, so call the tool again to
+fetch and sign fresh context.
+
 **REST:** `POST /v1/governance/propose`
 
 **When to call:** Admin/operator use only. When the validator set needs to
@@ -703,7 +716,11 @@ rebalancing voting power.
 
 ### sage_gov_vote
 
-**Purpose:** Vote on an active governance proposal. Only validators can vote.
+**Purpose:** Authorize the target node's local validator to vote on an active
+governance proposal. Only that validator receives voting power; the MCP/HTTP
+operator identity cannot borrow another reachable validator. After app-v20,
+the tool automatically attaches fresh validator/chain context. This node-local
+operator need not be the global admin that authorized proposal creation.
 
 **Source:** `tools.go:274-286` (definition), `tools.go:1910-1938` (handler)
 
@@ -719,8 +736,9 @@ rebalancing voting power.
 
 **REST:** `POST /v1/governance/vote`
 
-**When to call:** When you are a validator and there is an active proposal to
-vote on. Check `sage_gov_status` first to get the current `proposal_id`.
+**When to call:** Through the validator node whose configured operator key you
+hold, when there is an active proposal to vote on. Check `sage_gov_status`
+first to get the current `proposal_id`.
 
 ---
 

@@ -90,9 +90,14 @@ type SyncOrigin struct {
 	OriginChainID   string
 	OriginMemoryID  string
 	OriginCreatedAt string // opaque origin timestamp, stored verbatim
-	LocalMemoryID   string
-	DomainTag       string
-	Outcome         string
+	// OriginAgentPubkey is the exact roster/authenticated ed25519 identity whose
+	// signature was verified when this copy was admitted. Group digest/relay
+	// queries bind it to the current same-group origin member, preventing two
+	// agents on one chain from being conflated across groups.
+	OriginAgentPubkey string
+	LocalMemoryID     string
+	DomainTag         string
+	Outcome           string
 	// OriginSig is the ORIGIN agent's ed25519 signature persisted at admission
 	// (v11.8 mesh relay, docs §9.2). Nil for pre-v11.8 pairwise rows / rejections;
 	// a relayer re-serves it verbatim so the receiver verifies authenticity
@@ -121,13 +126,29 @@ type SyncControl struct {
 	Role              string
 	ControllerChainID string
 	ControllerAgentID string
-	PolicyEpoch       string
-	RemoteCAPin       string
-	BindingState      string
-	Revision          int64
-	PolicyHash        string
-	DeliveredRevision int64
+	// PeerAgentID is the remote node-operator key frozen during JOIN. It is
+	// distinct from ControllerAgentID: on a host-side row the historical
+	// controller is local, while peer-authenticated v3 policy/write requests must
+	// still be pinned to the guest operator that completed the ceremony.
+	PeerAgentID         string
+	PolicyEpoch         string
+	RemoteCAPin         string
+	BindingState        string
+	PolicyVersion       int
+	Revision            int64
+	PolicyHash          string
+	DeliveredRevision   int64
+	RemotePolicyVersion int
+	RemoteRevision      int64
+	RemotePolicyHash    string
 }
+
+const (
+	SyncDirectionLocalPublish    = "local_publish"
+	SyncDirectionLocalSubscribe  = "local_subscribe"
+	SyncDirectionRemotePublish   = "remote_publish"
+	SyncDirectionRemoteSubscribe = "remote_subscribe"
+)
 
 // CommittedHashMatch is one committed memory row matching a content hash,
 // used by the B-D1 cross-domain duplicate gate.
@@ -175,6 +196,7 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		origin_chain_id   TEXT NOT NULL,
 		origin_memory_id  TEXT NOT NULL,
 		origin_created_at TEXT NOT NULL DEFAULT '',
+		origin_agent_pubkey TEXT NOT NULL DEFAULT '',
 		local_memory_id   TEXT NOT NULL DEFAULT '',
 		domain_tag        TEXT NOT NULL DEFAULT '',
 		outcome           TEXT NOT NULL
@@ -208,13 +230,26 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		role                 TEXT NOT NULL CHECK (role IN ('host','guest')),
 		controller_chain_id  TEXT NOT NULL,
 		controller_agent_id  TEXT NOT NULL,
+		peer_agent_id        TEXT NOT NULL DEFAULT '',
 		policy_epoch         TEXT NOT NULL,
 		remote_ca_pin        TEXT NOT NULL,
 		binding_state        TEXT NOT NULL CHECK (binding_state IN ('pending','active')),
+		policy_version       INTEGER NOT NULL DEFAULT 3,
 		revision             INTEGER NOT NULL DEFAULT 0,
 		policy_hash          TEXT NOT NULL DEFAULT '',
 		delivered_revision   INTEGER NOT NULL DEFAULT 0,
+		remote_policy_version INTEGER NOT NULL DEFAULT 0,
+		remote_revision       INTEGER NOT NULL DEFAULT 0,
+		remote_policy_hash    TEXT NOT NULL DEFAULT '',
 		updated_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	)`)
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS sync_directional_domains (
+		remote_chain_id TEXT NOT NULL,
+		direction       TEXT NOT NULL CHECK (direction IN ('local_publish','local_subscribe','remote_publish','remote_subscribe')),
+		domain_tag      TEXT NOT NULL,
+		created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		PRIMARY KEY (remote_chain_id, direction, domain_tag)
 	)`)
 	// fed_peer_names: the friendly label a peer network chose for itself, learned
 	// at join time. Purely a local display convenience (the connections list shows
@@ -240,11 +275,46 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		`SELECT COUNT(*) FROM pragma_table_info('sync_origin') WHERE name='origin_sig'`).Scan(&hasOriginSig); err == nil && hasOriginSig == 0 {
 		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_origin ADD COLUMN origin_sig BLOB`)
 	}
+	var hasOriginAgent int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('sync_origin') WHERE name='origin_agent_pubkey'`).Scan(&hasOriginAgent); err == nil && hasOriginAgent == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_origin ADD COLUMN origin_agent_pubkey TEXT NOT NULL DEFAULT ''`)
+	}
 	var hasOriginChain int
 	if err := s.conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM pragma_table_info('sync_outbox') WHERE name='origin_chain_id'`).Scan(&hasOriginChain); err == nil && hasOriginChain == 0 {
 		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_outbox ADD COLUMN origin_chain_id TEXT NOT NULL DEFAULT ''`)
 	}
+	// Existing host-managed links used the bilateral v1 interpretation. Preserve
+	// that behavior until their host explicitly publishes a v2 policy; fresh
+	// databases get the CREATE-table default above.
+	var hasPolicyVersion int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('sync_control') WHERE name='policy_version'`).Scan(&hasPolicyVersion); err == nil && hasPolicyVersion == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_control ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 1`)
+	}
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"peer_agent_id", `ALTER TABLE sync_control ADD COLUMN peer_agent_id TEXT NOT NULL DEFAULT ''`},
+		{"remote_policy_version", `ALTER TABLE sync_control ADD COLUMN remote_policy_version INTEGER NOT NULL DEFAULT 0`},
+		{"remote_revision", `ALTER TABLE sync_control ADD COLUMN remote_revision INTEGER NOT NULL DEFAULT 0`},
+		{"remote_policy_hash", `ALTER TABLE sync_control ADD COLUMN remote_policy_hash TEXT NOT NULL DEFAULT ''`},
+	} {
+		var found int
+		if err := s.conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info('sync_control') WHERE name=?`, col.name).Scan(&found); err == nil && found == 0 {
+			_, _ = s.writeExecContext(ctx, col.ddl)
+		}
+	}
+	// The legacy guest-side controller was the remote host, so that identity is
+	// already ceremony-frozen and can be backfilled safely. A legacy host-side
+	// row names the LOCAL controller and has no trustworthy key in this table;
+	// leave it empty until Manager verifies the exact two-member ceremony roster
+	// and freezes the recovered guest key with FreezeSyncControlPeerAgent.
+	_, _ = s.writeExecContext(ctx, `UPDATE sync_control SET peer_agent_id=controller_agent_id
+		WHERE peer_agent_id='' AND role='guest'`)
 }
 
 func (s *SQLiteStore) PrepareSyncControl(ctx context.Context, c SyncControl) error {
@@ -252,17 +322,24 @@ func (s *SQLiteStore) PrepareSyncControl(ctx context.Context, c SyncControl) err
 		c.ControllerAgentID == "" || c.PolicyEpoch == "" || c.RemoteCAPin == "" {
 		return fmt.Errorf("incomplete sync control binding")
 	}
+	if c.PolicyVersion == 0 {
+		c.PolicyVersion = 3
+	}
 	_, err := s.writeExecContext(ctx, `
-		INSERT INTO sync_control (remote_chain_id, role, controller_chain_id, controller_agent_id,
-			policy_epoch, remote_ca_pin, binding_state)
-		VALUES (?, ?, ?, ?, ?, ?, 'pending')
+		INSERT INTO sync_control (remote_chain_id, role, controller_chain_id, controller_agent_id, peer_agent_id,
+			policy_epoch, remote_ca_pin, binding_state, policy_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
 		ON CONFLICT(remote_chain_id) DO UPDATE SET
 			role=excluded.role, controller_chain_id=excluded.controller_chain_id,
-			controller_agent_id=excluded.controller_agent_id, policy_epoch=excluded.policy_epoch,
-			remote_ca_pin=excluded.remote_ca_pin, revision=0, policy_hash='', delivered_revision=0,
+			controller_agent_id=excluded.controller_agent_id, peer_agent_id=excluded.peer_agent_id,
+			policy_epoch=excluded.policy_epoch,
+			remote_ca_pin=excluded.remote_ca_pin, policy_version=excluded.policy_version,
+			revision=0, policy_hash='', delivered_revision=0,
+			remote_policy_version=0, remote_revision=0, remote_policy_hash='',
 			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		WHERE sync_control.binding_state='pending'`,
-		c.RemoteChainID, c.Role, c.ControllerChainID, c.ControllerAgentID, c.PolicyEpoch, c.RemoteCAPin)
+		c.RemoteChainID, c.Role, c.ControllerChainID, c.ControllerAgentID, c.PeerAgentID,
+		c.PolicyEpoch, c.RemoteCAPin, c.PolicyVersion)
 	if err != nil {
 		return err
 	}
@@ -271,8 +348,9 @@ func (s *SQLiteStore) PrepareSyncControl(ctx context.Context, c SyncControl) err
 		return err
 	}
 	if existing == nil || existing.Role != c.Role || existing.ControllerChainID != c.ControllerChainID ||
-		existing.ControllerAgentID != c.ControllerAgentID || existing.PolicyEpoch != c.PolicyEpoch ||
-		existing.RemoteCAPin != c.RemoteCAPin {
+		existing.ControllerAgentID != c.ControllerAgentID || existing.PeerAgentID != c.PeerAgentID ||
+		existing.PolicyEpoch != c.PolicyEpoch ||
+		existing.RemoteCAPin != c.RemoteCAPin || existing.PolicyVersion != c.PolicyVersion {
 		return fmt.Errorf("different sync controller binding already exists; revoke before re-enrolling")
 	}
 	return nil
@@ -297,10 +375,53 @@ func (s *SQLiteStore) ActivateSyncControl(ctx context.Context, remoteChainID, ep
 		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_outbox WHERE remote_chain_id=?`, remoteChainID); err != nil {
 			return err
 		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_directional_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return err
+		}
 		_, err := tx.writeExecContext(ctx, `UPDATE sync_control SET binding_state='active', revision=0,
-			policy_hash='', delivered_revision=0, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			policy_hash='', delivered_revision=0, remote_policy_version=0, remote_revision=0,
+			remote_policy_hash='', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 			WHERE remote_chain_id=? AND policy_epoch=?`, remoteChainID, epoch)
 		return err
+	})
+}
+
+// FreezeSyncControlPeerAgent upgrades a legacy active binding after the
+// Manager has recovered the remote operator from ceremony-authenticated
+// artifacts. It is a compare-and-freeze operation: the epoch and CA pin must
+// still match, an existing peer key may only match exactly, and no caller can
+// use it to replace the identity on an active connection.
+func (s *SQLiteStore) FreezeSyncControlPeerAgent(ctx context.Context, remoteChainID, epoch, remoteCAPin, peerAgentID string) error {
+	if err := validatePeerRBACIdentity(remoteChainID, peerAgentID, CurrentPeerRBACPolicyVersion); err != nil {
+		return err
+	}
+	if epoch == "" || remoteCAPin == "" {
+		return fmt.Errorf("sync peer binding epoch and remote CA pin are required")
+	}
+	return s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		var existingPeer, existingEpoch, existingCAPin, state string
+		if err := tx.conn.QueryRowContext(ctx, `SELECT peer_agent_id, policy_epoch, remote_ca_pin, binding_state
+			FROM sync_control WHERE remote_chain_id=?`, remoteChainID).
+			Scan(&existingPeer, &existingEpoch, &existingCAPin, &state); err != nil {
+			return fmt.Errorf("read sync peer binding: %w", err)
+		}
+		if state != "active" || existingEpoch != epoch || existingCAPin != remoteCAPin {
+			return fmt.Errorf("%w: active sync ceremony generation changed", ErrPeerRBACBindingMismatch)
+		}
+		if existingPeer != "" {
+			if existingPeer != peerAgentID {
+				return fmt.Errorf("%w: sync peer identity already frozen", ErrPeerRBACBindingMismatch)
+			}
+			return nil
+		}
+		if _, err := tx.writeExecContext(ctx, `UPDATE sync_control SET peer_agent_id=?,
+			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			WHERE remote_chain_id=? AND peer_agent_id='' AND policy_epoch=? AND remote_ca_pin=? AND binding_state='active'`,
+			peerAgentID, remoteChainID, epoch, remoteCAPin); err != nil {
+			return fmt.Errorf("freeze sync peer binding: %w", err)
+		}
+		return nil
 	})
 }
 
@@ -324,6 +445,26 @@ func (s *SQLiteStore) PurgeSyncPeerState(ctx context.Context, remoteChainID stri
 		}
 		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_control WHERE remote_chain_id=?`, remoteChainID); err != nil {
 			return fmt.Errorf("purge sync control: %w", err)
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_directional_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("purge directional sync domains: %w", err)
+		}
+		// Trust revocation must make authorization deny-all immediately. Preserve
+		// only the header while a managed Write grant still needs tx-7 cleanup;
+		// retaining old domain rows would let Read/Copy (or a stale preview Write)
+		// resurrect if the same chain/operator re-paired before cleanup completed.
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM peer_rbac_domain WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("clear revoked peer RBAC domains: %w", err)
+		}
+		var managedGrantCount int
+		if err := tx.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM peer_rbac_managed_grant
+			WHERE remote_chain_id=?`, remoteChainID).Scan(&managedGrantCount); err != nil {
+			return fmt.Errorf("count managed peer grants: %w", err)
+		}
+		if managedGrantCount == 0 {
+			if _, err := tx.writeExecContext(ctx, `DELETE FROM peer_rbac_policy WHERE remote_chain_id=?`, remoteChainID); err != nil {
+				return fmt.Errorf("purge retired peer RBAC policy: %w", err)
+			}
 		}
 		// A revoke removes transport/policy state, not the fact that an already
 		// committed local memory originated elsewhere. Promote crash-window
@@ -352,10 +493,12 @@ func (s *SQLiteStore) PurgeSyncPeerState(ctx context.Context, remoteChainID stri
 func (s *SQLiteStore) GetSyncControl(ctx context.Context, remoteChainID string) (*SyncControl, error) {
 	c := &SyncControl{}
 	err := s.conn.QueryRowContext(ctx, `SELECT remote_chain_id, role, controller_chain_id,
-		controller_agent_id, policy_epoch, remote_ca_pin, binding_state, revision,
-		policy_hash, delivered_revision FROM sync_control WHERE remote_chain_id=?`, remoteChainID).
-		Scan(&c.RemoteChainID, &c.Role, &c.ControllerChainID, &c.ControllerAgentID, &c.PolicyEpoch,
-			&c.RemoteCAPin, &c.BindingState, &c.Revision, &c.PolicyHash, &c.DeliveredRevision)
+		controller_agent_id, peer_agent_id, policy_epoch, remote_ca_pin, binding_state, policy_version, revision,
+		policy_hash, delivered_revision, remote_policy_version, remote_revision, remote_policy_hash
+		FROM sync_control WHERE remote_chain_id=?`, remoteChainID).
+		Scan(&c.RemoteChainID, &c.Role, &c.ControllerChainID, &c.ControllerAgentID, &c.PeerAgentID, &c.PolicyEpoch,
+			&c.RemoteCAPin, &c.BindingState, &c.PolicyVersion, &c.Revision, &c.PolicyHash, &c.DeliveredRevision,
+			&c.RemotePolicyVersion, &c.RemoteRevision, &c.RemotePolicyHash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -364,9 +507,11 @@ func (s *SQLiteStore) GetSyncControl(ctx context.Context, remoteChainID string) 
 
 func (s *SQLiteStore) ListPendingSyncControls(ctx context.Context) ([]SyncControl, error) {
 	rows, err := s.conn.QueryContext(ctx, `SELECT remote_chain_id, role, controller_chain_id,
-		controller_agent_id, policy_epoch, remote_ca_pin, binding_state, revision,
-		policy_hash, delivered_revision FROM sync_control
-		WHERE role='host' AND binding_state='active' AND revision > delivered_revision ORDER BY remote_chain_id`)
+		controller_agent_id, peer_agent_id, policy_epoch, remote_ca_pin, binding_state, policy_version, revision,
+		policy_hash, delivered_revision, remote_policy_version, remote_revision, remote_policy_hash
+		FROM sync_control
+		WHERE binding_state='active' AND revision > delivered_revision
+		AND (role='host' OR policy_version >= 3) ORDER BY remote_chain_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -375,7 +520,8 @@ func (s *SQLiteStore) ListPendingSyncControls(ctx context.Context) ([]SyncContro
 	for rows.Next() {
 		var c SyncControl
 		if err := rows.Scan(&c.RemoteChainID, &c.Role, &c.ControllerChainID, &c.ControllerAgentID,
-			&c.PolicyEpoch, &c.RemoteCAPin, &c.BindingState, &c.Revision, &c.PolicyHash, &c.DeliveredRevision); err != nil {
+			&c.PeerAgentID, &c.PolicyEpoch, &c.RemoteCAPin, &c.BindingState, &c.PolicyVersion, &c.Revision, &c.PolicyHash, &c.DeliveredRevision,
+			&c.RemotePolicyVersion, &c.RemoteRevision, &c.RemotePolicyHash); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -394,6 +540,111 @@ func (s *SQLiteStore) MarkSyncPolicyDelivered(ctx context.Context, remoteChainID
 // ApplySyncPolicy atomically advances the controller snapshot and replaces the
 // effective domains. The caller has already authenticated treaty/controller.
 func (s *SQLiteStore) ApplySyncPolicy(ctx context.Context, remoteChainID, epoch string, revision int64, policyHash string, domains []string) (string, error) {
+	return s.ApplySyncPolicyVersion(ctx, remoteChainID, epoch, 1, revision, policyHash, domains)
+}
+
+// ApplySyncPolicyVersion is the version-aware policy snapshot primitive. v1 is
+// the legacy bilateral interpretation; v2 keeps the same atomic revision/hash
+// guarantees while treating each agreement scope as directional.
+func (s *SQLiteStore) ApplySyncPolicyVersion(ctx context.Context, remoteChainID, epoch string, policyVersion int, revision int64, policyHash string, domains []string) (string, error) {
+	if policyVersion != 1 && policyVersion != 2 {
+		return "", fmt.Errorf("unsupported sync policy version %d", policyVersion)
+	}
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
+	result := "applied"
+	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		var current int64
+		var currentVersion, remoteVersion int
+		var currentHash, state string
+		if err := tx.conn.QueryRowContext(ctx, `SELECT revision, policy_hash, binding_state,
+			policy_version, remote_policy_version FROM sync_control
+			WHERE remote_chain_id=? AND policy_epoch=?`, remoteChainID, epoch).
+			Scan(&current, &currentHash, &state, &currentVersion, &remoteVersion); err != nil {
+			return err
+		}
+		if state != "active" {
+			return fmt.Errorf("sync control is not active")
+		}
+		if currentVersion >= 3 || remoteVersion >= 3 {
+			return fmt.Errorf("peer-RBAC sync policy cannot be downgraded to version %d", policyVersion)
+		}
+		if revision < current {
+			return fmt.Errorf("stale sync policy revision")
+		}
+		if revision == current {
+			if policyHash != currentHash {
+				return fmt.Errorf("sync policy revision conflict")
+			}
+			result = "duplicate"
+			return nil
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return err
+		}
+		for _, domain := range domains {
+			if _, err := tx.writeExecContext(ctx, `INSERT INTO sync_domains (remote_chain_id, domain_tag) VALUES (?, ?)`, remoteChainID, domain); err != nil {
+				return err
+			}
+		}
+		_, err := tx.writeExecContext(ctx, `UPDATE sync_control SET policy_version=?, revision=?, policy_hash=?,
+			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE remote_chain_id=? AND policy_epoch=?`,
+			policyVersion, revision, policyHash, remoteChainID, epoch)
+		return err
+	})
+	return result, err
+}
+
+// GetDirectionalSyncDomains returns one normalized v3 permission set. The four
+// directions deliberately separate what this node publishes/allows from what
+// it requests and from the peer's mirrored declarations.
+func (s *SQLiteStore) GetDirectionalSyncDomains(ctx context.Context, remoteChainID, direction string) ([]string, error) {
+	switch direction {
+	case SyncDirectionLocalPublish, SyncDirectionLocalSubscribe, SyncDirectionRemotePublish, SyncDirectionRemoteSubscribe:
+	default:
+		return nil, fmt.Errorf("invalid sync direction %q", direction)
+	}
+	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag FROM sync_directional_domains
+		WHERE remote_chain_id=? AND direction=? ORDER BY domain_tag`, remoteChainID, direction)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var domain string
+		if err := rows.Scan(&domain); err != nil {
+			return nil, err
+		}
+		out = append(out, domain)
+	}
+	return out, rows.Err()
+}
+
+func replaceDirectionalDomains(ctx context.Context, tx *SQLiteStore, remoteChainID, direction string, domains []string) error {
+	if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_directional_domains WHERE remote_chain_id=? AND direction=?`, remoteChainID, direction); err != nil {
+		return err
+	}
+	for _, domain := range domains {
+		if domain == "" {
+			return fmt.Errorf("empty domain in directional sync policy")
+		}
+		if _, err := tx.writeExecContext(ctx, `INSERT INTO sync_directional_domains
+			(remote_chain_id, direction, domain_tag) VALUES (?, ?, ?)`, remoteChainID, direction, domain); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ApplyLocalDirectionalSyncPolicy advances this node's publisher/subscriber
+// snapshot. delivered_revision is advanced separately only after the peer has
+// durably acknowledged the same snapshot.
+func (s *SQLiteStore) ApplyLocalDirectionalSyncPolicy(ctx context.Context, remoteChainID, epoch string, version int, revision int64, policyHash string, publish, subscribe []string) (string, error) {
+	if version < 3 {
+		return "", fmt.Errorf("directional sync policy requires version 3 or newer")
+	}
 	unlock := s.LockSyncPolicyWrite()
 	defer unlock()
 	result := "applied"
@@ -418,17 +669,60 @@ func (s *SQLiteStore) ApplySyncPolicy(ctx context.Context, remoteChainID, epoch 
 			result = "duplicate"
 			return nil
 		}
-		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
+		if err := replaceDirectionalDomains(ctx, tx, remoteChainID, SyncDirectionLocalPublish, publish); err != nil {
 			return err
 		}
-		for _, domain := range domains {
-			if _, err := tx.writeExecContext(ctx, `INSERT INTO sync_domains (remote_chain_id, domain_tag) VALUES (?, ?)`, remoteChainID, domain); err != nil {
-				return err
-			}
+		if err := replaceDirectionalDomains(ctx, tx, remoteChainID, SyncDirectionLocalSubscribe, subscribe); err != nil {
+			return err
 		}
-		_, err := tx.writeExecContext(ctx, `UPDATE sync_control SET revision=?, policy_hash=?,
+		_, err := tx.writeExecContext(ctx, `UPDATE sync_control SET policy_version=?, revision=?, policy_hash=?,
 			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE remote_chain_id=? AND policy_epoch=?`,
-			revision, policyHash, remoteChainID, epoch)
+			version, revision, policyHash, remoteChainID, epoch)
+		return err
+	})
+	return result, err
+}
+
+// ApplyRemoteDirectionalSyncPolicy mirrors the peer's independently authored
+// publisher/subscriber snapshot. Its revision lane is separate from the local
+// lane, so both colleagues can change permissions concurrently.
+func (s *SQLiteStore) ApplyRemoteDirectionalSyncPolicy(ctx context.Context, remoteChainID, epoch string, version int, revision int64, policyHash string, publish, subscribe []string) (string, error) {
+	if version < 3 {
+		return "", fmt.Errorf("directional sync policy requires version 3 or newer")
+	}
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
+	result := "applied"
+	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		var current int64
+		var currentHash, state string
+		if err := tx.conn.QueryRowContext(ctx, `SELECT remote_revision, remote_policy_hash, binding_state FROM sync_control
+			WHERE remote_chain_id=? AND policy_epoch=?`, remoteChainID, epoch).Scan(&current, &currentHash, &state); err != nil {
+			return err
+		}
+		if state != "active" {
+			return fmt.Errorf("sync control is not active")
+		}
+		if revision < current {
+			return fmt.Errorf("stale remote sync policy revision")
+		}
+		if revision == current {
+			if policyHash != currentHash {
+				return fmt.Errorf("remote sync policy revision conflict")
+			}
+			result = "duplicate"
+			return nil
+		}
+		if err := replaceDirectionalDomains(ctx, tx, remoteChainID, SyncDirectionRemotePublish, publish); err != nil {
+			return err
+		}
+		if err := replaceDirectionalDomains(ctx, tx, remoteChainID, SyncDirectionRemoteSubscribe, subscribe); err != nil {
+			return err
+		}
+		_, err := tx.writeExecContext(ctx, `UPDATE sync_control SET remote_policy_version=?, remote_revision=?, remote_policy_hash=?,
+			updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE remote_chain_id=? AND policy_epoch=?`,
+			version, revision, policyHash, remoteChainID, epoch)
 		return err
 	})
 	return result, err
@@ -533,7 +827,11 @@ func (s *SQLiteStore) GetSyncDomains(ctx context.Context, remoteChainID string) 
 // one consented sync domain — the drainer's iteration set.
 func (s *SQLiteStore) ListSyncDomainChains(ctx context.Context) ([]string, error) {
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT DISTINCT remote_chain_id FROM sync_domains ORDER BY remote_chain_id`)
+		`SELECT remote_chain_id FROM (
+			SELECT remote_chain_id FROM sync_domains
+			UNION
+			SELECT remote_chain_id FROM sync_directional_domains
+		) ORDER BY remote_chain_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list sync chains: %w", err)
 	}
@@ -917,9 +1215,9 @@ func (s *SQLiteStore) RecordSyncOrigin(ctx context.Context, o SyncOrigin) error 
 	}
 	_, err := s.writeExecContext(ctx, `
 		INSERT OR IGNORE INTO sync_origin
-			(origin_chain_id, origin_memory_id, origin_created_at, local_memory_id, domain_tag, outcome, origin_sig)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		o.OriginChainID, o.OriginMemoryID, o.OriginCreatedAt, o.LocalMemoryID, o.DomainTag, o.Outcome, sig)
+			(origin_chain_id, origin_memory_id, origin_created_at, origin_agent_pubkey, local_memory_id, domain_tag, outcome, origin_sig)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		o.OriginChainID, o.OriginMemoryID, o.OriginCreatedAt, o.OriginAgentPubkey, o.LocalMemoryID, o.DomainTag, o.Outcome, sig)
 	if err != nil {
 		return fmt.Errorf("record sync origin: %w", err)
 	}
@@ -930,12 +1228,12 @@ func (s *SQLiteStore) RecordSyncOrigin(ctx context.Context, o SyncOrigin) error 
 // or sql.ErrNoRows if this pair has never been decided.
 func (s *SQLiteStore) GetSyncOrigin(ctx context.Context, originChainID, originMemoryID string) (*SyncOrigin, error) {
 	row := s.conn.QueryRowContext(ctx, `
-		SELECT origin_chain_id, origin_memory_id, origin_created_at, local_memory_id, domain_tag, outcome, origin_sig, created_at
+		SELECT origin_chain_id, origin_memory_id, origin_created_at, origin_agent_pubkey, local_memory_id, domain_tag, outcome, origin_sig, created_at
 		  FROM sync_origin
 		 WHERE origin_chain_id = ? AND origin_memory_id = ?`, originChainID, originMemoryID)
 	var o SyncOrigin
 	var createdAt string
-	if err := row.Scan(&o.OriginChainID, &o.OriginMemoryID, &o.OriginCreatedAt,
+	if err := row.Scan(&o.OriginChainID, &o.OriginMemoryID, &o.OriginCreatedAt, &o.OriginAgentPubkey,
 		&o.LocalMemoryID, &o.DomainTag, &o.Outcome, &o.OriginSig, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, sql.ErrNoRows
@@ -950,9 +1248,10 @@ func (s *SQLiteStore) GetSyncOrigin(ctx context.Context, originChainID, originMe
 // copy: the ORIGINAL origin memory id, its opaque origin timestamp, and the
 // origin agent's persisted signature (v11.8 mesh relay, docs §9.2).
 type RelayOrigin struct {
-	OriginMemoryID  string
-	OriginCreatedAt string
-	OriginSig       []byte
+	OriginMemoryID    string
+	OriginCreatedAt   string
+	OriginAgentPubkey string
+	OriginSig         []byte
 }
 
 // GetRelayOrigin resolves the stored origin provenance for one local copy this
@@ -968,10 +1267,10 @@ func (s *SQLiteStore) GetRelayOrigin(ctx context.Context, originChainID, localMe
 	}
 	var ro RelayOrigin
 	err := s.conn.QueryRowContext(ctx, `
-		SELECT origin_memory_id, origin_created_at, origin_sig
+		SELECT origin_memory_id, origin_created_at, origin_agent_pubkey, origin_sig
 		  FROM sync_origin
 		 WHERE origin_chain_id = ? AND local_memory_id = ? AND outcome = 'admitted'`,
-		originChainID, localMemoryID).Scan(&ro.OriginMemoryID, &ro.OriginCreatedAt, &ro.OriginSig)
+		originChainID, localMemoryID).Scan(&ro.OriginMemoryID, &ro.OriginCreatedAt, &ro.OriginAgentPubkey, &ro.OriginSig)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, sql.ErrNoRows
 	}

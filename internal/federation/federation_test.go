@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -620,6 +621,7 @@ func TestReceiptExchangeEndToEnd(t *testing.T) {
 func TestReceiptRejectsMismatchedChannel(t *testing.T) {
 	a := newTestChain(t, "chain-a")
 	b := newTestChain(t, "chain-b")
+	federate(t, b, a, "https://chain-a.example:8444", []string{"*"}, 4, 0)
 
 	sharedID := hex.EncodeToString(sha256Bytes("envelope-2"))
 	core := sha256Bytes("core-2")
@@ -644,6 +646,74 @@ func TestReceiptRejectsMismatchedChannel(t *testing.T) {
 	forgedSig := ed25519.Sign(b.agentKey, push.Receipt) // wrong signer for chain-a
 	if _, err := b.mgr.HandleIncomingReceipt(a.chainID, &ReceiptPush{Receipt: push.Receipt, ValSig: forgedSig}); err == nil {
 		t.Fatal("receipt with non-coauthor signature accepted")
+	}
+}
+
+func TestReceiptReleasedAfterCompletedRevokeCannotBroadcastAttest(t *testing.T) {
+	a := newTestChain(t, "chain-a")
+	b := newTestChain(t, "chain-b")
+	comet, captured := fakeComet(t)
+	b.mgr.cometRPC = comet.URL
+	federate(t, b, a, "https://chain-a.example:8444", []string{"shared"}, 2, 0)
+
+	sharedID := hex.EncodeToString(sha256Bytes("revoked-receipt-envelope"))
+	core := sha256Bytes("revoked-receipt-core")
+	coauthors := []tx.CoCommitCoauthor{
+		{PubKey: a.agentPub, ChainID: a.chainID, Sig: make([]byte, ed25519.SignatureSize)},
+		{PubKey: b.agentPub, ChainID: b.chainID, Sig: make([]byte, ed25519.SignatureSize)},
+	}
+	seedCoCommit(t, a, sharedID, core, coauthors)
+	seedCoCommit(t, b, sharedID, core, coauthors)
+	push, err := a.mgr.BuildSignedReceipt(sharedID, 7, 1751400000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agreement, err := b.mgr.ActiveAgreement(a.chainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(push)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := &blockingPeerValueContext{
+		Context: context.Background(),
+		peer:    &peerIdentity{ChainID: a.chainID, AgentID: hex.EncodeToString(a.agentPub), Agreement: agreement},
+		entered: make(chan struct{}), release: make(chan struct{}),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/receipt", bytes.NewReader(body)).WithContext(blocked)
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		b.mgr.handleReceipt(rec, req)
+		close(done)
+	}()
+	select {
+	case <-blocked.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("receipt handler did not pause at its authenticated peer context")
+	}
+	if err := b.badger.UpdateCrossFedStatus(a.chainID, "revoked"); err != nil {
+		t.Fatal(err)
+	}
+	ss, ok := b.mem.(*store.SQLiteStore)
+	if !ok {
+		t.Fatal("test memory store is not SQLite")
+	}
+	if err := ss.PurgeSyncPeerState(context.Background(), a.chainID); err != nil {
+		t.Fatal(err)
+	}
+	close(blocked.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("released stale receipt did not finish")
+	}
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("stale receipt status=%d body=%s, want 403", rec.Code, rec.Body.String())
+	}
+	if len(*captured) != 0 {
+		t.Fatalf("stale receipt broadcast %d attest transactions after revoke", len(*captured))
 	}
 }
 

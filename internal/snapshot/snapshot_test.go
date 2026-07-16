@@ -19,6 +19,8 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"
+
+	"github.com/l33tdawg/sage/internal/consensuskeys"
 )
 
 // writeTarZstWithEntry creates a tar.zst archive at path containing a
@@ -324,6 +326,160 @@ func TestTakeVerifyRestore_HappyPath(t *testing.T) {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatalf("expected %s after restore: %v", p, err)
 		}
+	}
+}
+
+func TestStandaloneAppHashRulesIgnoreOnlyExactLocalMigrationProgress(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "badger")
+	opts := badger.DefaultOptions(dir)
+	opts.Logger = nil
+	db, openErr := badger.Open(opts)
+	if openErr != nil {
+		t.Fatalf("open badger: %v", openErr)
+	}
+	if err := db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set([]byte("memory:m1"), []byte("value")); err != nil {
+			return err
+		}
+		return txn.Set([]byte("state:height"), []byte("42"))
+	}); err != nil {
+		t.Fatalf("seed badger: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close badger: %v", err)
+	}
+	baseline, hashErr := computeAppHashAllRulesStandalone(dir)
+	if hashErr != nil {
+		t.Fatalf("baseline hashes: %v", hashErr)
+	}
+
+	db, openErr = badger.Open(opts)
+	if openErr != nil {
+		t.Fatalf("reopen badger: %v", openErr)
+	}
+	inProgress := append([]byte{0}, []byte("org_member:org-a:agent-a")...)
+	if err := db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set([]byte(consensuskeys.AgentOrgsIndexBackfillProgress), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set([]byte(consensuskeys.OrgNameIndexBackfillProgress), inProgress)
+	}); err != nil {
+		t.Fatalf("write local progress: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close progress badger: %v", err)
+	}
+	withProgress, hashErr := computeAppHashAllRulesStandalone(dir)
+	if hashErr != nil {
+		t.Fatalf("progress hashes: %v", hashErr)
+	}
+	if !bytes.Equal(withProgress, baseline) {
+		t.Fatalf("complete/in-progress local cursors changed a consensus hash rule")
+	}
+
+	// Exclusion is exact. A future or attacker-controlled lookalike key must stay
+	// committed to by every rule until its own fork explicitly says otherwise.
+	db, openErr = badger.Open(opts)
+	if openErr != nil {
+		t.Fatalf("reopen exact-match badger: %v", openErr)
+	}
+	if err := db.Update(func(txn *badger.Txn) error {
+		return txn.Set([]byte(consensuskeys.AgentOrgsIndexBackfillProgress+":extra"), []byte{1})
+	}); err != nil {
+		t.Fatalf("write lookalike key: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close exact-match badger: %v", err)
+	}
+	withLookalike, hashErr := computeAppHashAllRulesStandalone(dir)
+	if hashErr != nil {
+		t.Fatalf("lookalike hashes: %v", hashErr)
+	}
+	if bytes.Equal(withLookalike, baseline) {
+		t.Fatal("a non-exact migration key was incorrectly excluded")
+	}
+}
+
+func TestTakeVerifyRestore_PreservesExcludedLocalMigrationProgress(t *testing.T) {
+	parent := t.TempDir()
+	srcData := filepath.Join(parent, "src", "data")
+	if err := os.MkdirAll(srcData, 0o700); err != nil {
+		t.Fatalf("mkdir source: %v", err)
+	}
+	vaultPath, _ := seedDataDir(t, srcData)
+	badgerPath := filepath.Join(srcData, "badger")
+	opts := badger.DefaultOptions(badgerPath)
+	opts.Logger = nil
+	db, openErr := badger.Open(opts)
+	if openErr != nil {
+		t.Fatalf("open source badger: %v", openErr)
+	}
+	inProgress := append([]byte{0}, []byte("org:legacy-org")...)
+	if err := db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set([]byte(consensuskeys.AgentOrgsIndexBackfillProgress), []byte{1}); err != nil {
+			return err
+		}
+		return txn.Set([]byte(consensuskeys.OrgNameIndexBackfillProgress), inProgress)
+	}); err != nil {
+		t.Fatalf("write source progress: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close source badger: %v", err)
+	}
+	appHash, hashErr := computeAppHashStandalone(badgerPath)
+	if hashErr != nil {
+		t.Fatalf("compute source hash: %v", hashErr)
+	}
+
+	const height = int64(43)
+	if _, err := Take(context.Background(), srcData, height, appHash, "migration-progress", Options{
+		BinaryVersion: "v11.9.0-test", VaultKeyPath: vaultPath, IncludeBinary: false,
+	}); err != nil {
+		t.Fatalf("Take: %v", err)
+	}
+	snapshotDir := filepath.Join(snapshotsRoot(srcData), fmt.Sprintf("%d", height))
+	if err := Verify(snapshotDir); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	dstData := filepath.Join(parent, "dst", "data")
+	if _, err := Restore(snapshotDir, dstData); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	restoredHash, restoredHashErr := computeAppHashStandalone(filepath.Join(dstData, "badger"))
+	if restoredHashErr != nil {
+		t.Fatalf("compute restored hash: %v", restoredHashErr)
+	}
+	if !bytes.Equal(restoredHash, appHash) {
+		t.Fatalf("restored AppHash mismatch: got %x want %x", restoredHash, appHash)
+	}
+
+	restoredOpts := badger.DefaultOptions(filepath.Join(dstData, "badger"))
+	restoredOpts.Logger = nil
+	restored, restoredOpenErr := badger.Open(restoredOpts)
+	if restoredOpenErr != nil {
+		t.Fatalf("open restored badger: %v", restoredOpenErr)
+	}
+	defer restored.Close()
+	if err := restored.View(func(txn *badger.Txn) error {
+		for key, want := range map[string][]byte{
+			consensuskeys.AgentOrgsIndexBackfillProgress: {1},
+			consensuskeys.OrgNameIndexBackfillProgress:   inProgress,
+		} {
+			item, err := txn.Get([]byte(key))
+			if err != nil {
+				return err
+			}
+			got, err := item.ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(got, want) {
+				return fmt.Errorf("restored %s = %x, want %x", key, got, want)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("verify restored progress: %v", err)
 	}
 }
 

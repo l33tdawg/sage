@@ -8,6 +8,13 @@ updates:
       go-deps:
         patterns:
           - "*"
+    ignore:
+      # go-libp2p is a pre-v1 module. Dependabot occasionally proposes the
+      # unrelated legacy v6.0.23+incompatible line, whose split imports cannot
+      # resolve against this module graph; keep real v0.x updates visible.
+      - dependency-name: github.com/libp2p/go-libp2p
+        versions:
+          - ">= 1.0.0"
 
   - package-ecosystem: gomod
     directory: /natter

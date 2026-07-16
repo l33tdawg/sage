@@ -13,12 +13,15 @@
 !define PRODUCT_PUBLISHER "Dhillon Andrew Kannabhiran"
 !define PRODUCT_WEB_SITE "https://github.com/l33tdawg/sage"
 !define PRODUCT_VERSION "${VERSION}"
+!ifndef ASSET_VERSION
+!define ASSET_VERSION "${VERSION}"
+!endif
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_DIR_REGKEY "Software\SAGE"
 
 ; ---- General ----
 Name "${PRODUCT_FULL_NAME}"
-OutFile "SAGE-${VERSION}-Windows-Setup.exe"
+OutFile "SAGE-${ASSET_VERSION}-Windows-Setup.exe"
 InstallDir "$PROGRAMFILES64\SAGE"
 InstallDirRegKey HKLM "${PRODUCT_DIR_REGKEY}" ""
 RequestExecutionLevel admin

@@ -47,7 +47,7 @@ func TestV75_EndToEnd_ProposeEncodeFinalizeActivate(t *testing.T) {
 			TargetAppVersion:   targetAppVersion,
 			BinarySHA256:       "0123456789abcdef",
 			ProposerID:         ak.id,
-			UpgradeDelayBlocks: 0, // chain floor will raise to defaultUpgradeDelayBlocks (200)
+			UpgradeDelayBlocks: defaultUpgradeDelayBlocks,
 		},
 	}
 	require.NoError(t, tx.SignTx(parsedTx, ak.priv), "sign outer tx")
@@ -70,8 +70,9 @@ func TestV75_EndToEnd_ProposeEncodeFinalizeActivate(t *testing.T) {
 	require.Equal(t, uint32(0), result.Code, "processTx rejected propose: %s", result.Log)
 	assert.Contains(t, result.Log, "upgrade plan accepted")
 
-	// 4. Plan is persisted in BadgerDB. Activation height should be
-	//    proposeHeight + max(payload.delay=0, floor=200) = 250.
+	// 4. Plan is persisted in BadgerDB. This historical scenario carries the
+	//    production delay explicitly, so activation remains at height 250 even
+	//    in the shortened v11.9 fixture build.
 	plan, err := app.badgerStore.GetUpgradePlan()
 	require.NoError(t, err)
 	require.NotNil(t, plan)
@@ -79,7 +80,7 @@ func TestV75_EndToEnd_ProposeEncodeFinalizeActivate(t *testing.T) {
 	assert.Equal(t, targetAppVersion, plan.TargetAppVersion)
 	expectedActivation := proposeHeight + defaultUpgradeDelayBlocks
 	assert.Equal(t, expectedActivation, plan.ActivationHeight,
-		"chain floor should raise zero UpgradeDelayBlocks to %d", defaultUpgradeDelayBlocks)
+		"explicit production delay should remain %d blocks", defaultUpgradeDelayBlocks)
 
 	// 5. FinalizeBlock on a height before activation — no
 	//    ConsensusParamUpdates, plan still pending.
@@ -148,9 +149,10 @@ func TestV75_EndToEnd_CancelBeforeActivation(t *testing.T) {
 		AgentBodyHash:  bodyHash,
 		AgentTimestamp: ts,
 		UpgradePropose: &tx.UpgradePropose{
-			Name:             "v7.5-cancel-e2e",
-			TargetAppVersion: 10,
-			ProposerID:       ak.id,
+			Name:               "v7.5-cancel-e2e",
+			TargetAppVersion:   10,
+			ProposerID:         ak.id,
+			UpgradeDelayBlocks: defaultUpgradeDelayBlocks,
 		},
 	}
 	require.Equal(t, uint32(0), app.processTx(proposeTx, 100, time.Unix(ts, 0)).Code)

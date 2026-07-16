@@ -49,7 +49,7 @@ func (s *BadgerStore) SetScopeRecord(record scope.Record) error {
 		return fmt.Errorf("encode scope record: %w", err)
 	}
 
-	return s.db.Update(func(txn *badger.Txn) error {
+	return s.update(func(txn *badger.Txn) error {
 		key := scopeRecordKey(record.ScopeID)
 		var previous *scope.Record
 		exactReplay := false
@@ -89,7 +89,7 @@ func (s *BadgerStore) SetScopeRecord(record scope.Record) error {
 			}
 		}
 		if exactReplay {
-			return setScopeRevisionAnchor(txn, record.ScopeID, record.Revision, encoded)
+			return setScopeRevisionAnchor(s, txn, record.ScopeID, record.Revision, encoded)
 		}
 
 		// Check all new domain claims before deleting any old mapping. A collision
@@ -107,7 +107,7 @@ func (s *BadgerStore) SetScopeRecord(record scope.Record) error {
 		if previous != nil {
 			for _, oldDomain := range previous.Domains {
 				if !containsScopeDomain(record.Domains, oldDomain.Name) {
-					if err := txn.Delete(scopeDomainKey(oldDomain.Name)); err != nil {
+					if err := s.txnDelete(txn, scopeDomainKey(oldDomain.Name)); err != nil {
 						return err
 					}
 				}
@@ -115,25 +115,25 @@ func (s *BadgerStore) SetScopeRecord(record scope.Record) error {
 		}
 		if record.State != scope.StateRetired {
 			for _, domain := range record.Domains {
-				if err := txn.Set(scopeDomainKey(domain.Name), []byte(record.ScopeID)); err != nil {
+				if err := s.txnSet(txn, scopeDomainKey(domain.Name), []byte(record.ScopeID)); err != nil {
 					return err
 				}
 			}
 		} else if previous != nil {
 			for _, oldDomain := range previous.Domains {
-				if err := txn.Delete(scopeDomainKey(oldDomain.Name)); err != nil {
+				if err := s.txnDelete(txn, scopeDomainKey(oldDomain.Name)); err != nil {
 					return err
 				}
 			}
 		}
-		if err := setScopeRevisionAnchor(txn, record.ScopeID, record.Revision, encoded); err != nil {
+		if err := setScopeRevisionAnchor(s, txn, record.ScopeID, record.Revision, encoded); err != nil {
 			return err
 		}
-		return txn.Set(key, encoded)
+		return s.txnSet(txn, key, encoded)
 	})
 }
 
-func setScopeRevisionAnchor(txn *badger.Txn, scopeID string, revision uint64, encoded []byte) error {
+func setScopeRevisionAnchor(s *BadgerStore, txn *badger.Txn, scopeID string, revision uint64, encoded []byte) error {
 	key := scopeRevisionKey(scopeID, revision)
 	want := scopeRevisionDigest(encoded)
 	item, err := txn.Get(key)
@@ -148,7 +148,7 @@ func setScopeRevisionAnchor(txn *badger.Txn, scopeID string, revision uint64, en
 	if !errors.Is(err, badger.ErrKeyNotFound) {
 		return err
 	}
-	return txn.Set(key, want)
+	return s.txnSet(txn, key, want)
 }
 
 // GetScopeRecord returns one decoded canonical record, or (nil, nil) if it has
@@ -156,7 +156,7 @@ func setScopeRevisionAnchor(txn *badger.Txn, scopeID string, revision uint64, en
 // treat corrupted consensus state as an absent scope.
 func (s *BadgerStore) GetScopeRecord(scopeID string) (*scope.Record, error) {
 	var record *scope.Record
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, err := txn.Get(scopeRecordKey(scopeID))
 		if err != nil {
 			return err
@@ -185,7 +185,7 @@ func (s *BadgerStore) GetScopeRecord(scopeID string) (*scope.Record, error) {
 func (s *BadgerStore) ListScopeRecords() ([]scope.Record, error) {
 	prefix := []byte("state:scope:")
 	records := make([]scope.Record, 0)
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.Prefix = prefix
 		it := txn.NewIterator(opts)
@@ -219,7 +219,7 @@ func (s *BadgerStore) ListScopeRecords() ([]scope.Record, error) {
 // for one accepted revision, or nil when that revision has never existed.
 func (s *BadgerStore) GetScopeRevisionHash(scopeID string, revision uint64) ([]byte, error) {
 	var digest []byte
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		item, err := txn.Get(scopeRevisionKey(scopeID, revision))
 		if err != nil {
 			return err
@@ -246,7 +246,7 @@ func (s *BadgerStore) GetScopeRevisionHash(scopeID string, revision uint64) ([]b
 // their mapping and therefore never accidentally turn an old domain back on.
 func (s *BadgerStore) GetScopeForDomain(domain string) (*scope.Record, error) {
 	var scopeID string
-	err := s.db.View(func(txn *badger.Txn) error {
+	err := s.view(func(txn *badger.Txn) error {
 		mapped, err := getScopeDomainMapping(txn, domain)
 		if err != nil {
 			return err

@@ -147,6 +147,15 @@ for i in $(seq 0 $((NUM_VALIDATORS - 1))); do
     # Set block time
     sed -i.bak 's/timeout_commit = ".*"/timeout_commit = "3s"/' "$CONFIG"
 
+    # App-v20 transition hygiene. The application can deterministically drain
+    # bounded stale invalid transactions, but official split-Comet deployments
+    # still pin the one-transaction/global raw ceiling and recheck leftovers.
+    # An empty WAL also guarantees a full validator-pair restart cannot retain
+    # a pre-v11.9 oversized mempool entry across the ceremony boundary.
+    sed -i.bak 's/^recheck = .*/recheck = true/' "$CONFIG"
+    sed -i.bak 's/^max_tx_bytes = .*/max_tx_bytes = 1048576/' "$CONFIG"
+    sed -i.bak 's|^wal_dir = .*|wal_dir = ""|' "$CONFIG"
+
     # Enable Prometheus metrics
     sed -i.bak 's/prometheus = false/prometheus = true/' "$CONFIG"
 

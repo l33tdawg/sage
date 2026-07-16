@@ -21,25 +21,21 @@ const stateHeightKey = "height"
 const stateAppHashKey = "app_hash"
 const stateEpochKey = "epoch"
 
-// SaveState persists the app state to BadgerDB.
+// SaveState persists the complete CometBFT handshake tuple to BadgerDB in one
+// durable transaction. Height, AppHash, and epoch must never be observable from
+// different commits: Comet uses the first two to decide whether to replay the
+// last block during startup.
 func SaveState(bs *store.BadgerStore, state *AppState) error {
-	var err error
-
 	heightBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(heightBytes, uint64(state.Height)) // #nosec G115 -- height is always non-negative
-	err = bs.SetState(stateHeightKey, heightBytes)
-	if err != nil {
-		return fmt.Errorf("save height: %w", err)
-	}
-	err = bs.SetState(stateAppHashKey, state.AppHash)
-	if err != nil {
-		return fmt.Errorf("save app hash: %w", err)
-	}
 	epochBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(epochBytes, uint64(state.EpochNum)) // #nosec G115 -- epoch is always non-negative
-	err = bs.SetState(stateEpochKey, epochBytes)
-	if err != nil {
-		return fmt.Errorf("save epoch: %w", err)
+	if err := bs.SetStatesAtomic([]store.StateWrite{
+		{Key: stateHeightKey, Value: heightBytes},
+		{Key: stateAppHashKey, Value: state.AppHash},
+		{Key: stateEpochKey, Value: epochBytes},
+	}); err != nil {
+		return fmt.Errorf("save atomic app state: %w", err)
 	}
 	return nil
 }

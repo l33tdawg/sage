@@ -87,10 +87,13 @@ func TestSyncDomainsRoundTrip(t *testing.T) {
 func TestSyncControlPolicyRevisionAndAtomicDomains(t *testing.T) {
 	ctx := context.Background()
 	s := newSyncTestStore(t)
-	binding := SyncControl{RemoteChainID: "chain-b", Role: "guest", ControllerChainID: "chain-b",
-		ControllerAgentID: "agent-host", PolicyEpoch: "epoch-1", RemoteCAPin: "pin-1"}
+	binding := SyncControl{RemoteChainID: "chain-b", Role: "guest", ControllerChainID: "chain-b", PolicyVersion: 1,
+		ControllerAgentID: "agent-host", PeerAgentID: "agent-host", PolicyEpoch: "epoch-1", RemoteCAPin: "pin-1"}
 	if err := s.PrepareSyncControl(ctx, binding); err != nil {
 		t.Fatal(err)
+	}
+	if stored, getErr := s.GetSyncControl(ctx, "chain-b"); getErr != nil || stored.PeerAgentID != "agent-host" {
+		t.Fatalf("peer agent binding = %+v err=%v", stored, getErr)
 	}
 	if err := s.SetSyncDomains(ctx, "chain-b", []string{"legacy"}); err != nil {
 		t.Fatal(err)
@@ -132,6 +135,100 @@ func TestSyncControlPolicyRevisionAndAtomicDomains(t *testing.T) {
 	domains, _ = s.GetSyncDomains(ctx, "chain-b")
 	if len(domains) != 0 {
 		t.Fatalf("disable left domains: %v", domains)
+	}
+}
+
+func TestFreezeSyncControlPeerAgentIsCeremonyBoundAndImmutable(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	peerID := testPeerAgentID(t)
+	if err := s.PrepareSyncControl(ctx, SyncControl{
+		RemoteChainID: "chain-legacy", Role: "host", ControllerChainID: "chain-local",
+		ControllerAgentID: "local-controller", PolicyEpoch: "epoch-legacy",
+		RemoteCAPin: "ca-pin-legacy", PolicyVersion: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ActivateSyncControl(ctx, "chain-legacy", "epoch-legacy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FreezeSyncControlPeerAgent(ctx, "chain-legacy", "epoch-legacy", "ca-pin-legacy", peerID); err != nil {
+		t.Fatal(err)
+	}
+	control, err := s.GetSyncControl(ctx, "chain-legacy")
+	if err != nil || control == nil || control.PeerAgentID != peerID {
+		t.Fatalf("frozen control=%+v err=%v", control, err)
+	}
+	if err := s.FreezeSyncControlPeerAgent(ctx, "chain-legacy", "epoch-legacy", "ca-pin-legacy", peerID); err != nil {
+		t.Fatalf("idempotent freeze: %v", err)
+	}
+	for name, tc := range map[string][3]string{
+		"different peer":  {"epoch-legacy", "ca-pin-legacy", testPeerAgentID(t)},
+		"different epoch": {"other-epoch", "ca-pin-legacy", peerID},
+		"different CA":    {"epoch-legacy", "other-pin", peerID},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := s.FreezeSyncControlPeerAgent(ctx, "chain-legacy", tc[0], tc[1], tc[2]); !errors.Is(err, ErrPeerRBACBindingMismatch) {
+				t.Fatalf("freeze error=%v, want binding mismatch", err)
+			}
+		})
+	}
+}
+
+func TestPeerRBACSyncControlRejectsLegacyPolicyDowngrade(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	binding := SyncControl{
+		RemoteChainID: "chain-v3", Role: "host", ControllerChainID: "chain-local",
+		ControllerAgentID: "agent-local", PeerAgentID: "agent-peer",
+		PolicyEpoch: "epoch-v3", RemoteCAPin: "pin-v3", PolicyVersion: 3,
+	}
+	if err := s.PrepareSyncControl(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ActivateSyncControl(ctx, "chain-v3", "epoch-v3"); err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []int{1, 2} {
+		if _, err := s.ApplySyncPolicyVersion(ctx, "chain-v3", "epoch-v3", version, 1, "legacy", []string{"tii"}); err == nil {
+			t.Fatalf("accepted v3 -> v%d downgrade", version)
+		}
+	}
+	control, err := s.GetSyncControl(ctx, "chain-v3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control.PolicyVersion != 3 || control.Revision != 0 {
+		t.Fatalf("downgrade mutated control: %+v", control)
+	}
+}
+
+func TestSyncControlLegacyPeerAgentBackfillIsRoleSafe(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	requireBinding := func(c SyncControl) {
+		t.Helper()
+		if err := s.PrepareSyncControl(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireBinding(SyncControl{RemoteChainID: "legacy-host", Role: "guest",
+		ControllerChainID: "legacy-host", ControllerAgentID: "frozen-remote-host",
+		PolicyEpoch: "epoch-guest", RemoteCAPin: "pin-guest", PolicyVersion: 1})
+	requireBinding(SyncControl{RemoteChainID: "legacy-guest", Role: "host",
+		ControllerChainID: "local-chain", ControllerAgentID: "local-controller",
+		PolicyEpoch: "epoch-host", RemoteCAPin: "pin-host", PolicyVersion: 1})
+
+	// Re-running the idempotent migration models opening rows created before the
+	// peer_agent_id column existed.
+	s.migrateSyncTables(ctx)
+	guestSide, err := s.GetSyncControl(ctx, "legacy-host")
+	if err != nil || guestSide.PeerAgentID != "frozen-remote-host" {
+		t.Fatalf("guest-side peer backfill = %+v err=%v", guestSide, err)
+	}
+	hostSide, err := s.GetSyncControl(ctx, "legacy-guest")
+	if err != nil || hostSide.PeerAgentID != "" {
+		t.Fatalf("host-side legacy row must remain unbound, got %+v err=%v", hostSide, err)
 	}
 }
 

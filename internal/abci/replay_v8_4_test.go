@@ -115,7 +115,7 @@ func TestReplayV8_4_R4_RealActivationBoundaryByteParity(t *testing.T) {
 			TargetAppVersion:   5,
 			BinarySHA256:       "deadbeef",
 			ProposerID:         proposer.id,
-			UpgradeDelayBlocks: 0, // chain floor raises to 200
+			UpgradeDelayBlocks: defaultUpgradeDelayBlocks,
 		},
 	}
 	require.NoError(t, tx.SignTx(proposeTx, proposer.priv))

@@ -121,6 +121,10 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 			return directDialer.DialContext(dialCtx, network, address)
 		}
 	}
+	// Deliberately no client-wide Timeout or shorter ResponseHeaderTimeout: the
+	// caller's context is authoritative. Some authenticated receipt and ceremony
+	// operations include a bounded consensus commit wait; their call sites own
+	// the exact budget. The reserved peer Write route returns 501 before dialing.
 	client := &http.Client{Transport: transport}
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)

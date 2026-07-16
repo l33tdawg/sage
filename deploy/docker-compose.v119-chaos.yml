@@ -7,6 +7,7 @@ services:
   abci0:
     image: sage-v119-chaos-abci:local
     build: !reset null
+    command: ["./amid-v119-fixture"]
     ports: !override
       - "127.0.0.1:18190:8080"
       - "127.0.0.1:13112:2112"
@@ -15,12 +16,15 @@ services:
       - "${V119_CHAOS_GENESIS_DIR:?required}/node0/config:/validator:ro"
     environment:
       COMET_RPC: "http://cometbft0-local:26657"
+      SAGE_GOVERNANCE_OPERATOR_ID: "${V119_GOVERNANCE_OPERATOR_ID:-}"
+      VOTER_REQUIRED: "true"
     networks:
       validator0:
         aliases: [abci0-local]
   abci1:
     image: sage-v119-chaos-abci:local
     build: !reset null
+    command: ["./amid-v119-fixture"]
     ports: !override
       - "127.0.0.1:18191:8080"
       - "127.0.0.1:13113:2112"
@@ -29,12 +33,15 @@ services:
       - "${V119_CHAOS_GENESIS_DIR:?required}/node1/config:/validator:ro"
     environment:
       COMET_RPC: "http://cometbft1-local:26657"
+      SAGE_GOVERNANCE_OPERATOR_ID: "${V119_GOVERNANCE_OPERATOR_ID:-}"
+      VOTER_REQUIRED: "true"
     networks:
       validator1:
         aliases: [abci1-local]
   abci2:
     image: sage-v119-chaos-abci:local
     build: !reset null
+    command: ["./amid-v119-fixture"]
     ports: !override
       - "127.0.0.1:18192:8080"
       - "127.0.0.1:13114:2112"
@@ -43,12 +50,15 @@ services:
       - "${V119_CHAOS_GENESIS_DIR:?required}/node2/config:/validator:ro"
     environment:
       COMET_RPC: "http://cometbft2-local:26657"
+      SAGE_GOVERNANCE_OPERATOR_ID: "${V119_GOVERNANCE_OPERATOR_ID:-}"
+      VOTER_REQUIRED: "true"
     networks:
       validator2:
         aliases: [abci2-local]
   abci3:
     image: sage-v119-chaos-abci:local
     build: !reset null
+    command: ["./amid-v119-fixture"]
     ports: !override
       - "127.0.0.1:18193:8080"
       - "127.0.0.1:13115:2112"
@@ -57,6 +67,8 @@ services:
       - "${V119_CHAOS_GENESIS_DIR:?required}/node3/config:/validator:ro"
     environment:
       COMET_RPC: "http://cometbft3-local:26657"
+      SAGE_GOVERNANCE_OPERATOR_ID: "${V119_GOVERNANCE_OPERATOR_ID:-}"
+      VOTER_REQUIRED: "true"
     networks:
       validator3:
         aliases: [abci3-local]

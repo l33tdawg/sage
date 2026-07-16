@@ -111,18 +111,18 @@ func TestProcessUpgradePropose_AppliesFloorDelay(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
 
-	// Delay below the floor (defaultUpgradeDelayBlocks=200) should be
-	// raised to the floor so a fast-attacking proposer can't pick a
-	// near-zero activation height.
+	// A zero delay should be raised to the effective floor so the production
+	// and isolated v11.9 fixture builds exercise their respective boundary.
 	const height = int64(100)
-	ptx := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 10)
+	floor := effectiveUpgradeDelayFloorBlocks()
+	ptx := makeUpgradeProposeTx(t, ak, "v7.5.0", 7, "", 0)
 	result := app.processUpgradePropose(ptx, height, time.Now())
 	require.Equal(t, uint32(0), result.Code)
 
 	plan, err := app.badgerStore.GetUpgradePlan()
 	require.NoError(t, err)
 	require.NotNil(t, plan)
-	assert.Equal(t, height+defaultUpgradeDelayBlocks, plan.ActivationHeight,
+	assert.Equal(t, height+floor, plan.ActivationHeight,
 		"delay should be raised to the floor")
 }
 
@@ -425,8 +425,9 @@ func TestFinalizeBlock_ActivatesUpgradeAtHeight(t *testing.T) {
 	app := setupTestApp(t)
 	ak := newAgentKey(t)
 
-	// Seed a plan that activates at exactly height 150.
-	prop := makeUpgradeProposeTx(t, ak, "v7.5.0", 8, "", 50)
+	// Seed a plan that activates at exactly height 300 in both production and
+	// the shortened v11.9 fixture build.
+	prop := makeUpgradeProposeTx(t, ak, "v7.5.0", 8, "", defaultUpgradeDelayBlocks)
 	require.Equal(t, uint32(0), app.processUpgradePropose(prop, 100, time.Now()).Code)
 	plan, err := app.badgerStore.GetUpgradePlan()
 	require.NoError(t, err)

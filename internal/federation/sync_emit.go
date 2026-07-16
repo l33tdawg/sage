@@ -337,6 +337,17 @@ func (m *Manager) AppendPreSignedEntry(ctx context.Context, groupID string, e st
 // It returns the fully controller-approved entry so the owner can immediately
 // ingest the same bytes rather than waiting for anti-entropy.
 func (m *Manager) AdmitOwnerDomainAdd(ctx context.Context, groupID string, e store.SyncGroupLogEntry) (store.SyncGroupLogEntry, error) {
+	return m.admitOwnerDomainAdd(ctx, groupID, e, nil)
+}
+
+// admitOwnerDomainAddFromPeer is the network-facing controller admission path.
+// The request's exact peer identity is revalidated under the same policy write
+// lease that spans the journal transaction, closing revoke-between-auth-and-write.
+func (m *Manager) admitOwnerDomainAddFromPeer(ctx context.Context, groupID string, e store.SyncGroupLogEntry, peer *peerIdentity) (store.SyncGroupLogEntry, error) {
+	return m.admitOwnerDomainAdd(ctx, groupID, e, peer)
+}
+
+func (m *Manager) admitOwnerDomainAdd(ctx context.Context, groupID string, e store.SyncGroupLogEntry, requiredPeer *peerIdentity) (store.SyncGroupLogEntry, error) {
 	ss := m.syncStore()
 	if ss == nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("group journal requires the SQLite store backend")
@@ -357,50 +368,66 @@ func (m *Manager) AdmitOwnerDomainAdd(ctx context.Context, groupID string, e sto
 		return store.SyncGroupLogEntry{}, fmt.Errorf("refusing to admit a malformed pre-signed %s entry: %w", e.EntryType, err)
 	}
 	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
+	policyUnlock := ss.LockSyncPolicyWrite()
+	defer policyUnlock()
+	if requiredPeer != nil {
+		if requiredPeer.ChainID != e.AuthorChainID || requiredPeer.AgentID != e.AuthorAgentPubkey {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("domain admission peer does not match the signed owner")
+		}
+		bound, bindErr := m.currentInboundGroupPeerBound(ctx, ss, requiredPeer.ChainID, requiredPeer.AgentID)
+		if bindErr != nil {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("revalidate domain admission peer: %w", bindErr)
+		}
+		if !bound {
+			return store.SyncGroupLogEntry{}, errGroupPeerNoLongerBound
+		}
+	}
 	if held, getErr := ss.GetSyncGroupLogEntry(ctx, groupID, e.Subchain, e.Seq); getErr != nil {
-		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, getErr
 	} else if held != nil && held.EntryHash == e.EntryHash {
-		m.journalMu.Unlock()
 		return *held, nil
 	}
 	gs, loadErr := loadGroupApplyState(ctx, ss, groupID)
 	if loadErr != nil {
-		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, loadErr
 	}
 	if gs.controllerChain != m.localChainID || !gs.controllerKey.Equal(m.agentPub) {
-		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, fmt.Errorf("only the active group controller may admit a pre-signed domain_add")
 	}
 	ownerKey := gs.memberKey[e.AuthorChainID]
 	if !gs.memberActive(e.AuthorChainID) || ownerKey == nil || verifyJournalEntry(e, ownerKey) != nil {
-		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, fmt.Errorf("pre-signed domain_add does not verify under the active owner's pinned key")
 	}
 	payload := parseJournalPayload(e.PayloadJSON)
 	mayOwn, capabilityErr := ss.GroupMemberMayOwnDomain(ctx, groupID, e.AuthorChainID, payload[pkDomainTag])
 	if capabilityErr != nil {
-		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, capabilityErr
 	}
 	if !mayOwn {
-		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, fmt.Errorf("owner has no invitee-signed capability for domain %q", payload[pkDomainTag])
 	}
 	if authErr := m.authorizeControllerAffecting(ctx, ss, groupID, e.EntryHash); authErr != nil {
-		m.journalMu.Unlock()
 		return store.SyncGroupLogEntry{}, authErr
 	}
 	attachControllerSignature(&e, gs.controllerEpoch, m.localChainID, m.agentPub, m.agentKey)
-	_, evicted, removed, err := m.ingestJournalEntriesLocked(ctx, ss, groupID, e.Subchain, []store.SyncGroupLogEntry{e})
-	m.journalMu.Unlock()
-	// POST-BATCH removal enforcement runs OUTSIDE journalMu, exactly as the pull /
-	// AppendGroupJournalEntry paths do (a no-op unless this entry evicted a member or
-	// removed a domain).
-	m.enforceRemovalBatch(ss, groupID, evicted, removed)
+	var evicted, removed []string
+	err := ss.RunInTx(ctx, func(txStore store.OffchainStore) error {
+		txSS, ok := txStore.(*store.SQLiteStore)
+		if !ok {
+			return fmt.Errorf("group journal requires the SQLite store backend")
+		}
+		_, evicted, removed, loadErr = m.ingestJournalEntriesInTxLocked(ctx, txSS, groupID, e.Subchain, []store.SyncGroupLogEntry{e})
+		return loadErr
+	})
 	if err != nil {
 		return store.SyncGroupLogEntry{}, err
+	}
+	// domain_add cannot evict a member or remove a domain. Keep the values visible
+	// to the common invariant and future entry-type hardening without attempting a
+	// nested policy write while this admission still owns the write lease.
+	if len(evicted) != 0 || len(removed) != 0 {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("domain_add produced an invalid removal side effect")
 	}
 	return e, nil
 }

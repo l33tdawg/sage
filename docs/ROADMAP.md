@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.8.5 is the current release.** This document records the v11.7 slate and the v11.8 synchronization-group release as shipped and looks forward to v11.9, the v11.10–v11.13 productization bridge, and the v12 completion milestone. Everything past v11.8 is planned, not promised, and carries no date.
+**Status (2026-07):** **v11.9.0 is the current release.** The exact-source cold state-sync proof passed on the release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. This document keeps v11.8's deferred federated inbox distinct from delivered synchronization groups and looks forward to the v11.10–v11.13 productization bridge and v12. Nothing after v11.9 is promised or dated.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -19,8 +19,8 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 
 ### Federation
 
-- **Whole-SAGE-to-whole-SAGE join ceremony.** Guided guest and host wizards, offline-bundled, and human-verified. Scope grants (allowed domains + a 0-4 clearance ceiling) are enforced when serving recall, recorded as an on-chain treaty, and revocable. v11.6 adds first-class internet/NAT traversal and authenticated post-pair route exchange so a LAN relationship can roam.
-- **Off-consensus transport.** mTLS federation listener, read-only recall query proxy (foreign results are merge-in-response only, never persisted to your chain), and receipt exchange.
+- **Whole-SAGE-to-whole-SAGE join ceremony.** Guided guest and host wizards, offline-bundled, and human-verified. JOIN establishes exact chain/operator/CA/epoch trust and is revocable; in v11.9 it grants zero domains by itself. Each node separately manages a mutable Read/Copy snapshot over existing domains without reconnecting. v11.6 added first-class internet/NAT traversal and authenticated post-pair route exchange so a LAN relationship can roam.
+- **Off-consensus transport.** The pinned mTLS federation listener serves live Read results as merge-in-response-only data. Copy requires both the source's current offer and the receiver's independent subscription before a locally governed copy is retained. Cross-host Write remains reserved and fails closed with `501` in v11.9 until one trusted connection can be bound to one consensus-authorized submission.
 - **Consensus-layer federation primitives.** On-chain `cross_fed` exchange terms (Mode-1, tx 33/34) and the co-commit primitive (tx 31/32) landed at the app layer.
 
 ### Consensus and memory integrity
@@ -102,31 +102,37 @@ One instance per node (instance lock with owned pidfile), coordinated restart th
 
 ---
 
-## v11.8 - planned (the collaboration release)
+## v11.8 - shipped (the collaboration release)
 
-Forward-looking. Nothing here is committed to a date; treat it as speculative until it ships.
+The synchronization-group control plane shipped in v11.8.2 and was maintained through v11.8.5. It remains an off-consensus, independent-chain sharing layer; it is not the same-chain Byzantine quorum introduced by v11.9.
 
 ### Sharing & Sync control plane
 
-Add a dedicated **Sharing & Sync** section, separate from Agents and identity management. It shows every synchronization group, member node, role and voting power where applicable, full-sync versus selective-sync status, shared domains, owner, backfill/catch-up position, health, and last successful synchronization.
+A dedicated **Sharing & Sync** section, separate from Agents and identity management, exposes synchronization groups, member nodes, roles, selective-sync state, shared domains, ownership, backfill/catch-up position, health, and recent synchronization.
 
-A domain's original/current owner may propose adding or removing that domain, create a new shared domain, backfill earlier memories, change eligible nodes, or stop future synchronization; group-level RBAC and validator governance authorize changes that affect other members. Removing a domain or node has explicit, auditable semantics for retained historical copies, tombstones, future updates, rejoin, and local deletion - it never silently erases another member's data.
+Signed roster and per-domain journals govern membership, selective synchronization, backfill, controller rotation, removal, and rejoin. Retained historical copies are never silently erased from another independent chain.
 
-This release also adds multi-node group membership and explicit full-sync/selective-sync roles, but does not claim self-healing BFT until the v11.9 quorum gates below pass.
+This shipped multi-node sharing and full/selective synchronization without claiming self-healing BFT. That distinction remains permanent: v11.9's BFT scope is a separate same-chain model rather than an upgrade of the v11.8 journal into cross-chain consensus.
 
-### Cross-network agent messaging (federated inbox)
+### Deferred from v11.8: cross-network agent messaging (federated inbox)
 
-Extend the agent-to-agent pipe (today a node-local inbox) across a federation link so an agent on one SAGE can hand work to an agent on a peer SAGE - a **federated inbox**. Rides on the v11.6 connectivity substrate and inherits the same scope grants that bound recall exchange; delivery stays off-consensus and message content is never written to either chain.
+The agent-to-agent pipe remains a node-local inbox. Extending it across a federation link so an agent on one SAGE can hand work to an agent on a peer SAGE remains future work. The intended **federated inbox** would ride the v11.6 connectivity substrate, inherit recall-exchange scope grants, remain off-consensus, and keep message content off both chains; v11.8 did not ship it.
 
 ---
 
-## v11.9 - in progress (opt-in implementation; release gates open)
+## v11.9 - shipped
+
+### Colleague-style independent-chain federation
+
+Federation now separates **trust** from **sharing**. A successful JOIN freezes the exact remote chain, operator, CA pin, and policy epoch but installs a present empty policy, so nothing is implicitly shared. Both operators independently choose from domains that already exist on their own node and can replace that complete snapshot at any time without re-pairing. Read permits live borrowed recall; Copy additionally needs the receiving node to opt in before it saves a locally governed copy. The versioned Write field and endpoint remain for compatibility but reject use until SAGE has a consensus capability bound to the active connection generation and exact submission.
+
+Direct and group lanes fail closed on identity drift: the live operator, CA, agreement generation, and—where applicable—the exact active group roster/domain must all agree. Agreement set/narrowing, JOIN activation, and revocation share one mutation boundary across signed REST and dashboard paths, so a completed policy change cannot race an older broader response. The CEREBRUM Federation page exposes both directional snapshots, receiver Copy choices, dynamic existing-domain selection, and usable scrolling for large domain sets.
 
 ### Domain-scoped quorum + self-healing replication
 
-Turn selected shared domains into hardened replicated canonical state across validator groups. A v11.9 scope is contained inside one SAGE consensus chain: its on-chain roster names existing validators, its exact domain allowlist prevents scope bleed, and its canonical Badger content mirror lets recovering nodes rebuild serving indexes. Validators independently evaluate proposed memories and commit only quorum-approved results. A surviving **greater-than-two-thirds voting-power quorum** continues accepting memories while a member is offline; ordered committed-block replay catches it up when it returns. The separate network-safe ABCI state-sync substrate is now implemented as an explicit authorized boot role with a deterministic latest-visible state stream, isolated verification, crash-safe whole-bundle activation, and seal-before-serving; an integrated real provider-to-pristine-receiver proof still gates release. The v11.8 SQLite/cross-chain Synchronization Group remains an off-consensus sharing overlay; v11.9 does not relabel it as BFT. SAGE's existing full local rollback snapshot contains private node material and must never be reused as a network payload.
+Selected domains now have hardened replicated canonical state across validator groups. A v11.9 scope is contained inside one SAGE consensus chain: its on-chain roster names existing validators, its exact domain allowlist prevents scope bleed, and its canonical Badger content mirror lets recovering nodes rebuild serving indexes. Validators independently evaluate proposed memories and commit only quorum-approved results. A surviving **greater-than-two-thirds voting-power quorum** continues accepting memories while a member is offline; ordered committed-block replay catches it up when it returns. The separate network-safe ABCI state-sync path is implemented as an explicit authorized boot role with a deterministic latest-visible state stream, isolated verification, crash-safe whole-bundle activation, and seal-before-serving. The final exact-source integrated provider-to-receiver cold run passed on source identity `7080580b15e7e5158a04e8b294ab772e51f294633be2737f904276afec4c3458`. The v11.8 SQLite/cross-chain Synchronization Group remains an off-consensus sharing overlay; v11.9 does not relabel it as BFT. SAGE's existing full local rollback snapshot contains private node material and must never be reused as a network payload.
 
-The release gate includes offline-write/catch-up, snapshot/state-sync recovery, validator and membership reconfiguration, revocation, conflict/degraded-mode behavior, and chaos testing. Topologies remain honest: four equal-power validators tolerate one offline validator; three equal-power validators do not continue with only two online because CometBFT requires more than two-thirds voting power. The chosen model is an exact-domain quorum scope inside one existing chain, not an extension of cross-chain federation sync. State-sync activation is boot-only whole-application replacement with crash journaling, exact provider-equals-validator P2P authorization, H+2 snapshot eligibility, full pristine/disk gates, latched expiry, and final-store serving order. Providers require effective `retain_blocks=0`. While unsealed, `Query` and `CheckTx` always fail fast; only consensus block calls may wait during the narrow PendingComet handoff. Six pinned Comet overlays include atomic state/effective-height-marker persistence and repeated empty-blockstore restart safety. The real Docker gate uses firewall P2P partitions that preserve private ABCI links and requires matched Comet block hash plus live ABCI state after healing, but both the authorized transfer and signed scope-reconfiguration proofs remain hard release requirements. It remains opt-in and cannot count as released until that integrated gate passes. Internet validators still require routable Comet TCP, port forwarding, or an operator VPN; federation is not a validator tunnel, and a future tunnel layer remains separate work. The network path must never reuse the private local rollback bundle or expose it to a federation peer.
+The release evidence covers offline-write/catch-up, state recovery, validator and membership reconfiguration, revocation, conflict/degraded behavior, and chaos. The real-Comet gate begins with three validators plus one live non-validator, drives the signed app-v20 ladder, then proves governed add, bounded power update, and removal at Comet's exact H+2 effective heights. Complete-pair restarts must preserve both Comet's set and the ABCI persisted roster; the removed gateway reports inactive, cannot cast a governance vote, and cannot reappear in later commits. Its post-change power layout leaves a connected greater-than-two-thirds side for the one-validator isolation and no quorum on either side of the later 2+2 split. State-sync activation is boot-only whole-application replacement with crash journaling, exact provider-equals-validator P2P authorization, H+2 snapshot eligibility, full pristine/disk gates, latched expiry, and final-store serving order. Providers require effective `retain_blocks=0`. While unsealed, `Query` and `CheckTx` fail fast; only consensus block calls may wait during the narrow PendingComet handoff. The scoped proof composes a race-enabled, dual-principal OS-process formation/revision oracle with the real Docker firewall P2P gate; the held subprocess is not called a TCP partition. The independent integrated wire gate proved reciprocal unauthorized-peer denial, two independent RPC origins, a receiver killed after durable completion but before runtime publication and restarted in ordinary mode, a second pristine receiver with `session < seal < REST`, provider restart, exact scoped projection, and block/AppHash convergence. Internet validators still require routable Comet TCP, port forwarding, or an operator VPN; federation is not a validator tunnel, and a future tunnel layer remains separate work. The network path must never reuse the private local rollback bundle or expose it to a federation peer.
 
 ---
 

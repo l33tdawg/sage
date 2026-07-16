@@ -1,8 +1,8 @@
-Verified against SDK source at SAGE v11.7.0. Package: sage-agent-sdk.
+Verified against SDK source for SAGE v11.9.0. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.7.0
+**Package:** `sage-agent-sdk` **Version:** 11.9.0
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -1031,7 +1031,33 @@ Known `operation` values include `"add_validator"`, `"remove_validator"`,
 and owns the zero proposal heights. `scope` and `payload` are mutually
 exclusive. Legacy callers may still supply pre-encoded canonical bytes.
 
-Returns `GovProposeResponse(proposal_id, tx_hash, status)`.
+Returns `GovProposeResponse(proposal_id, tx_hash, status)`. `proposal_id` is the
+deterministic governance-engine ID to pass to `governance_vote()` or
+`governance_cancel()`; it is intentionally distinct from the CometBFT
+`tx_hash`. Governance mutations must be signed with the target node's configured
+operator key so one operator cannot cause another validator to vote. The SDK
+already supplies the 8-byte `X-Nonce` required by app-v20 delegated governance.
+The target node returns `503` without both its live validator key and configured
+governance operator, and `403` when a different valid agent signs the request.
+
+Immediately before each governance mutation, the sync and async clients make
+an authenticated `GET /v1/governance/context`. When `app_v20_active` is true,
+they copy its `validator_id` and `governance_domain` into the mutation model
+*before* request signing. That binds the delegated proof to the exact target
+validator and chain. A `409` means the context changed between reads; repeat
+the operation so the SDK fetches fresh context and signs a new request. A
+pre-v20 server that has no context route (`404`) and an inactive context both
+retain the legacy request shape; other context failures remain fail-closed.
+The parsed `GovernanceContext` also exposes `validator_active` and the sorted
+`active_validators` list (`validator_id`, `voting_power`) loaded from persisted
+ABCI state. Those fields let operator tooling compare application membership
+with CometBFT after a governed H+2 change or restart; they are not copied into
+the mutation body.
+
+Every post-app-v20 delegated proposal requires the configured operator to be a
+registered global admin. Vote and cancel authorization deliberately do not:
+each validator can keep a distinct node-local operator while its outer
+validator key remains the voting-power/ownership principal.
 
 ---
 
@@ -1061,7 +1087,10 @@ governance_vote(proposal_id: str, decision: str) -> GovVoteResponse
 
 `decision`: `"accept"` | `"reject"` | `"abstain"`.
 
-Returns `GovVoteResponse(tx_hash, status)`.
+Returns `GovVoteResponse(tx_hash, status)`. The HTTP signer authorizes only the
+target node's local validator; the on-chain vote and its power remain attributed
+to that validator key. The SDK automatically attaches fresh app-v20 context;
+the node-local operator does not need the proposal admin key.
 
 ---
 
@@ -1073,7 +1102,10 @@ governance_cancel(proposal_id: str) -> GovCancelResponse
 
 `POST /v1/governance/cancel`
 
-Proposer only. Returns `GovCancelResponse(tx_hash, status)`.
+The configured operator authorizes cancellation by the local validator that
+proposed the record. The SDK automatically attaches fresh app-v20 context; the
+operator does not need global-admin authority. Returns
+`GovCancelResponse(tx_hash, status)`.
 
 ---
 
@@ -1194,16 +1226,36 @@ Pydantic alias: the Python field is `object_`; the JSON key is `object`. Use `Kn
 
 ---
 
+### `GovernanceContext`
+
+| Field | Type | Notes |
+|---|---|---|
+| `validator_id` | `str` | Live validator identity returned by the target node |
+| `governance_domain` | `str` | Empty pre-v20; canonical 64-hex chain binding when active |
+| `app_v20_active` | `bool` | Controls whether the SDK adds both bindings to the mutation |
+
+The context model is loaded internally before mutations; callers normally do
+not construct it.
+
+---
+
 ### `GovProposeRequest`
 
 | Field | Type | Notes |
 |---|---|---|
-| `operation` | `str` | `"add_validator"` / `"remove_validator"` / `"update_power"` / `"domain_reassign"` |
+| `operation` | `str` | Validator operations plus `domain_reassign`, `memory_domain_repair`, `sync_group_action`, and `scope_action` |
 | `target_id` | `str` | |
 | `target_pubkey` | `str \| None` | Required for `add_validator` |
 | `target_power` | `int \| None` | For `update_power` |
 | `reason` | `str` | |
 | `payload` | `str \| None` | Base64-encoded; `None` omitted on wire |
+| `scope` | `ScopeActionTemplate \| None` | Guided canonical scope form; mutually exclusive with `payload` |
+| `validator_id` | `str \| None` | SDK-populated from active governance context |
+| `governance_domain` | `str \| None` | SDK-populated from active governance context |
+
+`GovVoteRequest` and `GovCancelRequest` carry the same optional
+`validator_id`/`governance_domain` pair. They are omitted for pre-v20
+compatibility and populated automatically after activation.
 
 ---
 

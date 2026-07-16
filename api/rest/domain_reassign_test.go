@@ -295,7 +295,8 @@ func TestGovPropose_PayloadRoundtripIntoTx(t *testing.T) {
 		Reason:    "recovery: previous owner deprecated",
 		Payload:   base64.StdEncoding.EncodeToString(rawPayload),
 	})
-	req, _ := signedRequest(t, http.MethodPost, "/v1/governance/propose", body)
+	req, operatorID := signedRequest(t, http.MethodPost, "/v1/governance/propose", body)
+	configureTestGovernanceGateway(t, srv, operatorID)
 
 	rr := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr, req)
@@ -330,7 +331,8 @@ func TestGovPropose_InvalidBase64Payload(t *testing.T) {
 		Reason:    "test",
 		Payload:   "@@@not-base64@@@",
 	})
-	req, _ := signedRequest(t, http.MethodPost, "/v1/governance/propose", body)
+	req, operatorID := signedRequest(t, http.MethodPost, "/v1/governance/propose", body)
+	configureTestGovernanceGateway(t, srv, operatorID)
 
 	rr := httptest.NewRecorder()
 	srv.Router().ServeHTTP(rr, req)

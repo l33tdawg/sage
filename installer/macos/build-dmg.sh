@@ -19,8 +19,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-VERSION="${SAGE_VERSION:-dev}"
+ASSET_VERSION="${SAGE_VERSION:-dev}"
+VERSION="${ASSET_VERSION#v}"
 ARCH="${SAGE_ARCH:-$(uname -m)}"
+
+# Release builds set NOTARIZE=1. Keep unsigned local developer builds possible,
+# but make the notarized path fail closed before compilation when any signing
+# input is absent.
+if [ "${NOTARIZE:-0}" = "1" ]; then
+    : "${SIGN_IDENTITY:?NOTARIZE=1 requires SIGN_IDENTITY}"
+    : "${APPLE_ID:?NOTARIZE=1 requires APPLE_ID}"
+    : "${APPLE_TEAM_ID:?NOTARIZE=1 requires APPLE_TEAM_ID}"
+    : "${APPLE_PASSWORD:?NOTARIZE=1 requires APPLE_PASSWORD}"
+fi
 
 # Normalize arch names
 case "$ARCH" in
@@ -30,7 +41,7 @@ case "$ARCH" in
 esac
 
 APP_NAME="SAGE"
-DMG_NAME="SAGE-${VERSION}-macOS-${ARCH_LABEL}"
+DMG_NAME="SAGE-${ASSET_VERSION}-macOS-${ARCH_LABEL}"
 BUILD_DIR="${PROJECT_ROOT}/dist/macos-${ARCH_LABEL}"
 APP_DIR="${BUILD_DIR}/${APP_NAME}.app"
 
@@ -186,6 +197,7 @@ if [ "${NOTARIZE:-}" = "1" ] && [ -n "${APPLE_ID:-}" ]; then
 
     echo "==> Stapling notarization ticket..."
     xcrun stapler staple "${BUILD_DIR}/${DMG_NAME}.dmg"
+    xcrun stapler validate "${BUILD_DIR}/${DMG_NAME}.dmg"
 else
     echo "    (Skipping notarization — set NOTARIZE=1 to enable)"
 fi

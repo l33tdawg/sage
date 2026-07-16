@@ -13,6 +13,7 @@ import (
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/config"
+	cmted25519 "github.com/cometbft/cometbft/crypto/ed25519"
 	cmtnode "github.com/cometbft/cometbft/node"
 	cmtstate "github.com/cometbft/cometbft/state"
 	cmtstore "github.com/cometbft/cometbft/store"
@@ -48,6 +49,7 @@ type stateSyncSealRuntime interface {
 	SealActivatedBundleFromComet(
 		context.Context,
 		func() (height int64, appHash []byte, appVersion uint64, err error),
+		func(height int64, appHash []byte, appVersion uint64) error,
 	) (bool, int64, []byte, uint64, error)
 }
 
@@ -64,10 +66,18 @@ type stateSyncSealResult struct {
 // ahead of CometBFT after a crash between directory activation and Comet's own
 // state persistence.
 func readPersistedCometState(cfg *config.Config) (uint64, []byte, error) {
-	return readPersistedCometStateWithProvider(cfg, config.DefaultDBProvider)
+	return readPersistedCometStateWithProviderAndReceiver(cfg, config.DefaultDBProvider, nil)
 }
 
-func readPersistedCometStateWithProvider(cfg *config.Config, provider config.DBProvider) (uint64, []byte, error) {
+func readPersistedCometStateForReceiver(cfg *config.Config, receiverValidatorPublicKey []byte) (uint64, []byte, error) {
+	return readPersistedCometStateWithProviderAndReceiver(cfg, config.DefaultDBProvider, receiverValidatorPublicKey)
+}
+
+func readPersistedCometStateWithProviderAndReceiver(
+	cfg *config.Config,
+	provider config.DBProvider,
+	receiverValidatorPublicKey []byte,
+) (uint64, []byte, error) {
 	if cfg == nil || provider == nil {
 		return 0, nil, errors.New("CometBFT config and DB provider are required")
 	}
@@ -95,6 +105,9 @@ func readPersistedCometStateWithProvider(cfg *config.Config, provider config.DBP
 	if state.LastBlockHeight <= 0 || len(state.AppHash) != sha256.Size {
 		return 0, nil, errors.New("persisted CometBFT state has an invalid height or AppHash")
 	}
+	if rosterErr := requireCometStateSyncReceiverNonValidator(state, receiverValidatorPublicKey); rosterErr != nil {
+		return 0, nil, rosterErr
+	}
 	blockDB, err := provider(&config.DBContext{ID: "blockstore", Config: cfg})
 	if err != nil {
 		return 0, nil, fmt.Errorf("open CometBFT block store: %w", err)
@@ -114,10 +127,14 @@ func readPersistedCometStateWithProvider(cfg *config.Config, provider config.DBP
 // newRunningCometStateReader captures the node-owned StateStore once. Calling
 // ConfigureRPC on every startup poll would repeatedly rebuild RPC/genesis
 // plumbing while Comet is bootstrapping state sync.
-func newRunningCometStateReader(cometNode *cmtnode.Node) (func(int64, []byte) (int64, []byte, uint64, error), error) {
+func newRunningCometStateReader(cometNode *cmtnode.Node, receiverValidatorPublicKey []byte) (func(int64, []byte) (int64, []byte, uint64, error), error) {
 	if cometNode == nil {
 		return nil, errors.New("running CometBFT node is required")
 	}
+	if len(receiverValidatorPublicKey) != 0 && len(receiverValidatorPublicKey) != cmted25519.PubKeySize {
+		return nil, errors.New("state sync receiver requires an Ed25519 validator public key")
+	}
+	receiverValidatorPublicKey = append([]byte(nil), receiverValidatorPublicKey...)
 	blockStore := cometNode.BlockStore()
 	if blockStore == nil {
 		return nil, errors.New("running CometBFT block store is required")
@@ -141,6 +158,9 @@ func newRunningCometStateReader(cometNode *cmtnode.Node) (func(int64, []byte) (i
 		if loadErr != nil {
 			return 0, nil, 0, fmt.Errorf("load running CometBFT state: %w", loadErr)
 		}
+		if rosterErr := requireCometStateSyncReceiverNonValidator(state, receiverValidatorPublicKey); rosterErr != nil {
+			return 0, nil, 0, rosterErr
+		}
 		height, appHash, appVersion, stateErr := runningCometState(state)
 		if stateErr != nil || height == 0 {
 			return height, appHash, appVersion, stateErr
@@ -161,9 +181,42 @@ func newRunningCometStateReader(cometNode *cmtnode.Node) (func(int64, []byte) (i
 	}, nil
 }
 
+func requireCometStateSyncReceiverNonValidator(state cmtstate.State, publicKey []byte) error {
+	if len(publicKey) == 0 {
+		return nil
+	}
+	if len(publicKey) != cmted25519.PubKeySize {
+		return errors.New("state sync receiver requires an Ed25519 validator public key")
+	}
+	if state.LastBlockHeight <= 0 {
+		return nil
+	}
+	address := cmted25519.PubKey(publicKey).Address()
+	sets := []struct {
+		name string
+		set  *cmttypes.ValidatorSet
+	}{
+		{name: "last", set: state.LastValidators},
+		{name: "current", set: state.Validators},
+		{name: "next", set: state.NextValidators},
+	}
+	for _, candidate := range sets {
+		if candidate.set == nil {
+			return fmt.Errorf("running CometBFT state has no %s validator set", candidate.name)
+		}
+		if candidate.set.HasAddress(address) {
+			return fmt.Errorf("state sync receiver validator key is already active in the %s CometBFT validator set", candidate.name)
+		}
+	}
+	return nil
+}
+
 func validateCometBootstrapCommit(state cmtstate.State, blockStore cometBootstrapCommitStore) error {
 	if blockStore == nil || state.LastBlockHeight <= 0 || state.ChainID == "" || state.LastValidators == nil {
 		return errors.New("CometBFT bootstrap state or block store is incomplete")
+	}
+	if err := state.LastBlockID.ValidateBasic(); err != nil || !state.LastBlockID.IsComplete() {
+		return errors.New("CometBFT bootstrap state has an invalid last block ID")
 	}
 	commit := blockStore.LoadSeenCommit(state.LastBlockHeight)
 	if commit == nil {
@@ -177,6 +230,9 @@ func validateCometBootstrapCommit(state cmtstate.State, blockStore cometBootstra
 	}
 	if commit.Height != state.LastBlockHeight {
 		return errors.New("bootstrap commit height does not match persisted state")
+	}
+	if !commit.BlockID.Equals(state.LastBlockID) {
+		return errors.New("bootstrap commit block ID does not match persisted state")
 	}
 	if err := state.LastValidators.VerifyCommit(state.ChainID, commit.BlockID, state.LastBlockHeight, commit); err != nil {
 		return fmt.Errorf("bootstrap commit lacks a valid +2/3 signature: %w", err)
@@ -219,18 +275,20 @@ func waitForBootStateSyncSeal(
 	ctx context.Context,
 	runtime stateSyncSealRuntime,
 	readComet func(expectedHeight int64, expectedAppHash []byte) (height int64, appHash []byte, appVersion uint64, err error),
+	durableSeal func(height int64, appHash []byte, appVersion uint64) error,
 ) (stateSyncSealResult, error) {
-	return waitForBootStateSyncSealWithInterval(ctx, runtime, readComet, 25*time.Millisecond)
+	return waitForBootStateSyncSealWithInterval(ctx, runtime, readComet, durableSeal, 25*time.Millisecond)
 }
 
 func waitForBootStateSyncSealWithInterval(
 	ctx context.Context,
 	runtime stateSyncSealRuntime,
 	readComet func(expectedHeight int64, expectedAppHash []byte) (height int64, appHash []byte, appVersion uint64, err error),
+	durableSeal func(height int64, appHash []byte, appVersion uint64) error,
 	pollInterval time.Duration,
 ) (stateSyncSealResult, error) {
-	if runtime == nil || readComet == nil || pollInterval <= 0 {
-		return stateSyncSealResult{}, errors.New("state sync seal runtime, Comet reader, and positive poll interval are required")
+	if runtime == nil || readComet == nil || durableSeal == nil || pollInterval <= 0 {
+		return stateSyncSealResult{}, errors.New("state sync seal runtime, Comet reader, durable completion, and positive poll interval are required")
 	}
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -241,7 +299,7 @@ func waitForBootStateSyncSealWithInterval(
 			expectedHeight, expectedAppHash := runtime.ExpectedState()
 			sealed, height, appHash, appVersion, err := runtime.SealActivatedBundleFromComet(ctx, func() (int64, []byte, uint64, error) {
 				return readComet(expectedHeight, expectedAppHash)
-			})
+			}, durableSeal)
 			if err == nil {
 				return stateSyncSealResult{
 					activated: sealed,
@@ -271,16 +329,27 @@ func waitForBootStateSyncSealWithInterval(
 // canonical Badger directory. In particular, MkdirAll(badger) must not run
 // first: after a crash between live->quarantine and prepared->live, recreating
 // an empty live directory would turn a recoverable layout into an ambiguous one.
-func recoverPendingStateSyncActivation(ctx context.Context, dataDir, cometHome, badgerPath string) (statesync.RecoveryAction, bool, error) {
+func recoverPendingStateSyncActivation(
+	ctx context.Context,
+	dataDir, cometHome, badgerPath string,
+	complete func() error,
+) (statesync.RecoveryAction, bool, error) {
 	return recoverPendingStateSyncActivationWith(
 		ctx,
 		dataDir,
 		cometHome,
 		badgerPath,
-		readPersistedCometState,
+		func(cfg *config.Config) (uint64, []byte, error) {
+			receiverValidatorPublicKey, keyErr := localValidatorPubKey(cometHome)
+			if keyErr != nil {
+				return 0, nil, fmt.Errorf("read state-sync receiver validator key during activation recovery: %w", keyErr)
+			}
+			return readPersistedCometStateForReceiver(cfg, receiverValidatorPublicKey)
+		},
 		func(path string) (uint64, []byte, error) {
 			return sageabci.InspectStateSyncRecoveryDirectory(ctx, path)
 		},
+		complete,
 	)
 }
 
@@ -289,9 +358,10 @@ func recoverPendingStateSyncActivationWith(
 	dataDir, cometHome, badgerPath string,
 	readComet persistedCometStateReader,
 	inspect statesync.ActivationDirectoryInspector,
+	complete func() error,
 ) (statesync.RecoveryAction, bool, error) {
-	if dataDir == "" || cometHome == "" || badgerPath == "" || readComet == nil || inspect == nil {
-		return 0, false, errors.New("state sync recovery paths, Comet reader, and directory inspector are required")
+	if dataDir == "" || cometHome == "" || badgerPath == "" || readComet == nil || inspect == nil || complete == nil {
+		return 0, false, errors.New("state sync recovery paths, Comet reader, directory inspector, and completion are required")
 	}
 	if contextErr := ctx.Err(); contextErr != nil {
 		return 0, false, contextErr
@@ -315,24 +385,25 @@ func recoverPendingStateSyncActivationWith(
 	if err != nil {
 		return 0, true, err
 	}
-	action, err := statesync.RecoverActivationDirectories(dataDir, journalPath, cometHeight, cometAppHash, inspect)
+	action, err := statesync.RecoverActivationDirectories(dataDir, journalPath, cometHeight, cometAppHash, inspect, complete)
 	if err != nil {
 		return 0, true, err
 	}
 	return action, true, nil
 }
 
-// finishRecoveredStateSyncRole turns off the one-shot receiver in memory only
-// after journal recovery has cryptographically kept the activated application
-// against persisted Comet state. This lets a crash after StateStore.Bootstrap
-// resume as an ordinary synchronized node without requiring an operator to win
-// a restart race and edit configuration first.
-func finishRecoveredStateSyncRole(cfg *Config, found bool, action statesync.RecoveryAction) bool {
-	if cfg == nil || !found || action != statesync.RecoveryKeepActivated || !cfg.Quorum.StateSync.Receiving {
-		return false
+// completeStateSyncReceivingRole atomically disarms the one-shot receiver on
+// disk and in memory. The activation journal remains durable until this
+// idempotent completion succeeds, so every crash boundary can retry safely.
+func completeStateSyncReceivingRole(cfg *Config) error {
+	if cfg == nil {
+		return errors.New("state-sync receiver config is required")
+	}
+	if err := persistStateSyncReceiving(false); err != nil {
+		return fmt.Errorf("persist completed state-sync receiver role: %w", err)
 	}
 	cfg.Quorum.StateSync.Receiving = false
-	return true
+	return nil
 }
 
 // acquireNormalServingAfterStateSyncRecovery is the final admission barrier

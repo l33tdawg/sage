@@ -36,6 +36,51 @@ func TestPersistFederationPeerPreservesRawPathsAndRemoves(t *testing.T) {
 	assert.NotContains(t, loaded.Federation.P2PPeers, "remote-chain")
 }
 
+func TestPersistStateSyncReceivingPreservesRawPaths(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	raw := "data_dir: ~/sage-data\nagent_key_file: ./operator.key\nquorum:\n  enabled: true\n  state_sync:\n    receiving: true\n    authorization_file: ./join.json\n"
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "config.yaml"), []byte(raw), 0o600))
+
+	require.NoError(t, persistStateSyncReceiving(false))
+	written, err := os.ReadFile(filepath.Join(tmp, "config.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(written), "data_dir: ~/sage-data")
+	assert.Contains(t, string(written), "agent_key_file: ./operator.key")
+	assert.Contains(t, string(written), "authorization_file: ./join.json")
+	assert.NotContains(t, string(written), "receiving: true")
+	require.NoError(t, persistStateSyncReceiving(false), "completion must be idempotent")
+}
+
+func TestPersistStateSyncReceivingRejectsMissingConfig(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+	assert.ErrorContains(t, persistStateSyncReceiving(false), "config file is missing")
+}
+
+func TestPersistStateSyncReceivingPreservesAbsentDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SAGE_HOME", home)
+	raw := "quorum:\n  enabled: true\n  state_sync:\n    receiving: true\n"
+	require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), []byte(raw), 0o600))
+
+	require.NoError(t, persistStateSyncReceiving(false))
+	written, err := os.ReadFile(filepath.Join(home, "config.yaml"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(written), "data_dir:", "targeted update must not materialize absent zero values")
+	assert.NotContains(t, string(written), "rest_addr:")
+	assert.NotContains(t, string(written), "embedding:")
+
+	loaded, err := LoadConfig()
+	require.NoError(t, err)
+	assert.False(t, loaded.Quorum.StateSync.Receiving)
+	assert.Equal(t, filepath.Join(home, "data"), loaded.DataDir)
+	assert.Equal(t, filepath.Join(home, "agent.key"), loaded.AgentKey)
+	assert.Equal(t, "127.0.0.1:8080", loaded.RESTAddr)
+	assert.Equal(t, "hash", loaded.Embedding.Provider)
+	assert.Equal(t, 768, loaded.Embedding.Dimension)
+	assert.True(t, loaded.Voter.Enabled)
+}
+
 func TestDefaultConfig(t *testing.T) {
 	home := "/tmp/test-sage"
 	cfg := DefaultConfig(home)

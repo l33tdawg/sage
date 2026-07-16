@@ -40,16 +40,21 @@ type JoinAuthorizationConfig struct {
 	ProviderNodeIDs     []string  `json:"provider_node_ids"`
 }
 
-// ValidatorP2PProfile is the already-applied CometBFT connection policy that
-// protects state-sync metadata and chunks before ABCI is invoked. Peer fields
-// contain canonical node IDs, not nodeID@address strings.
+// ValidatorP2PProfile is the already-applied CometBFT connection policy for an
+// armed state-sync process. The pre-handshake address callback is only a
+// syntax/liveness gate; Comet's post-handshake ABCI Query callback enforces the
+// exact authenticated node-ID set before adding a peer to the switch. Peer
+// fields contain canonical node IDs, not nodeID@address strings.
 type ValidatorP2PProfile struct {
 	ChainID                 string
 	LocalNodeID             string
 	LocalValidatorPublicKey []byte
+	FilterPeers             bool
 	PEX                     bool
+	SeedMode                bool
 	Seeds                   []string
 	MaxInboundPeers         int
+	MaxOutboundPeers        int
 	UnconditionalPeerIDs    []string
 	PrivatePeerIDs          []string
 	PersistentPeerIDs       []string
@@ -61,6 +66,7 @@ type joinAuthorization struct {
 	validatorPublicKey  []byte
 	appVersion          uint64
 	expiresAt           time.Time
+	deadline            time.Time
 	snapshotHeightFloor uint64
 	validatorNodeIDs    []string
 	providerNodeIDs     []string
@@ -308,6 +314,32 @@ func (authorization *ReceivingAuthorization) ExpiresAt() time.Time {
 	return authorization.join.expiresAt
 }
 
+// Deadline is the process-local expiry boundary. When construction receives a
+// time.Now value it retains Go's monotonic reading, so a later wall-clock
+// rollback cannot extend the authorization.
+func (authorization *ReceivingAuthorization) Deadline() time.Time {
+	if authorization == nil || authorization.join == nil {
+		return time.Time{}
+	}
+	return authorization.join.deadline
+}
+
+// ExpiresAt returns the immutable one-shot ceremony deadline.
+func (authorization *ServingAuthorization) ExpiresAt() time.Time {
+	if authorization == nil || authorization.join == nil {
+		return time.Time{}
+	}
+	return authorization.join.expiresAt
+}
+
+// Deadline is the process-local monotonic expiry boundary.
+func (authorization *ServingAuthorization) Deadline() time.Time {
+	if authorization == nil || authorization.join == nil {
+		return time.Time{}
+	}
+	return authorization.join.deadline
+}
+
 // ApprovedPeerNodeIDs returns a private, canonical copy of the exact Comet P2P
 // allowlist: all existing validator nodes plus the distinct joining node.
 func (authorization *ServingAuthorization) ApprovedPeerNodeIDs() []string {
@@ -324,6 +356,28 @@ func (authorization *ReceivingAuthorization) ApprovedPeerNodeIDs() []string {
 		return nil
 	}
 	return authorization.join.approvedPeerNodeIDs()
+}
+
+// ValidatorNodeIDs returns the immutable pre-join validator peer set. Unlike
+// ApprovedPeerNodeIDs it deliberately omits the one-shot joining node. The P2P
+// filter uses this stable set after a serving authorization expires, and after
+// a receiver has sealed, so ordinary validator reconnects cannot be coupled to
+// the lifetime of the snapshot-transfer session.
+func (authorization *ServingAuthorization) ValidatorNodeIDs() []string {
+	if authorization == nil || authorization.join == nil {
+		return nil
+	}
+	return append([]string(nil), authorization.join.validatorNodeIDs...)
+}
+
+// ValidatorNodeIDs returns the immutable pre-join validator peer set. A sealed
+// receiver may keep using these peers after its one-shot transfer authorization
+// expires; snapshot admission itself remains closed.
+func (authorization *ReceivingAuthorization) ValidatorNodeIDs() []string {
+	if authorization == nil || authorization.join == nil {
+		return nil
+	}
+	return append([]string(nil), authorization.join.validatorNodeIDs...)
 }
 
 // ValidCometNodeID reports whether nodeID is CometBFT's canonical lowercase
@@ -377,13 +431,13 @@ func validateJoinAuthorization(config JoinAuthorizationConfig, now time.Time) (*
 	return &joinAuthorization{
 		chainID: config.ChainID, joiningNodeID: config.JoiningNodeID,
 		validatorPublicKey: append([]byte(nil), config.ValidatorPublicKey...), appVersion: config.AppVersion,
-		expiresAt: config.ExpiresAt.UTC(), snapshotHeightFloor: config.SnapshotHeightFloor,
+		expiresAt: config.ExpiresAt.UTC(), deadline: now.Add(config.ExpiresAt.Sub(now)), snapshotHeightFloor: config.SnapshotHeightFloor,
 		validatorNodeIDs: validators, providerNodeIDs: providers, providers: providerSet,
 	}, nil
 }
 
 func (authorization *joinAuthorization) validateAt(now time.Time) error {
-	if authorization == nil || !now.Before(authorization.expiresAt) {
+	if authorization == nil || !now.Before(authorization.deadline) {
 		return errors.New("state sync join authorization is expired")
 	}
 	return nil
@@ -403,8 +457,12 @@ func validateValidatorP2PProfile(profile ValidatorP2PProfile, authorization *joi
 	if !ValidCometNodeID(profile.LocalNodeID) {
 		return errors.New("state sync P2P profile has an invalid local node ID")
 	}
-	if profile.PEX || len(profile.Seeds) != 0 || profile.MaxInboundPeers != 0 {
-		return errors.New("state sync P2P profile must disable PEX and seeds and set max inbound peers to zero")
+	if !profile.FilterPeers {
+		return errors.New("state sync P2P profile must enable authenticated peer filtering")
+	}
+	if profile.PEX || profile.SeedMode || len(profile.Seeds) != 0 ||
+		profile.MaxInboundPeers != 0 || profile.MaxOutboundPeers != 0 {
+		return errors.New("state sync P2P profile must disable PEX, seeds, and seed mode and set ordinary peer capacity to zero")
 	}
 	expected := make(map[string]struct{}, len(authorization.validatorNodeIDs)+1)
 	for _, nodeID := range authorization.validatorNodeIDs {

@@ -7,11 +7,11 @@ import (
 
 // mustRecordAdmittedCopy records an ADMITTED sync_origin row with a local copy id
 // and an origin signature — the shape ListGroupRelayCandidates / GetRelayOrigin read.
-func mustRecordAdmittedCopy(t *testing.T, s *SQLiteStore, originChain, originMem, localID, domain string, sig []byte) {
+func mustRecordAdmittedCopy(t *testing.T, s *SQLiteStore, originChain, originAgent, originMem, localID, domain string, sig []byte) {
 	t.Helper()
 	if err := s.RecordSyncOrigin(context.Background(), SyncOrigin{
 		OriginChainID: originChain, OriginMemoryID: originMem, OriginCreatedAt: "2026-01-01T00:00:00Z",
-		LocalMemoryID: localID, DomainTag: domain, Outcome: SyncOutcomeAdmitted, OriginSig: sig,
+		OriginAgentPubkey: originAgent, LocalMemoryID: localID, DomainTag: domain, Outcome: SyncOutcomeAdmitted, OriginSig: sig,
 	}); err != nil {
 		t.Fatalf("RecordSyncOrigin(%s/%s): %v", originChain, originMem, err)
 	}
@@ -26,7 +26,7 @@ func TestGetRelayOriginRoundTrip(t *testing.T) {
 
 	sig := []byte{0x01, 0x02, 0x03, 0x04}
 	local := "local-copy-1"
-	mustRecordAdmittedCopy(t, s, "chain-x", "x-1", local, "studio", sig)
+	mustRecordAdmittedCopy(t, s, "chain-x", "keyx", "x-1", local, "studio", sig)
 
 	ro, err := s.GetRelayOrigin(ctx, "chain-x", local)
 	if err != nil {
@@ -40,7 +40,7 @@ func TestGetRelayOriginRoundTrip(t *testing.T) {
 	}
 
 	// A NULL-sig admitted copy reads back with a nil OriginSig.
-	mustRecordAdmittedCopy(t, s, "chain-y", "y-1", "local-copy-2", "studio", nil)
+	mustRecordAdmittedCopy(t, s, "chain-y", "keyy", "y-1", "local-copy-2", "studio", nil)
 	roNil, err := s.GetRelayOrigin(ctx, "chain-y", "local-copy-2")
 	if err != nil {
 		t.Fatalf("GetRelayOrigin(nil sig): %v", err)
@@ -66,13 +66,13 @@ func TestListGroupRelayCandidatesLeakSafe(t *testing.T) {
 	mustGroupMember(t, s, "g1", "chain-m", GroupRoleFullSync, GroupMemberActive, "keym")
 
 	// R (responder) HOLDS an admitted copy of X's studio memory -> a candidate.
-	mustRecordAdmittedCopy(t, s, "chain-x", "x-1", "local-x1", "studio", []byte{0xAA})
+	mustRecordAdmittedCopy(t, s, "chain-x", "keyx", "x-1", "local-x1", "studio", make([]byte, 64))
 	// R's OWN copy of M's memory: origin == requester -> NOT a relay candidate.
-	mustRecordAdmittedCopy(t, s, "chain-m", "m-1", "local-m1", "studio", []byte{0xBB})
+	mustRecordAdmittedCopy(t, s, "chain-m", "keym", "m-1", "local-m1", "studio", make([]byte, 64))
 	// A same-domain-dup admission (empty local id) -> no distinct copy to serve.
-	mustRecordAdmittedCopy(t, s, "chain-x", "x-2", "", "studio", []byte{0xCC})
+	mustRecordAdmittedCopy(t, s, "chain-x", "keyx", "x-2", "", "studio", make([]byte, 64))
 	// A suppressed (Gate 6.5) origin pair -> excluded even though R holds a copy.
-	mustRecordAdmittedCopy(t, s, "chain-x", "x-3", "local-x3", "studio", []byte{0xDD})
+	mustRecordAdmittedCopy(t, s, "chain-x", "keyx", "x-3", "local-x3", "studio", make([]byte, 64))
 	if err := s.InsertSyncTombstone(ctx, SyncTombstone{
 		GroupID: "g1", Scope: TombstoneScopeMemory, Enforcement: TombstoneEnforceLocalSuppress,
 		OriginChainID: "chain-x", OriginMemoryID: "x-3",
@@ -118,7 +118,7 @@ func TestListGroupRelayCandidatesClassifiedOwnerOnly(t *testing.T) {
 	mustGroupMember(t, s, "g1", "chain-x", GroupRoleFullSync, GroupMemberActive, "keyx")
 	mustGroupMember(t, s, "g1", "chain-r", GroupRoleFullSync, GroupMemberActive, "keyr")
 	mustGroupMember(t, s, "g1", "chain-m", GroupRoleFullSync, GroupMemberActive, "keym")
-	mustRecordAdmittedCopy(t, s, "chain-x", "x-9", "local-x9", "secret", []byte{0xEE})
+	mustRecordAdmittedCopy(t, s, "chain-x", "keyx", "x-9", "local-x9", "secret", make([]byte, 64))
 	cands, _, err := s.ListGroupRelayCandidates(ctx, "g1", "chain-m", "chain-r", "secret", "", 100)
 	if err != nil {
 		t.Fatalf("ListGroupRelayCandidates(owner): %v", err)
@@ -134,7 +134,7 @@ func TestListGroupRelayCandidatesClassifiedOwnerOnly(t *testing.T) {
 	mustGroupMember(t, s2, "g1", "chain-x", GroupRoleFullSync, GroupMemberActive, "keyx")
 	mustGroupMember(t, s2, "g1", "chain-r", GroupRoleFullSync, GroupMemberActive, "keyr")
 	mustGroupMember(t, s2, "g1", "chain-m", GroupRoleFullSync, GroupMemberActive, "keym")
-	mustRecordAdmittedCopy(t, s2, "chain-x", "x-9", "local-x9", "secret", []byte{0xEE})
+	mustRecordAdmittedCopy(t, s2, "chain-x", "keyx", "x-9", "local-x9", "secret", make([]byte, 64))
 	cands2, _, err := s2.ListGroupRelayCandidates(ctx, "g1", "chain-m", "chain-r", "secret", "", 100)
 	if err != nil {
 		t.Fatalf("ListGroupRelayCandidates(non-owner): %v", err)

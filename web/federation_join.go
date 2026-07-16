@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -71,32 +72,41 @@ func (h *DashboardHandler) fedReady(w http.ResponseWriter) bool {
 // registerFederationRoutes mounts the JOIN proxy inside the dashboard's
 // authenticated group (called from RegisterRoutes).
 func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
-	r.Get("/v1/dashboard/federation/network-name", h.handleGetNetworkName)
-	r.Put("/v1/dashboard/federation/network-name", h.handleSetNetworkName)
-	r.Get("/v1/dashboard/federation/connections", h.handleFedConnections)
-	r.Post("/v1/dashboard/federation/connections/{chain_id}/revoke", h.handleFedRevoke)
-	r.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
+	// Dashboard authentication deliberately accepts independently signed local
+	// agents for ordinary memory work. Federation is node-wide trust and policy,
+	// so put the entire surface behind the stricter operator boundary: a local
+	// CEREBRUM session or this node's exact operator signature. This also keeps
+	// ceremony state and peer grants out of unrelated agents' reach.
+	fr := r.With(h.federationOperatorGate)
+	fr.Get("/v1/dashboard/federation/network-name", h.handleGetNetworkName)
+	fr.Put("/v1/dashboard/federation/network-name", h.handleSetNetworkName)
+	fr.Get("/v1/dashboard/federation/shareable-domains", h.handleFedShareableDomains)
+	fr.Get("/v1/dashboard/federation/connections", h.handleFedConnections)
+	fr.Get("/v1/dashboard/federation/connections/{chain_id}/permissions", h.handleFedPermissionsGet)
+	fr.Put("/v1/dashboard/federation/connections/{chain_id}/permissions", h.handleFedPermissionsPut)
+	fr.Post("/v1/dashboard/federation/connections/{chain_id}/revoke", h.handleFedRevoke)
+	fr.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
 
-	r.Get("/v1/dashboard/federation/lan-endpoint", h.handleFedLanEndpoint)
-	r.Get("/v1/dashboard/federation/readiness", h.handleFedReadiness)
+	fr.Get("/v1/dashboard/federation/lan-endpoint", h.handleFedLanEndpoint)
+	fr.Get("/v1/dashboard/federation/readiness", h.handleFedReadiness)
 
 	// v11.6 host-controlled domain sync + status (operator-only surface, but the
 	// dashboard IS the operator here — cookie-authed local control plane).
-	r.Get("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncGet)
-	r.Put("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncSet)
-	r.Get("/v1/dashboard/federation/connections/{chain_id}/sync/status", h.handleFedSyncStatus)
-	r.Post("/v1/dashboard/federation/connections/{chain_id}/sync/resend", h.handleFedSyncResend)
+	fr.Get("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncGet)
+	fr.Put("/v1/dashboard/federation/connections/{chain_id}/sync", h.handleFedSyncSet)
+	fr.Get("/v1/dashboard/federation/connections/{chain_id}/sync/status", h.handleFedSyncStatus)
+	fr.Post("/v1/dashboard/federation/connections/{chain_id}/sync/resend", h.handleFedSyncResend)
 
-	r.Post("/v1/dashboard/federation/join/host/create", h.handleFedHostCreate)
-	r.Post("/v1/dashboard/federation/join/host/scan-return", h.handleFedHostScanReturn)
-	r.Get("/v1/dashboard/federation/join/host/{session_id}", h.handleFedHostStatus)
-	r.Post("/v1/dashboard/federation/join/host/{session_id}/approve", h.handleFedHostApprove)
-	r.Post("/v1/dashboard/federation/join/host/{session_id}/abort", h.handleFedHostAbort)
+	fr.Post("/v1/dashboard/federation/join/host/create", h.handleFedHostCreate)
+	fr.Post("/v1/dashboard/federation/join/host/scan-return", h.handleFedHostScanReturn)
+	fr.Get("/v1/dashboard/federation/join/host/{session_id}", h.handleFedHostStatus)
+	fr.Post("/v1/dashboard/federation/join/host/{session_id}/approve", h.handleFedHostApprove)
+	fr.Post("/v1/dashboard/federation/join/host/{session_id}/abort", h.handleFedHostAbort)
 
-	r.Post("/v1/dashboard/federation/join/guest/scan", h.handleFedGuestScan)
-	r.Post("/v1/dashboard/federation/join/guest/request", h.handleFedGuestRequest)
-	r.Get("/v1/dashboard/federation/join/guest/{session_id}/status", h.handleFedGuestStatus)
-	r.Post("/v1/dashboard/federation/join/guest/confirm", h.handleFedGuestConfirm)
+	fr.Post("/v1/dashboard/federation/join/guest/scan", h.handleFedGuestScan)
+	fr.Post("/v1/dashboard/federation/join/guest/request", h.handleFedGuestRequest)
+	fr.Get("/v1/dashboard/federation/join/guest/{session_id}/status", h.handleFedGuestStatus)
+	fr.Post("/v1/dashboard/federation/join/guest/confirm", h.handleFedGuestConfirm)
 
 	// v11.8 sync-group management (INT1): the local operator's authoring surface
 	// over the group-journal EMIT layer. Split by the §8 authorization model —
@@ -104,13 +114,13 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	// controller-affecting (roster control). Everything is OFF-consensus and
 	// locally authored; the emit self-check refuses an entry whose resolver-pinned
 	// key is not this node's, so a caller can never author for another owner.
-	r.Get("/v1/dashboard/federation/groups", h.handleFedGroupList)
-	r.Post("/v1/dashboard/federation/groups/{group_id}/domains", h.handleFedGroupDomainAdd)
-	r.Post("/v1/dashboard/federation/groups/{group_id}/domains/remove", h.handleFedGroupDomainRemove)
-	r.Post("/v1/dashboard/federation/groups/{group_id}/self-role", h.handleFedGroupSelfRole)
-	r.Post("/v1/dashboard/federation/groups/{group_id}/roster", h.handleFedGroupRosterControl)
-	r.Post("/v1/dashboard/federation/groups/{group_id}/members/invite", h.handleFedGroupMemberInvite)
-	r.Post("/v1/dashboard/federation/groups/{group_id}/epoch-rotate", h.handleFedGroupEpochRotate)
+	fr.Get("/v1/dashboard/federation/groups", h.handleFedGroupList)
+	fr.Post("/v1/dashboard/federation/groups/{group_id}/domains", h.handleFedGroupDomainAdd)
+	fr.Post("/v1/dashboard/federation/groups/{group_id}/domains/remove", h.handleFedGroupDomainRemove)
+	fr.Post("/v1/dashboard/federation/groups/{group_id}/self-role", h.handleFedGroupSelfRole)
+	fr.Post("/v1/dashboard/federation/groups/{group_id}/roster", h.handleFedGroupRosterControl)
+	fr.Post("/v1/dashboard/federation/groups/{group_id}/members/invite", h.handleFedGroupMemberInvite)
+	fr.Post("/v1/dashboard/federation/groups/{group_id}/epoch-rotate", h.handleFedGroupEpochRotate)
 }
 
 // --- LAN endpoint suggestion (fix the localhost-in-join-code footgun) -------
@@ -351,6 +361,7 @@ func (h *DashboardHandler) handleFedSyncGet(w http.ResponseWriter, r *http.Reque
 		domains = []string{}
 	}
 	role := "legacy"
+	policyVersion := 1
 	revision := int64(0)
 	delivered := int64(0)
 	control, controlErr := ss.GetSyncControl(r.Context(), chain)
@@ -359,10 +370,53 @@ func (h *DashboardHandler) handleFedSyncGet(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if control != nil {
-		role, revision, delivered = control.Role, control.Revision, control.DeliveredRevision
+		role, policyVersion, revision, delivered = control.Role, control.PolicyVersion, control.Revision, control.DeliveredRevision
 	}
-	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": domains,
-		"sync_role": role, "revision": revision, "delivered_revision": delivered})
+	publish := append([]string(nil), domains...)
+	subscribe := append([]string(nil), domains...)
+	remotePublish := []string{}
+	remoteSubscribe := []string{}
+	v3Marker := control != nil && (control.PolicyVersion >= federation.SyncPolicyVersionPeerRBAC ||
+		control.RemotePolicyVersion >= federation.SyncPolicyVersionPeerRBAC)
+	if v3Marker && (control.BindingState != "active" || control.PeerAgentID == "" ||
+		control.PolicyEpoch == "" || control.RemoteCAPin == "") {
+		fedWriteErr(w, http.StatusConflict, "This v3 sync binding is incomplete; re-pair before reading it.")
+		return
+	}
+	if v3Marker {
+		var readErr error
+		publish, readErr = ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionLocalPublish)
+		if readErr == nil {
+			subscribe, readErr = ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionLocalSubscribe)
+		}
+		if readErr == nil {
+			remotePublish, readErr = ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionRemotePublish)
+		}
+		if readErr == nil {
+			remoteSubscribe, readErr = ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionRemoteSubscribe)
+		}
+		if readErr != nil {
+			fedWriteErr(w, http.StatusInternalServerError, "Failed to read directional sync policy.")
+			return
+		}
+	}
+	for _, values := range []*[]string{&publish, &subscribe, &remotePublish, &remoteSubscribe} {
+		if *values == nil {
+			*values = []string{}
+		}
+	}
+	response := map[string]any{
+		"remote_chain_id": chain,
+		"publish_domains": publish, "subscribe_domains": subscribe,
+		"remote_publish_domains": remotePublish, "remote_subscribe_domains": remoteSubscribe,
+		"sync_role": role, "policy_version": policyVersion, "revision": revision, "delivered_revision": delivered,
+	}
+	if !v3Marker || slices.Equal(publish, subscribe) {
+		// The compatibility field describes one bilateral set. It is truthful for
+		// legacy links and for a v3 link only when both local lanes match.
+		response["sync_domains"] = publish
+	}
+	fedWriteJSON(w, http.StatusOK, response)
 }
 
 type hostSyncPolicyDriver interface {
@@ -370,6 +424,10 @@ type hostSyncPolicyDriver interface {
 }
 
 func (h *DashboardHandler) handleFedSyncSet(w http.ResponseWriter, r *http.Request) {
+	if !h.isFederationMutationOperatorRequest(r) {
+		fedWriteErr(w, http.StatusForbidden, "Changing federation sync requires the local node operator.")
+		return
+	}
 	if !h.fedReady(w) {
 		return
 	}
@@ -385,55 +443,154 @@ func (h *DashboardHandler) handleFedSyncSet(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var body struct {
-		Domains []string `json:"domains"`
+		Domains          *[]string `json:"domains"`
+		PublishDomains   *[]string `json:"publish_domains"`
+		SubscribeDomains *[]string `json:"subscribe_domains"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
-		fedWriteErr(w, http.StatusBadRequest, "Expected {\"domains\": [...]}.")
+		fedWriteErr(w, http.StatusBadRequest, "Expected publish_domains and/or subscribe_domains arrays.")
 		return
 	}
-	if len(body.Domains) > 100 {
-		fedWriteErr(w, http.StatusBadRequest, "A sync consent set is capped at 100 domains.")
+	if body.Domains == nil && body.PublishDomains == nil && body.SubscribeDomains == nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected publish_domains and/or subscribe_domains arrays.")
 		return
 	}
-	for _, d := range body.Domains {
-		if d == "" {
-			fedWriteErr(w, http.StatusBadRequest, "Sync domains must be non-empty.")
-			return
+	if body.Domains != nil && (body.PublishDomains != nil || body.SubscribeDomains != nil) {
+		fedWriteErr(w, http.StatusBadRequest, "Legacy domains cannot be combined with directional fields.")
+		return
+	}
+	validateDomains := func(values *[]string) bool {
+		if values == nil {
+			return true
 		}
-		if d == "*" {
-			fedWriteErr(w, http.StatusBadRequest, "Sync domains must be concrete (no \"*\").")
-			return
+		if len(*values) > 100 {
+			fedWriteErr(w, http.StatusBadRequest, "A sync permission set is capped at 100 domains.")
+			return false
 		}
-		if !federation.DomainAllowed(agreement.AllowedDomains, d) {
-			fedWriteErr(w, http.StatusBadRequest, "Domain "+strconv.Quote(d)+" is not covered by the agreement's shared domains.")
-			return
+		for _, d := range *values {
+			if d == "" {
+				fedWriteErr(w, http.StatusBadRequest, "Sync domains must be non-empty.")
+				return false
+			}
+			if d == "*" {
+				fedWriteErr(w, http.StatusBadRequest, "Sync domains must be concrete (no \"*\").")
+				return false
+			}
 		}
+		return true
+	}
+	if !validateDomains(body.Domains) || !validateDomains(body.PublishDomains) || !validateDomains(body.SubscribeDomains) {
+		return
 	}
 	control, controlErr := ss.GetSyncControl(r.Context(), chain)
 	if controlErr != nil {
 		fedWriteErr(w, http.StatusInternalServerError, "Could not verify host/guest sync policy ownership.")
 		return
 	}
+	v3Marker := control != nil && (control.PolicyVersion >= federation.SyncPolicyVersionPeerRBAC ||
+		control.RemotePolicyVersion >= federation.SyncPolicyVersionPeerRBAC)
+	frozenPeer := control != nil && control.BindingState == "active" && control.PeerAgentID != "" &&
+		control.PolicyEpoch != "" && control.RemoteCAPin != ""
+	if v3Marker && !frozenPeer {
+		fedWriteErr(w, http.StatusConflict, "This v3 sync binding is incomplete; re-pair before changing it.")
+		return
+	}
+	if v3Marker && body.Domains != nil {
+		fedWriteErr(w, http.StatusConflict, "This connection uses directional publish_domains and subscribe_domains, not legacy domains.")
+		return
+	}
+	// Either role may author its own independent v3 Publish/Subscribe lanes once
+	// the peer identity and ceremony generation are frozen. Omitted lanes are
+	// preserved; an explicit empty array clears only that lane. A frozen v2 link
+	// can migrate by making its first directional update, but legacy {domains}
+	// is never silently reinterpreted as v3 authority.
+	if body.PublishDomains != nil || body.SubscribeDomains != nil {
+		if !frozenPeer {
+			fedWriteErr(w, http.StatusConflict, "This legacy connection has no frozen peer identity; re-pair before using directional sync.")
+			return
+		}
+		driver, ok := h.Federation.(directionalSyncPolicyDriver)
+		if !ok {
+			fedWriteErr(w, http.StatusNotImplemented, "Directional sync policy is unavailable.")
+			return
+		}
+		publish, err := ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionLocalPublish)
+		if err != nil {
+			fedWriteErr(w, http.StatusInternalServerError, "Failed to read current publish policy.")
+			return
+		}
+		subscribe, err := ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionLocalSubscribe)
+		if err != nil {
+			fedWriteErr(w, http.StatusInternalServerError, "Failed to read current subscription policy.")
+			return
+		}
+		if body.PublishDomains != nil {
+			publish = append([]string(nil), (*body.PublishDomains)...)
+		}
+		if body.SubscribeDomains != nil {
+			subscribe = append([]string(nil), (*body.SubscribeDomains)...)
+		}
+		result, err := driver.SetDirectionalSyncPolicy(r.Context(), chain, publish, subscribe)
+		if err != nil {
+			fedWriteErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		remotePublish, _ := ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionRemotePublish)
+		remoteSubscribe, _ := ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionRemoteSubscribe)
+		if remotePublish == nil {
+			remotePublish = []string{}
+		}
+		if remoteSubscribe == nil {
+			remoteSubscribe = []string{}
+		}
+		response := map[string]any{
+			"remote_chain_id": chain,
+			"publish_domains": result.PublishDomains, "subscribe_domains": result.SubscribeDomains,
+			"remote_publish_domains": remotePublish, "remote_subscribe_domains": remoteSubscribe,
+			"sync_role": control.Role, "policy_version": result.Version,
+			"revision": result.Revision, "state": result.State,
+		}
+		if slices.Equal(result.PublishDomains, result.SubscribeDomains) {
+			response["sync_domains"] = result.PublishDomains
+		}
+		fedWriteJSON(w, http.StatusOK, response)
+		return
+	}
+	legacyDomains := []string{}
+	if body.Domains != nil {
+		legacyDomains = *body.Domains
+	}
 	if control != nil {
 		if control.Role == "guest" {
-			fedWriteErr(w, http.StatusConflict, "Memory sync for this connection is managed by the host node.")
+			fedWriteErr(w, http.StatusConflict, "This legacy guest connection must be re-paired before changing sync policy.")
 			return
 		}
 		driver, ok := h.Federation.(hostSyncPolicyDriver)
 		if !ok {
-			fedWriteErr(w, http.StatusNotImplemented, "Host-managed sync policy is unavailable.")
+			fedWriteErr(w, http.StatusNotImplemented, "Host-managed legacy sync policy is unavailable.")
 			return
 		}
-		result, err := driver.SetHostSyncPolicy(r.Context(), chain, body.Domains)
+		result, err := driver.SetHostSyncPolicy(r.Context(), chain, legacyDomains)
 		if err != nil {
 			fedWriteErr(w, http.StatusConflict, err.Error())
 			return
 		}
 		fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": result.Domains,
-			"sync_role": "host", "revision": result.Revision, "state": result.State})
+			"publish_domains": result.Domains, "subscribe_domains": result.Domains,
+			"remote_publish_domains": []string{}, "remote_subscribe_domains": []string{},
+			"sync_role": "host", "policy_version": result.Version, "revision": result.Revision, "state": result.State})
 		return
 	}
-	if err := ss.SetSyncDomains(r.Context(), chain, body.Domains); err != nil {
+	// Legacy links retain the old bilateral rule. Host-managed v2 policies are
+	// allowed to name a topic shared by either side; each sender's own agreement
+	// remains the authoritative egress gate.
+	for _, d := range legacyDomains {
+		if !federation.DomainAllowed(agreement.AllowedDomains, d) {
+			fedWriteErr(w, http.StatusBadRequest, "Domain "+strconv.Quote(d)+" is not covered by this legacy agreement's shared domains.")
+			return
+		}
+	}
+	if err := ss.SetSyncDomains(r.Context(), chain, legacyDomains); err != nil {
 		fedWriteErr(w, http.StatusInternalServerError, "Failed to save sync domains.")
 		return
 	}
@@ -441,7 +598,9 @@ func (h *DashboardHandler) handleFedSyncSet(w http.ResponseWriter, r *http.Reque
 	if saved == nil {
 		saved = []string{}
 	}
-	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": saved})
+	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "sync_domains": saved,
+		"publish_domains": saved, "subscribe_domains": saved,
+		"remote_publish_domains": []string{}, "remote_subscribe_domains": []string{}})
 }
 
 // handleFedSyncResend requeues rejected/failed outbox rows back to pending so
@@ -630,7 +789,15 @@ func (h *DashboardHandler) handleFedRevoke(w http.ResponseWriter, r *http.Reques
 		fedWriteErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	fedWriteJSON(w, http.StatusOK, map[string]string{"remote_chain_id": chain, "status": "revoked", "tx_hash": hash})
+	out := map[string]any{"remote_chain_id": chain, "status": "revoked", "tx_hash": hash}
+	if cleanupErr := h.ReconcileFederationManagedGrants(r.Context()); cleanupErr != nil {
+		// Trust is already revoked and the peer-RBAC policy denies immediately.
+		// Keep the durable ledger for the background tx-7 retry and report that
+		// distinction instead of pretending the on-chain cleanup finished.
+		out["grant_cleanup_pending"] = true
+		out["warning"] = "Connection revoked; a managed write-grant cleanup will retry in the background."
+	}
+	fedWriteJSON(w, http.StatusOK, out)
 }
 
 func (h *DashboardHandler) handleFedPeerStatus(w http.ResponseWriter, r *http.Request) {
@@ -874,6 +1041,25 @@ type groupManagementDriver interface {
 func (h *DashboardHandler) isSyncGroupOperatorRequest(r *http.Request) bool {
 	operatorID := strings.TrimSpace(h.NodeOperatorAgentID)
 	return operatorID != "" && verifiedDashboardAgentID(r.Context()) == operatorID
+}
+
+// isFederationMutationOperatorRequest admits either the authenticated local
+// CEREBRUM operator or an agent-signed request from this node's exact operator
+// identity. Dashboard authentication also admits ordinary agents, so callers
+// that make the Manager sign or persist node-wide federation policy must use
+// this stricter boundary.
+func (h *DashboardHandler) isFederationMutationOperatorRequest(r *http.Request) bool {
+	return h.isCEREBRUMOperatorRequest(r) || h.isSyncGroupOperatorRequest(r)
+}
+
+func (h *DashboardHandler) federationOperatorGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !h.isFederationMutationOperatorRequest(r) {
+			fedWriteErr(w, http.StatusForbidden, "Federation control requires the local node operator.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // groupDriver resolves the emit surface after the fedReady guard, or writes the

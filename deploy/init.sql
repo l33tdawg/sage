@@ -370,6 +370,20 @@ CREATE TABLE IF NOT EXISTS governance_votes (
     PRIMARY KEY (proposal_id, validator_id)
 );
 
+-- Exactly-once receipt for a whole consensus block's off-chain projection.
+-- The receipt is inserted in the same SQL transaction as every mirror write;
+-- CometBFT replay after a crash before Badger Commit therefore skips the
+-- already-durable batch without collapsing distinct events inside the block.
+-- Receipts are deliberately permanent (one indexed row per block) so a
+-- validator returning from an arbitrarily long partition still skips exact
+-- historical replays. Operator rollback snapshots must restore Badger, SQL,
+-- and CometBFT together; this ledger is not a cross-store rollback protocol.
+CREATE TABLE IF NOT EXISTS abci_projection_batches (
+    block_height BIGINT PRIMARY KEY,
+    app_hash     BYTEA NOT NULL CHECK (octet_length(app_hash) = 32),
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- Add classification column to memories table
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS classification SMALLINT NOT NULL DEFAULT 1;
 
