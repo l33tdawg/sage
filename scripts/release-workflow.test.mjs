@@ -89,6 +89,8 @@ test('metadata, source, race, frontend, and fault checks converge before packagi
 test('PR and main CI require the same v11.9 composite proofs as release', () => {
   assert.match(ciJob('v119-fault-gates'), /require_scoped_reconfiguration: true/);
   assert.match(ciJob('v119-fault-gates'), /require_authorized_state_sync: true/);
+  assert.match(ciJob('test'), /go test \.\/\.\.\. -v -count=1 -race -timeout 30m/);
+  assert.match(job('test'), /go test \.\/\.\.\. -count=1 -race -timeout 30m/);
 });
 
 test('the composite fault gate rechecks frozen source after every companion', () => {

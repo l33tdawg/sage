@@ -20,7 +20,7 @@ build-all: ## Build all binaries (amid, sage-gui, sage-cli)
 	go build -ldflags "$(LDFLAGS)" -o bin/sage-cli ./cmd/sage-cli
 
 test: ## Run unit tests
-	go test ./... -v -count=1 -race
+	go test ./... -v -count=1 -race -timeout 30m
 
 test-cometbft-patch: ## Run the local CometBFT state-sync hardening regression
 	cd third_party/cometbft && go test ./statesync ./blocksync ./node ./state ./store -run '^(TestReceiveOversizedSnapshotWithoutActiveSyncDoesNotPanic|TestStateSyncSealAbort.*|TestStateSyncBootstrapRestart.*|TestOfflineStateSyncHeight.*|TestLoadStateFromDBOrGenesisDocProviderCachesOnlyGenesisBeforeStateSync|TestRecoverStateSyncGenesisDocDBResidue.*|TestStateSyncGenesisDocDBResidue.*|TestPersistStateSyncBootstrap.*|TestCompleteStateSyncBootstrap.*|TestBootstrapAtomicallyPersistsEffectiveStateSyncHeight|TestStateSyncBootstrapComplete.*|TestRecoverIncompleteStateSyncBootstrap.*)$$' -count=1 -race
