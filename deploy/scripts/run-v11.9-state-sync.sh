@@ -439,24 +439,21 @@ wait_closed_provider_placeholder() {
   local container=$1
   local expected_ip=$2
   local deadline=$((SECONDS + 15))
-  local lookup=
+  local dial_evidence="dial tcp ${expected_ip}:26656: connect: connection refused"
+  local logs=
 
   while :; do
     if [ "$(docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null || true)" != true ]; then
       echo "ERROR: ${container} exited while waiting for the closed provider-p2p placeholder" >&2
       return 1
     fi
-    lookup=$(docker exec "${container}" busybox nslookup provider-p2p 2>&1 || true)
-    if printf '%s\n' "${lookup}" | awk -v want="${expected_ip}" '$NF == want { found=1 } END { exit !found }'; then
-      if docker exec "${container}" busybox nc -z -w 1 provider-p2p 26656; then
-        echo "ERROR: ${container} reached a P2P listener before provider exposure" >&2
-        return 1
-      fi
-      return 0
-    fi
+    logs=$(docker logs "${container}" 2>&1 || true)
+    case "${logs}" in
+      *"${dial_evidence}"*) return 0 ;;
+    esac
     if [ "${SECONDS}" -ge "${deadline}" ]; then
-      echo "ERROR: ${container} did not resolve provider-p2p to closed placeholder ${expected_ip}" >&2
-      echo "last DNS response: ${lookup:-<empty>}" >&2
+      echo "ERROR: ${container} did not dial the closed provider-p2p placeholder at ${expected_ip}:26656" >&2
+      echo "missing Comet dial evidence: ${dial_evidence}" >&2
       return 1
     fi
     sleep 1

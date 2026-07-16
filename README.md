@@ -53,7 +53,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ## What's New in v11.9.0
 
-> **Release evidence:** the exact-source `make v119-state-sync` cold run passed on source identity `2b6b0aad6e14083b39105622b4244a52a1178c8d0a99d287f5d8ec04d17d9b13`. The branch and tag workflows independently rerun the complete race, lint, SDK/frontend, security, fault, packaging, and publication gates before exposing release artifacts.
+> **Release evidence:** the exact-source `make v119-state-sync` cold run passed on source identity `7080580b15e7e5158a04e8b294ab772e51f294633be2737f904276afec4c3458`. The branch and tag workflows independently rerun the complete race, lint, SDK/frontend, security, fault, packaging, and publication gates before exposing release artifacts.
 
 > **Validator rollout boundary:** install and restart the exact frozen v11.9 artifact on **every participating validator** before anyone broadcasts the non-empty-domain `app-v20` / target-20 ceremony transaction. A merely >2/3 upgraded subset is unsafe: v11.8 does not understand the signed governance-domain tail. For operator-managed socket-mode Comet, keep `recheck=true`, cap `max_tx_bytes` at 1 MiB, and restart Comet as well so no pre-rollout oversized mempool entry survives.
 

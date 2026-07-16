@@ -111,15 +111,18 @@ test('the Linux cold gate atomically replaces container-owned config files', () 
   assert.doesNotMatch(v119StateSync, /cat >"\$\{(?:PROVIDER_HOME|home)\}\/config\.yaml"/);
 });
 
-test('the Linux cold gate tolerates Docker DNS startup races without weakening the closed-peer proof', () => {
+test('the Linux cold gate proves the closed placeholder through the real Comet dial path', () => {
   assert.match(v119StateSync, /wait_closed_provider_placeholder\(\)/);
-  assert.match(v119StateSync, /awk -v want="\$\{expected_ip\}" '\$NF == want/);
-  assert.match(v119StateSync, /busybox nc -z -w 1 provider-p2p 26656/);
+  assert.match(
+    v119StateSync,
+    /dial tcp \$\{expected_ip\}:26656: connect: connection refused/,
+  );
+  assert.match(v119StateSync, /"\$\{provider_id\}@provider-p2p:26656"/);
   assert.match(
     v119StateSync,
     /wait_closed_provider_placeholder "\$\{candidate\}" "\$\{placeholder_ip\}"/,
   );
-  assert.doesNotMatch(v119StateSync, /sleep 2\nfor candidate/);
+  assert.doesNotMatch(v119StateSync, /busybox nslookup provider-p2p/);
 });
 
 test('Dependabot ignores only incompatible post-v0 go-libp2p versions', () => {
