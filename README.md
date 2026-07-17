@@ -51,7 +51,20 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.9.0
+## What's New in v11.9.1
+
+**Task creation now applies the `[TASK]` marker exactly once.** MCP `sage_task` and CEREBRUM's task-creation path preserve content that is already marked instead of storing `[TASK] [TASK] ...`; unmarked content still receives the canonical prefix. Direct regression tests cover both entry points and both marked/unmarked inputs.
+
+- **Safer release recovery.** A failed publication can be resumed only from the current protected `main` workflow and always checks out the exact immutable tag. The staged Python wheel smoke test installs declared runtime dependencies before importing the SDK, catching packaging metadata failures before any public channel is touched.
+- **Stronger real-network evidence.** The four-validator partition proof accepts observed reject activity on either symmetric firewall endpoint while still verifying the exact peer topology on every node before, during, and after healing. This removes a timing-sensitive false failure without weakening the partition assertion.
+- **Maintained build and storage stack.** The Go database, compression, TOML, and SQLite dependencies are refreshed through the full race and fault matrix. GitHub's Go, Node, and CodeQL actions are updated and remain pinned to immutable commits.
+
+This patch changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.9.1.
+
+## Older releases
+
+<details>
+<summary>v11.9.0 - scoped consensus and colleague-style federation</summary>
 
 > **Release evidence:** the exact-source `make v119-state-sync` cold run passed on source identity `7080580b15e7e5158a04e8b294ab772e51f294633be2737f904276afec4c3458`. The branch and tag workflows independently rerun the complete race, lint, SDK/frontend, security, fault, packaging, and publication gates before exposing release artifacts.
 
@@ -71,7 +84,7 @@ This is same-chain validator replication, not a relabeling of v11.8 synchronizat
 
 App-v20 remains dormant until the governed upgrade activates it, preserving byte-identical pre-activation replay. A rolling binary install is safe only while the tagged target-20 ceremony has not been submitted. SDK 11.9.0.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.8.5 - anatomical MRI boundary</summary>
@@ -502,7 +515,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.9.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.9.1`.
 
 ### Upgrading from an older version?
 
