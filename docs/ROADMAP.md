@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.9.0 is the current release.** The exact-source cold state-sync proof passed on the release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. This document keeps v11.8's deferred federated inbox distinct from delivered synchronization groups and looks forward to the v11.10–v11.13 productization bridge and v12. Nothing after v11.9 is promised or dated.
+**Status (2026-07):** **v11.9.1 is the current release.** The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. This document keeps v11.8's deferred federated inbox distinct from delivered synchronization groups and looks forward to the v11.10–v11.13 productization bridge and v12. Nothing after v11.9 is promised or dated.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 

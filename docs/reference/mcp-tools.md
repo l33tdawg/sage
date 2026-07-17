@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.9.0.
+Reconciled against internal/mcp for SAGE v11.9.1.
 
 # SAGE MCP Tools Reference
 
@@ -450,7 +450,7 @@ verifying memories were committed after storing.
 
 | Name        | Type     | Required | Description |
 |-------------|----------|----------|-------------|
-| `content`   | string   | no*      | Task description. Required when creating. Stored prefixed as `[TASK] <content>`. |
+| `content`   | string   | no*      | Task description. Required when creating. Stored with exactly one `[TASK] ` prefix, including when the input is already marked. |
 | `domain`    | string   | no       | Domain tag. Default: `general`. |
 | `memory_id` | string   | no*      | Existing task memory ID. Required when updating. |
 | `status`    | string   | no       | `planned`, `in_progress`, `done`, `dropped`. Default: `planned`. |
