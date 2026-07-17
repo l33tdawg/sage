@@ -8,7 +8,10 @@ const server = JSON.parse(read('server.json'));
 const version = server.version;
 
 test('release-facing version metadata stays aligned', () => {
-  assert.match(version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
+  assert.match(
+    version,
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/,
+  );
   assert.deepEqual(
     server.packages.filter(({ registryType }) => registryType === 'oci'),
     [{
