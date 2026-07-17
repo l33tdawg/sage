@@ -5,6 +5,10 @@ import test from 'node:test';
 const workflowPath = new URL('../.github/workflows/release.yml', import.meta.url);
 const workflow = readFileSync(workflowPath, 'utf8');
 const ciWorkflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+const faultWorkflow = readFileSync(
+  new URL('../.github/workflows/v11.9-fault-gates.yml', import.meta.url),
+  'utf8',
+);
 const dependabot = readFileSync(new URL('../.github/dependabot.yml', import.meta.url), 'utf8');
 const macosBuild = readFileSync(new URL('../installer/macos/build-dmg.sh', import.meta.url), 'utf8');
 const windowsBuild = readFileSync(new URL('../installer/windows/build-exe.sh', import.meta.url), 'utf8');
@@ -88,6 +92,34 @@ test('metadata, source, race, frontend, and fault checks converge before packagi
   ]) {
     assertNeeds(id, ['quality-gate', 'release-metadata']);
   }
+});
+
+test('manual release recovery checks out the immutable tag in every source job', () => {
+  assert.match(workflow, /workflow_dispatch:\n    inputs:\n      release_tag:/);
+  assert.match(workflow, /RELEASE_TAG:.*inputs\.release_tag.*github\.ref_name/);
+  assert.match(job('release-metadata'), /CHECKED_OUT_COMMIT=\$\(git rev-parse HEAD\)/);
+  assert.match(job('release-metadata'), /GITHUB_REF.*refs\/heads\/main/);
+  assert.match(job('release-metadata'), /refs\/tags\/\$\{RELEASE_TAG\}\^\{commit\}/);
+  assert.match(job('v119-fault-gates'), /release_ref:.*inputs\.release_tag.*github\.ref/);
+
+  const checkoutCount = (workflow.match(/actions\/checkout@/g) || []).length;
+  const recoveryRefCount = (
+    workflow.match(/\$\{\{ github\.event_name == 'workflow_dispatch' && format\('refs\/tags\/\{0\}', inputs\.release_tag\) \|\| github\.ref \}\}/g)
+    || []
+  ).length;
+  assert.equal(recoveryRefCount, checkoutCount + 1);
+  assert.match(faultWorkflow, /release_ref:\n[\s\S]*?type: string/);
+  assert.equal(
+    (faultWorkflow.match(/ref: \$\{\{ inputs\.release_ref \|\| github\.ref \}\}/g) || []).length,
+    (faultWorkflow.match(/actions\/checkout@/g) || []).length,
+  );
+});
+
+test('wheel smoke installs declared runtime dependencies before importing the SDK', () => {
+  const pythonPackage = job('python-package');
+  assert.doesNotMatch(pythonPackage, /--no-deps/);
+  assert.match(pythonPackage, /sage-wheel-smoke\/bin\/pip" install dist\/\*\.whl/);
+  assert.match(pythonPackage, /import sage_sdk/);
 });
 
 test('PR and main CI require the same v11.9 composite proofs as release', () => {
