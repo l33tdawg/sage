@@ -76,21 +76,6 @@ func canonicalSyncDomainsFormat(raw []string) ([]string, error) {
 	return out, nil
 }
 
-// canonicalSyncDomains preserves the v1 bilateral treaty check for legacy
-// links. New host-managed links use canonicalSyncDomainsFormat instead.
-func canonicalSyncDomains(raw []string, agreement *store.CrossFedRecord) ([]string, error) {
-	out, err := canonicalSyncDomainsFormat(raw)
-	if err != nil {
-		return nil, err
-	}
-	for _, domain := range out {
-		if agreement == nil || !DomainAllowed(agreement.AllowedDomains, domain) {
-			return nil, fmt.Errorf("domain %q is outside the federation treaty", domain)
-		}
-	}
-	return out, nil
-}
-
 func syncPolicyHashVersion(version int, epoch, controller string, revision int64, domains []string) string {
 	h := sha256.New()
 	if version == SyncPolicyVersionDirectional {
@@ -512,9 +497,9 @@ func (m *Manager) deliverSyncPolicy(ctx context.Context, ss *store.SQLiteStore, 
 		req = &SyncPolicyRequest{Version: SyncPolicyVersionPeerRBAC, Epoch: control.PolicyEpoch,
 			Revision: control.Revision, PublishDomains: publish, SubscribeDomains: subscribe}
 	} else {
-		domains, err := ss.GetSyncDomains(ctx, remoteChainID)
-		if err != nil {
-			return err
+		domains, domainsErr := ss.GetSyncDomains(ctx, remoteChainID)
+		if domainsErr != nil {
+			return domainsErr
 		}
 		req = &SyncPolicyRequest{Version: SyncPolicyVersionDirectional, Epoch: control.PolicyEpoch, Revision: control.Revision, Domains: domains}
 	}
@@ -539,11 +524,11 @@ func (m *Manager) deliverSyncPolicy(ctx context.Context, ss *store.SQLiteStore, 
 		cancel()
 	}()
 	if push := m.syncPolicyPushFn; push != nil {
-		if _, err := push(deliveryCtx, remoteChainID, req); err != nil {
-			return err
+		if _, pushErr := push(deliveryCtx, remoteChainID, req); pushErr != nil {
+			return pushErr
 		}
-	} else if _, err := m.syncPolicyPushAgreement(deliveryCtx, agreement, req); err != nil {
-		return err
+	} else if _, pushErr := m.syncPolicyPushAgreement(deliveryCtx, agreement, req); pushErr != nil {
+		return pushErr
 	}
 	currentAgreement, err := m.ActiveAgreement(remoteChainID)
 	if err != nil || !sameAgreementGeneration(agreement, currentAgreement) {

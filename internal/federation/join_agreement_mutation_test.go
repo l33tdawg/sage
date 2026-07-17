@@ -27,8 +27,8 @@ func TestJoinStopCannotOverwriteConfirming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckConfirm: %v", err)
 	}
-	if err := node.mgr.HostAbort(sessionID); !errors.Is(err, ErrJoinAbortConflict) {
-		t.Fatalf("HostAbort after confirm = %v, want conflict", err)
+	if abortErr := node.mgr.HostAbort(sessionID); !errors.Is(abortErr, ErrJoinAbortConflict) {
+		t.Fatalf("HostAbort after confirm = %v, want conflict", abortErr)
 	}
 	body, marshalErr := json.Marshal(JoinAbortWire{SessionID: sessionID})
 	if marshalErr != nil {
@@ -45,8 +45,8 @@ func TestJoinStopCannotOverwriteConfirming(t *testing.T) {
 	if err != nil || view.State != JoinConfirming {
 		t.Fatalf("state after rejected Stops = %q err=%v, want %s", view.State, err, JoinConfirming)
 	}
-	if err := joins.MarkActive(sessionID); err != nil {
-		t.Fatalf("MarkActive: %v", err)
+	if activeErr := joins.MarkActive(sessionID); activeErr != nil {
+		t.Fatalf("MarkActive: %v", activeErr)
 	}
 	view, err = node.mgr.HostSessionStatus(sessionID)
 	if err != nil || !view.Active || view.State != JoinActive {

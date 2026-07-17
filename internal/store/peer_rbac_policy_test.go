@@ -289,11 +289,11 @@ func TestBoundPeerRBACPausePreservesSnapshotAndRequiresExactActiveBinding(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteSyncControl(ctx, policy.RemoteChainID); err != nil {
-		t.Fatal(err)
+	if deleteErr := s.DeleteSyncControl(ctx, policy.RemoteChainID); deleteErr != nil {
+		t.Fatal(deleteErr)
 	}
-	if _, err := s.SetBoundPeerRBACPaused(ctx, *paused, false); !errors.Is(err, ErrPeerRBACBindingMismatch) {
-		t.Fatalf("retired generation pause error=%v, want ErrPeerRBACBindingMismatch", err)
+	if _, resumeErr := s.SetBoundPeerRBACPaused(ctx, *paused, false); !errors.Is(resumeErr, ErrPeerRBACBindingMismatch) {
+		t.Fatalf("retired generation pause error=%v, want ErrPeerRBACBindingMismatch", resumeErr)
 	}
 	stillPaused, err := s.GetPeerRBACPolicy(ctx, policy.RemoteChainID)
 	if err != nil || stillPaused == nil || !stillPaused.Paused {

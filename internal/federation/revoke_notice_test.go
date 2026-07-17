@@ -60,14 +60,14 @@ func TestGuestAbortPropagatesAndZeroizesBothCeremonySides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := host.mgr.HostScanReturn(created.SessionID, scanned.ReturnURI); err != nil {
-		t.Fatal(err)
+	if scanErr := host.mgr.HostScanReturn(created.SessionID, scanned.ReturnURI); scanErr != nil {
+		t.Fatal(scanErr)
 	}
-	if _, err := guest.mgr.GuestRequest(ctx, created.SessionID, guestServer.URL, trustOnlyJoinScope); err != nil {
-		t.Fatal(err)
+	if _, requestErr := guest.mgr.GuestRequest(ctx, created.SessionID, guestServer.URL, trustOnlyJoinScope); requestErr != nil {
+		t.Fatal(requestErr)
 	}
-	if err := guest.mgr.GuestAbort(ctx, created.SessionID); err != nil {
-		t.Fatal(err)
+	if abortErr := guest.mgr.GuestAbort(ctx, created.SessionID); abortErr != nil {
+		t.Fatal(abortErr)
 	}
 	view, err := host.mgr.HostSessionStatus(created.SessionID)
 	if err != nil || view.State != JoinAborted {
@@ -89,8 +89,8 @@ func completeTwoServerCeremony(t *testing.T, host, guest *ceremonyNode, hostEndp
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := host.mgr.HostScanReturn(created.SessionID, scanned.ReturnURI); err != nil {
-		t.Fatal(err)
+	if scanErr := host.mgr.HostScanReturn(created.SessionID, scanned.ReturnURI); scanErr != nil {
+		t.Fatal(scanErr)
 	}
 	request, err := guest.mgr.GuestRequest(ctx, created.SessionID, guestEndpoint, trustOnlyJoinScope)
 	if err != nil {
@@ -120,14 +120,14 @@ func TestPermanentRevokeNotifiesExactPeerAndExplainsBothPastRows(t *testing.T) {
 	wrongEpochPeer := &peerIdentity{
 		ChainID: "host-revoke1", AgentID: hex.EncodeToString(host.mgr.agentPub), Agreement: guestAgreement,
 	}
-	if _, err := guest.mgr.acceptPeerRevokeNotice(context.Background(), wrongEpochPeer, RevokeNotice{PolicyEpoch: "retired-epoch"}); err == nil {
+	if _, noticeErr := guest.mgr.acceptPeerRevokeNotice(context.Background(), wrongEpochPeer, RevokeNotice{PolicyEpoch: "retired-epoch"}); noticeErr == nil {
 		t.Fatal("retired ceremony epoch terminated the active connection")
 	}
 	if guest.mgr.crossFedStatus("host-revoke1") != "active" {
 		t.Fatal("rejected notice changed the active agreement")
 	}
-	if event, err := guest.mgr.syncStore().GetFederationConnectionEvent(context.Background(), "host-revoke1"); err != nil || event != nil {
-		t.Fatalf("rejected notice wrote event=%+v err=%v", event, err)
+	if event, eventErr := guest.mgr.syncStore().GetFederationConnectionEvent(context.Background(), "host-revoke1"); eventErr != nil || event != nil {
+		t.Fatalf("rejected notice wrote event=%+v err=%v", event, eventErr)
 	}
 
 	result, err := host.mgr.RevokeAgreementNotifying("guest-revok2")

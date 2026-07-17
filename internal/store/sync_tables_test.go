@@ -163,23 +163,23 @@ func TestFederationConnectionEventSurvivesPurgeAndClearsOnlyOnFreshActivation(t 
 	if err != nil || event == nil || event.Event != FederationConnectionRevokedByPeer {
 		t.Fatalf("pending enrollment cleared event=%+v err=%v", event, err)
 	}
-	if err := s.ActivateSyncControl(ctx, binding.RemoteChainID, binding.PolicyEpoch); err != nil {
-		t.Fatal(err)
+	if activateErr := s.ActivateSyncControl(ctx, binding.RemoteChainID, binding.PolicyEpoch); activateErr != nil {
+		t.Fatal(activateErr)
 	}
 	event, err = s.GetFederationConnectionEvent(ctx, binding.RemoteChainID)
 	if err != nil || event != nil {
 		t.Fatalf("fresh active enrollment retained old event=%+v err=%v", event, err)
 	}
 
-	if err := s.SetFederationConnectionEvent(ctx, FederationConnectionEvent{
+	if setEventErr := s.SetFederationConnectionEvent(ctx, FederationConnectionEvent{
 		RemoteChainID: binding.RemoteChainID,
 		Event:         FederationConnectionRevokedLocally,
 		Message:       "This operator permanently revoked trust.",
-	}); err != nil {
-		t.Fatal(err)
+	}); setEventErr != nil {
+		t.Fatal(setEventErr)
 	}
-	if err := s.PurgeSyncPeerState(ctx, binding.RemoteChainID); err != nil {
-		t.Fatal(err)
+	if purgeErr := s.PurgeSyncPeerState(ctx, binding.RemoteChainID); purgeErr != nil {
+		t.Fatal(purgeErr)
 	}
 	event, err = s.GetFederationConnectionEvent(ctx, binding.RemoteChainID)
 	if err != nil || event == nil || event.Event != FederationConnectionRevokedLocally || event.CreatedAt == "" {

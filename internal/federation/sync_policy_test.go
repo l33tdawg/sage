@@ -693,8 +693,8 @@ func TestFreshGenerationCannotInheritBuiltStalePolicyPayload(t *testing.T) {
 	defer mutation.unlock()
 	defer mutation.generation.Restore()
 	select {
-	case err := <-deliveryDone:
-		require.ErrorContains(t, err, "generation")
+	case deliveryErr := <-deliveryDone:
+		require.ErrorContains(t, deliveryErr, "generation")
 	case <-time.After(2 * time.Second):
 		t.Fatal("stale E1 delivery did not terminate")
 	}
