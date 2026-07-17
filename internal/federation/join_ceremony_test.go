@@ -88,6 +88,11 @@ func newCeremonyNode(t *testing.T, chainID string) *ceremonyNode {
 				return "", 0, setErr
 			}
 		}
+		if parsed.Type == tx.TxTypeCrossFedRevoke && parsed.CrossFedRevoke != nil {
+			if revokeErr := badger.UpdateCrossFedStatus(parsed.CrossFedRevoke.RemoteChainID, "revoked"); revokeErr != nil {
+				return "", 0, revokeErr
+			}
+		}
 		node.mu.Lock()
 		node.broadcasts++
 		node.mu.Unlock()

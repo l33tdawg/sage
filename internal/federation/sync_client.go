@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
+	"github.com/l33tdawg/sage/internal/store"
 )
 
 // ErrSyncUnsupported reports that the peer does not expose /fed/v1/sync/*:
@@ -93,6 +95,17 @@ func (m *Manager) SyncPolicyPush(ctx context.Context, remoteChainID string, req 
 	if err != nil {
 		return nil, err
 	}
+	return m.syncPolicyPushAgreement(ctx, agreement, req)
+}
+
+// syncPolicyPushAgreement sends with the exact agreement snapshot captured at
+// delivery linearization. It must never re-resolve remoteChainID to a newer E2
+// after the caller built an E1 policy payload.
+func (m *Manager) syncPolicyPushAgreement(ctx context.Context, agreement *store.CrossFedRecord, req *SyncPolicyRequest) (*SyncPolicyResponse, error) {
+	if agreement == nil {
+		return nil, fmt.Errorf("sync policy agreement is unavailable")
+	}
+	remoteChainID := agreement.RemoteChainID
 	body, status, err := m.doPeerRequest(ctx, agreement, http.MethodPut, "/fed/v1/sync/policy", req)
 	if err != nil {
 		return nil, err

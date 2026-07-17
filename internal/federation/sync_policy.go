@@ -160,12 +160,41 @@ func (m *Manager) handleSyncPolicy(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid sync policy")
 		return
 	}
+
+	// Parse and canonicalize the untrusted body before taking the final write
+	// lease. The exact authenticated agreement + ceremony generation is then
+	// revalidated under that lease and kept stable through the SQLite commit.
+	var publish, subscribe, formattedDomains []string
+	var err error
+	if req.Version == SyncPolicyVersionPeerRBAC {
+		var pErr, sErr error
+		publish, pErr = canonicalSyncDomainsFormat(req.PublishDomains)
+		subscribe, sErr = canonicalSyncDomainsFormat(req.SubscribeDomains)
+		if pErr != nil || sErr != nil {
+			httpError(w, http.StatusBadRequest, "invalid directional sync policy")
+			return
+		}
+	} else {
+		formattedDomains, err = canonicalSyncDomainsFormat(req.Domains)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
+	policyUnlock := ss.LockSyncPolicyWrite()
+	defer policyUnlock()
+	currentAgreement, err := m.currentRequestAgreementBound(r.Context(), peer)
+	if err != nil {
+		httpError(w, http.StatusForbidden, "federation agreement generation changed before policy update")
+		return
+	}
 	control, err := ss.GetSyncControl(r.Context(), peer.ChainID)
 	if err != nil || control == nil || control.BindingState != "active" {
 		httpError(w, http.StatusForbidden, "peer is not this node's sync controller")
 		return
 	}
-	if control.PolicyEpoch != req.Epoch || control.RemoteCAPin != hex.EncodeToString(peer.Agreement.PeerPubKey) {
+	if control.PolicyEpoch != req.Epoch || control.RemoteCAPin != hex.EncodeToString(currentAgreement.PeerPubKey) {
 		httpError(w, http.StatusForbidden, "sync controller binding mismatch")
 		return
 	}
@@ -179,14 +208,8 @@ func (m *Manager) handleSyncPolicy(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusForbidden, "sync peer binding mismatch")
 			return
 		}
-		publish, pErr := canonicalSyncDomainsFormat(req.PublishDomains)
-		subscribe, sErr := canonicalSyncDomainsFormat(req.SubscribeDomains)
-		if pErr != nil || sErr != nil {
-			httpError(w, http.StatusBadRequest, "invalid directional sync policy")
-			return
-		}
 		hash := directionalSyncPolicyHash(req.Epoch, peer.ChainID, req.Revision, publish, subscribe)
-		status, applyErr := ss.ApplyRemoteDirectionalSyncPolicy(r.Context(), peer.ChainID, req.Epoch,
+		status, applyErr := ss.ApplyRemoteDirectionalSyncPolicyLocked(r.Context(), peer.ChainID, req.Epoch,
 			req.Version, req.Revision, hash, publish, subscribe)
 		if applyErr != nil {
 			httpError(w, http.StatusConflict, applyErr.Error())
@@ -200,18 +223,17 @@ func (m *Manager) handleSyncPolicy(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusForbidden, "peer is not this node's sync controller")
 		return
 	}
-	var domains []string
-	if req.Version == SyncPolicyVersionDirectional {
-		domains, err = canonicalSyncDomainsFormat(req.Domains)
-	} else {
-		domains, err = canonicalSyncDomains(req.Domains, peer.Agreement)
-	}
-	if err != nil {
-		httpError(w, http.StatusBadRequest, err.Error())
-		return
+	domains := formattedDomains
+	if req.Version == SyncPolicyVersionLegacy {
+		for _, domain := range domains {
+			if !DomainAllowed(currentAgreement.AllowedDomains, domain) {
+				httpError(w, http.StatusBadRequest, fmt.Sprintf("domain %q is outside the federation treaty", domain))
+				return
+			}
+		}
 	}
 	hash := syncPolicyHashVersion(req.Version, req.Epoch, peer.ChainID, req.Revision, domains)
-	status, err := ss.ApplySyncPolicyVersion(r.Context(), peer.ChainID, req.Epoch, req.Version, req.Revision, hash, domains)
+	status, err := ss.ApplySyncPolicyVersionLocked(r.Context(), peer.ChainID, req.Epoch, req.Version, req.Revision, hash, domains)
 	if err != nil {
 		httpError(w, http.StatusConflict, err.Error())
 		return
@@ -241,6 +263,10 @@ func (m *Manager) inboundGroupPeerBound(ctx context.Context, ss *store.SQLiteSto
 	if ss == nil || peer == nil || peer.Agreement == nil {
 		return false, nil
 	}
+	current, err := m.currentRequestAgreementBound(ctx, peer)
+	if err != nil {
+		return false, nil
+	}
 	control, err := ss.GetSyncControl(ctx, peer.ChainID)
 	if err != nil {
 		return false, err
@@ -248,7 +274,9 @@ func (m *Manager) inboundGroupPeerBound(ctx context.Context, ss *store.SQLiteSto
 	if control == nil {
 		return false, nil
 	}
-	return m.syncControlPeerBound(control, peer), nil
+	currentPeer := *peer
+	currentPeer.Agreement = current
+	return m.syncControlPeerBound(control, &currentPeer), nil
 }
 
 // currentInboundGroupPeerBound re-resolves the consensus agreement before
@@ -256,16 +284,8 @@ func (m *Manager) inboundGroupPeerBound(ctx context.Context, ss *store.SQLiteSto
 // sync-policy write lease immediately before a group mutation: a request may
 // have authenticated under an agreement that was revoked while it waited for
 // the journal/write lock, and that stale request must not commit afterward.
-func (m *Manager) currentInboundGroupPeerBound(ctx context.Context, ss *store.SQLiteStore, chainID, agentID string) (bool, error) {
-	agreement, err := m.ActiveAgreement(chainID)
-	if err != nil {
-		return false, nil
-	}
-	return m.inboundGroupPeerBound(ctx, ss, &peerIdentity{
-		ChainID:   chainID,
-		AgentID:   agentID,
-		Agreement: agreement,
-	})
+func (m *Manager) currentInboundGroupPeerBound(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity) (bool, error) {
+	return m.inboundGroupPeerBound(ctx, ss, peer)
 }
 
 // peerRBACSyncBinding is the exact direct-pair identity binding. Callers select
@@ -321,7 +341,10 @@ func (m *Manager) SetDirectionalSyncPolicy(ctx context.Context, remoteChainID st
 		return nil, fmt.Errorf("read peer copy permission: %w", err)
 	}
 	for _, domain := range publish {
-		if peerPolicy == nil || !peerRBACAllows(peerPolicy, domain, func(grant store.PeerRBACDomainPermission) bool { return grant.Copy }) {
+		// Pause controls effective egress, not configuration. Let the operator
+		// edit the dormant Copy snapshot while paused so Resume activates exactly
+		// the latest saved choices; pairwiseEgressPolicy still returns deny-all.
+		if peerPolicy == nil || !peerRBACConfiguredAllows(peerPolicy, domain, func(grant store.PeerRBACDomainPermission) bool { return grant.Copy }) {
 			return nil, fmt.Errorf("copy permission for %q is not granted to this peer", domain)
 		}
 	}
@@ -335,10 +358,16 @@ func (m *Manager) SetDirectionalSyncPolicy(ctx context.Context, remoteChainID st
 		return nil, err
 	}
 	state := "pending"
-	if err := m.deliverSyncPolicy(ctx, ss, remoteChainID); err == nil {
-		state = "delivered"
+	// While paused, keep the latest directional snapshot entirely local. Even
+	// domain labels are authorization metadata; sending them to the peer would
+	// make a supposedly disconnected edge observable. Resume nudges the drainer,
+	// which sends only the latest saved revision.
+	if peerPolicy == nil || !peerPolicy.Paused {
+		if err := m.deliverSyncPolicy(ctx, ss, remoteChainID); err == nil {
+			state = "delivered"
+		}
+		m.nudgeSync()
 	}
-	m.nudgeSync()
 	return &DirectionalSyncPolicyResult{Version: SyncPolicyVersionPeerRBAC, Revision: revision,
 		PublishDomains: publish, SubscribeDomains: subscribe, State: state}, nil
 }
@@ -435,10 +464,40 @@ func (m *Manager) authorizeOwnerUnilateralDomain(tag string, requireStoredOwner 
 }
 
 func (m *Manager) deliverSyncPolicy(ctx context.Context, ss *store.SQLiteStore, remoteChainID string) error {
+	if hook := m.syncPolicyFinalGateHook; hook != nil {
+		hook(remoteChainID)
+	}
+	lease := m.syncPolicyDeliveryLease(remoteChainID)
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	paused, generationBlocked := lease.deliveryBlocked()
+	if paused {
+		return fmt.Errorf("sharing pause requested; policy labels withheld")
+	}
+	if generationBlocked {
+		return fmt.Errorf("agreement generation is changing; policy labels withheld")
+	}
 	control, err := ss.GetSyncControl(ctx, remoteChainID)
 	if err != nil || control == nil || control.Revision <= control.DeliveredRevision ||
 		(control.Role != "host" && control.PolicyVersion < SyncPolicyVersionPeerRBAC) {
 		return err
+	}
+	agreement, err := m.ActiveAgreement(remoteChainID)
+	if err != nil {
+		return err
+	}
+	if control.BindingState != "active" || control.PolicyEpoch == "" ||
+		control.RemoteCAPin != hex.EncodeToString(agreement.PeerPubKey) {
+		return fmt.Errorf("sync policy generation does not match the active agreement")
+	}
+	if control.PolicyVersion >= SyncPolicyVersionPeerRBAC {
+		policy, policyErr := m.GetPeerRBACPolicy(ctx, remoteChainID)
+		if policyErr != nil {
+			return fmt.Errorf("recheck paused sharing before policy delivery: %w", policyErr)
+		}
+		if policy == nil || policy.Paused {
+			return fmt.Errorf("sharing is paused; policy labels withheld")
+		}
 	}
 	var req *SyncPolicyRequest
 	if control.PolicyVersion >= SyncPolicyVersionPeerRBAC {
@@ -459,12 +518,40 @@ func (m *Manager) deliverSyncPolicy(ctx context.Context, ss *store.SQLiteStore, 
 		}
 		req = &SyncPolicyRequest{Version: SyncPolicyVersionDirectional, Epoch: control.PolicyEpoch, Revision: control.Revision, Domains: domains}
 	}
-	push := m.syncPolicyPushFn
-	if push == nil {
-		push = m.SyncPolicyPush
+	if hook := m.syncPolicyBeforePushHook; hook != nil {
+		hook(remoteChainID)
 	}
-	if _, err := push(ctx, remoteChainID, req); err != nil {
+	// Every caller, including a dashboard request with no explicit deadline, is
+	// bounded. Pause can additionally cancel this exact peer request through the
+	// lease without waiting for the timeout.
+	deliveryCtx, cancel := context.WithTimeout(ctx, syncPushTimeout)
+	if lease.registerCancel(cancel) {
+		lease.clearCancel(cancel)
+		cancel()
+		paused, _ := lease.deliveryBlocked()
+		if paused {
+			return fmt.Errorf("sharing pause requested; policy labels withheld")
+		}
+		return fmt.Errorf("agreement generation is changing; policy labels withheld")
+	}
+	defer func() {
+		lease.clearCancel(cancel)
+		cancel()
+	}()
+	if push := m.syncPolicyPushFn; push != nil {
+		if _, err := push(deliveryCtx, remoteChainID, req); err != nil {
+			return err
+		}
+	} else if _, err := m.syncPolicyPushAgreement(deliveryCtx, agreement, req); err != nil {
 		return err
+	}
+	currentAgreement, err := m.ActiveAgreement(remoteChainID)
+	if err != nil || !sameAgreementGeneration(agreement, currentAgreement) {
+		return fmt.Errorf("sync policy agreement generation changed before acknowledgement")
+	}
+	currentControl, err := ss.GetSyncControl(ctx, remoteChainID)
+	if err != nil || currentControl == nil || !sameSyncControlGeneration(*control, *currentControl) {
+		return fmt.Errorf("sync policy ceremony generation changed before acknowledgement")
 	}
 	return ss.MarkSyncPolicyDelivered(context.Background(), remoteChainID, control.PolicyEpoch, control.Revision)
 }

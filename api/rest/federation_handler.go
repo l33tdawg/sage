@@ -74,7 +74,12 @@ type federationAgreementMutationLeaser interface {
 	LockAgreementMutation() func()
 }
 
+type federationSyncPolicyGenerationLeaser interface {
+	BeginSyncPolicyGenerationMutation(remoteChainID string) *federation.SyncPolicyGenerationMutation
+}
+
 var _ federationAgreementMutationLeaser = (*federation.Manager)(nil)
+var _ federationSyncPolicyGenerationLeaser = (*federation.Manager)(nil)
 
 func (s *Server) lockFederationAgreementMutation(w http.ResponseWriter) (func(), bool) {
 	leaser, ok := s.federation.(federationAgreementMutationLeaser)
@@ -161,6 +166,13 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer agreementUnlock()
+	// A raw legacy tx-33 can still replace an agreement used by a pending sync
+	// policy delivery. Quiesce that exact peer while the CA/terms generation is
+	// staged and committed; small handler fakes have no delivery engine.
+	if leaser, hasDelivery := s.federation.(federationSyncPolicyGenerationLeaser); hasDelivery {
+		generation := leaser.BeginSyncPolicyGenerationMutation(req.RemoteChainID)
+		defer generation.Restore()
+	}
 
 	// STAGE the remote CA to a pending sidecar and derive the pin, but do NOT
 	// commit it to the live path until the terms tx is authorized on-chain.
@@ -248,6 +260,37 @@ func (s *Server) handleCrossFedRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = decodeJSON(r, &req) // reason is optional; an empty body is fine
 
+	// A live Manager owns the complete permanent-disconnect workflow: notify
+	// the exact authenticated peer, revalidate the ceremony generation, commit
+	// tx-34, purge capabilities, and retain a human-readable local event. Keep
+	// the legacy REST transaction path below for deliberately transport-less
+	// deployments and small handler fakes.
+	if notifier, ok := s.federation.(interface {
+		RevokeAgreementNotifying(string) (*federation.RevokeAgreementResult, error)
+	}); ok {
+		result, err := notifier.RevokeAgreementNotifying(remoteChainID)
+		if err != nil {
+			s.logger.Error().Err(err).Str("remote", remoteChainID).Msg("cross_fed notifying revoke rejected")
+			writeProblem(w, http.StatusBadGateway, "Revoke rejected", err.Error())
+			return
+		}
+		if result == nil {
+			writeProblem(w, http.StatusBadGateway, "Revoke rejected", "Federation revoke returned no result.")
+			return
+		}
+		out := map[string]any{
+			"remote_chain_id": remoteChainID,
+			"tx_hash":         result.TxHash,
+			"status":          "revoked",
+			"peer_notified":   result.PeerNotified,
+		}
+		if result.NoticeError != "" {
+			out["notification_warning"] = result.NoticeError
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
 	// Hold the same generation lease as tx-33/JOIN from before tx-34 through
 	// the complete local capability purge. A completed revoke therefore cannot
 	// later delete artifacts belonging to a newer agreement generation.
@@ -291,6 +334,15 @@ func (s *Server) handleCrossFedRevoke(w http.ResponseWriter, r *http.Request) {
 	} else if ss := s.syncStore(); ss != nil {
 		if purgeErr := ss.PurgeSyncPeerState(r.Context(), remoteChainID); purgeErr != nil {
 			s.logger.Warn().Err(purgeErr).Str("remote", remoteChainID).Msg("revoke: sync state purge failed")
+		}
+	}
+	if ss := s.syncStore(); ss != nil {
+		if eventErr := ss.SetFederationConnectionEvent(r.Context(), store.FederationConnectionEvent{
+			RemoteChainID: remoteChainID,
+			Event:         store.FederationConnectionRevokedLocally,
+			Message:       "This operator permanently revoked trust.",
+		}); eventErr != nil {
+			s.logger.Warn().Err(eventErr).Str("remote", remoteChainID).Msg("revoke: connection event write failed")
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]string{

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -135,6 +136,54 @@ func TestSyncControlPolicyRevisionAndAtomicDomains(t *testing.T) {
 	domains, _ = s.GetSyncDomains(ctx, "chain-b")
 	if len(domains) != 0 {
 		t.Fatalf("disable left domains: %v", domains)
+	}
+}
+
+func TestFederationConnectionEventSurvivesPurgeAndClearsOnlyOnFreshActivation(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	binding := SyncControl{
+		RemoteChainID: "chain-event", Role: "guest", ControllerChainID: "chain-event",
+		ControllerAgentID: testPeerAgentID(t), PeerAgentID: testPeerAgentID(t),
+		PolicyEpoch: "epoch-event", RemoteCAPin: strings.Repeat("ab", 32), PolicyVersion: 3,
+	}
+	if err := s.SetFederationConnectionEvent(ctx, FederationConnectionEvent{
+		RemoteChainID: binding.RemoteChainID,
+		Event:         FederationConnectionRevokedByPeer,
+		Message:       "The peer operator permanently revoked trust.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PrepareSyncControl(ctx, binding); err != nil {
+		t.Fatal(err)
+	}
+	// A pending/aborted ceremony must not erase the explanation attached to the
+	// immutable past row. Only a successfully activated replacement does.
+	event, err := s.GetFederationConnectionEvent(ctx, binding.RemoteChainID)
+	if err != nil || event == nil || event.Event != FederationConnectionRevokedByPeer {
+		t.Fatalf("pending enrollment cleared event=%+v err=%v", event, err)
+	}
+	if err := s.ActivateSyncControl(ctx, binding.RemoteChainID, binding.PolicyEpoch); err != nil {
+		t.Fatal(err)
+	}
+	event, err = s.GetFederationConnectionEvent(ctx, binding.RemoteChainID)
+	if err != nil || event != nil {
+		t.Fatalf("fresh active enrollment retained old event=%+v err=%v", event, err)
+	}
+
+	if err := s.SetFederationConnectionEvent(ctx, FederationConnectionEvent{
+		RemoteChainID: binding.RemoteChainID,
+		Event:         FederationConnectionRevokedLocally,
+		Message:       "This operator permanently revoked trust.",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PurgeSyncPeerState(ctx, binding.RemoteChainID); err != nil {
+		t.Fatal(err)
+	}
+	event, err = s.GetFederationConnectionEvent(ctx, binding.RemoteChainID)
+	if err != nil || event == nil || event.Event != FederationConnectionRevokedLocally || event.CreatedAt == "" {
+		t.Fatalf("purge lost past-connection event=%+v err=%v", event, err)
 	}
 }
 

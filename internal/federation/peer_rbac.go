@@ -236,6 +236,58 @@ func (m *Manager) ReplacePeerRBACPolicy(ctx context.Context, remoteChainID strin
 	})
 }
 
+// SetPeerRBACPaused temporarily turns this node's complete directional grant
+// into deny-all without discarding the saved domain snapshot or the JOIN trust
+// binding. Resume is the inverse one-bit update; neither operation broadcasts a
+// consensus transaction or requires a new ceremony.
+func (m *Manager) SetPeerRBACPaused(ctx context.Context, remoteChainID string, paused bool) (*store.PeerRBACPolicy, error) {
+	ss := m.syncStore()
+	if ss == nil {
+		return nil, fmt.Errorf("peer RBAC requires the SQLite store backend")
+	}
+	// A completed Pause must be a hard disclosure boundary. Publish the operator
+	// mutation first (and Pause itself fail-closed) so an in-flight same-peer PUT
+	// is canceled, then take only this peer's delivery lease through the local
+	// bit update. Other peers stay independent.
+	lease := m.syncPolicyDeliveryLease(remoteChainID)
+	lease.beginPauseMutation(paused)
+	var durablePause *bool
+	lease.mu.Lock()
+	defer lease.mu.Unlock()
+	defer func() { lease.completePauseMutation(paused, durablePause) }()
+	if hook := m.syncPolicyPauseLeaseHook; hook != nil {
+		hook(remoteChainID)
+	}
+	// A queued HTTP request may be canceled before it owns the delivery lease.
+	// Read the ordered durable state without that cancellation so rollback never
+	// restores a stale latch captured before an earlier mutation committed. The
+	// requested write below still uses the caller's context and remains canceled.
+	policy, err := m.GetPeerRBACPolicy(context.WithoutCancel(ctx), remoteChainID)
+	if err != nil {
+		return nil, err
+	}
+	if policy == nil {
+		return nil, fmt.Errorf("connection has no exact peer RBAC snapshot; configure its domain permissions before pausing")
+	}
+	// The durable snapshot is authoritative if the in-memory latch was rebuilt
+	// after process start or another completed mutation preceded this one.
+	persistedPause := policy.Paused
+	durablePause = &persistedPause
+	updated, err := ss.SetBoundPeerRBACPaused(ctx, *policy, paused)
+	if err != nil {
+		return nil, err
+	}
+	committedPause := paused
+	durablePause = &committedPause
+	if !paused {
+		// A paused connection may have a newer local Copy/subscription snapshot
+		// that was deliberately withheld (including its domain labels). Deliver
+		// that latest revision as soon as sharing resumes.
+		m.nudgeSync()
+	}
+	return updated, nil
+}
+
 // initializePeerRBACPolicy is part of fresh JOIN activation, not a mutable
 // permission update. It deliberately discards any retired snapshot left behind
 // as a managed-grant cleanup identity, then binds a present, empty deny-all
@@ -271,7 +323,7 @@ func (m *Manager) initializePeerRBACPolicy(ctx context.Context, remoteChainID st
 	return nil
 }
 
-func peerRBACAllows(policy *store.PeerRBACPolicy, domain string, permission func(store.PeerRBACDomainPermission) bool) bool {
+func peerRBACConfiguredAllows(policy *store.PeerRBACPolicy, domain string, permission func(store.PeerRBACDomainPermission) bool) bool {
 	if policy == nil || domain == "" {
 		return false
 	}
@@ -283,6 +335,10 @@ func peerRBACAllows(policy *store.PeerRBACPolicy, domain string, permission func
 	return false
 }
 
+func peerRBACAllows(policy *store.PeerRBACPolicy, domain string, permission func(store.PeerRBACDomainPermission) bool) bool {
+	return policy != nil && !policy.Paused && peerRBACConfiguredAllows(policy, domain, permission)
+}
+
 func peerRBACAllowsRead(policy *store.PeerRBACPolicy, domain string) bool {
 	return peerRBACAllows(policy, domain, func(grant store.PeerRBACDomainPermission) bool { return grant.Read })
 }
@@ -290,6 +346,11 @@ func peerRBACAllowsRead(policy *store.PeerRBACPolicy, domain string) bool {
 func peerRBACGrantFromPolicy(policy *store.PeerRBACPolicy) *PeerRBACGrant {
 	if policy == nil {
 		return nil
+	}
+	if policy.Paused {
+		// Empty domains keeps older peers fail-closed; the additive Paused field
+		// lets current CEREBRUM builds explain why the saved grants disappeared.
+		return &PeerRBACGrant{PolicyVersion: policy.PolicyVersion, Paused: true, Domains: []PeerRBACDomainGrant{}}
 	}
 	domains := make([]PeerRBACDomainGrant, 0, len(policy.Domains))
 	for _, permission := range policy.Domains {
@@ -302,5 +363,5 @@ func peerRBACGrantFromPolicy(policy *store.PeerRBACPolicy) *PeerRBACGrant {
 			Copy:  permission.Copy,
 		})
 	}
-	return &PeerRBACGrant{PolicyVersion: policy.PolicyVersion, Domains: domains}
+	return &PeerRBACGrant{PolicyVersion: policy.PolicyVersion, Paused: false, Domains: domains}
 }

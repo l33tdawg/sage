@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -127,7 +128,14 @@ func (s *Server) handleJoinHostAbort(w http.ResponseWriter, r *http.Request) {
 	if !s.federationJoinReady(w, r) {
 		return
 	}
-	s.federation.HostAbort(chi.URLParam(r, "session_id"))
+	if err := s.federation.HostAbort(chi.URLParam(r, "session_id")); err != nil {
+		if errors.Is(err, federation.ErrJoinSessionNotFound) {
+			writeProblem(w, http.StatusNotFound, "Not found", "This connection setup no longer exists.")
+		} else {
+			writeProblem(w, http.StatusConflict, "Confirmation in progress", "This connection is already being confirmed. Check Federation before revoking it.")
+		}
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"session_id": chi.URLParam(r, "session_id"), "status": "aborted"})
 }
 

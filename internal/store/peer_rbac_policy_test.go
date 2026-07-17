@@ -247,6 +247,60 @@ func TestPeerRBACPolicyAtomicDynamicReplaceAndCanonicalPermissions(t *testing.T)
 	}
 }
 
+func TestBoundPeerRBACPausePreservesSnapshotAndRequiresExactActiveBinding(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	epoch, caPin := testPeerRBACBinding()
+	policy := PeerRBACPolicy{
+		RemoteChainID: "chain-pause", PeerAgentID: testPeerAgentID(t),
+		PolicyEpoch: epoch, RemoteCAPin: caPin, PolicyVersion: CurrentPeerRBACPolicyVersion,
+		Domains: []PeerRBACDomainPermission{{Domain: "tii", Read: true, Copy: true}},
+	}
+	if err := s.PrepareSyncControl(ctx, testLegacyPeerRBACControl(policy)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ActivateSyncControl(ctx, policy.RemoteChainID, policy.PolicyEpoch); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.ReplaceBoundPeerRBACPolicy(ctx, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := s.SetBoundPeerRBACPaused(ctx, *stored, true)
+	if err != nil || paused == nil || !paused.Paused || len(paused.Domains) != 1 || !paused.Domains[0].Copy {
+		t.Fatalf("paused policy=%+v err=%v", paused, err)
+	}
+
+	// Editing the complete permission snapshot while paused must not silently
+	// reconnect the peer. Resume is the only operation that clears the bit.
+	replacement := *paused
+	replacement.Domains = []PeerRBACDomainPermission{{Domain: "replacement", Read: true}}
+	replaced, err := s.ReplaceBoundPeerRBACPolicy(ctx, replacement)
+	if err != nil || replaced == nil || !replaced.Paused || len(replaced.Domains) != 1 || replaced.Domains[0].Domain != "replacement" {
+		t.Fatalf("paused replacement=%+v err=%v", replaced, err)
+	}
+	resumed, err := s.SetBoundPeerRBACPaused(ctx, *replaced, false)
+	if err != nil || resumed == nil || resumed.Paused || len(resumed.Domains) != 1 {
+		t.Fatalf("resumed policy=%+v err=%v", resumed, err)
+	}
+
+	// A stale UI request cannot change a retired generation after revocation.
+	paused, err = s.SetBoundPeerRBACPaused(ctx, *resumed, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSyncControl(ctx, policy.RemoteChainID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetBoundPeerRBACPaused(ctx, *paused, false); !errors.Is(err, ErrPeerRBACBindingMismatch) {
+		t.Fatalf("retired generation pause error=%v, want ErrPeerRBACBindingMismatch", err)
+	}
+	stillPaused, err := s.GetPeerRBACPolicy(ctx, policy.RemoteChainID)
+	if err != nil || stillPaused == nil || !stillPaused.Paused {
+		t.Fatalf("failed stale resume changed policy=%+v err=%v", stillPaused, err)
+	}
+}
+
 func TestPeerRBACPolicyValidationAndFrozenBinding(t *testing.T) {
 	ctx := context.Background()
 	s := newSyncTestStore(t)

@@ -286,6 +286,60 @@ func TestSyncPushV3RequiresRemoteCopyAndLocalSubscription(t *testing.T) {
 	assert.Equal(t, int32(1), comet.calls.Load(), "denied v3 items must never reach consensus")
 }
 
+func TestPausedV3PushDoesNotRevealSavedReadDomainDuplicates(t *testing.T) {
+	ctx := context.Background()
+	comet := &scriptedComet{responses: []string{cometOK}}
+	m, ms := newSyncTestManager(t, comet)
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	peer := testPeer(2)
+	peer.AgentID = hex.EncodeToString(peerPub)
+	peer.Agreement.PeerPubKey = []byte("pin-bytes-32-aaaaaaaaaaaaaaaaaaaa")
+	bindTestPeerAgreement(t, m, peer)
+	require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: peer.ChainID, Role: "guest", ControllerChainID: peer.ChainID,
+		ControllerAgentID: peer.AgentID, PeerAgentID: peer.AgentID,
+		PolicyEpoch: "epoch-paused-oracle", RemoteCAPin: hex.EncodeToString(peer.Agreement.PeerPubKey),
+	}))
+	require.NoError(t, ms.ActivateSyncControl(ctx, peer.ChainID, "epoch-paused-oracle"))
+	_, err = ms.ApplyLocalDirectionalSyncPolicy(ctx, peer.ChainID, "epoch-paused-oracle",
+		SyncPolicyVersionPeerRBAC, 1, "local", nil, []string{"shared"})
+	require.NoError(t, err)
+	_, err = ms.ApplyRemoteDirectionalSyncPolicy(ctx, peer.ChainID, "epoch-paused-oracle",
+		SyncPolicyVersionPeerRBAC, 1, "remote", []string{"shared"}, nil)
+	require.NoError(t, err)
+	_, err = m.ReplacePeerRBACPolicy(ctx, peer.ChainID, []store.PeerRBACDomainPermission{
+		{Domain: "shared", Read: true}, {Domain: "private", Read: true},
+	})
+	require.NoError(t, err)
+	_, err = m.SetPeerRBACPaused(ctx, peer.ChainID, true)
+	require.NoError(t, err)
+
+	sameDomain := syncItem("paused-same", "shared", "known same-domain bytes")
+	seedCommitted(t, ms, "native-same", "shared", sameDomain.Content)
+	comet.after = func() {
+		_ = seedCommittedMemory(ctx, ms, syncMemoryID(peer.ChainID, sameDomain.OriginMemoryID),
+			sameDomain.Domain, sameDomain.Content, mustDecodeHex(t, sameDomain.ContentHash))
+	}
+	_, sameResp := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{sameDomain}})
+	require.NotNil(t, sameResp)
+	require.Len(t, sameResp.Results, 1)
+	assert.Equal(t, SyncOutcomeAccepted, sameResp.Results[0].Outcome)
+
+	crossDomain := syncItem("paused-cross", "shared", "known cross-domain bytes")
+	seedCommitted(t, ms, "native-private", "private", crossDomain.Content)
+	comet.after = func() {
+		_ = seedCommittedMemory(ctx, ms, syncMemoryID(peer.ChainID, crossDomain.OriginMemoryID),
+			crossDomain.Domain, crossDomain.Content, mustDecodeHex(t, crossDomain.ContentHash))
+	}
+	_, crossResp := pushAs(t, m, peer, SyncPushRequest{Items: []SyncItem{crossDomain}})
+	require.NotNil(t, crossResp)
+	require.Len(t, crossResp.Results, 1)
+	assert.Equal(t, SyncOutcomeAccepted, crossResp.Results[0].Outcome)
+	assert.NotEqual(t, SyncOutcomeDuplicate, crossResp.Results[0].Outcome)
+	assert.NotEqual(t, SyncOutcomeRejectedXDomainDup, crossResp.Results[0].Outcome)
+}
+
 // TestSyncPushOriginSig exercises Gate 5.5: an origin-signed item is admitted;
 // a forged (corrupted-sig) or mis-attributed (sig over different content) item
 // is rejected terminally; and a pre-v11.8 item with no sig still admits.

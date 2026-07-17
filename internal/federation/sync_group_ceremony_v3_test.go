@@ -33,10 +33,8 @@ func TestTrustOnlyV3MemberInviteIsIndependentFromDirectCopy(t *testing.T) {
 		"chain-r", "https://controller.invalid:8444", controllerPin, 4, 0,
 		nil, nil, "active",
 	))
-	agreement := &store.CrossFedRecord{
-		RemoteChainID: "chain-r", PeerPubKey: controllerPin, MaxClearance: 4,
-		AllowedDomains: nil, Status: "active",
-	}
+	agreement, err := invitee.mgr.ActiveAgreement("chain-r")
+	require.NoError(t, err)
 	require.NoError(t, ss.PrepareSyncControl(ctx, store.SyncControl{
 		RemoteChainID: "chain-r", Role: "guest", ControllerChainID: "chain-r",
 		ControllerAgentID: controllerID, PeerAgentID: controllerID,

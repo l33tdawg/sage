@@ -22,6 +22,132 @@ import (
 // commit timeout).
 const maxConcurrentReceiptBroadcasts = 4
 
+// syncPolicyDeliveryLease is per peer: one unreachable colleague must never
+// delay the admin from pausing another. Pause intent is published before the
+// lease is acquired so it can cancel an in-flight same-peer PUT immediately.
+type syncPolicyDeliveryLease struct {
+	mu               sync.Mutex
+	stateMu          sync.Mutex
+	pauseRequested   bool
+	pauseRevision    uint64
+	pauseMutations   int
+	pendingPauses    int
+	generationBlocks int
+	cancel           context.CancelFunc
+}
+
+// SyncPolicyGenerationMutation blocks and cancels outbound policy-label
+// delivery for one peer while an agreement generation is replaced or retired.
+// Call exactly one terminal method. Methods are idempotent so deferred Restore
+// can safely guard early returns before Activate/Retire succeeds.
+type SyncPolicyGenerationMutation struct {
+	lease         *syncPolicyDeliveryLease
+	pauseRevision uint64
+	once          sync.Once
+}
+
+func (g *SyncPolicyGenerationMutation) finish(resetOperatorPause bool) {
+	if g == nil || g.lease == nil {
+		return
+	}
+	g.once.Do(func() {
+		g.lease.stateMu.Lock()
+		if resetOperatorPause && g.lease.pauseRevision == g.pauseRevision && g.lease.pauseMutations == 0 {
+			// A fresh JOIN starts with an empty, unpaused deny-all policy. Never
+			// inherit the retired connection's steady in-memory Pause intent, but
+			// never erase a Pause/Resume that began while this generation held
+			// the delivery lease.
+			if g.lease.pauseRequested {
+				g.lease.pauseRequested = false
+				g.lease.pauseRevision++
+			}
+		}
+		if g.lease.generationBlocks > 0 {
+			g.lease.generationBlocks--
+		}
+		g.lease.stateMu.Unlock()
+		g.lease.mu.Unlock()
+	})
+}
+
+// Restore releases a failed generation mutation without touching the
+// operator's independent Pause/Resume intent.
+func (g *SyncPolicyGenerationMutation) Restore() { g.finish(false) }
+
+// Activate releases a completely installed active generation for delivery.
+func (g *SyncPolicyGenerationMutation) Activate() { g.finish(true) }
+
+// Retire releases a purged/revoked generation while keeping delivery blocked.
+func (g *SyncPolicyGenerationMutation) Retire() { g.finish(false) }
+
+// beginPauseMutation publishes one operator mutation before waiting on the
+// delivery lease. Pause is fail-closed immediately so it can cancel an active
+// PUT; Resume keeps the old latch until its durable policy update succeeds.
+func (l *syncPolicyDeliveryLease) beginPauseMutation(paused bool) {
+	l.stateMu.Lock()
+	l.pauseRevision++
+	l.pauseMutations++
+	if paused {
+		l.pendingPauses++
+		l.pauseRequested = true
+	}
+	cancel := l.cancel
+	l.stateMu.Unlock()
+	if paused && cancel != nil {
+		cancel()
+	}
+}
+
+// completePauseMutation commits the ordered durable state when it is known.
+// A later Pause publishes before it can acquire the lease, so an earlier
+// Resume must never clear the latch while any Pause is still pending. A nil
+// durable state means the ordered read itself failed; retain the fail-closed
+// in-memory state. Advancing the revision again prevents a generation token
+// captured mid-mutation from treating it as an inherited Pause.
+func (l *syncPolicyDeliveryLease) completePauseMutation(requestedPause bool, durablePause *bool) {
+	l.stateMu.Lock()
+	if requestedPause && l.pendingPauses > 0 {
+		l.pendingPauses--
+	}
+	if durablePause != nil {
+		l.pauseRequested = *durablePause
+	}
+	if l.pendingPauses > 0 {
+		l.pauseRequested = true
+	}
+	l.pauseRevision++
+	if l.pauseMutations > 0 {
+		l.pauseMutations--
+	}
+	l.stateMu.Unlock()
+}
+
+func (l *syncPolicyDeliveryLease) deliveryBlocked() (paused bool, generation bool) {
+	l.stateMu.Lock()
+	defer l.stateMu.Unlock()
+	return l.pauseRequested, l.generationBlocks > 0
+}
+
+func (l *syncPolicyDeliveryLease) registerCancel(cancel context.CancelFunc) bool {
+	l.stateMu.Lock()
+	l.cancel = cancel
+	blocked := l.pauseRequested || l.generationBlocks > 0
+	l.stateMu.Unlock()
+	if blocked {
+		cancel()
+	}
+	return blocked
+}
+
+func (l *syncPolicyDeliveryLease) clearCancel(cancel context.CancelFunc) {
+	l.stateMu.Lock()
+	// A delivery owns l.mu, so no second delivery can replace this callback.
+	// Clear unconditionally; the parameter documents which lifecycle ended.
+	_ = cancel
+	l.cancel = nil
+	l.stateMu.Unlock()
+}
+
 // Config wires a Manager into the node.
 type Config struct {
 	// LocalChainID is this network's globally-unique chain id (v11 Phase 0),
@@ -104,6 +230,22 @@ type Manager struct {
 	// tests so drain logic is testable without a TLS peer.
 	syncPushFn       func(ctx context.Context, remoteChainID string, req *SyncPushRequest) (*SyncPushResponse, error)
 	syncPolicyPushFn func(ctx context.Context, remoteChainID string, req *SyncPolicyRequest) (*SyncPolicyResponse, error)
+	// syncPolicyDeliveryLeases linearize outbound policy-label disclosure with
+	// Pause per remote chain. The map mutex is held only for lookup/creation;
+	// each per-peer lease may span a bounded network request without blocking an
+	// unrelated peer or either node's inbound SQLite policy writer.
+	syncPolicyDeliveryLeasesMu sync.Mutex
+	syncPolicyDeliveryLeases   map[string]*syncPolicyDeliveryLease
+	// syncPolicyFinalGateHook is a deterministic test barrier immediately before
+	// the delivery-vs-pause lease. It is nil in production.
+	syncPolicyFinalGateHook func(remoteChainID string)
+	// syncPolicyBeforePushHook is a deterministic test barrier after the exact
+	// agreement/control payload is built but before any network call.
+	syncPolicyBeforePushHook func(remoteChainID string)
+	// syncPolicyPauseLeaseHook is a deterministic test barrier after Pause or
+	// Resume owns the per-peer delivery lease but before it reads the bound
+	// policy snapshot. It is nil in production.
+	syncPolicyPauseLeaseHook func(remoteChainID string)
 
 	// syncNudge wakes the outbox drainer ahead of its ticker when the commit
 	// watcher enqueues new work. Buffered-1 (a pending nudge covers all
@@ -234,6 +376,44 @@ type Manager struct {
 func (m *Manager) LockAgreementMutation() func() {
 	m.agreementMutationMu.Lock()
 	return m.agreementMutationMu.Unlock
+}
+
+func (m *Manager) syncPolicyDeliveryLease(remoteChainID string) *syncPolicyDeliveryLease {
+	m.syncPolicyDeliveryLeasesMu.Lock()
+	defer m.syncPolicyDeliveryLeasesMu.Unlock()
+	if m.syncPolicyDeliveryLeases == nil {
+		m.syncPolicyDeliveryLeases = make(map[string]*syncPolicyDeliveryLease)
+	}
+	lease := m.syncPolicyDeliveryLeases[remoteChainID]
+	if lease == nil {
+		lease = &syncPolicyDeliveryLease{}
+		m.syncPolicyDeliveryLeases[remoteChainID] = lease
+	}
+	return lease
+}
+
+// BeginSyncPolicyGenerationMutation joins the canonical agreement -> per-peer
+// delivery -> SQLite policy lock order. It publishes the block before waiting,
+// cancels an in-flight policy PUT, and prevents an E1 payload from being sent
+// after E2 or a completed revoke becomes authoritative.
+func (m *Manager) BeginSyncPolicyGenerationMutation(remoteChainID string) *SyncPolicyGenerationMutation {
+	lease := m.syncPolicyDeliveryLease(remoteChainID)
+	lease.stateMu.Lock()
+	lease.generationBlocks++
+	cancel := lease.cancel
+	lease.stateMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	lease.mu.Lock()
+	// Capture only after this generation owns the delivery lease. Operator
+	// mutations that completed while Begin waited belong to the retiring
+	// generation and may be reset by Activate; mutations that start after this
+	// point advance the revision and must survive into the fresh generation.
+	lease.stateMu.Lock()
+	pauseRevision := lease.pauseRevision
+	lease.stateMu.Unlock()
+	return &SyncPolicyGenerationMutation{lease: lease, pauseRevision: pauseRevision}
 }
 
 // PeerDialFunc returns a stream-backed connection for remoteChainID. handled

@@ -144,6 +144,21 @@ type SyncControl struct {
 }
 
 const (
+	FederationConnectionRevokedLocally = "revoked_locally"
+	FederationConnectionRevokedByPeer  = "revoked_by_peer"
+)
+
+// FederationConnectionEvent is node-local presentation metadata for an
+// immutable cross_fed audit row. It never grants authority; it only lets
+// CEREBRUM explain why a past connection ended.
+type FederationConnectionEvent struct {
+	RemoteChainID string `json:"remote_chain_id"`
+	Event         string `json:"event"`
+	Message       string `json:"message,omitempty"`
+	CreatedAt     string `json:"created_at"`
+}
+
+const (
 	SyncDirectionLocalPublish    = "local_publish"
 	SyncDirectionLocalSubscribe  = "local_subscribe"
 	SyncDirectionRemotePublish   = "remote_publish"
@@ -260,6 +275,16 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		name            TEXT NOT NULL,
 		updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	)`)
+	// fed_connection_events explains immutable revoked rows in CEREBRUM. It is
+	// deliberately separate from sync_control because revocation purges that
+	// live capability binding. A fresh enrollment clears the old event.
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS fed_connection_events (
+		remote_chain_id TEXT PRIMARY KEY,
+		event           TEXT NOT NULL CHECK (event IN ('revoked_locally','revoked_by_peer')),
+		message         TEXT NOT NULL DEFAULT '',
+		created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	)`)
 	// v11.8 mesh pull-relay (docs §9.2 must-fix #1). Both additive + idempotent,
 	// pragma-guarded (the migrateTaskPickup / sync_control.group_id idiom):
 	//   - sync_origin.origin_sig: the ORIGIN agent's ed25519 signature over the
@@ -356,6 +381,39 @@ func (s *SQLiteStore) PrepareSyncControl(ctx context.Context, c SyncControl) err
 	return nil
 }
 
+// SetFederationConnectionEvent records why a past agreement row is no longer
+// live. It is presentation-only and cannot influence any authorization path.
+func (s *SQLiteStore) SetFederationConnectionEvent(ctx context.Context, event FederationConnectionEvent) error {
+	if strings.TrimSpace(event.RemoteChainID) == "" || strings.TrimSpace(event.RemoteChainID) != event.RemoteChainID {
+		return fmt.Errorf("remote chain id is required")
+	}
+	if event.Event != FederationConnectionRevokedLocally && event.Event != FederationConnectionRevokedByPeer {
+		return fmt.Errorf("unsupported federation connection event %q", event.Event)
+	}
+	if len(event.Message) > 512 {
+		return fmt.Errorf("federation connection event message is too long")
+	}
+	_, err := s.writeExecContext(ctx, `INSERT INTO fed_connection_events(remote_chain_id,event,message)
+		VALUES(?,?,?) ON CONFLICT(remote_chain_id) DO UPDATE SET event=excluded.event,
+		message=excluded.message, created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
+		event.RemoteChainID, event.Event, event.Message)
+	return err
+}
+
+func (s *SQLiteStore) GetFederationConnectionEvent(ctx context.Context, remoteChainID string) (*FederationConnectionEvent, error) {
+	event := &FederationConnectionEvent{}
+	err := s.conn.QueryRowContext(ctx, `SELECT remote_chain_id,event,message,created_at
+		FROM fed_connection_events WHERE remote_chain_id=?`, remoteChainID).
+		Scan(&event.RemoteChainID, &event.Event, &event.Message, &event.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get federation connection event: %w", err)
+	}
+	return event, nil
+}
+
 func (s *SQLiteStore) ActivateSyncControl(ctx context.Context, remoteChainID, epoch string) error {
 	unlock := s.LockSyncPolicyWrite()
 	defer unlock()
@@ -378,11 +436,16 @@ func (s *SQLiteStore) ActivateSyncControl(ctx context.Context, remoteChainID, ep
 		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_directional_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
 			return err
 		}
-		_, err := tx.writeExecContext(ctx, `UPDATE sync_control SET binding_state='active', revision=0,
+		if _, err := tx.writeExecContext(ctx, `UPDATE sync_control SET binding_state='active', revision=0,
 			policy_hash='', delivered_revision=0, remote_policy_version=0, remote_revision=0,
 			remote_policy_hash='', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-			WHERE remote_chain_id=? AND policy_epoch=?`, remoteChainID, epoch)
-		return err
+			WHERE remote_chain_id=? AND policy_epoch=?`, remoteChainID, epoch); err != nil {
+			return err
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM fed_connection_events WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("clear retired federation connection event: %w", err)
+		}
+		return nil
 	})
 }
 
@@ -505,6 +568,31 @@ func (s *SQLiteStore) GetSyncControl(ctx context.Context, remoteChainID string) 
 	return c, err
 }
 
+// ListSyncControls enumerates every live or crash-stranded local federation
+// binding. Authorization never uses this list; the Manager uses it only to
+// reconcile node-local artifacts whose on-chain agreement is no longer active.
+func (s *SQLiteStore) ListSyncControls(ctx context.Context) ([]SyncControl, error) {
+	rows, err := s.conn.QueryContext(ctx, `SELECT remote_chain_id, role, controller_chain_id,
+		controller_agent_id, peer_agent_id, policy_epoch, remote_ca_pin, binding_state, policy_version, revision,
+		policy_hash, delivered_revision, remote_policy_version, remote_revision, remote_policy_hash
+		FROM sync_control ORDER BY remote_chain_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make([]SyncControl, 0)
+	for rows.Next() {
+		var c SyncControl
+		if err := rows.Scan(&c.RemoteChainID, &c.Role, &c.ControllerChainID, &c.ControllerAgentID,
+			&c.PeerAgentID, &c.PolicyEpoch, &c.RemoteCAPin, &c.BindingState, &c.PolicyVersion, &c.Revision,
+			&c.PolicyHash, &c.DeliveredRevision, &c.RemotePolicyVersion, &c.RemoteRevision, &c.RemotePolicyHash); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLiteStore) ListPendingSyncControls(ctx context.Context) ([]SyncControl, error) {
 	rows, err := s.conn.QueryContext(ctx, `SELECT remote_chain_id, role, controller_chain_id,
 		controller_agent_id, peer_agent_id, policy_epoch, remote_ca_pin, binding_state, policy_version, revision,
@@ -552,6 +640,16 @@ func (s *SQLiteStore) ApplySyncPolicyVersion(ctx context.Context, remoteChainID,
 	}
 	unlock := s.LockSyncPolicyWrite()
 	defer unlock()
+	return s.ApplySyncPolicyVersionLocked(ctx, remoteChainID, epoch, policyVersion, revision, policyHash, domains)
+}
+
+// ApplySyncPolicyVersionLocked is the final-write variant for authenticated
+// handlers that must revalidate an exact peer generation while holding the
+// same sync-policy write lease. The caller MUST hold LockSyncPolicyWrite.
+func (s *SQLiteStore) ApplySyncPolicyVersionLocked(ctx context.Context, remoteChainID, epoch string, policyVersion int, revision int64, policyHash string, domains []string) (string, error) {
+	if policyVersion != 1 && policyVersion != 2 {
+		return "", fmt.Errorf("unsupported sync policy version %d", policyVersion)
+	}
 	result := "applied"
 	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)
@@ -692,6 +790,16 @@ func (s *SQLiteStore) ApplyRemoteDirectionalSyncPolicy(ctx context.Context, remo
 	}
 	unlock := s.LockSyncPolicyWrite()
 	defer unlock()
+	return s.ApplyRemoteDirectionalSyncPolicyLocked(ctx, remoteChainID, epoch, version, revision, policyHash, publish, subscribe)
+}
+
+// ApplyRemoteDirectionalSyncPolicyLocked mirrors
+// ApplySyncPolicyVersionLocked for the peer-authored v3 revision lane. The
+// caller MUST hold LockSyncPolicyWrite.
+func (s *SQLiteStore) ApplyRemoteDirectionalSyncPolicyLocked(ctx context.Context, remoteChainID, epoch string, version int, revision int64, policyHash string, publish, subscribe []string) (string, error) {
+	if version < 3 {
+		return "", fmt.Errorf("directional sync policy requires version 3 or newer")
+	}
 	result := "applied"
 	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)

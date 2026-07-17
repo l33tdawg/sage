@@ -116,6 +116,11 @@ type peerRBACPolicyDriver interface {
 	ReplacePeerRBACPolicy(context.Context, string, []store.PeerRBACDomainPermission) (*store.PeerRBACPolicy, error)
 }
 
+type peerRBACPauseDriver interface {
+	peerRBACPolicyDriver
+	SetPeerRBACPaused(context.Context, string, bool) (*store.PeerRBACPolicy, error)
+}
+
 type directionalSyncPolicyDriver interface {
 	SetDirectionalSyncPolicy(context.Context, string, []string, []string) (*federation.DirectionalSyncPolicyResult, error)
 }
@@ -214,9 +219,53 @@ func (h *DashboardHandler) handleFedPermissionsGet(w http.ResponseWriter, r *htt
 		"remote_chain_id":    chain,
 		"local_permissions":  local,
 		"local_legacy":       localLegacy,
+		"local_paused":       localPolicy != nil && localPolicy.Paused,
 		"remote_permissions": remote,
 		"remote_known":       remoteKnown,
 		"remote_legacy":      remoteLegacy,
+		"remote_paused":      statusErr == nil && status != nil && status.PeerRBACGrant != nil && status.PeerRBACGrant.Paused,
+	})
+}
+
+// handleFedPause is the everyday temporary disconnect control. It preserves
+// trust and the complete saved domain snapshot while all authorization paths
+// evaluate the local grant as deny-all. Revoke is intentionally separate.
+func (h *DashboardHandler) handleFedPause(w http.ResponseWriter, r *http.Request) {
+	if !h.isFederationMutationOperatorRequest(r) {
+		fedWriteErr(w, http.StatusForbidden, "Pausing federation sharing requires the local node operator.")
+		return
+	}
+	if !h.fedReady(w) {
+		return
+	}
+	h.federationPolicyMu.Lock()
+	defer h.federationPolicyMu.Unlock()
+	chain := chi.URLParam(r, "chain_id")
+	if h.findAgreement(chain) == nil {
+		fedWriteErr(w, http.StatusConflict, "No active agreement for this connection.")
+		return
+	}
+	driver, ok := h.Federation.(peerRBACPauseDriver)
+	if !ok {
+		fedWriteErr(w, http.StatusNotImplemented, "Peer RBAC pause is unavailable on this node.")
+		return
+	}
+	var body struct {
+		Paused *bool `json:"paused"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil || body.Paused == nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected {\"paused\": true|false}.")
+		return
+	}
+	policy, err := driver.SetPeerRBACPaused(r.Context(), chain, *body.Paused)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{
+		"remote_chain_id": chain,
+		"paused":          policy.Paused,
+		"permissions":     clonePeerPermissions(policy.Domains),
 	})
 }
 
@@ -397,6 +446,7 @@ func (h *DashboardHandler) handleFedPermissionsPut(w http.ResponseWriter, r *htt
 	fedWriteJSON(w, http.StatusOK, map[string]any{
 		"remote_chain_id":   chain,
 		"local_permissions": clonePeerPermissions(policy.Domains),
+		"local_paused":      policy.Paused,
 		"grant_results":     grantResults,
 		"warnings":          warnings,
 	})

@@ -49,12 +49,17 @@ type PeerRBACDomainPermission struct {
 // operator. Domains is always non-nil for a configured policy, including an
 // explicit deny-all snapshot.
 type PeerRBACPolicy struct {
-	RemoteChainID string                     `json:"remote_chain_id"`
-	PeerAgentID   string                     `json:"peer_agent_id"`
-	PolicyEpoch   string                     `json:"policy_epoch"`
-	RemoteCAPin   string                     `json:"remote_ca_pin"`
-	PolicyVersion int                        `json:"policy_version"`
-	Domains       []PeerRBACDomainPermission `json:"domains"`
+	RemoteChainID string `json:"remote_chain_id"`
+	PeerAgentID   string `json:"peer_agent_id"`
+	PolicyEpoch   string `json:"policy_epoch"`
+	RemoteCAPin   string `json:"remote_ca_pin"`
+	PolicyVersion int    `json:"policy_version"`
+	// Paused is a local operator kill-switch for this directional grant. The
+	// domain snapshot remains intact so sharing can resume without repeating
+	// JOIN, but every Read/Copy authorization path treats a paused policy as
+	// deny-all. It is bound to the same frozen peer/epoch/CA header as Domains.
+	Paused  bool                       `json:"paused"`
+	Domains []PeerRBACDomainPermission `json:"domains"`
 }
 
 func (s *SQLiteStore) migratePeerRBACPolicies(ctx context.Context) {
@@ -65,6 +70,7 @@ func (s *SQLiteStore) migratePeerRBACPolicies(ctx context.Context) {
 		policy_epoch    TEXT NOT NULL DEFAULT '',
 		remote_ca_pin   TEXT NOT NULL DEFAULT '',
 		policy_version  INTEGER NOT NULL,
+		paused          INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0,1)),
 		updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	)`)
 	_, _ = s.writeExecContext(ctx, `
@@ -98,6 +104,11 @@ func (s *SQLiteStore) migratePeerRBACPolicies(ctx context.Context) {
 			`SELECT COUNT(*) FROM pragma_table_info('peer_rbac_policy') WHERE name=?`, column).Scan(&present); err == nil && present == 0 {
 			_, _ = s.writeExecContext(ctx, `ALTER TABLE peer_rbac_policy ADD COLUMN `+column+` TEXT NOT NULL DEFAULT ''`)
 		}
+	}
+	var hasPaused int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('peer_rbac_policy') WHERE name='paused'`).Scan(&hasPaused); err == nil && hasPaused == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE peer_rbac_policy ADD COLUMN paused INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0,1))`)
 	}
 	// Development builds briefly wrote headers without ceremony-generation
 	// fields. Backfill only from the same chain's frozen sync_control row; if no
@@ -246,16 +257,21 @@ func validatePeerRBACPolicyHeader(policy PeerRBACPolicy) error {
 // deny-all snapshot and must never be collapsed into the legacy case.
 func (s *SQLiteStore) GetPeerRBACPolicy(ctx context.Context, remoteChainID string) (*PeerRBACPolicy, error) {
 	policy := &PeerRBACPolicy{Domains: make([]PeerRBACDomainPermission, 0)}
+	var paused int
 	err := s.conn.QueryRowContext(ctx, `
-		SELECT remote_chain_id, peer_agent_id, policy_epoch, remote_ca_pin, policy_version
+		SELECT remote_chain_id, peer_agent_id, policy_epoch, remote_ca_pin, policy_version, paused
 		FROM peer_rbac_policy WHERE remote_chain_id=?`, remoteChainID).
-		Scan(&policy.RemoteChainID, &policy.PeerAgentID, &policy.PolicyEpoch, &policy.RemoteCAPin, &policy.PolicyVersion)
+		Scan(&policy.RemoteChainID, &policy.PeerAgentID, &policy.PolicyEpoch, &policy.RemoteCAPin, &policy.PolicyVersion, &paused)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get peer RBAC policy header: %w", err)
 	}
+	if paused != 0 && paused != 1 {
+		return nil, fmt.Errorf("stored peer RBAC pause state is invalid")
+	}
+	policy.Paused = paused == 1
 	if validationErr := validatePeerRBACPolicyHeader(*policy); validationErr != nil {
 		return nil, fmt.Errorf("stored peer RBAC policy header is invalid: %w", validationErr)
 	}
@@ -404,6 +420,47 @@ func (s *SQLiteStore) replacePeerRBACPolicy(ctx context.Context, policy PeerRBAC
 		return nil, err
 	}
 	return s.GetPeerRBACPolicy(ctx, policy.RemoteChainID)
+}
+
+// SetBoundPeerRBACPaused flips the local directional kill-switch without
+// modifying its saved domain snapshot. The update is accepted only while the
+// exact JOIN-frozen peer, epoch and CA binding remains active. Holding the
+// sync-policy write lease makes a completed pause linearize after every
+// response that was already authorized under the old state.
+func (s *SQLiteStore) SetBoundPeerRBACPaused(ctx context.Context, binding PeerRBACPolicy, paused bool) (*PeerRBACPolicy, error) {
+	if err := validatePeerRBACPolicyHeader(binding); err != nil {
+		return nil, err
+	}
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
+	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		result, execErr := tx.writeExecContext(ctx, `UPDATE peer_rbac_policy SET
+			paused=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			WHERE remote_chain_id=? AND peer_agent_id=? AND policy_epoch=? AND remote_ca_pin=? AND policy_version=?
+			AND EXISTS (SELECT 1 FROM sync_control c WHERE c.remote_chain_id=peer_rbac_policy.remote_chain_id
+				AND c.peer_agent_id=peer_rbac_policy.peer_agent_id
+				AND c.policy_epoch=peer_rbac_policy.policy_epoch
+				AND c.remote_ca_pin=peer_rbac_policy.remote_ca_pin
+				AND c.binding_state='active')`,
+			paused, binding.RemoteChainID, binding.PeerAgentID, binding.PolicyEpoch,
+			binding.RemoteCAPin, binding.PolicyVersion)
+		if execErr != nil {
+			return fmt.Errorf("set peer RBAC pause state: %w", execErr)
+		}
+		rows, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return fmt.Errorf("inspect peer RBAC pause update: %w", rowsErr)
+		}
+		if rows != 1 {
+			return fmt.Errorf("%w: active peer RBAC binding changed during pause update", ErrPeerRBACBindingMismatch)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.GetPeerRBACPolicy(ctx, binding.RemoteChainID)
 }
 
 // DeletePeerRBACPolicy removes both the explicit header and its rows. It is a

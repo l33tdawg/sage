@@ -109,6 +109,42 @@ func TestRouteExchangeRejectsAuthenticatedChainWithWrongOperator(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestStaleAuthenticatedRouteRequestCannotPersistIntoFreshCeremonyEpoch(t *testing.T) {
+	m, ss, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "remote-chain", 4)
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	peerAgentID := hex.EncodeToString(peerPub)
+	agreement := bindP2PRouteControl(t, m, "remote-chain", peerAgentID, "epoch-routes-e1")
+	e1, err := ss.GetSyncControl(context.Background(), "remote-chain")
+	require.NoError(t, err)
+	require.NotNil(t, e1)
+	stalePeer := &peerIdentity{
+		ChainID: "remote-chain", AgentID: peerAgentID, Agreement: agreement, CeremonyCaptured: true,
+		Ceremony: &peerCeremonyBinding{PeerAgentID: e1.PeerAgentID, PolicyEpoch: e1.PolicyEpoch,
+			RemoteCAPin: e1.RemoteCAPin, State: e1.BindingState},
+	}
+	e2 := *e1
+	e2.PolicyEpoch = "epoch-routes-e2"
+	require.NoError(t, ss.PurgeSyncPeerState(context.Background(), e1.RemoteChainID))
+	require.NoError(t, ss.PrepareSyncControl(context.Background(), e2))
+	require.NoError(t, ss.ActivateSyncControl(context.Background(), e2.RemoteChainID, e2.PolicyEpoch))
+
+	persisted := false
+	m.SetJoinP2PHooks(JoinP2PHooks{
+		LocalBundle: func() (JoinP2PBundle, error) { return testRouteBundle(t, "203.0.113.20"), nil },
+		Persist:     func(string, []string) error { persisted = true; return nil },
+	})
+	body, err := json.Marshal(testRouteBundle(t, "203.0.113.10"))
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/p2p/routes", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, stalePeer))
+	rr := httptest.NewRecorder()
+	m.handleP2PRoutes(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.False(t, persisted, "E1-authenticated route bundle must not persist into E2")
+}
+
 func TestRouteExchangeRejectsNonActiveOrCorruptFrozenBinding(t *testing.T) {
 	tests := []struct {
 		name     string

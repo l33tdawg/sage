@@ -1,13 +1,113 @@
 package federation
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/tx"
 )
+
+// TestJoinStopCannotOverwriteConfirming pins the operator-facing race: once a
+// verified confirm atomically owns the session, neither local nor peer Stop may
+// return success and overwrite it with ABORTED while activation continues.
+func TestJoinStopCannotOverwriteConfirming(t *testing.T) {
+	node := newCeremonyNode(t, "host-stop")
+	joins, sessionID, certSPKI, attestation, guestKey, _ := approvedSession(t)
+	node.mgr.joins = joins
+	_, err := joins.CheckConfirm(sessionID, certSPKI,
+		SignEnroll(guestKey, attestation, false),
+		SignEnroll(guestKey, attestation, true), time.Now())
+	if err != nil {
+		t.Fatalf("CheckConfirm: %v", err)
+	}
+	if err := node.mgr.HostAbort(sessionID); !errors.Is(err, ErrJoinAbortConflict) {
+		t.Fatalf("HostAbort after confirm = %v, want conflict", err)
+	}
+	body, marshalErr := json.Marshal(JoinAbortWire{SessionID: sessionID})
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/join/abort", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), joinCertSPKIKey{}, certSPKI))
+	rr := httptest.NewRecorder()
+	node.mgr.handleJoinAbort(rr, req)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("bound guest Abort HTTP status=%d body=%s, want 409", rr.Code, rr.Body.String())
+	}
+	view, err := node.mgr.HostSessionStatus(sessionID)
+	if err != nil || view.State != JoinConfirming {
+		t.Fatalf("state after rejected Stops = %q err=%v, want %s", view.State, err, JoinConfirming)
+	}
+	if err := joins.MarkActive(sessionID); err != nil {
+		t.Fatalf("MarkActive: %v", err)
+	}
+	view, err = node.mgr.HostSessionStatus(sessionID)
+	if err != nil || !view.Active || view.State != JoinActive {
+		t.Fatalf("final state = %+v err=%v", view, err)
+	}
+}
+
+func TestHostConfirmPreActivationFailuresLeaveRestartableTerminalSession(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, node *ceremonyNode, joins *JoinStore, sessionID string)
+	}{
+		{
+			name: "prepare sync control",
+			setup: func(t *testing.T, node *ceremonyNode, _ *JoinStore, _ string) {
+				t.Helper()
+				if err := node.mgr.syncStore().Close(); err != nil {
+					t.Fatalf("close SQLite failure seam: %v", err)
+				}
+			},
+		},
+		{
+			name: "missing P2P persistence",
+			setup: func(t *testing.T, _ *ceremonyNode, joins *JoinStore, sessionID string) {
+				t.Helper()
+				joins.mu.Lock()
+				joins.sessions[sessionID].ExpectedGuestP2P = []string{"/ip4/203.0.113.10/tcp/4001"}
+				joins.mu.Unlock()
+			},
+		},
+		{
+			name: "tx33 broadcast",
+			setup: func(_ *testing.T, node *ceremonyNode, _ *JoinStore, _ string) {
+				node.mgr.broadcastFn = func([]byte) (string, int64, error) {
+					return "", 0, errors.New("forced tx33 failure")
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node := newCeremonyNode(t, "host-xxxxx")
+			joins, sessionID, certSPKI, attestation, guestKey, _ := approvedSession(t)
+			node.mgr.joins = joins
+			tc.setup(t, node, joins, sessionID)
+			_, _, err := node.mgr.hostConfirm(sessionID, certSPKI,
+				SignEnroll(guestKey, attestation, false),
+				SignEnroll(guestKey, attestation, true), "")
+			if err == nil {
+				t.Fatal("hostConfirm unexpectedly succeeded")
+			}
+			view, statusErr := node.mgr.HostSessionStatus(sessionID)
+			if statusErr != nil || view.State != JoinAborted || view.Active {
+				t.Fatalf("failed confirm state=%+v err=%v, want ABORTED", view, statusErr)
+			}
+			if stopErr := node.mgr.HostAbort(sessionID); stopErr != nil {
+				t.Fatalf("Stop after failed confirm must be honest and idempotent: %v", stopErr)
+			}
+		})
+	}
+}
 
 // TestHostConfirmAgreementLeaseSpansLocalActivation pins the gap that used to
 // exist after JOIN's tx-33 commit: revocation must not commit and purge while
