@@ -437,6 +437,20 @@ func (h *DashboardHandler) handlePreValidate(w http.ResponseWriter, r *http.Requ
 const sessionCookieName = "sage_session"
 const sessionTTL = 24 * time.Hour
 
+// taskContentPrefix marks a memory as a task in its stored content. Kept in sync
+// with internal/mcp (deliberately duplicated rather than importing internal/mcp
+// into web just for this).
+const taskContentPrefix = "[TASK] "
+
+// applyTaskPrefix marks content as a task, idempotently — a task typed as
+// "[TASK] ..." in the UI must not become "[TASK] [TASK] ...".
+func applyTaskPrefix(content string) string {
+	if strings.HasPrefix(content, taskContentPrefix) {
+		return content
+	}
+	return taskContentPrefix + content
+}
+
 type verifiedDashboardAgentKey struct{}
 
 func verifiedDashboardAgentID(ctx context.Context) string {
@@ -2354,7 +2368,7 @@ func (h *DashboardHandler) handleCreateTaskDashboard(w http.ResponseWriter, r *h
 		body.Domain = "general"
 	}
 
-	taskContent := "[TASK] " + body.Content
+	taskContent := applyTaskPrefix(body.Content)
 	memoryID := uuid.New().String()
 
 	// Generate embedding
