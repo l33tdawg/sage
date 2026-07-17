@@ -208,6 +208,33 @@ test('the real-Comet fixture proves governance-domain binding before the long fo
   assert.ok(bindingGate >= 0 && bindingGate < forkLadder);
 });
 
+test('the real-Comet firewall proof allows one symmetric endpoint to count the rejection', () => {
+  assert.match(
+    v119Chaos,
+    /wait_partition_firewalls_exercised\(\)[\s\S]*?for service in "\$@"; do[\s\S]*?total=\$\(\(total \+ packets\)\)[\s\S]*?if \[ "\$\{total\}" -gt 0 \]/,
+  );
+  assert.doesNotMatch(v119Chaos, /wait_partition_firewall_exercised\(\)/);
+  assert.equal(
+    (v119Chaos.match(/wait_partition_firewalls_exercised 30 cometbft0 cometbft1 cometbft2 cometbft3/g) || []).length,
+    2,
+  );
+
+  for (const marker of [
+    '--- fault 1: isolate lower-power validator1',
+    '--- fault 2: post-removal stable-IP 2+2 split',
+  ]) {
+    const start = v119Chaos.indexOf(marker);
+    const counterGate = v119Chaos.indexOf('wait_partition_firewalls_exercised 30', start);
+    const heal = v119Chaos.indexOf('remove_partition_firewall', counterGate);
+    assert.ok(start >= 0 && counterGate > start && heal > counterGate);
+    assert.equal(
+      (v119Chaos.slice(counterGate, heal).match(/wait_exact_peer_set/g) || []).length,
+      4,
+      `${marker} must still prove the exact peer set on every node`,
+    );
+  }
+});
+
 test('all private artifacts converge at one publication gate', () => {
   assert.match(job('goreleaser-prepare'), /release --clean --skip=publish/);
   assert.doesNotMatch(job('docker-image'), /push:\s+true/);
