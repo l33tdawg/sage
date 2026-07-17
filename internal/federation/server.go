@@ -37,11 +37,20 @@ const (
 
 type peerCtxKey struct{}
 
+type peerCeremonyBinding struct {
+	PeerAgentID string
+	PolicyEpoch string
+	RemoteCAPin string
+	State       string
+}
+
 // peerIdentity is what peerAuth binds for downstream handlers.
 type peerIdentity struct {
-	ChainID   string
-	AgentID   string
-	Agreement *store.CrossFedRecord
+	ChainID          string
+	AgentID          string
+	Agreement        *store.CrossFedRecord
+	Ceremony         *peerCeremonyBinding
+	CeremonyCaptured bool
 }
 
 // Router returns the federation listener's HTTP handler. EVERY route sits
@@ -54,6 +63,7 @@ func (m *Manager) Router() http.Handler {
 		r.Post("/fed/v1/query", m.handleQuery)
 		r.Post("/fed/v1/write", m.handleRemoteWrite)
 		r.Post("/fed/v1/receipt", m.handleReceipt)
+		r.Post("/fed/v1/connection/revoke-notice", m.handleRevokeNotice)
 		r.Post("/fed/v1/sync/push", m.handleSyncPush)       // v11.5 domain sync
 		r.Post("/fed/v1/sync/digest", m.handleSyncDigest)   // v11.5 anti-entropy
 		r.Post("/fed/v1/sync/journal", m.handleSyncJournal) // v11.8 group journal exchange
@@ -101,7 +111,11 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		agreement, err := m.ActiveAgreement(peerChain)
+		// Snapshot consensus terms and the off-consensus JOIN epoch beneath the
+		// same mutation lease used by tx-33/tx-34 activation. Reading the epoch
+		// only after signature verification would let an E1 request be mislabeled
+		// E2 if an otherwise-identical re-pair completed during authentication.
+		agreement, ceremony, err := m.snapshotPeerAuthGeneration(r.Context(), peerChain)
 		if err != nil {
 			m.logger.Warn().Err(err).Str("peer", peerChain).Msg("federation request denied: no active agreement")
 			httpError(w, http.StatusForbidden, "no active agreement")
@@ -211,13 +225,45 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		ctx := context.WithValue(r.Context(), peerCtxKey{}, &peerIdentity{
-			ChainID:   peerChain,
-			AgentID:   agentID,
-			Agreement: agreement,
-		})
+		identity := &peerIdentity{
+			ChainID:          peerChain,
+			AgentID:          agentID,
+			Agreement:        agreement,
+			Ceremony:         ceremony,
+			CeremonyCaptured: true,
+		}
+		if _, err := m.currentRequestAgreementBound(r.Context(), identity); err != nil {
+			httpError(w, http.StatusForbidden, "federation agreement generation changed during authentication")
+			return
+		}
+		ctx := context.WithValue(r.Context(), peerCtxKey{}, identity)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (m *Manager) snapshotPeerAuthGeneration(ctx context.Context, peerChain string) (*store.CrossFedRecord, *peerCeremonyBinding, error) {
+	unlock := m.LockAgreementMutation()
+	defer unlock()
+	agreement, err := m.ActiveAgreement(peerChain)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ceremony *peerCeremonyBinding
+	if ss := m.syncStore(); ss != nil {
+		control, controlErr := ss.GetSyncControl(ctx, peerChain)
+		if controlErr != nil {
+			return nil, nil, fmt.Errorf("read federation ceremony binding: %w", controlErr)
+		}
+		if control != nil {
+			ceremony = &peerCeremonyBinding{
+				PeerAgentID: control.PeerAgentID,
+				PolicyEpoch: control.PolicyEpoch,
+				RemoteCAPin: control.RemoteCAPin,
+				State:       control.BindingState,
+			}
+		}
+	}
+	return agreement, ceremony, nil
 }
 
 // verifyV3AnyEpoch tries the v3 signature against each candidate seed (current
@@ -324,7 +370,17 @@ func (m *Manager) currentRequestAgreementBound(ctx context.Context, peer *peerId
 		return nil, fmt.Errorf("read peer operator binding: %w", err)
 	}
 	if control == nil {
+		if peer.CeremonyCaptured && peer.Ceremony != nil {
+			return nil, fmt.Errorf("authenticated federation ceremony generation changed")
+		}
 		return current, nil
+	}
+	if peer.CeremonyCaptured {
+		if peer.Ceremony == nil || peer.Ceremony.PeerAgentID != control.PeerAgentID ||
+			peer.Ceremony.PolicyEpoch != control.PolicyEpoch || peer.Ceremony.RemoteCAPin != control.RemoteCAPin ||
+			peer.Ceremony.State != control.BindingState || control.BindingState != "active" {
+			return nil, fmt.Errorf("authenticated federation ceremony generation changed")
+		}
 	}
 	peerOperator, err := m.resolvePeerOperatorAgentID(ctx, current)
 	if err != nil {

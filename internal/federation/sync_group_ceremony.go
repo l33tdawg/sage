@@ -603,7 +603,7 @@ func (m *Manager) admitMemberBootstrap(ctx context.Context, ss *store.SQLiteStor
 	err := func() error {
 		defer m.journalMu.Unlock()
 		defer policyWriteUnlock()
-		bound, bindErr := m.currentInboundGroupPeerBound(ctx, ss, peer.ChainID, peer.AgentID)
+		bound, bindErr := m.currentInboundGroupPeerBound(ctx, ss, peer)
 		if bindErr != nil {
 			return fmt.Errorf("revalidate bootstrap peer: %w", bindErr)
 		}

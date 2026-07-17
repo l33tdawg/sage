@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base32"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -108,6 +109,19 @@ const (
 )
 
 var joinB32 = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+var (
+	// ErrJoinSessionNotFound distinguishes an already-reaped/unknown ceremony
+	// from a valid session whose state no longer permits a Stop decision.
+	ErrJoinSessionNotFound = errors.New("join session not found")
+	// ErrJoinAbortConflict means confirmation has already crossed the atomic
+	// commit boundary (CONFIRMING or ACTIVE), so reporting a successful Stop
+	// would be false and could surprise the operator with an active pairing.
+	ErrJoinAbortConflict = errors.New("join session can no longer be stopped")
+	// ErrJoinAbortUnbound prevents one guest certificate from burning another
+	// guest's ceremony.
+	ErrJoinAbortUnbound = errors.New("join abort certificate is not bound to this session")
+)
 
 // JoinStore is the host-side session registry: TTL'd, single-ceremony, with a
 // per-session fail cap and a TLS-connection rate limiter (never XFF, RT-3).
@@ -571,31 +585,83 @@ func (js *JoinSession) scrubSeed() {
 	}
 }
 
-// MarkActive transitions to ACTIVE after the host broadcasts its tx-33 (the
-// staged guest CA is committed by the driver first).
-func (s *JoinStore) MarkActive(id string) {
+// MarkActive transitions CONFIRMING to ACTIVE after the host broadcasts its
+// tx-33 (the staged guest CA is committed by the driver first). The state
+// condition is deliberately checked under the same lock as Abort: neither a
+// late Stop nor an unrelated terminal transition may be overwritten.
+func (s *JoinStore) MarkActive(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if js, ok := s.sessions[id]; ok {
-		js.State = JoinActive
-		js.rollbackGuestCA = nil // committed; do not roll back on later cleanup
-		js.commitGuestCA = nil
-		js.scrubSeed() // persistent seed is committed; drop the ceremony copy now
+	js, ok := s.sessions[id]
+	if !ok {
+		return ErrJoinSessionNotFound
 	}
+	if js.State != JoinConfirming {
+		return fmt.Errorf("activate join from %s: %w", js.State, ErrJoinAbortConflict)
+	}
+	js.State = JoinActive
+	js.rollbackGuestCA = nil // committed; do not roll back on later cleanup
+	js.commitGuestCA = nil
+	js.scrubSeed() // persistent seed is committed; drop the ceremony copy now
+	return nil
 }
 
-// Abort marks a session aborted (burned on a human "No" or an error) and rolls
-// back any staged-but-uncommitted guest CA sidecar.
-func (s *JoinStore) Abort(id string) {
+// abortLocked performs the human Stop transition. CONFIRMING is already owned
+// by the confirm driver and ACTIVE must use permanent revocation, so both are
+// conflicts rather than false-success ABORTED responses.
+func (s *JoinStore) abortLocked(js *JoinSession) error {
+	switch js.State {
+	case JoinAborted:
+		return nil // idempotent Stop
+	case JoinConfirming, JoinActive:
+		return fmt.Errorf("join session is %s: %w", js.State, ErrJoinAbortConflict)
+	case JoinExpired:
+		return fmt.Errorf("join session is expired: %w", ErrJoinAbortConflict)
+	}
+	if js.rollbackGuestCA != nil {
+		js.rollbackGuestCA()
+		js.rollbackGuestCA = nil
+		js.commitGuestCA = nil
+	}
+	js.scrubSeed()
+	js.State = JoinAborted
+	return nil
+}
+
+// Abort atomically burns a locally controlled, pre-confirm session.
+func (s *JoinStore) Abort(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if js, ok := s.sessions[id]; ok {
-		if js.State != JoinActive && js.rollbackGuestCA != nil {
-			js.rollbackGuestCA()
-			js.rollbackGuestCA = nil
-			js.commitGuestCA = nil
-		}
-		js.scrubSeed() // burned session: don't leave the seed lingering until reap
+	js, ok := s.sessions[id]
+	if !ok {
+		return ErrJoinSessionNotFound
+	}
+	return s.abortLocked(js)
+}
+
+// AbortBound combines guest-certificate authorization and the Stop transition
+// in one critical section, closing the Get -> check -> Abort race with confirm.
+func (s *JoinStore) AbortBound(id string, certSPKI []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	js, ok := s.sessions[id]
+	if !ok {
+		return ErrJoinSessionNotFound
+	}
+	if len(js.BoundCertSPKI) == 0 || subtle.ConstantTimeCompare(js.BoundCertSPKI, certSPKI) != 1 {
+		return ErrJoinAbortUnbound
+	}
+	return s.abortLocked(js)
+}
+
+// FailConfirm is the driver's internal rollback path after CheckConfirm has
+// transferred ownership of the staged artifacts. It is intentionally not used
+// by operator-facing Stop routes.
+func (s *JoinStore) FailConfirm(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if js, ok := s.sessions[id]; ok && js.State == JoinConfirming {
+		js.scrubSeed()
 		js.State = JoinAborted
 	}
 }

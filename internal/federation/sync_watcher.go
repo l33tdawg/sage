@@ -111,6 +111,9 @@ func (m *Manager) onCommitted(ids []string) {
 				if aErr != nil {
 					continue // no active trust edge to this member: fail closed
 				}
+				if paused, pauseErr := m.connectionSharingPaused(ctx, ag); pauseErr != nil || paused {
+					continue
+				}
 				peerAgentID, bound, bindErr := m.exactGroupPeerAgentID(ctx, ss, ag)
 				if bindErr != nil || !bound {
 					continue

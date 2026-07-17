@@ -218,7 +218,12 @@ func (m *Manager) handleSyncPush(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusInternalServerError, "peer RBAC visibility lookup failed")
 			return
 		}
-		if policy != nil {
+		if policy != nil && policy.Paused {
+			// Inbound Copy remains the receiver's independent choice, but Pause
+			// makes every local content-existence signal invisible to this peer.
+			// Otherwise guessed pushes could distinguish same/cross-domain matches.
+			peerVisibleDomains = []string{}
+		} else if policy != nil {
 			for _, grant := range policy.Domains {
 				if grant.Read {
 					peerVisibleDomains = append(peerVisibleDomains, grant.Domain)
@@ -376,6 +381,12 @@ func (m *Manager) handleSyncDigestGroup(w http.ResponseWriter, r *http.Request, 
 	// historical treaty gate in addition to group membership.
 	_, v3, edgeErr := m.pairwiseIngressPolicy(ctx, ss, peer.Agreement, peer.AgentID)
 	if edgeErr != nil || (!v3 && !DomainAllowed(peer.Agreement.AllowedDomains, req.Domain)) {
+		httpError(w, http.StatusForbidden, "not_admitted")
+		return
+	}
+	if paused, pauseErr := m.connectionSharingPaused(ctx, peer.Agreement); pauseErr != nil || paused {
+		// Group digests enumerate receiver-side admission metadata for origins
+		// beyond the requester. A locally paused edge exposes none of it.
 		httpError(w, http.StatusForbidden, "not_admitted")
 		return
 	}

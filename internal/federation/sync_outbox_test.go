@@ -117,6 +117,72 @@ func TestSyncDrainEndToEnd(t *testing.T) {
 	assert.Empty(t, pushed)
 }
 
+func TestReconcileRetiredFederationStatePurgesOnlyDefinitiveRetirement(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedControl := func(chain, epoch string) {
+		seedDrainAgreement(t, bs, chain, 2)
+		agreement := mustDrainAgreement(t, m, chain)
+		require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{
+			RemoteChainID: chain, Role: "host", ControllerChainID: m.localChainID,
+			ControllerAgentID: hex.EncodeToString(m.agentPub), PeerAgentID: hex.EncodeToString(m.agentPub),
+			PolicyEpoch: epoch, RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey),
+		}))
+		require.NoError(t, ms.ActivateSyncControl(ctx, chain, epoch))
+	}
+	seedControl("chain-retired", "epoch-retired")
+	seedControl("chain-active", "epoch-active")
+	require.NoError(t, bs.UpdateCrossFedStatus("chain-retired", "revoked"))
+
+	m.reconcileRetiredFederationState(ctx, ms)
+	retired, err := ms.GetSyncControl(ctx, "chain-retired")
+	require.NoError(t, err)
+	assert.Nil(t, retired, "tx-34 crash residue must be purged on reconciliation")
+	active, err := ms.GetSyncControl(ctx, "chain-active")
+	require.NoError(t, err)
+	assert.NotNil(t, active, "an authoritative active agreement must never be treated as cleanup residue")
+}
+
+func TestRetiredReconcilerCannotPurgeFreshRepairGeneration(t *testing.T) {
+	ctx := context.Background()
+	m, ms, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-repair", 2)
+	agreement := mustDrainAgreement(t, m, "chain-repair")
+	base := store.SyncControl{
+		RemoteChainID: "chain-repair", Role: "host", ControllerChainID: m.localChainID,
+		ControllerAgentID: hex.EncodeToString(m.agentPub), PeerAgentID: hex.EncodeToString(m.agentPub),
+		RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey),
+	}
+	e1 := base
+	e1.PolicyEpoch = "epoch-retired-e1"
+	require.NoError(t, ms.PrepareSyncControl(ctx, e1))
+	require.NoError(t, ms.ActivateSyncControl(ctx, e1.RemoteChainID, e1.PolicyEpoch))
+	require.NoError(t, bs.UpdateCrossFedStatus(e1.RemoteChainID, "revoked"))
+
+	barrierCalls := 0
+	m.reconcileRetiredFederationStateAfterList(ctx, ms, func(listed store.SyncControl) {
+		barrierCalls++
+		require.Equal(t, e1.PolicyEpoch, listed.PolicyEpoch, "reconciler must hold the stale E1 list snapshot")
+		// Model a complete fresh JOIN generation landing after ListSyncControls
+		// but before this stale reconciler obtains agreementMutationMu and re-reads:
+		// a competing old-generation cleanup completes, then JOIN installs E2.
+		m.PurgeLocalFederationState(e1.RemoteChainID)
+		seedDrainAgreement(t, bs, e1.RemoteChainID, 2)
+		e2 := base
+		e2.PolicyEpoch = "epoch-fresh-e2"
+		require.NoError(t, ms.PrepareSyncControl(ctx, e2))
+		require.NoError(t, ms.ActivateSyncControl(ctx, e2.RemoteChainID, e2.PolicyEpoch))
+	})
+	require.Equal(t, 1, barrierCalls)
+	remaining, err := ms.GetSyncControl(ctx, e1.RemoteChainID)
+	require.NoError(t, err)
+	require.NotNil(t, remaining)
+	assert.Equal(t, "epoch-fresh-e2", remaining.PolicyEpoch,
+		"a stale retired-generation cleanup must not delete a fresh re-pair")
+	_, err = m.ActiveAgreement(e1.RemoteChainID)
+	require.NoError(t, err, "fresh authoritative E2 agreement must remain active")
+}
+
 func TestSyncDrainV3RequiresCopyGrantAndRecipientSubscription(t *testing.T) {
 	ctx := context.Background()
 	m, ms, bs := newDrainTestManager(t)
@@ -148,6 +214,19 @@ func TestSyncDrainV3RequiresCopyGrantAndRecipientSubscription(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, v3)
 	assert.Equal(t, []string{"tii.project"}, effective, "subtree intersection must narrow to the recipient subscription")
+	paused, err := m.SetPeerRBACPaused(ctx, "chain-b", true)
+	require.NoError(t, err)
+	assert.True(t, paused.Paused)
+	effective, v3, err = m.pairwiseEgressPolicy(ctx, ms, agreement)
+	require.NoError(t, err)
+	assert.True(t, v3)
+	assert.Empty(t, effective, "pause must stop an already-configured Copy lane without deleting it")
+	resumed, err := m.SetPeerRBACPaused(ctx, "chain-b", false)
+	require.NoError(t, err)
+	assert.False(t, resumed.Paused)
+	effective, _, err = m.pairwiseEgressPolicy(ctx, ms, agreement)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"tii.project"}, effective, "resume must restore the saved Copy lane without re-pairing")
 	require.NoError(t, ms.DeletePeerRBACPolicy(ctx, "chain-b"))
 	effective, v3, err = m.pairwiseEgressPolicy(ctx, ms, agreement)
 	require.NoError(t, err)

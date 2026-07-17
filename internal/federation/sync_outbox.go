@@ -95,6 +95,11 @@ func (m *Manager) startSyncDrainer(parent context.Context) {
 	m.syncNudge = make(chan struct{}, 1)
 	nudge := m.syncNudge
 
+	// A process can die after tx-34 commits but before node-local CA/seed/sync
+	// cleanup. Reconcile before workers start, then retry on every normal tick so
+	// a transient SQLite or route-store failure cannot permanently block re-pair.
+	m.reconcileRetiredFederationState(context.Background(), ss)
+
 	// Crash recovery: any row left 'delivering' by a previous process death
 	// (or a shutdown that cancelled the outcome write) is returned to
 	// 'pending' before the first scan, so it can be re-claimed.
@@ -159,10 +164,18 @@ func (m *Manager) StopSyncDrainer() {
 
 // syncTick runs one scan+drain pass over every peer with sync consent.
 func (m *Manager) syncTick(ctx context.Context, ss *store.SQLiteStore) {
+	m.reconcileRetiredFederationState(ctx, ss)
 	if pending, err := ss.ListPendingSyncControls(ctx); err == nil {
 		for _, control := range pending {
 			if ctx.Err() != nil {
 				return
+			}
+			agreement, activeErr := m.ActiveAgreement(control.RemoteChainID)
+			if activeErr != nil {
+				continue
+			}
+			if paused, pauseErr := m.connectionSharingPaused(ctx, agreement); pauseErr != nil || paused {
+				continue
 			}
 			pctx, cancel := context.WithTimeout(ctx, syncPushTimeout)
 			if deliveryErr := m.deliverSyncPolicy(pctx, ss, control.RemoteChainID); deliveryErr != nil {
@@ -208,6 +221,70 @@ func (m *Manager) syncTick(ctx context.Context, ss *store.SQLiteStore) {
 			m.syncScan(ctx, ss, agreement, senderScope)
 		}
 		m.syncDrain(ctx, ss, agreement, consented)
+	}
+}
+
+func (m *Manager) reconcileRetiredFederationState(ctx context.Context, ss *store.SQLiteStore) {
+	m.reconcileRetiredFederationStateAfterList(ctx, ss, nil)
+}
+
+func sameSyncControlGeneration(a, b store.SyncControl) bool {
+	return a.RemoteChainID == b.RemoteChainID && a.Role == b.Role &&
+		a.ControllerChainID == b.ControllerChainID && a.ControllerAgentID == b.ControllerAgentID &&
+		a.PeerAgentID == b.PeerAgentID && a.PolicyEpoch == b.PolicyEpoch &&
+		a.RemoteCAPin == b.RemoteCAPin && a.BindingState == b.BindingState
+}
+
+// reconcileRetiredFederationStateAfterList repairs the tx-34 -> local-purge
+// crash window. beforeLease is a deterministic test barrier after the stale
+// list snapshot; production passes nil.
+func (m *Manager) reconcileRetiredFederationStateAfterList(ctx context.Context, ss *store.SQLiteStore, beforeLease func(store.SyncControl)) {
+	controls, err := ss.ListSyncControls(ctx)
+	if err != nil {
+		m.logger.Warn().Err(err).Msg("federation: list local bindings for revoke reconciliation")
+		return
+	}
+	for _, control := range controls {
+		if ctx.Err() != nil {
+			return
+		}
+		if beforeLease != nil {
+			beforeLease(control)
+		}
+		// JOIN/re-pair and revoke both use agreement -> policy ordering. Join that
+		// generation lease before re-reading the listed control and authoritative
+		// record, then retain it through destructive cleanup so a stale E1 pass
+		// can never purge a freshly activated or pending E2.
+		agreementUnlock := m.LockAgreementMutation()
+		currentControl, controlErr := ss.GetSyncControl(ctx, control.RemoteChainID)
+		if controlErr != nil || currentControl == nil || !sameSyncControlGeneration(control, *currentControl) {
+			agreementUnlock()
+			if controlErr != nil {
+				m.logger.Warn().Err(controlErr).Str("remote", control.RemoteChainID).Msg("federation: local binding changed during revoke reconciliation")
+			}
+			continue
+		}
+		// Reconciliation is destructive to node-local credentials, so act only on
+		// an authoritative record we could read successfully. A transient Badger
+		// failure must never be interpreted as a revoked peer. The tx-34 crash
+		// window we are repairing is explicit status=revoked; expiry is equally
+		// definitive because ActiveAgreement would already deny the edge.
+		_, _, _, expiresAt, _, _, status, getErr := m.badger.GetCrossFed(control.RemoteChainID)
+		if getErr != nil {
+			agreementUnlock()
+			m.logger.Warn().Err(getErr).Str("remote", control.RemoteChainID).Msg("federation: authoritative revoke state unavailable; leaving local binding intact")
+			continue
+		}
+		retired := status == "revoked" || (status == "active" && expiresAt > 0 && time.Now().Unix() >= expiresAt)
+		if !retired {
+			agreementUnlock()
+			continue
+		}
+		m.PurgeLocalFederationState(control.RemoteChainID)
+		if remaining, readErr := ss.GetSyncControl(ctx, control.RemoteChainID); readErr != nil || remaining != nil {
+			m.logger.Warn().Err(readErr).Str("remote", control.RemoteChainID).Msg("federation: retired local binding cleanup will retry")
+		}
+		agreementUnlock()
 	}
 }
 
@@ -315,7 +392,22 @@ func (m *Manager) exactGroupPeerAgentID(ctx context.Context, ss *store.SQLiteSto
 	return control.PeerAgentID, true, nil
 }
 
+// connectionSharingPaused is the per-edge kill switch for every outbound
+// Read/Copy capability, including group-native and relayed Copy lanes. Group
+// membership and saved policies remain intact; returning an empty scope makes
+// Resume lossless without allowing a group to bypass the operator's pause.
+func (m *Manager) connectionSharingPaused(ctx context.Context, agreement *store.CrossFedRecord) (bool, error) {
+	policy, err := m.getPeerRBACPolicyForAgreement(ctx, agreement)
+	if err != nil {
+		return false, err
+	}
+	return policy != nil && policy.Paused, nil
+}
+
 func (m *Manager) groupSharedDomainsForAgreement(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord) ([]string, error) {
+	if paused, err := m.connectionSharingPaused(ctx, agreement); err != nil || paused {
+		return nil, err
+	}
 	peerAgentID, ok, err := m.exactGroupPeerAgentID(ctx, ss, agreement)
 	if err != nil || !ok {
 		return nil, err
@@ -325,6 +417,9 @@ func (m *Manager) groupSharedDomainsForAgreement(ctx context.Context, ss *store.
 }
 
 func (m *Manager) groupSharedDomainsWithGroupForAgreement(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord) ([]store.GroupDomainRef, error) {
+	if paused, err := m.connectionSharingPaused(ctx, agreement); err != nil || paused {
+		return nil, err
+	}
 	peerAgentID, ok, err := m.exactGroupPeerAgentID(ctx, ss, agreement)
 	if err != nil || !ok {
 		return nil, err
@@ -340,6 +435,9 @@ func sharedGroupOwnedDomainsForAgents(ctx context.Context, ss *store.SQLiteStore
 }
 
 func (m *Manager) sharedGroupOwnedDomainsForAgreement(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord) ([]string, error) {
+	if paused, err := m.connectionSharingPaused(ctx, agreement); err != nil || paused {
+		return nil, err
+	}
 	peerAgentID, ok, err := m.exactGroupPeerAgentID(ctx, ss, agreement)
 	if err != nil || !ok {
 		return nil, err
@@ -349,6 +447,9 @@ func (m *Manager) sharedGroupOwnedDomainsForAgreement(ctx context.Context, ss *s
 }
 
 func (m *Manager) resolveGroupRelayForAgreement(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, originChainID, originAgentID, domain string) (string, bool, error) {
+	if paused, err := m.connectionSharingPaused(ctx, agreement); err != nil || paused {
+		return "", false, err
+	}
 	peerAgentID, ok, err := m.exactGroupPeerAgentID(ctx, ss, agreement)
 	if err != nil || !ok {
 		return "", false, err
@@ -495,6 +596,9 @@ func (m *Manager) pairwiseEgressPolicy(ctx context.Context, ss *store.SQLiteStor
 	if policy == nil {
 		return []string{}, true, nil
 	}
+	if policy.Paused {
+		return []string{}, true, nil
+	}
 	copyGrants := make([]string, 0, len(policy.Domains))
 	for _, grant := range policy.Domains {
 		if grant.Copy {
@@ -615,16 +719,33 @@ func (m *Manager) syncScan(ctx context.Context, ss *store.SQLiteStore, agreement
 // syncDrain claims one batch and delivers it.
 func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreement *store.CrossFedRecord, consented []string) {
 	chain := agreement.RemoteChainID
+	// Capture the configured egress lanes and Pause bit under one policy lease.
+	// Without this small snapshot boundary, Pause could make one lane read empty
+	// between calls and a quick Resume could then make the final bit read false,
+	// incorrectly turning queued work into a terminal scope rejection. A pause
+	// after this snapshot is caught by the second leased check before transport.
+	initialPolicyUnlock := ss.LockSyncPolicyRead()
+	paused, pauseErr := m.connectionSharingPaused(ctx, agreement)
+	if pauseErr != nil || paused {
+		initialPolicyUnlock()
+		if pauseErr != nil {
+			m.logger.Warn().Err(pauseErr).Str("peer", chain).Msg("sync: pause state lookup failed")
+		}
+		return
+	}
 	directV3, v3, directErr := m.pairwiseEgressPolicy(ctx, ss, agreement)
 	if directErr != nil {
+		initialPolicyUnlock()
 		m.logger.Warn().Err(directErr).Str("peer", chain).Msg("sync: direct copy policy lookup failed")
 		return
 	}
 	groupOwned, groupErr := m.sharedGroupOwnedDomainsForAgreement(ctx, ss, agreement)
 	if groupErr != nil {
+		initialPolicyUnlock()
 		m.logger.Warn().Err(groupErr).Str("peer", chain).Msg("sync: group owner policy lookup failed")
 		return
 	}
+	initialPolicyUnlock()
 	claimed, claimErr := ss.ClaimDueSyncOutbox(ctx, chain, SyncPushMaxItems)
 	if claimErr != nil {
 		m.logger.Warn().Err(claimErr).Str("peer", chain).Msg("sync: claim failed")
@@ -810,13 +931,24 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 	control, controlErr := ss.GetSyncControl(ctx, chain)
 	currentDirectV3, currentV3, directPolicyErr := m.pairwiseEgressPolicy(ctx, ss, currentAgreement)
 	currentGroupOwned, currentGroupErr := m.sharedGroupOwnedDomainsForAgreement(ctx, ss, currentAgreement)
+	currentPaused, pauseErr := m.connectionSharingPaused(ctx, currentAgreement)
 	policyPending := control != nil && control.Revision > control.DeliveredRevision &&
 		(control.Role == "host" || control.PolicyVersion >= SyncPolicyVersionPeerRBAC)
-	if gateErr != nil || consentErr != nil || controlErr != nil || directPolicyErr != nil || currentGroupErr != nil {
+	if gateErr != nil || consentErr != nil || controlErr != nil || directPolicyErr != nil || currentGroupErr != nil || pauseErr != nil {
 		policyUnlock()
 		policyLocked = false
 		for _, row := range itemRows {
 			retry(row, false, false, syncBackoffBase, "sync policy changed before delivery")
+		}
+		return
+	}
+	if currentPaused {
+		policyUnlock()
+		policyLocked = false
+		for _, row := range itemRows {
+			// Pause is reversible configuration, not a terminal scope removal.
+			// Return claimed rows to pending unchanged so Resume can deliver them.
+			retry(row, false, false, syncBackoffBase, "connection sharing is paused")
 		}
 		return
 	}

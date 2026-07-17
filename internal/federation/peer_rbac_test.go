@@ -257,6 +257,26 @@ func TestPeerRBACQueryAuthoritativeDynamicReadAndWrongAgent(t *testing.T) {
 	if err := json.NewDecoder(allowed.Body).Decode(&response); err != nil || len(response.Results) != 1 || response.Results[0].MemoryID != "rbac-memory" {
 		t.Fatalf("RBAC response = %+v err=%v", response, err)
 	}
+	paused, err := m.SetPeerRBACPaused(context.Background(), "chain-peer", true)
+	if err != nil || paused == nil || !paused.Paused || len(paused.Domains) != 1 {
+		t.Fatalf("pause result=%+v err=%v", paused, err)
+	}
+	deniedWhilePaused := peerRBACQuery(t, m, agreement, "chain-peer", peerID, "rbac.shared", "directional")
+	if deniedWhilePaused.Code != http.StatusForbidden {
+		t.Fatalf("paused read status=%d, want 403", deniedWhilePaused.Code)
+	}
+	advertised := peerRBACGrantFromPolicy(paused)
+	if advertised == nil || !advertised.Paused || advertised.Domains == nil || len(advertised.Domains) != 0 {
+		t.Fatalf("paused grant did not advertise fail-closed state: %#v", advertised)
+	}
+	resumed, err := m.SetPeerRBACPaused(context.Background(), "chain-peer", false)
+	if err != nil || resumed == nil || resumed.Paused || len(resumed.Domains) != 1 {
+		t.Fatalf("resume result=%+v err=%v", resumed, err)
+	}
+	allowedAgain := peerRBACQuery(t, m, agreement, "chain-peer", peerID, "rbac.shared", "directional")
+	if allowedAgain.Code != http.StatusOK {
+		t.Fatalf("resumed read status=%d body=%s", allowedAgain.Code, allowedAgain.Body.String())
+	}
 
 	wrongAgent := peerRBACQuery(t, m, agreement, "chain-peer", newPeerOperatorID(t), "rbac.shared", "directional")
 	if wrongAgent.Code != http.StatusForbidden {
@@ -360,6 +380,61 @@ func TestPeerRBACReadRevokeWaitsForInFlightResponse(t *testing.T) {
 	denied := peerRBACQuery(t, m, agreement, "chain-peer", peerID, "rbac.shared", "leased")
 	if denied.Code != http.StatusForbidden {
 		t.Fatalf("post-revoke query status=%d want 403", denied.Code)
+	}
+}
+
+func TestPeerRBACPauseWaitsForInFlightReadAndDeniesNextRequest(t *testing.T) {
+	m, ss, bs := newDrainTestManager(t)
+	peerID := newPeerOperatorID(t)
+	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-pause", peerID, "host", nil, 4)
+	seedCommitted(t, ss, "pause-memory", "rbac.shared", "leased pause response")
+	if err := bs.SetMemoryClassification("pause-memory", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ReplacePeerRBACPolicy(context.Background(), "chain-pause", []store.PeerRBACDomainPermission{{Domain: "rbac", Read: true}}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(QueryRequest{Mode: ModeText, Query: "leased", DomainTag: "rbac.shared", TopK: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/query", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{
+		ChainID: "chain-pause", AgentID: peerID, Agreement: agreement,
+	}))
+	bw := newBlockingResponseWriter()
+	served := make(chan struct{})
+	go func() {
+		m.handleQuery(bw, req)
+		close(served)
+	}()
+	select {
+	case <-bw.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("query did not reach response write")
+	}
+
+	pauseDone := make(chan error, 1)
+	go func() {
+		_, pauseErr := m.SetPeerRBACPaused(context.Background(), "chain-pause", true)
+		pauseDone <- pauseErr
+	}()
+	select {
+	case err := <-pauseDone:
+		t.Fatalf("pause returned while old-policy response was in flight: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(bw.release)
+	<-served
+	if err := <-pauseDone; err != nil {
+		t.Fatal(err)
+	}
+	if bw.status != http.StatusOK {
+		t.Fatalf("authorized in-flight response status=%d", bw.status)
+	}
+	denied := peerRBACQuery(t, m, agreement, "chain-pause", peerID, "rbac.shared", "leased")
+	if denied.Code != http.StatusForbidden {
+		t.Fatalf("post-pause query status=%d want 403", denied.Code)
 	}
 }
 

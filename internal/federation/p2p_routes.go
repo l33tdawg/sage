@@ -120,9 +120,10 @@ func (m *Manager) handleP2PRoutes(w http.ResponseWriter, r *http.Request) {
 	// Snapshot the ceremony generation that authenticated this request. This
 	// short lease does not cover body parsing or local route discovery.
 	unlock := ss.LockSyncPolicyRead()
+	_, requestErr := m.currentRequestAgreementBound(r.Context(), identity)
 	_, expectedBinding, err := m.currentP2PRouteBinding(r.Context(), identity.ChainID)
 	unlock()
-	if err != nil || identity.Agreement.RemoteChainID != identity.ChainID ||
+	if requestErr != nil || err != nil || identity.Agreement.RemoteChainID != identity.ChainID ||
 		expectedBinding.peerAgentID == "" || identity.AgentID != expectedBinding.peerAgentID ||
 		expectedBinding.agreementCAPin != hex.EncodeToString(identity.Agreement.PeerPubKey) {
 		httpError(w, http.StatusForbidden, "p2p route exchange requires the frozen peer operator")
@@ -145,8 +146,9 @@ func (m *Manager) handleP2PRoutes(w http.ResponseWriter, r *http.Request) {
 	// and finally Remove runs after this write; a completed purge makes this
 	// recheck fail before any route can be re-added.
 	unlock = ss.LockSyncPolicyRead()
+	_, requestErr = m.currentRequestAgreementBound(r.Context(), identity)
 	_, currentBinding, err := m.currentP2PRouteBinding(r.Context(), identity.ChainID)
-	if err != nil || currentBinding != expectedBinding {
+	if requestErr != nil || err != nil || currentBinding != expectedBinding {
 		unlock()
 		httpError(w, http.StatusForbidden, "p2p route binding changed before persistence")
 		return

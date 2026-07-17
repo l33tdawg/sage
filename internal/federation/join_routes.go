@@ -150,6 +150,13 @@ type JoinConfirmWire struct {
 	GroupInviteProof string `json:"group_invite_proof"` // invitee signature over exact group identity + signed scope
 }
 
+// JoinAbortWire lets the already-bound guest end the host's copy of an
+// unfinished ceremony. It carries no secret; joinAuth plus the exact bound
+// client-certificate SPKI is the authorization.
+type JoinAbortWire struct {
+	SessionID string `json:"session_id"`
+}
+
 // JoinConfirmResp reports the host's activation.
 type JoinConfirmResp struct {
 	Status        string                    `json:"status"`
@@ -180,6 +187,7 @@ func (m *Manager) mountJoinRoutes(r chi.Router) {
 		r.Use(m.joinAuth(false))
 		r.Post("/fed/v1/join/request", m.handleJoinRequest)
 		r.Post("/fed/v1/join/confirm", m.handleJoinConfirm)
+		r.Post("/fed/v1/join/abort", m.handleJoinAbort)
 	})
 	// Read-only routes: generous rate limit so a bound guest's ~2s status poll
 	// over a multi-minute ceremony is never throttled (the stuck-guest bug).
@@ -403,6 +411,34 @@ func (m *Manager) handleJoinStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleJoinAbort propagates a guest-side Stop decision so the host does not
+// sit on an unexplained waiting screen. Only the certificate pinned by the
+// bound request may burn that session; unknown and pre-bind sessions are not
+// remotely abortable.
+func (m *Manager) handleJoinAbort(w http.ResponseWriter, r *http.Request) {
+	var req JoinAbortWire
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.SessionID) == "" {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	err := m.joins.AbortBound(req.SessionID, joinCertSPKI(r.Context()))
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrJoinSessionNotFound):
+			httpError(w, http.StatusNotFound, "no such join session")
+		case errors.Is(err, ErrJoinAbortUnbound):
+			httpError(w, http.StatusForbidden, "abort from an unbound client certificate")
+		default:
+			httpError(w, http.StatusConflict, "connection confirmation is already in progress; check Federation before revoking")
+		}
+		return
+	}
+	if end := m.joinP2PHooks().End; end != nil {
+		end(req.SessionID)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "aborted"})
+}
+
 // handleJoinConfirm verifies the guest's approval-#2 signatures over the FROZEN
 // E, then broadcasts the host's tx-33, commits the staged guest CA + seed, and
 // marks the session ACTIVE. This is the host's half of the 2-of-2 gate.
@@ -455,6 +491,13 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	// the nested gate explicitly around the consensus generation change.
 	agreementUnlock := m.LockAgreementMutation()
 	defer agreementUnlock()
+	generation := m.BeginSyncPolicyGenerationMutation(ctx.GuestChain)
+	defer generation.Restore()
+	// Every return before MarkActive must terminate CONFIRMING. FailConfirm is
+	// state-conditional, so it becomes a no-op after successful activation and
+	// safely covers preparation, route persistence, and tx-33 failures without
+	// duplicating a fragile rollback call at every branch.
+	defer m.joins.FailConfirm(sessionID)
 	epoch := syncPolicyEpoch(ctx.ApprovedE)
 	if ss := m.syncStore(); ss != nil {
 		if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
@@ -532,7 +575,10 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	if err := m.initializePeerRBACPolicy(context.Background(), ctx.GuestChain); err != nil {
 		return m.undoPartialHostConfirmLocked(sessionID, ctx, "peer RBAC initialization failed", err)
 	}
-	m.joins.MarkActive(sessionID)
+	if activeErr := m.joins.MarkActive(sessionID); activeErr != nil {
+		return m.undoPartialHostConfirmLocked(sessionID, ctx, "join session activation failed", activeErr)
+	}
+	generation.Activate()
 	if hooks.End != nil {
 		hooks.End(sessionID)
 	}
@@ -582,7 +628,7 @@ func (m *Manager) undoPartialHostConfirmLocked(sessionID string, ctx *ConfirmCon
 		m.logger.Error().Err(rErr).Str("guest", ctx.GuestChain).Msg("revoke after partial host confirm failed - manual cleanup may be needed")
 	}
 	ctx.RollbackGuestCA()
-	m.joins.Abort(sessionID)
+	m.joins.FailConfirm(sessionID)
 	return "", "", fmt.Errorf("%s after broadcast; agreement revoked: %w", what, cause)
 }
 
@@ -643,7 +689,7 @@ func (m *Manager) HostCreateMode(hostEndpoint string, requireP2P bool) (*HostCre
 		}
 	}
 	if requireP2P && transport != "p2p" {
-		m.joins.Abort(js.ID)
+		_ = m.joins.Abort(js.ID)
 		return nil, fmt.Errorf("internet connection is not ready: enable P2P and wait for a relay reservation")
 	}
 	return &HostCreateResult{
@@ -764,12 +810,17 @@ func (m *Manager) HostApprove(sessionID, typedCode string, grant ScopeWire) erro
 	return err
 }
 
-// HostAbort burns a session (H4 "No" / operator ignore).
-func (m *Manager) HostAbort(sessionID string) {
-	m.joins.Abort(sessionID)
+// HostAbort burns a pre-confirm session (H4 "No" / operator ignore). Once a
+// verified confirm owns the session, callers receive a conflict instead of a
+// misleading successful Stop while activation continues.
+func (m *Manager) HostAbort(sessionID string) error {
+	if err := m.joins.Abort(sessionID); err != nil {
+		return err
+	}
 	if end := m.joinP2PHooks().End; end != nil {
 		end(sessionID)
 	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1149,6 +1200,34 @@ func (m *Manager) GuestPollStatus(ctx context.Context, sessionID string) (*JoinS
 	return &resp, nil
 }
 
+// GuestAbort tells the host why this side stopped, then zeroizes the local
+// draft regardless of transport success. It is intentionally limited to the
+// requested state: once activation starts, GuestConfirm owns recovery and a
+// normal connection must use the explicit revoke path.
+func (m *Manager) GuestAbort(ctx context.Context, sessionID string) error {
+	m.guestConfirmMu.Lock()
+	defer m.guestConfirmMu.Unlock()
+	d, ok := m.getGuestDraft(sessionID)
+	if !ok {
+		return fmt.Errorf("no scanned connection for this session (re-scan)")
+	}
+	if d.state != guestDraftScanned && d.state != guestDraftRequested {
+		return fmt.Errorf("connection ceremony cannot be stopped in state %s", d.state)
+	}
+	defer m.dropGuestDraft(sessionID, d.generation)
+	if d.state == guestDraftScanned {
+		// The host has not bound this guest certificate yet, so there is no
+		// authenticated remote session we are allowed to abort. Local zeroization
+		// is the complete cancellation at this stage.
+		return nil
+	}
+	var resp map[string]string
+	if err := m.guestCall(ctx, d, http.MethodPost, "/fed/v1/join/abort", &JoinAbortWire{SessionID: sessionID}, &resp); err != nil {
+		return fmt.Errorf("tell peer the connection was stopped: %w", err)
+	}
+	return nil
+}
+
 // GuestConfirm is approval #2: it computes E, broadcasts the guest's OWN tx-33
 // first (guest-first activation, RT-7), then POSTs /fed/v1/join/confirm so the
 // host activates its side. hostScope is what the guest polled from /join/status.
@@ -1231,6 +1310,8 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 		txHash, err = func() (string, error) {
 			agreementUnlock := m.LockAgreementMutation()
 			defer agreementUnlock()
+			generation := m.BeginSyncPolicyGenerationMutation(d.hostChain)
+			defer generation.Restore()
 
 			if ss := m.syncStore(); ss != nil {
 				if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
@@ -1303,6 +1384,7 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 				_, _ = m.revokeAgreementLocked(d.hostChain)
 				return "", fmt.Errorf("peer RBAC initialization failed; agreement rolled back: %w", initErr)
 			}
+			generation.Activate()
 			return activatedHash, nil
 		}()
 		if err != nil {
@@ -1447,15 +1529,36 @@ func (m *Manager) broadcastCrossFedSetLocked(terms *tx.CrossFedTerms) (string, e
 // nothing on disk (consensus cannot touch node-local files); the purge is the
 // off-consensus half.
 func (m *Manager) RevokeAgreement(remoteChainID string) (string, error) {
-	agreementUnlock := m.LockAgreementMutation()
-	defer agreementUnlock()
-	return m.revokeAgreementLocked(remoteChainID)
+	result, err := m.RevokeAgreementNotifying(remoteChainID)
+	if result == nil {
+		return "", err
+	}
+	return result.TxHash, err
 }
 
 // revokeAgreementLocked commits tx-34 and purges all matching node-local
 // capabilities while the caller owns agreementMutationMu. JOIN rollback uses
 // this form to avoid recursively acquiring the non-reentrant agreement lease.
 func (m *Manager) revokeAgreementLocked(remoteChainID string) (string, error) {
+	return m.revokeAgreementLockedReason(remoteChainID, "operator disconnect")
+}
+
+func (m *Manager) revokeAgreementLockedReason(remoteChainID, reason string) (string, error) {
+	hash, err := m.broadcastRevokeAgreementLockedReason(remoteChainID, reason)
+	if err != nil {
+		return "", err
+	}
+	// Caller holds the matching SyncPolicyGenerationMutation through this purge.
+	m.purgeLocalFederationStateQuiesced(remoteChainID)
+	return hash, nil
+}
+
+// broadcastRevokeAgreementLockedReason commits tx-34 but deliberately leaves
+// the old node-local authentication material intact. The notifying revoke path
+// uses that short fail-closed window to tell the peer only after local consensus
+// has succeeded, then purges in a defer. ActiveAgreement already denies the
+// revoked edge during the window, so retained files cannot authorize requests.
+func (m *Manager) broadcastRevokeAgreementLockedReason(remoteChainID, reason string) (string, error) {
 	if err := ValidateChainID(remoteChainID); err != nil {
 		return "", err
 	}
@@ -1472,7 +1575,7 @@ func (m *Manager) revokeAgreementLocked(remoteChainID string) (string, error) {
 		Timestamp: time.Unix(ts, 0),
 		CrossFedRevoke: &tx.CrossFedRevoke{
 			RemoteChainID: remoteChainID,
-			Reason:        "operator disconnect",
+			Reason:        reason,
 		},
 		AgentPubKey:    m.agentPub,
 		AgentSig:       agentSig,
@@ -1490,7 +1593,6 @@ func (m *Manager) revokeAgreementLocked(remoteChainID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	m.PurgeLocalFederationState(remoteChainID)
 	return hash, nil
 }
 
@@ -1498,6 +1600,14 @@ func (m *Manager) revokeAgreementLocked(remoteChainID string) (string, error) {
 // with a revoked agreement. REST's independently-broadcast revoke calls this
 // same helper so no control surface leaves routes or sync authority behind.
 func (m *Manager) PurgeLocalFederationState(remoteChainID string) {
+	generation := m.BeginSyncPolicyGenerationMutation(remoteChainID)
+	defer generation.Retire()
+	m.purgeLocalFederationStateQuiesced(remoteChainID)
+}
+
+// purgeLocalFederationStateQuiesced is the destructive half used by callers
+// that already own the per-peer generation-delivery lease across tx-34.
+func (m *Manager) purgeLocalFederationStateQuiesced(remoteChainID string) {
 	// Off-consensus purge (zeroize seed cache + delete seed files + drop cached CA).
 	m.purgeSeed(remoteChainID)
 	m.invalidateCACache(remoteChainID)

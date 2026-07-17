@@ -51,17 +51,28 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.9.1
+## What's New in v11.9.2
 
-**Task creation now applies the `[TASK]` marker exactly once.** MCP `sage_task` and CEREBRUM's task-creation path preserve content that is already marked instead of storing `[TASK] [TASK] ...`; unmarked content still receives the canonical prefix. Direct regression tests cover both entry points and both marked/unmarked inputs.
+**Federation now behaves like colleague sharing in CEREBRUM.** JOIN establishes exact node/operator trust but shares zero domains by default. Each SAGE independently chooses and changes existing domains for live **Read** or optional **Copy** after pairing; remote **Write** remains explicitly unavailable until a future connection-bound consensus authorization exists.
 
-- **Safer release recovery.** A failed publication can be resumed only from the current protected `main` workflow and always checks out the exact immutable tag. The staged Python wheel smoke test installs declared runtime dependencies before importing the SDK, catching packaging metadata failures before any public channel is touched.
-- **Stronger real-network evidence.** The four-validator partition proof accepts observed reject activity on either symmetric firewall endpoint while still verifying the exact peer topology on every node before, during, and after healing. This removes a timing-sensitive false failure without weakening the partition assertion.
-- **Maintained build and storage stack.** The Go database, compression, TOML, and SQLite dependencies are refreshed through the full race and fault matrix. GitHub's Go, Node, and CodeQL actions are updated and remain pinned to immutable commits.
+- **Connections that stay manageable.** Every active row opens into clear local-versus-remote permissions, current Read/Copy state, and domain selection. Pause temporarily disconnects a colleague without losing the pairing or saved choices; Resume reconnects immediately. Permanent revoke remains available in details, not as everyday clutter, and the peer receives a durable explanation instead of a mysterious failure. Revoked history is collapsed out of the main list.
+- **A shorter, clearer trust ceremony.** The common path is two reciprocal QR scans followed by one six-digit anti-swap fingerprint check per person. The host's redundant pre-confirmation screen is gone; peer identity and the “trust only—no domains shared” boundary now live on the single real confirmation screen. Wide layouts keep both scan cards side by side, while narrow and short screens scroll cleanly around the camera preview.
+- **Fail-closed under races and retries.** JOIN activation, permission replacement, Pause/Resume, revocation, peer notification, stale reconciliation, and policy-label delivery are linearized against the exact CA/operator/epoch agreement generation. An old generation cannot disclose a newly built domain list, overwrite a fresh pairing, resurrect retired access, or clear a concurrent operator Pause.
 
-This patch changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.9.1.
+This patch changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.9.2.
 
 ## Older releases
+
+<details>
+<summary>v11.9.1 - task-marker correctness and release hardening</summary>
+
+**Task creation applies the `[TASK]` marker exactly once.** MCP `sage_task` and CEREBRUM's task-creation path preserve content that is already marked instead of storing `[TASK] [TASK] ...`; unmarked content still receives the canonical prefix. Direct regression tests cover both entry points and both marked/unmarked inputs.
+
+- A failed publication can be resumed only from the current protected `main` workflow and always checks out the exact immutable tag. The staged Python wheel smoke test installs declared runtime dependencies before importing the SDK.
+- The four-validator partition proof accepts observed reject activity on either symmetric firewall endpoint while still verifying the exact peer topology on every node before, during, and after healing.
+- The Go database, compression, TOML, and SQLite dependencies were refreshed through the full race and fault matrix. GitHub's Go, Node, and CodeQL actions remain pinned to immutable commits.
+
+</details>
 
 <details>
 <summary>v11.9.0 - scoped consensus and colleague-style federation</summary>
@@ -515,7 +526,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.9.1`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.9.2`.
 
 ### Upgrading from an older version?
 

@@ -2,6 +2,7 @@ package rest
 
 import (
 	"crypto/ed25519"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,7 +11,19 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/federation"
 )
+
+type notifyingRevokeFederation struct {
+	*fakeFederation
+	called string
+	result *federation.RevokeAgreementResult
+}
+
+func (f *notifyingRevokeFederation) RevokeAgreementNotifying(chain string) (*federation.RevokeAgreementResult, error) {
+	f.called = chain
+	return f.result, nil
+}
 
 func legacyFederationControlRouter(s *Server, callerID string) http.Handler {
 	r := chi.NewRouter()
@@ -59,5 +72,36 @@ func TestLegacyFederationControlRequiresExactNodeOperator(t *testing.T) {
 		if rr.Code == http.StatusForbidden {
 			t.Fatalf("operator did not cross federation-control gate for %s %s", route.method, route.path)
 		}
+	}
+}
+
+func TestRESTFederationRevokeUsesPeerNotificationWorkflowWhenAvailable(t *testing.T) {
+	driver := &notifyingRevokeFederation{
+		fakeFederation: &fakeFederation{},
+		result: &federation.RevokeAgreementResult{
+			TxHash: "tx-notify", PeerNotified: false, NoticeError: "peer was offline",
+		},
+	}
+	s := &Server{logger: zerolog.Nop(), nodeOperatorID: "node-operator", federation: driver}
+	req := httptest.NewRequest(http.MethodPost, "/v1/federation/cross/chain-peer/revoke", nil)
+	rr := httptest.NewRecorder()
+	legacyFederationControlRouter(s, "node-operator").ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if driver.called != "chain-peer" {
+		t.Fatalf("notifier called with %q", driver.called)
+	}
+	var body struct {
+		Status              string `json:"status"`
+		TxHash              string `json:"tx_hash"`
+		PeerNotified        bool   `json:"peer_notified"`
+		NotificationWarning string `json:"notification_warning"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "revoked" || body.TxHash != "tx-notify" || body.PeerNotified || body.NotificationWarning != "peer was offline" {
+		t.Fatalf("unexpected response: %+v", body)
 	}
 }

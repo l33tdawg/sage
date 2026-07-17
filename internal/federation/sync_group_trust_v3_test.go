@@ -104,6 +104,34 @@ func TestFreshTrustOnlyV3GroupOwnerFanoutIgnoresEmptyDirectLane(t *testing.T) {
 	require.Len(t, pushed, 1)
 	assert.Equal(t, "m-group", pushed[0].OriginMemoryID)
 
+	// A connection Pause is stronger than direct pairwise policy: it must also
+	// close group-native fanout to this exact peer without deleting the roster.
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-b", nil)
+	require.NoError(t, err)
+	_, err = m.SetPeerRBACPaused(ctx, "chain-b", true)
+	require.NoError(t, err)
+	pausedConsent, err := m.effectiveConsent(ctx, ms, "chain-b")
+	require.NoError(t, err)
+	assert.Empty(t, pausedConsent)
+	seedCommitted(t, ms, "m-paused-group", "studio", "must not cross a paused edge")
+	m.onCommitted([]string{"m-paused-group"})
+	counts, err = ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.NoError(t, err)
+	assert.Zero(t, counts[store.SyncStatePending], "paused group edge must not enqueue new work")
+	_, err = ms.EnqueueSyncOutbox(ctx, "chain-b", "m-paused-group")
+	require.NoError(t, err)
+	m.syncDrain(ctx, ms, agreement, []string{"studio"}) // deliberately stale caller snapshot
+	assert.Len(t, pushed, 1, "paused group edge must fail closed again at drain")
+	counts, err = ms.CountSyncOutboxByState(ctx, "chain-b")
+	require.NoError(t, err)
+	assert.Equal(t, 1, counts[store.SyncStatePending], "pause must return a claimed row to retryable pending")
+	assert.Zero(t, counts[store.SyncStateRejected], "temporary pause must never terminally reject queued Copy work")
+	_, err = m.SetPeerRBACPaused(ctx, "chain-b", false)
+	require.NoError(t, err)
+	resumedConsent, err := m.effectiveConsent(ctx, ms, "chain-b")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"studio"}, resumedConsent, "resume restores the unchanged group roster")
+
 	// Removal closes the journal capability without touching/re-pairing the trust
 	// edge. Even a stale/manual outbox row cannot cross the send-time group gate.
 	require.NoError(t, ms.SetSyncGroupMemberState(ctx, "g1", "chain-b", store.GroupMemberRemoved, 1))
@@ -229,6 +257,21 @@ func TestFreshTrustOnlyV3GroupRelayWorksWithoutDirectCopy(t *testing.T) {
 	r.syncDrain(ctx, msR, agreement, consented)
 	require.Len(t, pushed, 1)
 	assert.Equal(t, "chain-x", pushed[0].OriginChainID)
+	relayGroup, relayAllowed, err := r.resolveGroupRelayForAgreement(ctx, msR, agreement,
+		"chain-x", hex.EncodeToString(xPub), "studio")
+	require.NoError(t, err)
+	require.True(t, relayAllowed)
+	require.Equal(t, "g1", relayGroup)
+	_, err = r.ReplacePeerRBACPolicy(ctx, "chain-m", nil)
+	require.NoError(t, err)
+	_, err = r.SetPeerRBACPaused(ctx, "chain-m", true)
+	require.NoError(t, err)
+	_, relayAllowed, err = r.resolveGroupRelayForAgreement(ctx, msR, agreement,
+		"chain-x", hex.EncodeToString(xPub), "studio")
+	require.NoError(t, err)
+	require.False(t, relayAllowed, "pause must close a relayed Copy lane to the exact peer")
+	_, err = r.SetPeerRBACPaused(ctx, "chain-m", false)
+	require.NoError(t, err)
 
 	// Removal invalidates the exact three-member relay even though the transport
 	// trust edge remains active and the caller deliberately supplies stale consent.

@@ -59,6 +59,8 @@ func (m *Manager) UpdateAgreementSharing(remoteChainID string, domains []string)
 
 	m.agreementMutationMu.Lock()
 	defer m.agreementMutationMu.Unlock()
+	generation := m.BeginSyncPolicyGenerationMutation(remoteChainID)
+	defer generation.Restore()
 	// Legacy tx-33 terms are still the effective read policy until a peer is
 	// upgraded to directional RBAC. Take the same write side used by peer
 	// handlers before resolving the current terms and retain it through the

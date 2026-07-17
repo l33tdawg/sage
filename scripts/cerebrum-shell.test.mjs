@@ -55,6 +55,48 @@ test('federation owns a viewport-bounded vertical scroll container', () => {
     assert.match(federationPage, /flex:\s*1/);
     assert.match(federationPage, /min-height:\s*0/);
     assert.match(federationPage, /overflow-y:\s*auto/);
+    const scanVideo = cssSource.match(/\.fed-scan-video\s*\{([^}]*)\}/)?.[1] || '';
+    assert.match(scanVideo, /max-height:\s*min\(46vh,\s*340px\)/,
+        'a live camera must remain bounded on short laptop viewports');
+    assert.match(cssSource, /@media \(max-width:\s*820px\)[\s\S]*\.fed-exchange\s*\{\s*grid-template-columns:\s*1fr/,
+        'the two-way scan cards must stack into the page scroll container on narrow screens');
+});
+
+test('federation ceremony presents one clear two-way scan flow without dropping the safety check', () => {
+    const hostWizard = appSource.slice(appSource.indexOf('function HostJoinWizard('), appSource.indexOf('function fedCatalogMap('));
+    assert.match(hostWizard, /fed-wizard-wide/);
+    assert.match(hostWizard, /class="fed-exchange"/);
+    assert.match(hostWizard, /They scan this SAGE/);
+    assert.match(hostWizard, /Scan their SAGE back/);
+    assert.ok(hostWizard.indexOf('They scan this SAGE') < hostWizard.indexOf('Scan their SAGE back'));
+    assert.match(appSource, /Scan each other[\s\S]*Confirm colleague[\s\S]*Connected/,
+        'operators should see three human stages rather than protocol internals');
+    assert.match(hostWizard, /expectedCode=\$\{view\.code_g\}/,
+        'the pin-bound anti-relay safety code remains deliberate and unskippable');
+    assert.match(appSource, /expectedCode=\$\{codes\.code_h\}/,
+        'both operators still independently confirm the connection');
+    const guestWizard = appSource.slice(appSource.indexOf('function GuestJoinWizard('), appSource.indexOf('// HostJoinWizard'));
+    assert.match(guestWizard, /useState\('scan'\)/,
+        'the normal guest flow must open directly on the camera scan');
+    assert.doesNotMatch(appSource, /function FedChannelGate/,
+        'remote/fallback help must be progressive disclosure, not a three-choice preflight');
+    assert.match(guestWizard, /Connecting remotely or need to change the network address\?/);
+    assert.match(appSource, /Why check a number after scanning\?/,
+        'the remaining anti-relay fingerprint must explain why it exists');
+    assert.match(guestWizard, /They confirm you[\s\S]*You confirm them/,
+        'the guest should see one mutual check with one responsibility per person');
+    assert.match(hostWizard, /You confirm them[\s\S]*They confirm you/,
+        'the host should see the same mutual check from the opposite perspective');
+    assert.match(hostWizard, /step === 'waiting' && v\.guest_chain\) setStep\('compare'\)/,
+        'the host should move directly from the reciprocal scan to the one real trust decision');
+    assert.doesNotMatch(hostWizard, /step === 'review'/,
+        'a redundant pre-confirmation screen must not make the host approve the same colleague twice');
+    assert.match(hostWizard, /trustOnly=\$\{true\}/);
+    assert.match(appSource, /This establishes trust only; no domains are shared yet/,
+        'the single host confirmation screen must preserve the trust-versus-permissions boundary');
+    assert.match(apiSource, /fedGuestAbort/);
+    assert.match(guestWizard, /await fedGuestAbort\(scan\.session_id\)/,
+        'a guest-side Stop must notify the waiting peer');
 });
 
 test('federation separates trust from directional per-domain RBAC', () => {
@@ -99,6 +141,42 @@ test('federation separates trust from directional per-domain RBAC', () => {
     assert.doesNotMatch(panel, /Add a topic|syncRole|Managed by the host|host-managed/);
     assert.match(appSource, /<\$\{FedPermissionsPanel\} conn=\$\{c\}/);
     assert.doesNotMatch(appSource, /FedSyncPanel/);
+});
+
+test('federation keeps temporary pause separate from permanent revocation and hides past clutter', () => {
+    const page = appSource.slice(appSource.indexOf('function FederationPage('), appSource.indexOf('// PAGE_LABELS'));
+    const panel = appSource.slice(appSource.indexOf('function FedPermissionsPanel('), appSource.indexOf('// FederationWarmup'));
+    assert.match(apiSource, /connections\/\$\{encodeURIComponent\(chainId\)\}\/pause/);
+    assert.match(page, /Resume sharing/);
+    assert.match(page, /pairing preserved/);
+    assert.match(panel, /Revoke trust permanently/);
+    assert.match(page, /Past connections \(\$\{pastConns\.length\}\)/);
+    assert.match(page, /showPast && html/,
+        'immutable past rows must remain collapsed until the operator asks for history');
+    assert.match(panel, /remotePaused/);
+    assert.match(panel, /paused sharing/);
+    assert.match(page, /lastGoodConns/);
+    assert.doesNotMatch(page, /setConns\(\[\]\)/,
+        'one failed poll must not unmount live rows and unsaved permission drafts');
+    assert.match(page, /ended this connection/);
+    assert.match(page, /sage-fed-revoke-dismissed/,
+        'peer revocation must have a persistent, dismissible explanation outside collapsed history');
+    assert.match(page, /ended_at/);
+});
+
+test('federation ceremony controls expose accessible dialog, focus, and table semantics', () => {
+    assert.match(appSource, /aria-label="Enlarge connection QR code"/);
+    assert.match(appSource, /role="dialog" aria-modal="true"/);
+    assert.match(appSource, /triggerRef\.current\.focus\(\)/);
+    assert.match(appSource, /for="fed-safety-code"/);
+    assert.match(appSource, /role="alert">That doesn't match/);
+    assert.match(appSource, /querySelector\('\.fed-step h2, \.fed-step h3, \.fed-compare h3'\)/);
+    assert.match(appSource, /role="table" aria-label=/);
+    assert.match(appSource, /class="fed-perm-cell" role="cell"/);
+    assert.match(appSource, /fed-qr-manual-code/,
+        'clipboard or QR failure must expose selectable plaintext instead of a dead-end instruction');
+    assert.match(appSource, /aria-controls=\$\{`fed-connection-/);
+    assert.match(cssSource, /@media \(max-width:\s*560px\)[\s\S]*\.fed-perm-grid-copy-choice/);
 });
 
 test('task cards expand fully and planned task edits preserve consensus history', () => {

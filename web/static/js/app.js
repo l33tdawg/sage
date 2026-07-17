@@ -7,11 +7,12 @@ deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedSyncGet, fedSyncSet, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestConfirm } from './api.js';
+fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedSyncGet, fedSyncSet, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
 import { buildUpdateBanner } from './update-banner.js';
+import { normalizeFederationJoinState } from './federation-flow.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useLayoutEffect, useCallback, useContext } = preactHooks;
@@ -23,7 +24,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.9.1';
+const SAGE_VERSION = 'v11.9.2';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -11384,12 +11385,23 @@ function FedGreenRail() {
     </div>`;
 }
 
-// TwoOfTwoMeter - the ●○ / ●● 2-of-2 consent meter. n = 0..2.
-function TwoOfTwoMeter({ n, labelA = 'You', labelB = 'Them' }) {
-    return html`<div class="fed-2of2" role="status" aria-label=${`${n} of 2 confirmed`}>
-        <span class="fed-dot ${n >= 1 ? 'on' : ''}" title=${labelA}></span>
-        <span class="fed-dot ${n >= 2 ? 'on' : ''}" title=${labelB}></span>
-        <span class="fed-2of2-text">${n} of 2 confirmed</span>
+// FedCeremonyProgress keeps the security ceremony legible as three human
+// moments. The protocol still has two independent confirmations underneath,
+// but the operator should not have to think in implementation steps.
+function FedCeremonyProgress({ stage }) {
+    const stages = [
+        ['scan', 'Scan each other'],
+        ['check', 'Confirm colleague'],
+        ['done', 'Connected'],
+    ];
+    const active = Math.max(0, stages.findIndex(([id]) => id === stage));
+    return html`<div class="fed-ceremony-progress" aria-label="Connection progress">
+        ${stages.map(([id, label], index) => html`<div
+            class="fed-ceremony-progress-item ${index < active ? 'done' : ''} ${index === active ? 'active' : ''}"
+            aria-current=${index === active ? 'step' : null} key=${id}>
+            <span class="fed-ceremony-progress-dot">${index < active ? '✓' : index + 1}</span>
+            <span>${label}</span>
+        </div>`)}
     </div>`;
 }
 
@@ -11421,8 +11433,11 @@ function paintQr(el, text, size) {
 
 function FedQr({ text, size = 220, caption }) {
     const ref = useRef(null);
+    const triggerRef = useRef(null);
     const bigRef = useRef(null);
+    const dialogRef = useRef(null);
     const [copied, setCopied] = useState(false);
+    const [copyError, setCopyError] = useState(false);
     const [rendered, setRendered] = useState(false);
     const [big, setBig] = useState(false);
     useEffect(() => { setRendered(paintQr(ref.current, text, size)); }, [text, size]);
@@ -11431,26 +11446,48 @@ function FedQr({ text, size = 220, caption }) {
     // to the screen can lock on from across a desk.
     useEffect(() => {
         if (!big) return;
-        const px = Math.min(Math.round(Math.min(window.innerWidth, window.innerHeight) * 0.8), 640);
+        // Leave room for dialog padding, the white QR surround, hint text and
+        // gap. Sizing from the raw viewport at 80% clipped landscape laptops.
+        const px = Math.min(640,
+            Math.max(96, Math.floor(window.innerWidth - 96)),
+            Math.max(96, Math.floor(window.innerHeight - 180)));
         paintQr(bigRef.current, text, px);
-        const onKey = (e) => { if (e.key === 'Escape') setBig(false); };
+        if (dialogRef.current) dialogRef.current.focus();
+        const onKey = (e) => {
+            if (e.key === 'Escape') closeBig();
+            if (e.key === 'Tab') { e.preventDefault(); if (dialogRef.current) dialogRef.current.focus(); }
+        };
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
     }, [big, text]);
 
+    const closeBig = () => {
+        setBig(false);
+        requestAnimationFrame(() => { if (triggerRef.current) triggerRef.current.focus(); });
+    };
     const copy = async () => {
-        try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch (e) {}
+        setCopyError(false);
+        try { await navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }
+        catch (e) { setCopyError(true); }
     };
     return html`<div class="fed-qr">
-        <div class="fed-qr-canvas" ref=${ref} onClick=${() => rendered && setBig(true)}
-            role="button" title="Click to enlarge for scanning"></div>
+        <div class="fed-qr-canvas" ref=${el => { ref.current = el; triggerRef.current = el; }}
+            onClick=${() => rendered && setBig(true)}
+            onKeyDown=${e => { if (rendered && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setBig(true); } }}
+            role="button" tabindex="0" aria-label="Enlarge connection QR code" title="Click to enlarge for scanning"></div>
         ${!rendered && html`<div class="fed-qr-fallback muted">QR unavailable - share the code below instead.</div>`}
         ${caption && html`<div class="fed-qr-caption muted">${caption}</div>`}
         <div class="fed-qr-actions" style="display:flex;gap:8px;">
             ${rendered && html`<button class="btn fed-qr-enlarge" onClick=${() => setBig(true)}>⤢ Make it bigger</button>`}
             <button class="btn fed-copy-btn" onClick=${copy}>${copied ? '✓ Copied' : 'Copy code instead'}</button>
         </div>
-        ${big && html`<div class="fed-qr-lightbox" onClick=${() => setBig(false)}>
+        ${(copyError || !rendered) && html`<div class="fed-qr-manual">
+            ${copyError && html`<div class="fed-qr-copy-error" role="alert">Couldn’t copy automatically. Select and copy the connection code below.</div>`}
+            <textarea class="fed-qr-manual-code" readonly aria-label="Connection code for manual copy"
+                value=${text} onFocus=${e => e.currentTarget.select()} onClick=${e => e.currentTarget.select()}></textarea>
+        </div>`}
+        ${big && html`<div class="fed-qr-lightbox" ref=${dialogRef} role="dialog" aria-modal="true"
+            aria-label="Enlarged connection QR code" tabindex="-1" onClick=${closeBig}>
             <div class="fed-qr-lightbox-canvas" ref=${bigRef} onClick=${e => e.stopPropagation()}></div>
             <div class="fed-qr-lightbox-hint">Point the other computer's camera at this. Click anywhere or press Esc to close.</div>
         </div>`}
@@ -11508,7 +11545,7 @@ function FedScanInput({ onValue, busy }) {
                         const r = window.jsQR(img.data, img.width, img.height);
                         if (r) value = r.data;
                     }
-                    if (value) { stop(); onValue(value); return; }
+                    if (value) { stop(); onValue(value, 'camera'); return; }
                 } catch (e) {}
                 rafRef.current = requestAnimationFrame(scanLoop);
             };
@@ -11537,13 +11574,13 @@ function FedScanInput({ onValue, busy }) {
                 value=${pasted} onInput=${e => setPasted(e.target.value)}></textarea>
             <div class="fed-scan-actions">
                 <button class="btn" onClick=${() => setMode('choose')}>Back</button>
-                <button class="btn btn-primary" disabled=${!v || busy} onClick=${() => onValue(v)}>Use this code</button>
+                <button class="btn btn-primary" disabled=${!v || busy} onClick=${() => onValue(v, 'paste')}>Use this code</button>
             </div>
         </div>`;
     }
     return html`<div class="fed-scan-choose">
         <button class="btn btn-primary" disabled=${busy} onClick=${startCamera}>📷 Scan with camera</button>
-        <button class="btn" disabled=${busy} onClick=${() => setMode('paste')}>Paste the code</button>
+        <button class="fed-linkbtn" disabled=${busy} onClick=${() => setMode('paste')}>Can’t scan? Paste a connection code</button>
     </div>`;
 }
 
@@ -11551,19 +11588,28 @@ function FedScanInput({ onValue, busy }) {
 // pre-highlighted "Yes", no auto-advance, no timeout-confirm. Decisive consent
 // requires TYPING the code you heard; the confirm button stays inert until the
 // typed value matches what this node computed. "No - stop" is first-class danger.
-function FedCodeCompare({ title, instruction, expectedCode, confirmLabel, onConfirm, onReject, busy, tier4 }) {
+function FedCodeCompare({ title, instruction, expectedCode, confirmLabel, onConfirm, onReject, busy, tier4, peerName, peerID, trustOnly }) {
     const [typed, setTyped] = useState('');
     const norm = typed.replace(/\D/g, '');
     const match = norm.length === 6 && expectedCode && norm === String(expectedCode);
     return html`<div class="fed-compare">
         <${FedGreenRail} />
         <h3>${title}</h3>
+        ${peerName && html`<div class="fed-compare-peer">
+            <strong>${peerName}</strong>
+            ${peerID && html`<span class="muted">Network id: <code>${peerID}</code></span>`}
+        </div>`}
+        ${trustOnly && html`<p class="fed-compare-trust">This establishes trust only; no domains are shared yet. You choose access after connecting.</p>`}
         <p class="fed-compare-instr">${instruction}</p>
         ${tier4 && html`<div class="fed-tier4-note">No camera or shared screen? This spoken-code compare is your ONLY safety check - say it out loud on a call you placed to someone you trust, and only continue if it matches exactly.</div>`}
-        <label class="fed-compare-label">Type the code they read you</label>
-        <input class="fed-compare-input" inputmode="numeric" autocomplete="off" maxlength="7"
+        <details class="fed-why-code">
+            <summary>Why check a number after scanning?</summary>
+            <p>The two scans exchange the computers’ keys. This short fingerprint catches a code that was swapped or relayed before you approve it. Each person checks it once; it is not another account or password.</p>
+        </details>
+        <label class="fed-compare-label" for="fed-safety-code">Type the number on their screen</label>
+        <input id="fed-safety-code" class="fed-compare-input" inputmode="numeric" autocomplete="off" maxlength="7"
             placeholder="• • • • • •" value=${typed} onInput=${e => setTyped(e.target.value)} />
-        ${norm.length === 6 && !match && html`<div class="fed-compare-bad">That doesn't match what's on your screen. Do NOT continue - hang up and call them back on a number you trust.</div>`}
+        ${norm.length === 6 && !match && html`<div class="fed-compare-bad" role="alert">That doesn't match what's on your screen. Do NOT continue - hang up and call them back on a number you trust.</div>`}
         <div class="fed-compare-actions">
             <button class="btn btn-danger" disabled=${busy} onClick=${onReject}>No - stop</button>
             <button class="btn ${match ? 'btn-confirm-live' : ''}" disabled=${!match || busy} onClick=${() => onConfirm(norm)}>
@@ -11592,6 +11638,7 @@ function isLoopbackEndpoint(ep) {
 function useLanEndpoint() {
     const [endpoint, setEndpoint] = useState(`https://${location.hostname}:8444`);
     const [candidates, setCandidates] = useState([]);
+    const [resolved, setResolved] = useState(false);
     const touched = useRef(false);
     const set = (v) => { touched.current = true; setEndpoint(v); };
     useEffect(() => {
@@ -11606,10 +11653,11 @@ function useLanEndpoint() {
                     setEndpoint(r.suggested_endpoint);
                 }
             })
-            .catch(() => {});
+            .catch(() => {})
+            .finally(() => { if (live) setResolved(true); });
         return () => { live = false; };
     }, []);
-    return [endpoint, set, candidates];
+    return [endpoint, set, candidates, resolved];
 }
 
 // FedEndpointPicker - a labeled address chooser for multi-homed machines (VPN +
@@ -11630,37 +11678,11 @@ function FedEndpointPicker({ candidates, endpoint, onPick }) {
     </div>`;
 }
 
-// FedChannelGate - the physical-object question (redteam #2). Distinguishes a
-// code held as a PHYSICAL object from a transmitted image. A shared screen /
-// forwarded image / pure phone call routes to the spoken-code (Tier-4) path,
-// never presented as equal to in-person. Also collects the guest's own reachable
-// address (where the host will connect back).
-function FedChannelGate({ endpoint, onEndpoint, candidates, onChoose }) {
-    return html`<div class="fed-step">
-        <h2>Connect to another network</h2>
-        <${FedGreenRail} />
-        <div class="fed-field">
-            <label>Your network address (how they'll reach you)</label>
-            <input class="fed-share-input" value=${endpoint} onInput=${e => onEndpoint(e.target.value)}
-                placeholder="https://192.168.1.20:8444" />
-            <div class="muted">Usually https://[your computer's address]:8444 on your network.</div>
-            ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This is a localhost address — the other computer can't reach it. Use this machine's network address (e.g. <code>https://192.168.1.20:8444</code>), not <code>localhost</code>.</div>`}
-        </div>
-        <${FedEndpointPicker} candidates=${candidates} endpoint=${endpoint} onPick=${onEndpoint} />
-        <div class="fed-gate-q">Are you looking at their code as a physical thing they're holding - in the same room, or held up to the camera on a call YOU placed to someone you trust?</div>
-        <div class="fed-gate-choices">
-            <button class="btn btn-primary" onClick=${() => onChoose(false)}>Yes - same room, or their phone on my camera</button>
-            <button class="btn" onClick=${() => onChoose(true)}>We're on a call, I'd see a shared screen or an image</button>
-            <button class="btn" onClick=${() => onChoose(true)}>We're just on the phone / no camera</button>
-        </div>
-        <div class="muted fed-gate-note">A shared screen or a forwarded image can be faked. For those we use the spoken-code method - it's built for calls.</div>
-    </div>`;
-}
-
 // GuestJoinWizard - "Join a network". Maps to guest STEP 1-4.
 function GuestJoinWizard({ onExit }) {
-    const [step, setStep] = useState('channel');
-    const [endpoint, setEndpoint, lanCandidates] = useLanEndpoint();
+    const wizardRef = useRef(null);
+    const [step, setStep] = useState('scan');
+    const [endpoint, setEndpoint, lanCandidates, endpointReady] = useLanEndpoint();
     const [tier4, setTier4] = useState(false);
     const [scan, setScan] = useState(null);       // {session_id, host_chain, host_endpoint, host_pin, return_uri}
     const [codes, setCodes] = useState(null);      // {code_g, code_h, confirm_step}
@@ -11668,12 +11690,23 @@ function GuestJoinWizard({ onExit }) {
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
     const [pollNote, setPollNote] = useState('');
+    const [endedReason, setEndedReason] = useState('');
+
+    useEffect(() => {
+        requestAnimationFrame(() => {
+            const heading = wizardRef.current && wizardRef.current.querySelector('.fed-step h2, .fed-step h3, .fed-compare h3');
+            if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus(); }
+        });
+    }, [step]);
 
     const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
 
-    const doScan = async (uri) => {
+    const doScan = async (uri, source = 'camera') => {
         setBusy(true); setErr('');
-        try { const r = await fedGuestScan(uri, endpoint); setScan(r); setStep('return'); }
+        try {
+            if (source !== 'camera') setTier4(true);
+            const r = await fedGuestScan(uri, endpoint); setScan(r); setStep('return');
+        }
         catch (e) { fail(e); }
         setBusy(false);
     };
@@ -11704,12 +11737,24 @@ function GuestJoinWizard({ onExit }) {
         } catch (e) { fail(e); }
         setBusy(false);
     };
+    const stopGuest = async (nextStep = 'aborted') => {
+        setBusy(true);
+        try { if (scan) await fedGuestAbort(scan.session_id); }
+        catch (e) { setErr(`Stopped locally, but we couldn't notify the other computer: ${String(e.message || e)}`); }
+        setBusy(false); setStep(nextStep);
+    };
+    const exitGuest = async () => {
+        if (scan && !['done', 'aborted', 'ended'].includes(step)) {
+            try { await fedGuestAbort(scan.session_id); } catch (e) {}
+        }
+        onExit();
+    };
 
     // Poll host status while showing our code (waiting for host approval #1).
     // After a run of failed checks we surface a soft "still trying" note so a
     // genuinely stalled connection shows a reason instead of an eternal spinner.
     useEffect(() => {
-        if (step !== 'yourcode' || !scan) return;
+        if (!['yourcode', 'theircode'].includes(step) || !scan) return;
         let live = true;
         let misses = 0;
         const tick = async () => {
@@ -11717,69 +11762,87 @@ function GuestJoinWizard({ onExit }) {
                 const s = await fedGuestStatus(scan.session_id);
                 if (!live) return;
                 misses = 0; setPollNote('');
-                if (s.aborted) { setErr('They stopped the connection.'); setStep('channel'); return; }
-                if (s.host_approved) { setHostScope(s.host_scope || {}); setStep('theircode'); }
+                if (s.aborted || s.state === 'aborted') { setEndedReason('They stopped the connection before it completed.'); setStep('ended'); return; }
+                if (s.expired || s.state === 'expired') { setEndedReason('The connection code expired before both computers finished.'); setStep('ended'); return; }
+                if (s.active) { setStep('done'); return; }
+                if (step === 'yourcode' && s.host_approved) { setHostScope(s.host_scope || {}); setStep('theircode'); }
             } catch (e) {
                 if (!live) return;
                 misses += 1;
                 if (misses >= 4) setPollNote(`Can't check their side (${e && e.message ? e.message : 'no response'}). Make sure the other computer is on and you're both on the same network.`);
+                if (misses >= 15) { setEndedReason('We could not reach the other computer for about 30 seconds. Your connection has not been approved; check the network and try again.'); setStep('interrupted'); }
             }
         };
         const id = setInterval(tick, 2000); tick();
         return () => { live = false; clearInterval(id); setPollNote(''); };
     }, [step, scan]);
 
-    return html`<div class="fed-wizard">
+    const progressStage = step === 'done' ? 'done'
+        : (['yourcode', 'theircode'].includes(step) ? 'check' : 'scan');
+
+    return html`<div class="fed-wizard" ref=${wizardRef}>
         <div class="fed-wizard-head">
-            <button class="btn fed-back" onClick=${onExit}>← Back</button>
+            <button class="btn fed-back" onClick=${exitGuest}>← Back</button>
             <span class="fed-wizard-title">Join someone’s network</span>
         </div>
-        ${err && html`<div class="fed-err">${err}</div>`}
-
-        ${step === 'channel' && html`<${FedChannelGate} endpoint=${endpoint} onEndpoint=${setEndpoint} candidates=${lanCandidates}
-            onChoose=${(t) => { setTier4(t); setStep('scan'); }} />`}
+        ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
+        ${err && html`<div class="fed-err" role="alert">${err}</div>`}
 
         ${step === 'scan' && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h3>Point your camera at their code</h3>
-            ${tier4 && html`<div class="fed-tier4-note">No camera / shared screen: paste the code they send, then we'll double-check with a spoken code you compare out loud.</div>`}
-            <${FedScanInput} onValue=${doScan} busy=${busy} />
+            <h2>Scan their SAGE</h2>
+            <p class="muted">Point your camera at the connection code your colleague is showing you.</p>
+            ${tier4 && html`<div class="fed-tier4-note">Connecting remotely or using a pasted image? The short number check later protects against a code being swapped or relayed.</div>`}
+            ${!endpointReady && html`<div class="muted">Finding this computer’s network address…</div>`}
+            <${FedScanInput} onValue=${doScan} busy=${busy || !endpointReady} />
+            <details class="fed-advanced" open=${isLoopbackEndpoint(endpoint) || lanCandidates.length > 1}>
+                <summary onClick=${() => setTier4(true)}>Connecting remotely or need to change the network address?</summary>
+                <div class="fed-field">
+                    <label for="fed-guest-endpoint">This computer’s reachable address</label>
+                    <input id="fed-guest-endpoint" class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)}
+                        placeholder="https://192.168.1.20:8444" />
+                    ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">This is a localhost address. Another computer needs this SAGE’s LAN or internet-reachable address.</div>`}
+                </div>
+                <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
+            </details>
         </div>`}
 
         ${step === 'return' && scan && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h3>Now show them YOUR code</h3>
+            <h3>Now let them scan you</h3>
             <p class="muted">Connecting to <strong>${scan.host_name || scan.host_chain}</strong>${scan.host_name ? html` <span style="font-size:11px;">(id: <code>${scan.host_chain}</code>)</span>` : ''}. Hold this up to their camera, or send it for them to paste.</p>
             <${FedQr} text=${scan.return_uri} caption="Their SAGE scans this to check it's really you." />
             <div class="fed-step-actions">
-                <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : "They've got my code - verify trust"}</button>
+                <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : "They've scanned me — continue"}</button>
             </div>
         </div>`}
 
         ${step === 'yourcode' && codes && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h3>Read this to them out loud</h3>
+            <h3>They confirm you</h3>
             <${BigCode} code=${codes.code_g} />
-            <p class="fed-read-instr">Call them and read this code. It proves you're really connected to each other - not someone in the middle.</p>
+            <p class="fed-read-instr">${tier4
+                ? 'Read this code to them out loud. It catches a connection code that was swapped or relayed.'
+                : 'Have them compare this with their screen, or read it aloud. It catches a swapped connection code.'}</p>
             <div class="fed-waiting"><span class="fed-spinner"></span> Waiting for them to check your code…</div>
             ${pollNote && html`<div class="fed-tier4-note" style="margin-top:10px;">${pollNote}</div>`}
-            <${TwoOfTwoMeter} n=${0} />
         </div>`}
 
         ${step === 'theircode' && codes && html`<${FedCodeCompare}
-            title="Check the code they read you"
-            instruction="They'll read you a code. Type exactly what you hear."
+            title="You confirm them"
+            instruction=${tier4
+                ? "They'll read you one final code. Type exactly what you hear."
+                : "Compare with their screen, or type exactly what they read aloud."}
             expectedCode=${codes.code_h}
             tier4=${tier4}
             confirmLabel="Yes - connect"
             busy=${busy}
             onConfirm=${doConfirm}
-            onReject=${() => setStep('aborted')} />`}
+            onReject=${() => stopGuest('aborted')} />`}
 
         ${step === 'done' && html`<div class="fed-step fed-done">
             <div class="fed-done-check">✓</div>
             <h2>You're connected to ${scan && scan.host_chain}</h2>
-            <${TwoOfTwoMeter} n=${2} />
             <p class="muted">Trust is established. Each computer now manages what it shares. Open this connection to choose existing domains for live Read or optional Copy; disconnecting always stops future access. Connection-bound Write is reserved but not active yet.</p>
             <button class="btn btn-primary" onClick=${onExit}>Done</button>
         </div>`}
@@ -11790,16 +11853,35 @@ function GuestJoinWizard({ onExit }) {
             <p class="fed-compare-bad">Nothing was shared and nothing was changed on your brain. Hang up and call them back on a number you trust, then start over.</p>
             <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Federation</button></div>
         </div>`}
+        ${step === 'ended' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Connection stopped</h3>
+            <p class="muted">${endedReason}</p>
+            <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Federation</button></div>
+        </div>`}
+        ${step === 'interrupted' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Couldn’t reach the other SAGE</h3>
+            <p class="muted">${endedReason}</p>
+            <div class="fed-step-actions">
+                <button class="btn" onClick=${exitGuest}>Cancel</button>
+                <button class="btn btn-primary" onClick=${() => { setPollNote(''); setEndedReason(''); setStep('yourcode'); }}>Try again</button>
+            </div>
+        </div>`}
     </div>`;
 }
 
 // HostJoinWizard - "Let someone join". Maps to host H1-H7.
 function HostJoinWizard({ onExit }) {
+    const wizardRef = useRef(null);
     const [step, setStep] = useState('route');
     const [routeMode, setRouteMode] = useState('');
     const [endpoint, setEndpoint, lanCandidates] = useLanEndpoint();
     const [session, setSession] = useState(null);   // {session_id, otpauth_uri, host_pin}
     const [view, setView] = useState(null);          // host status view
+    const [tier4, setTier4] = useState(false);
+    const [endedReason, setEndedReason] = useState('');
+    const interruptedFrom = useRef('waiting');
     // The ceremony establishes trust, not authorization. The empty legacy
     // scope keeps the existing consensus transaction compatible; operators
     // add directional domain permissions only after the peer is trusted.
@@ -11808,9 +11890,16 @@ function HostJoinWizard({ onExit }) {
     const [err, setErr] = useState('');
     const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
 
+    useEffect(() => {
+        requestAnimationFrame(() => {
+            const heading = wizardRef.current && wizardRef.current.querySelector('.fed-step h2, .fed-step h3, .fed-compare h3');
+            if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus(); }
+        });
+    }, [step]);
+
     const doCreate = async (mode = routeMode || 'lan') => {
         setBusy(true); setErr('');
-        try { const r = await fedHostCreate(endpoint, mode); setSession(r); setRouteMode(mode); setStep('showqr'); }
+        try { const r = await fedHostCreate(endpoint, mode); setSession(r); setRouteMode(mode); setTier4(mode === 'internet'); setStep('showqr'); }
         catch (e) { fail(e); }
         setBusy(false);
     };
@@ -11834,9 +11923,9 @@ function HostJoinWizard({ onExit }) {
         autoTried.current = true; // don't immediately re-auto-create; let them edit
         setSession(null); setView(null); setStep('create');
     };
-    const doScanReturn = async (uri) => {
+    const doScanReturn = async (uri, source = 'camera') => {
         setBusy(true); setErr('');
-        try { await fedHostScanReturn(session.session_id, uri); setStep('waiting'); }
+        try { if (source !== 'camera') setTier4(true); await fedHostScanReturn(session.session_id, uri); setStep('waiting'); }
         catch (e) { fail(e); }
         setBusy(false);
     };
@@ -11848,8 +11937,13 @@ function HostJoinWizard({ onExit }) {
     };
     // Cancel from a non-decision screen: burn the session and leave.
     const abort = async () => {
-        try { if (session) await fedHostAbort(session.session_id); } catch (e) {}
-        onExit();
+        setErr('');
+        try {
+            if (session) await fedHostAbort(session.session_id);
+            onExit();
+        } catch (e) {
+            setErr(String(e.message || e));
+        }
     };
     // Reject at the trust moment: burn the session but STAY mounted so the
     // "Do NOT approve" safety message is actually seen.
@@ -11858,29 +11952,47 @@ function HostJoinWizard({ onExit }) {
         setStep('aborted');
     };
 
-    // Poll host session status during waiting / readback.
+    // Poll every in-flight host screen so a guest-side Stop, expiry, or network
+    // failure always becomes visible instead of leaving a dead spinner/card.
     useEffect(() => {
-        if (!session || (step !== 'waiting' && step !== 'readback')) return;
+        if (!session || !['waiting', 'compare', 'readback'].includes(step)) return;
         let live = true;
+        let misses = 0;
         const tick = async () => {
             try {
                 const v = await fedHostStatus(session.session_id);
                 if (!live) return;
+                misses = 0;
                 setView(v);
-                if (step === 'waiting' && v.guest_chain) setStep('review');
+                const state = normalizeFederationJoinState(v.state);
+                if (state === 'aborted') { setEndedReason('They stopped the connection before it completed.'); setStep('ended'); return; }
+                if (state === 'expired') { setEndedReason('The connection code expired before both computers finished.'); setStep('ended'); return; }
+                if (step === 'waiting' && v.guest_chain) setStep('compare');
                 if (step === 'readback' && v.active) setStep('done');
-            } catch (e) {}
+            } catch (e) {
+                if (!live) return;
+                misses += 1;
+                if (misses >= 15) {
+                    interruptedFrom.current = step;
+                    setEndedReason('We could not reach the local federation service for about 30 seconds. The connection has not silently advanced.');
+                    setStep('interrupted');
+                }
+            }
         };
         const id = setInterval(tick, 2000); tick();
         return () => { live = false; clearInterval(id); };
     }, [step, session]);
 
-    return html`<div class="fed-wizard">
+    const progressStage = step === 'done' ? 'done'
+        : (['compare', 'readback'].includes(step) ? 'check' : 'scan');
+
+    return html`<div class="fed-wizard ${step === 'showqr' ? 'fed-wizard-wide' : ''}" ref=${wizardRef}>
         <div class="fed-wizard-head">
             <button class="btn fed-back" onClick=${step === 'route' ? onExit : abort}>← ${step === 'route' ? 'Back' : 'Cancel'}</button>
             <span class="fed-wizard-title">Let someone join</span>
         </div>
-        ${err && html`<div class="fed-err">${err}</div>`}
+        ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
+        ${err && html`<div class="fed-err" role="alert">${err}</div>`}
 
         ${step === 'route' && html`<div class="fed-step">
             <h2>How are the two computers connected?</h2>
@@ -11896,22 +12008,36 @@ function HostJoinWizard({ onExit }) {
             <h2>Let someone join your network</h2>
             <${FedGreenRail} />
             <div class="fed-field">
-                <label>Your network address (how they'll reach you)</label>
-                <input class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:8444" />
+                <label for="fed-host-endpoint">Your network address (how they'll reach you)</label>
+                <input id="fed-host-endpoint" class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:8444" />
                 ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This address only works on this computer, so anyone who scans your code would reach their own machine instead. Pick this computer's address on your network below (e.g. <code>https://192.168.1.10:8444</code>).</div>`}
             </div>
             <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
             <button class="btn btn-primary" disabled=${busy} onClick=${() => doCreate('lan')}>${busy ? 'Working…' : 'Show my connection code'}</button>
         </div>`}
 
-        ${step === 'showqr' && session && html`<div class="fed-step">
+        ${step === 'showqr' && session && html`<div class="fed-step fed-exchange-step">
             <${FedGreenRail} />
-            <h3>Have them scan this</h3>
-            <${FedQr} text=${session.otpauth_uri} caption="Point the other computer's camera at this — tap “Make it bigger” if it won't focus." />
-            <p class="muted">Best done in the same room, or held up to a video call you trust.
-                <button class="fed-linkbtn" onClick=${editAddress}>Wrong address? Edit it</button></p>
-            <h3>Then scan their code back</h3>
-            <${FedScanInput} onValue=${doScanReturn} busy=${busy} />
+            <h2>Scan each other</h2>
+            <p class="fed-exchange-lead muted">Two quick scans, one in each direction. This confirms both computers before anything can be shared.</p>
+            <div class="fed-exchange">
+                <section class="fed-exchange-card">
+                    <div class="fed-exchange-card-head">
+                        <span class="fed-exchange-number">1</span>
+                        <div><h3>They scan this SAGE</h3><p class="muted">Show this code to your colleague.</p></div>
+                    </div>
+                    <${FedQr} size=${200} text=${session.otpauth_uri} caption="Their camera scans this first." />
+                    <button class="fed-linkbtn" onClick=${editAddress}>Wrong network address?</button>
+                </section>
+                <section class="fed-exchange-card fed-exchange-card-active">
+                    <div class="fed-exchange-card-head">
+                        <span class="fed-exchange-number">2</span>
+                        <div><h3>Scan their SAGE back</h3><p class="muted">They'll show you their return code.</p></div>
+                    </div>
+                    <${FedScanInput} onValue=${doScanReturn} busy=${busy} />
+                </section>
+            </div>
+            <p class="fed-exchange-note muted">Best done in the same room, or on a video call you placed to someone you trust.</p>
         </div>`}
 
         ${step === 'waiting' && html`<div class="fed-step">
@@ -11919,22 +12045,14 @@ function HostJoinWizard({ onExit }) {
             <div class="fed-waiting"><span class="fed-spinner"></span> Waiting for their request…</div>
         </div>`}
 
-        ${step === 'review' && view && html`<div class="fed-step">
-            <${FedGreenRail} />
-            <h3>${view.guest_name ? html`<strong>${view.guest_name}</strong> wants to connect` : html`Someone using the name "${view.guest_chain}" wants to connect`}</h3>
-            ${view.guest_name && html`<div class="muted" style="font-size:12px;margin-top:-4px;">Their network id: <code>${view.guest_chain}</code> — the name is just a label they chose; the code you check next is what proves it's really them.</div>`}
-            <h4>This step establishes identity trust only</h4>
-            <p class="muted">No domain access is granted by approving this connection. After both codes match, each computer independently chooses which existing domains the other may Read or offer for Copy. Connection-bound Write is reserved but not active yet.</p>
-            <div class="fed-step-actions">
-                <button class="btn btn-danger" onClick=${abort}>Ignore</button>
-                <button class="btn btn-primary" onClick=${() => setStep('compare')}>Next: verify their identity</button>
-            </div>
-        </div>`}
-
         ${step === 'compare' && view && html`<${FedCodeCompare}
-            title="Check their code"
-            instruction="They'll read you a code. Type exactly what you hear. This is the moment that proves it's really them."
+            title="You confirm them"
+            instruction="Compare with the code on their screen, or have them read it aloud. Type it here to make sure neither scan was swapped."
             expectedCode=${view.code_g}
+            peerName=${view.guest_name || view.guest_chain}
+            peerID=${view.guest_name ? view.guest_chain : ''}
+            trustOnly=${true}
+            tier4=${tier4}
             confirmLabel="Yes, they match - approve"
             busy=${busy}
             onConfirm=${doApprove}
@@ -11942,17 +12060,15 @@ function HostJoinWizard({ onExit }) {
 
         ${step === 'readback' && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h3>Read this code back to them</h3>
+            <h3>They confirm you</h3>
             ${view && view.code_h ? html`<${BigCode} code=${view.code_h} />` : html`<div class="fed-waiting"><span class="fed-spinner"></span> Preparing…</div>`}
-            <p class="fed-read-instr">Read this code to ${(view && (view.guest_name || view.guest_chain)) || 'them'} so they can confirm it. Say it out loud - don't paste it.</p>
-            <div class="fed-waiting"><span class="fed-spinner"></span> You approved. Waiting for them (2 of 2)…</div>
-            <${TwoOfTwoMeter} n=${1} />
+            <p class="fed-read-instr">Let ${(view && (view.guest_name || view.guest_chain)) || 'them'} compare this with their screen, or read it aloud. Don't send it as a pasted message.</p>
+            <div class="fed-waiting"><span class="fed-spinner"></span> Waiting for their confirmation…</div>
         </div>`}
 
         ${step === 'done' && html`<div class="fed-step fed-done">
             <div class="fed-done-check">✓</div>
             <h2>Connected to ${view && view.guest_chain}</h2>
-            <${TwoOfTwoMeter} n=${2} />
             <h3>Trust is established</h3>
             <p class="muted">Permissions are separate from trust. Open this connection from Federation to choose which existing domains they may Read or Copy. They manage what they share back from their own computer; connection-bound Write is reserved but not active yet.</p>
             <button class="btn btn-primary" onClick=${onExit}>Done</button>
@@ -11963,6 +12079,21 @@ function HostJoinWizard({ onExit }) {
             <h3>Stopped - the codes didn't match</h3>
             <p class="fed-compare-bad">Do NOT approve. Nothing was shared and nothing was changed on your brain. Hang up and call them back on a number you trust, then start over.</p>
             <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Federation</button></div>
+        </div>`}
+        ${step === 'ended' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Connection stopped</h3>
+            <p class="muted">${endedReason}</p>
+            <div class="fed-step-actions"><button class="btn btn-primary" onClick=${onExit}>Back to Federation</button></div>
+        </div>`}
+        ${step === 'interrupted' && html`<div class="fed-step">
+            <${FedGreenRail} />
+            <h3>Connection check interrupted</h3>
+            <p class="muted">${endedReason}</p>
+            <div class="fed-step-actions">
+                <button class="btn" onClick=${abort}>Cancel</button>
+                <button class="btn btn-primary" onClick=${() => { setEndedReason(''); setStep(interruptedFrom.current || 'waiting'); }}>Try again</button>
+            </div>
         </div>`}
     </div>`;
 }
@@ -12027,7 +12158,7 @@ function fedDomainMatchesFilter(domain, filter) {
 
 // FedPermissionsPanel keeps identity/trust separate from ongoing authorization.
 // Each node edits only its own grants and observes the peer's grants read-only.
-function FedPermissionsPanel({ conn }) {
+function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const chain = conn.remote_chain_id;
     const peerName = conn.peer_name || chain;
     const [catalog, setCatalog] = useState(null);
@@ -12035,6 +12166,7 @@ function FedPermissionsPanel({ conn }) {
     const [draft, setDraft] = useState(null);
     const [remote, setRemote] = useState({});
     const [remoteKnown, setRemoteKnown] = useState(false);
+    const [remotePaused, setRemotePaused] = useState(false);
     const [subscribeSaved, setSubscribeSaved] = useState([]);
     const [subscribeDraft, setSubscribeDraft] = useState([]);
     const [syncKnown, setSyncKnown] = useState(false);
@@ -12064,6 +12196,7 @@ function FedPermissionsPanel({ conn }) {
                 setSaved(local); setDraft(local);
                 setRemote(normalizeFedPermissionList(p.remote_permissions));
                 setRemoteKnown(p.remote_known === true);
+                setRemotePaused(p.remote_paused === true);
             } else {
                 // PUT replaces the entire local snapshot. If GET failed, an
                 // editable empty draft could silently erase grants we never
@@ -12100,6 +12233,7 @@ function FedPermissionsPanel({ conn }) {
                 const p = permissionsResult.value || {};
                 setRemote(normalizeFedPermissionList(p.remote_permissions));
                 setRemoteKnown(p.remote_known === true);
+                setRemotePaused(p.remote_paused === true);
             }
             if (live) timer = setTimeout(poll, 8000);
         };
@@ -12189,6 +12323,7 @@ function FedPermissionsPanel({ conn }) {
             setSaved(nextLocal); setDraft(nextLocal);
             if (Array.isArray(response.remote_permissions)) setRemote(normalizeFedPermissionList(response.remote_permissions));
             if (Object.prototype.hasOwnProperty.call(response, 'remote_known')) setRemoteKnown(response.remote_known === true);
+            if (Object.prototype.hasOwnProperty.call(response, 'remote_paused')) setRemotePaused(response.remote_paused === true);
             showToast(`Permissions updated for ${peerName}`, 'success');
         } catch (e) { setErr(String(e.message || e)); }
         setBusy(false);
@@ -12230,6 +12365,7 @@ function FedPermissionsPanel({ conn }) {
             setCatalog(fedCatalogMap(catalogResponse));
             setRemote(normalizeFedPermissionList(permissionResponse.remote_permissions));
             setRemoteKnown(permissionResponse.remote_known === true);
+            setRemotePaused(permissionResponse.remote_paused === true);
             if (!subscribeDirty) {
                 const domains = normalizeFedDomainList(syncResponse && syncResponse.subscribe_domains);
                 setSubscribeSaved(domains); setSubscribeDraft(domains); setSyncKnown(true);
@@ -12248,6 +12384,9 @@ function FedPermissionsPanel({ conn }) {
         <div class="fed-permissions-intro">
             <strong>Trust and permissions are separate.</strong> The connection proves who this computer is linked to. These domain permissions decide what may cross that trusted link, and either computer can change its own grants at any time.
         </div>
+        ${conn.sharing_paused && html`<div class="fed-perm-pause-note">
+            <strong>Sharing from this SAGE is paused.</strong> The saved domain choices below are preserved and take effect again when you resume.
+        </div>`}
 
         <section class="fed-perm-section">
             <div class="fed-perm-section-head">
@@ -12269,6 +12408,7 @@ function FedPermissionsPanel({ conn }) {
                 </div>
             </div>
             <div class="fed-perm-count muted">${visibleRows.length} of ${localRows.length} domains shown. Bulk actions affect only these visible rows.</div>
+            <div class="fed-perm-table" role="table" aria-label=${`Domains this computer shares with ${peerName}`}>
             <div class="fed-perm-grid fed-perm-grid-head" role="row">
                 <span role="columnheader">Existing domain</span><span role="columnheader">Read</span><span role="columnheader">Write (not yet)</span><span role="columnheader">Copy offer</span>
             </div>
@@ -12287,7 +12427,7 @@ function FedPermissionsPanel({ conn }) {
                             ${row.meta && !row.canShare ? html`<span class="fed-perm-tag blocked">not shareable</span>` : ''}
                         </span>
                     </div>
-                    ${['read', 'write', 'copy'].map(field => html`<label class="fed-perm-cell" key=${field}>
+                    ${['read', 'write', 'copy'].map(field => html`<label class="fed-perm-cell" role="cell" key=${field}>
                         <input type="checkbox"
                             aria-label="Allow ${peerName} to ${field} ${row.domain}"
                             checked=${!!permission[field]}
@@ -12297,6 +12437,7 @@ function FedPermissionsPanel({ conn }) {
                     </label>`)}
                 </div>`;
             })}
+            </div>
             ${err && html`<div class="fed-err fed-perm-error">${err}</div>`}
             <div class="fed-perm-actions">
                 <button class="btn btn-primary" disabled=${!dirty || busy} onClick=${save}>${busy ? 'Saving…' : 'Save what I share'}</button>
@@ -12312,9 +12453,13 @@ function FedPermissionsPanel({ conn }) {
                 </div>
                 <button class="btn" disabled=${refreshing} onClick=${refresh}>${refreshing ? 'Refreshing…' : 'Refresh'}</button>
             </div>
+            ${remotePaused && html`<div class="fed-perm-pause-note">
+                <strong>${peerName} paused sharing.</strong> Effective Read and Copy access is off now. Their saved choices stay private on their SAGE and can resume when they turn sharing back on.
+            </div>`}
             ${!remoteKnown && html`<div class="fed-perm-empty muted">Their SAGE has not reported its permission set yet.</div>`}
-            ${remoteKnown && remoteRows.length === 0 && html`<div class="fed-perm-empty muted">They are not sharing any domains with this computer.</div>`}
+            ${remoteKnown && !remotePaused && remoteRows.length === 0 && html`<div class="fed-perm-empty muted">They are not sharing any domains with this computer.</div>`}
             ${remoteRows.length > 0 && html`<div>
+                <div class="fed-perm-table" role="table" aria-label=${`Domains ${peerName} shares with this computer`}>
                 <div class="fed-perm-grid fed-perm-grid-copy-choice fed-perm-grid-head" role="row">
                     <span role="columnheader">Their domain</span><span role="columnheader">Read</span><span role="columnheader">Write (not yet)</span><span role="columnheader">Copy offered</span><span role="columnheader">Save here</span>
                 </div>
@@ -12323,12 +12468,12 @@ function FedPermissionsPanel({ conn }) {
                     return html`<div class="fed-perm-grid fed-perm-grid-copy-choice fed-perm-row fed-perm-remote-row" role="row" key=${domain}>
                     <div class="fed-perm-domain" role="rowheader">
                         <strong>${domain}</strong>
-                        ${!permission.copy && subscribed && html`<span class="fed-perm-domain-meta"><span class="fed-perm-tag stale">copy no longer offered — remove only</span></span>`}
+                        ${!remotePaused && !permission.copy && subscribed && html`<span class="fed-perm-domain-meta"><span class="fed-perm-tag stale">copy no longer offered — remove only</span></span>`}
                     </div>
-                    ${['read', 'write', 'copy'].map(field => html`<span class="fed-perm-cell" key=${field} aria-label="${field} ${permission[field] ? 'allowed' : 'not allowed'}">
+                    ${['read', 'write', 'copy'].map(field => html`<span class="fed-perm-cell" role="cell" key=${field} aria-label="${field} ${permission[field] ? 'allowed' : 'not allowed'}">
                         <span class="fed-perm-state ${permission[field] ? 'on' : 'off'}">${permission[field] ? '✓' : '—'}</span>
                     </span>`)}
-                    <label class="fed-perm-cell">
+                    <label class="fed-perm-cell" role="cell">
                         <input type="checkbox"
                             aria-label="Save synchronized copies of ${domain} on this computer"
                             checked=${subscribed}
@@ -12336,11 +12481,20 @@ function FedPermissionsPanel({ conn }) {
                             onChange=${() => toggleSubscription(domain, permission.copy)} />
                     </label>
                 </div>`;})}
+                </div>
                 <div class="fed-perm-actions">
                     <button class="btn btn-primary" disabled=${!syncKnown || !subscribeDirty || syncBusy} onClick=${saveSubscriptions}>${syncBusy ? 'Saving…' : 'Save copy choices'}</button>
                     <span class="muted">${!syncKnown ? 'Copy controls unavailable' : (subscribeDirty ? 'Unsaved copy choices' : 'Saved')}</span>
                 </div>
             </div>`}
+        </section>
+
+        <section class="fed-perm-danger">
+            <div>
+                <strong>Revoke trust permanently</strong>
+                <p>This ends the trusted pairing, notifies the peer when reachable, and requires the JOIN ceremony again if you reconnect. Use Pause sharing on the connection row for a temporary stop.</p>
+            </div>
+            <button class="btn btn-danger" disabled=${revokeBusy} onClick=${onRevoke}>${revokeBusy ? 'Revoking…' : 'Revoke trust…'}</button>
         </section>
     </div>`;
 }
@@ -12523,14 +12677,49 @@ function FederationPage() {
     const [conns, setConns] = useState(null);
     const [localChain, setLocalChain] = useState('');
     const [err, setErr] = useState('');
+    const [remoteNotice, setRemoteNotice] = useState(null);
+    const lastGoodConns = useRef(null);
 
     const load = async () => {
-        try { const r = await fedConnections(); setConns(r.connections || []); setLocalChain(r.local_chain_id || ''); setErr(''); }
-        catch (e) { setErr(String(e.message || e)); setConns([]); }
+        try {
+            const r = await fedConnections();
+            const next = Array.isArray(r.connections) ? r.connections : [];
+            const previous = lastGoodConns.current;
+            if (previous) {
+                const previouslyActive = new Set(previous.filter(c => c.status === 'active' && !c.expired).map(c => c.remote_chain_id));
+                next.filter(c => c.ended_by === 'revoked_by_peer' && previouslyActive.has(c.remote_chain_id))
+                    .forEach(c => showToast(`${c.peer_name || c.remote_chain_id} revoked this connection. Access has stopped.`, 'warning'));
+            }
+            const latestRemoteRevoke = next.filter(c => c.ended_by === 'revoked_by_peer')
+                .sort((a, b) => String(b.ended_at || '').localeCompare(String(a.ended_at || '')))[0] || null;
+            if (latestRemoteRevoke) {
+                const key = `sage-fed-revoke-dismissed:${latestRemoteRevoke.remote_chain_id}:${latestRemoteRevoke.ended_at || ''}`;
+                let dismissed = false;
+                try { dismissed = localStorage.getItem(key) === '1'; } catch (e) {}
+                setRemoteNotice(dismissed ? null : { ...latestRemoteRevoke, dismissKey: key });
+            } else {
+                setRemoteNotice(null);
+            }
+            lastGoodConns.current = next;
+            setConns(next); setLocalChain(r.local_chain_id || ''); setErr('');
+        }
+        catch (e) {
+            // Keep the last good rows (and any open permission draft) mounted
+            // across a transient poll failure. The error is useful; an empty
+            // list would falsely imply every connection disappeared.
+            setErr(String(e.message || e));
+        }
     };
-    useEffect(() => { if (mode === 'landing') load(); }, [mode]);
+    useEffect(() => {
+        if (mode !== 'landing') return undefined;
+        load();
+        const timer = setInterval(() => { if (!document.hidden) load(); }, 10000);
+        return () => clearInterval(timer);
+    }, [mode]);
 
     const [openChain, setOpenChain] = useState('');
+    const [showPast, setShowPast] = useState(false);
+    const [busyChain, setBusyChain] = useState('');
     // Start hidden-until-known: keep the join cards down until the first
     // readiness result, so a fresh (warming) node never briefly shows cards
     // that would start a ceremony doomed to fail. On a ready/mature node the
@@ -12538,17 +12727,47 @@ function FederationPage() {
     // also called on a readiness error (older binary), so cards still show.
     const [warming, setWarming] = useState(true); // fork-ladder warm-up on a fresh node
     const [fedOn, setFedOn] = useState(null); // master switch: null=unknown, then bool
+    const pause = async (conn, paused) => {
+        if (paused && !await showConfirmation(
+            `Pause sharing with ${conn.peer_name || conn.remote_chain_id}? Their live Read and Copy access stops immediately. Your selected domains and trusted pairing stay saved, so Resume is one click.`,
+            { title: 'Pause sharing?', confirmLabel: 'Pause sharing', tone: 'primary' }
+        )) return;
+        setBusyChain(conn.remote_chain_id);
+        try {
+            await fedPause(conn.remote_chain_id, paused);
+            showToast(paused ? 'Sharing paused; pairing preserved' : 'Sharing resumed', 'success');
+            await load();
+        } catch (e) { showToast(String(e.message || e), 'error'); }
+        setBusyChain('');
+    };
     const revoke = async (chain) => {
         if (!await showConfirmation(
-            `Turn off the connection to ${chain}? This does NOT erase anything - it just stops the two networks from reaching each other.`,
-            { title: 'Turn off this connection?', confirmLabel: 'Turn off connection', tone: 'danger' }
+            `Permanently revoke trust with ${chain}? This stops access, notifies the peer when reachable, and requires the JOIN ceremony again if you reconnect. Use Pause sharing instead for a temporary stop.`,
+            { title: 'Revoke trust permanently?', confirmLabel: 'Revoke trust', tone: 'danger' }
         )) return;
-        try { await fedRevoke(chain); showToast(`Disconnected from ${chain}`, 'success'); load(); }
+        setBusyChain(chain);
+        try {
+            const result = await fedRevoke(chain);
+            const note = result && result.peer_notified === false ? ' Peer notification could not be delivered.' : '';
+            showToast(`Trust revoked with ${chain}.${note}`, result && result.peer_notified === false ? 'warning' : 'success');
+            setOpenChain('');
+            await load();
+        }
         catch (e) { showToast(String(e.message || e), 'error'); }
+        setBusyChain('');
+    };
+    const dismissRemoteNotice = () => {
+        if (remoteNotice && remoteNotice.dismissKey) {
+            try { localStorage.setItem(remoteNotice.dismissKey, '1'); } catch (e) {}
+        }
+        setRemoteNotice(null);
     };
 
     if (mode === 'guest') return html`<div class="page fed-page"><${GuestJoinWizard} onExit=${() => setMode('landing')} /></div>`;
     if (mode === 'host') return html`<div class="page fed-page"><${HostJoinWizard} onExit=${() => setMode('landing')} /></div>`;
+
+    const liveConns = (conns || []).filter(c => c.status === 'active' && !c.expired);
+    const pastConns = (conns || []).filter(c => c.status !== 'active' || c.expired);
 
     return html`<div class="page fed-page">
         <div class="fed-landing">
@@ -12558,6 +12777,13 @@ function FederationPage() {
             <${FederationMasterSwitch} onChange=${setFedOn} />
             ${fedOn && html`<${NetworkNameEditor} />`}
             ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
+            ${remoteNotice && html`<div class="fed-peer-revoke-notice" role="status">
+                <div>
+                    <strong>${remoteNotice.peer_name || remoteNotice.remote_chain_id} ended this connection</strong>
+                    <p>${remoteNotice.ended_message || 'The other SAGE revoked the trusted link. Read and Copy access stopped immediately.'}</p>
+                </div>
+                <button class="btn" aria-label="Dismiss connection-ended notice" onClick=${dismissRemoteNotice}>Dismiss</button>
+            </div>`}
             ${fedOn === false && html`<div class="fed-off-note muted">Federation is off, so joining or hosting a connection is unavailable. Turn it on above to connect.</div>`}
             ${fedOn && html`<${FederationWarmup} onState=${(ready) => setWarming(!ready)} />`}
             ${fedOn && !warming && html`<div class="fed-roles">
@@ -12575,11 +12801,11 @@ function FederationPage() {
 
             ${(fedOn || (conns && conns.length > 0)) && html`<div class="fed-conns">
                 <h3>Your connections <${HelpTip} text="Each row is a trusted link to another SAGE. Expanding it shows two directional permission sets: what this computer grants them, and what they grant this computer. Each side controls only its own domains." /></h3>
-                ${conns && conns.length > 0 && html`<div class="fed-conns-explain muted">The scan and spoken code establish <strong>trust</strong>. Open a connection to manage the separate <strong>domain permissions</strong>: each computer independently decides which existing domains the other may Read or offer for Copy. Connection-bound Write is reserved but not active yet.</div>`}
+                ${liveConns.length > 0 && html`<div class="fed-conns-explain muted">The scan and spoken code establish <strong>trust</strong>. Open a connection to manage domain permissions. <strong>Pause</strong> temporarily stops what you share without losing the pairing; permanent revocation lives inside the connection details.</div>`}
                 ${conns === null && html`<div class="muted">Loading…</div>`}
-                ${conns && conns.length === 0 && html`
+                ${conns && liveConns.length === 0 && html`
                     <${EmptyState} icon="federation"
-                        headline="No connections yet"
+                        headline="No active connections"
                         hint=${fedOn
                             ? "Link your whole SAGE to another SAGE to share memories across networks. Join someone's network with a code they share, or host one and hand out a code."
                             : "Turn federation on above to link your whole SAGE to another SAGE and share memories across networks."}
@@ -12587,18 +12813,38 @@ function FederationPage() {
                         onAction=${fedOn ? (() => setMode('guest')) : null} />
                     ${localChain && html`<div class="muted" style="text-align:center;margin-top:4px;">Your network id: <code>${localChain}</code></div>`}
                 `}
-                ${conns && conns.map(c => html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
+                ${liveConns.map(c => html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
                     <div class="fed-conn-row">
-                        <button class="fed-conn-main fed-conn-expand" onClick=${() => setOpenChain(openChain === c.remote_chain_id ? '' : c.remote_chain_id)} disabled=${!(c.status === 'active' && !c.expired)}>
-                            <span class="fed-conn-status ${c.status === 'active' && !c.expired ? 'on' : 'off'}"></span>
+                        <button class="fed-conn-main fed-conn-expand" aria-expanded=${openChain === c.remote_chain_id}
+                            aria-controls=${`fed-connection-${c.remote_chain_id}`}
+                            onClick=${() => setOpenChain(openChain === c.remote_chain_id ? '' : c.remote_chain_id)}>
+                            <span class="fed-conn-status ${c.sharing_paused ? 'paused' : 'on'}"></span>
                             <span class="fed-conn-name" title=${c.peer_name ? c.remote_chain_id : ''}>${c.peer_name || c.remote_chain_id}</span>
-                            <span class="fed-conn-meta muted">${c.expired ? 'expired' : c.status} · ${c.status === 'active' && !c.expired ? 'manage domain permissions' : 'trust unavailable'}</span>
-                            ${c.status === 'active' && !c.expired && html`<span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>`}
+                            <span class="fed-conn-meta muted">${c.sharing_paused ? 'sharing paused · pairing preserved' : 'active · manage domain permissions'}</span>
+                            <span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>
                         </button>
-                        ${c.status === 'active' && html`<button class="btn btn-danger fed-conn-off" onClick=${() => revoke(c.remote_chain_id)}>Turn off</button>`}
+                        <button class="btn fed-conn-off ${c.sharing_paused ? 'btn-primary' : ''}"
+                            disabled=${busyChain === c.remote_chain_id}
+                            onClick=${() => pause(c, !c.sharing_paused)}>${busyChain === c.remote_chain_id ? 'Working…' : (c.sharing_paused ? 'Resume sharing' : 'Pause sharing')}</button>
                     </div>
-                    ${openChain === c.remote_chain_id && c.status === 'active' && !c.expired && html`<${FedPermissionsPanel} conn=${c} />`}
+                    ${openChain === c.remote_chain_id && html`<div id=${`fed-connection-${c.remote_chain_id}`}>
+                        <${FedPermissionsPanel} conn=${c} revokeBusy=${busyChain === c.remote_chain_id} onRevoke=${() => revoke(c.remote_chain_id)} />
+                    </div>`}
                 </div>`)}
+                ${pastConns.length > 0 && html`<div class="fed-past">
+                    <button class="fed-past-toggle" onClick=${() => setShowPast(!showPast)} aria-expanded=${showPast} aria-controls="fed-past-connections">
+                        <span>${showPast ? '▾' : '▸'}</span> Past connections (${pastConns.length})
+                    </button>
+                    ${showPast && html`<div class="fed-past-list" id="fed-past-connections">
+                        ${pastConns.map(c => html`<div class="fed-conn-row fed-conn-past" key=${c.remote_chain_id}>
+                            <span class="fed-conn-status off"></span>
+                            <span class="fed-conn-name" title=${c.peer_name ? c.remote_chain_id : ''}>${c.peer_name || c.remote_chain_id}</span>
+                            <span class="fed-conn-meta muted">${c.expired ? 'expired' : (c.ended_by === 'revoked_by_peer' ? 'revoked by peer' : 'revoked')} · audit history</span>
+                            ${c.ended_message && html`<span class="fed-past-reason muted">${c.ended_message}</span>`}
+                            ${c.ended_at && html`<time class="fed-past-time muted" datetime=${c.ended_at}>${new Date(c.ended_at).toLocaleString()}</time>`}
+                        </div>`)}
+                    </div>`}
+                </div>`}
             </div>`}
         </div>
     </div>`;

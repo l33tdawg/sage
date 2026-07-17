@@ -375,7 +375,7 @@ func (m *Manager) admitOwnerDomainAdd(ctx context.Context, groupID string, e sto
 		if requiredPeer.ChainID != e.AuthorChainID || requiredPeer.AgentID != e.AuthorAgentPubkey {
 			return store.SyncGroupLogEntry{}, fmt.Errorf("domain admission peer does not match the signed owner")
 		}
-		bound, bindErr := m.currentInboundGroupPeerBound(ctx, ss, requiredPeer.ChainID, requiredPeer.AgentID)
+		bound, bindErr := m.currentInboundGroupPeerBound(ctx, ss, requiredPeer)
 		if bindErr != nil {
 			return store.SyncGroupLogEntry{}, fmt.Errorf("revalidate domain admission peer: %w", bindErr)
 		}

@@ -155,7 +155,27 @@ type SharingUpdateResult struct {
 // rows is explicit deny-all.
 type PeerRBACGrant struct {
 	PolicyVersion int                   `json:"policy_version"`
+	Paused        bool                  `json:"paused,omitempty"`
 	Domains       []PeerRBACDomainGrant `json:"domains"`
+}
+
+// RevokeNotice is sent best-effort to the exact authenticated peer before a
+// permanent local tx-34 revoke. PolicyEpoch prevents a delayed notice from a
+// retired JOIN generation terminating a newly paired connection.
+type RevokeNotice struct {
+	PolicyEpoch string `json:"policy_epoch"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+type RevokeNoticeResponse struct {
+	Status string `json:"status"`
+	TxHash string `json:"tx_hash,omitempty"`
+}
+
+type RevokeAgreementResult struct {
+	TxHash       string `json:"tx_hash"`
+	PeerNotified bool   `json:"peer_notified"`
+	NoticeError  string `json:"notice_error,omitempty"`
 }
 
 type PeerRBACDomainGrant struct {

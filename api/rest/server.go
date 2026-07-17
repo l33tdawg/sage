@@ -121,7 +121,7 @@ type FederationService interface {
 	HostScanReturn(sessionID, returnURI string) error
 	HostSessionStatus(sessionID string) (*federation.HostSessionView, error)
 	HostApprove(sessionID, typedCode string, grant federation.ScopeWire) error
-	HostAbort(sessionID string)
+	HostAbort(sessionID string) error
 	// Guest side:
 	GuestScan(ctx context.Context, uri, guestEndpoint string) (*federation.GuestScanResult, error)
 	GuestRequest(ctx context.Context, sessionID, guestEndpoint string, scope federation.ScopeWire) (*federation.GuestRequestResult, error)

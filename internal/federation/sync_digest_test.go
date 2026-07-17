@@ -137,6 +137,41 @@ func TestGroupDigestServeLeaseLinearizesMemberRemoval(t *testing.T) {
 	assert.Nil(t, resp, "no post-removal group digest may be served")
 }
 
+func TestPausedConnectionReturnsGenericGroupDigestDenial(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	seedGroup(t, ms, "g-paused", "chain-ctl")
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	peer := &peerIdentity{ChainID: "chain-peer", AgentID: hex.EncodeToString(peerPub), Agreement: &store.CrossFedRecord{
+		RemoteChainID: "chain-peer", AllowedDomains: []string{"hr"}, Status: "active",
+	}}
+	bindInboundGroupPeer(t, m, ms, peer, "guest")
+	for _, member := range []store.SyncGroupMember{
+		{GroupID: "g-paused", MemberChainID: m.localChainID, Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive, MemberAgentPubkey: hex.EncodeToString(m.agentPub)},
+		{GroupID: "g-paused", MemberChainID: peer.ChainID, Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive, MemberAgentPubkey: peer.AgentID},
+	} {
+		require.NoError(t, ms.UpsertSyncGroupMember(ctx, member))
+	}
+	require.NoError(t, ms.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
+		GroupID: "g-paused", DomainTag: "hr", OwnerChainID: m.localChainID, AddedRevision: 1,
+	}))
+	require.NoError(t, ms.RecordSyncOrigin(ctx, store.SyncOrigin{
+		OriginChainID: peer.ChainID, OriginMemoryID: "must-stay-hidden", DomainTag: "hr",
+		Outcome: store.SyncOutcomeAdmitted, LocalMemoryID: "local-hidden",
+	}))
+	_, err = m.ReplacePeerRBACPolicy(ctx, peer.ChainID, nil)
+	require.NoError(t, err)
+	_, err = m.SetPeerRBACPaused(ctx, peer.ChainID, true)
+	require.NoError(t, err)
+
+	rr, resp := digestAs(t, m, peer, SyncDigestRequest{GroupID: "g-paused", Domain: "hr"})
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Nil(t, resp)
+	assert.JSONEq(t, `{"error":"not_admitted"}`, rr.Body.String())
+	assert.NotContains(t, rr.Body.String(), "must-stay-hidden")
+}
+
 func TestPairwiseDigestServeLeaseLinearizesConsentRemoval(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})

@@ -60,7 +60,7 @@ func (f *fakeFederation) HostSessionStatus(string) (*federation.HostSessionView,
 func (f *fakeFederation) HostApprove(string, string, federation.ScopeWire) error {
 	return errors.New("na")
 }
-func (f *fakeFederation) HostAbort(string) {}
+func (f *fakeFederation) HostAbort(string) error { return nil }
 func (f *fakeFederation) GuestScan(context.Context, string, string) (*federation.GuestScanResult, error) {
 	return nil, errors.New("na")
 }

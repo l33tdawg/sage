@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -32,7 +33,7 @@ type FederationJoinDriver interface {
 	HostScanReturn(sessionID, returnURI string) error
 	HostSessionStatus(sessionID string) (*federation.HostSessionView, error)
 	HostApprove(sessionID, typedCode string, grant federation.ScopeWire) error
-	HostAbort(sessionID string)
+	HostAbort(sessionID string) error
 	GuestScan(ctx context.Context, uri, guestEndpoint string) (*federation.GuestScanResult, error)
 	GuestRequest(ctx context.Context, sessionID, guestEndpoint string, scope federation.ScopeWire) (*federation.GuestRequestResult, error)
 	GuestPollStatus(ctx context.Context, sessionID string) (*federation.JoinStatusResp, error)
@@ -84,6 +85,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	fr.Get("/v1/dashboard/federation/connections", h.handleFedConnections)
 	fr.Get("/v1/dashboard/federation/connections/{chain_id}/permissions", h.handleFedPermissionsGet)
 	fr.Put("/v1/dashboard/federation/connections/{chain_id}/permissions", h.handleFedPermissionsPut)
+	fr.Put("/v1/dashboard/federation/connections/{chain_id}/pause", h.handleFedPause)
 	fr.Post("/v1/dashboard/federation/connections/{chain_id}/revoke", h.handleFedRevoke)
 	fr.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
 
@@ -106,6 +108,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	fr.Post("/v1/dashboard/federation/join/guest/scan", h.handleFedGuestScan)
 	fr.Post("/v1/dashboard/federation/join/guest/request", h.handleFedGuestRequest)
 	fr.Get("/v1/dashboard/federation/join/guest/{session_id}/status", h.handleFedGuestStatus)
+	fr.Post("/v1/dashboard/federation/join/guest/{session_id}/abort", h.handleFedGuestAbort)
 	fr.Post("/v1/dashboard/federation/join/guest/confirm", h.handleFedGuestConfirm)
 
 	// v11.8 sync-group management (INT1): the local operator's authoring surface
@@ -696,6 +699,10 @@ type FedConnection struct {
 	AllowedDomains []string `json:"allowed_domains"`
 	Status         string   `json:"status"`
 	Expired        bool     `json:"expired"`
+	SharingPaused  bool     `json:"sharing_paused"`
+	EndedBy        string   `json:"ended_by,omitempty"`
+	EndedMessage   string   `json:"ended_message,omitempty"`
+	EndedAt        string   `json:"ended_at,omitempty"`
 }
 
 // handleGetNetworkName returns the local network's friendly label + the raw
@@ -764,7 +771,7 @@ func (h *DashboardHandler) handleFedConnections(w http.ResponseWriter, _ *http.R
 		now := time.Now().Unix()
 		conns := make([]FedConnection, 0, len(records))
 		for _, rec := range records {
-			conns = append(conns, FedConnection{
+			conn := FedConnection{
 				RemoteChainID:  rec.RemoteChainID,
 				PeerName:       peerNames[rec.RemoteChainID],
 				Endpoint:       rec.Endpoint,
@@ -772,7 +779,22 @@ func (h *DashboardHandler) handleFedConnections(w http.ResponseWriter, _ *http.R
 				AllowedDomains: rec.AllowedDomains,
 				Status:         rec.Status,
 				Expired:        rec.ExpiresAt != 0 && now >= rec.ExpiresAt,
-			})
+			}
+			if rec.Status == "active" && !conn.Expired {
+				if driver, ok := h.Federation.(peerRBACPolicyDriver); ok {
+					if policy, policyErr := driver.GetPeerRBACPolicy(context.Background(), rec.RemoteChainID); policyErr == nil && policy != nil {
+						conn.SharingPaused = policy.Paused
+					}
+				}
+			}
+			if ss := h.syncStore(); ss != nil {
+				if event, eventErr := ss.GetFederationConnectionEvent(context.Background(), rec.RemoteChainID); eventErr == nil && event != nil {
+					conn.EndedBy = event.Event
+					conn.EndedMessage = event.Message
+					conn.EndedAt = event.CreatedAt
+				}
+			}
+			conns = append(conns, conn)
 		}
 		out["connections"] = conns
 	}
@@ -784,12 +806,36 @@ func (h *DashboardHandler) handleFedRevoke(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	chain := chi.URLParam(r, "chain_id")
-	hash, err := h.Federation.RevokeAgreement(chain)
+	var hash string
+	var notifyResult *federation.RevokeAgreementResult
+	var err error
+	if driver, ok := h.Federation.(interface {
+		RevokeAgreementNotifying(string) (*federation.RevokeAgreementResult, error)
+	}); ok {
+		notifyResult, err = driver.RevokeAgreementNotifying(chain)
+		if notifyResult != nil {
+			hash = notifyResult.TxHash
+		}
+	} else {
+		hash, err = h.Federation.RevokeAgreement(chain)
+	}
 	if err != nil {
 		fedWriteErr(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	if _, notifying := h.Federation.(interface {
+		RevokeAgreementNotifying(string) (*federation.RevokeAgreementResult, error)
+	}); notifying && notifyResult == nil {
+		fedWriteErr(w, http.StatusBadGateway, "Federation revoke returned no result.")
+		return
+	}
 	out := map[string]any{"remote_chain_id": chain, "status": "revoked", "tx_hash": hash}
+	if notifyResult != nil {
+		out["peer_notified"] = notifyResult.PeerNotified
+		if notifyResult.NoticeError != "" {
+			out["notification_warning"] = notifyResult.NoticeError
+		}
+	}
 	if cleanupErr := h.ReconcileFederationManagedGrants(r.Context()); cleanupErr != nil {
 		// Trust is already revoked and the peer-RBAC policy denies immediately.
 		// Keep the durable ledger for the background tx-7 retry and report that
@@ -912,7 +958,14 @@ func (h *DashboardHandler) handleFedHostAbort(w http.ResponseWriter, r *http.Req
 	if !h.fedReady(w) {
 		return
 	}
-	h.Federation.HostAbort(chi.URLParam(r, "session_id"))
+	if err := h.Federation.HostAbort(chi.URLParam(r, "session_id")); err != nil {
+		if errors.Is(err, federation.ErrJoinSessionNotFound) {
+			fedWriteErr(w, http.StatusNotFound, "This connection setup no longer exists.")
+		} else {
+			fedWriteErr(w, http.StatusConflict, "This connection is already being confirmed. Check its status in Federation before revoking it.")
+		}
+		return
+	}
 	fedWriteJSON(w, http.StatusOK, map[string]string{"status": "aborted"})
 }
 
@@ -983,6 +1036,26 @@ func (h *DashboardHandler) handleFedGuestStatus(w http.ResponseWriter, r *http.R
 		return
 	}
 	fedWriteJSON(w, http.StatusOK, resp)
+}
+
+func (h *DashboardHandler) handleFedGuestAbort(w http.ResponseWriter, r *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	driver, ok := h.Federation.(interface {
+		GuestAbort(context.Context, string) error
+	})
+	if !ok {
+		fedWriteErr(w, http.StatusNotImplemented, "Guest-side connection cancellation is unavailable.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	if err := driver.GuestAbort(ctx, chi.URLParam(r, "session_id")); err != nil {
+		fedWriteErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]string{"status": "aborted"})
 }
 
 func (h *DashboardHandler) handleFedGuestConfirm(w http.ResponseWriter, r *http.Request) {

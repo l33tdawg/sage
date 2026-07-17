@@ -855,6 +855,7 @@ export function fedSettingSet(enabled) { return fedPost('/v1/dashboard/settings/
 export function fedShareableDomains() { return fedFetch('/v1/dashboard/federation/shareable-domains'); }
 export function fedPermissionsGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`); }
 export function fedPermissionsSet(chainId, permissions) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`, { permissions }); }
+export function fedPause(chainId, paused) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pause`, { paused }); }
 // Directional copy policy and status for one trusted connection.
 export function fedSyncGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`); }
 // A source's Copy grant is permission; subscribe_domains is this receiver's
@@ -880,6 +881,7 @@ export function fedHostAbort(sessionId) { return fedPost(`/v1/dashboard/federati
 export function fedGuestScan(uri, endpoint) { return fedPost('/v1/dashboard/federation/join/guest/scan', { uri, endpoint }); }
 export function fedGuestRequest(body) { return fedPost('/v1/dashboard/federation/join/guest/request', body); }
 export function fedGuestStatus(sessionId) { return fedFetch(`/v1/dashboard/federation/join/guest/${encodeURIComponent(sessionId)}/status`); }
+export function fedGuestAbort(sessionId) { return fedPost(`/v1/dashboard/federation/join/guest/${encodeURIComponent(sessionId)}/abort`); }
 export function fedGuestConfirm(body) { return fedPost('/v1/dashboard/federation/join/guest/confirm', body); }
 
 // Managed reranker sidecar (guided setup: detect llama-server, download the
