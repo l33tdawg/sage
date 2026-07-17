@@ -1472,6 +1472,20 @@ func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, e
 	}, nil
 }
 
+// taskContentPrefix marks a memory as a task in its stored content.
+const taskContentPrefix = "[TASK] "
+
+// applyTaskPrefix marks content as a task, idempotently. Agents routinely pass
+// content that already reads "[TASK] ...", and prefixing unconditionally stored
+// the marker twice ("[TASK] [TASK] ..."), which then rendered doubled everywhere
+// the raw content is shown.
+func applyTaskPrefix(content string) string {
+	if strings.HasPrefix(content, taskContentPrefix) {
+		return content
+	}
+	return taskContentPrefix + content
+}
+
 func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, error) {
 	memoryID := stringParam(params, "memory_id", "")
 	content := stringParam(params, "content", "")
@@ -1509,7 +1523,7 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 		if status != "planned" && status != "in_progress" {
 			return nil, fmt.Errorf("a new task must start as planned or in_progress")
 		}
-		taskContent := fmt.Sprintf("[TASK] %s", content)
+		taskContent := applyTaskPrefix(content)
 		embedReq, _ := json.Marshal(map[string]string{"text": taskContent})
 		var embedResp struct {
 			Embedding []float32 `json:"embedding"`
