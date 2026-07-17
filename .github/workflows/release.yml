@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing immutable release tag to resume
+        required: true
+        type: string
 
 # The newest tag may be re-run to finish a failed publication step, but release
 # writers for different tags must never race each other for the mutable
@@ -28,16 +33,21 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+
 jobs:
   release-metadata:
     name: Release Metadata Gate
     runs-on: ubuntu-latest
     outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
       version: ${{ steps.metadata.outputs.version }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
           fetch-depth: 0
 
       - name: Validate tag and lockstep package metadata
@@ -46,28 +56,40 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
-            echo "::error::Release workflow_dispatch runs must select an existing tag ref"
+          if [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ] &&
+             [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error::Automatic release runs must originate from a tag push"
             exit 1
           fi
-          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] &&
+             [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Release recovery must use the protected main workflow"
+            exit 1
+          fi
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
             echo "::error::Release tag must be canonical SemVer (vMAJOR.MINOR.PATCH with an optional prerelease)"
             exit 1
           fi
 
-          TAG_COMMIT=$(git rev-parse "${GITHUB_REF_NAME}^{commit}")
-          if [ "${TAG_COMMIT}" != "${GITHUB_SHA}" ]; then
-            echo "::error::Checked-out commit does not match ${GITHUB_REF_NAME}"
+          TAG_COMMIT=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")
+          CHECKED_OUT_COMMIT=$(git rev-parse HEAD)
+          if [ "${TAG_COMMIT}" != "${CHECKED_OUT_COMMIT}" ]; then
+            echo "::error::Checked-out commit does not match ${RELEASE_TAG}"
             exit 1
           fi
           git fetch --no-tags origin \
             +refs/heads/main:refs/remotes/origin/main
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] &&
+             [ "${GITHUB_SHA}" != "$(git rev-parse refs/remotes/origin/main)" ]; then
+            echo "::error::Release recovery workflow is not the current protected main commit"
+            exit 1
+          fi
           if ! git merge-base --is-ancestor "${TAG_COMMIT}" refs/remotes/origin/main; then
             echo "::error::Release tag commit must be reachable from protected main"
             exit 1
           fi
 
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${RELEASE_TAG#v}"
           SDK_VERSION=$(sed -nE 's/^version = "([^"]+)"$/\1/p' sdk/python/pyproject.toml | head -1)
           INIT_VERSION=$(sed -nE 's/^__version__ = "([^"]+)"$/\1/p' sdk/python/src/sage_sdk/__init__.py | head -1)
           SERVER_VERSION=$(jq -er '.version' server.json)
@@ -101,11 +123,12 @@ jobs:
                 tail -1 || true
             )
             if [ -n "${NEWEST_STABLE_TAG}" ] &&
-               [ "${GITHUB_REF_NAME}" != "${NEWEST_STABLE_TAG}" ]; then
-              echo "::error::Refusing stale stable release ${GITHUB_REF_NAME}; newest protected-main tag is ${NEWEST_STABLE_TAG}"
+               [ "${RELEASE_TAG}" != "${NEWEST_STABLE_TAG}" ]; then
+              echo "::error::Refusing stale stable release ${RELEASE_TAG}; newest protected-main tag is ${NEWEST_STABLE_TAG}"
               exit 1
             fi
           fi
+          echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${PRERELEASE}" >> "${GITHUB_OUTPUT}"
 
@@ -114,6 +137,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.25'
@@ -133,6 +158,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: '1.25'
@@ -154,12 +181,15 @@ jobs:
       # shipped; later minors and majors must not silently drop the proofs.
       require_scoped_reconfiguration: true
       require_authorized_state_sync: true
+      release_ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
   frontend-static:
     name: Frontend Static Checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '24'
@@ -179,6 +209,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
           fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -223,6 +254,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
           fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -231,7 +263,7 @@ jobs:
 
       - name: Build Linux desktop bundle
         env:
-          SAGE_VERSION: ${{ github.ref_name }}
+          SAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: ./installer/linux/build-linux.sh
 
       - name: Stage stable name and checksums
@@ -269,6 +301,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
           fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -277,7 +310,7 @@ jobs:
 
       - name: Build DMG
         env:
-          SAGE_VERSION: ${{ github.ref_name }}
+          SAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
           SAGE_ARCH: ${{ matrix.arch }}
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -345,9 +378,9 @@ jobs:
         run: |
           set -euo pipefail
           cd "dist/macos-${ARCH_LABEL}"
-          cp "SAGE-${GITHUB_REF_NAME}-macOS-${ARCH_LABEL}.dmg" \
+          cp "SAGE-${RELEASE_TAG}-macOS-${ARCH_LABEL}.dmg" \
              "SAGE-macOS-${ARCH_LABEL}.dmg"
-          for file in "SAGE-${GITHUB_REF_NAME}-macOS-${ARCH_LABEL}.dmg" \
+          for file in "SAGE-${RELEASE_TAG}-macOS-${ARCH_LABEL}.dmg" \
                       "SAGE-macOS-${ARCH_LABEL}.dmg"; do
             shasum -a 256 "${file}" > "${file}.sha256"
             shasum -a 256 -c "${file}.sha256"
@@ -370,6 +403,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
           fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
@@ -387,15 +421,15 @@ jobs:
 
       - name: Build Windows installer
         env:
-          SAGE_VERSION: ${{ github.ref_name }}
+          SAGE_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
         run: ./installer/windows/build-exe.sh
 
       - name: Stage stable name and checksums
         run: |
           set -euo pipefail
           cd dist/windows-amd64
-          cp "SAGE-${GITHUB_REF_NAME}-Windows-Setup.exe" "SAGE-Windows-Setup.exe"
-          for file in "SAGE-${GITHUB_REF_NAME}-Windows-Setup.exe" \
+          cp "SAGE-${RELEASE_TAG}-Windows-Setup.exe" "SAGE-Windows-Setup.exe"
+          for file in "SAGE-${RELEASE_TAG}-Windows-Setup.exe" \
                       "SAGE-Windows-Setup.exe"; do
             sha256sum "${file}" > "${file}.sha256"
             sha256sum -c "${file}.sha256"
@@ -417,6 +451,8 @@ jobs:
     needs: [quality-gate, release-metadata]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -459,6 +495,8 @@ jobs:
     needs: [quality-gate, release-metadata]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.12'
@@ -477,7 +515,7 @@ jobs:
           test "$(find dist -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           python -m venv "${RUNNER_TEMP}/sage-wheel-smoke"
-          "${RUNNER_TEMP}/sage-wheel-smoke/bin/pip" install --no-deps dist/*.whl
+          "${RUNNER_TEMP}/sage-wheel-smoke/bin/pip" install dist/*.whl
           "${RUNNER_TEMP}/sage-wheel-smoke/bin/python" -c \
             "import sage_sdk; assert sage_sdk.__version__ == '${RELEASE_VERSION}'"
 
@@ -495,6 +533,8 @@ jobs:
     needs: [quality-gate, release-metadata]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
 
       - name: Verify manifest and fetch pinned publisher
         env:
@@ -558,9 +598,9 @@ jobs:
           test -f "staged/release-assets-goreleaser/sage-gui_${RELEASE_VERSION}_linux_amd64.tar.gz"
           test -f "staged/release-assets-goreleaser/sage-gui-linux-amd64.tar.gz"
           test -f "staged/release-assets-linux-desktop/sage-desktop_${RELEASE_VERSION}_linux_amd64.tar.gz"
-          test -f "staged/release-assets-macos-arm64/SAGE-${GITHUB_REF_NAME}-macOS-arm64.dmg"
-          test -f "staged/release-assets-macos-x86_64/SAGE-${GITHUB_REF_NAME}-macOS-x86_64.dmg"
-          test -f "staged/release-assets-windows/SAGE-${GITHUB_REF_NAME}-Windows-Setup.exe"
+          test -f "staged/release-assets-macos-arm64/SAGE-${RELEASE_TAG}-macOS-arm64.dmg"
+          test -f "staged/release-assets-macos-x86_64/SAGE-${RELEASE_TAG}-macOS-x86_64.dmg"
+          test -f "staged/release-assets-windows/SAGE-${RELEASE_TAG}-Windows-Setup.exe"
           test "$(find staged/release-package-python -maxdepth 1 -type f -name '*.whl' | wc -l)" -eq 1
           test "$(find staged/release-package-python -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test -s staged/release-image-docker/sage-image.tar
@@ -644,9 +684,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          if RELEASE_JSON=$(gh release view "${GITHUB_REF_NAME}" --json isDraft,isPrerelease 2>/dev/null); then
+          if RELEASE_JSON=$(gh release view "${RELEASE_TAG}" --json isDraft,isPrerelease 2>/dev/null); then
             if [ "$(jq -r '.isDraft' <<< "${RELEASE_JSON}")" != "true" ]; then
-              echo "::error::A public GitHub release already exists for ${GITHUB_REF_NAME}"
+              echo "::error::A public GitHub release already exists for ${RELEASE_TAG}"
               exit 1
             fi
             if [ "$(jq -r '.isPrerelease' <<< "${RELEASE_JSON}")" != "${RELEASE_PRERELEASE}" ]; then
@@ -655,7 +695,7 @@ jobs:
             fi
           else
             CREATE_ARGS=(
-              "${GITHUB_REF_NAME}"
+              "${RELEASE_TAG}"
               --draft
               --verify-tag
               --generate-notes
@@ -668,9 +708,9 @@ jobs:
             gh release create "${CREATE_ARGS[@]}"
           fi
 
-          gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+          gh release upload "${RELEASE_TAG}" release-assets/* --clobber
           find release-assets -maxdepth 1 -type f -exec basename {} \; | sort > /tmp/local-assets.txt
-          gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name' | sort > /tmp/remote-assets.txt
+          gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' | sort > /tmp/remote-assets.txt
           diff -u /tmp/local-assets.txt /tmp/remote-assets.txt
 
   publish-docker-version:
@@ -872,17 +912,17 @@ jobs:
           RELEASE_PRERELEASE: ${{ needs.release-metadata.outputs.prerelease }}
         run: |
           set -euo pipefail
-          if [ "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq '.isDraft')" = "true" ]; then
+          if [ "$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft')" = "true" ]; then
             if [ "${RELEASE_PRERELEASE}" = "true" ]; then
-              gh release edit "${GITHUB_REF_NAME}" --draft=false --latest=false
+              gh release edit "${RELEASE_TAG}" --draft=false --latest=false
             else
-              gh release edit "${GITHUB_REF_NAME}" --draft=false --latest
+              gh release edit "${RELEASE_TAG}" --draft=false --latest
             fi
           fi
-          test "$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq '.isDraft')" = "false"
-          test "$(gh release view "${GITHUB_REF_NAME}" --json isPrerelease --jq '.isPrerelease')" = \
+          test "$(gh release view "${RELEASE_TAG}" --json isDraft --jq '.isDraft')" = "false"
+          test "$(gh release view "${RELEASE_TAG}" --json isPrerelease --jq '.isPrerelease')" = \
                "${RELEASE_PRERELEASE}"
           if [ "${RELEASE_PRERELEASE}" = "false" ]; then
             test "$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name')" = \
-                 "${GITHUB_REF_NAME}"
+                 "${RELEASE_TAG}"
           fi

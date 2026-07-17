@@ -1014,20 +1014,30 @@ partition_firewall_packets() {
     awk '$3 == "REJECT" { packets += $1 } END { print packets + 0 }'
 }
 
-wait_partition_firewall_exercised() {
-  local service=$1
-  local timeout=${2:-30}
+wait_partition_firewalls_exercised() {
+  local timeout=${1:-30}
+  shift
+  [ "$#" -gt 0 ] || { echo "ERROR: no partition firewall services supplied" >&2; return 1; }
   local deadline=$((SECONDS + timeout))
-  local packets=0
+  local service packets total snapshot
   while [ "${SECONDS}" -lt "${deadline}" ]; do
-    packets=$(partition_firewall_packets "${service}" 2>/dev/null || echo 0)
-    if [ "${packets}" -gt 0 ]; then
-      echo "${service}: ${FIREWALL_CHAIN} rejected ${packets} P2P packets"
+    total=0
+    snapshot=""
+    for service in "$@"; do
+      packets=$(partition_firewall_packets "${service}" 2>/dev/null || echo 0)
+      total=$((total + packets))
+      snapshot="${snapshot} ${service}=${packets}"
+    done
+    # The rules are symmetric: when one endpoint rejects a packet, its peer
+    # cannot count that same packet. Exact peer-set assertions below prove the
+    # partition on every node; this counter gate proves the rules saw traffic.
+    if [ "${total}" -gt 0 ]; then
+      echo "${FIREWALL_CHAIN} rejected ${total} P2P packets across partition (${snapshot# })"
       return 0
     fi
     sleep 1
   done
-  echo "ERROR: ${service} P2P firewall did not reject any packets within ${timeout}s" >&2
+  echo "ERROR: partition firewalls did not reject any P2P packets within ${timeout}s (${snapshot# })" >&2
   return 1
 }
 
@@ -1520,9 +1530,7 @@ install_partition_firewall cometbft0 "${COMET_IPS[1]}"
 install_partition_firewall cometbft1 "${COMET_IPS[0]}" "${COMET_IPS[2]}" "${COMET_IPS[3]}"
 install_partition_firewall cometbft2 "${COMET_IPS[1]}"
 install_partition_firewall cometbft3 "${COMET_IPS[1]}"
-for service in cometbft0 cometbft1 cometbft2 cometbft3; do
-  wait_partition_firewall_exercised "${service}" 30
-done
+wait_partition_firewalls_exercised 30 cometbft0 cometbft1 cometbft2 cometbft3
 wait_exact_peer_set "${RPC_PORTS[0]}" "$(expected_peer_ids "${NODE_IDS[2]}" "${NODE_IDS[3]}")" 90
 wait_exact_peer_set "${RPC_PORTS[1]}" "$(expected_peer_ids)" 90
 wait_exact_peer_set "${RPC_PORTS[2]}" "$(expected_peer_ids "${NODE_IDS[0]}" "${NODE_IDS[3]}")" 90
@@ -1552,9 +1560,7 @@ install_partition_firewall cometbft0 "${COMET_IPS[2]}" "${COMET_IPS[3]}"
 install_partition_firewall cometbft1 "${COMET_IPS[2]}" "${COMET_IPS[3]}"
 install_partition_firewall cometbft2 "${COMET_IPS[0]}" "${COMET_IPS[1]}"
 install_partition_firewall cometbft3 "${COMET_IPS[0]}" "${COMET_IPS[1]}"
-for service in cometbft0 cometbft1 cometbft2 cometbft3; do
-  wait_partition_firewall_exercised "${service}" 30
-done
+wait_partition_firewalls_exercised 30 cometbft0 cometbft1 cometbft2 cometbft3
 wait_exact_peer_set "${RPC_PORTS[0]}" "$(expected_peer_ids "${NODE_IDS[1]}")" 90
 wait_exact_peer_set "${RPC_PORTS[1]}" "$(expected_peer_ids "${NODE_IDS[0]}")" 90
 wait_exact_peer_set "${RPC_PORTS[2]}" "$(expected_peer_ids "${NODE_IDS[3]}")" 90

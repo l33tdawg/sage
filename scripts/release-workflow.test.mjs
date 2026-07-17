@@ -5,6 +5,10 @@ import test from 'node:test';
 const workflowPath = new URL('../.github/workflows/release.yml', import.meta.url);
 const workflow = readFileSync(workflowPath, 'utf8');
 const ciWorkflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+const faultWorkflow = readFileSync(
+  new URL('../.github/workflows/v11.9-fault-gates.yml', import.meta.url),
+  'utf8',
+);
 const dependabot = readFileSync(new URL('../.github/dependabot.yml', import.meta.url), 'utf8');
 const macosBuild = readFileSync(new URL('../installer/macos/build-dmg.sh', import.meta.url), 'utf8');
 const windowsBuild = readFileSync(new URL('../installer/windows/build-exe.sh', import.meta.url), 'utf8');
@@ -88,6 +92,34 @@ test('metadata, source, race, frontend, and fault checks converge before packagi
   ]) {
     assertNeeds(id, ['quality-gate', 'release-metadata']);
   }
+});
+
+test('manual release recovery checks out the immutable tag in every source job', () => {
+  assert.match(workflow, /workflow_dispatch:\n    inputs:\n      release_tag:/);
+  assert.match(workflow, /RELEASE_TAG:.*inputs\.release_tag.*github\.ref_name/);
+  assert.match(job('release-metadata'), /CHECKED_OUT_COMMIT=\$\(git rev-parse HEAD\)/);
+  assert.match(job('release-metadata'), /GITHUB_REF.*refs\/heads\/main/);
+  assert.match(job('release-metadata'), /refs\/tags\/\$\{RELEASE_TAG\}\^\{commit\}/);
+  assert.match(job('v119-fault-gates'), /release_ref:.*inputs\.release_tag.*github\.ref/);
+
+  const checkoutCount = (workflow.match(/actions\/checkout@/g) || []).length;
+  const recoveryRefCount = (
+    workflow.match(/\$\{\{ github\.event_name == 'workflow_dispatch' && format\('refs\/tags\/\{0\}', inputs\.release_tag\) \|\| github\.ref \}\}/g)
+    || []
+  ).length;
+  assert.equal(recoveryRefCount, checkoutCount + 1);
+  assert.match(faultWorkflow, /release_ref:\n[\s\S]*?type: string/);
+  assert.equal(
+    (faultWorkflow.match(/ref: \$\{\{ inputs\.release_ref \|\| github\.ref \}\}/g) || []).length,
+    (faultWorkflow.match(/actions\/checkout@/g) || []).length,
+  );
+});
+
+test('wheel smoke installs declared runtime dependencies before importing the SDK', () => {
+  const pythonPackage = job('python-package');
+  assert.doesNotMatch(pythonPackage, /--no-deps/);
+  assert.match(pythonPackage, /sage-wheel-smoke\/bin\/pip" install dist\/\*\.whl/);
+  assert.match(pythonPackage, /import sage_sdk/);
 });
 
 test('PR and main CI require the same v11.9 composite proofs as release', () => {
@@ -174,6 +206,33 @@ test('the real-Comet fixture proves governance-domain binding before the long fo
     'for target in 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do',
   );
   assert.ok(bindingGate >= 0 && bindingGate < forkLadder);
+});
+
+test('the real-Comet firewall proof allows one symmetric endpoint to count the rejection', () => {
+  assert.match(
+    v119Chaos,
+    /wait_partition_firewalls_exercised\(\)[\s\S]*?for service in "\$@"; do[\s\S]*?total=\$\(\(total \+ packets\)\)[\s\S]*?if \[ "\$\{total\}" -gt 0 \]/,
+  );
+  assert.doesNotMatch(v119Chaos, /wait_partition_firewall_exercised\(\)/);
+  assert.equal(
+    (v119Chaos.match(/wait_partition_firewalls_exercised 30 cometbft0 cometbft1 cometbft2 cometbft3/g) || []).length,
+    2,
+  );
+
+  for (const marker of [
+    '--- fault 1: isolate lower-power validator1',
+    '--- fault 2: post-removal stable-IP 2+2 split',
+  ]) {
+    const start = v119Chaos.indexOf(marker);
+    const counterGate = v119Chaos.indexOf('wait_partition_firewalls_exercised 30', start);
+    const heal = v119Chaos.indexOf('remove_partition_firewall', counterGate);
+    assert.ok(start >= 0 && counterGate > start && heal > counterGate);
+    assert.equal(
+      (v119Chaos.slice(counterGate, heal).match(/wait_exact_peer_set/g) || []).length,
+      4,
+      `${marker} must still prove the exact peer set on every node`,
+    );
+  }
 });
 
 test('all private artifacts converge at one publication gate', () => {
