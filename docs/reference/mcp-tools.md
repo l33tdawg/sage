@@ -444,7 +444,7 @@ verifying memories were committed after storing.
 **Purpose:** Create or update a task in the persistent backlog. Tasks use
 `memory_type: task` and do not decay while open.
 
-**Source:** `tools.go:148-166` (definition), `tools.go:1201-1287` (handler)
+**Source:** `tools.go:161-178` (definition), `tools.go:1475-1589` (prefix helper and handler)
 
 **Parameters:**
 
