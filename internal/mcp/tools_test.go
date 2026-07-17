@@ -1879,3 +1879,36 @@ func TestSageInboxReturnsClaimedPipelineWorkWhenTaskInboxFails(t *testing.T) {
 	require.Equal(t, "pipe-claimed", items[0]["pipe_id"])
 	require.Equal(t, true, items[0]["requires_result"])
 }
+
+// TestTaskContentPrefixIdempotent guards the "[TASK] [TASK] ..." regression:
+// agents routinely pass content that already reads "[TASK] ...", and prefixing
+// unconditionally stored the marker twice.
+func TestTaskContentPrefixIdempotent(t *testing.T) {
+	apply := applyTaskPrefix
+
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"bare content gets the prefix", "Ship the exporter", "[TASK] Ship the exporter"},
+		{"already prefixed is left alone", "[TASK] Ship the exporter", "[TASK] Ship the exporter"},
+		{"only the leading marker counts", "Fix the [TASK] label", "[TASK] Fix the [TASK] label"},
+		{"empty content still gets the prefix", "", "[TASK] "},
+		{"prefix without the space is not a match", "[TASK]Ship", "[TASK] [TASK]Ship"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := apply(tt.content); got != tt.want {
+				t.Errorf("apply(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+
+	// Applying twice must equal applying once — the property that was broken.
+	for _, c := range []string{"Ship it", "[TASK] Ship it", ""} {
+		if once, twice := apply(c), apply(apply(c)); once != twice {
+			t.Errorf("not idempotent for %q: once=%q twice=%q", c, once, twice)
+		}
+	}
+}
