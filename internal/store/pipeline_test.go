@@ -13,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // TestPipelineSizeCaps verifies the E8c size guards at the store boundary,
@@ -295,6 +297,92 @@ func TestPipelineRoundTrip(t *testing.T) {
 	stats, err := s.PipelineStats(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats["completed"])
+}
+
+func TestPipelineVaultEncryptionAndFederationProvenance(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "pipes.db"))
+	require.NoError(t, err)
+	defer s.Close()
+	keyFile := filepath.Join(t.TempDir(), "vault.key")
+	require.NoError(t, vault.Init(keyFile, "pipeline-passphrase"))
+	v, err := vault.Open(keyFile, "pipeline-passphrase")
+	require.NoError(t, err)
+	s.SetVault(v)
+
+	now := time.Now().UTC()
+	msg := &PipelineMessage{
+		PipeID: "pipe-foreign", FromAgent: strings.Repeat("a", 64), ToAgent: strings.Repeat("b", 64),
+		Intent: "analyze", Payload: "sensitive transient work", Status: "pending",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+		SourceChainID: "chain-peer", SourcePipeID: "peer-pipe-7",
+		FederationPolicyEpoch: "epoch-7", FederationAgreementID: strings.Repeat("c", 64),
+		FederationContactID: strings.Repeat("d", 64),
+	}
+	require.NoError(t, s.InsertPipeline(ctx, msg))
+	var rawIntent, rawPayload string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT intent, payload FROM pipeline_messages WHERE pipe_id=?`, msg.PipeID).Scan(&rawIntent, &rawPayload))
+	assert.NotEqual(t, msg.Intent, rawIntent)
+	assert.NotEqual(t, msg.Payload, rawPayload)
+	assert.True(t, strings.HasPrefix(rawIntent, encPrefix))
+	assert.True(t, strings.HasPrefix(rawPayload, encPrefix))
+
+	got, err := s.GetPipeline(ctx, msg.PipeID)
+	require.NoError(t, err)
+	assert.Equal(t, msg.Intent, got.Intent)
+	assert.Equal(t, msg.Payload, got.Payload)
+	assert.Equal(t, msg.SourceChainID, got.SourceChainID)
+	assert.Equal(t, msg.SourcePipeID, got.SourcePipeID)
+	assert.Equal(t, msg.FederationPolicyEpoch, got.FederationPolicyEpoch)
+	assert.Equal(t, msg.FederationAgreementID, got.FederationAgreementID)
+	assert.Equal(t, msg.FederationContactID, got.FederationContactID)
+
+	require.NoError(t, s.ClaimPipeline(ctx, msg.PipeID, msg.ToAgent))
+	require.NoError(t, s.CompletePipeline(ctx, msg.PipeID, msg.ToAgent, "sensitive result", ""))
+	var rawResult string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT result FROM pipeline_messages WHERE pipe_id=?`, msg.PipeID).Scan(&rawResult))
+	assert.NotEqual(t, "sensitive result", rawResult)
+	assert.True(t, strings.HasPrefix(rawResult, encPrefix))
+
+	s.SetVault(nil)
+	s.SetVaultExpected(true)
+	_, err = s.GetPipeline(ctx, msg.PipeID)
+	require.ErrorIs(t, err, ErrPipeContentUnavailable)
+}
+
+func TestPipelineFederationNamespacesCannotEnterLocalInboxOrResults(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewSQLiteStore(ctx, ":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	now := time.Now().UTC()
+	collidingAgentID := "same-agent-id"
+
+	require.NoError(t, s.InsertPipeline(ctx, &PipelineMessage{
+		PipeID: "pipe-outbound", FromAgent: "local-sender", ToAgent: collidingAgentID,
+		DestinationChainID: "chain-peer", Intent: "remote", Payload: "work", Status: "pending",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+	inbox, err := s.GetInbox(ctx, collidingAgentID, "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, inbox, "outbound remote rows must never become locally claimable")
+
+	require.NoError(t, s.InsertPipeline(ctx, &PipelineMessage{
+		PipeID: "pipe-imported", FromAgent: collidingAgentID, ToAgent: "local-recipient",
+		SourceChainID: "chain-peer", SourcePipeID: "remote-id", Intent: "foreign", Payload: "work", Status: "pending",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+	inbox, err = s.GetInbox(ctx, "local-recipient", "", 10)
+	require.NoError(t, err)
+	require.Len(t, inbox, 1)
+	require.Equal(t, "chain-peer", inbox[0].SourceChainID)
+	require.NoError(t, s.ClaimPipeline(ctx, "pipe-imported", "local-recipient"))
+	require.NoError(t, s.CompletePipeline(ctx, "pipe-imported", "local-recipient", "done", ""))
+	results, err := s.GetCompletedForSender(ctx, collidingAgentID, 10)
+	require.NoError(t, err)
+	assert.Empty(t, results, "a foreign sender id must not collide into a local sender's result list")
 }
 
 func TestPipelineExpiry(t *testing.T) {

@@ -451,7 +451,7 @@ type SyncDomainsRequest struct {
 }
 
 type directionalSyncPolicyDriver interface {
-	SetDirectionalSyncPolicy(context.Context, string, []string, []string) (*federation.DirectionalSyncPolicyResult, error)
+	UpdateDirectionalSyncPolicy(context.Context, string, *[]string, *[]string) (*federation.DirectionalSyncPolicyResult, error)
 }
 
 func hasV3SyncMarker(control *store.SyncControl) bool {
@@ -562,29 +562,7 @@ func (s *Server) handleSyncDomainsSet(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusNotImplemented, "Sync policy unavailable", "Directional sync policy is not wired on this node.")
 			return
 		}
-		publish, readErr := ss.GetDirectionalSyncDomains(r.Context(), remoteChainID, store.SyncDirectionLocalPublish)
-		if readErr != nil {
-			writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read the current publish policy.")
-			return
-		}
-		subscribe, readErr := ss.GetDirectionalSyncDomains(r.Context(), remoteChainID, store.SyncDirectionLocalSubscribe)
-		if readErr != nil {
-			writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to read the current subscription policy.")
-			return
-		}
-		if publish == nil {
-			publish = []string{}
-		}
-		if subscribe == nil {
-			subscribe = []string{}
-		}
-		if req.PublishDomains != nil {
-			publish = append([]string{}, (*req.PublishDomains)...)
-		}
-		if req.SubscribeDomains != nil {
-			subscribe = append([]string{}, (*req.SubscribeDomains)...)
-		}
-		result, policyErr := driver.SetDirectionalSyncPolicy(r.Context(), remoteChainID, publish, subscribe)
+		result, policyErr := driver.UpdateDirectionalSyncPolicy(r.Context(), remoteChainID, req.PublishDomains, req.SubscribeDomains)
 		if policyErr != nil {
 			writeProblem(w, http.StatusConflict, "Sync policy denied", policyErr.Error())
 			return

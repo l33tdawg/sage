@@ -491,8 +491,10 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/org/{org_id}/dept/{dept_id}/members", s.handleListDeptMembers)
 
 		// Pipeline endpoints
+		r.Post("/v1/pipe/resolve", s.handlePipeResolve)
 		r.Post("/v1/pipe/send", s.handlePipeSend)
 		r.Get("/v1/pipe/inbox", s.handlePipeInbox)
+		r.Get("/v1/pipe/updates", s.handlePipeUpdates)
 		r.Put("/v1/pipe/{pipe_id}/claim", s.handlePipeClaim)
 		r.Put("/v1/pipe/{pipe_id}/result", s.handlePipeResult)
 		r.Get("/v1/pipe/{pipe_id}", s.handlePipeStatus)

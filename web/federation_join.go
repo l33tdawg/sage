@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/internal/federation"
+	"github.com/l33tdawg/sage/internal/netguard"
 	"github.com/l33tdawg/sage/internal/store"
 )
 
@@ -49,7 +51,9 @@ type FederationJoinDriver interface {
 // SetFederation wires the JOIN ceremony driver (call before RegisterRoutes).
 func (h *DashboardHandler) SetFederation(f FederationJoinDriver) { h.Federation = f }
 
-const fedCallTimeout = 25 * time.Second
+const (
+	fedCallTimeout = 25 * time.Second
+)
 
 func fedWriteJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -86,6 +90,8 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	fr.Get("/v1/dashboard/federation/connections/{chain_id}/permissions", h.handleFedPermissionsGet)
 	fr.Put("/v1/dashboard/federation/connections/{chain_id}/permissions", h.handleFedPermissionsPut)
 	fr.Put("/v1/dashboard/federation/connections/{chain_id}/pause", h.handleFedPause)
+	fr.Get("/v1/dashboard/federation/connections/{chain_id}/pipe-contacts", h.handleFedPipeContactsGet)
+	fr.Put("/v1/dashboard/federation/connections/{chain_id}/pipe-contacts", h.handleFedPipeContactsPut)
 	fr.Post("/v1/dashboard/federation/connections/{chain_id}/revoke", h.handleFedRevoke)
 	fr.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
 
@@ -129,9 +135,18 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 // --- LAN endpoint suggestion (fix the localhost-in-join-code footgun) -------
 
 // fedDefaultPort is the standard federation listener port (node.go default
-// 0.0.0.0:8444, and the placeholder in every wizard field). An operator who
-// runs a custom port edits the suggested endpoint in the wizard.
+// 0.0.0.0:8444). The dashboard normally receives the effective configured
+// listener address from node.go; this constant is only the safe legacy/test
+// fallback when the handler is embedded without that wiring.
 const fedDefaultPort = 8444
+
+func (h *DashboardHandler) federationListenerBind() (string, int) {
+	host, port, ok := parseMCPTLSAddr(h.FederationAddr)
+	if !ok || port < 1 || port > 65535 {
+		return "", fedDefaultPort
+	}
+	return host, port
+}
 
 // FedLanCandidate is one address a JOINING peer on another machine could use to
 // reach this node's federation listener.
@@ -149,26 +164,80 @@ type FedLanCandidate struct {
 // on the guest: the host had baked localhost into its code). So we enumerate
 // this host's routable LAN addresses server-side (physical-LAN-private first)
 // and let the wizard default to the most-likely-reachable one.
-func (h *DashboardHandler) handleFedLanEndpoint(w http.ResponseWriter, _ *http.Request) {
-	cands := directIPv4Candidates()
-	out := make([]FedLanCandidate, 0, len(cands))
-	for _, c := range cands {
-		out = append(out, FedLanCandidate{
-			Endpoint:  fmt.Sprintf("https://%s:%d", c.IP, fedDefaultPort),
-			IP:        c.IP,
-			Iface:     c.Iface,
-			IsPrivate: c.IsPrivate,
-		})
+func (h *DashboardHandler) handleFedLanEndpoint(w http.ResponseWriter, r *http.Request) {
+	bindHost, port := h.federationListenerBind()
+	var out []FedLanCandidate
+	wildcardBind := bindHost == "" || bindHost == "0.0.0.0" || bindHost == "::"
+	if !wildcardBind {
+		// An explicit bind accepts traffic only for that exact host. Advertising
+		// another interface would mint a signed but unreachable JOIN endpoint. The
+		// LAN ceremony deliberately excludes public/CGNAT/overlay endpoints; those
+		// use the Internet/libp2p path instead.
+		ip := net.ParseIP(bindHost)
+		if netguard.LocalLANHost(bindHost) {
+			out = append(out, FedLanCandidate{
+				Endpoint:  "https://" + net.JoinHostPort(bindHost, strconv.Itoa(port)),
+				IP:        bindHost,
+				Iface:     "configured listener",
+				IsPrivate: ip != nil && ip.IsPrivate(),
+			})
+		}
+	} else {
+		cands := directIPv4Candidates()
+		out = make([]FedLanCandidate, 0, len(cands))
+		for _, c := range cands {
+			if !netguard.LocalLANHost(c.IP) {
+				continue
+			}
+			out = append(out, FedLanCandidate{
+				Endpoint:  fmt.Sprintf("https://%s:%d", c.IP, port),
+				IP:        c.IP,
+				Iface:     c.Iface,
+				IsPrivate: c.IsPrivate,
+			})
+		}
+		// A wildcard listener may also be reachable through the exact private
+		// address used to open CEREBRUM even when interface enumeration is empty
+		// (for example inside a constrained container). Resolve that fallback on
+		// the server, where the listener mode and LAN guard are both known. The
+		// browser must never fabricate it for an explicit public/overlay bind.
+		if len(out) == 0 {
+			if candidate, ok := privateFederationDashboardCandidate(r, port); ok {
+				out = append(out, candidate)
+			}
+		}
 	}
 	suggested := ""
 	if len(out) > 0 {
 		suggested = out[0].Endpoint // ranked: physical-LAN-private wins
 	}
 	fedWriteJSON(w, http.StatusOK, map[string]any{
-		"port":               fedDefaultPort,
+		"port":               port,
 		"suggested_endpoint": suggested,
 		"candidates":         out,
 	})
+}
+
+func privateFederationDashboardCandidate(r *http.Request, port int) (FedLanCandidate, bool) {
+	if r == nil {
+		return FedLanCandidate{}, false
+	}
+	requestHost := strings.TrimSpace(r.Host)
+	if host, _, splitErr := net.SplitHostPort(requestHost); splitErr == nil {
+		requestHost = host
+	} else {
+		requestHost = strings.TrimPrefix(strings.TrimSuffix(requestHost, "]"), "[")
+	}
+	ip := net.ParseIP(requestHost)
+	if ip == nil || !ip.IsPrivate() || !netguard.LocalLANHost(requestHost) {
+		return FedLanCandidate{}, false
+	}
+	return FedLanCandidate{
+		Endpoint:  "https://" + net.JoinHostPort(requestHost, strconv.Itoa(port)),
+		IP:        requestHost,
+		Iface:     "CEREBRUM address",
+		IsPrivate: true,
+	}, true
 }
 
 // --- Federation readiness (fork-ladder warm-up) -----------------------------
@@ -512,28 +581,14 @@ func (h *DashboardHandler) handleFedSyncSet(w http.ResponseWriter, r *http.Reque
 			fedWriteErr(w, http.StatusConflict, "This legacy connection has no frozen peer identity; re-pair before using directional sync.")
 			return
 		}
-		driver, ok := h.Federation.(directionalSyncPolicyDriver)
+		driver, ok := h.Federation.(interface {
+			UpdateDirectionalSyncPolicy(context.Context, string, *[]string, *[]string) (*federation.DirectionalSyncPolicyResult, error)
+		})
 		if !ok {
 			fedWriteErr(w, http.StatusNotImplemented, "Directional sync policy is unavailable.")
 			return
 		}
-		publish, err := ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionLocalPublish)
-		if err != nil {
-			fedWriteErr(w, http.StatusInternalServerError, "Failed to read current publish policy.")
-			return
-		}
-		subscribe, err := ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionLocalSubscribe)
-		if err != nil {
-			fedWriteErr(w, http.StatusInternalServerError, "Failed to read current subscription policy.")
-			return
-		}
-		if body.PublishDomains != nil {
-			publish = append([]string(nil), (*body.PublishDomains)...)
-		}
-		if body.SubscribeDomains != nil {
-			subscribe = append([]string(nil), (*body.SubscribeDomains)...)
-		}
-		result, err := driver.SetDirectionalSyncPolicy(r.Context(), chain, publish, subscribe)
+		result, err := driver.UpdateDirectionalSyncPolicy(r.Context(), chain, body.PublishDomains, body.SubscribeDomains)
 		if err != nil {
 			fedWriteErr(w, http.StatusConflict, err.Error())
 			return
@@ -1076,7 +1131,9 @@ func (h *DashboardHandler) handleFedGuestConfirm(w http.ResponseWriter, r *http.
 		fedWriteErr(w, http.StatusBadRequest, "Invalid request.")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	// Final confirmation can wait for two sequential consensus commits: the
+	// guest's local tx-33, then the host's tx-33 over the peer listener.
+	ctx, cancel := context.WithTimeout(r.Context(), federation.JoinConfirmationOperationTimeout())
 	defer cancel()
 	txHash, err := h.Federation.GuestConfirm(ctx, body.SessionID, body.Endpoint, federation.ScopeWire{
 		MaxClearance:   body.HostScope.MaxClearance,

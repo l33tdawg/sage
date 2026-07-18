@@ -536,6 +536,9 @@ const (
 	// MaxOpenPipesPerAgent caps the non-terminal (pending or claimed) pipes a
 	// single requester identity may hold open at once.
 	MaxOpenPipesPerAgent = 256
+	// MaxOpenPipesPerPeer bounds one authenticated federation chain even when
+	// it has many legitimate local agent identities.
+	MaxOpenPipesPerPeer = 1024
 	// MaxOpenPipesGlobal caps non-terminal pipes across all requesters, so
 	// many identities cannot collectively exhaust disk.
 	MaxOpenPipesGlobal = 10000
@@ -544,11 +547,13 @@ const (
 // Pipeline guard errors. Callers distinguish these with errors.Is and map them
 // to HTTP 413 (too large) and 429 (quota).
 var (
-	ErrPipePayloadTooLarge = errors.New("pipeline payload exceeds maximum size")
-	ErrPipeResultTooLarge  = errors.New("pipeline result exceeds maximum size")
-	ErrPipeIntentTooLarge  = errors.New("pipeline intent exceeds maximum size")
-	ErrPipeQuotaPerAgent   = errors.New("too many open pipelines for this requester")
-	ErrPipeQuotaGlobal     = errors.New("too many open pipelines on this node")
+	ErrPipePayloadTooLarge    = errors.New("pipeline payload exceeds maximum size")
+	ErrPipeResultTooLarge     = errors.New("pipeline result exceeds maximum size")
+	ErrPipeIntentTooLarge     = errors.New("pipeline intent exceeds maximum size")
+	ErrPipeQuotaPerAgent      = errors.New("too many open pipelines for this requester")
+	ErrPipeQuotaPerPeer       = errors.New("too many open pipelines from this federation peer")
+	ErrPipeQuotaGlobal        = errors.New("too many open pipelines on this node")
+	ErrPipeContentUnavailable = errors.New("pipeline content is unavailable while the vault is locked")
 )
 
 // PipelineMessage represents an ephemeral agent-to-agent work item.
@@ -569,6 +574,17 @@ type PipelineMessage struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	ExpiresAt    time.Time  `json:"expires_at"`
 	JournalID    string     `json:"journal_id,omitempty"`
+	// Federation provenance is additive. Empty fields identify an ordinary
+	// local pipe. Imported work always receives a fresh local PipeID and keeps
+	// the peer's ID in SourcePipeID; outbound work names DestinationChainID so
+	// it can never become locally claimable even if agent IDs collide.
+	SourceChainID             string `json:"source_chain_id,omitempty"`
+	SourcePipeID              string `json:"source_pipe_id,omitempty"`
+	DestinationChainID        string `json:"destination_chain_id,omitempty"`
+	FederationPolicyEpoch     string `json:"federation_policy_epoch,omitempty"`
+	FederationAgreementID     string `json:"federation_agreement_id,omitempty"`
+	FederationContactID       string `json:"federation_contact_id,omitempty"`
+	FederationContactRevision string `json:"federation_contact_revision,omitempty"`
 }
 
 // PipelineStore defines the interface for agent-to-agent pipeline storage.
@@ -587,6 +603,97 @@ type PipelineStore interface {
 	// never-claimed pipe even if it carried an oversized expires_at.
 	ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error)
 	PurgePipelines(ctx context.Context, olderThan time.Time) (int, error)
+}
+
+// PipelineAgentProof preserves the exact already-verified local REST request
+// signature for delayed peer verification. SQLite vault-encrypts this complete
+// tuple at rest; encrypting only CanonicalRequest would leave its signature and
+// nonce as an offline oracle for guesses at low-entropy payloads.
+type PipelineAgentProof struct {
+	AgentID          string `json:"agent_id"`
+	Signature        []byte `json:"signature"`
+	Timestamp        int64  `json:"timestamp"`
+	Nonce            []byte `json:"nonce,omitempty"`
+	CanonicalRequest []byte `json:"canonical_request"`
+}
+
+// PipelineTransportOutbox is transport metadata attached to one authoritative
+// pipeline row. It is not a second inbox or public state machine.
+type PipelineTransportOutbox struct {
+	EventID         string
+	PipeID          string
+	RemoteChainID   string
+	EventKind       string
+	PolicyEpoch     string
+	AgreementID     string
+	ContactID       string
+	ContactRevision string
+	SourceAgentID   string
+	TargetAgentID   string
+	Proof           PipelineAgentProof
+	State           string
+	Attempts        int
+	NextAttemptAt   time.Time
+	CreatedAt       time.Time
+	ExpiresAt       time.Time
+	DeliveredAt     *time.Time
+	LastError       string
+}
+
+type PipelineTransportDedup struct {
+	RemoteChainID   string
+	PolicyEpoch     string
+	AgreementID     string
+	ContactID       string
+	ContactRevision string
+	SourceAgentID   string
+	TargetAgentID   string
+	EventKind       string
+	RemotePipeID    string
+	ContentHash     []byte
+	ProofHash       []byte
+	LocalPipeID     string
+	Outcome         string
+	ExpiresAt       time.Time
+}
+
+// PipelineDeliveryUpdate is a payload-free terminal transport notice for the
+// local agent that signed a federated send or result. It deliberately exposes
+// no message content or proof bytes; LastError is peer-originated diagnostic
+// text and callers must present it as external/untrusted.
+type PipelineDeliveryUpdate struct {
+	EventID       string    `json:"event_id"`
+	PipeID        string    `json:"pipe_id"`
+	EventKind     string    `json:"event_kind"`
+	RemoteChainID string    `json:"remote_chain_id"`
+	TargetAgentID string    `json:"target_agent_id"`
+	State         string    `json:"state"`
+	Attempts      int       `json:"attempts"`
+	LastError     string    `json:"last_error"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// PipelineTransportUpdateStore is optional because federated transport is a
+// SQLite extension. It gives the signer actionable terminal delivery feedback
+// without broadening the ordinary pipeline store contract.
+type PipelineTransportUpdateStore interface {
+	ListPipelineDeliveryUpdates(ctx context.Context, agentID string, limit int) ([]*PipelineDeliveryUpdate, error)
+}
+
+// FederatedPipelineStore is the optional SQLite transport extension. Backends
+// that do not implement it keep the existing local PipelineStore behavior and
+// do not advertise federated delivery.
+type FederatedPipelineStore interface {
+	PipelineStore
+	InsertPipelineWithTransport(ctx context.Context, msg *PipelineMessage, event *PipelineTransportOutbox) error
+	CompleteFederatedPipelineWithTransport(ctx context.Context, pipeID, agentID, result string, event *PipelineTransportOutbox) error
+	AdmitFederatedPipeline(ctx context.Context, msg *PipelineMessage, dedup *PipelineTransportDedup) (localPipeID string, duplicate bool, err error)
+	ApplyFederatedPipelineResult(ctx context.Context, pipeID, result string, dedup *PipelineTransportDedup) (duplicate bool, err error)
+	GetPipelineTransport(ctx context.Context, eventID string) (*PipelineTransportOutbox, error)
+	ListPendingPipelineTransport(ctx context.Context, now time.Time, limit int) ([]*PipelineTransportOutbox, error)
+	MarkPipelineTransportDelivered(ctx context.Context, eventID string) error
+	RecordPipelineTransportFailure(ctx context.Context, eventID, detail string, nextAttempt time.Time, terminal bool) error
+	PurgeExpiredPipelineTransport(ctx context.Context, now time.Time) (int, error)
 }
 
 // AgentNotification is a durable, one-way notice for an agent. Unlike a
@@ -657,6 +764,11 @@ type OffchainStore interface {
 	// the transaction is rolled back; otherwise it is committed. The OffchainStore
 	// passed to fn is scoped to the transaction — all writes through it are atomic.
 	RunInTx(ctx context.Context, fn func(tx OffchainStore) error) error
+	// RunInAgentContactTx is the projection variant for a batch that may create
+	// or update network_agents. SQLite takes the contact write lease before its
+	// write mutex so federation readers cannot observe or act on a half-generation;
+	// backends without federated contact projection may delegate to RunInTx.
+	RunInAgentContactTx(ctx context.Context, fn func(tx OffchainStore) error) error
 }
 
 // OrgStore defines the interface for organization, department, and federation storage.

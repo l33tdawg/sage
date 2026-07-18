@@ -643,7 +643,7 @@ func TestProcessAgentRegister_IdempotentReregister_PreservesPermissions(t *testi
 
 	// Flush everything queued so far so the SQL mirror reflects the permissions.
 	ctx := context.Background()
-	require.NoError(t, app.offchainStore.RunInTx(ctx, func(s store.OffchainStore) error {
+	require.NoError(t, app.offchainStore.RunInAgentContactTx(ctx, func(s store.OffchainStore) error {
 		return app.flushPendingWrites(ctx, s, app.pendingWrites)
 	}))
 	app.pendingWrites = nil
@@ -663,7 +663,7 @@ func TestProcessAgentRegister_IdempotentReregister_PreservesPermissions(t *testi
 	require.Equal(t, uint32(0), rr.Code, "idempotent re-register should succeed: %s", rr.Log)
 
 	// Flush the re-register write.
-	require.NoError(t, app.offchainStore.RunInTx(ctx, func(s store.OffchainStore) error {
+	require.NoError(t, app.offchainStore.RunInAgentContactTx(ctx, func(s store.OffchainStore) error {
 		return app.flushPendingWrites(ctx, s, app.pendingWrites)
 	}))
 	app.pendingWrites = nil
@@ -1022,12 +1022,22 @@ type busyInjectingStore struct {
 }
 
 func (s *busyInjectingStore) RunInTx(ctx context.Context, fn func(tx store.OffchainStore) error) error {
+	return s.runInjected(ctx, fn, s.OffchainStore.RunInTx)
+}
+
+func (s *busyInjectingStore) RunInAgentContactTx(ctx context.Context, fn func(tx store.OffchainStore) error) error {
+	return s.runInjected(ctx, fn, s.OffchainStore.RunInAgentContactTx)
+}
+
+func (s *busyInjectingStore) runInjected(ctx context.Context, fn func(tx store.OffchainStore) error,
+	run func(context.Context, func(store.OffchainStore) error) error,
+) error {
 	s.attempts++
 	if s.alwaysFail || s.failuresRemaining > 0 {
 		s.failuresRemaining--
 		return errors.New("database is locked (5) (SQLITE_BUSY)")
 	}
-	return s.OffchainStore.RunInTx(ctx, fn)
+	return run(ctx, fn)
 }
 
 // TestCommitRetriesOnSQLITE_BUSYAndEventuallyFlushes exercises the happy

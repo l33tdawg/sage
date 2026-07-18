@@ -3,6 +3,7 @@ package federation
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"strings"
 	"testing"
 	"time"
 )
@@ -99,6 +100,98 @@ func TestCheckConfirmWrongCertRejected(t *testing.T) {
 	ack := SignEnroll(guestPriv, e, true)
 	if _, err := st.CheckConfirm(id, randN(32), sig, ack, now); err == nil {
 		t.Fatal("CheckConfirm accepted an unbound client certificate")
+	}
+}
+
+func TestRequestRejectsEndpointDifferentFromScannedReturnCode(t *testing.T) {
+	st := NewJoinStore()
+	now := time.Now()
+	hostPin, guestPin := randN(32), randN(32)
+	js, err := st.Create("host-anchor", hostPin, "https://host:18444", randN(20), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetExpectedGuest(js.ID, guestPin, "https://guest:19444", now); err != nil {
+		t.Fatal(err)
+	}
+	guestPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	_, err = st.Request(js.ID, now, GuestRequestInput{
+		GuestChain: "guest-anchor", GuestAgentPub: guestPub, GuestNonce: randN(16),
+		GuestPin: guestPin, GuestEndpoint: "https://guest:8444",
+		GuestScope: trustOnlyJoinScope.digest(), CertSPKI: randN(32),
+	})
+	if err == nil || !strings.Contains(err.Error(), "endpoint does not match") {
+		t.Fatalf("Request endpoint mismatch err=%v", err)
+	}
+	got, ok := st.Get(js.ID, now)
+	if !ok || got.State != JoinCreated || got.GuestChain != "" {
+		t.Fatalf("endpoint mismatch mutated session: %+v ok=%v", got, ok)
+	}
+}
+
+func TestRequestRejectedWhileConfirmingPreservesFrozenActiveReplay(t *testing.T) {
+	st, id, certSPKI, e, guestPriv, _ := approvedSession(t)
+	now := time.Now()
+	sig := SignEnroll(guestPriv, e, false)
+	ack := SignEnroll(guestPriv, e, true)
+	if _, err := st.CheckConfirm(id, certSPKI, sig, ack, now); err != nil {
+		t.Fatalf("CheckConfirm: %v", err)
+	}
+	before, ok := st.Get(id, now)
+	if !ok {
+		t.Fatal("confirming session missing")
+	}
+	_, err := st.Request(id, now, GuestRequestInput{
+		GuestChain: before.GuestChain, GuestAgentPub: randN(ed25519.PublicKeySize),
+		GuestNonce: randN(16), GuestPin: before.GuestPin,
+		GuestEndpoint: before.GuestEndpoint, GuestScope: before.GuestScope,
+		GuestScopeWire: before.GuestScopeWire, CertSPKI: certSPKI,
+	})
+	if err == nil || !strings.Contains(err.Error(), "CONFIRMING") {
+		t.Fatalf("re-request during CONFIRMING err=%v", err)
+	}
+	if err := st.MarkActive(id, "tx-confirming-race"); err != nil {
+		t.Fatalf("MarkActive after rejected re-request: %v", err)
+	}
+	replay, err := st.CheckConfirm(id, certSPKI, sig, ack, now)
+	if err != nil {
+		t.Fatalf("ACTIVE replay after rejected re-request: %v", err)
+	}
+	if !replay.AlreadyActive || replay.ActivationTxHash != "tx-confirming-race" || replay.ApprovedE != e {
+		t.Fatalf("replay changed after confirming re-request: %+v", replay)
+	}
+}
+
+func TestRequestRejectedWhileActiveLeavesReplayStable(t *testing.T) {
+	st, id, certSPKI, e, guestPriv, _ := approvedSession(t)
+	now := time.Now()
+	sig := SignEnroll(guestPriv, e, false)
+	ack := SignEnroll(guestPriv, e, true)
+	if _, err := st.CheckConfirm(id, certSPKI, sig, ack, now); err != nil {
+		t.Fatalf("CheckConfirm: %v", err)
+	}
+	if err := st.MarkActive(id, "tx-active-replay"); err != nil {
+		t.Fatalf("MarkActive: %v", err)
+	}
+	active, ok := st.Get(id, now)
+	if !ok {
+		t.Fatal("active session missing")
+	}
+	_, err := st.Request(id, now, GuestRequestInput{
+		GuestChain: active.GuestChain, GuestAgentPub: randN(ed25519.PublicKeySize),
+		GuestNonce: randN(16), GuestPin: active.GuestPin,
+		GuestEndpoint: active.GuestEndpoint, GuestScope: active.GuestScope,
+		GuestScopeWire: active.GuestScopeWire, CertSPKI: certSPKI,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ACTIVE") {
+		t.Fatalf("re-request during ACTIVE err=%v", err)
+	}
+	replay, err := st.CheckConfirm(id, certSPKI, sig, ack, now)
+	if err != nil {
+		t.Fatalf("ACTIVE replay after rejected re-request: %v", err)
+	}
+	if !replay.AlreadyActive || replay.ActivationTxHash != "tx-active-replay" || replay.ApprovedE != e {
+		t.Fatalf("active replay changed after re-request: %+v", replay)
 	}
 }
 

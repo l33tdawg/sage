@@ -11,6 +11,49 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestConsensusOwnerCommitWaitsForOwnershipReaders(t *testing.T) {
+	base, err := NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, base.CloseBadger()) })
+	require.NoError(t, base.RegisterDomain("research", "owner-a", "", 1))
+	scoped := base.BeginConsensusTransaction(nil)
+	require.NoError(t, scoped.TransferDomain("research", "owner-b", "", 2))
+
+	unlock := base.LockDomainOwnershipRead()
+	committed := make(chan error, 1)
+	go func() { committed <- scoped.CommitConsensusTransaction() }()
+	select {
+	case err := <-committed:
+		t.Fatalf("ownership-changing consensus commit bypassed an active reader: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	require.NoError(t, <-committed)
+	owner, err := base.GetDomainOwner("research")
+	require.NoError(t, err)
+	require.Equal(t, "owner-b", owner)
+}
+
+func TestSetSharedDomainWaitsForOwnershipReaders(t *testing.T) {
+	base, err := NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, base.CloseBadger()) })
+
+	unlock := base.LockDomainOwnershipRead()
+	shared := make(chan error, 1)
+	go func() { shared <- base.SetSharedDomain("open.shared") }()
+	select {
+	case err := <-shared:
+		t.Fatalf("shared-domain publication bypassed an active owner reader: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	require.NoError(t, <-shared)
+	marker, err := base.GetState("shared_domain:open.shared")
+	require.NoError(t, err)
+	require.Equal(t, []byte{1}, marker)
+}
+
 func TestConsensusTransactionPreWriteSentinelDoesNotPoison(t *testing.T) {
 	base, err := NewBadgerStore(t.TempDir())
 	require.NoError(t, err)

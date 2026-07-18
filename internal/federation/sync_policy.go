@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -295,10 +296,37 @@ func (m *Manager) peerRBACSyncBinding(control *store.SyncControl, agreement *sto
 // copy subscription. publish is a subset of what this node shares for live
 // reads; subscribe is what this node elects to retain from the peer.
 func (m *Manager) SetDirectionalSyncPolicy(ctx context.Context, remoteChainID string, rawPublish, rawSubscribe []string) (*DirectionalSyncPolicyResult, error) {
+	return m.UpdateDirectionalSyncPolicy(ctx, remoteChainID, &rawPublish, &rawSubscribe)
+}
+
+// UpdateDirectionalSyncPolicy atomically replaces either or both locally
+// authored lanes. A nil pointer preserves that lane under the same store lease;
+// callers therefore never need a racy read-modify-write around this method.
+func (m *Manager) UpdateDirectionalSyncPolicy(ctx context.Context, remoteChainID string, rawPublish, rawSubscribe *[]string) (*DirectionalSyncPolicyResult, error) {
+	return m.mutateDirectionalSyncPolicy(ctx, remoteChainID, rawPublish, rawSubscribe, false)
+}
+
+// ReconcileDirectionalPublishToPeerRBAC is the fail-closed first half of a
+// dashboard RBAC replacement. It can only narrow Publish to the domains the
+// current peer policy already grants for Copy and preserves Subscribe
+// atomically. A later RBAC replacement can therefore never momentarily activate
+// an old/stale Publish lane.
+func (m *Manager) ReconcileDirectionalPublishToPeerRBAC(ctx context.Context, remoteChainID string) (*DirectionalSyncPolicyResult, error) {
+	return m.mutateDirectionalSyncPolicy(ctx, remoteChainID, nil, nil, true)
+}
+
+func (m *Manager) mutateDirectionalSyncPolicy(ctx context.Context, remoteChainID string, rawPublish, rawSubscribe *[]string, intersectPublish bool) (*DirectionalSyncPolicyResult, error) {
 	ss := m.syncStore()
 	if ss == nil {
 		return nil, fmt.Errorf("domain sync requires SQLite")
 	}
+	unlock := ss.LockSyncPolicyWrite()
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
 	agreement, err := m.ActiveAgreement(remoteChainID)
 	if err != nil {
 		return nil, err
@@ -308,11 +336,27 @@ func (m *Manager) SetDirectionalSyncPolicy(ctx context.Context, remoteChainID st
 		control.PeerAgentID == "" || control.RemoteCAPin != hex.EncodeToString(agreement.PeerPubKey) {
 		return nil, fmt.Errorf("this connection has no active directional sync binding")
 	}
-	publish, err := canonicalSyncDomainsFormat(rawPublish)
+	currentPublish, err := ss.GetDirectionalSyncDomains(ctx, remoteChainID, store.SyncDirectionLocalPublish)
+	if err != nil {
+		return nil, fmt.Errorf("read current publish policy: %w", err)
+	}
+	currentSubscribe, err := ss.GetDirectionalSyncDomains(ctx, remoteChainID, store.SyncDirectionLocalSubscribe)
+	if err != nil {
+		return nil, fmt.Errorf("read current subscription policy: %w", err)
+	}
+	publishRaw := currentPublish
+	if rawPublish != nil {
+		publishRaw = *rawPublish
+	}
+	subscribeRaw := currentSubscribe
+	if rawSubscribe != nil {
+		subscribeRaw = *rawSubscribe
+	}
+	publish, err := canonicalSyncDomainsFormat(publishRaw)
 	if err != nil {
 		return nil, err
 	}
-	subscribe, err := canonicalSyncDomainsFormat(rawSubscribe)
+	subscribe, err := canonicalSyncDomainsFormat(subscribeRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -321,9 +365,18 @@ func (m *Manager) SetDirectionalSyncPolicy(ctx context.Context, remoteChainID st
 	// subscribe-only v2->v3 migration could silently turn legacy sync_domains
 	// into a new outbound Copy capability. Legacy SetHostSyncPolicy/v1-v2 paths
 	// retain their tx-33 compatibility without entering this method.
-	peerPolicy, err := m.GetPeerRBACPolicy(ctx, remoteChainID)
+	peerPolicy, err := m.getPeerRBACPolicyForAgreement(ctx, agreement)
 	if err != nil {
 		return nil, fmt.Errorf("read peer copy permission: %w", err)
+	}
+	if intersectPublish {
+		narrowed := make([]string, 0, len(publish))
+		for _, domain := range publish {
+			if peerPolicy != nil && peerRBACConfiguredAllows(peerPolicy, domain, func(grant store.PeerRBACDomainPermission) bool { return grant.Copy }) {
+				narrowed = append(narrowed, domain)
+			}
+		}
+		publish = narrowed
 	}
 	for _, domain := range publish {
 		// Pause controls effective egress, not configuration. Let the operator
@@ -333,21 +386,41 @@ func (m *Manager) SetDirectionalSyncPolicy(ctx context.Context, remoteChainID st
 			return nil, fmt.Errorf("copy permission for %q is not granted to this peer", domain)
 		}
 	}
-	if err := m.authorizeSyncPolicyDomains(publish); err != nil {
-		return nil, err
+	// The reconciliation form can only remove capability from a previously
+	// committed lane, so it must remain usable even if local domain ownership
+	// changed since that lane was saved. The final requested Publish update still
+	// performs the complete current ownership check below.
+	if !intersectPublish {
+		if err := m.authorizeSyncPolicyDomains(publish); err != nil {
+			return nil, err
+		}
+	}
+	if intersectPublish && slices.Equal(publish, currentPublish) {
+		state := "pending"
+		if control.DeliveredRevision >= control.Revision {
+			state = "delivered"
+		}
+		result := &DirectionalSyncPolicyResult{Version: SyncPolicyVersionPeerRBAC, Revision: control.Revision,
+			PublishDomains: publish, SubscribeDomains: subscribe, State: state}
+		unlock()
+		locked = false
+		return result, nil
 	}
 	revision := control.Revision + 1
 	hash := directionalSyncPolicyHash(control.PolicyEpoch, m.localChainID, revision, publish, subscribe)
-	if _, err := ss.ApplyLocalDirectionalSyncPolicy(ctx, remoteChainID, control.PolicyEpoch,
+	if _, err := ss.ApplyLocalDirectionalSyncPolicyLocked(ctx, remoteChainID, control.PolicyEpoch,
 		SyncPolicyVersionPeerRBAC, revision, hash, publish, subscribe); err != nil {
 		return nil, err
 	}
+	paused := peerPolicy == nil || peerPolicy.Paused
+	unlock()
+	locked = false
 	state := "pending"
 	// While paused, keep the latest directional snapshot entirely local. Even
 	// domain labels are authorization metadata; sending them to the peer would
 	// make a supposedly disconnected edge observable. Resume nudges the drainer,
 	// which sends only the latest saved revision.
-	if peerPolicy == nil || !peerPolicy.Paused {
+	if !paused && !intersectPublish {
 		if err := m.deliverSyncPolicy(ctx, ss, remoteChainID); err == nil {
 			state = "delivered"
 		}

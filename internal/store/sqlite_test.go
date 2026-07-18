@@ -912,6 +912,41 @@ func TestUpdateAgentLastSeen(t *testing.T) {
 	assert.Equal(t, "active", got.Status, "UpdateAgentLastSeen should also set status to active")
 }
 
+func TestRunInAgentContactTxWaitsForReadersWithoutBlockingOrdinaryTransactions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, s.CreateAgent(ctx, &AgentEntry{AgentID: "contact-agent", Name: "owner", Status: "active"}))
+
+	unlock := s.LockAgentContactRead()
+	ordinary := make(chan error, 1)
+	go func() {
+		ordinary <- s.RunInTx(ctx, func(tx OffchainStore) error {
+			return tx.(*SQLiteStore).SetPreference(ctx, "contact-neutral", "ok")
+		})
+	}()
+	require.NoError(t, <-ordinary, "an unrelated transaction must not wait behind a contact snapshot reader")
+	require.ErrorContains(t, s.RunInTx(ctx, func(tx OffchainStore) error {
+		return tx.UpdateAgentStatus(ctx, "contact-agent", "inactive")
+	}), "requires RunInAgentContactTx")
+
+	updated := make(chan error, 1)
+	go func() {
+		updated <- s.RunInAgentContactTx(ctx, func(tx OffchainStore) error {
+			return tx.UpdateAgentStatus(ctx, "contact-agent", "inactive")
+		})
+	}()
+	select {
+	case err := <-updated:
+		t.Fatalf("agent-aware projection mutation bypassed an active contact reader: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	require.NoError(t, <-updated)
+	agent, err := s.GetAgent(ctx, "contact-agent")
+	require.NoError(t, err)
+	require.Equal(t, "inactive", agent.Status)
+}
+
 func TestAcquireRedeployLock(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

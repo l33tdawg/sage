@@ -598,7 +598,8 @@ func (s *Server) signedRequest(ctx context.Context, method, path string, body []
 // keep-alive EOF) may be retried like a GET. Memory-submitting POSTs stay
 // single-shot: retrying those could double-commit.
 var retryableIdempotentPOSTPaths = map[string]bool{
-	"/v1/embed": true,
+	"/v1/embed":        true,
+	"/v1/pipe/resolve": true,
 }
 
 // doSignedJSON makes a signed request and decodes the JSON response.

@@ -23,7 +23,7 @@ You grant what **they** may Read or Copy from **you**; they grant what **you** m
 
 ## Before you start
 
-- Both people need federation switched on. For **Same LAN**, the wizard uses the federation listener (usually port **8444**) for the ceremony, then securely exchanges roaming routes after signing when both nodes support v11.6. For **Internet**, the host's enrollment code carries its signed-session libp2p routes and the ceremony uses those routes from the start.
+- Both people need federation switched on. For **Same LAN**, the wizard reads the node's actual federation listener address and port (usually **8444**) for the ceremony, then securely exchanges roaming routes after signing when both nodes support v11.6. An explicit listener host is honored exactly; a wildcard bind lets the wizard offer detected LAN addresses. Port `0` is invalid because an ephemeral port cannot be truthfully advertised. For **Internet**, the host's enrollment code carries its signed-session libp2p routes and the ceremony uses those routes from the start.
 - Internet connectivity depends on at least one configured relay being reachable. SAGE ships with the project relay route and operators may add or replace relay multiaddrs. A relay outage can delay a relay-only connection, but does not weaken authentication or expose memory content.
 - You will each need a camera, or a shared screen, or at least a phone call you placed to a number you trust. The connection is safest when you are in the same room or on a video call you started.
 - You do not choose domains during JOIN. After both codes match, open the connection and choose from domains that already exist on your own SAGE. Leaving every box clear is a healthy connected state that shares nothing.
@@ -111,7 +111,7 @@ Pick **Let someone join mine**.
 
 ### 1. Choose how the computers connect
 
-Pick **Same LAN** when both computers are on the same local network, or **Internet** when they need the signed libp2p route carried in the enrollment code. Enter the address the other person will use to reach you (default `https://your-host:8444`), then press **Show my connection code**.
+Pick **Same LAN** when both computers are on the same local network, or **Internet** when they need the signed libp2p route carried in the enrollment code. For Same LAN, SAGE fills the address from the listener the node actually started and requires a complete reachable address before it creates a code. Internet setup needs a ready relay reservation but does not invent or expose a LAN address when none is authoritative; the attested P2P routes carry the ceremony. Usually you can show the connection code immediately; use the advanced address control only when a multi-homed LAN machine requires a different reachable address.
 
 ### 2. Show your code, then scan theirs back
 
@@ -224,7 +224,13 @@ As the guest, you got ahead of the host. The host must scan your return code (st
 The codes did not line up. This is the safety check doing its job. Do not continue. Hang up, reach the other person on a number you trust, and start the ceremony over.
 
 **"Your side is connected but the host has not confirmed yet."**
-You (the guest) finished, but the host's final step has not landed. This is a safe, one-sided window - the host cannot query you until their side is live. Give it a moment; the ceremony retries. If it never completes, turn off your half from the Federation list and start again.
+You (the guest) finished, but the final response did not reach you. This is a safe, one-sided window - the host cannot query you until their side is live. Press **Yes - connect** again: if the host already activated, it verifies the same certificate and signatures and returns the original result without creating another agreement transaction. If the host never activated, the same retry completes it.
+
+**"Endpoint changed" / "endpoint does not match the scanned connection code."**
+An address was edited after one of the codes was generated. Endpoints are part
+of the signed safety transcript, so SAGE stops before either side activates.
+Generate fresh codes after correcting `federation.listen_addr`; never edit a QR
+payload or reuse the old return card.
 
 **The session expired / "join session not found or expired."**
 A join has to finish within about 15 minutes. If you left it sitting, the session times out for safety. Start over from the Federation page - nothing was created.

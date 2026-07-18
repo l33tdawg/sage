@@ -241,11 +241,12 @@ func (s *Server) registerTools() map[string]Tool {
 			Name: "sage_pipe",
 			Description: "Send work to another agent via SAGE pipeline. The target agent will see this in their inbox " +
 				"on their next sage_turn or sage_inbox call. Address by provider name (e.g. 'perplexity', 'chatgpt') " +
-				"or by agent_id. SAGE journals the exchange when complete but does NOT store the full payload as memory.",
+				"or agent_id on this SAGE, or use a visible federated #node/agent handle or agent_id@chain address. " +
+				"Local exchanges journal a summary when complete; foreign pipeline content is never stored as memory.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"to":          map[string]any{"type": "string", "description": "Target: provider name (e.g. 'perplexity', 'chatgpt') or agent_id hex"},
+					"to":          map[string]any{"type": "string", "description": "Target: local provider/name/agent_id, or visible federated #node/agent handle or agent_id@chain address"},
 					"intent":      map[string]any{"type": "string", "description": "What you want done: 'research', 'summarize', 'analyze', 'review', etc."},
 					"payload":     map[string]any{"type": "string", "description": "The work content to send"},
 					"ttl_minutes": map[string]any{"type": "integer", "description": "Time-to-live in minutes (default: 60, max: 1440)", "default": 60},
@@ -270,7 +271,7 @@ func (s *Server) registerTools() map[string]Tool {
 		"sage_pipe_result": {
 			Name: "sage_pipe_result",
 			Description: "Return results for a claimed pipeline work item. Sends your result back to the requesting agent. " +
-				"SAGE auto-journals the exchange as a memory (just the summary, not the full payload).",
+				"SAGE journals a summary for local exchanges; federated work and results remain transient and are never auto-journaled.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -2101,7 +2102,7 @@ func floatParam(params map[string]any, key string, defaultVal float64) float64 {
 func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, error) {
 	to := stringParam(params, "to", "")
 	if to == "" {
-		return nil, fmt.Errorf("'to' is required (provider name or agent_id)")
+		return nil, fmt.Errorf("'to' is required (local provider/name/agent_id or federated #node/agent or agent_id@chain)")
 	}
 	payload := stringParam(params, "payload", "")
 	if payload == "" {
@@ -2116,42 +2117,100 @@ func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, erro
 		ttlMinutes = 1440
 	}
 
-	// Resolve target: hex agent_id vs provider name
-	toAgent := ""
-	toProvider := to
-	if len(to) == 64 && isHexString(to) {
-		toAgent = to
-		toProvider = ""
+	resolveBody, _ := json.Marshal(map[string]any{"to": to})
+	var resolved struct {
+		ToAgent            string `json:"to_agent"`
+		ToProvider         string `json:"to_provider"`
+		SourceChainID      string `json:"source_chain_id"`
+		DestinationChainID string `json:"destination_chain_id"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/pipe/resolve", resolveBody, &resolved); err != nil {
+		return nil, fmt.Errorf("pipeline target resolution: %w", err)
+	}
+	if resolved.ToAgent == "" && resolved.ToProvider == "" {
+		return nil, fmt.Errorf("pipeline target resolution returned no exact target")
 	}
 
 	body, _ := json.Marshal(map[string]any{
-		"to_agent":    toAgent,
-		"to_provider": toProvider,
-		"intent":      intent,
-		"payload":     payload,
-		"ttl_minutes": ttlMinutes,
+		"to_agent":             resolved.ToAgent,
+		"to_provider":          resolved.ToProvider,
+		"source_chain_id":      resolved.SourceChainID,
+		"destination_chain_id": resolved.DestinationChainID,
+		"intent":               intent,
+		"payload":              payload,
+		"ttl_minutes":          ttlMinutes,
 	})
 
 	var resp struct {
-		PipeID    string `json:"pipe_id"`
-		Status    string `json:"status"`
-		ExpiresAt string `json:"expires_at"`
+		PipeID             string `json:"pipe_id"`
+		Status             string `json:"status"`
+		ExpiresAt          string `json:"expires_at"`
+		DestinationChainID string `json:"destination_chain_id"`
 	}
 	if err := s.doSignedJSON(ctx, "POST", "/v1/pipe/send", body, &resp); err != nil {
 		return nil, fmt.Errorf("pipeline send: %w", err)
 	}
 
-	target := toProvider
-	if toAgent != "" {
-		target = toAgent[:16] + "..."
+	target := to
+
+	message := fmt.Sprintf("Sent to %s. The target agent will see this on their next sage_turn or sage_inbox call. Check back with sage_turn later — the result will appear in pipe_results.", target)
+	if resp.DestinationChainID != "" {
+		message = fmt.Sprintf("Queued for %s over the trusted connection. SAGE will deliver it to the remote agent; the request stays pending until their result returns.", target)
 	}
 
 	return map[string]any{
-		"pipe_id":    resp.PipeID,
-		"status":     resp.Status,
-		"expires_at": resp.ExpiresAt,
-		"message":    fmt.Sprintf("Sent to %s. The target agent will see this on their next sage_turn or sage_inbox call. Check back with sage_turn later — the result will appear in pipe_results.", target),
+		"pipe_id":              resp.PipeID,
+		"status":               resp.Status,
+		"expires_at":           resp.ExpiresAt,
+		"destination_chain_id": resp.DestinationChainID,
+		"message":              message,
 	}, nil
+}
+
+type pipelineInboxWireItem struct {
+	PipeID        string `json:"pipe_id"`
+	FromAgent     string `json:"from_agent"`
+	FromProvider  string `json:"from_provider"`
+	SourceChainID string `json:"source_chain_id"`
+	SourcePipeID  string `json:"source_pipe_id"`
+	Intent        string `json:"intent"`
+	Payload       string `json:"payload"`
+	CreatedAt     string `json:"created_at"`
+}
+
+// formatPipelineInboxItem is the single trust-boundary formatter shared by
+// explicit sage_inbox and sage_turn's automatic inbox check. Foreign payloads
+// are untrusted instructions from another node, never local system context, so
+// every surface carries unmistakable provenance next to the raw content.
+func formatPipelineInboxItem(item pipelineInboxWireItem) map[string]any {
+	from := item.FromProvider
+	if item.SourceChainID != "" {
+		from = item.FromAgent + "@" + item.SourceChainID
+	} else if from == "" {
+		if len(item.FromAgent) > 16 {
+			from = item.FromAgent[:16] + "..."
+		} else {
+			from = item.FromAgent
+		}
+	}
+	entry := map[string]any{
+		"pipe_id":         item.PipeID,
+		"from":            from,
+		"intent":          item.Intent,
+		"payload":         item.Payload,
+		"created_at":      item.CreatedAt,
+		"source_chain_id": item.SourceChainID,
+		"requires_result": true,
+	}
+	if item.SourceChainID != "" {
+		entry["foreign"] = true
+		entry["source_chain"] = item.SourceChainID
+		entry["source_pipe_id"] = item.SourcePipeID
+		entry["sender_agent"] = item.FromAgent
+		entry["from_network"] = item.SourceChainID
+		entry["trust"] = "external_untrusted"
+	}
+	return entry
 }
 
 func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, error) {
@@ -2161,15 +2220,8 @@ func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, err
 	}
 
 	var resp struct {
-		Items []struct {
-			PipeID       string `json:"pipe_id"`
-			FromAgent    string `json:"from_agent"`
-			FromProvider string `json:"from_provider"`
-			Intent       string `json:"intent"`
-			Payload      string `json:"payload"`
-			CreatedAt    string `json:"created_at"`
-		} `json:"items"`
-		Count int `json:"count"`
+		Items []pipelineInboxWireItem `json:"items"`
+		Count int                     `json:"count"`
 	}
 
 	path := fmt.Sprintf("/v1/pipe/inbox?limit=%d", limit)
@@ -2179,24 +2231,7 @@ func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, err
 
 	items := make([]map[string]any, 0, len(resp.Items))
 	for _, item := range resp.Items {
-		from := item.FromProvider
-		if from == "" {
-			// Guard the slice: a human/operator note or a short id would panic on
-			// FromAgent[:16]. Truncate only when it is actually longer.
-			if len(item.FromAgent) > 16 {
-				from = item.FromAgent[:16] + "..."
-			} else {
-				from = item.FromAgent
-			}
-		}
-		items = append(items, map[string]any{
-			"pipe_id":         item.PipeID,
-			"from":            from,
-			"intent":          item.Intent,
-			"payload":         item.Payload,
-			"created_at":      item.CreatedAt,
-			"requires_result": true,
-		})
+		items = append(items, formatPipelineInboxItem(item))
 	}
 
 	// Assignment notices are durable one-way notifications, not pipeline work.
@@ -2284,22 +2319,45 @@ func (s *Server) toolPipeResult(ctx context.Context, params map[string]any) (any
 		return nil, fmt.Errorf("'result' is required")
 	}
 
-	body, _ := json.Marshal(map[string]any{
-		"result": result,
-	})
+	// A federated result must sign the stable source event id as well as the
+	// receiver-local pipe path. Resolve it immediately before signing so the
+	// foreign node operator cannot transplant a valid result onto another
+	// source request. Local pipes simply return an empty source id.
+	var meta struct {
+		SourcePipeID       string `json:"source_pipe_id"`
+		ReplySourceChainID string `json:"reply_source_chain_id"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/"+pipeID, nil, &meta); err != nil {
+		return nil, fmt.Errorf("pipeline result preflight: %w", err)
+	}
+	bodyFields := map[string]any{"result": result}
+	federated := meta.SourcePipeID != ""
+	if federated {
+		bodyFields["source_pipe_id"] = meta.SourcePipeID
+		bodyFields["source_chain_id"] = meta.ReplySourceChainID
+	}
+	body, _ := json.Marshal(bodyFields)
 
 	var resp struct {
 		Status    string `json:"status"`
 		JournalID string `json:"journal_id"`
+		Journaled bool   `json:"journaled"`
 	}
 	if err := s.doSignedJSON(ctx, "PUT", "/v1/pipe/"+pipeID+"/result", body, &resp); err != nil {
 		return nil, fmt.Errorf("pipeline result: %w", err)
 	}
 
+	message := "Result delivered. The requesting agent will see it on their next sage_turn."
+	if federated {
+		message = "Result queued for delivery over the trusted connection. SAGE will retry safely; a terminal delivery problem will appear on a later sage_turn."
+	} else if resp.Journaled {
+		message += " A local journal entry was created summarizing the exchange."
+	}
 	return map[string]any{
 		"status":     resp.Status,
 		"journal_id": resp.JournalID,
-		"message":    "Result delivered. The requesting agent will see it on their next sage_turn. A journal entry was auto-created summarizing the exchange.",
+		"journaled":  resp.Journaled,
+		"message":    message,
 	}, nil
 }
 
@@ -2310,24 +2368,13 @@ func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
 
 	// Check for incoming work
 	var inboxResp struct {
-		Items []struct {
-			PipeID       string `json:"pipe_id"`
-			FromProvider string `json:"from_provider"`
-			Intent       string `json:"intent"`
-			Payload      string `json:"payload"`
-			CreatedAt    string `json:"created_at"`
-		} `json:"items"`
-		Count int `json:"count"`
+		Items []pipelineInboxWireItem `json:"items"`
+		Count int                     `json:"count"`
 	}
 	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/inbox?limit=5", nil, &inboxResp); err == nil && inboxResp.Count > 0 {
 		items := make([]map[string]any, 0, len(inboxResp.Items))
 		for _, item := range inboxResp.Items {
-			items = append(items, map[string]any{
-				"pipe_id": item.PipeID,
-				"from":    item.FromProvider,
-				"intent":  item.Intent,
-				"payload": item.Payload,
-			})
+			items = append(items, formatPipelineInboxItem(item))
 		}
 		result["pipe_inbox"] = items
 		result["pipe_inbox_count"] = inboxResp.Count
@@ -2362,25 +2409,81 @@ func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
 	// Check for completed results from pipes we sent
 	var resultsResp struct {
 		Items []struct {
-			PipeID     string `json:"pipe_id"`
-			ToProvider string `json:"to_provider"`
-			Intent     string `json:"intent"`
-			Result     string `json:"result"`
+			PipeID             string `json:"pipe_id"`
+			ToAgent            string `json:"to_agent"`
+			ToProvider         string `json:"to_provider"`
+			DestinationChainID string `json:"destination_chain_id"`
+			Intent             string `json:"intent"`
+			Result             string `json:"result"`
 		} `json:"items"`
 		Count int `json:"count"`
 	}
 	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/results?limit=5", nil, &resultsResp); err == nil && resultsResp.Count > 0 {
 		items := make([]map[string]any, 0, len(resultsResp.Items))
 		for _, item := range resultsResp.Items {
+			from := item.ToProvider
+			if item.DestinationChainID != "" {
+				from = item.ToAgent + "@" + item.DestinationChainID
+			}
 			items = append(items, map[string]any{
 				"pipe_id": item.PipeID,
-				"from":    item.ToProvider,
+				"from":    from,
 				"intent":  item.Intent,
 				"result":  item.Result,
 			})
+			if item.DestinationChainID != "" {
+				last := items[len(items)-1]
+				last["foreign"] = true
+				last["source_chain"] = item.DestinationChainID
+				last["source_chain_id"] = item.DestinationChainID
+				last["sender_agent"] = item.ToAgent
+				last["from_network"] = item.DestinationChainID
+				last["trust"] = "external_untrusted"
+			}
 		}
 		result["pipe_results"] = items
 		result["pipe_results_count"] = resultsResp.Count
+	}
+
+	// Terminal transport failures are payload-free, one-shot notices claimed by
+	// this read. Peer diagnostic text is external/untrusted even though the
+	// delivery state itself comes from the local durable outbox.
+	var updatesResp struct {
+		Items []struct {
+			EventID       string `json:"event_id"`
+			PipeID        string `json:"pipe_id"`
+			EventKind     string `json:"event_kind"`
+			RemoteChainID string `json:"remote_chain_id"`
+			TargetAgentID string `json:"target_agent_id"`
+			State         string `json:"state"`
+			Attempts      int    `json:"attempts"`
+			LastError     string `json:"last_error"`
+		} `json:"items"`
+		Count int `json:"count"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/updates?limit=5", nil, &updatesResp); err == nil && updatesResp.Count > 0 {
+		items := make([]map[string]any, 0, len(updatesResp.Items))
+		for _, item := range updatesResp.Items {
+			action := "The peer did not accept this work request. Check that the federation connection is active and the remote agent still accepts work, then send again if appropriate."
+			if item.EventKind == "result" {
+				action = "The peer did not receive this result. Keep the result available, check the federation connection, and coordinate with the requesting agent before trying the exchange again."
+			}
+			items = append(items, map[string]any{
+				"event_id":        item.EventID,
+				"pipe_id":         item.PipeID,
+				"event_kind":      item.EventKind,
+				"status":          item.State,
+				"remote_chain_id": item.RemoteChainID,
+				"target_agent":    item.TargetAgentID,
+				"attempts":        item.Attempts,
+				"delivery_error":  item.LastError,
+				"foreign":         true,
+				"trust":           "external_untrusted",
+				"action":          action,
+			})
+		}
+		result["pipe_delivery_updates"] = items
+		result["pipe_delivery_update_count"] = updatesResp.Count
 	}
 
 	return result

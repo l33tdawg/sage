@@ -117,6 +117,7 @@ type DashboardHandler struct {
 	ExecPath         string // path to sage-gui binary, used by /v1/mcp-config
 	RESTAddr         string // configured REST listen address (cfg.RESTAddr), surfaced read-only in Settings > Connection
 	MCPTLSAddr       string // configured MCP TLS (bearer) listen address, used by /v1/dashboard/connect/remote-url to report whether the node is reachable from another computer (loopback bind = local-only)
+	FederationAddr   string // effective federation mTLS listen address, used to generate JOIN codes with the port the node actually bound
 	TunnelClient     TunnelClientManager
 	Encrypted        atomic.Bool
 	VaultLocked      atomic.Bool // true when encryption is enabled but vault hasn't been unlocked yet
@@ -461,13 +462,23 @@ func verifiedDashboardAgentID(ctx context.Context) string {
 // isCEREBRUMOperatorRequest distinguishes the local dashboard operator from a
 // signed agent or an unauthenticated LAN process. Browser headers provide CSRF
 // protection, not identity: non-loopback browsers must also carry a real
-// encrypted-dashboard session. On encryption-off nodes operator mutations and
-// full-board reads are therefore loopback-only.
+// encrypted-dashboard session. Older WebViews can omit Fetch Metadata and
+// Origin on same-origin requests; those requests are admitted only when they
+// come from loopback, target a safe local/IP Host, and carry a valid encrypted
+// dashboard session. On encryption-off nodes operator mutations and full-board
+// reads are therefore loopback-only.
 func (h *DashboardHandler) isCEREBRUMOperatorRequest(r *http.Request) bool {
-	if verifiedDashboardAgentID(r.Context()) != "" ||
-		(r.Header.Get("Sec-Fetch-Site") == "" && strings.TrimSpace(r.Header.Get("Origin")) == "") ||
-		!isLocalRequest(r) {
+	if verifiedDashboardAgentID(r.Context()) != "" || !isLocalRequest(r) {
 		return false
+	}
+	secFetch := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if secFetch == "" && origin == "" {
+		if !isLoopbackRemote(r.RemoteAddr) || !hostIsLoopbackOrIP(r.Host) || !h.Encrypted.Load() {
+			return false
+		}
+		cookie, err := r.Cookie(sessionCookieName)
+		return err == nil && h.validSession(cookie.Value)
 	}
 	if isLoopbackRemote(r.RemoteAddr) {
 		return true
@@ -860,7 +871,8 @@ func isLocalRequest(r *http.Request) bool {
 	// Non-browser callers (CLI, curl, MCP agents) connect directly, are not a
 	// rebinding vector, and legitimately send arbitrary Host values, so they are
 	// not constrained here. Sec-Fetch-Site is a browser-set forbidden header that
-	// page JS cannot suppress, so a real browser request always carries it.
+	// page JS cannot suppress when the browser supplies Fetch Metadata; older
+	// WebViews may omit it and are handled by the stricter operator gate above.
 	if (secFetch != "" || origin != "") && !hostIsLoopbackOrIP(r.Host) {
 		return false
 	}

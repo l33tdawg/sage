@@ -64,6 +64,7 @@ func (m *Manager) Router() http.Handler {
 		r.Post("/fed/v1/write", m.handleRemoteWrite)
 		r.Post("/fed/v1/receipt", m.handleReceipt)
 		r.Post("/fed/v1/connection/revoke-notice", m.handleRevokeNotice)
+		r.Post("/fed/v1/pipe/event", m.handlePipeEvent)
 		r.Post("/fed/v1/sync/push", m.handleSyncPush)       // v11.5 domain sync
 		r.Post("/fed/v1/sync/digest", m.handleSyncDigest)   // v11.5 anti-entropy
 		r.Post("/fed/v1/sync/journal", m.handleSyncJournal) // v11.8 group journal exchange
@@ -401,38 +402,62 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusForbidden, "unauthenticated")
 		return
 	}
-	if ss := m.syncStore(); ss != nil {
-		policyUnlock := ss.LockSyncPolicyRead()
-		defer policyUnlock()
+	ss := m.syncStore()
+	policyUnlock := func() {}
+	ownerUnlock := func() {}
+	contactUnlock := func() {}
+	if ss != nil {
+		policyUnlock = ss.LockSyncPolicyRead()
+		if m.badger != nil {
+			ownerUnlock = m.badger.LockDomainOwnershipRead()
+		}
+		contactUnlock = ss.LockAgentContactRead()
+	}
+	releaseSnapshot := func() {
+		contactUnlock()
+		ownerUnlock()
+		policyUnlock()
 	}
 	agreement, err := m.currentRequestAgreementBound(r.Context(), peer)
 	if err != nil {
+		releaseSnapshot()
 		httpError(w, http.StatusForbidden, "federation agreement is no longer active for this operator")
 		return
 	}
 	var caps []string
 	if m.syncStore() != nil {
 		caps = append(caps, CapabilitySync)
+		caps = append(caps, CapabilityFederatedPipeline)
 	}
 	policy, err := m.getPeerRBACPolicyForAgreement(r.Context(), agreement)
 	if err != nil {
+		releaseSnapshot()
 		m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation status peer RBAC lookup failed")
 		httpError(w, http.StatusInternalServerError, "peer RBAC lookup failed")
 		return
 	}
 	var peerRBACGrant *PeerRBACGrant
+	var pipeContacts *PipeContactGrant
 	if policy != nil {
 		if policy.PeerAgentID != peer.AgentID {
+			releaseSnapshot()
 			httpError(w, http.StatusForbidden, "requesting operator is not bound to this peer RBAC policy")
 			return
 		}
 		peerRBACGrant = peerRBACGrantFromPolicy(policy)
+		pipeContacts, err = m.buildPipeContactGrant(r.Context(), peer, policy)
+		if err != nil {
+			releaseSnapshot()
+			m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation status pipe contact projection failed")
+			httpError(w, http.StatusInternalServerError, "pipe contact projection failed")
+			return
+		}
 	}
 	domains := []string{}
 	if policy == nil {
 		domains = append(domains, agreement.AllowedDomains...)
 	}
-	writeJSON(w, http.StatusOK, &StatusResponse{
+	response := &StatusResponse{
 		ChainID:      m.localChainID,
 		Time:         time.Now().Unix(),
 		Capabilities: caps,
@@ -441,7 +466,13 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 			MaxClearance:   agreement.MaxClearance,
 		},
 		PeerRBACGrant: peerRBACGrant,
-	})
+		PipeContacts:  pipeContacts,
+	}
+	// The leases protect construction of one coherent authorization snapshot,
+	// not a peer-controlled socket write. Once the value is materialized, slow
+	// status readers must not delay consensus agent projection.
+	releaseSnapshot()
+	writeJSON(w, http.StatusOK, response)
 }
 
 // handleQuery serves a scoped read-only recall to an authenticated peer.

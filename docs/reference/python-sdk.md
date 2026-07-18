@@ -1,8 +1,8 @@
-Verified against SDK source for SAGE v11.9.2. Package: sage-agent-sdk.
+Verified against SDK source for SAGE v11.10.0. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.9.2
+**Package:** `sage-agent-sdk` **Version:** 11.10.0
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -569,6 +569,21 @@ Returns `EpochInfo(epoch_num, block_height, scores: list[ValidatorScore])`. Each
 
 ### Pipeline (Agent-to-Agent Messaging)
 
+#### `pipe_resolve()`
+
+```python
+pipe_resolve(to: str) -> PipeResolveResponse
+```
+
+`POST /v1/pipe/resolve`
+
+Resolves a local agent/provider name, exact `agent@chain` address, or visible
+`#network/agent` handle to the exact `to_agent`, `source_chain_id`, and
+`destination_chain_id` fields that must be signed into a send. Resolution does
+not queue work.
+
+---
+
 #### `pipe_send()`
 
 ```python
@@ -578,14 +593,20 @@ pipe_send(
     to_provider: str | None = None,
     intent: str | None = None,
     ttl_minutes: int | None = None,
+    source_chain_id: str | None = None,
+    destination_chain_id: str | None = None,
 ) -> PipeSendResponse
 ```
 
 `POST /v1/pipe/send`
 
-Route by `to_agent` (agent ID) or `to_provider` (provider name). At most one should be set.
+Route local work by `to_agent` (agent ID) or `to_provider` (provider name). For
+federated work, call `pipe_resolve()` immediately before sending and pass its
+exact agent/source/destination fields; the server re-resolves and rejects stale
+contact, agreement, pause, or opt-in state.
 
-Returns `PipeSendResponse(pipe_id, status, expires_at)`.
+Returns `PipeSendResponse(pipe_id, status, expires_at,
+destination_chain_id)`. An empty destination identifies ordinary local work.
 
 ---
 
@@ -621,9 +642,13 @@ pipe_result(pipe_id: str, result: str) -> PipeResultResponse
 
 `PUT /v1/pipe/{pipe_id}/result`
 
-Submits a result for a claimed message. Auto-journaled to memory.
+The SDK first reads the pipeline status. For foreign work it automatically
+copies the stable `source_pipe_id` and exact `reply_source_chain_id` into the
+fresh signed result request, so an imported item can complete over its original
+return route. Local completion keeps its summary journal; foreign work and its
+result remain transient and are never auto-journaled.
 
-Returns `PipeResultResponse(status, journal_id: str | None)`.
+Returns `PipeResultResponse(status, journal_id: str | None, journaled: bool)`.
 
 ---
 
@@ -634,6 +659,10 @@ pipe_status(pipe_id: str) -> PipeMessage
 ```
 
 `GET /v1/pipe/{pipe_id}`
+
+`PipeMessage` includes additive `source_chain_id`, `source_pipe_id`,
+`destination_chain_id`, `reply_source_chain_id`, policy/agreement/contact
+bindings, and claim/journal fields when applicable.
 
 ---
 
@@ -646,6 +675,20 @@ pipe_results(limit: int = 5) -> PipeInboxResponse
 `GET /v1/pipe/results`
 
 Lists completed (result-submitted) pipeline messages.
+
+---
+
+#### `pipe_updates()`
+
+```python
+pipe_updates(limit: int = 5) -> PipeDeliveryUpdatesResponse
+```
+
+`GET /v1/pipe/updates`
+
+Atomically claims one-shot, payload-free terminal delivery notices for
+federated sends and results signed by this local agent. `last_error` may include
+peer-originated text and must be treated as external/untrusted.
 
 ---
 

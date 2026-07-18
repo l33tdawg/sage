@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.9.2.
+Reconciled against internal/mcp for SAGE v11.10.0.
 
 # SAGE MCP Tools Reference
 
@@ -133,6 +133,10 @@ most important operational tool.
   backfills the vector after recovery/unlock.
 - `pipe_inbox`: pipeline items addressed to this agent (if any).
 - `pipe_inbox_count`, `pipe_results`, `pipe_results_count`: pipeline data.
+- `pipe_delivery_updates`, `pipe_delivery_update_count`: one-shot terminal
+  feedback for federated sends/results that exhausted safe delivery. Each item
+  is payload-free, marked `foreign:true` and `trust:"external_untrusted"`, and
+  includes an actionable recovery message.
 - `recall_error` / `store_error`: set if a phase failed.
 - `recall_mode` (`semantic_only` | `hybrid` | `keyword_only`), `semantic_degraded`
   (bool), `degraded_reason`: signal when the recall silently fell back to
@@ -570,8 +574,9 @@ mutable display name/bio and can be called again at any time.
 
 ### sage_pipe
 
-**Purpose:** Send work to another agent via the SAGE pipeline. The target sees
-it in their inbox on their next `sage_turn` or `sage_inbox` call.
+**Purpose:** Send work to another agent through the existing SAGE pipeline,
+locally or across an approved federation connection. The target sees it in the
+same inbox on their next `sage_turn` or `sage_inbox` call.
 
 **Source:** `tools.go:211-227` (definition), `tools.go:1663-1717` (handler)
 
@@ -579,16 +584,39 @@ it in their inbox on their next `sage_turn` or `sage_inbox` call.
 
 | Name          | Type   | Required | Description |
 |---------------|--------|----------|-------------|
-| `to`          | string | yes      | Target: provider name (e.g. `perplexity`, `chatgpt`) or 64-char hex `agent_id`. |
+| `to`          | string | yes      | Local provider/name/agent ID, visible `#node/agent-prefix` handle, or exact `agent@chain` address. |
 | `payload`     | string | yes      | The work content to send. |
 | `intent`      | string | no       | What you want done: `research`, `summarize`, `analyze`, `review`, etc. |
 | `ttl_minutes` | int    | no       | Time-to-live in minutes. Default: 60. Max: 1440 (24h). |
 
-**Returns:**
-- `pipe_id`, `status`, `expires_at`, `message`.
+Before every send, MCP calls the read-only `/v1/pipe/resolve` endpoint. For a
+federated contact it signs the exact returned source chain, agent, and
+destination chain; the
+friendly alias is never the authorization anchor. A qualified remote target
+that is unknown, stale, ambiguous, paused, unavailable, or not accepting fails
+without falling through to local name resolution (`tools.go:2108-2167`;
+`api/rest/pipe_handler.go:47-213`).
 
-**Note:** SAGE journals the exchange when complete but does NOT store the full
-payload as a memory — only a summary.
+An exact `agent@chain` address can still be resolved and durably queued while
+that one peer is genuinely offline if SAGE has a previous authenticated,
+encrypted contact snapshot bound to the unchanged JOIN/CA/operator/policy
+generation. Friendly handles and bare names remain live-only. The cached
+snapshot is not transmit authority: the outbox performs a fresh authenticated
+contact and policy match before payload bytes can leave the node
+(`internal/federation/client.go:47-67`;
+`internal/federation/pipe_targets.go:87-295`;
+`internal/federation/pipe_outbox.go:171-220`).
+
+**Returns:**
+- `pipe_id`, `status`, `expires_at`, `destination_chain_id`, and `message`.
+- Local acceptance says **Sent**. Federated acceptance says **Queued** because
+  durable local enqueue is not a delivery receipt (`tools.go:2169-2178`).
+- If the remote node is offline, use its exact `agent@chain` address. A friendly
+  handle deliberately cannot resolve from cached display metadata.
+
+**Note:** A purely local exchange keeps the existing completion summary journal.
+A federated payload/result is vault-backed transient input and is never
+auto-journaled as memory.
 
 `payload` is capped at 256 KiB and `intent` at 8 KiB. Each verified sender may
 hold at most 256 pending/claimed pipes and the node at most 10000; a full quota
@@ -621,7 +649,7 @@ assignment notices. Pipeline items are atomically claimed and require
 | `limit` | int  | no       | Max combined items to return across both inbox sources. Default: 5. Max: 20. |
 
 **Returns:**
-- `items`: mixed array. Pipeline work contains `{pipe_id, from, intent, payload, created_at, requires_result:true}`; assignment notices contain `{notification_id, kind, task_id, assignment_version, domain, title, created_at, requires_result:false}`.
+- `items`: mixed array. Local pipeline work contains `{pipe_id, from, intent, payload, created_at, requires_result:true}`. Foreign work uses the same shape and adds `foreign:true`, `source_chain`, `source_pipe_id`, exact `sender_agent`, `from_network`, and `trust:"external_untrusted"`; its `from` value is the exact `agent@chain` address. Assignment notices contain `{notification_id, kind, task_id, assignment_version, domain, title, created_at, requires_result:false}` (`tools.go:2370-2446`).
 - `count`: combined number of returned items, never greater than `limit`.
 - `pipeline_count` / `task_assignment_count`: source-specific counts.
 - `task_inbox_error`: present only when pipeline work was already claimed successfully but assignment notices could not be checked; returned pipeline work must still be processed.
@@ -638,8 +666,9 @@ turns or when you need more than 5 items.
 
 ### sage_pipe_result
 
-**Purpose:** Return results for a claimed pipeline work item. Sends the result
-back to the requesting agent and auto-journals the exchange.
+**Purpose:** Return results for a claimed pipeline work item. Local results keep
+their existing summary journal. A foreign result is signed by the receiving
+agent, durably queued over the original return route, and not journaled.
 
 **Source:** `tools.go:241-254` (definition), `tools.go:1772-1799` (handler)
 
@@ -651,10 +680,16 @@ back to the requesting agent and auto-journals the exchange.
 | `result`  | string | yes      | Your result/response. |
 
 **Returns:**
-- `status`, `journal_id`, `message`.
+- `status`, `journal_id`, `journaled`, and `message`.
 
-**Note:** A journal entry is auto-created summarizing the exchange (just the
-summary, not the full payload). `result` is capped at 256 KiB.
+**Note:** MCP first reads the pipe status. For foreign work it automatically
+copies the stable `source_pipe_id` and exact local reply-source chain into the
+signed completion request, keeping
+the public tool call unchanged (`tools.go:2288-2333`). A local journal summarizes
+the exchange; foreign completion returns `journaled:false`. `result` is capped
+at 256 KiB. For foreign work, `message` says the result was **queued for
+delivery**, not delivered; if retry later becomes terminal, the completing
+agent receives a `pipe_delivery_updates` notice on `sage_turn`.
 
 **REST:** `PUT /v1/pipe/{pipe_id}/result`
 

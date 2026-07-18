@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"errors"
 	"net/http"
 
@@ -8,6 +9,12 @@ import (
 
 	"github.com/l33tdawg/sage/internal/federation"
 )
+
+// contextWithJoinConfirmTimeout covers the guest's local tx-33 followed by the
+// host's tx-33. Ordinary federation reads use the much shorter recall budget.
+func contextWithJoinConfirmTimeout(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), federation.JoinConfirmationOperationTimeout())
+}
 
 // v11 real-TOTP JOIN ceremony - the LOCAL operator half. These endpoints drive
 // the guided guest/host wizards. They are node-operator-only (requireNodeOperator)
@@ -226,7 +233,7 @@ func (s *Server) handleJoinGuestConfirm(w http.ResponseWriter, r *http.Request) 
 		writeProblem(w, http.StatusBadRequest, "Invalid JSON", err.Error())
 		return
 	}
-	ctx, cancel := contextWithFedTimeout(r)
+	ctx, cancel := contextWithJoinConfirmTimeout(r)
 	defer cancel()
 	txHash, err := s.federation.GuestConfirm(ctx, body.SessionID, body.Endpoint, federation.ScopeWire{
 		MaxClearance:   body.HostScope.MaxClearance,

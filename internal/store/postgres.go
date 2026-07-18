@@ -2338,6 +2338,13 @@ func (s *PostgresStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) e
 	return tx.Commit(ctx)
 }
 
+// RunInAgentContactTx matches the OffchainStore projection contract. Federated
+// pipeline/contact projection is SQLite-only, so PostgreSQL needs no additional
+// process-local lease.
+func (s *PostgresStore) RunInAgentContactTx(ctx context.Context, fn func(tx OffchainStore) error) error {
+	return s.RunInTx(ctx, fn)
+}
+
 // --- AgentStore (mirrors SQLiteStore against the agents table) ---
 
 // agentColumns is the SELECT projection shared by ListAgents / GetAgent /

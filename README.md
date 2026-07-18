@@ -51,7 +51,20 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.9.2
+## What's New in v11.10.0
+
+**Federation now feels like connecting two colleagues' SAGE nodes, not configuring infrastructure.** The reciprocal QR ceremony derives the exact listener or internet/P2P route, survives retries and rapid confirmation, and creates trust with zero implicit sharing. CEREBRUM keeps Read, Copy, Pause/Resume, and permanent revoke distinct, preserves saved choices while paused, explains peer revocation on both sides, and keeps historical connections out of the active list.
+
+- **Independent, visible sharing controls.** Each operator chooses existing local domains at any time without reconnecting. Read borrows live answers; Copy requires both the source offer and the receiver's separate **Save here** opt-in. Long permission lists scroll cleanly, domain-owner contacts show exact `agent@chain` addresses plus friendly handles, and cross-host Write remains unavailable until it has connection-bound consensus authorization.
+- **The agent inbox crosses trusted federation edges.** Existing `sage_pipe` work can target an explicitly visible remote agent over direct mTLS or the persisted roaming route. Receiver acceptance is default-off, payloads are marked untrusted, offline work queues durably, Pause and acceptance-off are retryable, reconnect resumes unchanged work, and delivery/result import is replay-safe and idempotent. This is agent-to-agent infrastructure—not a CEREBRUM user messaging client and not remote memory Write.
+- **Fail-closed ceremony and operator polish.** Exact configured ports are preserved, incomplete endpoints cannot create or scan codes, internet pairing never invents a LAN fallback, double-submit is idempotent, and exact CA/operator/epoch identity still gates every action. Copy-save errors stay beside their controls; keyboard, QR, navigation, lock, and connection affordances have accessible names and clear feedback. The Python SDK also accepts legacy empty inboxes encoded as `items: null`.
+
+This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.10.0.
+
+## Older releases
+
+<details>
+<summary>v11.9.2 - colleague-style federation management</summary>
 
 **Federation now behaves like colleague sharing in CEREBRUM.** JOIN establishes exact node/operator trust but shares zero domains by default. Each SAGE independently chooses and changes existing domains for live **Read** or optional **Copy** after pairing; remote **Write** remains explicitly unavailable until a future connection-bound consensus authorization exists.
 
@@ -61,7 +74,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 This patch changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.9.2.
 
-## Older releases
+</details>
 
 <details>
 <summary>v11.9.1 - task-marker correctness and release hardening</summary>
@@ -526,7 +539,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.9.2`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.10.0`.
 
 ### Upgrading from an older version?
 

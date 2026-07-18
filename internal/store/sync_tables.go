@@ -489,8 +489,14 @@ func (s *SQLiteStore) FreezeSyncControlPeerAgent(ctx context.Context, remoteChai
 }
 
 func (s *SQLiteStore) DeleteSyncControl(ctx context.Context, remoteChainID string) error {
-	_, err := s.writeExecContext(ctx, `DELETE FROM sync_control WHERE remote_chain_id=?`, remoteChainID)
-	return err
+	return s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_control WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return err
+		}
+		_, err := tx.writeExecContext(ctx, `DELETE FROM fed_pipe_remote_contact_snapshot WHERE remote_chain_id=?`, remoteChainID)
+		return err
+	})
 }
 
 func (s *SQLiteStore) PurgeSyncPeerState(ctx context.Context, remoteChainID string) error {
@@ -511,6 +517,39 @@ func (s *SQLiteStore) PurgeSyncPeerState(ctx context.Context, remoteChainID stri
 		}
 		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_directional_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
 			return fmt.Errorf("purge directional sync domains: %w", err)
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM fed_pipe_contact_acceptance WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("purge federated pipe contact acceptance: %w", err)
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM fed_pipe_remote_contact_snapshot WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("purge federated pipe remote contact snapshot: %w", err)
+		}
+		// Retiring a peer generation is terminal for every in-flight pipeline in
+		// either direction. Fail the user-visible rows and pending delivery events
+		// in the same transaction so they cannot become quota-consuming zombies or
+		// revive under a quick re-pair. Keep only payload-free failed metadata until
+		// the exact local signing agent claims its one-shot delivery notice; scrub
+		// the signed request/proof immediately. Replay tombstones are deliberately
+		// preserved in pipeline_transport_dedup.
+		if _, err := tx.writeExecContext(ctx, `UPDATE pipeline_messages SET status='failed'
+			WHERE status IN ('pending','claimed') AND (source_chain_id=? OR destination_chain_id=?)`,
+			remoteChainID, remoteChainID); err != nil {
+			return fmt.Errorf("fail retired federated pipelines: %w", err)
+		}
+		if _, err := tx.writeExecContext(ctx, `UPDATE pipeline_transport_outbox
+			SET state='failed',
+				attempts=attempts + CASE WHEN state='pending' THEN 1 ELSE 0 END,
+				next_attempt_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+				last_error=CASE WHEN state='pending'
+					THEN 'federation connection revoked before delivery' ELSE last_error END,
+				proof_signature=X'', proof_timestamp=0, proof_nonce=X'', proof_canonical=''
+			WHERE remote_chain_id=? AND (state='pending' OR (state='failed' AND reported_at IS NULL))`,
+			remoteChainID); err != nil {
+			return fmt.Errorf("fail retired federated pipeline outbox: %w", err)
+		}
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM pipeline_transport_outbox
+			WHERE remote_chain_id=? AND NOT (state='failed' AND reported_at IS NULL)`, remoteChainID); err != nil {
+			return fmt.Errorf("purge federated pipeline outbox: %w", err)
 		}
 		// Trust revocation must make authorization deny-all immediately. Preserve
 		// only the header while a managed Write grant still needs tx-7 cleanup;
@@ -740,11 +779,19 @@ func replaceDirectionalDomains(ctx context.Context, tx *SQLiteStore, remoteChain
 // snapshot. delivered_revision is advanced separately only after the peer has
 // durably acknowledged the same snapshot.
 func (s *SQLiteStore) ApplyLocalDirectionalSyncPolicy(ctx context.Context, remoteChainID, epoch string, version int, revision int64, policyHash string, publish, subscribe []string) (string, error) {
+	unlock := s.LockSyncPolicyWrite()
+	defer unlock()
+	return s.ApplyLocalDirectionalSyncPolicyLocked(ctx, remoteChainID, epoch, version, revision, policyHash, publish, subscribe)
+}
+
+// ApplyLocalDirectionalSyncPolicyLocked is the atomic local-lane replacement
+// used by Manager partial updates. The caller MUST hold LockSyncPolicyWrite so
+// omitted Publish/Subscribe lanes can be read and preserved without a stale
+// read-modify-write race across dashboard and signed REST callers.
+func (s *SQLiteStore) ApplyLocalDirectionalSyncPolicyLocked(ctx context.Context, remoteChainID, epoch string, version int, revision int64, policyHash string, publish, subscribe []string) (string, error) {
 	if version < 3 {
 		return "", fmt.Errorf("directional sync policy requires version 3 or newer")
 	}
-	unlock := s.LockSyncPolicyWrite()
-	defer unlock()
 	result := "applied"
 	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)

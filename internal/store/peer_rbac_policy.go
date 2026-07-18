@@ -54,6 +54,10 @@ type PeerRBACPolicy struct {
 	PolicyEpoch   string `json:"policy_epoch"`
 	RemoteCAPin   string `json:"remote_ca_pin"`
 	PolicyVersion int    `json:"policy_version"`
+	// Revision advances on every full domain-snapshot replacement. Pause does
+	// not advance it: pause/resume is temporary, while a domain edit must make
+	// previously stored contact consent stale until explicitly rebound.
+	Revision int64 `json:"revision"`
 	// Paused is a local operator kill-switch for this directional grant. The
 	// domain snapshot remains intact so sharing can resume without repeating
 	// JOIN, but every Read/Copy authorization path treats a paused policy as
@@ -70,9 +74,11 @@ func (s *SQLiteStore) migratePeerRBACPolicies(ctx context.Context) {
 		policy_epoch    TEXT NOT NULL DEFAULT '',
 		remote_ca_pin   TEXT NOT NULL DEFAULT '',
 		policy_version  INTEGER NOT NULL,
+		revision        INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
 		paused          INTEGER NOT NULL DEFAULT 0 CHECK (paused IN (0,1)),
 		updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	)`)
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE peer_rbac_policy ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0)`)
 	_, _ = s.writeExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS peer_rbac_domain (
 		remote_chain_id TEXT NOT NULL,
@@ -259,9 +265,10 @@ func (s *SQLiteStore) GetPeerRBACPolicy(ctx context.Context, remoteChainID strin
 	policy := &PeerRBACPolicy{Domains: make([]PeerRBACDomainPermission, 0)}
 	var paused int
 	err := s.conn.QueryRowContext(ctx, `
-		SELECT remote_chain_id, peer_agent_id, policy_epoch, remote_ca_pin, policy_version, paused
+		SELECT remote_chain_id, peer_agent_id, policy_epoch, remote_ca_pin, policy_version, revision, paused
 		FROM peer_rbac_policy WHERE remote_chain_id=?`, remoteChainID).
-		Scan(&policy.RemoteChainID, &policy.PeerAgentID, &policy.PolicyEpoch, &policy.RemoteCAPin, &policy.PolicyVersion, &paused)
+		Scan(&policy.RemoteChainID, &policy.PeerAgentID, &policy.PolicyEpoch, &policy.RemoteCAPin,
+			&policy.PolicyVersion, &policy.Revision, &paused)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -272,6 +279,9 @@ func (s *SQLiteStore) GetPeerRBACPolicy(ctx context.Context, remoteChainID strin
 		return nil, fmt.Errorf("stored peer RBAC pause state is invalid")
 	}
 	policy.Paused = paused == 1
+	if policy.Revision <= 0 {
+		return nil, fmt.Errorf("stored peer RBAC revision is invalid")
+	}
 	if validationErr := validatePeerRBACPolicyHeader(*policy); validationErr != nil {
 		return nil, fmt.Errorf("stored peer RBAC policy header is invalid: %w", validationErr)
 	}
@@ -365,11 +375,12 @@ func (s *SQLiteStore) replacePeerRBACPolicy(ctx context.Context, policy PeerRBAC
 
 		var existingAgent string
 		var existingVersion int
+		var existingRevision int64
 		var existingEpoch, existingCAPin string
 		getErr := tx.conn.QueryRowContext(ctx, `
-			SELECT peer_agent_id, policy_epoch, remote_ca_pin, policy_version
+			SELECT peer_agent_id, policy_epoch, remote_ca_pin, policy_version, revision
 			FROM peer_rbac_policy WHERE remote_chain_id=?`, policy.RemoteChainID).
-			Scan(&existingAgent, &existingEpoch, &existingCAPin, &existingVersion)
+			Scan(&existingAgent, &existingEpoch, &existingCAPin, &existingVersion, &existingRevision)
 		switch {
 		case getErr == nil && (existingAgent != policy.PeerAgentID || existingEpoch != policy.PolicyEpoch ||
 			existingCAPin != policy.RemoteCAPin || existingVersion != policy.PolicyVersion):
@@ -378,12 +389,19 @@ func (s *SQLiteStore) replacePeerRBACPolicy(ctx context.Context, policy PeerRBAC
 			return fmt.Errorf("read existing peer RBAC binding: %w", getErr)
 		}
 		if _, execErr := tx.writeExecContext(ctx, `
-			INSERT INTO peer_rbac_policy(remote_chain_id, peer_agent_id, policy_epoch, remote_ca_pin, policy_version)
-			VALUES(?,?,?,?,?)
+			INSERT INTO peer_rbac_policy(remote_chain_id, peer_agent_id, policy_epoch, remote_ca_pin, policy_version, revision)
+			VALUES(?,?,?,?,?,1)
 			ON CONFLICT(remote_chain_id) DO UPDATE SET
+				revision=peer_rbac_policy.revision+1,
 				updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
 			policy.RemoteChainID, policy.PeerAgentID, policy.PolicyEpoch, policy.RemoteCAPin, policy.PolicyVersion); execErr != nil {
 			return fmt.Errorf("upsert peer RBAC policy header: %w", execErr)
+		}
+		// A full domain snapshot replacement changes which owners are exposed.
+		// Clear every previous inbound-work choice in the same transaction; the
+		// monotonic revision is the fail-closed barrier for concurrent readers.
+		if _, execErr := tx.writeExecContext(ctx, `DELETE FROM fed_pipe_contact_acceptance WHERE remote_chain_id=?`, policy.RemoteChainID); execErr != nil {
+			return fmt.Errorf("clear stale federated pipe contact acceptance: %w", execErr)
 		}
 		if _, execErr := tx.writeExecContext(ctx, `DELETE FROM peer_rbac_domain WHERE remote_chain_id=?`, policy.RemoteChainID); execErr != nil {
 			return fmt.Errorf("replace peer RBAC domains: %w", execErr)
@@ -438,13 +456,14 @@ func (s *SQLiteStore) SetBoundPeerRBACPaused(ctx context.Context, binding PeerRB
 		result, execErr := tx.writeExecContext(ctx, `UPDATE peer_rbac_policy SET
 			paused=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
 			WHERE remote_chain_id=? AND peer_agent_id=? AND policy_epoch=? AND remote_ca_pin=? AND policy_version=?
+			AND revision=?
 			AND EXISTS (SELECT 1 FROM sync_control c WHERE c.remote_chain_id=peer_rbac_policy.remote_chain_id
 				AND c.peer_agent_id=peer_rbac_policy.peer_agent_id
 				AND c.policy_epoch=peer_rbac_policy.policy_epoch
 				AND c.remote_ca_pin=peer_rbac_policy.remote_ca_pin
 				AND c.binding_state='active')`,
 			paused, binding.RemoteChainID, binding.PeerAgentID, binding.PolicyEpoch,
-			binding.RemoteCAPin, binding.PolicyVersion)
+			binding.RemoteCAPin, binding.PolicyVersion, binding.Revision)
 		if execErr != nil {
 			return fmt.Errorf("set peer RBAC pause state: %w", execErr)
 		}
@@ -469,6 +488,9 @@ func (s *SQLiteStore) SetBoundPeerRBACPaused(ctx context.Context, binding PeerRB
 func (s *SQLiteStore) DeletePeerRBACPolicy(ctx context.Context, remoteChainID string) error {
 	return s.RunInTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM fed_pipe_contact_acceptance WHERE remote_chain_id=?`, remoteChainID); err != nil {
+			return fmt.Errorf("delete federated pipe contact acceptance: %w", err)
+		}
 		if _, err := tx.writeExecContext(ctx, `DELETE FROM peer_rbac_domain WHERE remote_chain_id=?`, remoteChainID); err != nil {
 			return fmt.Errorf("delete peer RBAC domains: %w", err)
 		}

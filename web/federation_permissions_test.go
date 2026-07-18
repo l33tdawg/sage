@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -16,8 +17,12 @@ import (
 
 type pauseContractDriver struct {
 	FederationJoinDriver
-	policy *store.PeerRBACPolicy
-	calls  []bool
+	policy       *store.PeerRBACPolicy
+	calls        []bool
+	replaceCalls int
+	publish      []string
+	subscribe    []string
+	syncErr      error
 }
 
 func (d *pauseContractDriver) ResolvePeerOperatorAgentID(context.Context, string) (string, error) {
@@ -29,8 +34,45 @@ func (d *pauseContractDriver) GetPeerRBACPolicy(context.Context, string) (*store
 	return &clone, nil
 }
 func (d *pauseContractDriver) ReplacePeerRBACPolicy(_ context.Context, _ string, domains []store.PeerRBACDomainPermission) (*store.PeerRBACPolicy, error) {
+	d.replaceCalls++
 	d.policy.Domains = append([]store.PeerRBACDomainPermission(nil), domains...)
+	d.policy.Revision++
 	return d.GetPeerRBACPolicy(context.Background(), d.policy.RemoteChainID)
+}
+
+func (d *pauseContractDriver) UpdateDirectionalSyncPolicy(_ context.Context, _ string, publish, subscribe *[]string) (*federation.DirectionalSyncPolicyResult, error) {
+	if d.syncErr != nil {
+		return nil, d.syncErr
+	}
+	if publish != nil {
+		d.publish = append([]string(nil), (*publish)...)
+	}
+	if subscribe != nil {
+		d.subscribe = append([]string(nil), (*subscribe)...)
+	}
+	return &federation.DirectionalSyncPolicyResult{
+		Version: federation.SyncPolicyVersionPeerRBAC, Revision: 2,
+		PublishDomains: d.publish, SubscribeDomains: d.subscribe, State: "pending",
+	}, nil
+}
+func (d *pauseContractDriver) ReconcileDirectionalPublishToPeerRBAC(_ context.Context, _ string) (*federation.DirectionalSyncPolicyResult, error) {
+	allowed := make(map[string]bool)
+	for _, permission := range d.policy.Domains {
+		if permission.Copy {
+			allowed[permission.Domain] = true
+		}
+	}
+	narrowed := make([]string, 0, len(d.publish))
+	for _, domain := range d.publish {
+		if allowed[domain] {
+			narrowed = append(narrowed, domain)
+		}
+	}
+	d.publish = narrowed
+	return &federation.DirectionalSyncPolicyResult{
+		Version: federation.SyncPolicyVersionPeerRBAC, Revision: 1,
+		PublishDomains: d.publish, SubscribeDomains: d.subscribe, State: "pending",
+	}, nil
 }
 func (d *pauseContractDriver) SetPeerRBACPaused(_ context.Context, _ string, paused bool) (*store.PeerRBACPolicy, error) {
 	d.calls = append(d.calls, paused)
@@ -42,6 +84,29 @@ func (d *pauseContractDriver) PeerStatus(context.Context, string) (*federation.S
 		PolicyVersion: federation.SyncPolicyVersionPeerRBAC, Paused: true,
 		Domains: []federation.PeerRBACDomainGrant{},
 	}}, nil
+}
+
+type policyOnlyContractDriver struct {
+	FederationJoinDriver
+	policy       *store.PeerRBACPolicy
+	replaceCalls int
+}
+
+func (d *policyOnlyContractDriver) ResolvePeerOperatorAgentID(context.Context, string) (string, error) {
+	return d.policy.PeerAgentID, nil
+}
+
+func (d *policyOnlyContractDriver) GetPeerRBACPolicy(context.Context, string) (*store.PeerRBACPolicy, error) {
+	clone := *d.policy
+	clone.Domains = append([]store.PeerRBACDomainPermission(nil), d.policy.Domains...)
+	return &clone, nil
+}
+
+func (d *policyOnlyContractDriver) ReplacePeerRBACPolicy(_ context.Context, _ string, domains []store.PeerRBACDomainPermission) (*store.PeerRBACPolicy, error) {
+	d.replaceCalls++
+	d.policy.Domains = append([]store.PeerRBACDomainPermission(nil), domains...)
+	d.policy.Revision++
+	return d.GetPeerRBACPolicy(context.Background(), d.policy.RemoteChainID)
 }
 
 func TestNormalizeRequestedPeerPermissionsEnforcesDependencies(t *testing.T) {
@@ -73,6 +138,121 @@ func TestClonePeerPermissionsSanitizesStaleWriteAndCanonicalizesCopy(t *testing.
 	require.Equal(t, []store.PeerRBACDomainPermission{{
 		Domain: "tii", Read: true, Write: false, Copy: true,
 	}}, permissions)
+}
+
+func TestFederationPermissionSavePreflightsAndReportsCopyAlignment(t *testing.T) {
+	setup := func(t *testing.T, driver FederationJoinDriver) (*DashboardHandler, *store.SQLiteStore, *store.BadgerStore) {
+		t.Helper()
+		ctx := context.Background()
+		ss, err := store.NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "permissions.db"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = ss.Close() })
+		bs, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = bs.CloseBadger() })
+		pin := bytes.Repeat([]byte{0x44}, 32)
+		require.NoError(t, bs.SetCrossFed("chain-peer", "https://peer:8444", pin, 4, 0, nil, nil, "active"))
+		owner := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		require.NoError(t, bs.RegisterDomain("tii.work", owner, "", 1))
+		require.NoError(t, ss.PrepareSyncControl(ctx, store.SyncControl{
+			RemoteChainID: "chain-peer", Role: "host", ControllerChainID: "chain-local",
+			ControllerAgentID: owner, PeerAgentID: "peer-agent", PolicyEpoch: "epoch-save",
+			RemoteCAPin: "4444444444444444444444444444444444444444444444444444444444444444",
+		}))
+		require.NoError(t, ss.ActivateSyncControl(ctx, "chain-peer", "epoch-save"))
+		_, err = ss.ApplyLocalDirectionalSyncPolicy(ctx, "chain-peer", "epoch-save",
+			federation.SyncPolicyVersionPeerRBAC, 1, "local-save-1", nil, []string{"peer.offered"})
+		require.NoError(t, err)
+		h := NewDashboardHandler(ss, "test")
+		h.BadgerStore = bs
+		h.NodeOperatorAgentID = owner
+		h.Federation = driver
+		return h, ss, bs
+	}
+	request := func(h *DashboardHandler) *httptest.ResponseRecorder {
+		body := bytes.NewBufferString(`{"permissions":[{"domain":"tii.work","copy":true}]}`)
+		req := withFederationChain(httptest.NewRequest(http.MethodPut,
+			"http://localhost/v1/dashboard/federation/connections/chain-peer/permissions", body), "chain-peer")
+		markLocalCEREBRUM(req)
+		rr := httptest.NewRecorder()
+		h.handleFedPermissionsPut(rr, req)
+		return rr
+	}
+	basePolicy := func() *store.PeerRBACPolicy {
+		return &store.PeerRBACPolicy{
+			RemoteChainID: "chain-peer", PeerAgentID: "peer-agent", PolicyEpoch: "epoch-save",
+			RemoteCAPin:   "4444444444444444444444444444444444444444444444444444444444444444",
+			PolicyVersion: federation.SyncPolicyVersionPeerRBAC,
+		}
+	}
+
+	t.Run("missing copy alignment leaves RBAC unchanged", func(t *testing.T) {
+		driver := &policyOnlyContractDriver{policy: basePolicy()}
+		h, _, _ := setup(t, driver)
+		rr := request(h)
+		require.Equal(t, http.StatusNotImplemented, rr.Code, rr.Body.String())
+		require.Zero(t, driver.replaceCalls)
+		require.Contains(t, rr.Body.String(), "Permissions were not changed")
+	})
+
+	t.Run("successful alignment preserves subscribe choices", func(t *testing.T) {
+		driver := &pauseContractDriver{policy: basePolicy(), subscribe: []string{"peer.offered"}}
+		h, _, _ := setup(t, driver)
+		rr := request(h)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		require.Equal(t, 1, driver.replaceCalls)
+		require.Equal(t, []string{"tii.work"}, driver.publish)
+		require.Equal(t, []string{"peer.offered"}, driver.subscribe)
+	})
+
+	t.Run("synthetic revision zero policy is persisted before alignment", func(t *testing.T) {
+		driver := &pauseContractDriver{policy: basePolicy(), subscribe: []string{"peer.offered"}}
+		h, _, _ := setup(t, driver)
+		body := bytes.NewBufferString(`{"permissions":[]}`)
+		req := withFederationChain(httptest.NewRequest(http.MethodPut,
+			"http://localhost/v1/dashboard/federation/connections/chain-peer/permissions", body), "chain-peer")
+		markLocalCEREBRUM(req)
+		rr := httptest.NewRecorder()
+		h.handleFedPermissionsPut(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		require.Equal(t, 1, driver.replaceCalls, "a synthesized deny-all policy is not a durable stored revision")
+		require.Equal(t, int64(1), driver.policy.Revision)
+		require.Empty(t, driver.publish)
+		require.Equal(t, []string{"peer.offered"}, driver.subscribe)
+	})
+
+	t.Run("alignment failure is explicit and retryable after safe RBAC commit", func(t *testing.T) {
+		driver := &pauseContractDriver{policy: basePolicy(), subscribe: []string{"peer.offered"}, syncErr: errors.New("binding changed")}
+		h, _, _ := setup(t, driver)
+		rr := request(h)
+		require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+		require.Equal(t, 1, driver.replaceCalls)
+		require.Equal(t, []store.PeerRBACDomainPermission{{Domain: "tii.work", Read: true, Copy: true}}, driver.policy.Domains)
+		require.Contains(t, rr.Body.String(), "Permissions were saved")
+		require.Contains(t, rr.Body.String(), "Retry Save what I share")
+
+		getReq := withFederationChain(httptest.NewRequest(http.MethodGet,
+			"http://localhost/v1/dashboard/federation/connections/chain-peer/permissions", nil), "chain-peer")
+		markLocalCEREBRUM(getReq)
+		getRR := httptest.NewRecorder()
+		h.handleFedPermissionsGet(getRR, getReq)
+		require.Equal(t, http.StatusOK, getRR.Code, getRR.Body.String())
+		var getBody struct {
+			CopyAlignmentPending bool `json:"copy_alignment_pending"`
+		}
+		require.NoError(t, json.NewDecoder(getRR.Body).Decode(&getBody))
+		require.True(t, getBody.CopyAlignmentPending, "reload must keep the failed alignment retry actionable")
+
+		driver.syncErr = nil
+		retryRR := request(h)
+		require.Equal(t, http.StatusOK, retryRR.Code, retryRR.Body.String())
+		require.Equal(t, 1, driver.replaceCalls, "an unchanged retry must preserve the policy/contact revision")
+		var retryBody struct {
+			PolicyReplaced bool `json:"policy_replaced"`
+		}
+		require.NoError(t, json.NewDecoder(retryRR.Body).Decode(&retryBody))
+		require.False(t, retryBody.PolicyReplaced)
+	})
 }
 
 func TestFederationPauseEndpointPreservesPolicyAndReportsBothDirections(t *testing.T) {

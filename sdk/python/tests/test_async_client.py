@@ -227,3 +227,85 @@ async def test_inactive_governance_context_preserves_pre_v20_body(async_client, 
     body = json.loads(route.calls.last.request.read())
     assert "validator_id" not in body
     assert "governance_domain" not in body
+
+
+@pytest.mark.asyncio
+async def test_federated_pipe_resolve_send_and_result_binding(async_client, mock_api):
+    import json
+
+    agent_id = "cd" * 32
+    mock_api.post("/v1/pipe/resolve").mock(
+        return_value=httpx.Response(200, json={
+            "to_agent": agent_id,
+            "to_provider": "",
+            "source_chain_id": "local-sage",
+            "destination_chain_id": "amy-sage",
+        })
+    )
+    send = mock_api.post("/v1/pipe/send").mock(
+        return_value=httpx.Response(201, json={
+            "pipe_id": "sent-async", "status": "pending",
+            "expires_at": "2026-07-19T00:00:00Z", "destination_chain_id": "amy-sage",
+        })
+    )
+    target = await async_client.pipe_resolve("#amy/cdcdcdcd")
+    sent = await async_client.pipe_send(
+        "review this",
+        to_agent=target.to_agent,
+        source_chain_id=target.source_chain_id,
+        destination_chain_id=target.destination_chain_id,
+    )
+    send_body = json.loads(send.calls.last.request.read())
+    assert send_body["to_agent"] == agent_id
+    assert send_body["source_chain_id"] == "local-sage"
+    assert send_body["destination_chain_id"] == "amy-sage"
+    assert sent.destination_chain_id == "amy-sage"
+
+    mock_api.get("/v1/pipe/incoming-async").mock(
+        return_value=httpx.Response(200, json={
+            "pipe_id": "incoming-async", "status": "claimed",
+            "source_chain_id": "amy-sage", "source_pipe_id": "remote-event-async",
+            "reply_source_chain_id": "local-sage",
+        })
+    )
+    result_route = mock_api.put("/v1/pipe/incoming-async/result").mock(
+        return_value=httpx.Response(200, json={"status": "completed", "journal_id": "", "journaled": False})
+    )
+    completed = await async_client.pipe_result("incoming-async", "done")
+    result_body = json.loads(result_route.calls.last.request.read())
+    assert result_body == {
+        "result": "done",
+        "source_pipe_id": "remote-event-async",
+        "source_chain_id": "local-sage",
+    }
+    assert completed.journaled is False
+
+    mock_api.get("/v1/pipe/updates").mock(
+        return_value=httpx.Response(200, json={
+            "items": [{
+                "event_id": "failed-async", "pipe_id": "incoming-async", "event_kind": "result",
+                "remote_chain_id": "amy-sage", "target_agent_id": agent_id,
+                "state": "failed", "attempts": 4, "last_error": "peer unavailable",
+            }],
+            "count": 1,
+        })
+    )
+    updates = await async_client.pipe_updates()
+    assert updates.items[0].event_kind == "result"
+    assert updates.items[0].last_error == "peer unavailable"
+
+
+@pytest.mark.asyncio
+async def test_empty_pipe_collections_tolerate_legacy_null(async_client, mock_api):
+    mock_api.get("/v1/pipe/inbox").mock(
+        return_value=httpx.Response(200, json={"items": None, "count": 0})
+    )
+    mock_api.get("/v1/pipe/results").mock(
+        return_value=httpx.Response(200, json={"items": None, "count": 0})
+    )
+    mock_api.get("/v1/pipe/updates").mock(
+        return_value=httpx.Response(200, json={"items": None, "count": 0})
+    )
+    assert (await async_client.pipe_inbox()).items == []
+    assert (await async_client.pipe_results()).items == []
+    assert (await async_client.pipe_updates()).items == []

@@ -856,6 +856,12 @@ export function fedShareableDomains() { return fedFetch('/v1/dashboard/federatio
 export function fedPermissionsGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`); }
 export function fedPermissionsSet(chainId, permissions) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`, { permissions }); }
 export function fedPause(chainId, paused) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pause`, { paused }); }
+export function fedPipeContactsGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pipe-contacts`); }
+export function fedPipeContactSet(chainId, agentId, contactId, accepting) {
+    return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pipe-contacts`, {
+        agent_id: agentId, contact_id: contactId, accepting: !!accepting,
+    });
+}
 // Directional copy policy and status for one trusted connection.
 export function fedSyncGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/sync`); }
 // A source's Copy grant is permission; subscribe_domains is this receiver's

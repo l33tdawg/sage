@@ -24,12 +24,16 @@ type syncContractDriver struct {
 	subscribe []string
 }
 
-func (d *syncContractDriver) SetDirectionalSyncPolicy(_ context.Context, _ string, publish, subscribe []string) (*federation.DirectionalSyncPolicyResult, error) {
-	d.publish = append([]string(nil), publish...)
-	d.subscribe = append([]string(nil), subscribe...)
+func (d *syncContractDriver) UpdateDirectionalSyncPolicy(_ context.Context, _ string, publish, subscribe *[]string) (*federation.DirectionalSyncPolicyResult, error) {
+	if publish != nil {
+		d.publish = append([]string(nil), (*publish)...)
+	}
+	if subscribe != nil {
+		d.subscribe = append([]string(nil), (*subscribe)...)
+	}
 	return &federation.DirectionalSyncPolicyResult{
 		Version: federation.SyncPolicyVersionPeerRBAC, Revision: 2,
-		PublishDomains: append([]string(nil), publish...), SubscribeDomains: append([]string(nil), subscribe...),
+		PublishDomains: append([]string(nil), d.publish...), SubscribeDomains: append([]string(nil), d.subscribe...),
 		State: "delivered",
 	}, nil
 }
@@ -64,7 +68,7 @@ func TestFederationSyncV3ContractAndOmittedLanePreservation(t *testing.T) {
 		federation.SyncPolicyVersionPeerRBAC, 1, "remote-1", []string{"remote.publish"}, []string{"remote.subscribe"})
 	require.NoError(t, err)
 
-	driver := &syncContractDriver{}
+	driver := &syncContractDriver{publish: []string{"local.publish"}, subscribe: []string{"local.subscribe"}}
 	h := NewDashboardHandler(ss, "test")
 	h.BadgerStore = bs
 	h.Federation = driver

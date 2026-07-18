@@ -1,11 +1,17 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,8 +218,17 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 
 	// Approval #2: guest confirms - broadcasts its tx-33, then the host confirms
 	// against the frozen E and broadcasts its tx-33.
-	if _, confirmErr := guest.mgr.GuestConfirm(ctx, create.SessionID, guestEndpoint, hostGrant); confirmErr != nil {
+	firstTx, confirmErr := guest.mgr.GuestConfirm(ctx, create.SessionID, guestEndpoint, hostGrant)
+	if confirmErr != nil {
 		t.Fatalf("GuestConfirm: %v", confirmErr)
+	}
+	replayedTx, replayErr := guest.mgr.GuestConfirm(ctx, create.SessionID, guestEndpoint, hostGrant)
+	if replayErr != nil || replayedTx != firstTx {
+		t.Fatalf("GuestConfirm idempotent replay tx=%q err=%v, want %q", replayedTx, replayErr, firstTx)
+	}
+	completedDraft, ok := guest.mgr.getGuestDraft(create.SessionID)
+	if !ok || completedDraft.state != guestDraftActive || len(completedDraft.seed) != 0 {
+		t.Fatalf("guest completion receipt retained sensitive ceremony state: %+v", completedDraft)
 	}
 
 	// Host session is ACTIVE.
@@ -273,6 +288,42 @@ func TestLANHostCreateRemainsLegacyWithP2PHooks(t *testing.T) {
 	}
 	if create.Transport != "" || strings.Contains(create.OTPAuthURI, "x_sage_transport") {
 		t.Fatalf("normal LAN QR is not backward-compatible: transport=%q uri=%s", create.Transport, create.OTPAuthURI)
+	}
+}
+
+func TestValidateJoinEndpointRequiresExplicitCompletePort(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		endpoint string
+		valid    bool
+	}{
+		{"https://127.0.0.1:18444", true},
+		{" https://127.0.0.1:18444 ", false},
+		{"https://127.0.0.1:443", true},
+		{"https://[::1]:443", true},
+		{"https://[fd00::20]:18444", true},
+		{"https://127.0.0.1:", false},
+		{"https://[::1]:", false},
+		{"https://127.0.0.1", false},
+		{"https://[::1]", false},
+		{"https:127.0.0.1:18444", false},
+		{"https://fd00::20:18444", false},
+		{"https://127.0.0.1:0", false},
+		{"https://127.0.0.1:65536", false},
+		{"https://127.0.0.1:nope", false},
+		{"https://user@127.0.0.1:18444", false},
+		{"https://127.0.0.1:18444/path", false},
+		{"https://127.0.0.1:18444?query=1", false},
+	} {
+		test := test
+		t.Run(test.endpoint, func(t *testing.T) {
+			err := validateJoinEndpoint(test.endpoint)
+			if test.valid {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
 	}
 }
 
@@ -347,6 +398,166 @@ func TestJoinApproveWrongCodeRejected(t *testing.T) {
 	}
 	if host.count() != 0 {
 		t.Fatalf("a rejected approval broadcast a tx (%d)", host.count())
+	}
+}
+
+func TestJoinRejectsRewrittenHostQREndpointBeforeActivation(t *testing.T) {
+	host := newCeremonyNode(t, "host-endpoint")
+	guest := newCeremonyNode(t, "guest-endpoint")
+	hostTLS, _ := host.mgr.ServerTLSConfig()
+	srv := httptest.NewUnstartedServer(host.mgr.Router())
+	srv.TLS = hostTLS
+	srv.StartTLS()
+	defer srv.Close()
+
+	create, err := host.mgr.HostCreate(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the live listener port but rewrite the endpoint inside the QR.
+	// Both names are on the test certificate, so CA fetching still succeeds and
+	// the protocol—not routing—must detect the changed signed transcript.
+	endpointURL, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpointURL.Host = "localhost:" + endpointURL.Port()
+	qrURL, err := url.Parse(create.OTPAuthURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := qrURL.Query()
+	query.Set("x_sage_ep", endpointURL.String())
+	qrURL.RawQuery = query.Encode()
+
+	scan, err := guest.mgr.GuestScan(context.Background(), qrURL.String(), "https://127.0.0.1:19444")
+	if err != nil {
+		t.Fatalf("GuestScan rewritten reachable endpoint: %v", err)
+	}
+	if err := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); err != nil {
+		t.Fatal(err)
+	}
+	_, err = guest.mgr.GuestRequest(context.Background(), create.SessionID, "https://127.0.0.1:19444", trustOnlyJoinScope)
+	if err == nil || !strings.Contains(err.Error(), "host endpoint does not match") {
+		t.Fatalf("rewritten host endpoint request err=%v", err)
+	}
+	if host.count() != 0 || guest.count() != 0 {
+		t.Fatalf("endpoint mismatch broadcast txs host=%d guest=%d", host.count(), guest.count())
+	}
+	view, err := host.mgr.HostSessionStatus(create.SessionID)
+	if err != nil || view.GuestChain != "" || view.State != JoinCreated {
+		t.Fatalf("host bound a mismatched endpoint: view=%+v err=%v", view, err)
+	}
+}
+
+func TestGuestConfirmRejectsEndpointChangedAfterReturnQRThenRetriesFrozenEndpoint(t *testing.T) {
+	host := newCeremonyNode(t, "host-frozen")
+	guest := newCeremonyNode(t, "guest-frozen")
+	hostTLS, _ := host.mgr.ServerTLSConfig()
+	srv := httptest.NewUnstartedServer(host.mgr.Router())
+	srv.TLS = hostTLS
+	srv.StartTLS()
+	defer srv.Close()
+	ctx := context.Background()
+	guestEndpoint := "https://127.0.0.1:19444"
+
+	create, err := host.mgr.HostCreate(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan, err := guest.mgr.GuestScan(ctx, create.OTPAuthURI, guestEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); err != nil {
+		t.Fatal(err)
+	}
+	codes, err := guest.mgr.GuestRequest(ctx, create.SessionID, guestEndpoint, trustOnlyJoinScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.mgr.HostApprove(create.SessionID, codes.CodeG, trustOnlyJoinScope); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guest.mgr.GuestConfirm(ctx, create.SessionID, "https://127.0.0.1:8444", trustOnlyJoinScope); err == nil || !strings.Contains(err.Error(), "endpoint changed") {
+		t.Fatalf("changed confirm endpoint err=%v", err)
+	}
+	if host.count() != 0 || guest.count() != 0 {
+		t.Fatalf("changed confirm endpoint broadcast txs host=%d guest=%d", host.count(), guest.count())
+	}
+	if _, err := guest.mgr.GuestConfirm(ctx, create.SessionID, guestEndpoint, trustOnlyJoinScope); err != nil {
+		t.Fatalf("retry with frozen endpoint: %v", err)
+	}
+	if host.count() != 1 || guest.count() != 1 {
+		t.Fatalf("successful frozen retry txs host=%d guest=%d", host.count(), guest.count())
+	}
+}
+
+func TestJoinConfirmActiveReplayIsAuthenticatedAndDoesNotRebroadcast(t *testing.T) {
+	host := newCeremonyNode(t, "host-xxxxx")
+	joins, sessionID, _, attestation, guestKey, _ := approvedSession(t)
+	host.mgr.joins = joins
+	goodSig := SignEnroll(guestKey, attestation, false)
+	goodAck := SignEnroll(guestKey, attestation, true)
+	boundCert := &x509.Certificate{RawSubjectPublicKeyInfo: randN(48)}
+	wrongCert := &x509.Certificate{RawSubjectPublicKeyInfo: randN(48)}
+	joins.mu.Lock()
+	joins.sessions[sessionID].BoundCertSPKI = SPKIFingerprint(boundCert)
+	joins.mu.Unlock()
+	const connIP = "10.0.0.77"
+	for i := 0; i < connMaxAttempts-connConfirmReserve; i++ {
+		require.True(t, joins.AllowConn(connIP, time.Now()))
+	}
+	require.False(t, joins.AllowConn(connIP, time.Now()), "ordinary retries must stop before the confirm reserve")
+
+	post := func(cert *x509.Certificate, sig, ack []byte, forwardedFor string) (int, JoinConfirmResp) {
+		t.Helper()
+		body, err := json.Marshal(JoinConfirmWire{
+			SessionID: sessionID, GuestSig: hex.EncodeToString(sig), GuestAckSig: hex.EncodeToString(ack),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/fed/v1/join/confirm", bytes.NewReader(body))
+		req.RemoteAddr = connIP + ":4242"
+		req.Header.Set("X-Forwarded-For", forwardedFor)
+		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{cert}}
+		rr := httptest.NewRecorder()
+		host.mgr.joinAuth(joinRateConfirm)(http.HandlerFunc(host.mgr.handleJoinConfirm)).ServeHTTP(rr, req)
+		var resp JoinConfirmResp
+		if rr.Code == http.StatusOK {
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return rr.Code, resp
+	}
+
+	status1, first := post(boundCert, goodSig, goodAck, "198.51.100.1")
+	if status1 != http.StatusOK {
+		t.Fatalf("first confirm status=%d", status1)
+	}
+	if host.count() != 1 {
+		t.Fatalf("first confirm broadcasts=%d", host.count())
+	}
+	if status, _ := post(wrongCert, goodSig, goodAck, "198.51.100.2"); status != http.StatusUnprocessableEntity {
+		t.Fatalf("ACTIVE replay with changed certificate status=%d", status)
+	}
+	if status, _ := post(boundCert, randN(64), goodAck, "198.51.100.3"); status != http.StatusUnprocessableEntity {
+		t.Fatalf("ACTIVE replay with changed signature status=%d", status)
+	}
+	status2, replay := post(boundCert, goodSig, goodAck, "198.51.100.4")
+	if status2 != http.StatusOK {
+		t.Fatalf("replayed confirm status=%d", status2)
+	}
+	if host.count() != 1 {
+		t.Fatalf("replayed confirm rebroadcast: count=%d", host.count())
+	}
+	if replay.TxHash != first.TxHash || replay.SyncGroupID != first.SyncGroupID || replay.HostChain != first.HostChain {
+		t.Fatalf("replay result changed first=%+v replay=%+v", first, replay)
+	}
+	if status, _ := post(boundCert, goodSig, goodAck, "203.0.113.99"); status != http.StatusTooManyRequests {
+		t.Fatalf("confirm reserve exceeded aggregate mutation cap: status=%d", status)
 	}
 }
 

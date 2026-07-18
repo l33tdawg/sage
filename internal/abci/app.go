@@ -7146,6 +7146,10 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			maxRetries = defaultFlushMaxRetries
 		}
 		var lastErr error
+		runProjectionTx := working.offchainStore.RunInTx
+		if projectionWritesAgentContacts(writes) {
+			runProjectionTx = working.offchainStore.RunInAgentContactTx
+		}
 		for attempt := 0; attempt < maxRetries; attempt++ {
 			if attempt > 0 {
 				backoff := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond
@@ -7156,7 +7160,7 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 					Msg("retrying offchain flush after SQLITE_BUSY")
 				time.Sleep(backoff)
 			}
-			lastErr = working.offchainStore.RunInTx(ctx, func(tx store.OffchainStore) error {
+			lastErr = runProjectionTx(ctx, func(tx store.OffchainStore) error {
 				for _, pw := range writes {
 					if payloadErr := validatePendingWritePayload(pw); payloadErr != nil {
 						return payloadErr
@@ -7263,6 +7267,20 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 	}
 
 	return &abcitypes.ResponseCommit{RetainHeight: retainHeight}, nil
+}
+
+// projectionWritesAgentContacts reports whether one atomic off-chain mirror
+// batch can change the peer-visible agent identity/availability projection.
+// Keep this deliberately narrow: unrelated consensus projection traffic must
+// not wait behind a slow federated contact reader.
+func projectionWritesAgentContacts(writes []pendingWrite) bool {
+	for _, pw := range writes {
+		switch pw.writeType {
+		case "agent_register", "agent_update", "agent_permission":
+			return true
+		}
+	}
+	return false
 }
 
 // SetRetainBlocks configures the block-retention window Commit reports to

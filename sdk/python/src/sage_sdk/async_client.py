@@ -37,8 +37,10 @@ from sage_sdk.models import (
     MemorySubmitResponse,
     MemoryType,
     PendingMemoriesResponse,
+    PipeDeliveryUpdatesResponse,
     PipeInboxResponse,
     PipeMessage,
+    PipeResolveResponse,
     PipeResultResponse,
     PipeSendResponse,
     PreValidateResponse,
@@ -512,6 +514,8 @@ class AsyncSageClient:
         to_provider: str | None = None,
         intent: str | None = None,
         ttl_minutes: int | None = None,
+        source_chain_id: str | None = None,
+        destination_chain_id: str | None = None,
     ) -> PipeSendResponse:
         """Send a message through the agent pipeline."""
         body: dict[str, Any] = {"payload": payload}
@@ -523,8 +527,17 @@ class AsyncSageClient:
             body["intent"] = intent
         if ttl_minutes is not None:
             body["ttl_minutes"] = ttl_minutes
+        if source_chain_id is not None:
+            body["source_chain_id"] = source_chain_id
+        if destination_chain_id is not None:
+            body["destination_chain_id"] = destination_chain_id
         resp = await self._request("POST", "/v1/pipe/send", json=body)
         return PipeSendResponse.model_validate(resp.json())
+
+    async def pipe_resolve(self, to: str) -> PipeResolveResponse:
+        """Resolve a local name or visible federated handle to exact send fields."""
+        resp = await self._request("POST", "/v1/pipe/resolve", json={"to": to})
+        return PipeResolveResponse.model_validate(resp.json())
 
     async def pipe_inbox(self, limit: int = 5) -> PipeInboxResponse:
         """Get pending messages in the agent's inbox."""
@@ -537,8 +550,15 @@ class AsyncSageClient:
         return resp.json()
 
     async def pipe_result(self, pipe_id: str, result: str) -> PipeResultResponse:
-        """Submit a result for a claimed pipeline message."""
-        resp = await self._request("PUT", f"/v1/pipe/{pipe_id}/result", json={"result": result})
+        """Submit a result, preserving a foreign request's signed return binding."""
+        current = await self.pipe_status(pipe_id)
+        body: dict[str, Any] = {"result": result}
+        if current.source_pipe_id:
+            if not current.reply_source_chain_id:
+                raise ValueError("foreign pipeline status omitted reply_source_chain_id")
+            body["source_pipe_id"] = current.source_pipe_id
+            body["source_chain_id"] = current.reply_source_chain_id
+        resp = await self._request("PUT", f"/v1/pipe/{pipe_id}/result", json=body)
         return PipeResultResponse.model_validate(resp.json())
 
     async def pipe_status(self, pipe_id: str) -> PipeMessage:
@@ -550,6 +570,11 @@ class AsyncSageClient:
         """List completed pipeline message results."""
         resp = await self._request("GET", "/v1/pipe/results", params={"limit": limit})
         return PipeInboxResponse.model_validate(resp.json())
+
+    async def pipe_updates(self, limit: int = 5) -> PipeDeliveryUpdatesResponse:
+        """Claim one-shot terminal delivery notices for federated sends/results."""
+        resp = await self._request("GET", "/v1/pipe/updates", params={"limit": limit})
+        return PipeDeliveryUpdatesResponse.model_validate(resp.json())
 
     # --- Access Control --------------------------------------------------------
 

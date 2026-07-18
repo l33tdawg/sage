@@ -1446,6 +1446,35 @@ components:
           description: Defaults to member.
 
     # -- Pipeline ------------------------------------------------------------
+    PipeResolveRequest:
+      type: object
+      required:
+        - to
+      properties:
+        to:
+          type: string
+          description: Local agent/provider name, exact agent@chain address, or visible #network/agent handle.
+
+    PipeResolveResponse:
+      type: object
+      properties:
+        to_agent:
+          type: string
+        to_provider:
+          type: string
+        source_chain_id:
+          type: string
+          description: Local chain bound into a federated send request.
+        destination_chain_id:
+          type: string
+          description: Remote chain bound into a federated send request; empty for local targets.
+        address:
+          type: string
+        handle:
+          type: string
+        display_name:
+          type: string
+
     PipeSendRequest:
       type: object
       required:
@@ -1457,6 +1486,12 @@ components:
         to_provider:
           type: string
           description: Provider name or agent name; resolves to agent_id if unambiguous.
+        source_chain_id:
+          type: string
+          description: Exact local chain returned by /v1/pipe/resolve for a federated target.
+        destination_chain_id:
+          type: string
+          description: Exact remote chain returned by /v1/pipe/resolve for a federated target.
         intent:
           type: string
           description: Human description of the work.
@@ -1476,6 +1511,12 @@ components:
       properties:
         result:
           type: string
+        source_pipe_id:
+          type: string
+          description: Stable source event ID from GET /v1/pipe/{pipe_id}; required for federated results.
+        source_chain_id:
+          type: string
+          description: Exact reply-source chain from GET /v1/pipe/{pipe_id}; required for federated results.
 
     PipelineMessage:
       type: object
@@ -1509,6 +1550,58 @@ components:
           type: string
           format: date-time
         completed_at:
+          type: string
+          format: date-time
+        claimed_by:
+          type: string
+        journal_id:
+          type: string
+        source_chain_id:
+          type: string
+          description: Origin SAGE chain for imported work.
+        source_pipe_id:
+          type: string
+          description: Stable origin event ID for imported work.
+        destination_chain_id:
+          type: string
+          description: Destination SAGE chain for outbound work.
+        reply_source_chain_id:
+          type: string
+          description: Local chain that must be bound into a federated result request.
+        federation_policy_epoch:
+          type: string
+        federation_agreement_id:
+          type: string
+        federation_contact_id:
+          type: string
+        federation_contact_revision:
+          type: string
+          description: Target-specific federation authorization revision; unrelated contact changes do not invalidate exact-address queued work.
+
+    PipelineDeliveryUpdate:
+      type: object
+      description: Payload-free, one-shot terminal delivery feedback for the local signing agent.
+      properties:
+        event_id:
+          type: string
+        pipe_id:
+          type: string
+        event_kind:
+          type: string
+          enum: [send, result]
+        remote_chain_id:
+          type: string
+        target_agent_id:
+          type: string
+        state:
+          type: string
+          enum: [failed]
+        attempts:
+          type: integer
+        last_error:
+          type: string
+          description: Peer-originated diagnostic text; clients must present it as external/untrusted.
+        created_at:
           type: string
           format: date-time
 
@@ -3707,6 +3800,34 @@ paths:
           $ref: "#/components/responses/NotFound"
 
   # -- Pipeline -----------------------------------------------------------
+  /v1/pipe/resolve:
+    post:
+      operationId: pipeResolve
+      summary: Resolve a local name or visible federated handle to exact signed send fields.
+      tags:
+        - Pipeline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PipeResolveRequest"
+      responses:
+        "200":
+          description: Exact local or federated pipeline target.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PipeResolveResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
   /v1/pipe/send:
     post:
       operationId: pipeSend
@@ -3735,6 +3856,9 @@ paths:
                   expires_at:
                     type: string
                     format: date-time
+                  destination_chain_id:
+                    type: string
+                    description: Exact remote SAGE chain for a federated send; empty for local work.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -3765,11 +3889,46 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items, count]
                 properties:
                   items:
                     type: array
                     items:
                       $ref: "#/components/schemas/PipelineMessage"
+                  count:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/pipe/updates:
+    get:
+      operationId: pipeDeliveryUpdates
+      summary: Atomically claim terminal federated delivery notices for the authenticated local agent.
+      tags:
+        - Pipeline
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 5
+      responses:
+        "200":
+          description: Payload-free failed send/result notices. Returned notices are marked reported.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PipelineDeliveryUpdate"
                   count:
                     type: integer
         "401":
@@ -3798,6 +3957,7 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items, count]
                 properties:
                   items:
                     type: array
@@ -3871,10 +4031,11 @@ paths:
   /v1/pipe/{pipe_id}/result:
     put:
       operationId: pipeResult
-      summary: Submit result for a claimed message. Triggers auto-journal.
+      summary: Submit a result for a claimed local or federated message.
       description: >-
-        Inserts an `observation` memory in domain `agent-pipeline` via
-        off-chain insert.
+        Local completion inserts an `observation` memory in domain
+        `agent-pipeline`. Federated work remains transient and queues a signed
+        result over the original return route without auto-journaling.
       tags:
         - Pipeline
       parameters:
@@ -3903,6 +4064,9 @@ paths:
                   journal_id:
                     type: string
                     description: memory_id of the auto-journal entry, or empty string.
+                  journaled:
+                    type: boolean
+                    description: False for federated work; local completion may create a summary journal.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":

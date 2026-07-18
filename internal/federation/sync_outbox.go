@@ -165,6 +165,10 @@ func (m *Manager) StopSyncDrainer() {
 // syncTick runs one scan+drain pass over every peer with sync consent.
 func (m *Manager) syncTick(ctx context.Context, ss *store.SQLiteStore) {
 	m.reconcileRetiredFederationState(ctx, ss)
+	// The existing agent pipeline has its own outbox/dedup tables and exact
+	// contact authorization. It shares this worker lifecycle only so restart,
+	// shutdown and immediate nudges stay single-owner.
+	m.pipelineDrain(ctx, ss)
 	if pending, err := ss.ListPendingSyncControls(ctx); err == nil {
 		for _, control := range pending {
 			if ctx.Err() != nil {

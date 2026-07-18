@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.9.2. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.10.0. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -1290,10 +1290,64 @@ The `access_token` returned by `/oauth/token` is the same bearer accepted by `Au
 
 ## 10. Pipeline (Agent-to-Agent)
 
-Async work routing between agents. State is off-chain (not consensus-validated).
-The production pipeline store is SQLite. `PostgresStore` currently exposes
-interface stubs that return "not implemented" and must not be described as pipe
-support.
+Async work routing between agents on this node or across an approved SAGE
+federation connection. Agent-visible state remains off-chain and uses the same
+SQLite-backed pipeline inbox in both cases; the transport outbox and replay
+ledger are delivery machinery, not a second inbox. `PostgresStore` currently
+exposes interface stubs that return "not implemented" and must not be described
+as pipe support (`internal/store/store.go:548-643`,
+`internal/store/pipeline_transport.go:30-73`).
+
+Pipeline intent, payload, result, and the complete persisted agent proof are
+vault-backed. A foreign request or result is never automatically journaled,
+embedded, indexed as memory, written to Badger/AppHash, or treated as trusted
+instructions (`internal/store/sqlite.go:4764-4837`,
+`internal/store/pipeline_transport.go:92-176`,
+`api/rest/pipe_handler.go:538-572`).
+
+### `POST /v1/pipe/resolve`
+
+Resolve a human-friendly target without sending any content or creating a
+pipeline row. The MCP client calls this immediately before `send`, then signs
+the exact returned destination (`api/rest/pipe_handler.go:47-126`,
+`internal/mcp/tools.go:2108-2167`).
+
+**Request:** `{"to":"provider, agent name, #node/agent-prefix, or agent@chain"}`
+
+**Response** (HTTP 200):
+
+```json
+{
+  "to_agent": "<exact 64-hex agent id, or empty for a local provider>",
+  "to_provider": "<local provider, or empty>",
+  "source_chain_id": "<exact local chain for a federated target, otherwise empty>",
+  "destination_chain_id": "<exact remote chain id, or empty for local>",
+  "address": "<agent@chain for a federated contact>",
+  "handle": "<#node/agent-prefix>",
+  "display_name": "<sanitized remote label>"
+}
+```
+
+Local targets retain their existing provider/name/ID behavior. Federated
+resolution is limited to the finite authenticated contact snapshots disclosed
+by active peers. A qualified handle never falls through to a similarly named
+local target. Unknown, stale, paused, unavailable, non-accepting, ambiguous, or
+temporarily incomplete resolution fails explicitly. An exact `agent@chain`
+address may resolve while that one peer is genuinely offline from the last
+authenticated contact snapshot, but only when its encrypted cache still
+matches the complete active JOIN, CA, operator, policy-epoch, and policy
+revision binding. Friendly handles and bare labels always require a live,
+complete peer scan. TLS/certificate/authentication, HTTP, identity, malformed
+response, and binding failures never use the cache
+(`internal/federation/client.go:47-67,154-160`;
+`internal/federation/pipe_targets.go:87-167,169-295`;
+`internal/store/federated_pipe_contacts.go:49-195`).
+
+The cached result is only a local queue-routing hint. Immediately before every
+delivery attempt, the durable outbox performs a fresh authenticated live
+resolution and requires the exact policy epoch, agreement, contact ID, contact
+revision, agent, and chain to match. No intent or payload leaves this SAGE from
+the cached snapshot alone (`internal/federation/pipe_outbox.go:171-220`).
 
 ### `POST /v1/pipe/send`
 
@@ -1303,19 +1357,37 @@ Send a pipeline message to another agent or provider.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `to_agent` | string | no* | Direct agent_id (* one of to_agent or to_provider required) |
+| `to_agent` | string | no* | Exact agent_id (* one of to_agent or to_provider required) |
 | `to_provider` | string | no* | Provider name or agent name; resolves to agent_id if unambiguous |
+| `source_chain_id` | string | for federation | Exact local chain returned by `/v1/pipe/resolve`; source-node binding inside the signed agent proof |
+| `destination_chain_id` | string | no | For a federated send, the exact chain returned by `/v1/pipe/resolve`; requires exact `to_agent` and empty `to_provider` |
 | `intent` | string | no | Human description of the work |
 | `payload` | string | yes | Arbitrary content |
 | `ttl_minutes` | int | no | 1–1440; defaults to 60 |
 
-Target agent must be registered. `to_agent` takes precedence; `to_provider` resolves via provider field or name lookup.
+For a local send, the target must be registered here. For a federated send,
+call `/v1/pipe/resolve` first and sign its exact `source_chain_id`, `to_agent`,
+and `destination_chain_id`. Friendly `#node/agent` aliases are rejected by the send
+route itself so a display alias cannot be rebound after signing
+(`api/rest/pipe_handler.go:161-213`). A remote send also requires a fresh
+nonce-bound Ed25519 agent proof; bearer-only and legacy nonce-less identity
+cannot cross the federation edge (`api/rest/pipe_handler.go:261-283`).
 
-**Response** (HTTP 201): `{"pipe_id": "pipe-<uuid>", "status": "pending", "expires_at": "..."}`
+**Response** (HTTP 201):
+`{"pipe_id":"pipe-<uuid>","status":"pending","expires_at":"...","destination_chain_id":"<remote chain or empty>"}`.
+For a remote send, `pending` means durably queued for delivery; it does not claim
+that the peer or agent has already received the work. Consequently, an exact
+address resolved from the bounded offline cache can be accepted locally while
+the peer is down; delivery waits for that peer to return and pass the fresh live
+authorization preflight above.
 
 **Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:513-515`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:4083` payload, `:4086` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:527-529`) to 413.
 
 **Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
+
+Federated admission additionally caps one authenticated source chain at 1024
+open imported rows (`MaxOpenPipesPerPeer`, `internal/store/store.go:539-541`;
+`internal/store/sqlite.go:4798-4821`).
 
 Stale pipes are reaped independently: pending or claimed rows older than 48h are force-expired regardless of their stamped TTL (`ExpireStalePipelines`, wired into the 5-minute sweep plus a boot one-shot), and terminal rows purge 24h after creation.
 
@@ -1327,7 +1399,19 @@ Fetch pending messages for the authenticated agent (by agent_id or provider). Au
 
 **Query parameters:** `limit` (1–20, default 5)
 
-**Response** (HTTP 200): `{"items": [...PipelineMessage], "count": N}`
+**Response** (HTTP 200): `{"items": [...PipelineMessage], "count": N}`.
+An empty inbox is always encoded as `{"items":[],"count":0}`, never
+`items:null`; the Python SDK also normalizes `null` from an older node to an
+empty list (`api/rest/pipe_handler.go`; `internal/store/sqlite.go`;
+`sdk/python/src/sage_sdk/models.py:315-323`).
+Foreign items carry additive immutable provenance including
+`source_chain_id`, stable `source_pipe_id`, exact sender/recipient identities,
+and agreement/policy/contact bindings. REST clients must treat foreign payloads
+as untrusted input; the MCP `sage_inbox`/`sage_turn` formatter makes that
+boundary explicit with `foreign:true` and `trust:"external_untrusted"`. They use a
+fresh local `pipe_id`; a wire event ID is never adopted as the receiver's local
+primary key (`internal/store/store.go:563-606`,
+`internal/federation/pipe_transport.go:276-418`).
 
 Concurrent inbox reads return only messages whose claim compare-and-swap the
 caller actually won; a losing reader never receives the same work item.
@@ -1392,17 +1476,31 @@ Atomically claim a pipeline message (prevents double-processing).
 
 ### `PUT /v1/pipe/{pipe_id}/result`
 
-Submit result for a claimed message. Triggers auto-journal: inserts an `observation` memory in domain `agent-pipeline` via off-chain insert.
+Submit a result for a claimed message. Purely local completion keeps the
+existing auto-journal summary. Federated completion does not journal and queues
+the result over the original agreement-bound return route
+(`api/rest/pipe_handler.go:538-633`).
 
 **Request body:**
 
 | Field | Type | Required |
 |---|---|---|
 | `result` | string | yes |
+| `source_pipe_id` | string | for foreign work | Stable source proof/event ID returned with the inbox item; prevents replying against stale foreign metadata |
+| `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 
 `result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:513`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:4190`, mapping `ErrPipeResultTooLarge`).
 
-**Response** (HTTP 200): `{"status": "completed", "journal_id": "<memory_id or empty>"}`
+**Response** (HTTP 200):
+`{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.
+For foreign work, `journal_id` is empty and `journaled` is false. MCP supplies
+`source_pipe_id` automatically after its status preflight, so the ordinary
+`sage_pipe_result(pipe_id, result)` interface does not gain another user step
+(`internal/mcp/tools.go:2288-2333`).
+
+`completed` means the foreign result and its signed return event were committed
+atomically to the local durable outbox. It is queued, not yet a peer delivery
+receipt; terminal delivery feedback is claimed through `/v1/pipe/updates`.
 
 ---
 
@@ -1420,7 +1518,28 @@ Completed pipeline messages sent by the authenticated agent.
 
 **Query parameters:** `limit` (1–20, default 5)
 
-**Response** (HTTP 200): `{"items": [...], "count": N}`
+**Response** (HTTP 200): `{"items": [...], "count": N}`. Empty results use
+`items:[]`, never `items:null`.
+
+---
+
+### `GET /v1/pipe/updates`
+
+Atomically claims payload-free terminal delivery notices for federated sends
+or results signed by the authenticated local agent. This closes the asynchronous
+failure loop: a sender learns that remote work was never accepted, and a local
+completer learns if its queued result could not return. Returned notices are
+marked reported and do not repeat on every turn.
+
+**Query parameters:** `limit` (1–20, default 5)
+
+**Response** (HTTP 200):
+`{"items":[{"event_id","pipe_id","event_kind":"send|result","remote_chain_id","target_agent_id","state":"failed","attempts","last_error","created_at"}],"count":N}`.
+An empty update set uses `items:[]`, never `items:null`; current Python clients
+also tolerate the older null encoding.
+No intent, payload, result, or proof bytes are exposed. `last_error` may contain
+peer-originated diagnostic text and must be presented as external/untrusted.
+`sage_turn` polls this route and returns actionable `pipe_delivery_updates`.
 
 ---
 

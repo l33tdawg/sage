@@ -350,7 +350,7 @@ func peerRBACGrantFromPolicy(policy *store.PeerRBACPolicy) *PeerRBACGrant {
 	if policy.Paused {
 		// Empty domains keeps older peers fail-closed; the additive Paused field
 		// lets current CEREBRUM builds explain why the saved grants disappeared.
-		return &PeerRBACGrant{PolicyVersion: policy.PolicyVersion, Paused: true, Domains: []PeerRBACDomainGrant{}}
+		return &PeerRBACGrant{PolicyVersion: policy.PolicyVersion, Revision: policy.Revision, Paused: true, Domains: []PeerRBACDomainGrant{}}
 	}
 	domains := make([]PeerRBACDomainGrant, 0, len(policy.Domains))
 	for _, permission := range policy.Domains {
@@ -363,5 +363,5 @@ func peerRBACGrantFromPolicy(policy *store.PeerRBACPolicy) *PeerRBACGrant {
 			Copy:  permission.Copy,
 		})
 	}
-	return &PeerRBACGrant{PolicyVersion: policy.PolicyVersion, Paused: false, Domains: domains}
+	return &PeerRBACGrant{PolicyVersion: policy.PolicyVersion, Revision: policy.Revision, Paused: false, Domains: domains}
 }

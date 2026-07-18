@@ -396,3 +396,84 @@ def test_governance_propose_rejects_scope_and_payload(client):
                 "members": [{"validator_id": "validator-a", "assigned_weight": 1}],
             },
         )
+
+
+def test_federated_pipe_resolve_send_and_result_binding(client, mock_api):
+    import json
+
+    agent_id = "ab" * 32
+    mock_api.post("/v1/pipe/resolve").mock(
+        return_value=httpx.Response(200, json={
+            "to_agent": agent_id,
+            "to_provider": "",
+            "source_chain_id": "local-sage",
+            "destination_chain_id": "amy-sage",
+            "address": f"{agent_id}@amy-sage",
+        })
+    )
+    send = mock_api.post("/v1/pipe/send").mock(
+        return_value=httpx.Response(201, json={
+            "pipe_id": "sent-1", "status": "pending",
+            "expires_at": "2026-07-19T00:00:00Z", "destination_chain_id": "amy-sage",
+        })
+    )
+    target = client.pipe_resolve("#amy/abababab")
+    sent = client.pipe_send(
+        "review this",
+        to_agent=target.to_agent,
+        source_chain_id=target.source_chain_id,
+        destination_chain_id=target.destination_chain_id,
+    )
+    send_body = json.loads(send.calls.last.request.read())
+    assert send_body["to_agent"] == agent_id
+    assert send_body["source_chain_id"] == "local-sage"
+    assert send_body["destination_chain_id"] == "amy-sage"
+    assert sent.destination_chain_id == "amy-sage"
+
+    mock_api.get("/v1/pipe/incoming-1").mock(
+        return_value=httpx.Response(200, json={
+            "pipe_id": "incoming-1", "status": "claimed",
+            "source_chain_id": "amy-sage", "source_pipe_id": "remote-event-1",
+            "reply_source_chain_id": "local-sage",
+        })
+    )
+    result_route = mock_api.put("/v1/pipe/incoming-1/result").mock(
+        return_value=httpx.Response(200, json={"status": "completed", "journal_id": "", "journaled": False})
+    )
+    completed = client.pipe_result("incoming-1", "done")
+    result_body = json.loads(result_route.calls.last.request.read())
+    assert result_body == {
+        "result": "done",
+        "source_pipe_id": "remote-event-1",
+        "source_chain_id": "local-sage",
+    }
+    assert completed.journaled is False
+
+    mock_api.get("/v1/pipe/updates").mock(
+        return_value=httpx.Response(200, json={
+            "items": [{
+                "event_id": "failed-1", "pipe_id": "incoming-1", "event_kind": "result",
+                "remote_chain_id": "amy-sage", "target_agent_id": agent_id,
+                "state": "failed", "attempts": 4, "last_error": "peer unavailable",
+            }],
+            "count": 1,
+        })
+    )
+    updates = client.pipe_updates()
+    assert updates.items[0].event_kind == "result"
+    assert updates.items[0].last_error == "peer unavailable"
+
+
+def test_empty_pipe_collections_tolerate_legacy_null(client, mock_api):
+    mock_api.get("/v1/pipe/inbox").mock(
+        return_value=httpx.Response(200, json={"items": None, "count": 0})
+    )
+    mock_api.get("/v1/pipe/results").mock(
+        return_value=httpx.Response(200, json={"items": None, "count": 0})
+    )
+    mock_api.get("/v1/pipe/updates").mock(
+        return_value=httpx.Response(200, json={"items": None, "count": 0})
+    )
+    assert client.pipe_inbox().items == []
+    assert client.pipe_results().items == []
+    assert client.pipe_updates().items == []

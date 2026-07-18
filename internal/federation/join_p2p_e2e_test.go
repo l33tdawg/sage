@@ -128,11 +128,14 @@ func TestJoinCeremonyRelayOnlyMTLSAndPersistedRoutes(t *testing.T) {
 		}
 	}()
 
-	create, err := hostNode.mgr.HostCreateMode("https://127.0.0.1:1", true)
+	create, err := hostNode.mgr.HostCreateMode("", true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	scan, err := guestNode.mgr.GuestScan(ctx, create.OTPAuthURI, "https://127.0.0.1:1")
+	if create.Endpoint != joinP2POnlyEndpoint {
+		t.Fatalf("P2P-only endpoint = %q, want transport sentinel", create.Endpoint)
+	}
+	scan, err := guestNode.mgr.GuestScan(ctx, create.OTPAuthURI, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +143,7 @@ func TestJoinCeremonyRelayOnlyMTLSAndPersistedRoutes(t *testing.T) {
 		t.Fatal(scanErr)
 	}
 	scope := trustOnlyJoinScope
-	codes, err := guestNode.mgr.GuestRequest(ctx, create.SessionID, "https://127.0.0.1:1", scope)
+	codes, err := guestNode.mgr.GuestRequest(ctx, create.SessionID, "", scope)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +154,7 @@ func TestJoinCeremonyRelayOnlyMTLSAndPersistedRoutes(t *testing.T) {
 	if err != nil || polled.HostScope == nil {
 		t.Fatalf("poll: %+v err=%v", polled, err)
 	}
-	if _, err := guestNode.mgr.GuestConfirm(ctx, create.SessionID, "https://127.0.0.1:1", *polled.HostScope); err != nil {
+	if _, err := guestNode.mgr.GuestConfirm(ctx, create.SessionID, "", *polled.HostScope); err != nil {
 		t.Fatal(err)
 	}
 	if hostNode.count() != 1 || guestNode.count() != 1 {

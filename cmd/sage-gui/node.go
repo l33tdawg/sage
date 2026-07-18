@@ -81,10 +81,37 @@ func resolveRetainBlocks(configured int64, quorumEnabled bool) int64 {
 var errCoordinatedRestart = errors.New("coordinated restart requested")
 
 // Authenticated federation operations may include bounded consensus waits.
-// Keep the peer listener above the ordinary 60-second broadcast ceiling.
+// Keep the peer listener above one ordinary 60-second broadcast ceiling. The
+// browser-facing final confirmation spans two sequential commits (guest then
+// host), so the REST response budget must cover both.
 // Peer Write itself is deliberately fail-closed in v11.9 until a scoped
 // consensus ingress capability exists.
-const federationListenerWriteTimeout = 70 * time.Second
+var (
+	federationListenerWriteTimeout = federation.JoinConfirmationPeerTimeout() + 5*time.Second
+	restListenerWriteTimeout       = federation.JoinConfirmationOperationTimeout() + 5*time.Second
+)
+
+const defaultFederationListenAddr = "0.0.0.0:8444"
+
+func effectiveFederationListenAddr(configured string) string {
+	if addr := strings.TrimSpace(configured); addr != "" {
+		return addr
+	}
+	return defaultFederationListenAddr
+}
+
+func validatedFederationListenAddr(configured string) (string, error) {
+	addr := effectiveFederationListenAddr(configured)
+	_, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("must be host:port: %w", err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("port must be between 1 and 65535")
+	}
+	return addr, nil
+}
 
 func runServe() (rerr error) {
 	cfg, err := LoadConfig()
@@ -920,6 +947,17 @@ func runServe() (rerr error) {
 	// Agent create/update will be broadcast on-chain in addition to direct SQLite writes.
 	dashboard.CometBFTRPC = cometRPC
 	dashboard.RESTAddr = cfg.RESTAddr // surfaced read-only in Settings > Connection
+	// JOIN codes are signed over the exact advertised endpoints. Surface the
+	// same effective address used by the listener so a custom port cannot be
+	// silently replaced with the historical 8444 default in the QR payload.
+	dashboard.FederationAddr = effectiveFederationListenAddr(cfg.Federation.ListenAddr)
+	if cfg.Federation.Enabled {
+		fedAddr, fedAddrErr := validatedFederationListenAddr(cfg.Federation.ListenAddr)
+		if fedAddrErr != nil {
+			return fmt.Errorf("invalid federation listen_addr %q: %w", cfg.Federation.ListenAddr, fedAddrErr)
+		}
+		dashboard.FederationAddr = fedAddr
+	}
 	mcpConfigAPIURL = restBaseURL(cfg.RESTAddr)
 	if currentExec, execErr := os.Executable(); execErr == nil {
 		if resolvedExec, resolveErr := filepath.EvalSymlinks(currentExec); resolveErr == nil {
@@ -1142,7 +1180,7 @@ func runServe() (rerr error) {
 		Addr:         cfg.RESTAddr,
 		Handler:      r,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: restListenerWriteTimeout,
 		IdleTimeout:  60 * time.Second,
 	}
 	var startupErr error
@@ -1414,7 +1452,7 @@ func runServe() (rerr error) {
 				Handler:      r,
 				TLSConfig:    tlsCfg,
 				ReadTimeout:  15 * time.Second,
-				WriteTimeout: 15 * time.Second,
+				WriteTimeout: restListenerWriteTimeout,
 				IdleTimeout:  60 * time.Second,
 			}
 			plainTLSListener, listenErr := (&net.ListenConfig{}).Listen(ctx, "tcp", tlsAddr)
@@ -1445,10 +1483,7 @@ func runServe() (rerr error) {
 		} else if fedTLS, fedTLSErr := fedMgr.ServerTLSConfig(); fedTLSErr != nil {
 			logger.Warn().Err(fedTLSErr).Msg("federation listener disabled: TLS config failed")
 		} else {
-			fedAddr := cfg.Federation.ListenAddr
-			if fedAddr == "" {
-				fedAddr = "0.0.0.0:8444"
-			}
+			fedAddr := dashboard.FederationAddr
 			fedServer = &http.Server{
 				Addr:         fedAddr,
 				Handler:      fedMgr.Router(),

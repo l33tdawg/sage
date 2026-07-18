@@ -51,6 +51,14 @@ const maxScopedAgentProofPrunePerClaim = 8
 type BadgerStore struct {
 	db *badger.DB
 
+	// domainOwnershipGate linearizes the consensus publication of domain-owner
+	// changes with bounded federation operations that authorize one exact owner.
+	// Transaction-scoped clones share this pointer with the process-wide store;
+	// otherwise a staged TransferDomain could publish while a foreign result is
+	// already crossing the network under the old owner projection.
+	domainOwnershipGate    *sync.RWMutex
+	domainOwnershipMutated bool
+
 	// Startup index repair is constructor-local, but the exported Ensure
 	// methods remain safe if an operator tool calls them concurrently. The
 	// first migration under this lock scrubs the short-lived dirty-tree Badger
@@ -176,10 +184,37 @@ func (s *BadgerStore) BeginConsensusTransaction(mutationHook func(int)) *BadgerS
 		panic("store: nested consensus transaction")
 	}
 	return &BadgerStore{
-		db:           s.db,
-		txn:          s.db.NewTransaction(true),
-		mutationHook: mutationHook,
+		db:                     s.db,
+		domainOwnershipGate:    s.domainOwnershipGate,
+		txn:                    s.db.NewTransaction(true),
+		mutationHook:           mutationHook,
+		domainOwnershipMutated: false,
 	}
+}
+
+// LockDomainOwnershipRead holds the currently published owner projection
+// stable through one bounded external side effect. Direct owner writes take
+// the write side; app-v20 scoped transactions take it only when publishing the
+// transaction, so uncommitted consensus state is never exposed.
+func (s *BadgerStore) LockDomainOwnershipRead() func() {
+	if s == nil || s.domainOwnershipGate == nil {
+		return func() {}
+	}
+	s.domainOwnershipGate.RLock()
+	return s.domainOwnershipGate.RUnlock
+}
+
+func (s *BadgerStore) withDomainOwnershipMutation(fn func() error) error {
+	if s.txn != nil {
+		s.domainOwnershipMutated = true
+		return fn()
+	}
+	if s.domainOwnershipGate == nil {
+		return fn()
+	}
+	s.domainOwnershipGate.Lock()
+	defer s.domainOwnershipGate.Unlock()
+	return fn()
 }
 
 // InConsensusTransaction reports whether this handle is the transaction-scoped
@@ -198,6 +233,10 @@ func (s *BadgerStore) CommitConsensusTransaction() error {
 		err := s.poisoned
 		s.DiscardConsensusTransaction()
 		return err
+	}
+	if s.domainOwnershipMutated && s.domainOwnershipGate != nil {
+		s.domainOwnershipGate.Lock()
+		defer s.domainOwnershipGate.Unlock()
 	}
 	if err := s.txn.Commit(); err != nil {
 		return err
@@ -259,7 +298,7 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 		return nil, fmt.Errorf("open badger: %w", err)
 	}
 
-	store := &BadgerStore{db: db}
+	store := &BadgerStore{db: db, domainOwnershipGate: &sync.RWMutex{}}
 
 	// Backfill the multi-org agent→orgs reverse index from the authoritative
 	// org_member forward index. Cheap, idempotent — required for in-place
@@ -294,7 +333,7 @@ func OpenBadgerStoreReadOnly(path string) (*BadgerStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open badger read-only: %w", err)
 	}
-	return &BadgerStore{db: db}, nil
+	return &BadgerStore{db: db, domainOwnershipGate: &sync.RWMutex{}}, nil
 }
 
 // OpenBadgerStoreWithoutMigrations opens an existing Badger database writable
@@ -319,7 +358,7 @@ func OpenBadgerStoreWithoutMigrations(path string) (*BadgerStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open badger without migrations: %w", err)
 	}
-	return &BadgerStore{db: db}, nil
+	return &BadgerStore{db: db, domainOwnershipGate: &sync.RWMutex{}}, nil
 }
 
 // memoryKey returns the BadgerDB key for a memory's on-chain state.
@@ -2009,7 +2048,9 @@ func (s *BadgerStore) CountGrantsByDomainUpTo(domain string, limit int) (count i
 // Thin wrapper around SetState — kept as a named method to keep the call
 // site at the ABCI layer readable and to centralize the key naming.
 func (s *BadgerStore) SetSharedDomain(name string) error {
-	return s.SetState("shared_domain:"+name, []byte{1})
+	return s.withDomainOwnershipMutation(func() error {
+		return s.SetState("shared_domain:"+name, []byte{1})
+	})
 }
 
 // HasAccess checks if an agent has the required access level on a domain.
@@ -2215,24 +2256,26 @@ func (s *BadgerStore) ResolveOwningAncestor(domain string) (owner, ownedDomain s
 // This is intentionally check-and-set to prevent ownership "capture" when a prior registration
 // record is present but unexpectedly read as empty during the submit path.
 func (s *BadgerStore) RegisterDomain(name, ownerID, parentDomain string, height int64) error {
-	return s.update(func(txn *badger.Txn) error {
-		if item, getErr := txn.Get(domainKey(name)); getErr == nil {
-			var existingOwner string
-			if err := item.Value(func(val []byte) error {
-				owner, _, decErr := decodeString(val, 0)
-				existingOwner = owner
-				return decErr
-			}); err == nil && existingOwner != "" {
-				return ErrDomainAlreadyRegistered
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			if item, getErr := txn.Get(domainKey(name)); getErr == nil {
+				var existingOwner string
+				if err := item.Value(func(val []byte) error {
+					owner, _, decErr := decodeString(val, 0)
+					existingOwner = owner
+					return decErr
+				}); err == nil && existingOwner != "" {
+					return ErrDomainAlreadyRegistered
+				}
+			} else if !errors.Is(getErr, badger.ErrKeyNotFound) {
+				return getErr
 			}
-		} else if !errors.Is(getErr, badger.ErrKeyNotFound) {
-			return getErr
-		}
-		val := make([]byte, 4+len(ownerID)+4+len(parentDomain)+8)
-		offset := encodeString(val, 0, ownerID)
-		offset = encodeString(val, offset, parentDomain)
-		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return s.txnSet(txn, domainKey(name), val)
+			val := make([]byte, 4+len(ownerID)+4+len(parentDomain)+8)
+			offset := encodeString(val, 0, ownerID)
+			offset = encodeString(val, offset, parentDomain)
+			binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
+			return s.txnSet(txn, domainKey(name), val)
+		})
 	})
 }
 
@@ -2240,12 +2283,14 @@ func (s *BadgerStore) RegisterDomain(name, ownerID, parentDomain string, height 
 // authorization (e.g. current owner consent or admin role). Do NOT call from
 // transaction processing paths that should use RegisterDomain's check-and-set semantics.
 func (s *BadgerStore) TransferDomain(name, newOwnerID, parentDomain string, height int64) error {
-	return s.update(func(txn *badger.Txn) error {
-		val := make([]byte, 4+len(newOwnerID)+4+len(parentDomain)+8)
-		offset := encodeString(val, 0, newOwnerID)
-		offset = encodeString(val, offset, parentDomain)
-		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return s.txnSet(txn, domainKey(name), val)
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			val := make([]byte, 4+len(newOwnerID)+4+len(parentDomain)+8)
+			offset := encodeString(val, 0, newOwnerID)
+			offset = encodeString(val, offset, parentDomain)
+			binary.BigEndian.PutUint64(val[offset:offset+8], uint64(height)) // #nosec G115 -- block height is always non-negative
+			return s.txnSet(txn, domainKey(name), val)
+		})
 	})
 }
 

@@ -36,15 +36,17 @@ type sqlQuerier interface {
 
 // SQLiteStore implements MemoryStore, ValidatorScoreStore, AccessStore, and OrgStore using SQLite.
 type SQLiteStore struct {
-	conn            sqlQuerier // either *sql.DB or *sql.Tx
-	db              *sql.DB    // nil for tx-scoped stores
-	dbPath          string
-	vault           *vault.Vault  // nil = no encryption
-	vaultExpected   bool          // true = encryption should be active; reject writes if vault nil
-	decryptWarnOnce sync.Once     // gates the one-time decryption failure warning
-	writeMu         sync.Mutex    // serializes ALL writes to prevent SQLITE_BUSY
-	syncPolicyGate  *sync.RWMutex // shared with tx clones; linearizes consent vs egress
-	syncOriginGate  *sync.RWMutex // shared with tx clones; linearizes copy provenance vs re-forward scans
+	conn                  sqlQuerier // either *sql.DB or *sql.Tx
+	db                    *sql.DB    // nil for tx-scoped stores
+	dbPath                string
+	vault                 *vault.Vault  // nil = no encryption
+	vaultExpected         bool          // true = encryption should be active; reject writes if vault nil
+	decryptWarnOnce       sync.Once     // gates the one-time decryption failure warning
+	writeMu               sync.Mutex    // serializes ALL writes to prevent SQLITE_BUSY
+	syncPolicyGate        *sync.RWMutex // shared with tx clones; linearizes consent vs egress
+	syncOriginGate        *sync.RWMutex // shared with tx clones; linearizes copy provenance vs re-forward scans
+	agentContactGate      *sync.RWMutex // shared with tx clones; linearizes advertised agent identity/availability
+	agentContactWriteHeld bool          // true only on a RunInAgentContactTx-scoped clone
 
 	// Optional cross-encoder reranker; nil = skip the rerank pass and return
 	// the RRF-sorted candidates directly. Wired at server startup via
@@ -262,7 +264,7 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 		}
 	}
 
-	s := &SQLiteStore{conn: db, db: db, dbPath: dbPath, syncPolicyGate: &sync.RWMutex{}, syncOriginGate: &sync.RWMutex{}}
+	s := &SQLiteStore{conn: db, db: db, dbPath: dbPath, syncPolicyGate: &sync.RWMutex{}, syncOriginGate: &sync.RWMutex{}, agentContactGate: &sync.RWMutex{}}
 	if err := s.initSchema(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
@@ -724,6 +726,7 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 
 	// Migration: add pipeline_messages table.
 	s.migratePipeline(ctx)
+	s.migratePipelineTransport(ctx)
 
 	// Migration: add mcp_tokens table for HTTP MCP transport bearer auth.
 	s.migrateMCPTokens(ctx)
@@ -748,6 +751,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// Directional peer-RBAC capability snapshots. Header presence is meaningful:
 	// a present header with zero domain rows is explicit deny-all, not legacy.
 	s.migratePeerRBACPolicies(ctx)
+
+	// Per-contact inbound work-request consent. This stays local/off-consensus,
+	// but every row is bound to one exact peer-RBAC/JOIN generation.
+	s.migrateFederatedPipeContacts(ctx)
 
 	// FTS5 full-text search index on memory content.
 	// Used as a fallback when semantic embeddings are unavailable (hash mode).
@@ -3113,6 +3120,12 @@ func (s *SQLiteStore) GetAgentByName(ctx context.Context, name string) (*AgentEn
 }
 
 func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *AgentEntry) error {
+	return s.withAgentContactMutation(func() error {
+		return s.createAgent(ctx, agent)
+	})
+}
+
+func (s *SQLiteStore) createAgent(ctx context.Context, agent *AgentEntry) error {
 	var claimExpiry *string
 	if agent.ClaimExpiresAt != nil {
 		t := agent.ClaimExpiresAt.Format(time.RFC3339)
@@ -3144,6 +3157,12 @@ func (s *SQLiteStore) CreateAgent(ctx context.Context, agent *AgentEntry) error 
 }
 
 func (s *SQLiteStore) UpdateAgent(ctx context.Context, agent *AgentEntry) error {
+	return s.withAgentContactMutation(func() error {
+		return s.updateAgent(ctx, agent)
+	})
+}
+
+func (s *SQLiteStore) updateAgent(ctx context.Context, agent *AgentEntry) error {
 	var claimExpiry *string
 	if agent.ClaimExpiresAt != nil {
 		t := agent.ClaimExpiresAt.Format(time.RFC3339)
@@ -3166,30 +3185,36 @@ func (s *SQLiteStore) UpdateAgent(ctx context.Context, agent *AgentEntry) error 
 }
 
 func (s *SQLiteStore) RemoveAgent(ctx context.Context, agentID string) error {
-	_, err := s.writeExecContext(ctx, `
-		UPDATE network_agents SET status='removed', removed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
-		WHERE agent_id=?`, agentID)
-	if err != nil {
-		return fmt.Errorf("remove agent: %w", err)
-	}
-	return nil
+	return s.withAgentContactMutation(func() error {
+		_, err := s.writeExecContext(ctx, `
+			UPDATE network_agents SET status='removed', removed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			WHERE agent_id=?`, agentID)
+		if err != nil {
+			return fmt.Errorf("remove agent: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *SQLiteStore) UpdateAgentStatus(ctx context.Context, agentID, status string) error {
-	_, err := s.writeExecContext(ctx, `UPDATE network_agents SET status=? WHERE agent_id=?`, status, agentID)
-	if err != nil {
-		return fmt.Errorf("update agent status: %w", err)
-	}
-	return nil
+	return s.withAgentContactMutation(func() error {
+		_, err := s.writeExecContext(ctx, `UPDATE network_agents SET status=? WHERE agent_id=?`, status, agentID)
+		if err != nil {
+			return fmt.Errorf("update agent status: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *SQLiteStore) UpdateAgentLastSeen(ctx context.Context, agentID string, lastSeen time.Time) error {
 	ts := lastSeen.UTC().Format("2006-01-02T15:04:05.000Z")
-	_, err := s.writeExecContext(ctx, `UPDATE network_agents SET last_seen=?, status='active' WHERE agent_id=?`, ts, agentID)
-	if err != nil {
-		return fmt.Errorf("update agent last seen: %w", err)
-	}
-	return nil
+	return s.withAgentContactMutation(func() error {
+		_, err := s.writeExecContext(ctx, `UPDATE network_agents SET last_seen=?, status='active' WHERE agent_id=?`, ts, agentID)
+		if err != nil {
+			return fmt.Errorf("update agent last seen: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *SQLiteStore) BackfillFirstSeen(ctx context.Context, agentID string, firstSeen time.Time) error {
@@ -3202,6 +3227,17 @@ func (s *SQLiteStore) BackfillFirstSeen(ctx context.Context, agentID string, fir
 }
 
 func (s *SQLiteStore) RotateAgentKey(ctx context.Context, oldAgentID string) (string, []byte, error) {
+	var newAgentID string
+	var seed []byte
+	err := s.withAgentContactMutation(func() error {
+		var rotateErr error
+		newAgentID, seed, rotateErr = s.rotateAgentKey(ctx, oldAgentID)
+		return rotateErr
+	})
+	return newAgentID, seed, err
+}
+
+func (s *SQLiteStore) rotateAgentKey(ctx context.Context, oldAgentID string) (string, []byte, error) {
 	// Generate new Ed25519 keypair
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -3690,12 +3726,66 @@ func (s *SQLiteStore) ClaimProjectionBatch(ctx context.Context, height int64, ap
 	return true, nil
 }
 
-// RunInTx executes fn within a SQLite transaction. All writes through
-// the tx-scoped OffchainStore are atomic — either all succeed or all roll back.
+// LockAgentContactRead holds the agent identity, display label, and availability
+// inputs used by the peer-scoped contact projection stable through one bounded
+// federation side effect. The write side wraps every agent mutation.
+func (s *SQLiteStore) LockAgentContactRead() func() {
+	if s == nil || s.agentContactGate == nil {
+		return func() {}
+	}
+	s.agentContactGate.RLock()
+	return s.agentContactGate.RUnlock
+}
+
+func (s *SQLiteStore) withAgentContactMutation(fn func() error) error {
+	// A tx-scoped clone is created only by runInTx. The public RunInTx has
+	// no safe way to acquire another process lock after SQLite's writeMu;
+	// projection batches that mutate agents therefore enter through
+	// RunInAgentContactTx, which acquires the write side in the right order.
+	if s.db == nil {
+		if s.agentContactGate != nil && !s.agentContactWriteHeld {
+			return errors.New("agent mutation inside transaction requires RunInAgentContactTx")
+		}
+		return fn()
+	}
+	if s.agentContactGate == nil {
+		return fn()
+	}
+	s.agentContactGate.Lock()
+	defer s.agentContactGate.Unlock()
+	return fn()
+}
+
+// RunInTx executes a contact-neutral callback within a SQLite transaction. All
+// writes through the tx-scoped OffchainStore are atomic — either all succeed
+// or all roll back.
 func (s *SQLiteStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) error) error {
+	return s.runInTx(ctx, false, fn)
+}
+
+// RunInAgentContactTx is used by an ABCI projection batch that can create or
+// update network_agents. Only that batch takes the contact write lease; an
+// unrelated transaction therefore cannot be stalled by a slow authenticated
+// peer that is reading a contact snapshot.
+func (s *SQLiteStore) RunInAgentContactTx(ctx context.Context, fn func(tx OffchainStore) error) error {
+	return s.runInTx(ctx, true, fn)
+}
+
+// runPipelineTx is reserved for transactions whose schema does not touch
+// network_agents. It prevents a self-deadlock when an imported-pipe operation
+// already holds the contact read lease through its durable SQLite transition.
+func (s *SQLiteStore) runPipelineTx(ctx context.Context, fn func(tx OffchainStore) error) error {
+	return s.runInTx(ctx, false, fn)
+}
+
+func (s *SQLiteStore) runInTx(ctx context.Context, contactMutation bool, fn func(tx OffchainStore) error) error {
 	if s.db == nil {
 		// Already in a transaction — execute directly.
 		return fn(s)
+	}
+	if contactMutation && s.agentContactGate != nil {
+		s.agentContactGate.Lock()
+		defer s.agentContactGate.Unlock()
 	}
 	// Serialize write transactions at the Go level to prevent SQLITE_BUSY.
 	// SQLite's busy_timeout handles statement-level contention, but concurrent
@@ -3712,6 +3802,8 @@ func (s *SQLiteStore) RunInTx(ctx context.Context, fn func(tx OffchainStore) err
 		conn: tx, dbPath: s.dbPath,
 		vault: s.vault, vaultExpected: s.vaultExpected,
 		syncPolicyGate: s.syncPolicyGate, syncOriginGate: s.syncOriginGate,
+		agentContactGate:      s.agentContactGate,
+		agentContactWriteHeld: contactMutation,
 	}
 	if err := fn(txStore); err != nil {
 		return err
@@ -4700,18 +4792,58 @@ func (s *SQLiteStore) migratePipeline(ctx context.Context) {
 		claimed_at    TEXT,
 		completed_at  TEXT,
 		expires_at    TEXT NOT NULL,
-		journal_id    TEXT
+		journal_id    TEXT,
+		source_chain_id         TEXT NOT NULL DEFAULT '',
+		source_pipe_id          TEXT NOT NULL DEFAULT '',
+		destination_chain_id    TEXT NOT NULL DEFAULT '',
+		federation_policy_epoch TEXT NOT NULL DEFAULT '',
+		federation_agreement_id TEXT NOT NULL DEFAULT '',
+		federation_contact_id   TEXT NOT NULL DEFAULT '',
+		federation_contact_revision TEXT NOT NULL DEFAULT ''
 	)`)
 	var hasClaimedBy int
 	_ = s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('pipeline_messages') WHERE name='claimed_by'`).Scan(&hasClaimedBy)
 	if hasClaimedBy == 0 {
 		_, _ = s.writeExecContext(ctx, `ALTER TABLE pipeline_messages ADD COLUMN claimed_by TEXT NOT NULL DEFAULT ''`)
 	}
+	for _, migration := range []string{
+		`ALTER TABLE pipeline_messages ADD COLUMN source_chain_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE pipeline_messages ADD COLUMN source_pipe_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE pipeline_messages ADD COLUMN destination_chain_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE pipeline_messages ADD COLUMN federation_policy_epoch TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE pipeline_messages ADD COLUMN federation_agreement_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE pipeline_messages ADD COLUMN federation_contact_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE pipeline_messages ADD COLUMN federation_contact_revision TEXT NOT NULL DEFAULT ''`,
+	} {
+		_, _ = s.writeExecContext(ctx, migration)
+	}
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_provider ON pipeline_messages(to_provider, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_to_agent ON pipeline_messages(to_agent, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_from_agent ON pipeline_messages(from_agent, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_claimed_by ON pipeline_messages(claimed_by, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_expires ON pipeline_messages(status, expires_at)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_destination ON pipeline_messages(destination_chain_id, status)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_source ON pipeline_messages(source_chain_id, source_pipe_id)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_source_status ON pipeline_messages(source_chain_id, status)`)
+}
+
+func (s *SQLiteStore) decryptPipelineFields(m *PipelineMessage) error {
+	for label, field := range map[string]*string{
+		"intent": &m.Intent, "payload": &m.Payload, "result": &m.Result,
+	} {
+		if *field == "" {
+			continue
+		}
+		plaintext, err := s.decryptContent(*field)
+		if err != nil {
+			return fmt.Errorf("decrypt pipeline %s: %w", label, err)
+		}
+		if plaintext == VaultLockedPlaceholder {
+			return ErrPipeContentUnavailable
+		}
+		*field = plaintext
+	}
+	return nil
 }
 
 func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) error {
@@ -4721,6 +4853,14 @@ func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) 
 	}
 	if len(msg.Intent) > MaxPipeIntentBytes {
 		return ErrPipeIntentTooLarge
+	}
+	encryptedIntent, err := s.encryptContent(msg.Intent)
+	if err != nil {
+		return fmt.Errorf("encrypt pipeline intent: %w", err)
+	}
+	encryptedPayload, err := s.encryptContent(msg.Payload)
+	if err != nil {
+		return fmt.Errorf("encrypt pipeline payload: %w", err)
 	}
 
 	// Serialize the quota reads and the insert as one critical section. The old
@@ -4740,12 +4880,23 @@ func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) 
 	// this process.
 	var perAgent int
 	if err := s.conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pipeline_messages WHERE from_agent = ? AND status IN ('pending','claimed')`,
-		msg.FromAgent).Scan(&perAgent); err != nil {
+		`SELECT COUNT(*) FROM pipeline_messages WHERE from_agent = ? AND source_chain_id = ? AND status IN ('pending','claimed')`,
+		msg.FromAgent, msg.SourceChainID).Scan(&perAgent); err != nil {
 		return err
 	}
 	if perAgent >= MaxOpenPipesPerAgent {
 		return ErrPipeQuotaPerAgent
+	}
+	if msg.SourceChainID != "" {
+		var perPeer int
+		if err := s.conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pipeline_messages WHERE source_chain_id = ? AND status IN ('pending','claimed')`,
+			msg.SourceChainID).Scan(&perPeer); err != nil {
+			return err
+		}
+		if perPeer >= MaxOpenPipesPerPeer {
+			return ErrPipeQuotaPerPeer
+		}
 	}
 	var global int
 	if err := s.conn.QueryRowContext(ctx,
@@ -4758,18 +4909,22 @@ func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) 
 
 	// Call the underlying connection directly: standalone stores already hold
 	// writeMu above, while tx-scoped stores are already inside the parent lock.
-	_, err := s.conn.ExecContext(ctx,
-		`INSERT INTO pipeline_messages (pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err = s.conn.ExecContext(ctx,
+		`INSERT INTO pipeline_messages (pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at,
+		 source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		msg.PipeID, msg.FromAgent, msg.FromProvider, msg.ToAgent, msg.ToProvider,
-		msg.Intent, msg.Payload, msg.Status, formatTime(msg.CreatedAt), formatTime(msg.ExpiresAt))
+		encryptedIntent, encryptedPayload, msg.Status, formatTime(msg.CreatedAt), formatTime(msg.ExpiresAt),
+		msg.SourceChainID, msg.SourcePipeID, msg.DestinationChainID, msg.FederationPolicyEpoch,
+		msg.FederationAgreementID, msg.FederationContactID, msg.FederationContactRevision)
 	return err
 }
 
 func (s *SQLiteStore) GetPipeline(ctx context.Context, pipeID string) (*PipelineMessage, error) {
 	row := s.conn.QueryRowContext(ctx,
 		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
-		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, '')
+		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
+		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision
 		 FROM pipeline_messages WHERE pipe_id = ?`, pipeID)
 
 	var m PipelineMessage
@@ -4777,7 +4932,8 @@ func (s *SQLiteStore) GetPipeline(ctx context.Context, pipeID string) (*Pipeline
 	var claimedAt, completedAt *string
 	if err := row.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
 		&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &m.ClaimedBy, &claimedAt, &completedAt,
-		&expiresAt, &m.JournalID); err != nil {
+		&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
+		&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("pipeline message not found: %s", pipeID)
 		}
@@ -4787,14 +4943,19 @@ func (s *SQLiteStore) GetPipeline(ctx context.Context, pipeID string) (*Pipeline
 	m.ExpiresAt = parseTime(expiresAt)
 	m.ClaimedAt = parseTimePtr(claimedAt)
 	m.CompletedAt = parseTimePtr(completedAt)
+	if err := s.decryptPipelineFields(&m); err != nil {
+		return nil, err
+	}
 	return &m, nil
 }
 
 func (s *SQLiteStore) GetInbox(ctx context.Context, agentID, provider string, limit int) ([]*PipelineMessage, error) {
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at
+		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload, status, created_at, expires_at,
+		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision
 		 FROM pipeline_messages
 		 WHERE status = 'pending'
+		   AND destination_chain_id = ''
 		   AND (to_agent = ? OR (to_agent = '' AND to_provider = ?))
 		   AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 		 ORDER BY created_at ASC LIMIT ?`,
@@ -4804,19 +4965,24 @@ func (s *SQLiteStore) GetInbox(ctx context.Context, agentID, provider string, li
 	}
 	defer func() { _ = rows.Close() }()
 
-	var items []*PipelineMessage
+	items := make([]*PipelineMessage, 0)
 	for rows.Next() {
 		var m PipelineMessage
 		var createdAt, expiresAt string
 		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
-			&m.Intent, &m.Payload, &m.Status, &createdAt, &expiresAt); err != nil {
+			&m.Intent, &m.Payload, &m.Status, &createdAt, &expiresAt, &m.SourceChainID,
+			&m.SourcePipeID, &m.DestinationChainID, &m.FederationPolicyEpoch,
+			&m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseTime(createdAt)
 		m.ExpiresAt = parseTime(expiresAt)
+		if err := s.decryptPipelineFields(&m); err != nil {
+			return nil, err
+		}
 		items = append(items, &m)
 	}
-	return items, nil
+	return items, rows.Err()
 }
 
 func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string) error {
@@ -4839,10 +5005,14 @@ func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, res
 	if len(result) > MaxPipeContentBytes {
 		return ErrPipeResultTooLarge
 	}
+	encryptedResult, err := s.encryptContent(result)
+	if err != nil {
+		return fmt.Errorf("encrypt pipeline result: %w", err)
+	}
 	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'completed', result = ?, journal_id = ?, claimed_by = CASE WHEN claimed_by = '' THEN ? ELSE claimed_by END,
-		        completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		 WHERE pipe_id = ? AND status = 'claimed' AND (claimed_by = ? OR claimed_by = '')`, result, journalID, agentID, pipeID, agentID)
+		 completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		 WHERE pipe_id = ? AND status = 'claimed' AND (claimed_by = ? OR claimed_by = '')`, encryptedResult, journalID, agentID, pipeID, agentID)
 	if err != nil {
 		return err
 	}
@@ -4856,9 +5026,10 @@ func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, res
 func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error) {
 	rows, err := s.conn.QueryContext(ctx,
 		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent,
-		        COALESCE(result, ''), status, created_at, completed_at, expires_at, COALESCE(journal_id, '')
+		        COALESCE(result, ''), status, created_at, completed_at, expires_at, COALESCE(journal_id, ''),
+		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision
 		 FROM pipeline_messages
-		 WHERE from_agent = ? AND status = 'completed'
+		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'
 		 ORDER BY completed_at DESC LIMIT ?`,
 		agentID, limit)
 	if err != nil {
@@ -4866,21 +5037,26 @@ func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string,
 	}
 	defer func() { _ = rows.Close() }()
 
-	var items []*PipelineMessage
+	items := make([]*PipelineMessage, 0)
 	for rows.Next() {
 		var m PipelineMessage
 		var createdAt, expiresAt string
 		var completedAt *string
 		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
-			&m.Intent, &m.Result, &m.Status, &createdAt, &completedAt, &expiresAt, &m.JournalID); err != nil {
+			&m.Intent, &m.Result, &m.Status, &createdAt, &completedAt, &expiresAt, &m.JournalID,
+			&m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID, &m.FederationPolicyEpoch,
+			&m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseTime(createdAt)
 		m.ExpiresAt = parseTime(expiresAt)
 		m.CompletedAt = parseTimePtr(completedAt)
+		if err := s.decryptPipelineFields(&m); err != nil {
+			return nil, err
+		}
 		items = append(items, &m)
 	}
-	return items, nil
+	return items, rows.Err()
 }
 
 func (s *SQLiteStore) ListPipelines(ctx context.Context, status string, limit int) ([]*PipelineMessage, error) {
@@ -4888,7 +5064,8 @@ func (s *SQLiteStore) ListPipelines(ctx context.Context, status string, limit in
 		limit = 50
 	}
 	query := `SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
-	                 COALESCE(result, ''), status, created_at, claimed_at, completed_at, expires_at, COALESCE(journal_id, '')
+		                 COALESCE(result, ''), status, created_at, claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
+		                 source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision
 	          FROM pipeline_messages`
 	var args []any
 	if status != "" {
@@ -4911,13 +5088,17 @@ func (s *SQLiteStore) ListPipelines(ctx context.Context, status string, limit in
 		var claimedAt, completedAt *string
 		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
 			&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &claimedAt, &completedAt,
-			&expiresAt, &m.JournalID); err != nil {
+			&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
+			&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseTime(createdAt)
 		m.ExpiresAt = parseTime(expiresAt)
 		m.ClaimedAt = parseTimePtr(claimedAt)
 		m.CompletedAt = parseTimePtr(completedAt)
+		if err := s.decryptPipelineFields(&m); err != nil {
+			return nil, err
+		}
 		items = append(items, &m)
 	}
 	return items, nil
@@ -4974,15 +5155,29 @@ func (s *SQLiteStore) ExpireStalePipelines(ctx context.Context, olderThan time.T
 }
 
 func (s *SQLiteStore) PurgePipelines(ctx context.Context, olderThan time.Time) (int, error) {
-	res, err := s.writeExecContext(ctx,
-		`DELETE FROM pipeline_messages
-		 WHERE status IN ('completed', 'expired', 'failed')
-		   AND created_at < ?`, formatTime(olderThan))
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	return int(n), nil
+	var purged int64
+	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		if _, err := tx.writeExecContext(ctx, `DELETE FROM pipeline_transport_outbox
+			WHERE pipe_id IN (SELECT p.pipe_id FROM pipeline_messages p
+				WHERE p.status IN ('completed','expired','failed') AND p.created_at < ?
+				AND NOT EXISTS (SELECT 1 FROM pipeline_transport_outbox keep
+					WHERE keep.pipe_id=p.pipe_id AND (keep.state='pending'
+						OR (keep.state='failed' AND keep.reported_at IS NULL))))`, formatTime(olderThan)); err != nil {
+			return err
+		}
+		res, err := tx.writeExecContext(ctx, `DELETE FROM pipeline_messages
+			WHERE status IN ('completed', 'expired', 'failed') AND created_at < ?
+			AND NOT EXISTS (SELECT 1 FROM pipeline_transport_outbox keep
+				WHERE keep.pipe_id=pipeline_messages.pipe_id AND (keep.state='pending'
+					OR (keep.state='failed' AND keep.reported_at IS NULL)))`, formatTime(olderThan))
+		if err != nil {
+			return err
+		}
+		purged, _ = res.RowsAffected()
+		return nil
+	})
+	return int(purged), err
 }
 
 // --- Dynamic Validator Governance ---

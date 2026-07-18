@@ -57,6 +57,12 @@ const (
 	joinCallTimeout    = 20 * time.Second
 )
 
+// joinP2POnlyEndpoint is transcript material for an Internet ceremony that has
+// no truthful LAN/direct address to advertise. All JOIN HTTP travels over the
+// attested libp2p bundle, and established-peer dialing recognizes this exact
+// value as P2P-only so it is never attempted as a TCP fallback.
+const joinP2POnlyEndpoint = "https://127.0.0.1:65535"
+
 type joinCertSPKIKey struct{}
 
 // ---------------------------------------------------------------------------
@@ -108,15 +114,16 @@ func (s ScopeWire) digest() [32]byte {
 // the clear (§2.4). The guest is authenticated by mTLS (its cert chains to a CA
 // whose SPKI equals the scanned guest pin) - not by a body signature.
 type JoinRequestWire struct {
-	SessionID     string    `json:"session_id"`
-	GuestChain    string    `json:"guest_chain"`
-	GuestName     string    `json:"guest_name,omitempty"` // friendly label (cosmetic, unauthenticated)
-	GuestAgentID  string    `json:"guest_agent_id"`       // hex ed25519 operator pub
-	GuestNonce    string    `json:"guest_nonce"`          // hex 16B
-	GuestPin      string    `json:"guest_pin"`            // hex 32B SPKI (must equal the scanned anchor)
-	GuestCAPEM    string    `json:"guest_ca_pem"`
-	GuestEndpoint string    `json:"guest_endpoint"`
-	Scope         ScopeWire `json:"scope"` // guest's scope_G inputs
+	SessionID            string    `json:"session_id"`
+	GuestChain           string    `json:"guest_chain"`
+	GuestName            string    `json:"guest_name,omitempty"` // friendly label (cosmetic, unauthenticated)
+	GuestAgentID         string    `json:"guest_agent_id"`       // hex ed25519 operator pub
+	GuestNonce           string    `json:"guest_nonce"`          // hex 16B
+	GuestPin             string    `json:"guest_pin"`            // hex 32B SPKI (must equal the scanned anchor)
+	GuestCAPEM           string    `json:"guest_ca_pem"`
+	GuestEndpoint        string    `json:"guest_endpoint"`
+	ExpectedHostEndpoint string    `json:"expected_host_endpoint,omitempty"` // exact host endpoint frozen in the scanned QR
+	Scope                ScopeWire `json:"scope"`                            // guest's scope_G inputs
 }
 
 // JoinRequestResp is returned to the guest - enough to compute CODE_G/CODE_H.
@@ -182,29 +189,42 @@ type JoinCAResp struct {
 // mountJoinRoutes attaches the join ceremony routes under joinAuth. Called from
 // Router() so they share the listener but not peerAuth.
 func (m *Manager) mountJoinRoutes(r chi.Router) {
-	// Code-submitting / state-changing routes: strict per-source rate limit.
+	// Request/abort use only the non-reserved mutation budget.
 	r.Group(func(r chi.Router) {
-		r.Use(m.joinAuth(false))
+		r.Use(m.joinAuth(joinRateMutation))
 		r.Post("/fed/v1/join/request", m.handleJoinRequest)
-		r.Post("/fed/v1/join/confirm", m.handleJoinConfirm)
 		r.Post("/fed/v1/join/abort", m.handleJoinAbort)
+	})
+	// Final confirmation may use the reserved tail of the same aggregate cap so
+	// a lost response or rapid duplicate can reach authenticated ACTIVE replay.
+	r.Group(func(r chi.Router) {
+		r.Use(m.joinAuth(joinRateConfirm))
+		r.Post("/fed/v1/join/confirm", m.handleJoinConfirm)
 	})
 	// Read-only routes: generous rate limit so a bound guest's ~2s status poll
 	// over a multi-minute ceremony is never throttled (the stuck-guest bug).
 	r.Group(func(r chi.Router) {
-		r.Use(m.joinAuth(true))
+		r.Use(m.joinAuth(joinRateRead))
 		r.Get("/fed/v1/join/ca", m.handleJoinCA)
 		r.Get("/fed/v1/join/status", m.handleJoinStatus)
 	})
 }
 
+type joinRateClass uint8
+
+const (
+	joinRateMutation joinRateClass = iota
+	joinRateConfirm
+	joinRateRead
+)
+
 // joinAuth is the pre-agreement middleware: it rate-limits on the TLS
 // connection (never X-Forwarded-For, RT-3), caps the body, and threads the
 // presented client-cert leaf SPKI into the request context for per-session
 // binding. It does NOT require an active agreement (that is the whole point).
-// readOnly selects the generous read limiter (status polling) vs. the strict
-// code-submitting limiter.
-func (m *Manager) joinAuth(readOnly bool) func(http.Handler) http.Handler {
+// rateClass selects the strict non-reserved mutation budget, the reserved
+// confirmation tranche, or the independent read-only polling budget.
+func (m *Manager) joinAuth(rateClass joinRateClass) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
@@ -218,11 +238,18 @@ func (m *Manager) joinAuth(readOnly bool) func(http.Handler) http.Handler {
 			if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 				connKey = host
 			}
-			allowed := m.joins.AllowConn(connKey, time.Now())
-			if readOnly {
-				allowed = m.joins.AllowConnRead(connKey, time.Now())
+			now := time.Now()
+			var allowed bool
+			switch rateClass {
+			case joinRateConfirm:
+				allowed = m.joins.AllowConnConfirm(connKey, now)
+			case joinRateRead:
+				allowed = m.joins.AllowConnRead(connKey, now)
+			default:
+				allowed = m.joins.AllowConn(connKey, now)
 			}
 			if !allowed {
+				w.Header().Set("Retry-After", "60")
 				httpError(w, http.StatusTooManyRequests, "too many join attempts")
 				return
 			}
@@ -281,6 +308,15 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.GuestChain == m.localChainID {
 		httpError(w, http.StatusBadRequest, "refusing self-federation")
+		return
+	}
+	// New peers echo the exact endpoint they scanned before the host stages any
+	// guest material. Endpoints are part of the signed attestation, so silently
+	// accepting a rewritten QR would otherwise fail only after the guest's tx-33.
+	// Empty preserves compatibility with older guests; new guests independently
+	// verify the response echo below when talking to an older host.
+	if req.ExpectedHostEndpoint != "" && req.ExpectedHostEndpoint != js.HostEndpoint {
+		httpError(w, http.StatusConflict, "host endpoint does not match the scanned connection code; generate a new code")
 		return
 	}
 	if err := validateTrustOnlyJoinScope(req.Scope); err != nil {
@@ -484,6 +520,13 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	if err != nil {
 		return "", "", err
 	}
+	if ctx.AlreadyActive {
+		return ctx.ActivationTxHash, m.localChainID, nil
+	}
+	// CheckConfirm hands the driver its own copy of the ceremony seed. The live
+	// session is scrubbed by MarkActive/FailConfirm, so scrub this independent
+	// copy on every success and failure path as well.
+	defer zeroize(ctx.Seed)
 	// One lease owns this agreement generation from local preparation through
 	// tx-33 and every activation artifact (or the matching tx-34 rollback).
 	// PrepareSyncControl is still pending/non-authoritative here; activation and
@@ -575,7 +618,7 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	if err := m.initializePeerRBACPolicy(context.Background(), ctx.GuestChain); err != nil {
 		return m.undoPartialHostConfirmLocked(sessionID, ctx, "peer RBAC initialization failed", err)
 	}
-	if activeErr := m.joins.MarkActive(sessionID); activeErr != nil {
+	if activeErr := m.joins.MarkActive(sessionID, txHash); activeErr != nil {
 		return m.undoPartialHostConfirmLocked(sessionID, ctx, "join session activation failed", activeErr)
 	}
 	generation.Activate()
@@ -656,6 +699,9 @@ func (m *Manager) HostCreate(hostEndpoint string) (*HostCreateResult, error) {
 // Normal LAN setup keeps its legacy QR byte shape; two v11.6 peers exchange
 // roaming routes over authenticated mTLS only after the agreement is active.
 func (m *Manager) HostCreateMode(hostEndpoint string, requireP2P bool) (*HostCreateResult, error) {
+	if requireP2P && hostEndpoint == "" {
+		hostEndpoint = joinP2POnlyEndpoint
+	}
 	if err := validateJoinEndpoint(hostEndpoint); err != nil {
 		return nil, fmt.Errorf("invalid host endpoint: %w", err)
 	}
@@ -832,6 +878,7 @@ type guestDraft struct {
 	hostChain     string
 	hostName      string // host's friendly label (cosmetic, from the CA fetch)
 	hostEndpoint  string
+	guestEndpoint string
 	hostPin       []byte
 	hostCAPEM     []byte
 	hostAgentPub  []byte
@@ -858,6 +905,7 @@ const (
 	guestDraftRequested   guestDraftState = "requested"
 	guestDraftConfirming  guestDraftState = "confirming"
 	guestDraftLocalActive guestDraftState = "local_active"
+	guestDraftActive      guestDraftState = "active"
 )
 
 func (m *Manager) putGuestDraft(d *guestDraft) error {
@@ -947,6 +995,28 @@ func (m *Manager) finishGuestRequest(d *guestDraft) bool {
 	return true
 }
 
+// finishGuestConfirm retains only a short-lived, zeroized completion receipt.
+// It makes the dashboard boundary idempotent for a same-tick double submit or a
+// lost HTTP response without retaining the ceremony seed after activation.
+func (m *Manager) finishGuestConfirm(sessionID string, generation uint64) bool {
+	m.guestMu.Lock()
+	defer m.guestMu.Unlock()
+	d, ok := m.guestDrafts[sessionID]
+	if !ok || d.generation != generation || d.state != guestDraftConfirming || d.txHash == "" {
+		return false
+	}
+	zeroize(d.seed)
+	d.seed = nil
+	d.hostCAPEM = nil
+	d.hostPin = nil
+	d.hostAgentPub = nil
+	d.guestNonce = nil
+	d.hostNonce = nil
+	d.scope = ScopeWire{}
+	d.state = guestDraftActive
+	return true
+}
+
 func cloneGuestDraft(d *guestDraft) *guestDraft {
 	if d == nil {
 		return nil
@@ -1008,6 +1078,20 @@ func (m *Manager) dropGuestDraft(sessionID string, generation uint64) {
 	}
 }
 
+// dropGuestDraftsForChain invalidates every pending or retained completion for
+// a permanently retired peer. A retry must never reuse old ceremony signatures
+// or a seed after local revoke/re-pair changed the trust generation.
+func (m *Manager) dropGuestDraftsForChain(remoteChainID string) {
+	m.guestMu.Lock()
+	defer m.guestMu.Unlock()
+	for sessionID, d := range m.guestDrafts {
+		if d != nil && d.hostChain == remoteChainID {
+			zeroize(d.seed)
+			delete(m.guestDrafts, sessionID)
+		}
+	}
+}
+
 // GuestScanResult is returned to the guest wizard after a successful scan.
 type GuestScanResult struct {
 	SessionID    string `json:"session_id"`
@@ -1022,12 +1106,16 @@ type GuestScanResult struct {
 // CA over the join listener, asserts its SPKI equals the scanned pin (refuse on
 // mismatch), and caches a draft. It returns the guest's own return QR string.
 func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*GuestScanResult, error) {
-	if err := validateJoinEndpoint(guestEndpoint); err != nil {
-		return nil, fmt.Errorf("invalid guest endpoint: %w", err)
-	}
 	enr, err := totp.ParseEnrollment(uri, false) // seed REQUIRED for a host enrollment
 	if err != nil {
 		return nil, err
+	}
+	defer zeroize(enr.Seed)
+	if enr.Transport == "p2p" && guestEndpoint == "" {
+		guestEndpoint = joinP2POnlyEndpoint
+	}
+	if err := validateJoinEndpoint(guestEndpoint); err != nil {
+		return nil, fmt.Errorf("invalid guest endpoint: %w", err)
 	}
 	if enr.Role != "host" {
 		return nil, fmt.Errorf("this is not a host connection code")
@@ -1060,17 +1148,18 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 		return nil, err
 	}
 	draft := &guestDraft{
-		sessionID:    sessionID,
-		hostChain:    enr.ChainID,
-		hostName:     hostName,
-		hostEndpoint: enr.Endpoint,
-		hostPin:      append([]byte(nil), enr.Pin...),
-		hostCAPEM:    caPEM,
-		seed:         append([]byte(nil), enr.Seed...),
-		expiresAt:    time.Now().Add(guestDraftTTL),
-		hostPeerID:   enr.PeerID,
-		hostP2PAddrs: append([]string(nil), enr.P2PAddrs...),
-		state:        guestDraftScanned,
+		sessionID:     sessionID,
+		hostChain:     enr.ChainID,
+		hostName:      hostName,
+		hostEndpoint:  enr.Endpoint,
+		guestEndpoint: guestEndpoint,
+		hostPin:       append([]byte(nil), enr.Pin...),
+		hostCAPEM:     caPEM,
+		seed:          append([]byte(nil), enr.Seed...),
+		expiresAt:     time.Now().Add(guestDraftTTL),
+		hostPeerID:    enr.PeerID,
+		hostP2PAddrs:  append([]string(nil), enr.P2PAddrs...),
+		state:         guestDraftScanned,
 	}
 	returnURI := totp.ProvisioningURI(nil, m.localChainID, "SAGE", ownPin, guestEndpoint, sidForQR(sessionID), "guest")
 	if enr.Transport == "p2p" {
@@ -1123,8 +1212,14 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 			m.transitionGuestDraft(sessionID, d.generation, guestDraftRequesting, guestDraftScanned)
 		}
 	}()
+	if len(d.hostP2PAddrs) > 0 && guestEndpoint == "" {
+		guestEndpoint = d.guestEndpoint
+	}
 	if err := validateJoinEndpoint(guestEndpoint); err != nil {
 		return nil, fmt.Errorf("invalid guest endpoint: %w", err)
+	}
+	if guestEndpoint != d.guestEndpoint {
+		return nil, fmt.Errorf("guest endpoint changed after the return code was generated; re-scan to use a new endpoint")
 	}
 	ownPin, err := m.ownPin()
 	if err != nil {
@@ -1139,31 +1234,47 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 		return nil, readErr
 	}
 	body := &JoinRequestWire{
-		SessionID:     sessionID,
-		GuestChain:    m.localChainID,
-		GuestName:     sanitizeName(m.NetworkName()),
-		GuestAgentID:  hex.EncodeToString(m.agentPub),
-		GuestNonce:    hex.EncodeToString(guestNonce),
-		GuestPin:      hex.EncodeToString(ownPin),
-		GuestCAPEM:    string(ownCAPEM),
-		GuestEndpoint: guestEndpoint,
-		Scope:         scope,
+		SessionID:            sessionID,
+		GuestChain:           m.localChainID,
+		GuestName:            sanitizeName(m.NetworkName()),
+		GuestAgentID:         hex.EncodeToString(m.agentPub),
+		GuestNonce:           hex.EncodeToString(guestNonce),
+		GuestPin:             hex.EncodeToString(ownPin),
+		GuestCAPEM:           string(ownCAPEM),
+		GuestEndpoint:        d.guestEndpoint,
+		ExpectedHostEndpoint: d.hostEndpoint,
+		Scope:                scope,
 	}
 	var resp JoinRequestResp
 	if callErr := m.guestCall(ctx, d, http.MethodPost, "/fed/v1/join/request", body, &resp); callErr != nil {
 		return nil, callErr
 	}
+	rejectBoundResponse := func(reason error) (*GuestRequestResult, error) {
+		// The host may already have bound and staged this guest. Tell it to burn
+		// that unfinished session and drop our seed rather than resetting locally
+		// to SCANNED and leaving a misleading, unrecoverable half-ceremony.
+		var abortResp map[string]string
+		_ = m.guestCall(ctx, d, http.MethodPost, "/fed/v1/join/abort", &JoinAbortWire{SessionID: sessionID}, &abortResp)
+		m.dropGuestDraft(sessionID, d.generation)
+		return nil, reason
+	}
+	if resp.HostChain != d.hostChain {
+		return rejectBoundResponse(fmt.Errorf("host identity changed since the scan - stop"))
+	}
+	if resp.HostEndpoint != d.hostEndpoint {
+		return rejectBoundResponse(fmt.Errorf("host endpoint changed since the scan; generate and scan a new connection code"))
+	}
 	hostNonce, err := hex.DecodeString(resp.HostNonce)
 	if err != nil || len(hostNonce) != 16 {
-		return nil, fmt.Errorf("host returned an invalid nonce")
+		return rejectBoundResponse(fmt.Errorf("host returned an invalid nonce"))
 	}
 	// The host echoes its pin; it MUST equal the scanned one (anchor).
 	if echoed, dErr := hex.DecodeString(resp.HostPin); dErr != nil || subtle.ConstantTimeCompare(echoed, d.hostPin) != 1 {
-		return nil, fmt.Errorf("host pin changed since the scan - stop")
+		return rejectBoundResponse(fmt.Errorf("host pin changed since the scan - stop"))
 	}
 	hostAgentPub, err := hex.DecodeString(resp.HostAgentID)
 	if err != nil || len(hostAgentPub) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("host returned an invalid agent id")
+		return rejectBoundResponse(fmt.Errorf("host returned an invalid agent id"))
 	}
 	d.guestNonce = guestNonce
 	d.hostNonce = hostNonce
@@ -1237,12 +1348,48 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 	}
 	m.guestConfirmMu.Lock()
 	defer m.guestConfirmMu.Unlock()
+	// A completed request retains only endpoint + tx result until the ceremony
+	// TTL expires. Return the same success to a rapid duplicate without dialing
+	// the host, replaying tx-33, or reconstructing sensitive ceremony material.
+	if completed, ok := m.getGuestDraft(sessionID); ok && completed.state == guestDraftActive {
+		if len(completed.hostP2PAddrs) > 0 && guestEndpoint == "" {
+			guestEndpoint = completed.guestEndpoint
+		}
+		if err := validateJoinEndpoint(guestEndpoint); err != nil {
+			return "", fmt.Errorf("invalid guest endpoint: %w", err)
+		}
+		if guestEndpoint != completed.guestEndpoint {
+			return "", fmt.Errorf("guest endpoint changed after activation")
+		}
+		if completed.txHash == "" {
+			return "", fmt.Errorf("completed connection has no activation receipt")
+		}
+		if _, err := m.ActiveAgreement(completed.hostChain); err != nil {
+			return "", fmt.Errorf("completed connection is no longer active")
+		}
+		return completed.txHash, nil
+	}
 	d, previousState, ok := m.claimGuestDraft(sessionID,
 		[]guestDraftState{guestDraftRequested, guestDraftLocalActive}, guestDraftConfirming)
 	if !ok {
 		return "", fmt.Errorf("connection confirmation is already in progress or unavailable")
 	}
+	// claimGuestDraft returns a deep copy so callers never race the live draft.
+	// Scrub this independent seed copy on every success and error path; the live
+	// draft retains its own copy only while a retry remains valid.
+	defer zeroize(d.seed)
 	localActive := previousState == guestDraftLocalActive
+	// One agreement-generation lease spans our local tx-33/artifacts and the
+	// bounded peer confirmation. A queued revoke therefore runs only after the
+	// host is ACTIVE and can receive the terminal notice. Retried confirmation
+	// also revalidates the exact local ceremony generation under this lease.
+	agreementUnlock := m.LockAgreementMutation()
+	agreementLocked := true
+	defer func() {
+		if agreementLocked {
+			agreementUnlock()
+		}
+	}()
 	confirmed := false
 	defer func() {
 		if !confirmed {
@@ -1253,11 +1400,17 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 			m.transitionGuestDraft(sessionID, d.generation, guestDraftConfirming, to)
 		}
 	}()
+	if len(d.hostP2PAddrs) > 0 && guestEndpoint == "" {
+		guestEndpoint = d.guestEndpoint
+	}
 	if d.hostNonce == nil || d.guestNonce == nil {
 		return "", fmt.Errorf("request step not completed")
 	}
 	if err := validateJoinEndpoint(guestEndpoint); err != nil {
 		return "", fmt.Errorf("invalid guest endpoint: %w", err)
+	}
+	if guestEndpoint != d.guestEndpoint {
+		return "", fmt.Errorf("guest endpoint changed after the return code was generated; re-scan to use a new endpoint")
 	}
 	ownPin, err := m.ownPin()
 	if err != nil {
@@ -1268,7 +1421,7 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 		HostChain:     d.hostChain,
 		GuestPin:      ownPin,
 		HostPin:       d.hostPin,
-		GuestEndpoint: guestEndpoint,
+		GuestEndpoint: d.guestEndpoint,
 		HostEndpoint:  d.hostEndpoint,
 		GuestScope:    d.scope.digest(),
 		HostScope:     hostScope.digest(),
@@ -1302,14 +1455,10 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 	hooks := m.joinP2PHooks()
 	txHash := d.txHash
 	if !localActive {
-		// The local activation is one agreement generation. Release the lease
-		// before the outbound /join/confirm network call below, but not between
-		// tx-33 and CA/seed/control/RBAC persistence. Activation/RBAC helpers
-		// acquire policy W internally; the tx helper owns the only explicit
-		// nested lease around the consensus generation change.
+		// The local activation is one agreement generation. Do not release the
+		// lease between tx-33, CA/seed/control/RBAC persistence, and the bounded
+		// outbound /join/confirm below.
 		txHash, err = func() (string, error) {
-			agreementUnlock := m.LockAgreementMutation()
-			defer agreementUnlock()
 			generation := m.BeginSyncPolicyGenerationMutation(d.hostChain)
 			defer generation.Restore()
 
@@ -1392,6 +1541,10 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 		}
 		localActive = true
 	}
+	if bindErr := m.requireGuestDraftAgreementCurrent(d, epoch); bindErr != nil {
+		m.dropGuestDraft(sessionID, d.generation)
+		return "", bindErr
+	}
 
 	// Tell the host to activate its side.
 	confirmBody := &JoinConfirmWire{
@@ -1401,11 +1554,12 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 		GroupInviteProof: invitePayload[pkInviteeSig],
 	}
 	var confirmResp JoinConfirmResp
-	if err := m.guestCall(ctx, d, http.MethodPost, "/fed/v1/join/confirm", confirmBody, &confirmResp); err != nil {
+	confirmErr := m.guestCallWithTimeout(ctx, d, http.MethodPost, "/fed/v1/join/confirm", confirmBody, &confirmResp, JoinConfirmationPeerTimeout())
+	if confirmErr != nil {
 		// Our side is active; the host's is not yet. Safe one-sided window -
 		// peerAuth rejects host->guest until the host's tx lands; retry confirm.
-		m.logger.Warn().Err(err).Str("host", d.hostChain).Msg("guest active but host confirm failed (one-sided window)")
-		return txHash, fmt.Errorf("your side is connected but the host has not confirmed yet: %w", err)
+		m.logger.Warn().Err(confirmErr).Str("host", d.hostChain).Msg("guest active but host confirm failed (one-sided window)")
+		return txHash, fmt.Errorf("your side is connected but the host has not confirmed yet: %w", confirmErr)
 	}
 	// The host returns its controller-signed roster so the guest discovers and
 	// converges the same deterministic group immediately.  This is additive on
@@ -1448,7 +1602,14 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 	if hooks.End != nil {
 		hooks.End(sessionID)
 	}
-	m.dropGuestDraft(sessionID, d.generation)
+	retainedCompletion := m.finishGuestConfirm(sessionID, d.generation)
+	if !retainedCompletion {
+		// Bilateral activation already succeeded. Do not turn a bookkeeping miss
+		// into a false failure; drop any matching sensitive draft and return the
+		// committed result. Only subsequent duplicate-response convenience is lost.
+		m.logger.Warn().Str("session", shortID(sessionID)).Msg("could not retain zeroized join completion receipt")
+		m.dropGuestDraft(sessionID, d.generation)
+	}
 	m.logger.Info().Str("host", d.hostChain).Str("tx", txHash).Msg("federation join activated (guest side)")
 	return txHash, nil
 }
@@ -1461,6 +1622,42 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 func (m *Manager) guestConfirmCodes(d *guestDraft, ownPin []byte) (string, string) {
 	return ConfirmCodes(d.seed, m.localChainID, ownPin, d.hostChain, d.hostPin,
 		d.guestNonce, d.hostNonce, d.confirmStep)
+}
+
+// requireGuestDraftAgreementCurrent proves that a local-active retry still
+// belongs to the exact ceremony generation whose signatures and seed the draft
+// retains. The caller owns agreementMutationMu, so a revoke/re-pair cannot
+// change either consensus terms or the sync binding until the peer confirm
+// returns.
+func (m *Manager) requireGuestDraftAgreementCurrent(d *guestDraft, epoch string) error {
+	if d == nil {
+		return fmt.Errorf("connection confirmation has no local ceremony state")
+	}
+	current, err := m.ActiveAgreement(d.hostChain)
+	if err != nil {
+		return fmt.Errorf("local connection is no longer active: %w", err)
+	}
+	expected := &store.CrossFedRecord{
+		RemoteChainID: d.hostChain, Endpoint: d.hostEndpoint, PeerPubKey: d.hostPin,
+		MaxClearance:   uint8(clampClearance(d.scope.MaxClearance)),
+		AllowedDomains: d.scope.AllowedDomains, Status: "active",
+	}
+	if !sameAgreementGeneration(expected, current) {
+		return fmt.Errorf("local connection generation changed before peer confirmation")
+	}
+	ss := m.syncStore()
+	if ss == nil {
+		return fmt.Errorf("local connection policy binding is unavailable")
+	}
+	control, err := ss.GetSyncControl(context.Background(), d.hostChain)
+	hostAgentID := hex.EncodeToString(d.hostAgentPub)
+	if err != nil || control == nil || control.BindingState != "active" || control.Role != "guest" ||
+		control.ControllerChainID != d.hostChain || control.ControllerAgentID != hostAgentID ||
+		control.PeerAgentID != hostAgentID || control.PolicyEpoch != epoch ||
+		control.RemoteCAPin != hex.EncodeToString(d.hostPin) {
+		return fmt.Errorf("local connection policy generation changed before peer confirmation")
+	}
+	return nil
 }
 
 // broadcastCrossFedSet builds, agent-proofs (with the node operator key), and
@@ -1611,6 +1808,7 @@ func (m *Manager) purgeLocalFederationStateQuiesced(remoteChainID string) {
 	// Off-consensus purge (zeroize seed cache + delete seed files + drop cached CA).
 	m.purgeSeed(remoteChainID)
 	m.invalidateCACache(remoteChainID)
+	m.dropGuestDraftsForChain(remoteChainID)
 	// v11.5 domain-sync purge: consent + queued deliveries die with the
 	// agreement. Best-effort — a failed purge must not fail the revoke (the
 	// send-time ActiveAgreement gate already stops delivery); the drainer's
@@ -1712,11 +1910,15 @@ func (m *Manager) fetchHostCA(ctx context.Context, hostEndpoint, sessionID strin
 // guestCall performs a signed-by-mTLS ceremony call to the host, verifying the
 // host's server cert against the fetched+pinned host CA.
 func (m *Manager) guestCall(ctx context.Context, d *guestDraft, method, path string, body, out any) error {
+	return m.guestCallWithTimeout(ctx, d, method, path, body, out, joinCallTimeout)
+}
+
+func (m *Manager) guestCallWithTimeout(ctx context.Context, d *guestDraft, method, path string, body, out any, timeout time.Duration) error {
 	tlsCfg, err := m.joinClientTLS(d.hostCAPEM, d.hostPin)
 	if err != nil {
 		return err
 	}
-	reqCtx, cancel := context.WithTimeout(ctx, joinCallTimeout)
+	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	base, err := netguard.LocalLANHTTPBase(d.hostEndpoint, "https")
 	if err != nil {
@@ -1871,12 +2073,16 @@ func (m *Manager) ownCAPEM() ([]byte, error) {
 	return readFileClamped(filepath.Join(m.certsDir, tlsca.CACertFile))
 }
 
-// validateJoinEndpoint enforces the same scheme+host-only rule the cross_fed
-// REST builder uses (a path/query would mis-route and mis-pin).
+// validateJoinEndpoint enforces the exact listener-address grammar frozen into
+// a JOIN transcript. The explicit port is mandatory even for 443: accepting a
+// partially typed trailing colon as an implicit default made the camera/QR
+// actions target a different listener than the operator entered.
 func validateJoinEndpoint(endpoint string) error {
 	u, err := url.Parse(endpoint)
-	if err != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
-		return fmt.Errorf("endpoint must be an https://host[:port] URL with no path, query, or fragment")
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.Port() == "" || u.User != nil ||
+		(strings.Contains(u.Hostname(), ":") && !strings.HasPrefix(u.Host, "[")) ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("endpoint must be an https://host:port URL with no path, query, or fragment")
 	}
 	if _, err := netguard.LocalLANHTTPBase(endpoint, "https"); err != nil {
 		return err

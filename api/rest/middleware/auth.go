@@ -259,6 +259,13 @@ func WithAgentID(ctx context.Context, agentID string) context.Context {
 	return context.WithValue(ctx, agentIDKey, agentID)
 }
 
+// WithAgentAuth installs an already-verified proof for internal wiring and
+// focused handler tests. Production requests receive this value only from
+// Ed25519AuthMiddleware after signature and freshness validation.
+func WithAgentAuth(ctx context.Context, proof *AgentAuthProof) context.Context {
+	return context.WithValue(ctx, agentAuthKey, proof)
+}
+
 // ContextAgentAuth extracts the raw agent auth proof from the request context.
 // Returns nil if not present.
 func ContextAgentAuth(ctx context.Context) *AgentAuthProof {

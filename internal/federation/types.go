@@ -133,6 +133,11 @@ type StatusResponse struct {
 	// PeerRBACGrant is advertised only to the exact chain+operator identity bound
 	// to the snapshot. Its absence preserves compatibility with legacy peers.
 	PeerRBACGrant *PeerRBACGrant `json:"peer_rbac_grant,omitempty"`
+	// PipeContacts is the finite, peer-scoped projection of effective domain
+	// owners for the domains in PeerRBACGrant. It is discovery metadata only:
+	// presence never advertises the federated-pipeline capability or authorizes
+	// delivery. Older peers ignore this additive field.
+	PipeContacts *PipeContactGrant `json:"pipe_contacts,omitempty"`
 }
 
 // SharingGrant is the serving node's current read envelope for one
@@ -155,6 +160,7 @@ type SharingUpdateResult struct {
 // rows is explicit deny-all.
 type PeerRBACGrant struct {
 	PolicyVersion int                   `json:"policy_version"`
+	Revision      int64                 `json:"revision,omitempty"`
 	Paused        bool                  `json:"paused,omitempty"`
 	Domains       []PeerRBACDomainGrant `json:"domains"`
 }
@@ -183,6 +189,63 @@ type PeerRBACDomainGrant struct {
 	Read   bool   `json:"read"`
 	Write  bool   `json:"write"`
 	Copy   bool   `json:"copy"`
+}
+
+const PipeContactVersion = 1
+
+const CapabilityFederatedPipeline = "federated-pipeline-v1"
+
+// PipeContactGrant is the serving node's peer-scoped agent-address snapshot.
+// Revision is content-addressed over the exact federation binding, domain
+// ownership, agent availability, and all contacts; it invalidates the complete
+// cached snapshot. Individual deliveries derive a target-specific authorization
+// revision so an unrelated contact cannot invalidate exact-address queued work.
+type PipeContactGrant struct {
+	Version     int           `json:"version"`
+	AgreementID string        `json:"agreement_id"`
+	Revision    string        `json:"revision"`
+	Paused      bool          `json:"paused"`
+	Contacts    []PipeContact `json:"contacts"`
+}
+
+// PipeContact is one effective domain owner visible to one authenticated peer.
+// Handle is a copy-friendly alias only; Address and AgentID preserve the exact
+// machine identity. ContactID is the authorization-bound identity of this
+// exact owner projection; it changes when the peer/policy/owner generation
+// changes and must accompany every acceptance mutation.
+type PipeContact struct {
+	AgentID     string              `json:"agent_id"`
+	ContactID   string              `json:"contact_id,omitempty"`
+	DisplayName string              `json:"display_name,omitempty"`
+	Address     string              `json:"address,omitempty"`
+	Handle      string              `json:"handle,omitempty"`
+	Available   bool                `json:"available"`
+	Accepting   bool                `json:"accepting"`
+	Domains     []PipeContactDomain `json:"domains"`
+}
+
+// PipeContactDomain records why a contact is visible. OwningDomain differs
+// from Domain when the shared leaf inherits its effective owner from an
+// ancestor.
+type PipeContactDomain struct {
+	Domain       string `json:"domain"`
+	OwningDomain string `json:"owning_domain"`
+	OwnerHeight  int64  `json:"owner_height"`
+}
+
+// RemotePipeTarget is the exact, current peer-scoped route produced from a
+// qualified agent address. Display fields are advisory; transport binds the
+// full chain/agent/contact/policy tuple.
+type RemotePipeTarget struct {
+	ChainID         string `json:"chain_id"`
+	AgentID         string `json:"agent_id"`
+	ContactID       string `json:"contact_id"`
+	ContactRevision string `json:"contact_revision"`
+	PolicyEpoch     string `json:"policy_epoch"`
+	AgreementID     string `json:"agreement_id"`
+	Address         string `json:"address"`
+	Handle          string `json:"handle,omitempty"`
+	DisplayName     string `json:"display_name,omitempty"`
 }
 
 // DeliveryResult is the per-peer outcome of a receipt fan-out.

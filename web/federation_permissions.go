@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,8 +122,9 @@ type peerRBACPauseDriver interface {
 	SetPeerRBACPaused(context.Context, string, bool) (*store.PeerRBACPolicy, error)
 }
 
-type directionalSyncPolicyDriver interface {
-	SetDirectionalSyncPolicy(context.Context, string, []string, []string) (*federation.DirectionalSyncPolicyResult, error)
+type directionalSyncPolicyMutationDriver interface {
+	UpdateDirectionalSyncPolicy(context.Context, string, *[]string, *[]string) (*federation.DirectionalSyncPolicyResult, error)
+	ReconcileDirectionalPublishToPeerRBAC(context.Context, string) (*federation.DirectionalSyncPolicyResult, error)
 }
 
 func legacyDomainPermissions(domains []string) []store.PeerRBACDomainPermission {
@@ -186,9 +188,22 @@ func (h *DashboardHandler) handleFedPermissionsGet(w http.ResponseWriter, r *htt
 		return
 	}
 
+	ss := h.syncStore()
+	if ss == nil {
+		fedWriteErr(w, http.StatusNotImplemented, "Peer RBAC requires the SQLite store backend.")
+		return
+	}
+	unlock := ss.LockSyncPolicyRead()
 	localPolicy, err := driver.GetPeerRBACPolicy(r.Context(), chain)
 	if err != nil {
+		unlock()
 		fedWriteErr(w, http.StatusInternalServerError, "Failed to read local peer permissions.")
+		return
+	}
+	localPublish, publishErr := ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionLocalPublish)
+	unlock()
+	if publishErr != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Failed to verify Copy delivery alignment.")
 		return
 	}
 	localLegacy := localPolicy == nil
@@ -196,6 +211,13 @@ func (h *DashboardHandler) handleFedPermissionsGet(w http.ResponseWriter, r *htt
 	if localPolicy != nil {
 		local = clonePeerPermissions(localPolicy.Domains)
 	}
+	expectedPublish := make([]string, 0)
+	for _, permission := range local {
+		if permission.Copy {
+			expectedPublish = append(expectedPublish, permission.Domain)
+		}
+	}
+	copyAlignmentPending := !slices.Equal(expectedPublish, localPublish)
 
 	remote := []store.PeerRBACDomainPermission{}
 	remoteKnown := false
@@ -216,14 +238,15 @@ func (h *DashboardHandler) handleFedPermissionsGet(w http.ResponseWriter, r *htt
 	}
 
 	fedWriteJSON(w, http.StatusOK, map[string]any{
-		"remote_chain_id":    chain,
-		"local_permissions":  local,
-		"local_legacy":       localLegacy,
-		"local_paused":       localPolicy != nil && localPolicy.Paused,
-		"remote_permissions": remote,
-		"remote_known":       remoteKnown,
-		"remote_legacy":      remoteLegacy,
-		"remote_paused":      statusErr == nil && status != nil && status.PeerRBACGrant != nil && status.PeerRBACGrant.Paused,
+		"remote_chain_id":        chain,
+		"local_permissions":      local,
+		"local_legacy":           localLegacy,
+		"local_paused":           localPolicy != nil && localPolicy.Paused,
+		"copy_alignment_pending": copyAlignmentPending,
+		"remote_permissions":     remote,
+		"remote_known":           remoteKnown,
+		"remote_legacy":          remoteLegacy,
+		"remote_paused":          statusErr == nil && status != nil && status.PeerRBACGrant != nil && status.PeerRBACGrant.Paused,
 	})
 }
 
@@ -364,9 +387,50 @@ func (h *DashboardHandler) handleFedPermissionsPut(w http.ResponseWriter, r *htt
 		fedWriteErr(w, http.StatusNotImplemented, "Peer RBAC requires the SQLite store backend.")
 		return
 	}
-	policy, err := driver.ReplacePeerRBACPolicy(r.Context(), chain, desired)
+	// Preflight every fallible dependency before the authoritative RBAC snapshot
+	// changes. In particular, an empty Copy selection must still clear a stale
+	// publisher lane, and a failed Subscribe read must never be mistaken for an
+	// intentional request to erase this receiver's independent Copy choices.
+	managed, err := ss.ListManagedPeerAccessGrants(r.Context(), chain)
 	if err != nil {
-		fedWriteErr(w, http.StatusInternalServerError, "Failed to replace the local peer policy.")
+		fedWriteErr(w, http.StatusInternalServerError, "Permissions were not changed because legacy grant cleanup could not be prepared.")
+		return
+	}
+	syncDriver, ok := h.Federation.(directionalSyncPolicyMutationDriver)
+	if !ok {
+		fedWriteErr(w, http.StatusNotImplemented, "Permissions were not changed because Copy alignment is unavailable on this node.")
+		return
+	}
+	copyDomains := make([]string, 0)
+	for _, entry := range desired {
+		if entry.Copy {
+			copyDomains = append(copyDomains, entry.Domain)
+		}
+	}
+	// First remove any already-stale Publish entries under the old RBAC snapshot.
+	// This mutation is narrowing-only and preserves Subscribe atomically, so the
+	// following RBAC replacement cannot activate an old Copy lane even if final
+	// delivery alignment fails.
+	if _, reconcileErr := syncDriver.ReconcileDirectionalPublishToPeerRBAC(r.Context(), chain); reconcileErr != nil {
+		fedWriteErr(w, http.StatusConflict, "Permissions were not changed because existing Copy delivery could not be made safe. Retry Save what I share. ("+reconcileErr.Error()+")")
+		return
+	}
+	currentPolicy, err := driver.GetPeerRBACPolicy(r.Context(), chain)
+	if err != nil {
+		fedWriteErr(w, http.StatusInternalServerError, "Failed to recheck the local peer policy.")
+		return
+	}
+	policyChanged := currentPolicy == nil || currentPolicy.Revision <= 0 || !slices.Equal(clonePeerPermissions(currentPolicy.Domains), desired)
+	policy := currentPolicy
+	if policyChanged {
+		policy, err = driver.ReplacePeerRBACPolicy(r.Context(), chain, desired)
+		if err != nil {
+			fedWriteErr(w, http.StatusInternalServerError, "Failed to replace the local peer policy.")
+			return
+		}
+	}
+	if _, syncErr := syncDriver.UpdateDirectionalSyncPolicy(r.Context(), chain, &copyDomains, nil); syncErr != nil {
+		fedWriteErr(w, http.StatusConflict, "Permissions were saved, but Copy delivery could not finish. No new copies will be sent until it is aligned. Retry Save what I share. ("+syncErr.Error()+")")
 		return
 	}
 	warnings := make([]string, 0)
@@ -374,11 +438,6 @@ func (h *DashboardHandler) handleFedPermissionsPut(w http.ResponseWriter, r *htt
 
 	// Every retained row is preview-era cleanup provenance. v11.9 never treats
 	// one as desired authorization, even if a stale policy once carried Write.
-	managed, err := ss.ListManagedPeerAccessGrants(r.Context(), chain)
-	if err != nil {
-		fedWriteErr(w, http.StatusInternalServerError, "Peer policy was replaced, but managed grant cleanup could not be listed.")
-		return
-	}
 	for _, grant := range managed {
 		grant.State = store.ManagedPeerGrantPendingRevoke
 		if markErr := ss.UpsertManagedPeerAccessGrant(r.Context(), grant); markErr != nil {
@@ -423,31 +482,12 @@ func (h *DashboardHandler) handleFedPermissionsPut(w http.ResponseWriter, r *htt
 		}
 	}
 
-	// Keep the v3 copy transport's publisher lane aligned with Copy grants. The
-	// subscriber lane is a separate local choice and is preserved verbatim.
-	copyDomains := make([]string, 0)
-	for _, entry := range policy.Domains {
-		if entry.Copy {
-			copyDomains = append(copyDomains, entry.Domain)
-		}
-	}
-	if syncDriver, ok := h.Federation.(directionalSyncPolicyDriver); ok {
-		subscribe := []string{}
-		if ss := h.syncStore(); ss != nil {
-			subscribe, _ = ss.GetDirectionalSyncDomains(r.Context(), chain, store.SyncDirectionLocalSubscribe)
-		}
-		if _, syncErr := syncDriver.SetDirectionalSyncPolicy(r.Context(), chain, copyDomains, subscribe); syncErr != nil {
-			warnings = append(warnings, "copy policy: "+syncErr.Error())
-		}
-	} else if len(copyDomains) > 0 {
-		warnings = append(warnings, "copy policy transport is unavailable")
-	}
-
 	fedWriteJSON(w, http.StatusOK, map[string]any{
 		"remote_chain_id":   chain,
 		"local_permissions": clonePeerPermissions(policy.Domains),
 		"local_paused":      policy.Paused,
 		"grant_results":     grantResults,
 		"warnings":          warnings,
+		"policy_replaced":   policyChanged,
 	})
 }

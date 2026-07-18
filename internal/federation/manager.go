@@ -230,6 +230,12 @@ type Manager struct {
 	// tests so drain logic is testable without a TLS peer.
 	syncPushFn       func(ctx context.Context, remoteChainID string, req *SyncPushRequest) (*SyncPushResponse, error)
 	syncPolicyPushFn func(ctx context.Context, remoteChainID string, req *SyncPolicyRequest) (*SyncPolicyResponse, error)
+	// pipeEventPushFn is the federated pipeline delivery seam. Production uses
+	// the authenticated mTLS client; tests inject it to exercise retry and
+	// revalidation without a listener.
+	pipeEventPushFn       func(ctx context.Context, remoteChainID string, event *PipeEvent) (*PipeEventResponse, error)
+	pipeTargetResolveFn   func(ctx context.Context, target string) (*RemotePipeTarget, error)
+	pipeResultPreflightFn func(ctx context.Context, msg *store.PipelineMessage, outbox *store.PipelineTransportOutbox) error
 	// syncPolicyDeliveryLeases linearize outbound policy-label disclosure with
 	// Pause per remote chain. The map mutex is held only for lookup/creation;
 	// each per-peer lease may span a bounded network request without blocking an

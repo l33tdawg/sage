@@ -60,6 +60,69 @@ test('federation owns a viewport-bounded vertical scroll container', () => {
         'a live camera must remain bounded on short laptop viewports');
     assert.match(cssSource, /@media \(max-width:\s*820px\)[\s\S]*\.fed-exchange\s*\{\s*grid-template-columns:\s*1fr/,
         'the two-way scan cards must stack into the page scroll container on narrow screens');
+    assert.match(cssSource, /@media \(max-height:\s*760px\)[\s\S]*\.fed-exchange-card \.fed-qr-canvas/,
+        'short laptop viewports must compact the initial QR instead of opening with it clipped');
+    assert.match(cssSource, /@media \(max-width:\s*560px\)[\s\S]*\.health-bar[\s\S]*white-space:\s*nowrap/,
+        'mobile health metadata must stay on one horizontally scrollable line');
+});
+
+test('federation endpoint discovery uses the node listener as the signed source of truth', () => {
+    const hook = appSource.slice(appSource.indexOf('function useLanEndpoint()'), appSource.indexOf('// FedEndpointPicker'));
+    const guestWizard = appSource.slice(appSource.indexOf('function GuestJoinWizard('), appSource.indexOf('// HostJoinWizard'));
+    assert.match(hook, /useState\(''\)/,
+        'the browser must not guess the historical 8444 port before asking the node');
+    assert.match(hook, /const authoritative = r\.suggested_endpoint \|\| ''/,
+        'only the server-validated listener suggestion may drive the advertised JOIN endpoint');
+    assert.doesNotMatch(hook, /location\.hostname/,
+        'the browser must not fabricate an actionable host after authoritative discovery returns empty');
+    assert.match(hook, /if \(!authoritative\) setEndpointFailed\(true\)/,
+        'an empty authoritative suggestion must stay a visible recovery state');
+    assert.match(hook, /setEndpointFailed\(true\)/,
+        'endpoint discovery failures must remain explicit instead of being swallowed');
+    assert.match(guestWizard, /busy=\$\{busy \|\| !endpointReady \|\| endpointInvalid\}/,
+        'a partial endpoint must stay blocked while an empty endpoint may scan an Internet/P2P code');
+    assert.match(guestWizard, /!!String\(endpoint \|\| ''\)\.trim\(\) && !isFederationEndpointFormatValid\(endpoint\)/,
+        'an empty endpoint is reserved for backend-verified P2P enrollment, never accepted as a partial LAN endpoint');
+    assert.match(guestWizard, /open=\$\{endpointFailed \|\| endpointMissing \|\| endpointInvalid/,
+        'endpoint failure must open the manual recovery controls');
+    assert.match(hook, /if \(isFederationEndpointFormatValid\(normalized\)\) setEndpointFailed\(false\)/,
+        'a complete manual recovery address should clear stale discovery clutter without accepting partial input');
+    const validatorSource = appSource.match(/function isFederationEndpointFormatValid\(ep\) \{[\s\S]*?\n\}/)?.[0];
+    assert.ok(validatorSource, 'endpoint format validator must exist');
+    const validate = Function(`${validatorSource}; return isFederationEndpointFormatValid;`)();
+    assert.equal(validate('h'), false);
+    assert.equal(validate('https://192.168.1.20:18444'), true);
+    assert.equal(validate(' https://192.168.1.20:18444 '), false);
+    assert.equal(validate('https://192.168.1.20:443'), true);
+    assert.equal(validate('https://[fd00::20]:18444'), true);
+    assert.equal(validate('https://[::1]:443'), true);
+    assert.equal(validate('https://192.168.1.20:'), false);
+    assert.equal(validate('https://[::1]:'), false);
+    assert.equal(validate('https://192.168.1.20'), false);
+    assert.equal(validate('https://[::1]'), false);
+    assert.equal(validate('https:192.168.1.20:18444'), false);
+    assert.equal(validate('https://fd00::20:18444'), false);
+    assert.equal(validate('https://192.168.1.20:0'), false);
+    assert.equal(validate('https://192.168.1.20:65536'), false);
+    assert.equal(validate('https://192.168.1.20:nope'), false);
+    assert.equal(validate('http://192.168.1.20:18444'), false);
+    assert.equal(validate('https://192.168.1.20:18444/path'), false);
+    assert.equal(validate('https://192.168.1.20:18444?x=1'), false);
+    const hostWizard = appSource.slice(appSource.indexOf('function HostJoinWizard('), appSource.indexOf('function fedCatalogMap('));
+    assert.match(hostWizard, /mode === 'lan' && !isFederationEndpointFormatValid\(endpoint\)/,
+        'host creation must reject a partially typed LAN address before calling the server');
+    assert.match(hostWizard, /!isFederationEndpointFormatValid\(endpoint\) \|\| isLoopbackEndpoint\(endpoint\)/,
+        'host auto-create must wait for a complete non-loopback endpoint');
+    assert.match(hostWizard, /disabled=\$\{busy \|\| !endpointReady \|\| endpointMissing \|\| endpointInvalid\}/,
+        'host manual create must stay disabled for a partial endpoint');
+    assert.match(guestWizard, /if \(confirmInFlight\.current\) return;[\s\S]*confirmInFlight\.current = true/,
+        'same-tick final-confirm clicks must collapse into one dashboard request');
+    assert.match(guestWizard, /catch \(e\) \{[\s\S]*confirmInFlight\.current = false;[\s\S]*fail\(e\);/,
+        'a failed final confirmation must release the latch for one explicit retry');
+    assert.doesNotMatch(guestWizard, /federation\.listen_addr<\/code>[^<]*in Settings/,
+        'guest recovery copy must not send operators to a nonexistent listen-address setting');
+    assert.doesNotMatch(appSource, /https:\/\/192\.168\.1\.(?:10|20):8444/,
+        'manual recovery hints must not reintroduce the historical default-port defect');
 });
 
 test('federation ceremony presents one clear two-way scan flow without dropping the safety check', () => {
@@ -143,11 +206,58 @@ test('federation separates trust from directional per-domain RBAC', () => {
     assert.doesNotMatch(appSource, /FedSyncPanel/);
 });
 
+test('federation agent contacts stay administrative and default-off', () => {
+    const panel = appSource.slice(appSource.indexOf('function FedPermissionsPanel('), appSource.indexOf('// FederationWarmup'));
+    const page = appSource.slice(appSource.indexOf('function FederationPage('), appSource.indexOf('// PAGE_LABELS'));
+
+    assert.match(apiSource, /connections\/\$\{encodeURIComponent\(chainId\)\}\/pipe-contacts/);
+    assert.match(apiSource, /agent_id: agentId, contact_id: contactId, accepting: !!accepting/,
+        'a toggle must carry the exact agent and contact revision instead of a display handle');
+    assert.match(panel, /Agent work requests/);
+    assert.match(panel, /It is not a chat/,
+        'CEREBRUM must remain the administrative surface, not become a second inbox');
+    assert.match(panel, /New contacts start off/);
+    assert.match(panel, /role="switch"/);
+    assert.match(panel, /contact\.contact_id/,
+        'acceptance mutations must use the opaque contact identity');
+    assert.match(panel, /contact\.address \|\| contact\.handle/,
+        'the primary copy action must prefer the exact single-peer route');
+    assert.match(panel, /Copy address/);
+    assert.match(panel, /aria-label=\$\{`Copy address for \$\{contact\./,
+        'remote contact copy controls must identify the contact they copy');
+    assert.match(panel, /Update and reset/,
+        'domain replacement must warn before clearing enabled work-request consent');
+	assert.match(panel, /setSyncSaveErr\(String\(e\.message \|\| e\)\)/,
+		'remote copy-save failures must use feedback local to their Save controls');
+	assert.match(panel, /Array\.isArray\(response\.warnings\)/,
+		'local permission saves must consume partial-success cleanup warnings');
+	assert.match(panel, /warnings\.length > 0[\s\S]*setErr\([\s\S]*showToast\([\s\S]*'warning'[\s\S]*else[\s\S]*showToast\([\s\S]*'success'/,
+		'cleanup warnings must stay beside the local Save controls and suppress the green success toast');
+	assert.match(panel, /copy_alignment_pending === true/,
+		'permission loads must surface a durable Copy/RBAC alignment retry');
+	assert.match(panel, /disabled=\$\{\(!dirty && !alignmentPending\) \|\| busy\}[\s\S]*Retry copy alignment/,
+		'a pure alignment retry must remain actionable after reload');
+	assert.match(panel, /response\.policy_replaced !== false/,
+		'a pure alignment retry must not reset unchanged agent acceptance switches');
+    assert.match(panel, /\$\{syncErr && html`<div class="fed-err fed-perm-error" role="alert">/,
+        'remote refresh feedback must be visible and announced in its section');
+    assert.match(panel, /\$\{syncSaveErr && html`<div class="fed-err fed-perm-error" role="alert">/,
+        'remote copy-save feedback must remain visible beside the bottom Save controls');
+    assert.match(panel, /if \(dirty && !localPipeContactsKnown/,
+        'an unavailable contact snapshot must conservatively warn before a domain save');
+    assert.match(page, /Live Read, Copy, and agent work requests stop immediately/,
+        'pause feedback must cover every suspended federation capability');
+    assert.doesNotMatch(panel, /Send message|Compose message|Message body/,
+        'the federation panel must not grow a human chat composer');
+});
+
 test('federation keeps temporary pause separate from permanent revocation and hides past clutter', () => {
     const page = appSource.slice(appSource.indexOf('function FederationPage('), appSource.indexOf('// PAGE_LABELS'));
     const panel = appSource.slice(appSource.indexOf('function FedPermissionsPanel('), appSource.indexOf('// FederationWarmup'));
     assert.match(apiSource, /connections\/\$\{encodeURIComponent\(chainId\)\}\/pause/);
     assert.match(page, /Resume sharing/);
+    assert.match(page, /aria-label=\$\{`\$\{c\.sharing_paused \? 'Resume' : 'Pause'\} sharing with/,
+        'pause controls must identify the connection they affect');
     assert.match(page, /pairing preserved/);
     assert.match(panel, /Revoke trust permanently/);
     assert.match(page, /Past connections \(\$\{pastConns\.length\}\)/);
@@ -165,7 +275,9 @@ test('federation keeps temporary pause separate from permanent revocation and hi
 });
 
 test('federation ceremony controls expose accessible dialog, focus, and table semantics', () => {
-    assert.match(appSource, /aria-label="Enlarge connection QR code"/);
+    assert.match(appSource, /aria-label=\$\{rendered \? 'Enlarge connection QR code' : null\}/);
+    assert.match(appSource, /role=\$\{rendered \? 'button' : null\} tabindex=\$\{rendered \? '0' : '-1'\}/,
+        'a failed QR render must not leave a dead keyboard button');
     assert.match(appSource, /role="dialog" aria-modal="true"/);
     assert.match(appSource, /triggerRef\.current\.focus\(\)/);
     assert.match(appSource, /for="fed-safety-code"/);
@@ -175,8 +287,31 @@ test('federation ceremony controls expose accessible dialog, focus, and table se
     assert.match(appSource, /class="fed-perm-cell" role="cell"/);
     assert.match(appSource, /fed-qr-manual-code/,
         'clipboard or QR failure must expose selectable plaintext instead of a dead-end instruction');
+    assert.match(appSource, /label for="fed-endpoint-picker"/);
+    assert.match(appSource, /select id="fed-endpoint-picker"/);
+    assert.match(appSource, /class="fed-paste"[^>]*aria-label="Paste a federation connection code"/s,
+        'the manual scan fallback must have a stable accessible name');
     assert.match(appSource, /aria-controls=\$\{`fed-connection-/);
+    assert.match(appSource, /label for="fed-network-name"/);
+    assert.match(appSource, /input id="fed-network-name"/);
+    assert.match(appSource, /class="btn fed-back" disabled=\$\{busy\}/,
+        'ceremony navigation must not race an in-flight submission');
+    assert.match(appSource, /class="fed-err" role="alert">Couldn't load connections: \$\{err\}/,
+        'connection-load errors must remain visible and announced');
     assert.match(cssSource, /@media \(max-width:\s*560px\)[\s\S]*\.fed-perm-grid-copy-choice/);
+});
+
+test('mobile header preserves controls in encrypted and large-text modes', () => {
+    assert.match(cssSource, /@media \(max-width:\s*560px\)[\s\S]*\.lock-btn\s*\{[^}]*margin-right:\s*0/s);
+    assert.match(cssSource, /@media \(max-width:\s*560px\)[\s\S]*\.text-size-toggle\s*\{[^}]*flex:\s*none/s);
+    assert.match(cssSource, /@media \(max-width:\s*480px\)[\s\S]*\.sage-version\s*\{\s*display:\s*none/s,
+        'the release badge must yield space before encrypted and accessibility controls clip');
+    assert.match(appSource, /role="group" aria-label="Text size"/);
+    assert.match(appSource, /class="lock-btn" title="Lock CEREBRUM" aria-label="Lock CEREBRUM"/,
+        'the icon-only vault control must keep a stable accessible name after rerenders');
+    for (const size of ['Small', 'Medium', 'Large']) {
+        assert.match(appSource, new RegExp(`aria-label="${size} text" aria-pressed=`));
+    }
 });
 
 test('task cards expand fully and planned task edits preserve consensus history', () => {

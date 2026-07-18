@@ -89,28 +89,42 @@ type syncDirectionalFederation struct {
 	directionalErr error
 }
 
-func (f *syncDirectionalFederation) SetDirectionalSyncPolicy(ctx context.Context, chain string, publish, subscribe []string) (*federation.DirectionalSyncPolicyResult, error) {
+func (f *syncDirectionalFederation) UpdateDirectionalSyncPolicy(ctx context.Context, chain string, publish, subscribe *[]string) (*federation.DirectionalSyncPolicyResult, error) {
 	f.calls++
 	f.lastChain = chain
-	f.lastPublish = append([]string{}, publish...)
-	f.lastSubscribe = append([]string{}, subscribe...)
 	if f.directionalErr != nil {
 		return nil, f.directionalErr
 	}
+	currentPublish, err := f.store.GetDirectionalSyncDomains(ctx, chain, store.SyncDirectionLocalPublish)
+	if err != nil {
+		return nil, err
+	}
+	currentSubscribe, err := f.store.GetDirectionalSyncDomains(ctx, chain, store.SyncDirectionLocalSubscribe)
+	if err != nil {
+		return nil, err
+	}
+	if publish != nil {
+		currentPublish = append([]string{}, (*publish)...)
+	}
+	if subscribe != nil {
+		currentSubscribe = append([]string{}, (*subscribe)...)
+	}
+	f.lastPublish = append([]string{}, currentPublish...)
+	f.lastSubscribe = append([]string{}, currentSubscribe...)
 	control, err := f.store.GetSyncControl(ctx, chain)
 	if err != nil {
 		return nil, err
 	}
 	revision := control.Revision + 1
 	if _, err = f.store.ApplyLocalDirectionalSyncPolicy(ctx, chain, control.PolicyEpoch,
-		federation.SyncPolicyVersionPeerRBAC, revision, "rest-directional-test", publish, subscribe); err != nil {
+		federation.SyncPolicyVersionPeerRBAC, revision, "rest-directional-test", currentPublish, currentSubscribe); err != nil {
 		return nil, err
 	}
 	return &federation.DirectionalSyncPolicyResult{
 		Version:          federation.SyncPolicyVersionPeerRBAC,
 		Revision:         revision,
-		PublishDomains:   append([]string{}, publish...),
-		SubscribeDomains: append([]string{}, subscribe...),
+		PublishDomains:   append([]string{}, currentPublish...),
+		SubscribeDomains: append([]string{}, currentSubscribe...),
 		State:            "pending",
 	}, nil
 }

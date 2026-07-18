@@ -7,7 +7,7 @@ deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedSyncGet, fedSyncSet, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
+fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
@@ -24,7 +24,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.9.2';
+const SAGE_VERSION = 'v11.10.0';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -11319,20 +11319,20 @@ function App() {
                 <h1 aria-label=${`CEREBRUM - ${PAGE_LABELS[page] || 'Your SAGE Brain'}`}>CEREBRUM <span class="sage-version" title="SAGE release">${sageVersion}</span> <span class="topbar-sep" aria-hidden="true">/</span> <span class="topbar-page">${PAGE_LABELS[page] || 'Your SAGE Brain'}</span></h1>
                 <div class="spacer"></div>
                 ${isEncrypted && html`
-                    <button class="lock-btn" title="Lock CEREBRUM" onClick=${async () => {
+                    <button class="lock-btn" title="Lock CEREBRUM" aria-label="Lock CEREBRUM" onClick=${async () => {
                         await lockSession();
                         setAuthState('login');
                     }}>
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="16" height="16" aria-hidden="true" focusable="false">
                             <rect x="3" y="11" width="18" height="11" rx="2"/>
                             <path d="M7 11V7a5 5 0 0110 0v4"/>
                         </svg>
                     </button>
                 `}
-                <div class="text-size-toggle" title="Text size">
-                    <button class="text-size-btn sz-s ${textSize === 'small' ? 'active' : ''}" onClick=${() => changeTextSize('small')}>A</button>
-                    <button class="text-size-btn sz-m ${textSize === 'medium' ? 'active' : ''}" onClick=${() => changeTextSize('medium')}>A</button>
-                    <button class="text-size-btn sz-l ${textSize === 'large' ? 'active' : ''}" onClick=${() => changeTextSize('large')}>A</button>
+                <div class="text-size-toggle" title="Text size" role="group" aria-label="Text size">
+                    <button class="text-size-btn sz-s ${textSize === 'small' ? 'active' : ''}" aria-label="Small text" aria-pressed=${textSize === 'small'} onClick=${() => changeTextSize('small')}>A</button>
+                    <button class="text-size-btn sz-m ${textSize === 'medium' ? 'active' : ''}" aria-label="Medium text" aria-pressed=${textSize === 'medium'} onClick=${() => changeTextSize('medium')}>A</button>
+                    <button class="text-size-btn sz-l ${textSize === 'large' ? 'active' : ''}" aria-label="Large text" aria-pressed=${textSize === 'large'} onClick=${() => changeTextSize('large')}>A</button>
                 </div>
                 <button class="theme-toggle" title=${theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'} aria-label=${theme === 'light' ? 'Switch to dark theme' : 'Switch to light theme'} onClick=${() => changeTheme(theme === 'light' ? 'dark' : 'light')}>
                     ${theme === 'light'
@@ -11474,7 +11474,9 @@ function FedQr({ text, size = 220, caption }) {
         <div class="fed-qr-canvas" ref=${el => { ref.current = el; triggerRef.current = el; }}
             onClick=${() => rendered && setBig(true)}
             onKeyDown=${e => { if (rendered && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setBig(true); } }}
-            role="button" tabindex="0" aria-label="Enlarge connection QR code" title="Click to enlarge for scanning"></div>
+            role=${rendered ? 'button' : null} tabindex=${rendered ? '0' : '-1'}
+            aria-label=${rendered ? 'Enlarge connection QR code' : null}
+            title=${rendered ? 'Click to enlarge for scanning' : null}></div>
         ${!rendered && html`<div class="fed-qr-fallback muted">QR unavailable - share the code below instead.</div>`}
         ${caption && html`<div class="fed-qr-caption muted">${caption}</div>`}
         <div class="fed-qr-actions" style="display:flex;gap:8px;">
@@ -11571,6 +11573,7 @@ function FedScanInput({ onValue, busy }) {
         return html`<div class="fed-scan">
             ${camErr && html`<div class="muted">${camErr}</div>`}
             <textarea class="fed-paste" rows="3" placeholder="Paste the connection code (starts with otpauth://…)"
+                aria-label="Paste a federation connection code"
                 value=${pasted} onInput=${e => setPasted(e.target.value)}></textarea>
             <div class="fed-scan-actions">
                 <button class="btn" onClick=${() => setMode('choose')}>Back</button>
@@ -11629,35 +11632,76 @@ function isLoopbackEndpoint(ep) {
     return s.includes('localhost') || s.includes('127.0.0.1') || s.includes('[::1]') || s.includes('//::1');
 }
 
-// useLanEndpoint - resolves the endpoint the wizard should advertise. Starts
-// from location.hostname (works for same-machine tests) but immediately asks
-// the node for its real routable LAN address, because the browser only knows
-// the hostname the operator typed (usually "localhost"). Returns [endpoint,
-// setEndpoint, candidates]; setEndpoint keeps the manual field editable and
-// candidates drives the picker when the machine is multi-homed.
+// isFederationEndpointFormatValid is the browser's fast format gate. The Go
+// endpoint validator remains authoritative (including LAN/loopback scope), but
+// the camera must not open while a manual recovery address is only partially
+// typed or carries a path/query that cannot be frozen into the JOIN transcript.
+function isFederationEndpointFormatValid(ep) {
+    try {
+        const input = String(ep || '');
+        const raw = input.trim();
+        if (input !== raw) return false;
+        if (!raw.startsWith('https://')) return false;
+        // URL canonicalization erases both a dangling colon and an explicit
+        // default :443. Inspect the raw authority first so only an explicitly
+        // complete host:port can open a camera or mint a signed JOIN code.
+        const rest = raw.slice('https://'.length);
+        const authority = rest.split(/[/?#]/, 1)[0];
+        let portText = '';
+        if (authority.startsWith('[')) {
+            const close = authority.indexOf(']');
+            if (close <= 1 || !/^:\d+$/.test(authority.slice(close + 1))) return false;
+            portText = authority.slice(close + 2);
+        } else {
+            const colon = authority.lastIndexOf(':');
+            if (colon <= 0 || colon !== authority.indexOf(':')) return false;
+            portText = authority.slice(colon + 1);
+        }
+        if (!/^\d+$/.test(portText)) return false;
+        const port = Number(portText);
+        const u = new URL(raw);
+        return u.protocol === 'https:' && !!u.hostname && !u.username && !u.password
+            && (u.pathname === '' || u.pathname === '/') && !u.search && !u.hash
+            && Number.isInteger(port) && port >= 1 && port <= 65535;
+    } catch (e) {
+        return false;
+    }
+}
+
+// useLanEndpoint - resolves the endpoint the wizard should advertise from the
+// node's effective federation listener. JOIN attestations freeze this exact
+// value, so the browser must never guess a port. setEndpoint remains available
+// as progressive disclosure for NAT/relay addresses the node cannot discover.
 function useLanEndpoint() {
-    const [endpoint, setEndpoint] = useState(`https://${location.hostname}:8444`);
+    const [endpoint, setEndpoint] = useState('');
     const [candidates, setCandidates] = useState([]);
     const [resolved, setResolved] = useState(false);
+    const [endpointFailed, setEndpointFailed] = useState(false);
     const touched = useRef(false);
-    const set = (v) => { touched.current = true; setEndpoint(v); };
+    const set = (v) => {
+        const normalized = String(v || '').trim();
+        touched.current = true;
+        setEndpoint(normalized);
+        if (isFederationEndpointFormatValid(normalized)) setEndpointFailed(false);
+    };
     useEffect(() => {
         let live = true;
         fedLanEndpoint()
             .then(r => {
-                if (!live || !r) return;
+                if (!live) return;
+                if (!r) { setEndpointFailed(true); return; }
                 if (Array.isArray(r.candidates)) setCandidates(r.candidates);
-                // Only auto-fill when the operator hasn't typed their own, and
-                // only if the current value is a useless loopback address.
-                if (!touched.current && r.suggested_endpoint && isLoopbackEndpoint(endpoint)) {
-                    setEndpoint(r.suggested_endpoint);
+                if (!touched.current) {
+                    const authoritative = r.suggested_endpoint || '';
+                    setEndpoint(authoritative);
+                    if (!authoritative) setEndpointFailed(true);
                 }
             })
-            .catch(() => {})
+            .catch(() => { if (live) setEndpointFailed(true); })
             .finally(() => { if (live) setResolved(true); });
         return () => { live = false; };
     }, []);
-    return [endpoint, set, candidates, resolved];
+    return [endpoint, set, candidates, resolved, endpointFailed];
 }
 
 // FedEndpointPicker - a labeled address chooser for multi-homed machines (VPN +
@@ -11668,11 +11712,11 @@ function FedEndpointPicker({ candidates, endpoint, onPick }) {
     if (!candidates || candidates.length < 2) return null;
     const idx = candidates.findIndex(c => c.endpoint === endpoint);
     return html`<div class="fed-field">
-        <label>Detected addresses on this computer</label>
-        <select class="fed-share-input" value=${idx >= 0 ? String(idx) : 'custom'}
+        <label for="fed-endpoint-picker">Detected addresses on this computer</label>
+        <select id="fed-endpoint-picker" class="fed-share-input" value=${idx >= 0 ? String(idx) : 'custom'}
             onChange=${e => { const i = parseInt(e.target.value, 10); if (candidates[i]) onPick(candidates[i].endpoint); }}>
             ${idx < 0 && html`<option value="custom">Custom — ${endpoint}</option>`}
-            ${candidates.map((c, i) => html`<option value=${String(i)}>${c.iface} — ${c.ip} ${c.is_private ? '(local network)' : '(direct/overlay)'}</option>`)}
+            ${candidates.map((c, i) => html`<option value=${String(i)}>${c.iface} — ${c.ip} (local network)</option>`)}
         </select>
         <div class="muted">Pick the one on the same network as the other computer. Wi-Fi/Ethernet on a home or office network is usually the "local network" one.</div>
     </div>`;
@@ -11682,7 +11726,7 @@ function FedEndpointPicker({ candidates, endpoint, onPick }) {
 function GuestJoinWizard({ onExit }) {
     const wizardRef = useRef(null);
     const [step, setStep] = useState('scan');
-    const [endpoint, setEndpoint, lanCandidates, endpointReady] = useLanEndpoint();
+    const [endpoint, setEndpoint, lanCandidates, endpointReady, endpointFailed] = useLanEndpoint();
     const [tier4, setTier4] = useState(false);
     const [scan, setScan] = useState(null);       // {session_id, host_chain, host_endpoint, host_pin, return_uri}
     const [codes, setCodes] = useState(null);      // {code_g, code_h, confirm_step}
@@ -11691,6 +11735,7 @@ function GuestJoinWizard({ onExit }) {
     const [err, setErr] = useState('');
     const [pollNote, setPollNote] = useState('');
     const [endedReason, setEndedReason] = useState('');
+    const confirmInFlight = useRef(false);
 
     useEffect(() => {
         requestAnimationFrame(() => {
@@ -11702,6 +11747,10 @@ function GuestJoinWizard({ onExit }) {
     const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
 
     const doScan = async (uri, source = 'camera') => {
+        if (!!String(endpoint || '').trim() && !isFederationEndpointFormatValid(endpoint)) {
+            setErr('Enter a complete reachable address such as https://192.168.1.20:18444 before scanning.');
+            return;
+        }
         setBusy(true); setErr('');
         try {
             if (source !== 'camera') setTier4(true);
@@ -11730,11 +11779,16 @@ function GuestJoinWizard({ onExit }) {
         setBusy(false);
     };
     const doConfirm = async () => {
+        if (confirmInFlight.current) return;
+        confirmInFlight.current = true;
         setBusy(true); setErr('');
         try {
             await fedGuestConfirm({ session_id: scan.session_id, endpoint, host_scope: hostScope || {} });
             setStep('done');
-        } catch (e) { fail(e); }
+        } catch (e) {
+            confirmInFlight.current = false;
+            fail(e);
+        }
         setBusy(false);
     };
     const stopGuest = async (nextStep = 'aborted') => {
@@ -11779,10 +11833,12 @@ function GuestJoinWizard({ onExit }) {
 
     const progressStage = step === 'done' ? 'done'
         : (['yourcode', 'theircode'].includes(step) ? 'check' : 'scan');
+    const endpointMissing = endpointReady && !String(endpoint || '').trim();
+    const endpointInvalid = endpointReady && !!String(endpoint || '').trim() && !isFederationEndpointFormatValid(endpoint);
 
     return html`<div class="fed-wizard" ref=${wizardRef}>
         <div class="fed-wizard-head">
-            <button class="btn fed-back" onClick=${exitGuest}>← Back</button>
+            <button class="btn fed-back" disabled=${busy} onClick=${exitGuest}>← Back</button>
             <span class="fed-wizard-title">Join someone’s network</span>
         </div>
         ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
@@ -11794,14 +11850,16 @@ function GuestJoinWizard({ onExit }) {
             <p class="muted">Point your camera at the connection code your colleague is showing you.</p>
             ${tier4 && html`<div class="fed-tier4-note">Connecting remotely or using a pasted image? The short number check later protects against a code being swapped or relayed.</div>`}
             ${!endpointReady && html`<div class="muted">Finding this computer’s network address…</div>`}
-            <${FedScanInput} onValue=${doScan} busy=${busy || !endpointReady} />
-            <details class="fed-advanced" open=${isLoopbackEndpoint(endpoint) || lanCandidates.length > 1}>
+            ${endpointMissing && html`<div class="fed-tier4-note" role="status">No local-network address was detected. You can still scan an Internet connection code. For a same-network connection, enter this computer’s reachable address below.</div>`}
+            ${endpointInvalid && html`<div class="fed-err" role="alert">Enter the full <code>https://host:port</code> address with no path or query before scanning.</div>`}
+            <${FedScanInput} onValue=${doScan} busy=${busy || !endpointReady || endpointInvalid} />
+            <details class="fed-advanced" open=${endpointFailed || endpointMissing || endpointInvalid || isLoopbackEndpoint(endpoint) || lanCandidates.length > 1}>
                 <summary onClick=${() => setTier4(true)}>Connecting remotely or need to change the network address?</summary>
                 <div class="fed-field">
                     <label for="fed-guest-endpoint">This computer’s reachable address</label>
                     <input id="fed-guest-endpoint" class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)}
-                        placeholder="https://192.168.1.20:8444" />
-                    ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">This is a localhost address. Another computer needs this SAGE’s LAN or internet-reachable address.</div>`}
+                        placeholder="https://192.168.1.20:PORT" />
+                    ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">This advertised address points back to this computer, so a colleague’s SAGE cannot reach it. Same-computer testing still works. For another computer, set <code>federation.listen_addr</code> to a reachable or wildcard address in your SAGE config, restart SAGE, then enter that reachable <code>https://host:port</code> address here.</div>`}
                 </div>
                 <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
             </details>
@@ -11876,7 +11934,7 @@ function HostJoinWizard({ onExit }) {
     const wizardRef = useRef(null);
     const [step, setStep] = useState('route');
     const [routeMode, setRouteMode] = useState('');
-    const [endpoint, setEndpoint, lanCandidates] = useLanEndpoint();
+    const [endpoint, setEndpoint, lanCandidates, endpointReady] = useLanEndpoint();
     const [session, setSession] = useState(null);   // {session_id, otpauth_uri, host_pin}
     const [view, setView] = useState(null);          // host status view
     const [tier4, setTier4] = useState(false);
@@ -11898,6 +11956,10 @@ function HostJoinWizard({ onExit }) {
     }, [step]);
 
     const doCreate = async (mode = routeMode || 'lan') => {
+        if (mode === 'lan' && !isFederationEndpointFormatValid(endpoint)) {
+            setErr('Enter a complete reachable address such as https://192.168.1.10:18444 before creating a code.');
+            return;
+        }
         setBusy(true); setErr('');
         try { const r = await fedHostCreate(endpoint, mode); setSession(r); setRouteMode(mode); setTier4(mode === 'internet'); setStep('showqr'); }
         catch (e) { fail(e); }
@@ -11910,11 +11972,11 @@ function HostJoinWizard({ onExit }) {
     // stay on the address screen so the operator can correct it first.
     const autoTried = useRef(false);
     useEffect(() => {
-        if (autoTried.current || step !== 'create' || session || busy) return;
-        if (!endpoint || isLoopbackEndpoint(endpoint)) return;
+        if (autoTried.current || step !== 'create' || session || busy || !endpointReady) return;
+        if (!isFederationEndpointFormatValid(endpoint) || isLoopbackEndpoint(endpoint)) return;
         autoTried.current = true;
         doCreate();
-    }, [endpoint, step, session, busy]);
+    }, [endpoint, endpointReady, step, session, busy]);
 
     // "Wrong address?" from the QR screen: burn the auto-minted session and go
     // back to the address form (re-minting is intentional — the code embeds it).
@@ -11985,10 +12047,12 @@ function HostJoinWizard({ onExit }) {
 
     const progressStage = step === 'done' ? 'done'
         : (['compare', 'readback'].includes(step) ? 'check' : 'scan');
+    const endpointMissing = endpointReady && !String(endpoint || '').trim();
+    const endpointInvalid = endpointReady && !!String(endpoint || '').trim() && !isFederationEndpointFormatValid(endpoint);
 
     return html`<div class="fed-wizard ${step === 'showqr' ? 'fed-wizard-wide' : ''}" ref=${wizardRef}>
         <div class="fed-wizard-head">
-            <button class="btn fed-back" onClick=${step === 'route' ? onExit : abort}>← ${step === 'route' ? 'Back' : 'Cancel'}</button>
+            <button class="btn fed-back" disabled=${busy} onClick=${step === 'route' ? onExit : abort}>← ${step === 'route' ? 'Back' : 'Cancel'}</button>
             <span class="fed-wizard-title">Let someone join</span>
         </div>
         ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
@@ -12007,13 +12071,16 @@ function HostJoinWizard({ onExit }) {
         ${step === 'create' && html`<div class="fed-step">
             <h2>Let someone join your network</h2>
             <${FedGreenRail} />
+            ${!endpointReady && html`<div class="muted">Finding this computer’s network address…</div>`}
+            ${endpointMissing && html`<div class="fed-err" role="alert">We couldn’t read this node’s federation address. Enter the reachable address below before creating a code.</div>`}
+            ${endpointInvalid && html`<div class="fed-err" role="alert">Enter the full <code>https://host:port</code> address with no path or query before creating a code.</div>`}
             <div class="fed-field">
                 <label for="fed-host-endpoint">Your network address (how they'll reach you)</label>
-                <input id="fed-host-endpoint" class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:8444" />
-                ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">⚠︎ This address only works on this computer, so anyone who scans your code would reach their own machine instead. Pick this computer's address on your network below (e.g. <code>https://192.168.1.10:8444</code>).</div>`}
+                <input id="fed-host-endpoint" class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:PORT" />
+                ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">This advertised address points back to this computer, so another SAGE cannot reach it. Same-computer testing still works. For another computer, set <code>federation.listen_addr</code> to a reachable or wildcard address, restart SAGE, then choose the detected reachable address above or use Internet setup.</div>`}
             </div>
             <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
-            <button class="btn btn-primary" disabled=${busy} onClick=${() => doCreate('lan')}>${busy ? 'Working…' : 'Show my connection code'}</button>
+            <button class="btn btn-primary" disabled=${busy || !endpointReady || endpointMissing || endpointInvalid} onClick=${() => doCreate('lan')}>${busy ? 'Working…' : 'Show my connection code'}</button>
         </div>`}
 
         ${step === 'showqr' && session && html`<div class="fed-step fed-exchange-step">
@@ -12027,7 +12094,7 @@ function HostJoinWizard({ onExit }) {
                         <div><h3>They scan this SAGE</h3><p class="muted">Show this code to your colleague.</p></div>
                     </div>
                     <${FedQr} size=${200} text=${session.otpauth_uri} caption="Their camera scans this first." />
-                    <button class="fed-linkbtn" onClick=${editAddress}>Wrong network address?</button>
+                    ${routeMode === 'lan' && html`<button class="fed-linkbtn" onClick=${editAddress}>Wrong network address?</button>`}
                 </section>
                 <section class="fed-exchange-card fed-exchange-card-active">
                     <div class="fed-exchange-card-head">
@@ -12156,6 +12223,17 @@ function fedDomainMatchesFilter(domain, filter) {
     return name.includes(query);
 }
 
+function normalizeFedPipeContactGrant(value) {
+    const grant = value && typeof value === 'object' ? value : {};
+    const contacts = Array.isArray(grant.contacts) ? grant.contacts.filter(contact => contact && contact.agent_id) : [];
+    return {
+        version: Number(grant.version || 0),
+        revision: String(grant.revision || ''),
+        paused: grant.paused === true,
+        contacts,
+    };
+}
+
 // FedPermissionsPanel keeps identity/trust separate from ongoing authorization.
 // Each node edits only its own grants and observes the peer's grants read-only.
 function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
@@ -12167,12 +12245,22 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const [remote, setRemote] = useState({});
     const [remoteKnown, setRemoteKnown] = useState(false);
     const [remotePaused, setRemotePaused] = useState(false);
+    const [alignmentPending, setAlignmentPending] = useState(false);
+	const [localPipeContacts, setLocalPipeContacts] = useState(null);
+	const [localPipeContactsKnown, setLocalPipeContactsKnown] = useState(false);
+	const [remotePipeContacts, setRemotePipeContacts] = useState(null);
+	const [remotePipeKnown, setRemotePipeKnown] = useState(false);
+	const [pipeContactBusy, setPipeContactBusy] = useState('');
+	const [pipeContactErr, setPipeContactErr] = useState('');
+	const [copiedContact, setCopiedContact] = useState('');
     const [subscribeSaved, setSubscribeSaved] = useState([]);
     const [subscribeDraft, setSubscribeDraft] = useState([]);
     const [syncKnown, setSyncKnown] = useState(false);
     const [filter, setFilter] = useState('');
     const [busy, setBusy] = useState(false);
     const [syncBusy, setSyncBusy] = useState(false);
+    const [syncErr, setSyncErr] = useState('');
+    const [syncSaveErr, setSyncSaveErr] = useState('');
     const [refreshing, setRefreshing] = useState(false);
     const [err, setErr] = useState('');
     const [reloadToken, setReloadToken] = useState(0);
@@ -12180,11 +12268,14 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     useEffect(() => {
         let live = true;
         setErr('');
+        setSyncErr('');
+        setSyncSaveErr('');
         const load = async () => {
-            const [catalogResult, permissionsResult, syncResult] = await Promise.allSettled([
+            const [catalogResult, permissionsResult, syncResult, pipeContactsResult] = await Promise.allSettled([
                 fedShareableDomains(),
                 fedPermissionsGet(chain),
                 fedSyncGet(chain),
+				fedPipeContactsGet(chain),
             ]);
             if (!live) return;
             const errors = [];
@@ -12197,6 +12288,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 setRemote(normalizeFedPermissionList(p.remote_permissions));
                 setRemoteKnown(p.remote_known === true);
                 setRemotePaused(p.remote_paused === true);
+                setAlignmentPending(p.copy_alignment_pending === true);
             } else {
                 // PUT replaces the entire local snapshot. If GET failed, an
                 // editable empty draft could silently erase grants we never
@@ -12209,8 +12301,21 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 setSubscribeSaved(domains); setSubscribeDraft(domains); setSyncKnown(true);
             } else {
                 setSubscribeSaved([]); setSubscribeDraft([]); setSyncKnown(false);
-                errors.push(`copy choices: ${syncResult.reason && syncResult.reason.message ? syncResult.reason.message : syncResult.reason}`);
+                setSyncErr(`Couldn't load copy choices: ${syncResult.reason && syncResult.reason.message ? syncResult.reason.message : syncResult.reason}`);
             }
+			if (pipeContactsResult.status === 'fulfilled') {
+				const result = pipeContactsResult.value || {};
+				setLocalPipeContacts(normalizeFedPipeContactGrant(result.local_contacts));
+				setLocalPipeContactsKnown(true);
+				setRemotePipeContacts(result.remote_contacts ? normalizeFedPipeContactGrant(result.remote_contacts) : null);
+				setRemotePipeKnown(result.remote_known === true);
+				setPipeContactErr('');
+			} else {
+				setLocalPipeContacts(normalizeFedPipeContactGrant(null));
+				setLocalPipeContactsKnown(false);
+				setRemotePipeContacts(null); setRemotePipeKnown(false);
+				setPipeContactErr('Agent contacts are temporarily unavailable.');
+			}
             setErr(errors.length ? `Couldn't load ${errors.join('; ')}` : '');
         };
         load();
@@ -12223,9 +12328,10 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         let live = true;
         let timer = null;
         const poll = async () => {
-            const [catalogResult, permissionsResult] = await Promise.allSettled([
+            const [catalogResult, permissionsResult, pipeContactsResult] = await Promise.allSettled([
                 fedShareableDomains(),
                 fedPermissionsGet(chain),
+				fedPipeContactsGet(chain),
             ]);
             if (!live) return;
             if (catalogResult.status === 'fulfilled') setCatalog(fedCatalogMap(catalogResult.value));
@@ -12234,7 +12340,16 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 setRemote(normalizeFedPermissionList(p.remote_permissions));
                 setRemoteKnown(p.remote_known === true);
                 setRemotePaused(p.remote_paused === true);
+                setAlignmentPending(p.copy_alignment_pending === true);
             }
+			if (pipeContactsResult.status === 'fulfilled') {
+				const result = pipeContactsResult.value || {};
+				setLocalPipeContacts(normalizeFedPipeContactGrant(result.local_contacts));
+				setLocalPipeContactsKnown(true);
+				setRemotePipeContacts(result.remote_contacts ? normalizeFedPipeContactGrant(result.remote_contacts) : null);
+				setRemotePipeKnown(result.remote_known === true);
+				setPipeContactErr('');
+			}
             if (live) timer = setTimeout(poll, 8000);
         };
         timer = setTimeout(poll, 8000);
@@ -12244,7 +12359,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     if (catalog === null || draft === null || saved === null) {
         return html`<div class="fed-permissions-panel">
             ${err
-                ? html`<div><div class="fed-err">${err}</div><button class="btn" onClick=${() => setReloadToken(n => n + 1)}>Retry</button></div>`
+                ? html`<div><div class="fed-err" role="alert">${err}</div><button class="btn" onClick=${() => setReloadToken(n => n + 1)}>Retry</button></div>`
                 : html`<span class="muted">Loading domain permissions…</span>`}
         </div>`;
     }
@@ -12313,18 +12428,58 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     };
 
     const save = async () => {
+        const enabledWorkRequests = localPipeContacts && Array.isArray(localPipeContacts.contacts)
+            ? localPipeContacts.contacts.filter(contact => contact && contact.accepting === true).length
+            : 0;
+        if (dirty && !localPipeContactsKnown && !await showConfirmation(
+            'Agent work-request switches could not be loaded. Updating the shared domain list will reset any enabled switches to Off. You can turn unchanged agents back on after refreshing.',
+            { title: 'Update shared domains?', confirmLabel: 'Update and reset', tone: 'primary' }
+        )) return;
+        if (dirty && enabledWorkRequests > 0 && !await showConfirmation(
+            `Updating the shared domain list resets ${enabledWorkRequests} enabled agent work-request ${enabledWorkRequests === 1 ? 'switch' : 'switches'} to Off. This prevents a changed domain owner or scope from inheriting permission. You can turn unchanged agents back on after saving.`,
+            { title: 'Update shared domains?', confirmLabel: 'Update and reset', tone: 'primary' }
+        )) return;
         setBusy(true); setErr('');
-        try {
-            const permissions = fedPermissionSnapshot(draft);
-            const response = await fedPermissionsSet(chain, permissions);
+		try {
+			const permissions = fedPermissionSnapshot(draft);
+			const response = await fedPermissionsSet(chain, permissions);
+			const warnings = Array.isArray(response.warnings)
+				? response.warnings.map(value => String(value || '').trim()).filter(Boolean)
+				: [];
             const nextLocal = normalizeFedPermissionList(
                 Array.isArray(response.local_permissions) ? response.local_permissions : permissions
             );
             setSaved(nextLocal); setDraft(nextLocal);
+            setAlignmentPending(false);
             if (Array.isArray(response.remote_permissions)) setRemote(normalizeFedPermissionList(response.remote_permissions));
             if (Object.prototype.hasOwnProperty.call(response, 'remote_known')) setRemoteKnown(response.remote_known === true);
             if (Object.prototype.hasOwnProperty.call(response, 'remote_paused')) setRemotePaused(response.remote_paused === true);
-            showToast(`Permissions updated for ${peerName}`, 'success');
+            if (response.policy_replaced !== false) {
+                // A changed permission snapshot deliberately invalidates every
+                // prior per-agent acceptance. A pure alignment retry leaves the
+                // identical RBAC revision and its switches untouched.
+                setLocalPipeContacts(current => current ? {
+                    ...current,
+                    contacts: current.contacts.map(contact => ({ ...contact, accepting: false })),
+                } : current);
+                try {
+                    const latestContacts = await fedPipeContactsGet(chain);
+                    setLocalPipeContacts(normalizeFedPipeContactGrant(latestContacts && latestContacts.local_contacts));
+					setLocalPipeContactsKnown(true);
+                    setRemotePipeContacts(latestContacts && latestContacts.remote_contacts ? normalizeFedPipeContactGrant(latestContacts.remote_contacts) : null);
+                    setRemotePipeKnown(latestContacts && latestContacts.remote_known === true);
+                    setPipeContactErr('');
+                } catch (_) {
+					setLocalPipeContactsKnown(false);
+                    setPipeContactErr('Domains were saved and work-request switches were reset. Refresh to load the latest agent contacts.');
+                }
+            }
+			if (warnings.length > 0) {
+				setErr(`Permissions were saved, but SAGE is still cleaning up: ${warnings.join('; ')}`);
+				showToast(`Permissions saved for ${peerName}, with cleanup still in progress`, 'warning', 10000);
+			} else {
+				showToast(`Permissions updated for ${peerName}`, 'success');
+			}
         } catch (e) { setErr(String(e.message || e)); }
         setBusy(false);
     };
@@ -12340,7 +12495,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     };
 
     const saveSubscriptions = async () => {
-        setSyncBusy(true); setErr('');
+        setSyncBusy(true); setSyncSaveErr('');
         try {
             const response = await fedSyncSet(chain, subscribeDraft);
             const savedDomains = normalizeFedDomainList(
@@ -12350,22 +12505,61 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
             );
             setSubscribeSaved(savedDomains); setSubscribeDraft(savedDomains); setSyncKnown(true);
             showToast(`Local copy choices updated for ${peerName}`, 'success');
-        } catch (e) { setErr(String(e.message || e)); }
+        } catch (e) { setSyncSaveErr(String(e.message || e)); }
         setSyncBusy(false);
     };
 
+	const togglePipeContact = async contact => {
+		if (!contact || !contact.agent_id || !contact.contact_id) return;
+		const next = contact.accepting !== true;
+		setPipeContactBusy(contact.contact_id); setPipeContactErr('');
+		try {
+			const response = await fedPipeContactSet(chain, contact.agent_id, contact.contact_id, next);
+			setLocalPipeContacts(normalizeFedPipeContactGrant(response && response.local_contacts));
+			setLocalPipeContactsKnown(true);
+			showToast(`${next ? 'Allowed' : 'Stopped'} work requests for ${contact.display_name || contact.handle || 'agent'}`, 'success');
+		} catch (e) {
+			setPipeContactErr(String(e.message || e));
+			try {
+				const latest = await fedPipeContactsGet(chain);
+				setLocalPipeContacts(normalizeFedPipeContactGrant(latest && latest.local_contacts));
+				setLocalPipeContactsKnown(true);
+				setRemotePipeContacts(latest && latest.remote_contacts ? normalizeFedPipeContactGrant(latest.remote_contacts) : null);
+				setRemotePipeKnown(latest && latest.remote_known === true);
+			} catch (_) { /* the original actionable error remains visible */ }
+		}
+		setPipeContactBusy('');
+	};
+
+	const copyPipeContact = async contact => {
+		// The exact agent@chain address selects one peer without depending on
+		// unrelated peers being online. The friendly handle remains visible as a
+		// human label, but the one-click action chooses the reliable route.
+		const value = contact && (contact.address || contact.handle);
+		if (!value) return;
+		try {
+			await navigator.clipboard.writeText(value);
+			setCopiedContact(contact.agent_id);
+			setTimeout(() => setCopiedContact(current => current === contact.agent_id ? '' : current), 1500);
+		} catch (e) {
+			setPipeContactErr('Could not copy the agent address.');
+		}
+	};
+
     const refresh = async () => {
-        setRefreshing(true); setErr('');
+        setRefreshing(true); setSyncErr(''); setSyncSaveErr('');
         try {
-            const [catalogResponse, permissionResponse, syncResponse] = await Promise.all([
+			const [catalogResponse, permissionResponse, syncResponse, pipeContactsResponse] = await Promise.all([
                 fedShareableDomains(),
                 fedPermissionsGet(chain),
                 fedSyncGet(chain),
+				fedPipeContactsGet(chain),
             ]);
             setCatalog(fedCatalogMap(catalogResponse));
             setRemote(normalizeFedPermissionList(permissionResponse.remote_permissions));
             setRemoteKnown(permissionResponse.remote_known === true);
             setRemotePaused(permissionResponse.remote_paused === true);
+            setAlignmentPending(permissionResponse.copy_alignment_pending === true);
             if (!subscribeDirty) {
                 const domains = normalizeFedDomainList(syncResponse && syncResponse.subscribe_domains);
                 setSubscribeSaved(domains); setSubscribeDraft(domains); setSyncKnown(true);
@@ -12376,9 +12570,16 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 const local = normalizeFedPermissionList(permissionResponse.local_permissions);
                 setSaved(local); setDraft(local);
             }
-        } catch (e) { setErr(String(e.message || e)); }
+			setLocalPipeContacts(normalizeFedPipeContactGrant(pipeContactsResponse && pipeContactsResponse.local_contacts));
+			setLocalPipeContactsKnown(true);
+			setRemotePipeContacts(pipeContactsResponse && pipeContactsResponse.remote_contacts ? normalizeFedPipeContactGrant(pipeContactsResponse.remote_contacts) : null);
+			setRemotePipeKnown(pipeContactsResponse && pipeContactsResponse.remote_known === true);
+			setPipeContactErr('');
+        } catch (e) { setSyncErr(String(e.message || e)); }
         setRefreshing(false);
     };
+	const localAgentContacts = localPipeContacts && Array.isArray(localPipeContacts.contacts) ? localPipeContacts.contacts : [];
+	const remoteAgentContacts = remotePipeContacts && Array.isArray(remotePipeContacts.contacts) ? remotePipeContacts.contacts : [];
 
     return html`<div class="fed-permissions-panel">
         <div class="fed-permissions-intro">
@@ -12387,6 +12588,67 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         ${conn.sharing_paused && html`<div class="fed-perm-pause-note">
             <strong>Sharing from this SAGE is paused.</strong> The saved domain choices below are preserved and take effect again when you resume.
         </div>`}
+
+		<section class="fed-perm-section fed-agent-section">
+			<div class="fed-perm-section-head">
+				<div>
+					<h4>Agent work requests</h4>
+					<p>This extends SAGE's existing agent inbox across this trusted connection. It is not a chat: you choose which domain-owner agents may receive work, and each side controls its own agents.</p>
+				</div>
+			</div>
+			<div class="fed-agent-columns">
+				<div class="fed-agent-column">
+					<h5>Agents on this SAGE</h5>
+					<p class="muted">Allow ${peerName}'s SAGE to send a work request to a specific local agent. New contacts start off. Changing the shared domain list resets enabled switches to Off.</p>
+					${localPipeContacts === null && html`<div class="fed-agent-empty muted">Loading local agents…</div>`}
+					${localPipeContacts !== null && localAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">Share a domain with an owner to make its agent available here.</div>`}
+					${localAgentContacts.map(contact => {
+						const domains = Array.isArray(contact.domains) ? contact.domains.map(item => item.domain).filter(Boolean) : [];
+						const status = contact.available === false ? 'Agent unavailable' : (contact.accepting ? (localPipeContacts.paused ? 'Allowed · connection paused' : 'Accepting requests') : 'Requests off');
+						return html`<div class="fed-agent-row" key=${contact.agent_id}>
+							<div class="fed-agent-identity">
+								<strong>${contact.display_name || contact.handle || 'Local agent'}</strong>
+								${contact.handle && html`<code>${contact.handle}</code>`}
+								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Domain owner'}</span>
+							</div>
+							<label class="fed-agent-toggle">
+								<span class=${contact.accepting ? 'on' : ''}>${status}</span>
+								<input type="checkbox" role="switch"
+									aria-label=${`Allow work requests from ${peerName} to ${contact.display_name || contact.agent_id}`}
+									checked=${contact.accepting === true}
+									disabled=${contact.available === false || !contact.contact_id || pipeContactBusy === contact.contact_id}
+									onChange=${() => togglePipeContact(contact)} />
+							</label>
+						</div>`;
+					})}
+				</div>
+				<div class="fed-agent-column fed-agent-remote">
+					<h5>Agents on ${peerName}</h5>
+					<p class="muted">These are the domain-owner agents their SAGE makes visible. Copying the exact address gives your agent a reliable route to that SAGE; CEREBRUM only manages the connection.</p>
+					${!remotePipeKnown && html`<div class="fed-agent-empty muted">Their SAGE has not reported agent contacts yet.</div>`}
+					${remotePipeKnown && remoteAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">They are not exposing any domain-owner agents to this connection.</div>`}
+					${remoteAgentContacts.map(contact => {
+						const domains = Array.isArray(contact.domains) ? contact.domains.map(item => item.domain).filter(Boolean) : [];
+						const ready = contact.available !== false && contact.accepting === true && !remotePipeContacts.paused;
+						return html`<div class="fed-agent-row" key=${contact.agent_id}>
+							<div class="fed-agent-identity">
+								<strong>${contact.display_name || contact.handle || 'Remote agent'}</strong>
+								${contact.handle && html`<span class="fed-agent-handle muted">${contact.handle}</span>`}
+								<code title=${contact.address || ''}>${contact.address || contact.handle || 'Address unavailable'}</code>
+								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Shared-domain owner'}</span>
+							</div>
+							<div class="fed-agent-remote-actions">
+								<span class="fed-agent-readiness ${ready ? 'ready' : ''}">${ready ? 'Ready' : (remotePipeContacts.paused ? 'Paused' : (contact.available === false ? 'Unavailable' : 'Not accepting'))}</span>
+								<button class="btn" disabled=${!contact.address && !contact.handle}
+									aria-label=${`Copy address for ${contact.display_name || contact.handle || contact.agent_id} on ${peerName}`}
+									onClick=${() => copyPipeContact(contact)}>${copiedContact === contact.agent_id ? 'Copied' : 'Copy address'}</button>
+							</div>
+						</div>`;
+					})}
+				</div>
+			</div>
+			${pipeContactErr && html`<div class="fed-err fed-perm-error" role="alert">${pipeContactErr}</div>`}
+		</section>
 
         <section class="fed-perm-section">
             <div class="fed-perm-section-head">
@@ -12438,10 +12700,10 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 </div>`;
             })}
             </div>
-            ${err && html`<div class="fed-err fed-perm-error">${err}</div>`}
+            ${err && html`<div class="fed-err fed-perm-error" role="alert">${err}</div>`}
             <div class="fed-perm-actions">
-                <button class="btn btn-primary" disabled=${!dirty || busy} onClick=${save}>${busy ? 'Saving…' : 'Save what I share'}</button>
-                <span class="muted">${dirty ? 'Unsaved permission changes' : 'Saved'}</span>
+                <button class="btn btn-primary" disabled=${(!dirty && !alignmentPending) || busy} onClick=${save}>${busy ? 'Saving…' : (!dirty && alignmentPending ? 'Retry copy alignment' : 'Save what I share')}</button>
+                <span class="muted">${dirty ? 'Unsaved permission changes' : (alignmentPending ? 'Copy delivery needs retry' : 'Saved')}</span>
             </div>
         </section>
 
@@ -12453,6 +12715,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 </div>
                 <button class="btn" disabled=${refreshing} onClick=${refresh}>${refreshing ? 'Refreshing…' : 'Refresh'}</button>
             </div>
+            ${syncErr && html`<div class="fed-err fed-perm-error" role="alert">${syncErr}</div>`}
             ${remotePaused && html`<div class="fed-perm-pause-note">
                 <strong>${peerName} paused sharing.</strong> Effective Read and Copy access is off now. Their saved choices stay private on their SAGE and can resume when they turn sharing back on.
             </div>`}
@@ -12486,6 +12749,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                     <button class="btn btn-primary" disabled=${!syncKnown || !subscribeDirty || syncBusy} onClick=${saveSubscriptions}>${syncBusy ? 'Saving…' : 'Save copy choices'}</button>
                     <span class="muted">${!syncKnown ? 'Copy controls unavailable' : (subscribeDirty ? 'Unsaved copy choices' : 'Saved')}</span>
                 </div>
+                ${syncSaveErr && html`<div class="fed-err fed-perm-error" role="alert">${syncSaveErr}</div>`}
             </div>`}
         </section>
 
@@ -12657,9 +12921,9 @@ function NetworkNameEditor() {
             </div>
         ` : html`
             <div class="fed-netname-edit">
-                <label class="fed-netname-label muted">Name this network — this is what people see when you connect</label>
+                <label for="fed-network-name" class="fed-netname-label muted">Name this network — this is what people see when you connect</label>
                 <div class="fed-netname-row">
-                    <input class="fed-share-input" maxlength="48" value=${draft} placeholder="e.g. Dhillon's MacBook"
+                    <input id="fed-network-name" class="fed-share-input" maxlength="48" value=${draft} placeholder="e.g. Dhillon's MacBook"
                         onInput=${e => setDraft(e.target.value)}
                         onKeyDown=${e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') setEditing(false); }} autofocus />
                     <button class="btn btn-primary" disabled=${busy} onClick=${save}>${busy ? '…' : 'Save'}</button>
@@ -12729,13 +12993,13 @@ function FederationPage() {
     const [fedOn, setFedOn] = useState(null); // master switch: null=unknown, then bool
     const pause = async (conn, paused) => {
         if (paused && !await showConfirmation(
-            `Pause sharing with ${conn.peer_name || conn.remote_chain_id}? Their live Read and Copy access stops immediately. Your selected domains and trusted pairing stay saved, so Resume is one click.`,
+            `Pause sharing with ${conn.peer_name || conn.remote_chain_id}? Live Read, Copy, and agent work requests stop immediately. Your trusted pairing, selected domains, and per-agent work-request switches stay saved, so Resume is one click.`,
             { title: 'Pause sharing?', confirmLabel: 'Pause sharing', tone: 'primary' }
         )) return;
         setBusyChain(conn.remote_chain_id);
         try {
             await fedPause(conn.remote_chain_id, paused);
-            showToast(paused ? 'Sharing paused; pairing preserved' : 'Sharing resumed', 'success');
+            showToast(paused ? 'Sharing and work requests paused; pairing preserved' : 'Sharing resumed', 'success');
             await load();
         } catch (e) { showToast(String(e.message || e), 'error'); }
         setBusyChain('');
@@ -12776,7 +13040,7 @@ function FederationPage() {
             <${FedGreenRail} />
             <${FederationMasterSwitch} onChange=${setFedOn} />
             ${fedOn && html`<${NetworkNameEditor} />`}
-            ${err && html`<div class="fed-err">Couldn't load connections: ${err}</div>`}
+            ${err && html`<div class="fed-err" role="alert">Couldn't load connections: ${err}</div>`}
             ${remoteNotice && html`<div class="fed-peer-revoke-notice" role="status">
                 <div>
                     <strong>${remoteNotice.peer_name || remoteNotice.remote_chain_id} ended this connection</strong>
@@ -12825,6 +13089,7 @@ function FederationPage() {
                         </button>
                         <button class="btn fed-conn-off ${c.sharing_paused ? 'btn-primary' : ''}"
                             disabled=${busyChain === c.remote_chain_id}
+                            aria-label=${`${c.sharing_paused ? 'Resume' : 'Pause'} sharing with ${c.peer_name || c.remote_chain_id}`}
                             onClick=${() => pause(c, !c.sharing_paused)}>${busyChain === c.remote_chain_id ? 'Working…' : (c.sharing_paused ? 'Resume sharing' : 'Pause sharing')}</button>
                     </div>
                     ${openChain === c.remote_chain_id && html`<div id=${`fed-connection-${c.remote_chain_id}`}>

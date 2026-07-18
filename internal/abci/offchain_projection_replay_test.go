@@ -27,7 +27,11 @@ func TestFlushPendingWritesRejectsUnknownMalformedAndMissingAgentPayloads(t *tes
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := app.offchainStore.RunInTx(ctx, func(tx store.OffchainStore) error {
+			runTx := app.offchainStore.RunInTx
+			if projectionWritesAgentContacts([]pendingWrite{tt.write}) {
+				runTx = app.offchainStore.RunInAgentContactTx
+			}
+			err := runTx(ctx, func(tx store.OffchainStore) error {
 				return app.flushPendingWrites(ctx, tx, []pendingWrite{tt.write})
 			})
 			require.ErrorContains(t, err, tt.want)

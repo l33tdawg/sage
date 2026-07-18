@@ -17,6 +17,19 @@ import (
 
 const defaultBroadcastTimeout = 60 * time.Second
 
+// JoinConfirmationPeerTimeout covers the host's one consensus commit plus
+// response headroom. JoinConfirmationOperationTimeout covers the guest and host
+// commits sequentially for the browser-facing request. Both derive from the
+// operator's broadcast override so raising it cannot silently recreate a
+// shorter ceremony deadline on the same node.
+func JoinConfirmationPeerTimeout() time.Duration {
+	return broadcastTimeout() + 5*time.Second
+}
+
+func JoinConfirmationOperationTimeout() time.Duration {
+	return 2*broadcastTimeout() + 10*time.Second
+}
+
 func broadcastTimeout() time.Duration {
 	if v := os.Getenv("SAGE_TX_COMMIT_TIMEOUT_MS"); v != "" {
 		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {

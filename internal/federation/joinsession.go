@@ -82,6 +82,11 @@ type JoinSession struct {
 	ApprovedGuestEnd   string
 	ApprovedGuestAgent []byte
 
+	// ActivationTxHash is persisted at the same locked transition to ACTIVE.
+	// A guest that loses the successful HTTP response may replay the exact signed
+	// confirm and receive this result without broadcasting a second tx-33.
+	ActivationTxHash string
+
 	failCount int
 }
 
@@ -126,16 +131,11 @@ var (
 // JoinStore is the host-side session registry: TTL'd, single-ceremony, with a
 // per-session fail cap and a TLS-connection rate limiter (never XFF, RT-3).
 //
-// Two limiters, split by whether the route submits a confirm code or just reads
-// state. `rl` (strict) governs the state-changing, code-submitting routes
-// (/join/request, /join/confirm) — the actual abuse vector, additionally capped
-// per session by joinMaxFailPerSid. `rlRead` (generous) governs the read-only
-// polling routes (/join/ca, /join/status): a bound guest polls status every ~2s
-// for the whole ceremony (a minute or more of human back-and-forth), which is
-// legitimate traffic that a 20/min strict cap would wrongly throttle — leaving
-// the guest stuck mid-ceremony, unable to see the host's approval. A read GET
-// carries no code, so it cannot brute-force anything; the generous cap still
-// bounds a spray while letting real polling through.
+// The mutation limiter reserves a small tranche for final confirmation. Normal
+// request/abort traffic may consume only the non-reserved portion, while signed
+// confirms may consume the full (unchanged) aggregate cap. This keeps recovery
+// reachable after earlier retries without increasing the accepted mutation
+// budget. `rlRead` independently governs /join/ca and /join/status polling.
 type JoinStore struct {
 	mu       sync.Mutex
 	sessions map[string]*JoinSession
@@ -257,7 +257,16 @@ func (js *JoinSession) attestation(hostScope [32]byte) [32]byte {
 
 // AllowConn reports whether a request from connKey (a TLS-connection-derived
 // key, NOT XFF) is within the rate limit.
-func (s *JoinStore) AllowConn(connKey string, now time.Time) bool { return s.rl.allow(connKey, now) }
+func (s *JoinStore) AllowConn(connKey string, now time.Time) bool {
+	return s.rl.allowBelow(connKey, now, connMaxAttempts-connConfirmReserve)
+}
+
+// AllowConnConfirm may use the reserved tail of the same aggregate mutation
+// budget. Invalid confirms still consume it and total accepted mutations remain
+// capped at connMaxAttempts per direct source/window.
+func (s *JoinStore) AllowConnConfirm(connKey string, now time.Time) bool {
+	return s.rl.allow(connKey, now)
+}
 
 // AllowConnRead is the generous limiter for read-only polling routes
 // (/join/ca, /join/status). Separate budget from AllowConn so a bound guest's
@@ -326,6 +335,18 @@ func (s *JoinStore) Request(id string, now time.Time, in GuestRequestInput) (*Jo
 	if !ok || (now.After(js.ExpiresAt) && js.State != JoinActive) {
 		return nil, fmt.Errorf("join session not found or expired")
 	}
+	// Requests may only (re)bind a pre-confirmation session. Once CheckConfirm
+	// transfers the frozen transcript and staged-CA closures to the driver, a
+	// concurrent re-request must not mutate the live fields that ACTIVE replay
+	// retains. In particular, accepting a re-request in CONFIRMING could clear
+	// ApprovedE after the real tx uses its safe snapshot, corrupting the returned
+	// group id and making recovery from a lost HTTP 200 impossible.
+	switch js.State {
+	case JoinCreated, JoinRequested, JoinHostApproved:
+		// Allowed pre-confirmation states.
+	default:
+		return nil, fmt.Errorf("join request not allowed while session is %s", js.State)
+	}
 	if js.failCount >= joinMaxFailPerSid {
 		return nil, fmt.Errorf("join session locked (too many attempts)")
 	}
@@ -337,6 +358,10 @@ func (s *JoinStore) Request(id string, now time.Time, in GuestRequestInput) (*Jo
 	if subtle.ConstantTimeCompare(js.ExpectedGuestPin, in.GuestPin) != 1 {
 		js.failCount++
 		return nil, fmt.Errorf("guest key does not match the scanned connection code")
+	}
+	if js.ExpectedGuestEnd != in.GuestEndpoint {
+		js.failCount++
+		return nil, fmt.Errorf("guest endpoint does not match the scanned connection code")
 	}
 	if len(in.GuestAgentPub) == 0 {
 		return nil, fmt.Errorf("missing guest agent key")
@@ -463,6 +488,29 @@ func (s *JoinStore) CheckConfirm(id string, certSPKI, guestSig, guestAckSig []by
 	if !ok {
 		return nil, fmt.Errorf("join session not found")
 	}
+	// A successful host activation is replayable until the normal session grace
+	// cleanup. This is recovery for a lost HTTP 200: authenticate the same bound
+	// TLS certificate and re-verify both signatures over the retained frozen E,
+	// then return the original tx result without transferring closures or
+	// entering CONFIRMING again.
+	if js.State == JoinActive {
+		if subtle.ConstantTimeCompare(js.BoundCertSPKI, certSPKI) != 1 {
+			return nil, fmt.Errorf("confirm from an unbound client certificate")
+		}
+		if !js.Approved || len(js.ApprovedGuestAgent) != ed25519.PublicKeySize || js.ActivationTxHash == "" {
+			return nil, fmt.Errorf("active join session has no replayable confirmation")
+		}
+		pub := ed25519.PublicKey(js.ApprovedGuestAgent)
+		if !VerifyEnroll(pub, js.ApprovedE, false, guestSig) || !VerifyEnroll(pub, js.ApprovedE, true, guestAckSig) {
+			return nil, fmt.Errorf("guest approval signatures do not verify against the frozen attestation")
+		}
+		return &ConfirmContext{
+			GuestChain:       js.GuestChain,
+			ApprovedE:        js.ApprovedE,
+			ActivationTxHash: js.ActivationTxHash,
+			AlreadyActive:    true,
+		}, nil
+	}
 	// Expiry gate (parity with Get/Request): never drive a confirm on a lapsed
 	// session - combined with the reaper NOT reaping CONFIRMING/ACTIVE, this
 	// closes the commit-vs-reap race on the staged CA sidecar.
@@ -541,19 +589,21 @@ func (s *JoinStore) CheckConfirm(id string, certSPKI, guestSig, guestAckSig []by
 // (under the lock); every field here is a copy - the driver holds no live
 // pointer.
 type ConfirmContext struct {
-	GuestChain      string
-	GuestName       string // friendly label the guest chose (cosmetic; for local display)
-	GuestPin        []byte
-	GuestEndpoint   string
-	GuestPeerID     string
-	GuestP2PAddrs   []string
-	GuestAgentID    []byte
-	GuestScope      ScopeWire
-	ApprovedE       [32]byte
-	Seed            []byte // the ceremony's own seed (NOT re-resolved by chain id)
-	HostGrant       HostGrant
-	commitGuestCA   func() error
-	rollbackGuestCA func()
+	GuestChain       string
+	GuestName        string // friendly label the guest chose (cosmetic; for local display)
+	GuestPin         []byte
+	GuestEndpoint    string
+	GuestPeerID      string
+	GuestP2PAddrs    []string
+	GuestAgentID     []byte
+	GuestScope       ScopeWire
+	ApprovedE        [32]byte
+	Seed             []byte // the ceremony's own seed (NOT re-resolved by chain id)
+	HostGrant        HostGrant
+	ActivationTxHash string
+	AlreadyActive    bool
+	commitGuestCA    func() error
+	rollbackGuestCA  func()
 }
 
 // CommitGuestCA persists the staged guest CA (called by the driver ONLY after
@@ -589,7 +639,7 @@ func (js *JoinSession) scrubSeed() {
 // tx-33 (the staged guest CA is committed by the driver first). The state
 // condition is deliberately checked under the same lock as Abort: neither a
 // late Stop nor an unrelated terminal transition may be overwritten.
-func (s *JoinStore) MarkActive(id string) error {
+func (s *JoinStore) MarkActive(id, txHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	js, ok := s.sessions[id]
@@ -599,7 +649,11 @@ func (s *JoinStore) MarkActive(id string) error {
 	if js.State != JoinConfirming {
 		return fmt.Errorf("activate join from %s: %w", js.State, ErrJoinAbortConflict)
 	}
+	if strings.TrimSpace(txHash) == "" {
+		return fmt.Errorf("activate join without transaction hash")
+	}
 	js.State = JoinActive
+	js.ActivationTxHash = txHash
 	js.rollbackGuestCA = nil // committed; do not roll back on later cleanup
 	js.commitGuestCA = nil
 	js.scrubSeed() // persistent seed is committed; drop the ceremony copy now
@@ -734,11 +788,12 @@ type connRateLimiter struct {
 }
 
 const (
-	// connMaxAttempts caps the state-changing, code-submitting routes
-	// (/join/request, /join/confirm) per source per window. Kept tight — these
-	// are the abuse vector, and joinMaxFailPerSid separately caps code guesses
-	// per session.
+	// connMaxAttempts caps ALL state-changing routes per source per window.
 	connMaxAttempts = 20
+	// connConfirmReserve keeps enough of that unchanged aggregate cap available
+	// for an initial final submit, a same-tick duplicate, and explicit recovery
+	// after a lost response. Request/abort traffic cannot consume this tranche.
+	connConfirmReserve = 4
 	// connMaxReadAttempts caps the read-only routes (/join/ca, /join/status).
 	// Generous because a bound guest legitimately polls status every ~2s for the
 	// full ceremony; at 30/min a strict cap wrongly throttles the poll and the
@@ -753,6 +808,10 @@ func newConnRateLimiter(maxAttempts int) *connRateLimiter {
 }
 
 func (rl *connRateLimiter) allow(key string, now time.Time) bool {
+	return rl.allowBelow(key, now, rl.maxAttempts)
+}
+
+func (rl *connRateLimiter) allowBelow(key string, now time.Time, cap int) bool {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	cutoff := now.Add(-connWindow)
@@ -762,7 +821,7 @@ func (rl *connRateLimiter) allow(key string, now time.Time) bool {
 			fresh = append(fresh, t)
 		}
 	}
-	if len(fresh) >= rl.maxAttempts {
+	if len(fresh) >= cap {
 		rl.attempts[key] = fresh
 		return false
 	}

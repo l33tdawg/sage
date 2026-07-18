@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class MemoryType(str, Enum):
@@ -262,6 +262,8 @@ class AgentInfo(BaseModel):
 class PipeSendRequest(BaseModel):
     to_agent: str | None = None
     to_provider: str | None = None
+    source_chain_id: str | None = None
+    destination_chain_id: str | None = None
     intent: str | None = None
     payload: str
     ttl_minutes: int | None = None
@@ -271,6 +273,17 @@ class PipeSendResponse(BaseModel):
     pipe_id: str
     status: str
     expires_at: str
+    destination_chain_id: str | None = None
+
+
+class PipeResolveResponse(BaseModel):
+    to_agent: str | None = None
+    to_provider: str | None = None
+    source_chain_id: str | None = None
+    destination_chain_id: str | None = None
+    address: str | None = None
+    handle: str | None = None
+    display_name: str | None = None
 
 
 class PipeMessage(BaseModel):
@@ -288,16 +301,55 @@ class PipeMessage(BaseModel):
     completed_at: str | None = None
     expires_at: str | None = None
     journal_id: str | None = None
+    claimed_by: str | None = None
+    source_chain_id: str | None = None
+    source_pipe_id: str | None = None
+    destination_chain_id: str | None = None
+    reply_source_chain_id: str | None = None
+    federation_policy_epoch: str | None = None
+    federation_agreement_id: str | None = None
+    federation_contact_id: str | None = None
+    federation_contact_revision: str | None = None
 
 
 class PipeInboxResponse(BaseModel):
     items: list[PipeMessage]
     count: int
 
+    @field_validator("items", mode="before")
+    @classmethod
+    def normalize_null_items(cls, value: object) -> object:
+        """Tolerate older SAGE nodes that encoded an empty slice as null."""
+        return [] if value is None else value
+
+
+class PipeDeliveryUpdate(BaseModel):
+    event_id: str
+    pipe_id: str
+    event_kind: str
+    remote_chain_id: str
+    target_agent_id: str
+    state: str
+    attempts: int = 0
+    last_error: str | None = None
+    created_at: str | None = None
+
+
+class PipeDeliveryUpdatesResponse(BaseModel):
+    items: list[PipeDeliveryUpdate]
+    count: int
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def normalize_null_items(cls, value: object) -> object:
+        """Tolerate older SAGE nodes that encoded an empty slice as null."""
+        return [] if value is None else value
+
 
 class PipeResultResponse(BaseModel):
     status: str
     journal_id: str | None = None
+    journaled: bool = False
 
 
 # --- Validator Models ---

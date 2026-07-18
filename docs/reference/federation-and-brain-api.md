@@ -1,10 +1,10 @@
-<!-- Verified against SAGE v11.9.2 code (2026-07-17). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.10.0 code (2026-07-19). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
 v11 adds two independent HTTP surfaces. v11.6 can carry the same mTLS HTTP protocol over direct HTTPS or libp2p, including NAT traversal and Circuit Relay v2 fallback. The dashboard JOIN wizard offers Same LAN and Internet setup: Internet enrollment carries bounded libp2p routes in the QR, while two v11.6 nodes paired on a LAN exchange and persist roaming routes over their authenticated agreement after signing. Older peers remain compatible with the legacy LAN enrollment. The relay is outside the trust boundary and sees only encrypted traffic.
 
-1. **Cross-network federation** - a directional read/copy exchange between two independent SAGE chains, plus a guided TOTP JOIN ceremony that establishes node trust. Mutable per-domain peer RBAC is separate from that ceremony. Write is reserved in the versioned wire shape but unavailable in v11.9. This spans three listeners: a dedicated peer-facing mTLS listener (`/fed/v1/*`), the node operator's REST control surface (`/v1/federation/*`), and a cookie-authed dashboard proxy (`/v1/dashboard/federation/*`).
+1. **Cross-network federation** - a directional read/copy exchange between two independent SAGE chains, plus a guided TOTP JOIN ceremony that establishes node trust. Mutable per-domain peer RBAC is separate from that ceremony. Write is reserved in the versioned wire shape but unavailable in v11.9/v11.10. The existing agent pipeline can also carry explicitly accepted agent-to-agent work over that trust edge; it remains off-consensus and is not remote memory Write. This spans three listeners: a dedicated peer-facing mTLS listener (`/fed/v1/*`), the node operator's REST control surface (`/v1/federation/*`), and a cookie-authed dashboard proxy (`/v1/dashboard/federation/*`).
 2. **The brain as a tool** - the memory "train of thought" endpoint (`GET /v1/dashboard/memory/{id}/related`) that powers the MRI click-to-explore board.
 
 ### The trust / consensus boundary (read this first)
@@ -50,7 +50,8 @@ active. A request containing `write:true` is rejected; it is not silently
 converted into an ordinary grant (`web/federation_permissions.go:223-258`).
 
 **Pause sharing** is a local, reversible kill switch for that complete
-directional snapshot. It immediately makes this node's Read and every Copy lane
+directional snapshot. It immediately makes this node's Read, every Copy lane,
+and agent work-request route
 (direct, group-native, and relayed) evaluate as deny-all while preserving the
 JOIN trust, group membership, and saved domain choices. The operator may edit
 the dormant choices while paused; Resume activates the latest saved snapshot
@@ -82,13 +83,30 @@ as deny-all instead of taking that fallback (`internal/store/peer_rbac_policy.go
 
 ## 1. The federation mTLS listener - `/fed/v1/*` (peer-facing)
 
-A **separate port and router** from the local API. Started from `cmd/sage-gui/node.go:770-798` on `cfg.Federation.ListenAddr` (default `0.0.0.0:8444`) with `TLS 1.3` and `ClientAuth = tls.RequireAnyClientCert` (`internal/federation/trust.go:264-275`) - the local REST/TLS listeners keep `NoClientCert` semantics untouched. The router is built in `internal/federation/server.go:48-70`.
+A **separate port and router** from the local API. It listens on the effective
+`cfg.Federation.ListenAddr` (default `0.0.0.0:8444`) with `TLS 1.3` and
+`ClientAuth = tls.RequireAnyClientCert`; the local REST/TLS listeners keep
+`NoClientCert` semantics untouched (`cmd/sage-gui/node.go`; `internal/federation/trust.go`).
+The dashboard receives that same effective bind address and uses its exact port
+when generating JOIN endpoints. Explicit host binds are advertised exactly;
+only wildcard binds expand to detected LAN addresses (`web/federation_join.go`).
+Port `0` is rejected at startup because an ephemeral kernel-selected port cannot
+be truthfully embedded in a code before the listener binds.
+JOIN endpoints themselves must be complete literal `https://host:port` values
+with an explicit numeric port from 1 through 65535 (including explicit `:443`);
+IPv6 hosts must be bracketed. A dangling colon, implicit/default port, userinfo,
+path, query, or fragment fails validation before QR generation or camera
+scanning becomes actionable (`internal/federation/join_routes.go`;
+`web/static/js/app.js`).
+This matters cryptographically because both endpoints are frozen into the
+two-party enrollment attestation. The peer router is built in
+`internal/federation/server.go`.
 
 ### Two middleware groups on one listener
 
 | Group | Routes | Middleware | Why |
 |---|---|---|---|
-| Established peers | `status`, `query`, reserved `write`, `receipt`, `connection/revoke-notice`, `p2p/routes`, `sync/*` | `peerAuth` (`internal/federation/server.go:74-220`) | Requires an ACTIVE cross_fed agreement; v11.9 Write then returns `501` |
+| Established peers | `status`, `query`, reserved `write`, `receipt`, `connection/revoke-notice`, `p2p/routes`, `sync/*`, `pipe/event` | `peerAuth` (`internal/federation/server.go:74-220`) | Requires an ACTIVE cross_fed agreement; reserved Write returns `501` |
 | Pre-agreement JOIN | `join/ca`, `join/request`, `join/status`, `join/confirm`, `join/abort` | `joinAuth` (`internal/federation/join_routes.go`) | No agreement exists yet during a join |
 
 ### `peerAuth` - the established-peer authenticator (`internal/federation/server.go:74-220`)
@@ -125,9 +143,42 @@ Authenticated reachability / identity and permission preflight (`handleStatus`,
 |---|---|---|
 | `chain_id` | string | the serving node's own chain id |
 | `time` | int64 | serving node's unix time |
-| `capabilities` | []string | optional features. v11.9 may advertise `sync`; it never advertises reserved `write-v1` (`internal/federation/server.go:291-315`). |
+| `capabilities` | []string | optional features. A SQLite-backed v11.10 node advertises `sync` and `federated-pipeline-v1`; it never advertises reserved `write-v1` (`internal/federation/server.go:414-427`). |
 | `peer_rbac_grant` | object, optional | the serving node's current `{policy_version, paused, domains:[{domain,read,write,copy}]}` snapshot, disclosed only to the exact bound peer; present with zero rows means deny-all. While paused, current peers see `paused:true` and an empty domain list; the empty list also keeps older peers fail-closed. The versioned `write` member is always false in v11.9 (`internal/federation/peer_rbac.go:313-330`). |
+| `pipe_contacts` | object, optional | Finite peer-scoped projection of effective owners for shared Read/Copy domains: exact `agreement_id`, content-addressed `revision`, pause state, and contacts with exact `agent@chain`, friendly handle, source domains, availability, and default-off `accepting`. Ownerless/open-shared domains expose no guessed contact. The exact frozen peer alone receives this snapshot (`internal/federation/pipe_contacts.go:31-198`). |
 | `sharing_grant` | object, optional | legacy compatibility envelope (`allowed_domains`, `max_clearance`) |
+
+### `POST /fed/v1/pipe/event`
+
+Authenticated transport for the existing agent pipeline. v1 accepts only
+`send` and `result`; other internal outbox labels are reserved and rejected on
+the wire (`internal/federation/server.go:67`,
+`internal/federation/pipe_transport.go:278-364`).
+
+The outer `peerAuth` proof binds the exact active chain/operator/CA/epoch and
+agreement. The nested Ed25519 agent proof is the original nonce-bound local
+REST request and signs the exact source chain, destination chain, recipient,
+content, TTL, and—for results—the stable source event. The receiver requires
+those signed values to match the authenticated envelope, so a node cannot
+reroute a friendly alias, relabel another source chain's proof, extend its TTL,
+or substitute the agent (`api/rest/pipe_handler.go:132-321`,
+`internal/federation/pipe_transport.go:72-169`, `:371-463`).
+
+Admission then re-derives the current effective owner and exact
+agreement/policy/contact revision under policy, ownership, and agent-contact
+read leases. It requires the receiver's per-contact work-request switch to be
+on. Imported work gets a fresh local pipe ID and appears through ordinary
+`sage_turn`/`sage_inbox`; only the stable proof-derived event ID crosses the
+wire. Delivery is at-least-once with durable idempotence and equivocation
+rejection. Replay tombstones survive revoke/re-pair cleanup
+(`internal/store/pipeline_transport.go:191-326`,
+`internal/store/sync_tables.go:496-531`).
+
+The whole inner proof plus intent/payload/result use the local vault-backed
+storage path. Foreign completion creates no memory journal, and the result is
+atomically paired with its durable return outbox event before the peer is
+acknowledged (`internal/store/pipeline_transport.go:126-189`, `:256-326`;
+`api/rest/pipe_handler.go:538-640`).
 
 ### `POST /fed/v1/query`
 
@@ -229,17 +280,31 @@ Accepts a peer's Mode-2 `CommitReceipt` push and anchors it via `TxTypeCoCommitA
 but NOT an active agreement; it rate-limits on the direct TCP peer (never
 `X-Forwarded-For`), caps the body at 64 KB (`joinBodyCap`), and threads the
 client-cert leaf SPKI into context for per-session binding. Nothing here is on
-the consensus path.
+the consensus path. One source receives at most 20 JOIN mutations per minute;
+ordinary request/abort traffic can consume only 16 of those slots, reserving
+four for final confirmation/recovery. Read polling has an independent budget,
+and a limited mutation receives `Retry-After: 60`. This keeps an authenticated
+ACTIVE confirmation replay reachable without increasing the total mutation
+cap (`internal/federation/joinsession.go`; `internal/federation/join_routes.go`).
+
+Final confirmation may contain two sequential consensus waits: the guest
+commits its local tx-33 and the host then commits its tx-33. The guest-to-host
+peer deadline covers one configured broadcast timeout plus headroom, while the
+dashboard/REST listener budget covers both commits plus headroom. These budgets
+derive from `SAGE_TX_COMMIT_TIMEOUT_MS`, so an operator who raises the consensus
+timeout does not silently recreate a shorter HTTP deadline
+(`internal/federation/broadcast.go`; `cmd/sage-gui/node.go`;
+`web/federation_join.go`).
 
 | Method + path | Handler | Purpose |
 |---|---|---|
 | `GET /fed/v1/join/ca?session_id=…` | `handleJoinCA` (`join_routes.go:237-252`) | Serves the host's own CA PEM to a scanning guest (guest authenticates it by the scanned pin, not the transport). Returns `{chain_id, ca_pem}` (`JoinCAResp`). `404` if no live session. |
-| `POST /fed/v1/join/request` | `handleJoinRequest` (`join_routes.go:254-370`) | Guest -> host. Rejects non-trust-only scope, binds the guest to the session, asserts the presented guest CA SPKI equals the scanned anchor pin, verifies the TLS client cert chains to that CA, and stages (does not commit) the guest CA. |
+| `POST /fed/v1/join/request` | `handleJoinRequest` (`join_routes.go`) | Guest -> host. Rejects non-trust-only scope, exact host/guest endpoint drift from either scanned card, binds the guest to the session, asserts the presented guest CA SPKI equals the scanned anchor pin, verifies the TLS client cert chains to that CA, and stages (does not commit) the guest CA. |
 | `GET /fed/v1/join/status?session_id=…` | `handleJoinStatus` (`join_routes.go:370-406`) | Guest polls state flags; once the host approves, also returns the fixed compatibility scope. Only the bound client cert may read. |
 | `POST /fed/v1/join/abort` | `handleJoinAbort` (`join_routes.go`) | A bound guest propagates Stop to the host. The exact bound client-cert SPKI is required; active connections must use permanent revoke instead. |
-| `POST /fed/v1/join/confirm` | `handleJoinConfirm` (`join_routes.go:406-440`) | Guest -> host approval #2. Verifies the guest's signatures over the frozen attestation E, then the host broadcasts its tx-33, commits the staged CA + seed, marks ACTIVE. |
+| `POST /fed/v1/join/confirm` | `handleJoinConfirm` (`join_routes.go`) | Guest -> host approval #2. Verifies the guest's signatures over the frozen attestation E, then the host broadcasts its tx-33, commits the staged CA + seed, and marks ACTIVE. An identical confirm from the same bound certificate replays the stored activation result after a lost HTTP response without a second broadcast; changed certificates/signatures still fail. |
 
-Internet enrollment adds `x_sage_transport=p2p`, protocol, peer ID, and up to four complete peer multiaddrs to the otherwise compatible TOTP URI. Parsing is all-or-nothing: the peer ID must match every terminal `/p2p/<id>`, at least one route must contain `/p2p-circuit`, and malformed or partial P2P metadata is rejected. P2P route and peer identity digests are included in the frozen attestation E, so route substitution makes the signed confirmation fail. The spoken codes separately bind the seed, CA pins, session nonces, and step. Temporary pre-agreement stream admission is bounded by session and peer and becomes a durable allowlist entry only after the agreement commits.
+Internet enrollment adds `x_sage_transport=p2p`, protocol, peer ID, and up to four complete peer multiaddrs to the otherwise compatible TOTP URI. Parsing is all-or-nothing: the peer ID must match every terminal `/p2p/<id>`, at least one route must contain `/p2p-circuit`, and malformed or partial P2P metadata is rejected. P2P route and peer identity digests are included in the frozen attestation E, so route substitution makes the signed confirmation fail. The spoken codes separately bind the seed, CA pins, session nonces, and step. Temporary pre-agreement stream admission is bounded by session and peer and becomes a durable allowlist entry only after the agreement commits. When authoritative LAN discovery is empty, Internet setup uses a reserved loopback transcript endpoint while every ceremony call travels over the attested P2P routes. Established-peer dialing recognizes that exact value as P2P-only and never attempts it as a direct TCP fallback; a missing route is classified as offline so exact-address work may remain queued without sending bytes (`internal/federation/join_routes.go`; `internal/federation/client.go`).
 
 ### `POST /fed/v1/p2p/routes` (established peers)
 
@@ -271,12 +336,18 @@ whether the live peer was notified and retains a local `revoked_locally` /
 **`JoinRequestWire`** (guest -> host, `internal/federation/join_routes.go:105-119`):
 `session_id`, `guest_chain`, `guest_agent_id` (hex ed25519), `guest_nonce`
 (hex 16B), `guest_pin` (hex 32B SPKI = scanned anchor), `guest_ca_pem`,
-`guest_endpoint`, and the compatibility `scope` shape
+`guest_endpoint`, optional `expected_host_endpoint`, and the compatibility `scope` shape
 (`{max_clearance, allowed_domains, mode, direction}`). No secret seed is carried
 - the seed rode the QR; the nonce is freshness-only. The handler accepts only
 the fixed trust-only `{4, [], "exchange", "both"}` values
 (`internal/federation/join_routes.go:75-91`, `257-280`); do not interpret these
 retained fields as mutable peer-RBAC policy.
+The guest freezes its endpoint when it generates the return card and uses that
+same value for request and confirmation. The host requires it to equal the
+scanned return card. New guests send the host endpoint they scanned so a new
+host rejects a rewritten code before staging; every guest also verifies the
+anchored host's response echo. Endpoint drift therefore fails before either
+tx-33 rather than creating a one-sided agreement.
 
 **`JoinRequestResp`** (`join_routes.go:121-129`): `host_chain`, `host_agent_id`, `host_nonce` (hex 16B), `confirm_step`, `host_pin` (echo), `host_endpoint`.
 
@@ -286,6 +357,8 @@ retained fields as mutable peer-RBAC policy.
 (hex ed25519 over E), `guest_ack_sig` (hex ed25519 over E), and the signed
 pairwise group invite proof. **`JoinConfirmResp`** (`join_routes.go:152-159`):
 `status`, `host_chain`, `tx_hash`, plus optional sync-group bootstrap fields.
+ACTIVE sessions retain the original activation hash for their bounded cleanup
+grace so an authenticated identical confirmation can recover a lost response.
 
 ---
 
@@ -362,6 +435,11 @@ authorization belongs to the post-JOIN permission endpoints.
 | `POST /v1/federation/join/guest/confirm` | `handleJoinGuestConfirm` (`:212`) | Approval #2: broadcast guest tx-33, tell host to activate |
 
 (All handlers in `api/rest/federation_join_handler.go`.) Bodies: `HostCreateBody{endpoint}`; `HostScanReturnBody{session_id, return_uri}`; `HostApproveBody{typed_code, max_clearance, allowed_domains, mode, direction}`; `GuestScanBody{uri, endpoint}`; `GuestRequestBody{session_id, endpoint, max_clearance, allowed_domains, mode, direction}`; `GuestConfirmBody{session_id, endpoint, host_scope{…}}`. Guest scan/request/confirm return the Manager result structs (`GuestScanResult`, `GuestRequestResult` with `code_g`/`code_h`/`confirm_step`, and `{session_id, status:"active", tx_hash}`).
+All caller-supplied JOIN endpoints use the complete explicit-port validation
+described above. Repeating the guest's identical final confirmation returns the
+original activation hash during the bounded draft lifetime instead of
+broadcasting another agreement; CEREBRUM also synchronously latches the first
+submission so same-tick clicks share one request.
 
 ---
 
@@ -385,6 +463,8 @@ Every route 501s when the transport is not wired (`fedReady`,
 | `PUT /v1/dashboard/federation/connections/{chain_id}/permissions` | `handleFedPermissionsPut` (`web/federation_permissions.go:254-402`) | Replace this node's complete existing-domain Read/Copy snapshot for the frozen peer. A true `write` field is rejected. |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/pause` | `handleFedPause` (`web/federation_permissions.go:230-270`) | Set `{"paused":true|false}` for this node's directional grant without deleting trust or saved domains. |
 | `GET/PUT /v1/dashboard/federation/connections/{chain_id}/sync` | `handleFedSyncGet/Set` (`web/federation_join.go:344-579`) | Read or change directional copy lanes; current UI changes only the receiver's `subscribe_domains` choice. |
+| `GET /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsGet` (`web/federation_pipe_contacts.go:23-61`) | Return this node's effective-owner contacts and the peer's authenticated read-only contact snapshot. |
+| `PUT /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsPut` (`web/federation_pipe_contacts.go:66-107`) | Toggle one exact local owner's default-off inbound work acceptance using its current contact ID. |
 | `POST /v1/dashboard/federation/connections/{chain_id}/revoke` | `handleFedRevoke` (`web/federation_join.go`) | Commit local tx-34, best-effort notify the peer with the retained exact old credentials, purge locally, and return notification status. |
 | `GET /v1/dashboard/federation/connections/{chain_id}/status` | `handleFedPeerStatus` (`web/federation_join.go:778`) | Peer reachability preflight |
 | `POST /v1/dashboard/federation/join/host/create` | `handleFedHostCreate` (`web/federation_join.go:795`) | Host H1; body includes `transport` (`lan` or `internet`) |
@@ -415,6 +495,16 @@ this SAGE” and “scan their SAGE back” side by side; it stacks into the pag
 real vertical scroll container on narrow/short viewports and bounds the camera
 preview so it cannot be cut off (`web/static/js/app.js:11928-11950`;
 `web/static/css/sage.css:4597-4604`, `4726-4753`, `4870-4892`).
+
+The same expanded detail contains **Agent work requests**, not a chat composer.
+For local surfaced owners, the operator independently enables inbound work from
+that peer; every new/changed contact starts Off. For remote owners, CEREBRUM
+shows the friendly handle but makes exact `agent@chain` the primary copyable
+address. Saving a changed domain snapshot warns that enabled contact choices
+will reset, then refreshes both projections authoritatively. Pause preserves
+the domain and contact choices while suspending delivery
+(`web/static/js/app.js:12181-12558`,
+`web/federation_pipe_contacts.go:20-107`).
 
 The permissions `PUT` body is
 `{"permissions":[{"domain":"tii.work","read":true,"write":false,"copy":true}]}`.

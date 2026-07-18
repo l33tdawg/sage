@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -15,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/auth"
@@ -41,6 +43,31 @@ func receiptDeliveryTimeout() time.Duration {
 // (our chain → their chain) pair.
 
 const maxFedResponseBytes = 16 << 20
+
+// ErrPeerOffline marks only ordinary dial/name-resolution failures for which
+// an exact, previously authenticated routing snapshot may be used to enqueue
+// work locally. TLS, certificate, HTTP, identity, and decode failures never
+// wrap this sentinel and therefore never permit cached authorization fallback.
+var ErrPeerOffline = errors.New("federation peer is offline")
+
+func isPeerOfflineDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrPeerOffline) {
+		return true
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" && opErr.Timeout() {
+		return true
+	}
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENETUNREACH) ||
+		errors.Is(err, syscall.EHOSTUNREACH)
+}
 
 // doPeerRequest performs one signed mTLS request against an agreement's
 // endpoint. Fail-closed by construction: no agreement, bad endpoint scheme,
@@ -100,12 +127,16 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 	req.Header.Set(HeaderSignature, hex.EncodeToString(sig))
 
 	transport := &http.Transport{TLSClientConfig: tlsCfg}
+	p2pOnly := agreement.Endpoint == joinP2POnlyEndpoint
 	if peerDial := m.peerDialFunc(); peerDial != nil {
 		directDialer := &net.Dialer{}
 		transport.DialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
 			conn, handled, dialErr := peerDial(dialCtx, agreement.RemoteChainID)
 			if handled {
 				if dialErr != nil {
+					if p2pOnly {
+						return nil, fmt.Errorf("%w: peer %s p2p route unavailable: %v", ErrPeerOffline, agreement.RemoteChainID, dialErr)
+					}
 					// Connectivity failure may fall back to the agreement's direct
 					// HTTPS endpoint. The same pinned-CA TLS config is applied below;
 					// TLS/authentication failures after a successful p2p dial do not
@@ -114,11 +145,21 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 					return directDialer.DialContext(dialCtx, network, address)
 				}
 				if conn == nil {
+					if p2pOnly {
+						return nil, fmt.Errorf("%w: peer %s p2p dial returned no connection", ErrPeerOffline, agreement.RemoteChainID)
+					}
 					return nil, fmt.Errorf("peer %s p2p dial returned no connection", agreement.RemoteChainID)
 				}
 				return conn, nil
 			}
+			if p2pOnly {
+				return nil, fmt.Errorf("%w: peer %s has no configured p2p route", ErrPeerOffline, agreement.RemoteChainID)
+			}
 			return directDialer.DialContext(dialCtx, network, address)
+		}
+	} else if p2pOnly {
+		transport.DialContext = func(context.Context, string, string) (net.Conn, error) {
+			return nil, fmt.Errorf("%w: peer %s has no p2p dialer", ErrPeerOffline, agreement.RemoteChainID)
 		}
 	}
 	// Deliberately no client-wide Timeout or shorter ResponseHeaderTimeout: the
@@ -129,6 +170,9 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
+		if isPeerOfflineDialError(err) {
+			return nil, 0, fmt.Errorf("%w: peer %s: %v", ErrPeerOffline, agreement.RemoteChainID, err)
+		}
 		return nil, 0, fmt.Errorf("peer %s unreachable: %w", agreement.RemoteChainID, err)
 	}
 	defer resp.Body.Close()
@@ -150,7 +194,7 @@ func (m *Manager) QueryPeer(ctx context.Context, remoteChainID string, qr *Query
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("peer %s returned %d: %s", remoteChainID, status, truncate(body, 200))
+		return nil, fmt.Errorf("peer %s returned %d: %s", agreement.RemoteChainID, status, truncate(body, 200))
 	}
 	var out QueryResponse
 	if err := json.Unmarshal(body, &out); err != nil {
@@ -185,19 +229,48 @@ func (m *Manager) PeerStatus(ctx context.Context, remoteChainID string) (*Status
 	if err != nil {
 		return nil, err
 	}
+	var control *store.SyncControl
+	if ss := m.syncStore(); ss != nil {
+		if current, controlErr := ss.GetSyncControl(ctx, remoteChainID); controlErr == nil {
+			control = current
+		}
+	}
+	out, err := m.fetchPeerStatus(ctx, agreement)
+	if err != nil {
+		return nil, err
+	}
+	// Preserve the last authenticated contact projection for exact-address
+	// offline queueing. This is best-effort for general status callers; the
+	// target resolver performs the same refresh as a required operation using
+	// its own immutable request-time binding.
+	if control != nil {
+		if cacheErr := m.refreshRemotePipeContactCache(ctx, agreement, control, out); cacheErr != nil {
+			m.logger.Debug().Err(cacheErr).Str("peer", remoteChainID).Msg("could not refresh authenticated remote pipe contact cache")
+		}
+	}
+	return out, nil
+}
+
+// fetchPeerStatus performs only the authenticated network exchange. Cache
+// callers supply their request-time agreement/control binding separately so a
+// delayed response can never be relabeled with post-response policy state.
+func (m *Manager) fetchPeerStatus(ctx context.Context, agreement *store.CrossFedRecord) (*StatusResponse, error) {
+	if agreement == nil {
+		return nil, fmt.Errorf("peer status agreement is unavailable")
+	}
 	body, status, err := m.doPeerRequest(ctx, agreement, http.MethodGet, "/fed/v1/status", nil)
 	if err != nil {
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("peer %s returned %d: %s", remoteChainID, status, truncate(body, 200))
+		return nil, fmt.Errorf("peer %s returned %d: %s", agreement.RemoteChainID, status, truncate(body, 200))
 	}
 	var out StatusResponse
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("decode peer response: %w", err)
 	}
-	if out.ChainID != remoteChainID {
-		return nil, fmt.Errorf("peer identifies as %q, agreement expects %q", out.ChainID, remoteChainID)
+	if out.ChainID != agreement.RemoteChainID {
+		return nil, fmt.Errorf("peer identifies as %q, agreement expects %q", out.ChainID, agreement.RemoteChainID)
 	}
 	return &out, nil
 }

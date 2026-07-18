@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,7 +46,7 @@ func TestJoinStopCannotOverwriteConfirming(t *testing.T) {
 	if err != nil || view.State != JoinConfirming {
 		t.Fatalf("state after rejected Stops = %q err=%v, want %s", view.State, err, JoinConfirming)
 	}
-	if activeErr := joins.MarkActive(sessionID); activeErr != nil {
+	if activeErr := joins.MarkActive(sessionID, "confirmed-tx"); activeErr != nil {
 		t.Fatalf("MarkActive: %v", activeErr)
 	}
 	view, err = node.mgr.HostSessionStatus(sessionID)
@@ -245,5 +246,180 @@ func TestHostConfirmAgreementLeaseSpansLocalActivation(t *testing.T) {
 	}
 	if node.mgr.seedEstablished("guest-yyyyy") {
 		t.Fatal("revoke did not purge the JOIN seed committed by the preceding generation")
+	}
+}
+
+func prepareApprovedGuestConfirm(t *testing.T, host, guest *ceremonyNode, hostEndpoint, guestEndpoint string) string {
+	t.Helper()
+	ctx := context.Background()
+	created, err := host.mgr.HostCreate(hostEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanned, err := guest.mgr.GuestScan(ctx, created.OTPAuthURI, guestEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.mgr.HostScanReturn(created.SessionID, scanned.ReturnURI); err != nil {
+		t.Fatal(err)
+	}
+	request, err := guest.mgr.GuestRequest(ctx, created.SessionID, guestEndpoint, trustOnlyJoinScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := host.mgr.HostApprove(created.SessionID, request.CodeG, trustOnlyJoinScope); err != nil {
+		t.Fatal(err)
+	}
+	return created.SessionID
+}
+
+func waitJoinTestSignal(t *testing.T, ch <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", label)
+	}
+}
+
+func TestGuestConfirmQueuesRevokeUntilPeerActivation(t *testing.T) {
+	host := newCeremonyNode(t, "host-order01")
+	guest := newCeremonyNode(t, "guest-order2")
+	hostTLS, err := host.mgr.ServerTLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	confirmEntered := make(chan struct{})
+	confirmRelease := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseConfirm := func() { releaseOnce.Do(func() { close(confirmRelease) }) }
+	defer releaseConfirm()
+	hostRouter := host.mgr.Router()
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fed/v1/join/confirm" {
+			enterOnce.Do(func() { close(confirmEntered) })
+			<-confirmRelease
+		}
+		hostRouter.ServeHTTP(w, r)
+	}))
+	server.TLS = hostTLS
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	guestEndpoint := "https://127.0.0.1:19444"
+	sessionID := prepareApprovedGuestConfirm(t, host, guest, server.URL, guestEndpoint)
+	type confirmResult struct {
+		tx  string
+		err error
+	}
+	confirmDone := make(chan confirmResult, 1)
+	go func() {
+		txHash, confirmErr := guest.mgr.GuestConfirm(context.Background(), sessionID, guestEndpoint, trustOnlyJoinScope)
+		confirmDone <- confirmResult{tx: txHash, err: confirmErr}
+	}()
+	waitJoinTestSignal(t, confirmEntered, "blocked peer confirmation")
+
+	if guest.mgr.crossFedStatus(host.mgr.localChainID) != "active" {
+		t.Fatal("guest did not commit its local agreement before contacting the host")
+	}
+	leaseHeld := !guest.mgr.agreementMutationMu.TryLock()
+	if !leaseHeld {
+		guest.mgr.agreementMutationMu.Unlock()
+		t.Fatal("guest confirmation released the agreement lease before peer activation")
+	}
+
+	type revokeResult struct {
+		result *RevokeAgreementResult
+		err    error
+	}
+	revokeStarted := make(chan struct{})
+	revokeDone := make(chan revokeResult, 1)
+	go func() {
+		close(revokeStarted)
+		result, revokeErr := guest.mgr.RevokeAgreementNotifying(host.mgr.localChainID)
+		revokeDone <- revokeResult{result: result, err: revokeErr}
+	}()
+	waitJoinTestSignal(t, revokeStarted, "queued revoke")
+	releaseConfirm()
+
+	var confirmed confirmResult
+	select {
+	case confirmed = <-confirmDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for guest confirmation")
+	}
+	if confirmed.err != nil || confirmed.tx == "" {
+		t.Fatalf("GuestConfirm tx=%q err=%v", confirmed.tx, confirmed.err)
+	}
+	var revoked revokeResult
+	select {
+	case revoked = <-revokeDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for queued revoke")
+	}
+	if revoked.err != nil || revoked.result == nil || !revoked.result.PeerNotified {
+		t.Fatalf("queued revoke result=%+v err=%v", revoked.result, revoked.err)
+	}
+	if guest.mgr.crossFedStatus(host.mgr.localChainID) != "revoked" ||
+		host.mgr.crossFedStatus(guest.mgr.localChainID) != "revoked" {
+		t.Fatalf("queued revoke did not run last: guest=%q host=%q",
+			guest.mgr.crossFedStatus(host.mgr.localChainID), host.mgr.crossFedStatus(guest.mgr.localChainID))
+	}
+	if _, ok := guest.mgr.getGuestDraft(sessionID); ok {
+		t.Fatal("queued revoke retained the completed guest ceremony receipt")
+	}
+}
+
+func TestGuestConfirmRetryRejectedAfterLocalRevoke(t *testing.T) {
+	host := newCeremonyNode(t, "host-retry01")
+	guest := newCeremonyNode(t, "guest-retry2")
+	hostTLS, err := host.mgr.ServerTLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var confirmCalls atomic.Int32
+	hostRouter := host.mgr.Router()
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/fed/v1/join/confirm" && confirmCalls.Add(1) == 1 {
+			http.Error(w, "forced confirmation outage", http.StatusServiceUnavailable)
+			return
+		}
+		hostRouter.ServeHTTP(w, r)
+	}))
+	server.TLS = hostTLS
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	guestEndpoint := "https://127.0.0.1:20444"
+	sessionID := prepareApprovedGuestConfirm(t, host, guest, server.URL, guestEndpoint)
+	firstTx, firstErr := guest.mgr.GuestConfirm(context.Background(), sessionID, guestEndpoint, trustOnlyJoinScope)
+	if firstErr == nil || firstTx == "" {
+		t.Fatalf("first GuestConfirm tx=%q err=%v, want retryable one-sided failure", firstTx, firstErr)
+	}
+	if guest.mgr.crossFedStatus(host.mgr.localChainID) != "active" || host.mgr.crossFedStatus(guest.mgr.localChainID) == "active" {
+		t.Fatalf("forced outage did not leave the expected one-sided window: guest=%q host=%q",
+			guest.mgr.crossFedStatus(host.mgr.localChainID), host.mgr.crossFedStatus(guest.mgr.localChainID))
+	}
+
+	revoked, revokeErr := guest.mgr.RevokeAgreementNotifying(host.mgr.localChainID)
+	if revokeErr != nil || revoked == nil || revoked.TxHash == "" {
+		t.Fatalf("local revoke result=%+v err=%v", revoked, revokeErr)
+	}
+	if _, ok := guest.mgr.getGuestDraft(sessionID); ok {
+		t.Fatal("local revoke retained a retryable seed-bearing guest draft")
+	}
+
+	retryTx, retryErr := guest.mgr.GuestConfirm(context.Background(), sessionID, guestEndpoint, trustOnlyJoinScope)
+	if retryErr == nil || retryTx != "" {
+		t.Fatalf("post-revoke GuestConfirm tx=%q err=%v, want terminal rejection", retryTx, retryErr)
+	}
+	if got := confirmCalls.Load(); got != 1 {
+		t.Fatalf("post-revoke retry reached the host %d times, want only the original failed call", got)
+	}
+	if guest.mgr.crossFedStatus(host.mgr.localChainID) != "revoked" || host.mgr.crossFedStatus(guest.mgr.localChainID) == "active" {
+		t.Fatalf("post-revoke retry changed trust state: guest=%q host=%q",
+			guest.mgr.crossFedStatus(host.mgr.localChainID), host.mgr.crossFedStatus(guest.mgr.localChainID))
 	}
 }

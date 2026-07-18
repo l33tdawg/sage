@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -262,6 +263,105 @@ func TestDirectionalPublishRequiresPeerRBACCopy(t *testing.T) {
 	require.ErrorContains(t, err, "not granted", "v3 must never promote legacy tx-33 scope into Copy")
 	_, err = m.SetDirectionalSyncPolicy(ctx, "chain-peer", nil, []string{"legacy"})
 	require.NoError(t, err, "a recipient may subscribe without granting the peer Copy in the other direction")
+}
+
+func TestReconcileDirectionalPublishNarrowsStaleLaneAndPreservesSubscribe(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-peer", 2, "legacy")
+	operatorID := hex.EncodeToString(m.agentPub)
+	require.NoError(t, bs.RegisterAgent(operatorID, "operator", "admin", "", "test", "", 1))
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	agreement, err := m.ActiveAgreement("chain-peer")
+	require.NoError(t, err)
+	require.NoError(t, ss.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-peer", Role: "host", ControllerChainID: m.localChainID,
+		ControllerAgentID: operatorID, PeerAgentID: hex.EncodeToString(peerPub),
+		PolicyEpoch: "epoch-reconcile", RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey),
+	}))
+	require.NoError(t, ss.ActivateSyncControl(ctx, "chain-peer", "epoch-reconcile"))
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{
+		{Domain: "allowed", Read: true, Copy: true},
+	})
+	require.NoError(t, err)
+	m.syncPolicyPushFn = func(_ context.Context, _ string, req *SyncPolicyRequest) (*SyncPolicyResponse, error) {
+		return &SyncPolicyResponse{Status: "applied", Revision: req.Revision}, nil
+	}
+
+	control, err := ss.GetSyncControl(ctx, "chain-peer")
+	require.NoError(t, err)
+	publish := []string{"allowed.child", "stale"}
+	subscribe := []string{"peer.offered"}
+	revision := control.Revision + 1
+	hash := directionalSyncPolicyHash(control.PolicyEpoch, m.localChainID, revision, publish, subscribe)
+	_, err = ss.ApplyLocalDirectionalSyncPolicy(ctx, "chain-peer", control.PolicyEpoch,
+		SyncPolicyVersionPeerRBAC, revision, hash, publish, subscribe)
+	require.NoError(t, err)
+
+	result, err := m.ReconcileDirectionalPublishToPeerRBAC(ctx, "chain-peer")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"allowed.child"}, result.PublishDomains)
+	assert.Equal(t, subscribe, result.SubscribeDomains)
+	storedPublish, err := ss.GetDirectionalSyncDomains(ctx, "chain-peer", store.SyncDirectionLocalPublish)
+	require.NoError(t, err)
+	storedSubscribe, err := ss.GetDirectionalSyncDomains(ctx, "chain-peer", store.SyncDirectionLocalSubscribe)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"allowed.child"}, storedPublish)
+	assert.Equal(t, subscribe, storedSubscribe)
+}
+
+func TestDirectionalPartialUpdatesPreserveConcurrentOppositeLane(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	seedDrainAgreement(t, bs, "chain-peer", 2, "legacy")
+	operatorID := hex.EncodeToString(m.agentPub)
+	require.NoError(t, bs.RegisterAgent(operatorID, "operator", "admin", "", "test", "", 1))
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	agreement, err := m.ActiveAgreement("chain-peer")
+	require.NoError(t, err)
+	require.NoError(t, ss.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-peer", Role: "host", ControllerChainID: m.localChainID,
+		ControllerAgentID: operatorID, PeerAgentID: hex.EncodeToString(peerPub),
+		PolicyEpoch: "epoch-partial", RemoteCAPin: hex.EncodeToString(agreement.PeerPubKey),
+	}))
+	require.NoError(t, ss.ActivateSyncControl(ctx, "chain-peer", "epoch-partial"))
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{
+		{Domain: "copy", Read: true, Copy: true},
+	})
+	require.NoError(t, err)
+	m.syncPolicyPushFn = func(_ context.Context, _ string, req *SyncPolicyRequest) (*SyncPolicyResponse, error) {
+		return &SyncPolicyResponse{Status: "applied", Revision: req.Revision}, nil
+	}
+
+	publish := []string{"copy.docs"}
+	subscribe := []string{"peer.notes"}
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, updateErr := m.UpdateDirectionalSyncPolicy(ctx, "chain-peer", &publish, nil)
+		errCh <- updateErr
+	}()
+	go func() {
+		defer wg.Done()
+		_, updateErr := m.UpdateDirectionalSyncPolicy(ctx, "chain-peer", nil, &subscribe)
+		errCh <- updateErr
+	}()
+	wg.Wait()
+	close(errCh)
+	for updateErr := range errCh {
+		require.NoError(t, updateErr)
+	}
+
+	storedPublish, err := ss.GetDirectionalSyncDomains(ctx, "chain-peer", store.SyncDirectionLocalPublish)
+	require.NoError(t, err)
+	storedSubscribe, err := ss.GetDirectionalSyncDomains(ctx, "chain-peer", store.SyncDirectionLocalSubscribe)
+	require.NoError(t, err)
+	assert.Equal(t, publish, storedPublish)
+	assert.Equal(t, subscribe, storedSubscribe)
 }
 
 func preparePendingPeerRBACPolicy(t *testing.T, m *Manager, ss *store.SQLiteStore, bs *store.BadgerStore, chainID string) {

@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.9.2. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
+<!-- Reconciled through SAGE v11.10.0. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
 
 # SAGE Reference — Environment Variables
 
@@ -34,7 +34,7 @@ notes which.
 | `SAGE_CMT_P2P_ADDR` | CometBFT P2P listen address. Personal mode defaults to loopback; quorum mode defaults to `tcp://0.0.0.0:26656` when unset. Generated agent bundles leave `p2p_addr` blank so this env override applies. | `tcp://127.0.0.1:26656` | sage-gui | `cmd/sage-gui/node.go:860` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowlist of origins for REST CORS. | `*` | REST | `api/rest/server.go:258-262` |
 | `SAGE_COMET_RPC` | CometBFT RPC endpoint for `sage-gui upgrade`; takes precedence over `SAGE_CMT_RPC_ADDR` for that command. | (built-in) | sage-gui | `cmd/sage-gui/upgrade.go:44` |
-| `SAGE_TX_COMMIT_TIMEOUT_MS` | Timeout (ms) for `broadcast_tx_commit`. Raise it for unusually slow consensus. | `60000` (60s) | REST, federation | `api/rest/memory_handler.go:1317`, `internal/federation/broadcast.go:14-21` |
+| `SAGE_TX_COMMIT_TIMEOUT_MS` | Timeout (ms) for `broadcast_tx_commit`. Raise it for unusually slow consensus; JOIN final-confirm peer and listener budgets derive from the same value. | `60000` (60s) | REST, federation | `api/rest/memory_handler.go`, `internal/federation/broadcast.go`, `cmd/sage-gui/node.go` |
 | `SAGE_NO_BROWSER` | If set to any non-empty value, don't auto-open a browser when the node starts. | (unset → opens browser) | sage-gui | `cmd/sage-gui/node.go:724` |
 | `SAGE_FED_RECALL_TIMEOUT_MS` | Timeout (ms) for federated recall fanout. | `4000` (4s) | REST | `api/rest/memory_handler.go:786-791` |
 | `SAGE_FED_RECEIPT_TIMEOUT_MS` | Timeout (ms) for federation receipt fetches. | `20000` (20s) | federation | `internal/federation/client.go:21-28` |
