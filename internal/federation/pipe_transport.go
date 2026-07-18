@@ -260,8 +260,8 @@ func (m *Manager) WithAuthorizedImportedPipe(ctx context.Context, msg *store.Pip
 		return err
 	}
 	if action != nil {
-		if err := action(); err != nil {
-			return err
+		if actionErr := action(); actionErr != nil {
+			return actionErr
 		}
 		// Re-derive while both leases are still held. This catches non-owner
 		// contact inputs (agent availability, agreement and acceptance) changing
@@ -393,8 +393,8 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 		return "", false, fmt.Errorf("send proof does not authorize the pipe endpoint: %w", err)
 	}
 	var signed signedPipeSendRequest
-	if err := decodeStrictPipeJSON(body, &signed); err != nil {
-		return "", false, fmt.Errorf("decode signed pipe send: %w", err)
+	if decodeErr := decodeStrictPipeJSON(body, &signed); decodeErr != nil {
+		return "", false, fmt.Errorf("decode signed pipe send: %w", decodeErr)
 	}
 	if signed.Payload != event.Payload || signed.Intent != event.Intent || !signedTargetMatchesContact(signed, event, *contact) {
 		return "", false, fmt.Errorf("signed send request does not match the pipeline event")
@@ -440,8 +440,8 @@ func (m *Manager) applyPipeResult(ctx context.Context, ss *store.SQLiteStore, pe
 		return "", false, fmt.Errorf("result proof does not authorize the pipe endpoint: %w", err)
 	}
 	var signed signedPipeResultRequest
-	if err := decodeStrictPipeJSON(body, &signed); err != nil {
-		return "", false, fmt.Errorf("decode signed pipe result: %w", err)
+	if decodeErr := decodeStrictPipeJSON(body, &signed); decodeErr != nil {
+		return "", false, fmt.Errorf("decode signed pipe result: %w", decodeErr)
 	}
 	if signed.Result != event.Result || signed.SourcePipeID != event.OriginEventID ||
 		signed.SourceChainID != event.SourceChainID {

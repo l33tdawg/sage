@@ -23,8 +23,8 @@ func TestConsensusOwnerCommitWaitsForOwnershipReaders(t *testing.T) {
 	committed := make(chan error, 1)
 	go func() { committed <- scoped.CommitConsensusTransaction() }()
 	select {
-	case err := <-committed:
-		t.Fatalf("ownership-changing consensus commit bypassed an active reader: %v", err)
+	case commitErr := <-committed:
+		t.Fatalf("ownership-changing consensus commit bypassed an active reader: %v", commitErr)
 	case <-time.After(100 * time.Millisecond):
 	}
 	unlock()
@@ -43,8 +43,8 @@ func TestSetSharedDomainWaitsForOwnershipReaders(t *testing.T) {
 	shared := make(chan error, 1)
 	go func() { shared <- base.SetSharedDomain("open.shared") }()
 	select {
-	case err := <-shared:
-		t.Fatalf("shared-domain publication bypassed an active owner reader: %v", err)
+	case shareErr := <-shared:
+		t.Fatalf("shared-domain publication bypassed an active owner reader: %v", shareErr)
 	case <-time.After(100 * time.Millisecond):
 	}
 	unlock()

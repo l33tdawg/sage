@@ -4879,29 +4879,29 @@ func (s *SQLiteStore) InsertPipeline(ctx context.Context, msg *PipelineMessage) 
 	// section above, the check + insert is atomic with respect to every writer in
 	// this process.
 	var perAgent int
-	if err := s.conn.QueryRowContext(ctx,
+	if quotaErr := s.conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM pipeline_messages WHERE from_agent = ? AND source_chain_id = ? AND status IN ('pending','claimed')`,
-		msg.FromAgent, msg.SourceChainID).Scan(&perAgent); err != nil {
-		return err
+		msg.FromAgent, msg.SourceChainID).Scan(&perAgent); quotaErr != nil {
+		return quotaErr
 	}
 	if perAgent >= MaxOpenPipesPerAgent {
 		return ErrPipeQuotaPerAgent
 	}
 	if msg.SourceChainID != "" {
 		var perPeer int
-		if err := s.conn.QueryRowContext(ctx,
+		if quotaErr := s.conn.QueryRowContext(ctx,
 			`SELECT COUNT(*) FROM pipeline_messages WHERE source_chain_id = ? AND status IN ('pending','claimed')`,
-			msg.SourceChainID).Scan(&perPeer); err != nil {
-			return err
+			msg.SourceChainID).Scan(&perPeer); quotaErr != nil {
+			return quotaErr
 		}
 		if perPeer >= MaxOpenPipesPerPeer {
 			return ErrPipeQuotaPerPeer
 		}
 	}
 	var global int
-	if err := s.conn.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM pipeline_messages WHERE status IN ('pending','claimed')`).Scan(&global); err != nil {
-		return err
+	if quotaErr := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pipeline_messages WHERE status IN ('pending','claimed')`).Scan(&global); quotaErr != nil {
+		return quotaErr
 	}
 	if global >= MaxOpenPipesGlobal {
 		return ErrPipeQuotaGlobal

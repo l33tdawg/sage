@@ -434,8 +434,8 @@ func TestJoinRejectsRewrittenHostQREndpointBeforeActivation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GuestScan rewritten reachable endpoint: %v", err)
 	}
-	if err := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); err != nil {
-		t.Fatal(err)
+	if scanErr := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); scanErr != nil {
+		t.Fatal(scanErr)
 	}
 	_, err = guest.mgr.GuestRequest(context.Background(), create.SessionID, "https://127.0.0.1:19444", trustOnlyJoinScope)
 	if err == nil || !strings.Contains(err.Error(), "host endpoint does not match") {
@@ -469,8 +469,8 @@ func TestGuestConfirmRejectsEndpointChangedAfterReturnQRThenRetriesFrozenEndpoin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); err != nil {
-		t.Fatal(err)
+	if scanErr := host.mgr.HostScanReturn(create.SessionID, scan.ReturnURI); scanErr != nil {
+		t.Fatal(scanErr)
 	}
 	codes, err := guest.mgr.GuestRequest(ctx, create.SessionID, guestEndpoint, trustOnlyJoinScope)
 	if err != nil {

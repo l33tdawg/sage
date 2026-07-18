@@ -260,8 +260,8 @@ func prepareApprovedGuestConfirm(t *testing.T, host, guest *ceremonyNode, hostEn
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := host.mgr.HostScanReturn(created.SessionID, scanned.ReturnURI); err != nil {
-		t.Fatal(err)
+	if scanErr := host.mgr.HostScanReturn(created.SessionID, scanned.ReturnURI); scanErr != nil {
+		t.Fatal(scanErr)
 	}
 	request, err := guest.mgr.GuestRequest(ctx, created.SessionID, guestEndpoint, trustOnlyJoinScope)
 	if err != nil {

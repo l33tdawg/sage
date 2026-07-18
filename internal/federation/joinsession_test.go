@@ -111,8 +111,8 @@ func TestRequestRejectsEndpointDifferentFromScannedReturnCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetExpectedGuest(js.ID, guestPin, "https://guest:19444", now); err != nil {
-		t.Fatal(err)
+	if bindErr := st.SetExpectedGuest(js.ID, guestPin, "https://guest:19444", now); bindErr != nil {
+		t.Fatal(bindErr)
 	}
 	guestPub, _, _ := ed25519.GenerateKey(rand.Reader)
 	_, err = st.Request(js.ID, now, GuestRequestInput{
@@ -150,8 +150,8 @@ func TestRequestRejectedWhileConfirmingPreservesFrozenActiveReplay(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "CONFIRMING") {
 		t.Fatalf("re-request during CONFIRMING err=%v", err)
 	}
-	if err := st.MarkActive(id, "tx-confirming-race"); err != nil {
-		t.Fatalf("MarkActive after rejected re-request: %v", err)
+	if markErr := st.MarkActive(id, "tx-confirming-race"); markErr != nil {
+		t.Fatalf("MarkActive after rejected re-request: %v", markErr)
 	}
 	replay, err := st.CheckConfirm(id, certSPKI, sig, ack, now)
 	if err != nil {

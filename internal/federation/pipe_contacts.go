@@ -366,8 +366,8 @@ func (m *Manager) SetPipeContactAcceptance(ctx context.Context, remoteChainID, l
 		return nil, ErrPipeContactChanged
 	}
 	ss := m.syncStore()
-	if err := ss.SetBoundFederatedPipeContactAcceptance(ctx, *policy, localAgentID, contactID, accepting); err != nil {
-		return nil, err
+	if acceptanceErr := ss.SetBoundFederatedPipeContactAcceptance(ctx, *policy, localAgentID, contactID, accepting); acceptanceErr != nil {
+		return nil, acceptanceErr
 	}
 
 	updated, err := m.LocalPipeContacts(ctx, remoteChainID)

@@ -533,8 +533,8 @@ func TestPipelineOutboxSendLinearizesWithPeerPurge(t *testing.T) {
 	purged := make(chan error, 1)
 	go func() { purged <- ss.PurgeSyncPeerState(ctx, "chain-peer") }()
 	select {
-	case err := <-purged:
-		t.Fatalf("peer purge returned while its old-generation payload was in flight: %v", err)
+	case purgeErr := <-purged:
+		t.Fatalf("peer purge returned while its old-generation payload was in flight: %v", purgeErr)
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(releasePush)
@@ -626,8 +626,8 @@ func TestPipelineOutboxResultLinearizesPeerAckWithDeliveredMarkBeforePurge(t *te
 	purged := make(chan error, 1)
 	go func() { purged <- ss.PurgeSyncPeerState(ctx, "chain-peer") }()
 	select {
-	case err := <-purged:
-		t.Fatalf("peer purge returned between result acceptance and durable delivery: %v", err)
+	case purgeErr := <-purged:
+		t.Fatalf("peer purge returned between result acceptance and durable delivery: %v", purgeErr)
 	case <-time.After(100 * time.Millisecond):
 	}
 	close(releasePush)

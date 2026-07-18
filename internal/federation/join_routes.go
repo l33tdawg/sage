@@ -1114,8 +1114,8 @@ func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*Gu
 	if enr.Transport == "p2p" && guestEndpoint == "" {
 		guestEndpoint = joinP2POnlyEndpoint
 	}
-	if err := validateJoinEndpoint(guestEndpoint); err != nil {
-		return nil, fmt.Errorf("invalid guest endpoint: %w", err)
+	if validationErr := validateJoinEndpoint(guestEndpoint); validationErr != nil {
+		return nil, fmt.Errorf("invalid guest endpoint: %w", validationErr)
 	}
 	if enr.Role != "host" {
 		return nil, fmt.Errorf("this is not a host connection code")

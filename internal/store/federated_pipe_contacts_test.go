@@ -36,8 +36,8 @@ func TestFederatedPipeContactAcceptanceBindsPolicyAndSurvivesPauseOnly(t *testin
 	if err != nil || len(acceptances) != 0 {
 		t.Fatalf("default acceptances=%v err=%v, want empty", acceptances, err)
 	}
-	if err := s.SetBoundFederatedPipeContactAcceptance(ctx, *stored, localAgentID, contactID, true); err != nil {
-		t.Fatal(err)
+	if acceptanceErr := s.SetBoundFederatedPipeContactAcceptance(ctx, *stored, localAgentID, contactID, true); acceptanceErr != nil {
+		t.Fatal(acceptanceErr)
 	}
 	acceptances, err = s.GetFederatedPipeContactAcceptances(ctx, *stored)
 	if err != nil || acceptances[localAgentID] != contactID {
@@ -133,16 +133,16 @@ func TestFederatedPipeRemoteContactSnapshotRequiresExactLiveBinding(t *testing.T
 		RemoteAgreementID: strings.Repeat("22", 32), ContactRevision: strings.Repeat("33", 32),
 		Snapshot: []byte(`{"version":1,"contacts":[]}`),
 	}
-	if err := s.PutFederatedPipeRemoteContactSnapshot(ctx, snapshot); err != nil {
-		t.Fatal(err)
+	if putErr := s.PutFederatedPipeRemoteContactSnapshot(ctx, snapshot); putErr != nil {
+		t.Fatal(putErr)
 	}
 	loaded, err := s.GetFederatedPipeRemoteContactSnapshot(ctx, *active, snapshot.LocalAgreementID)
 	if err != nil || loaded == nil || string(loaded.Snapshot) != string(snapshot.Snapshot) {
 		t.Fatalf("loaded snapshot=%+v err=%v", loaded, err)
 	}
 
-	if _, err := s.writeExecContext(ctx, `UPDATE sync_control SET remote_revision=remote_revision+1 WHERE remote_chain_id=?`, active.RemoteChainID); err != nil {
-		t.Fatal(err)
+	if _, updateErr := s.writeExecContext(ctx, `UPDATE sync_control SET remote_revision=remote_revision+1 WHERE remote_chain_id=?`, active.RemoteChainID); updateErr != nil {
+		t.Fatal(updateErr)
 	}
 	changed, err := s.GetSyncControl(ctx, active.RemoteChainID)
 	if err != nil {
@@ -194,13 +194,13 @@ func TestFederatedPipeRemoteContactSnapshotBoundDeletePreservesNewerPolicyBindin
 		RemoteAgreementID: strings.Repeat("22", 32), ContactRevision: strings.Repeat("33", 32),
 		Snapshot: []byte(`{"version":1,"revision":"old"}`),
 	}
-	if err := s.PutFederatedPipeRemoteContactSnapshot(ctx, oldSnapshot); err != nil {
-		t.Fatal(err)
+	if putErr := s.PutFederatedPipeRemoteContactSnapshot(ctx, oldSnapshot); putErr != nil {
+		t.Fatal(putErr)
 	}
 
-	if _, err := s.ApplyRemoteDirectionalSyncPolicy(ctx, control.RemoteChainID, control.PolicyEpoch,
-		3, 1, strings.Repeat("44", 32), nil, nil); err != nil {
-		t.Fatal(err)
+	if _, applyErr := s.ApplyRemoteDirectionalSyncPolicy(ctx, control.RemoteChainID, control.PolicyEpoch,
+		3, 1, strings.Repeat("44", 32), nil, nil); applyErr != nil {
+		t.Fatal(applyErr)
 	}
 	newControl, err := s.GetSyncControl(ctx, control.RemoteChainID)
 	if err != nil || newControl == nil {
@@ -214,12 +214,12 @@ func TestFederatedPipeRemoteContactSnapshotBoundDeletePreservesNewerPolicyBindin
 		RemoteAgreementID: strings.Repeat("55", 32), ContactRevision: strings.Repeat("66", 32),
 		Snapshot: []byte(`{"version":1,"revision":"new"}`),
 	}
-	if err := s.PutFederatedPipeRemoteContactSnapshot(ctx, newSnapshot); err != nil {
-		t.Fatal(err)
+	if putErr := s.PutFederatedPipeRemoteContactSnapshot(ctx, newSnapshot); putErr != nil {
+		t.Fatal(putErr)
 	}
 
-	if err := s.DeleteFederatedPipeRemoteContactSnapshotBound(ctx, *oldControl, localAgreementID); err != nil {
-		t.Fatal(err)
+	if deleteErr := s.DeleteFederatedPipeRemoteContactSnapshotBound(ctx, *oldControl, localAgreementID); deleteErr != nil {
+		t.Fatal(deleteErr)
 	}
 	loaded, err := s.GetFederatedPipeRemoteContactSnapshot(ctx, *newControl, localAgreementID)
 	if err != nil || loaded == nil {

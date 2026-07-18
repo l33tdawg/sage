@@ -246,12 +246,12 @@ func (m *Manager) resolveRemotePipeTarget(ctx context.Context, target string, al
 			unsupportedPeers++
 			continue
 		}
-		if err := validateRemotePipeContactGrant(agreement.RemoteChainID, status.PipeContacts); err != nil {
+		if grantErr := validateRemotePipeContactGrant(agreement.RemoteChainID, status.PipeContacts); grantErr != nil {
 			lookupErrors = append(lookupErrors, fmt.Errorf("%s: invalid pipe contact snapshot", agreement.RemoteChainID))
 			continue
 		}
-		if err := m.refreshRemotePipeContactCache(ctx, &agreement, control, status); err != nil {
-			lookupErrors = append(lookupErrors, fmt.Errorf("%s: cache authenticated pipe contacts: %w", agreement.RemoteChainID, err))
+		if refreshErr := m.refreshRemotePipeContactCache(ctx, &agreement, control, status); refreshErr != nil {
+			lookupErrors = append(lookupErrors, fmt.Errorf("%s: cache authenticated pipe contacts: %w", agreement.RemoteChainID, refreshErr))
 			continue
 		}
 		currentControl, err := ss.GetSyncControl(ctx, agreement.RemoteChainID)

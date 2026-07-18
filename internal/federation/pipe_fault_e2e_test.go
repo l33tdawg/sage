@@ -449,7 +449,7 @@ func TestFederatedPipelineCircuitRelayDisconnectRestartExactlyOnce(t *testing.T)
 	defer relayService.Close()
 	relayPeer := ma.StringCast("/p2p/" + relayHost.ID().String())
 	var relayAddr ma.Multiaddr
-	var relayBootstrap []string
+	relayBootstrap := make([]string, 0, len(relayHost.Addrs()))
 	for _, addr := range relayHost.Addrs() {
 		relayBootstrap = append(relayBootstrap, addr.Encapsulate(relayPeer).String())
 		if relayAddr == nil && strings.HasPrefix(addr.String(), "/ip4/127.0.0.1/") {

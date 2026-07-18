@@ -195,8 +195,8 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 	if msg == nil || msg.SourceChainID == "" || msg.SourcePipeID == "" || msg.DestinationChainID != "" {
 		return "", false, fmt.Errorf("imported pipeline provenance is invalid")
 	}
-	if err := validatePipelineTransportDedup(dedup); err != nil {
-		return "", false, err
+	if validationErr := validatePipelineTransportDedup(dedup); validationErr != nil {
+		return "", false, validationErr
 	}
 	if dedup.RemoteChainID != msg.SourceChainID || dedup.RemotePipeID != msg.SourcePipeID ||
 		dedup.SourceAgentID != msg.FromAgent || dedup.LocalPipeID != msg.PipeID ||
@@ -234,18 +234,18 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 		if !errors.Is(replayErr, sql.ErrNoRows) {
 			return fmt.Errorf("read pipeline proof replay key: %w", replayErr)
 		}
-		if err := tx.InsertPipeline(ctx, msg); err != nil {
-			return err
+		if insertErr := tx.InsertPipeline(ctx, msg); insertErr != nil {
+			return insertErr
 		}
-		if _, err := tx.writeExecContext(ctx, `INSERT INTO pipeline_transport_dedup
+		if _, execErr := tx.writeExecContext(ctx, `INSERT INTO pipeline_transport_dedup
 			(remote_chain_id, policy_epoch, agreement_id, contact_id, contact_revision,
 			 source_agent_id, target_agent_id, event_kind, remote_pipe_id, content_hash,
 			 proof_hash, local_pipe_id, outcome, expires_at)
 			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, dedup.RemoteChainID, dedup.PolicyEpoch,
 			dedup.AgreementID, dedup.ContactID, dedup.ContactRevision, dedup.SourceAgentID,
 			dedup.TargetAgentID, dedup.EventKind, dedup.RemotePipeID, dedup.ContentHash,
-			dedup.ProofHash, dedup.LocalPipeID, dedup.Outcome, formatTime(dedup.ExpiresAt)); err != nil {
-			return fmt.Errorf("insert pipeline transport dedup: %w", err)
+			dedup.ProofHash, dedup.LocalPipeID, dedup.Outcome, formatTime(dedup.ExpiresAt)); execErr != nil {
+			return fmt.Errorf("insert pipeline transport dedup: %w", execErr)
 		}
 		localPipeID = msg.PipeID
 		return nil
@@ -291,8 +291,8 @@ func (s *SQLiteStore) ApplyFederatedPipelineResult(ctx context.Context, pipeID, 
 	if len(result) > MaxPipeContentBytes {
 		return false, ErrPipeResultTooLarge
 	}
-	if err := validatePipelineTransportDedup(dedup); err != nil {
-		return false, err
+	if validationErr := validatePipelineTransportDedup(dedup); validationErr != nil {
+		return false, validationErr
 	}
 	if dedup.EventKind != "result" || dedup.LocalPipeID != pipeID {
 		return false, fmt.Errorf("federated result dedup binding mismatch")
