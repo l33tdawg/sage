@@ -33,6 +33,16 @@ also fails closed for later versions until their shell/daemon compatibility and
 promotion path deliberately replace it; it must not be carried unchanged into
 v12.
 
+GitHub Dependabot alert 37 (`RUSTSEC-2024-0429` /
+`GHSA-wrw7-89jp-8q8g`) is also an active promotion blocker. The Linux Tauri
+stack currently receives `glib` 0.18.5 through Wry/WebKitGTK; the affected safe
+iterator API can trigger undefined behavior and optimized-build crashes. As of
+this gate record, current Wry 0.55.1 still pins the affected GTK/glib family and
+upstream issue `tauri-apps/wry#1769` remains open, so no compatible dependency
+upgrade exists. The alert must remain open until a tested upstream migration or
+reviewed backport removes the affected code; it must not be dismissed merely to
+make release status green.
+
 Runtime promotion remains open until the install/launch/deep-link/offline,
 performance, assistive-technology, signing/notarization, update/rollback, and
 uninstall-preservation rows below have immutable platform results. Windows

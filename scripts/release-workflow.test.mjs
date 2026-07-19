@@ -142,6 +142,7 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(promotion, /Native standalone promotion does not apply before v11\.11\.0/);
   assert.match(promotion, /Native standalone release .* is blocked/);
   assert.match(promotion, /v11\.11 is deliberately a whole-release hold/);
+  assert.match(promotion, /RUSTSEC-2024-0429/);
   assert.match(promotion, /Signed\/notarized packages, installed-runtime acceptance/);
   assert.match(promotion, /exit 1/);
 
