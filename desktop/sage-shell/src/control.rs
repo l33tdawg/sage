@@ -274,13 +274,14 @@ fn connect(sage_home: &std::path::Path) -> Result<Box<dyn ControlStream>, String
 
 #[cfg(windows)]
 struct WindowsPipe {
-    handle: windows_sys::Win32::Foundation::HANDLE,
+    handle: std::os::windows::io::OwnedHandle,
     timeout: Duration,
 }
 
 #[cfg(windows)]
 impl WindowsPipe {
     fn connect(path: &str, timeout: Duration) -> std::io::Result<Self> {
+        use std::os::windows::io::FromRawHandle;
         use std::time::Instant;
         use windows_sys::Win32::Foundation::{
             ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
@@ -300,10 +301,13 @@ impl WindowsPipe {
                     std::ptr::null(),
                     OPEN_EXISTING,
                     FILE_FLAG_OVERLAPPED,
-                    0,
+                    std::ptr::null_mut(),
                 )
             };
             if handle != INVALID_HANDLE_VALUE {
+                // SAFETY: a successful CreateFileW call returns a newly owned
+                // handle, and OwnedHandle becomes its sole closing owner.
+                let handle = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(handle) };
                 return Ok(Self { handle, timeout });
             }
             let error = std::io::Error::last_os_error();
@@ -331,6 +335,7 @@ impl WindowsPipe {
         read: bool,
         timeout: Duration,
     ) -> std::io::Result<usize> {
+        use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT};
         use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
         use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
@@ -339,8 +344,9 @@ impl WindowsPipe {
         if payload.is_empty() {
             return Ok(0);
         }
+        let handle = self.handle.as_raw_handle();
         let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
-        if event == 0 {
+        if event.is_null() {
             return Err(std::io::Error::last_os_error());
         }
         struct Event(windows_sys::Win32::Foundation::HANDLE);
@@ -355,7 +361,7 @@ impl WindowsPipe {
         let started = unsafe {
             if read {
                 ReadFile(
-                    self.handle,
+                    handle,
                     payload.as_mut_ptr(),
                     payload.len() as u32,
                     std::ptr::null_mut(),
@@ -363,7 +369,7 @@ impl WindowsPipe {
                 )
             } else {
                 WriteFile(
-                    self.handle,
+                    handle,
                     payload.as_ptr(),
                     payload.len() as u32,
                     std::ptr::null_mut(),
@@ -382,8 +388,8 @@ impl WindowsPipe {
                 // Do not drop the buffer while Windows may still own it. The
                 // cancellation plus completion drain makes the deadline safe.
                 unsafe {
-                    let _ = CancelIoEx(self.handle, &overlapped);
-                    let _ = GetOverlappedResult(self.handle, &overlapped, &mut transferred, 1);
+                    let _ = CancelIoEx(handle, &overlapped);
+                    let _ = GetOverlappedResult(handle, &overlapped, &mut transferred, 1);
                 }
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -394,17 +400,10 @@ impl WindowsPipe {
                 return Err(std::io::Error::last_os_error());
             }
         }
-        if unsafe { GetOverlappedResult(self.handle, &overlapped, &mut transferred, 0) } == 0 {
+        if unsafe { GetOverlappedResult(handle, &overlapped, &mut transferred, 0) } == 0 {
             return Err(std::io::Error::last_os_error());
         }
         Ok(transferred as usize)
-    }
-}
-
-#[cfg(windows)]
-impl Drop for WindowsPipe {
-    fn drop(&mut self) {
-        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
     }
 }
 
@@ -692,10 +691,9 @@ mod tests {
         use windows_sys::Win32::Foundation::{
             CloseHandle, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE,
         };
-        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+        use windows_sys::Win32::Storage::FileSystem::{PIPE_ACCESS_DUPLEX, WriteFile};
         use windows_sys::Win32::System::Pipes::{
-            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
-            PIPE_TYPE_BYTE, PIPE_WAIT,
+            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_TYPE_BYTE, PIPE_WAIT,
         };
 
         let name = format!(
