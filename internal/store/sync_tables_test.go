@@ -496,14 +496,14 @@ func TestSyncPeerDeliveryStatusTracksTimestampedSuccessAndBacklog(t *testing.T) 
 			t.Fatalf("enqueue %s: %v", memoryID, err)
 		}
 	}
-	claimed, err := s.ClaimDueSyncOutbox(ctx, "chain-b", 1)
-	if err != nil || len(claimed) != 1 {
-		t.Fatalf("claim one: rows=%+v err=%v", claimed, err)
+	claimed, claimErr := s.ClaimDueSyncOutbox(ctx, "chain-b", 1)
+	if claimErr != nil || len(claimed) != 1 {
+		t.Fatalf("claim one: rows=%+v err=%v", claimed, claimErr)
 	}
 
-	status, err := s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
-	if err != nil {
-		t.Fatal(err)
+	status, statusErr := s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
+	if statusErr != nil {
+		t.Fatal(statusErr)
 	}
 	if status.Pending != 1 || status.Delivering != 1 || status.Backlog != 2 || status.LastDeliveredAt != "" {
 		t.Fatalf("pre-delivery status = %+v", status)
@@ -512,9 +512,9 @@ func TestSyncPeerDeliveryStatusTracksTimestampedSuccessAndBacklog(t *testing.T) 
 	if err := s.MarkSyncOutboxDelivered(ctx, "chain-b", claimed[0].MemoryID); err != nil {
 		t.Fatal(err)
 	}
-	status, err = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
-	if err != nil {
-		t.Fatal(err)
+	status, statusErr = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
+	if statusErr != nil {
+		t.Fatal(statusErr)
 	}
 	if status.Delivered != 1 || status.Pending != 1 || status.Backlog != 1 || status.LastDeliveredAt == "" {
 		t.Fatalf("post-delivery status = %+v", status)
@@ -530,25 +530,25 @@ func TestSyncPeerDeliveryStatusTracksTimestampedSuccessAndBacklog(t *testing.T) 
 	if err := s.MarkSyncOutboxDelivered(ctx, "chain-b", claimed[0].MemoryID); err != nil {
 		t.Fatal(err)
 	}
-	status, err = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
-	if err != nil || status.LastDeliveredAt != firstDelivery {
-		t.Fatalf("idempotent delivery moved first success: status=%+v err=%v", status, err)
+	status, statusErr = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
+	if statusErr != nil || status.LastDeliveredAt != firstDelivery {
+		t.Fatalf("idempotent delivery moved first success: status=%+v err=%v", status, statusErr)
 	}
 
 	if err := s.MarkSyncOutboxRejected(ctx, "chain-b", "mem-pending", SyncOutcomeRejectedNotConsented); err != nil {
 		t.Fatal(err)
 	}
-	status, err = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
-	if err != nil {
-		t.Fatal(err)
+	status, statusErr = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
+	if statusErr != nil {
+		t.Fatal(statusErr)
 	}
 	if status.Rejected != 1 || status.Backlog != 0 || status.Delivered != 1 || status.LastDeliveredAt == "" {
 		t.Fatalf("terminal status = %+v", status)
 	}
 
-	empty, err := s.GetSyncPeerDeliveryStatus(ctx, "chain-c")
-	if err != nil || empty != (SyncPeerDeliveryStatus{}) {
-		t.Fatalf("empty peer status = %+v err=%v", empty, err)
+	empty, emptyErr := s.GetSyncPeerDeliveryStatus(ctx, "chain-c")
+	if emptyErr != nil || empty != (SyncPeerDeliveryStatus{}) {
+		t.Fatalf("empty peer status = %+v err=%v", empty, emptyErr)
 	}
 }
 
@@ -579,9 +579,9 @@ func TestSyncOutboxDeliveredAtMigrationPreservesUnknownLegacyTime(t *testing.T) 
 	}
 
 	s.migrateSyncTables(ctx)
-	status, err := s.GetSyncPeerDeliveryStatus(ctx, "legacy-peer")
-	if err != nil {
-		t.Fatal(err)
+	status, statusErr := s.GetSyncPeerDeliveryStatus(ctx, "legacy-peer")
+	if statusErr != nil {
+		t.Fatal(statusErr)
 	}
 	if status.Delivered != 1 || status.LastDeliveredAt != "" {
 		t.Fatalf("legacy terminal row received a fabricated timestamp: %+v", status)
@@ -589,9 +589,9 @@ func TestSyncOutboxDeliveredAtMigrationPreservesUnknownLegacyTime(t *testing.T) 
 	if err := s.MarkSyncOutboxDelivered(ctx, "legacy-peer", "legacy-memory"); err != nil {
 		t.Fatal(err)
 	}
-	status, err = s.GetSyncPeerDeliveryStatus(ctx, "legacy-peer")
-	if err != nil || status.LastDeliveredAt != "" {
-		t.Fatalf("idempotent legacy replay fabricated a timestamp: status=%+v err=%v", status, err)
+	status, statusErr = s.GetSyncPeerDeliveryStatus(ctx, "legacy-peer")
+	if statusErr != nil || status.LastDeliveredAt != "" {
+		t.Fatalf("idempotent legacy replay fabricated a timestamp: status=%+v err=%v", status, statusErr)
 	}
 }
 

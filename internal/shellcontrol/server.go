@@ -70,8 +70,8 @@ func Start(sageHome, daemonVersion, uiOrigin string) (*Server, error) {
 		return nil, err
 	}
 	generationRaw := make([]byte, 32)
-	if _, err := rand.Read(generationRaw); err != nil {
-		return nil, fmt.Errorf("generate native-shell instance generation: %w", err)
+	if _, randErr := rand.Read(generationRaw); randErr != nil {
+		return nil, fmt.Errorf("generate native-shell instance generation: %w", randErr)
 	}
 	listener, endpoint, cleanup, err := listenEndpoint(sageHome)
 	if err != nil {
@@ -132,23 +132,23 @@ func (s *Server) serve() {
 }
 
 func (s *Server) handle(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
 	if err := verifyPeer(conn); err != nil {
 		return
 	}
-	payload, err := readFrame(conn)
-	if err != nil {
+	payload, readErr := readFrame(conn)
+	if readErr != nil {
 		return
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(payload)))
 	decoder.DisallowUnknownFields()
 	var req Request
-	if err := decoder.Decode(&req); err != nil || decoder.More() {
+	if decodeErr := decoder.Decode(&req); decodeErr != nil || decoder.More() {
 		return
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+	if trailingErr := decoder.Decode(&trailing); !errors.Is(trailingErr, io.EOF) {
 		return
 	}
 	if req.ControlProtocol != ControlProtocol || req.ShellProtocol != ShellProtocol || req.Operation != "status" {

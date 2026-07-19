@@ -46,12 +46,12 @@ func TestRejectsUnknownAndOversizedFrames(t *testing.T) {
 	for _, payload := range [][]byte{
 		[]byte(`{"control_protocol":1,"shell_protocol":1,"operation":"status","authority":"admin"}`),
 	} {
-		conn, err := net.Dial("unix", server.Endpoint())
-		require.NoError(t, err)
+		conn, dialErr := net.Dial("unix", server.Endpoint())
+		require.NoError(t, dialErr)
 		require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
 		assert.NoError(t, writeFrame(conn, payload))
-		_, err = readFrame(conn)
-		assert.Error(t, err)
+		_, readErr := readFrame(conn)
+		assert.Error(t, readErr)
 		require.NoError(t, conn.Close())
 	}
 	conn, err := net.Dial("unix", server.Endpoint())
@@ -77,7 +77,7 @@ func TestRejectsNonLoopbackOrDecoratedOrigin(t *testing.T) {
 func TestCleanupDoesNotRemoveReplacementSocket(t *testing.T) {
 	listener, endpoint, cleanup, err := listenEndpoint(shortTempDir(t))
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, listener.Close()) })
+	t.Cleanup(func() { _ = listener.Close() })
 	require.NoError(t, os.Remove(endpoint))
 	replacement, err := net.Listen("unix", endpoint)
 	require.NoError(t, err)
@@ -85,6 +85,7 @@ func TestCleanupDoesNotRemoveReplacementSocket(t *testing.T) {
 		require.NoError(t, replacement.Close())
 	})
 	assert.ErrorContains(t, cleanup(), "replaced")
+	require.NoError(t, listener.Close())
 	_, err = os.Lstat(endpoint)
 	assert.NoError(t, err)
 }
