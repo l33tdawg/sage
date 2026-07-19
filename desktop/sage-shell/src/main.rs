@@ -239,13 +239,7 @@ fn supervise<R: tauri::Runtime>(
                     } else {
                         None
                     };
-                    show_recovery_with_browser(
-                        &app,
-                        &session,
-                        view,
-                        None,
-                        browser_fallback,
-                    );
+                    show_recovery_with_browser(&app, &session, view, None, browser_fallback);
                 } else {
                     show_recovery(&app, &session, view, None);
                 }
@@ -357,7 +351,11 @@ fn open_launch_log(sage_home: &std::path::Path) -> Result<File, String> {
 }
 
 fn bundled_daemon_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
-    let filename = if cfg!(windows) { "sage-gui.exe" } else { "sage-gui" };
+    let filename = if cfg!(windows) {
+        "sage-gui.exe"
+    } else {
+        "sage-gui"
+    };
     let path = app
         .path()
         .resource_dir()
@@ -769,10 +767,8 @@ mod tests {
 
     #[test]
     fn launch_output_uses_the_existing_sage_log_location() {
-        let home = std::env::temp_dir().join(format!(
-            "sage-shell-launch-log-test-{}",
-            std::process::id()
-        ));
+        let home =
+            std::env::temp_dir().join(format!("sage-shell-launch-log-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let mut log = open_launch_log(&home).expect("open launch log");
         writeln!(log, "fixture launch output").expect("write launch log");

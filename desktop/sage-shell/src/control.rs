@@ -88,17 +88,16 @@ pub fn status(sage_home: &std::path::Path) -> Result<Status, StatusError> {
         .map_err(|error| StatusError::Unavailable(error.to_string()))?;
     write_frame(&mut *stream, request).map_err(StatusError::Unavailable)?;
     let response = read_frame(&mut *stream).map_err(StatusError::Unavailable)?;
-    let status: Status = serde_json::from_slice(&response).map_err(|error| {
-        StatusError::Incompatible {
+    let status: Status =
+        serde_json::from_slice(&response).map_err(|error| StatusError::Incompatible {
             message: error.to_string(),
             browser_origin: None,
             startup_proof: None,
-        }
-    })?;
+        })?;
     if let Err(message) = validate(&status) {
         let browser_origin = browser_fallback_origin(&status);
-        let startup_proof = valid_startup_proof(&status.startup_proof)
-            .then(|| status.startup_proof.clone());
+        let startup_proof =
+            valid_startup_proof(&status.startup_proof).then(|| status.startup_proof.clone());
         return Err(StatusError::Incompatible {
             message,
             browser_origin,
@@ -332,9 +331,7 @@ impl WindowsPipe {
         read: bool,
         timeout: Duration,
     ) -> std::io::Result<usize> {
-        use windows_sys::Win32::Foundation::{
-            ERROR_IO_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
-        };
+        use windows_sys::Win32::Foundation::{ERROR_IO_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT};
         use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
         use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
         use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
@@ -423,8 +420,7 @@ impl ControlStream for WindowsPipe {
         let mut offset = 0;
         while offset < payload.len() {
             let mut chunk = payload[offset..].to_vec();
-            let transferred =
-                self.transfer(&mut chunk, false, remaining_timeout(deadline)?)?;
+            let transferred = self.transfer(&mut chunk, false, remaining_timeout(deadline)?)?;
             if transferred == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::WriteZero,
@@ -440,11 +436,8 @@ impl ControlStream for WindowsPipe {
         let deadline = std::time::Instant::now() + self.timeout;
         let mut offset = 0;
         while offset < payload.len() {
-            let transferred = self.transfer(
-                &mut payload[offset..],
-                true,
-                remaining_timeout(deadline)?,
-            )?;
+            let transferred =
+                self.transfer(&mut payload[offset..], true, remaining_timeout(deadline)?)?;
             if transferred == 0 {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -590,9 +583,7 @@ fn write_frame(stream: &mut dyn ControlStream, payload: &[u8]) -> Result<(), Str
     let mut frame = Vec::with_capacity(4 + payload.len());
     frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     frame.extend_from_slice(payload);
-    stream
-        .write_all(&frame)
-        .map_err(|error| error.to_string())
+    stream.write_all(&frame).map_err(|error| error.to_string())
 }
 
 fn read_frame(stream: &mut dyn ControlStream) -> Result<Vec<u8>, String> {
@@ -643,7 +634,9 @@ mod tests {
             startup_proof: String::new(),
         };
         assert_eq!(
-            browser_fallback_origin(&status).as_ref().map(url::Url::as_str),
+            browser_fallback_origin(&status)
+                .as_ref()
+                .map(url::Url::as_str),
             Some("http://127.0.0.1:8080/")
         );
 
@@ -690,8 +683,7 @@ mod tests {
     }
 
     #[cfg(windows)]
-    static TEST_PIPE_SEQUENCE: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static TEST_PIPE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     #[cfg(windows)]
     fn stalled_pipe_server(partial: &[u8]) -> (String, std::thread::JoinHandle<()>) {
