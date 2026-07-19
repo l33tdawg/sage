@@ -53,7 +53,7 @@ func acquireInstanceLock(sageHome string) (*instanceLock, error) {
 	}
 	if err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, fmt.Errorf("another SAGE node already owns %s: %w", path, err)
+		return nil, fmt.Errorf("%w: another SAGE node already owns %s: %v", errInstanceLockHeld, path, err)
 	}
 	return &instanceLock{file: f}, nil
 }

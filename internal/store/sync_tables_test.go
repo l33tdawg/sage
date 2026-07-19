@@ -481,6 +481,120 @@ func TestSyncOutboxLifecycle(t *testing.T) {
 	}
 }
 
+func TestSyncPeerDeliveryStatusTracksTimestampedSuccessAndBacklog(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+
+	var deliveredAtColumn int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('sync_outbox') WHERE name='delivered_at'`).Scan(&deliveredAtColumn); err != nil || deliveredAtColumn != 1 {
+		t.Fatalf("sync_outbox delivered_at migration: count=%d err=%v", deliveredAtColumn, err)
+	}
+
+	for _, memoryID := range []string{"mem-delivering", "mem-pending"} {
+		if _, err := s.EnqueueSyncOutbox(ctx, "chain-b", memoryID); err != nil {
+			t.Fatalf("enqueue %s: %v", memoryID, err)
+		}
+	}
+	claimed, claimErr := s.ClaimDueSyncOutbox(ctx, "chain-b", 1)
+	if claimErr != nil || len(claimed) != 1 {
+		t.Fatalf("claim one: rows=%+v err=%v", claimed, claimErr)
+	}
+
+	status, statusErr := s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
+	if statusErr != nil {
+		t.Fatal(statusErr)
+	}
+	if status.Pending != 1 || status.Delivering != 1 || status.Backlog != 2 || status.LastDeliveredAt != "" {
+		t.Fatalf("pre-delivery status = %+v", status)
+	}
+
+	if err := s.MarkSyncOutboxDelivered(ctx, "chain-b", claimed[0].MemoryID); err != nil {
+		t.Fatal(err)
+	}
+	status, statusErr = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
+	if statusErr != nil {
+		t.Fatal(statusErr)
+	}
+	if status.Delivered != 1 || status.Pending != 1 || status.Backlog != 1 || status.LastDeliveredAt == "" {
+		t.Fatalf("post-delivery status = %+v", status)
+	}
+	if parsed := parseTime(status.LastDeliveredAt); parsed.IsZero() {
+		t.Fatalf("last_delivered_at is not a timestamp: %q", status.LastDeliveredAt)
+	}
+	const firstDelivery = "2026-07-19T06:30:00.000Z"
+	if _, err := s.writeExecContext(ctx, `UPDATE sync_outbox SET delivered_at=? WHERE remote_chain_id=? AND memory_id=?`,
+		firstDelivery, "chain-b", claimed[0].MemoryID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkSyncOutboxDelivered(ctx, "chain-b", claimed[0].MemoryID); err != nil {
+		t.Fatal(err)
+	}
+	status, statusErr = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
+	if statusErr != nil || status.LastDeliveredAt != firstDelivery {
+		t.Fatalf("idempotent delivery moved first success: status=%+v err=%v", status, statusErr)
+	}
+
+	if err := s.MarkSyncOutboxRejected(ctx, "chain-b", "mem-pending", SyncOutcomeRejectedNotConsented); err != nil {
+		t.Fatal(err)
+	}
+	status, statusErr = s.GetSyncPeerDeliveryStatus(ctx, "chain-b")
+	if statusErr != nil {
+		t.Fatal(statusErr)
+	}
+	if status.Rejected != 1 || status.Backlog != 0 || status.Delivered != 1 || status.LastDeliveredAt == "" {
+		t.Fatalf("terminal status = %+v", status)
+	}
+
+	empty, emptyErr := s.GetSyncPeerDeliveryStatus(ctx, "chain-c")
+	if emptyErr != nil || empty != (SyncPeerDeliveryStatus{}) {
+		t.Fatalf("empty peer status = %+v err=%v", empty, emptyErr)
+	}
+}
+
+func TestSyncOutboxDeliveredAtMigrationPreservesUnknownLegacyTime(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	if _, err := s.writeExecContext(ctx, `DROP TABLE sync_outbox`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeExecContext(ctx, `
+		CREATE TABLE sync_outbox (
+			remote_chain_id TEXT NOT NULL,
+			memory_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			next_attempt_at TEXT NOT NULL,
+			last_error TEXT,
+			created_at TEXT NOT NULL,
+			origin_chain_id TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (remote_chain_id, memory_id)
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeExecContext(ctx, `INSERT INTO sync_outbox
+		(remote_chain_id,memory_id,state,next_attempt_at,created_at)
+		VALUES ('legacy-peer','legacy-memory','delivered','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')`); err != nil {
+		t.Fatal(err)
+	}
+
+	s.migrateSyncTables(ctx)
+	status, statusErr := s.GetSyncPeerDeliveryStatus(ctx, "legacy-peer")
+	if statusErr != nil {
+		t.Fatal(statusErr)
+	}
+	if status.Delivered != 1 || status.LastDeliveredAt != "" {
+		t.Fatalf("legacy terminal row received a fabricated timestamp: %+v", status)
+	}
+	if err := s.MarkSyncOutboxDelivered(ctx, "legacy-peer", "legacy-memory"); err != nil {
+		t.Fatal(err)
+	}
+	status, statusErr = s.GetSyncPeerDeliveryStatus(ctx, "legacy-peer")
+	if statusErr != nil || status.LastDeliveredAt != "" {
+		t.Fatalf("idempotent legacy replay fabricated a timestamp: status=%+v err=%v", status, statusErr)
+	}
+}
+
 func TestSyncOriginFirstDecisionWins(t *testing.T) {
 	ctx := context.Background()
 	s := newSyncTestStore(t)

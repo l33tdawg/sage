@@ -1196,10 +1196,10 @@ func (h *DashboardHandler) federationOperatorGate(next http.Handler) http.Handle
 // canonical 501/not-implemented envelope and returns false.
 func (h *DashboardHandler) groupDriver(w http.ResponseWriter, r *http.Request) (groupManagementDriver, bool) {
 	// Group journal methods sign with the node operator key.  Dashboard auth also
-	// admits independently signed agents, so it is not by itself an operator
-	// boundary.  Never let an arbitrary agent turn its request into an
-	// operator-authored roster/domain mutation.
-	if !h.isSyncGroupOperatorRequest(r) {
+	// admits independently signed agents, so those requests must present the
+	// exact operator identity. Authenticated local CEREBRUM is also the operator
+	// surface and must remain able to drive the dedicated Sharing & Sync UI.
+	if !h.isFederationMutationOperatorRequest(r) {
 		fedWriteErr(w, http.StatusForbidden, "Sync-group management requires the local node operator.")
 		return nil, false
 	}
@@ -1226,10 +1226,73 @@ func groupEmitResult(e store.SyncGroupLogEntry) map[string]any {
 	}
 }
 
+type syncGroupMemberView struct {
+	ChainID                 string                        `json:"chain_id"`
+	Role                    string                        `json:"role"`
+	State                   string                        `json:"state"`
+	JoinedRevision          int64                         `json:"joined_revision"`
+	LastAckedRosterRevision int64                         `json:"last_acked_roster_revision"`
+	LastSeenJournalHead     string                        `json:"last_seen_journal_head,omitempty"`
+	LastSyncAt              string                        `json:"last_sync_at,omitempty"`
+	RosterRevisionLag       int64                         `json:"roster_revision_lag"`
+	RosterHeadCurrent       bool                          `json:"roster_head_current"`
+	CatchUpState            string                        `json:"catch_up_state"`
+	Health                  string                        `json:"health"`
+	PeerDelivery            *store.SyncPeerDeliveryStatus `json:"peer_delivery,omitempty"`
+}
+
+// syncGroupMemberProgress converts durable journal cursors into display state.
+// It deliberately does not invent a staleness timeout: an active remote member
+// with no successful journal observation is "unknown", while exact persisted
+// revision/head equality is current. The outbox projection beside this state is
+// separately peer-wide and records real delivery timestamps.
+func syncGroupMemberProgress(group store.SyncGroup, member store.SyncGroupMember, localChainID string) syncGroupMemberView {
+	futureRevision := member.LastAckedRosterRevision > group.RosterRevision
+	lag := group.RosterRevision - member.LastAckedRosterRevision
+	if lag < 0 {
+		lag = 0
+	}
+	headCurrent := member.LastSeenJournalHead == group.RosterJournalHead
+	view := syncGroupMemberView{
+		ChainID: member.MemberChainID, Role: member.Role, State: member.MemberState,
+		JoinedRevision:          member.JoinedRevision,
+		LastAckedRosterRevision: member.LastAckedRosterRevision,
+		LastSeenJournalHead:     member.LastSeenJournalHead,
+		LastSyncAt:              member.LastSyncAt,
+		RosterRevisionLag:       lag,
+		RosterHeadCurrent:       headCurrent,
+	}
+	switch member.MemberState {
+	case store.GroupMemberInvited:
+		view.CatchUpState, view.Health = "not_active", "invited"
+	case store.GroupMemberLeft, store.GroupMemberRemoved:
+		view.CatchUpState, view.Health = "not_active", "inactive"
+	case store.GroupMemberResyncing:
+		view.CatchUpState, view.Health = "resyncing", "recovering"
+	case store.GroupMemberActive:
+		if futureRevision {
+			// A cursor beyond the controller's durable revision is corrupt or
+			// incompatible. Never clamp it into a false healthy/current display.
+			view.CatchUpState, view.Health = "unknown", "unknown"
+		} else if lag > 0 || !headCurrent {
+			view.CatchUpState, view.Health = "catching_up", "catching_up"
+		} else if member.MemberChainID != localChainID && member.LastSyncAt == "" {
+			view.CatchUpState, view.Health = "current", "unknown"
+		} else {
+			view.CatchUpState, view.Health = "current", "healthy"
+		}
+	default:
+		// The store rejects unknown states, but a fail-safe display result keeps a
+		// future value from being mistaken for healthy by an older dashboard.
+		view.CatchUpState, view.Health = "unknown", "unknown"
+	}
+	return view
+}
+
 // handleFedGroupList enumerates the local node's sync groups with their roster and
 // active owner-signed shared domains — the operator's read view of the group plane.
 func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Request) {
-	if !h.isSyncGroupOperatorRequest(r) {
+	if !h.isFederationMutationOperatorRequest(r) {
 		fedWriteErr(w, http.StatusForbidden, "Sync-group metadata requires the local node operator.")
 		return
 	}
@@ -1248,34 +1311,33 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 		return
 	}
 	local := h.Federation.LocalChainID()
-	type memberView struct {
-		ChainID string `json:"chain_id"`
-		Role    string `json:"role"`
-		State   string `json:"state"`
-	}
 	type domainView struct {
 		DomainTag    string `json:"domain_tag"`
 		OwnerChainID string `json:"owner_chain_id"`
 		MaxClearance int    `json:"max_clearance"`
 	}
 	type groupView struct {
-		GroupID       string       `json:"group_id"`
-		DisplayName   string       `json:"display_name,omitempty"`
-		Controller    string       `json:"controller_chain_id"`
-		Epoch         string       `json:"epoch"`
-		IsController  bool         `json:"is_controller"`
-		LocalRole     string       `json:"local_role,omitempty"`
-		Members       []memberView `json:"members"`
-		SharedDomains []domainView `json:"shared_domains"`
+		GroupID           string                `json:"group_id"`
+		DisplayName       string                `json:"display_name,omitempty"`
+		Controller        string                `json:"controller_chain_id"`
+		Epoch             string                `json:"epoch"`
+		RosterRevision    int64                 `json:"roster_revision"`
+		RosterJournalHead string                `json:"roster_journal_head,omitempty"`
+		IsController      bool                  `json:"is_controller"`
+		LocalRole         string                `json:"local_role,omitempty"`
+		Members           []syncGroupMemberView `json:"members"`
+		SharedDomains     []domainView          `json:"shared_domains"`
 	}
+	peerDelivery := make(map[string]store.SyncPeerDeliveryStatus)
 	out := make([]groupView, 0, len(groups))
 	for i := range groups {
 		g := groups[i]
 		gv := groupView{
 			GroupID: g.GroupID, DisplayName: g.DisplayName,
 			Controller: g.ControllerChainID, Epoch: g.Epoch,
+			RosterRevision: g.RosterRevision, RosterJournalHead: g.RosterJournalHead,
 			IsController:  g.ControllerChainID == local,
-			Members:       []memberView{},
+			Members:       []syncGroupMemberView{},
 			SharedDomains: []domainView{},
 		}
 		members, mErr := ss.ListSyncGroupMembers(ctx, g.GroupID)
@@ -1284,7 +1346,20 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 			return
 		}
 		for _, mem := range members {
-			gv.Members = append(gv.Members, memberView{ChainID: mem.MemberChainID, Role: mem.Role, State: mem.MemberState})
+			member := syncGroupMemberProgress(g, mem, local)
+			if mem.MemberChainID != local {
+				delivery, found := peerDelivery[mem.MemberChainID]
+				if !found {
+					delivery, mErr = ss.GetSyncPeerDeliveryStatus(ctx, mem.MemberChainID)
+					if mErr != nil {
+						fedWriteErr(w, http.StatusInternalServerError, "Failed to read member delivery status.")
+						return
+					}
+					peerDelivery[mem.MemberChainID] = delivery
+				}
+				member.PeerDelivery = &delivery
+			}
+			gv.Members = append(gv.Members, member)
 			if mem.MemberChainID == local {
 				gv.LocalRole = mem.Role
 			}

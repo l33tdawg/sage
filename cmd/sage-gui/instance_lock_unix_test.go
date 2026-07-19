@@ -22,6 +22,7 @@ func TestInstanceLockExcludesSecondServeAndReleasesCleanly(t *testing.T) {
 	require.NoError(t, os.Unsetenv(instanceLockFDEnv))
 	second, err := acquireInstanceLock(home)
 	require.Error(t, err)
+	require.ErrorIs(t, err, errInstanceLockHeld)
 	require.Nil(t, second)
 
 	require.NoError(t, first.Close())

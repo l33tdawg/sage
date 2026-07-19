@@ -49,6 +49,7 @@ import (
 	"github.com/l33tdawg/sage/internal/orchestrator"
 	sagep2p "github.com/l33tdawg/sage/internal/p2p"
 	"github.com/l33tdawg/sage/internal/rerankd"
+	"github.com/l33tdawg/sage/internal/shellcontrol"
 	"github.com/l33tdawg/sage/internal/snapshot"
 	"github.com/l33tdawg/sage/internal/statesync"
 	"github.com/l33tdawg/sage/internal/store"
@@ -113,7 +114,7 @@ func validatedFederationListenAddr(configured string) (string, error) {
 	return addr, nil
 }
 
-func runServe() (rerr error) {
+func runServe(startupProof string) (rerr error) {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -132,6 +133,28 @@ func runServe() (rerr error) {
 		Str("rest_addr", cfg.RESTAddr).
 		Str("embedding", cfg.Embedding.Provider).
 		Msg("starting SAGE Personal node")
+
+	// The native shell is additive: failure to create its per-user control
+	// endpoint must not take the daemon, browser CEREBRUM, CLI, or MCP down.
+	// The endpoint starts only after main owns the existing instance lock.
+	var nativeControl *shellcontrol.Server
+	nativeControl, controlErr := shellcontrol.Start(SageHome(), version, restBaseURL(cfg.RESTAddr), startupProof)
+	if controlErr != nil {
+		logger.Warn().Err(controlErr).Msg("native shell control endpoint unavailable — browser CEREBRUM remains available")
+	} else {
+		defer func() {
+			if rerr != nil {
+				_ = nativeControl.SetState(shellcontrol.StateFailed)
+			}
+			if closeErr := nativeControl.Close(); closeErr != nil {
+				// The shell endpoint is additive. In particular, refusing to remove a
+				// path another process replaced is a safety success, not permission to
+				// turn an otherwise clean daemon shutdown into an update rollback.
+				logger.Warn().Err(closeErr).Msg("native shell control endpoint cleanup incomplete")
+			}
+		}()
+		logger.Info().Str("endpoint", nativeControl.Endpoint()).Msg("native shell control endpoint ready for negotiation")
+	}
 
 	// Ensure directories exist
 	cometHome := filepath.Join(cfg.DataDir, "cometbft")
@@ -1536,6 +1559,9 @@ func runServe() (rerr error) {
 
 	if restListener != nil {
 		startListener(func() {
+			if nativeControl != nil {
+				_ = nativeControl.SetState(shellcontrol.StateReady)
+			}
 			logger.Info().
 				Str("addr", cfg.RESTAddr).
 				Str("dashboard", fmt.Sprintf("http://%s/ui/", displayAddr)).
@@ -1746,6 +1772,9 @@ func runServe() (rerr error) {
 		}
 	}
 	signal.Stop(quit)
+	if nativeControl != nil {
+		_ = nativeControl.SetState(shellcontrol.StateDraining)
+	}
 	// Stop MCP admission and cancel/join active tool calls first. A slow quorum
 	// call must not outlive the stores it is using or consume the entire listener
 	// shutdown budget.
@@ -2627,10 +2656,10 @@ func seedNetworkAgents(ctx context.Context, s *store.SQLiteStore, cometHome stri
 // mountMCPHTTPTransport wires the HTTP/HTTPS MCP transport endpoints onto
 // the given chi router. Requires SQLite for the bearer-token store.
 //
-// The MCP server signs underlying REST calls with the local node operator key.
-// Bearers therefore resolve to that same identity; token rows created before
-// v11.7 may contain a different label, but must not impersonate an identity
-// whose private key the transport does not hold.
+// Keyed bearer tokens sign underlying REST calls with their own encrypted
+// Ed25519 identity. Legacy keyless tokens retain the local node operator key
+// for backward compatibility; the lookup must never silently downgrade a
+// keyed token when its signer cannot be loaded.
 //
 // CORS is liberal — MCP clients are first-class.
 func mountMCPHTTPTransport(r chi.Router, sqliteStore *store.SQLiteStore, cfg *Config, logger zerolog.Logger) *mcp.HTTPTransport {

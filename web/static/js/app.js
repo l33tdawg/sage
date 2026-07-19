@@ -1,13 +1,13 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchScopes, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
-rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
+rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, reorderTasks, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
+fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedGroups, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupMemberInvite, fedGroupMemberRemove, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
@@ -2114,6 +2114,7 @@ function TasksPage({ sse }) {
     const [editingTask, setEditingTask] = useState('');
     const [editContent, setEditContent] = useState('');
     const [savingTask, setSavingTask] = useState('');
+    const [reorderingColumn, setReorderingColumn] = useState('');
     const draggingRef = useRef(false);
     const reloadTimer = useRef(null);
     const movedThisSession = useRef(new Set()); // keeps just-completed old cards visible (see isRecentDone)
@@ -2241,7 +2242,7 @@ function TasksPage({ sse }) {
         setLoading(true);
         setError(null);
         try {
-            const data = await fetchTasks({ all: true, limit: 200 });
+            const data = await fetchTasks({ all: true, limit: 500 });
             const items = data.tasks || [];
             setTasks(items);
             const ds = [...new Set(items.map(t => t.domain_tag).filter(Boolean))].sort();
@@ -2266,6 +2267,33 @@ function TasksPage({ sse }) {
         } catch (e) {
             showToast('Could not move task: ' + (e.message || 'network error'), 'error');
             loadTasks(); // revert on error
+        }
+    }
+
+    async function reorderTask(task, direction) {
+		if (reorderingColumn) return;
+        const columnTasks = tasks.filter(t => t.task_status === task.task_status);
+        const from = columnTasks.findIndex(t => t.memory_id === task.memory_id);
+        const to = from + direction;
+        if (from < 0 || to < 0 || to >= columnTasks.length) return;
+        [columnTasks[from], columnTasks[to]] = [columnTasks[to], columnTasks[from]];
+        const orderedIDs = columnTasks.map(t => t.memory_id);
+        const rank = new Map(orderedIDs.map((id, index) => [id, index]));
+        const previousTasks = tasks;
+		setReorderingColumn(task.task_status);
+        setTasks(prev => [...prev].sort((a, b) => {
+            if (a.task_status !== task.task_status || b.task_status !== task.task_status) return 0;
+            return rank.get(a.memory_id) - rank.get(b.memory_id);
+        }));
+        try {
+            const res = await reorderTasks(task.task_status, orderedIDs);
+            if (res && res.error) throw new Error(res.error);
+        } catch (e) {
+            setTasks(previousTasks);
+            showToast('Could not save task order: ' + (e.message || 'network error'), 'error');
+            loadTasks();
+		} finally {
+			setReorderingColumn('');
         }
     }
 
@@ -2325,17 +2353,16 @@ function TasksPage({ sse }) {
         setAdding(false);
     }
 
-    // Filter out done/dropped items older than 7 days unless showOldDone is on.
-    // The cutoff uses created_at (the API has no completed_at), so a week-old
-    // card dropped on Done would vanish MID-DROP - exempt anything the user
-    // moved this session.
+    // Keep terminal cards on the board for seven days after their actual status
+    // transition. They may still be cleared manually at any time. created_at is
+    // only a compatibility fallback for nodes that have not migrated yet.
     function isRecentDone(task) {
         if (task.task_status !== 'done' && task.task_status !== 'dropped') return true;
         if (showOldDone) return true;
         if (movedThisSession.current.has(task.memory_id)) return true;
-        const created = new Date(task.created_at);
+        const completed = new Date(task.task_status_updated_at || task.created_at);
         const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        return created > sevenDaysAgo;
+        return completed > sevenDaysAgo;
     }
 
     function handleDragStart(e, task) {
@@ -2520,12 +2547,12 @@ function TasksPage({ sse }) {
                                 `}
                             </div>
                             <div class="kanban-cards">
-                                ${colTasks.map(task => html`
+                                ${colTasks.map((task, taskIndex) => html`
                                     ${(() => {
                                         const workState = taskWorkState(task);
                                         return html`
-                                    <div class="kanban-card ${dragging === task.memory_id ? 'dragging' : ''} ${expandedTasks.has(task.memory_id) ? 'expanded' : ''} ${editingTask === task.memory_id ? 'editing' : ''}"
-										 draggable=${editingTask !== task.memory_id}
+                                    <div class="kanban-card status-${task.task_status} ${workState ? 'has-work-state' : ''} ${dragging === task.memory_id ? 'dragging' : ''} ${expandedTasks.has(task.memory_id) ? 'expanded' : ''} ${editingTask === task.memory_id ? 'editing' : ''}"
+                                         draggable=${editingTask !== task.memory_id}
                                          onDragStart=${e => handleDragStart(e, task)}
                                          onDragEnd=${() => { draggingRef.current = false; scheduleReload(); }}>
                                         ${workState && html`
@@ -2568,7 +2595,14 @@ function TasksPage({ sse }) {
                                                 : html`<span title="Created from the dashboard" style="font-size:10px;color:var(--primary);">You</span>`}
                                             <span style="font-size:11px;color:var(--text-muted);margin-left:auto;">${timeAgo(task.created_at)}</span>
                                         </div>
-                                        ${agentList.length > 0 && html`
+										${(task.task_status === 'done' || task.task_status === 'dropped') ? html`
+											<div class="kanban-card-attribution ${task.assignee || task.task_picked_up_by ? '' : 'unknown'}">
+												<span aria-hidden="true">${task.task_status === 'done' ? '✓' : '✕'}</span>
+												<span>${task.assignee || task.task_picked_up_by
+													? `${task.task_status === 'done' ? 'Completed' : 'Dropped'} by ${agentName(task.assignee || task.task_picked_up_by)}`
+													: 'No assignee was recorded'}</span>
+											</div>
+										` : agentList.length > 0 && html`
                                             <div class="kanban-card-assign" style="margin-top:6px;display:flex;align-items:center;gap:4px;">
                                                 <span style="font-size:10px;color:var(--text-muted);">${task.assignee ? '👤' : 'Assign:'}</span>
                                                 <select style="flex:1;font-size:10px;padding:2px 4px;background:var(--bg-secondary);color:var(--text);border:1px solid var(--border);border-radius:4px;"
@@ -2583,6 +2617,10 @@ function TasksPage({ sse }) {
                                             </div>
                                         `}
 						<div class="kanban-card-actions">
+							<button class="kanban-action kanban-order-action" title="Move task up" aria-label=${`Move ${taskSummary(task)} up`}
+								disabled=${taskIndex === 0 || reorderingColumn === task.task_status} onClick=${e => { e.stopPropagation(); reorderTask(task, -1); }}>↑</button>
+							<button class="kanban-action kanban-order-action" title="Move task down" aria-label=${`Move ${taskSummary(task)} down`}
+								disabled=${taskIndex === colTasks.length - 1 || reorderingColumn === task.task_status} onClick=${e => { e.stopPropagation(); reorderTask(task, 1); }}>↓</button>
 							<span style="font-size:10px;color:var(--text-muted);">Status:</span>
 							<select class="kanban-status-select"
 								value=${task.task_status}
@@ -12935,6 +12973,141 @@ function NetworkNameEditor() {
     </div>`;
 }
 
+function SharingSyncGroupsPanel() {
+    const [groups, setGroups] = useState(null);
+    const [localChain, setLocalChain] = useState('');
+    const [error, setError] = useState('');
+    const [busy, setBusy] = useState('');
+    const [openGroup, setOpenGroup] = useState('');
+    const [drafts, setDrafts] = useState({});
+    const loadGroups = async () => {
+        try {
+            const result = await fedGroups();
+            setGroups(Array.isArray(result.groups) ? result.groups : []);
+            setLocalChain(result.local_chain_id || '');
+            setError('');
+        } catch (e) { setError(String(e.message || e)); }
+    };
+    useEffect(() => {
+        loadGroups();
+        const timer = setInterval(() => { if (!document.hidden) loadGroups(); }, 10000);
+        return () => clearInterval(timer);
+    }, []);
+    const patchDraft = (groupId, patch) => setDrafts(current => ({
+        ...current, [groupId]: { ...(current[groupId] || {}), ...patch },
+    }));
+    const mutate = async (key, action, success) => {
+        setBusy(key); setError('');
+        try {
+            await action(); showToast(success, 'success'); await loadGroups();
+            setBusy('');
+            return true;
+        } catch (e) {
+            const message = String(e.message || e);
+            setError(message); showToast(message, 'error');
+        }
+        setBusy('');
+        return false;
+    };
+    const domains = value => String(value || '').split(',').map(item => item.trim()).filter(Boolean);
+    const health = member => String(member.health || member.catch_up_state || member.state || 'unknown').replaceAll('_', ' ');
+    const when = value => value ? new Date(value).toLocaleString() : 'No successful sync recorded';
+
+    return html`<section class="fed-groups" aria-labelledby="sharing-sync-title">
+        <div class="fed-groups-head"><div>
+            <h2 id="sharing-sync-title">Sharing & Sync groups</h2>
+            <p class="muted">Manage N-member sharing, roles, domains, catch-up progress, and health separately from one-to-one trust connections.</p>
+        </div><button class="btn" onClick=${loadGroups} disabled=${busy !== ''}>Refresh</button></div>
+        ${error && html`<div class="fed-err" role="alert">Sharing & Sync: ${error}</div>`}
+        ${groups === null && !error && html`<div class="muted" role="status">Loading Sharing & Sync groups…</div>`}
+        ${groups && groups.length === 0 && html`<div class="fed-group-empty muted">No synchronization groups are configured. Existing one-to-one connections remain unchanged.</div>`}
+        ${groups && groups.map((group, groupIndex) => {
+            const groupId = group.group_id;
+            const draft = drafts[groupId] || {};
+            const panelId = 'sharing-sync-group-' + groupIndex;
+            return html`<article class="fed-group-card" key=${groupId}>
+                <button class="fed-group-summary" aria-expanded=${openGroup === groupId} aria-controls=${panelId} onClick=${() => setOpenGroup(openGroup === groupId ? '' : groupId)}>
+                    <span><strong>${group.display_name || groupId}</strong><small>${(group.members || []).length} members · ${(group.shared_domains || []).length} shared domains · local role ${group.local_role || 'unknown'}</small></span>
+                    <span aria-hidden="true">${openGroup === groupId ? '▾' : '▸'}</span>
+                </button>
+                ${openGroup === groupId && html`<div id=${panelId} class="fed-group-detail">
+                    <dl class="fed-group-facts">
+                        <div><dt>Controller</dt><dd><code>${group.controller_chain_id}</code>${group.is_controller ? ' (this node)' : ''}</dd></div>
+                        <div><dt>Roster revision</dt><dd>${group.roster_revision ?? 'unknown'}</dd></div>
+                        <div><dt>Journal head</dt><dd><code>${group.roster_journal_head || 'not reported'}</code></dd></div>
+                        <div><dt>Epoch</dt><dd><code>${group.epoch}</code></dd></div>
+                    </dl>
+                    <h3>Members and catch-up</h3>
+                    <div class="fed-group-table-wrap"><table class="fed-group-table">
+                        <thead><tr><th scope="col">Member</th><th scope="col">Role</th><th scope="col">Health</th><th scope="col">Backlog</th><th scope="col">Last successful sync</th><th scope="col">Actions</th></tr></thead>
+                        <tbody>${(group.members || []).map(member => html`<tr key=${member.chain_id}>
+                            <th scope="row"><code>${member.chain_id}</code>${member.chain_id === localChain && html`<span class="fed-group-local">this node</span>`}</th>
+                            <td>${member.role}</td><td><span class="fed-group-health">${health(member)}</span></td>
+                            <td>${member.peer_delivery ? member.peer_delivery.backlog : '—'}</td>
+                            <td><time datetime=${member.peer_delivery && member.peer_delivery.last_delivered_at || ''}>${when(member.peer_delivery && member.peer_delivery.last_delivered_at)}</time></td>
+                            <td>${group.is_controller && member.chain_id !== localChain && !['removed', 'left'].includes(member.state) && html`<button class="btn btn-danger" disabled=${busy !== ''} onClick=${async () => {
+                                if (!await showConfirmation('Remove ' + member.chain_id + ' from ' + (group.display_name || groupId) + '? Group delivery and consent are revoked; rejoining requires a fresh signed invite.', { title: 'Remove group member?', confirmLabel: 'Remove member', tone: 'danger' })) return;
+                                mutate(groupId + ':remove:' + member.chain_id, () => fedGroupMemberRemove(groupId, member.chain_id), 'Member removed and group access revoked');
+                            }}>Remove</button>`}</td>
+                        </tr>`)}</tbody>
+                    </table></div>
+                    <div class="fed-group-controls">
+                        <form onSubmit=${async event => {
+                            event.preventDefault();
+                            const role = draft.role || group.local_role || 'enrolled-no-sync';
+                            if (!await showConfirmation('Change this node’s role in ' + (group.display_name || groupId) + ' to ' + role + '? Selective domains are an explicit receive-consent subset.', { title: 'Change synchronization role?', confirmLabel: 'Apply role', tone: 'primary' })) return;
+                            mutate(groupId + ':role', () => fedGroupSelfRole(groupId, role, domains(draft.selectedDomains)), 'Local synchronization role updated');
+                        }}>
+                            <h4>This node’s synchronization role</h4>
+                            <label>Role<select value=${draft.role || group.local_role || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { role: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
+                            <label>Selective domains<input value=${draft.selectedDomains || ''} onInput=${event => patchDraft(groupId, { selectedDomains: event.target.value })} placeholder="comma separated" /></label>
+                            <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Apply role</button>
+                        </form>
+                        <form onSubmit=${async event => {
+                            event.preventDefault();
+                            const domain = String(draft.domain || '').trim();
+                            if (!domain || !await showConfirmation('Share domain “' + domain + '” with ' + (group.display_name || groupId) + '? Ownership is verified before authoring.', { title: 'Add shared domain?', confirmLabel: 'Share domain', tone: 'primary' })) return;
+                            const saved = await mutate(groupId + ':domain-add', () => fedGroupDomainAdd(groupId, domain, draft.clearance ?? 1), 'Shared domain added');
+                            if (saved) patchDraft(groupId, { domain: '' });
+                        }}>
+                            <h4>Add a domain this node owns</h4>
+                            <label>Domain<input required value=${draft.domain || ''} onInput=${event => patchDraft(groupId, { domain: event.target.value })} placeholder="project.alpha" /></label>
+                            <label>Maximum classification<select value=${draft.clearance ?? 1} onChange=${event => patchDraft(groupId, { clearance: event.target.value })}><option value="0">0 · Public</option><option value="1">1 · Internal</option><option value="2">2 · Confidential</option><option value="3">3 · Secret</option><option value="4">4 · Top secret</option></select></label>
+                            <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Add shared domain</button>
+                        </form>
+                    </div>
+                    <h3>Shared domains</h3>
+                    ${(group.shared_domains || []).length === 0 && html`<p class="muted">No domains are shared through this group.</p>`}
+                    <ul class="fed-group-domains">${(group.shared_domains || []).map(domain => html`<li key=${domain.domain_tag}>
+                        <span><strong>${domain.domain_tag}</strong><small>owner ${domain.owner_chain_id} · max classification ${domain.max_clearance}</small></span>
+                        ${domain.owner_chain_id === localChain && html`<button class="btn btn-danger" disabled=${busy !== ''} onClick=${async () => {
+                            if (!await showConfirmation('Stop sharing “' + domain.domain_tag + '” through ' + (group.display_name || groupId) + '? Local data is preserved and group delivery stops.', { title: 'Remove shared domain?', confirmLabel: 'Stop sharing', tone: 'danger' })) return;
+                            mutate(groupId + ':domain-remove:' + domain.domain_tag, () => fedGroupDomainRemove(groupId, domain.domain_tag), 'Shared domain removed');
+                        }}>Stop sharing</button>`}
+                    </li>`)}</ul>
+                    ${group.is_controller && html`<form class="fed-group-invite" onSubmit=${async event => {
+                        event.preventDefault();
+                        const chain = String(draft.inviteChain || '').trim();
+                        const pubkey = String(draft.invitePubkey || '').trim();
+                        const role = draft.inviteRole || 'enrolled-no-sync';
+                        if (!await showConfirmation('Invite or re-bootstrap ' + chain + ' in ' + (group.display_name || groupId) + ' as ' + role + '? The remote operator must cryptographically co-sign.', { title: 'Invite group member?', confirmLabel: 'Send invite', tone: 'primary' })) return;
+                        const saved = await mutate(groupId + ':invite', () => fedGroupMemberInvite(groupId, chain, pubkey, role, domains(draft.inviteSelected), domains(draft.inviteOwned)), 'Member invite accepted and bootstrap started');
+                        if (saved) patchDraft(groupId, { inviteChain: '', invitePubkey: '', inviteSelected: '', inviteOwned: '' });
+                    }}>
+                        <h3>Invite or retry member bootstrap</h3><p class="muted">The chain must already be trusted. The invite is a two-party signed ceremony.</p>
+                        <label>Member chain ID<input required value=${draft.inviteChain || ''} onInput=${event => patchDraft(groupId, { inviteChain: event.target.value })} /></label>
+                        <label>Member operator public key<input required pattern="[0-9a-fA-F]{64}" value=${draft.invitePubkey || ''} onInput=${event => patchDraft(groupId, { invitePubkey: event.target.value })} /></label>
+                        <label>Role<select value=${draft.inviteRole || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { inviteRole: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
+                        <label>Selective domains<input value=${draft.inviteSelected || ''} onInput=${event => patchDraft(groupId, { inviteSelected: event.target.value })} placeholder="comma separated" /></label>
+                        <label>Domains owned by invitee<input value=${draft.inviteOwned || ''} onInput=${event => patchDraft(groupId, { inviteOwned: event.target.value })} placeholder="comma separated" /></label>
+                        <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Invite or retry bootstrap</button>
+                    </form>`}
+                </div>`}
+            </article>`;
+        })}
+    </section>`;
+}
+
 // FederationPage - the 8th sidebar section landing: role fork + connections list.
 function FederationPage() {
     const [mode, setMode] = useState('landing'); // landing | guest | host
@@ -13062,6 +13235,7 @@ function FederationPage() {
                     <div class="fed-role-desc">You'll show a code for them to scan.</div>
                 </button>
             </div>`}
+            ${fedOn && html`<${SharingSyncGroupsPanel} />`}
 
             ${(fedOn || (conns && conns.length > 0)) && html`<div class="fed-conns">
                 <h3>Your connections <${HelpTip} text="Each row is a trusted link to another SAGE. Expanding it shows two directional permission sets: what this computer grants them, and what they grant this computer. Each side controls only its own domains." /></h3>

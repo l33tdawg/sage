@@ -1420,7 +1420,11 @@ caller actually won; a losing reader never receives the same work item.
 
 ### Task assignment and agent notices
 
-`GET /v1/dashboard/tasks?all=true&limit=N` is the local-human CEREBRUM Kanban feed; signed agents receive `403` and use the scoped backlog instead. It returns explicit `memory_type=task` records across `planned`, `in_progress`, `done`, and `dropped` on both SQLite and PostgreSQL; ordinary agent conversations/observations are not inferred as tasks. Historical task rows whose older writer did not persist `task_status` are returned with an empty status so CEREBRUM can ask the operator to classify each one—SAGE does not guess that unknown work is Planned or Done. New PostgreSQL inserts persist `TaskStatus`, matching SQLite.
+`GET /v1/dashboard/tasks?all=true&limit=N` is the local-human CEREBRUM Kanban feed; signed agents receive `403` and use the scoped backlog instead. It returns explicit `memory_type=task` records across `planned`, `in_progress`, `done`, and `dropped` on both SQLite and PostgreSQL; ordinary agent conversations/observations are not inferred as tasks. Historical task rows whose older writer did not persist `task_status` are returned with an empty status so CEREBRUM can ask the operator to classify each one—SAGE does not guess that unknown work is Planned or Done. New PostgreSQL inserts persist `TaskStatus`, matching SQLite. Each task also returns `task_status_updated_at`; CEREBRUM uses that lifecycle timestamp—not the task's original `created_at`—to keep Done/Dropped cards visible for seven days after their terminal transition. Manual Clear remains available before that window expires, while older cards can still be revealed with Show all (`web/handler.go:1919-1962`, `web/static/js/app.js:2328-2340`).
+
+`PUT /v1/dashboard/tasks/order` accepts `{"task_status":"planned","task_ids":["id-a","id-b"]}` from a local/authenticated CEREBRUM operator. It persists the supplied top-to-bottom order within that status column; omitted cards retain their relative order after the supplied cards. Moving a card to another status resets its board position so it arrives at the top of the destination column. CEREBRUM reads the backend maximum of 500 board cards and exposes accessible up/down controls on each card (`web/handler.go`, `internal/store/sqlite.go`, `internal/store/postgres.go`, `web/static/js/app.js`).
+
+Terminal task transitions retain `assignee` as the last responsible agent for board attribution while setting the handoff gate that prevents terminal pickup. Done/Dropped cards render that identity as read-only “Completed by”/“Dropped by” metadata instead of an editable assignment selector. Reopening to Planned clears the historical assignee and requires a fresh operator handoff; direct terminal-to-In-Progress transitions are rejected. Upgrade repair backfills terminal attribution from authenticated `task_picked_up_by` evidence where older versions already cleared `assignee`. For older agent-authored cards with neither field, it uses `submitting_agent` only when that exact ID exists in the agent registry; it never guesses from the provider label (`internal/store/sqlite.go`, `internal/store/postgres.go`, `web/static/js/app.js`).
 
 `PUT /v1/dashboard/tasks/{id}/assign` accepts `{"assignee":"<agent-id>"}`
 (empty unassigns). This is a local CEREBRUM operator action; callers presenting
@@ -1433,9 +1437,10 @@ allowed to read a non-public task. SQLite commits the assignee, monotonic
 assignment generation, in-progress transition, pickup reset, retirement of the
 prior notice, and new one-way notice atomically. Repeating the same assignment
 is a true no-op that preserves pickup evidence and does not duplicate notices.
-Moving a task to `done` or `dropped` clears its current assignee while retaining
-pickup evidence; reopening therefore remains unassigned until the operator
-hands it off again, which creates a fresh generation and notice.
+Moving a task to `done` or `dropped` retains its current assignee as terminal
+attribution alongside the pickup evidence. Reopening clears that historical
+assignee and remains unassigned until the operator hands it off again, which
+creates a fresh generation and notice.
 For signed agents, the scoped backlog contains only tasks whose assignee exactly
 matches the verified agent ID. `in_progress`, `done`, and `dropped` all require
 that same current active assignee, using an atomic owner/status transition.

@@ -172,6 +172,12 @@ Choose the desktop-shell technology through the deliberate evaluation v12 requir
 
 No chain reset. The SAGE daemon and authenticated local APIs remain independently testable and operable underneath the shell.
 
+The accepted framework decision, protocol boundary, and blocking release gates
+are recorded in [`desktop-shell-decision.md`](desktop-shell-decision.md),
+[`native-app-daemon-contract.md`](native-app-daemon-contract.md), and
+[`native-shell-quality-gates.md`](native-shell-quality-gates.md). The tracked
+Tauri foundation remains an opt-in preview until that full matrix passes.
+
 ### v11.12 - consumer onboarding and recovery
 
 Make first run and recovery survivable by someone who has never used SAGE, natively and without a terminal. Guided create-or-join, connect-an-AI-tool, and choose-what-is-private-or-shared flows; recovery-key backup and restore; and honest, consistent dialogs for destructive or privacy-affecting actions that explain what happened, what remains safe, and the next step. Plain language and safe defaults throughout. The gate includes clean-machine onboarding and recovery usability tests with real nontechnical users — the same bar v12 sets, brought forward so it is proven early rather than at the end.

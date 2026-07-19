@@ -601,6 +601,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			// Task backlog
 			r.Get("/v1/dashboard/tasks", h.handleGetTasks)
 			r.Post("/v1/dashboard/tasks", h.handleCreateTaskDashboard)
+			r.Put("/v1/dashboard/tasks/order", h.handleReorderTasksDashboard)
 			r.Put("/v1/dashboard/tasks/{id}/status", h.handleUpdateTaskStatusDashboard)
 			r.Put("/v1/dashboard/tasks/{id}/assign", h.handleAssignTask)
 			r.Get("/v1/dashboard/task-notifications", h.handleTaskNotifications)
@@ -2008,9 +2009,10 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		Provider        string `json:"provider"`
 		SubmittingAgent string `json:"submitting_agent"`
 		// Assignee: the agent_id a task is assigned to / claimed by (board only).
-		Assignee       string `json:"assignee"`
-		TaskPickedUpBy string `json:"task_picked_up_by"`
-		TaskPickedUpAt string `json:"task_picked_up_at,omitempty"`
+		Assignee            string `json:"assignee"`
+		TaskPickedUpBy      string `json:"task_picked_up_by"`
+		TaskPickedUpAt      string `json:"task_picked_up_at,omitempty"`
+		TaskStatusUpdatedAt string `json:"task_status_updated_at,omitempty"`
 	}
 	results := make([]taskResult, 0, len(tasks))
 	for _, t := range tasks {
@@ -2018,21 +2020,66 @@ func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request
 		if t.TaskPickedUpAt != nil {
 			taskPickedUpAt = t.TaskPickedUpAt.Format("2006-01-02T15:04:05Z")
 		}
+		taskStatusUpdatedAt := ""
+		if t.TaskStatusUpdatedAt != nil {
+			taskStatusUpdatedAt = t.TaskStatusUpdatedAt.Format("2006-01-02T15:04:05Z")
+		}
 		results = append(results, taskResult{
-			MemoryID:        t.MemoryID,
-			Content:         t.Content,
-			DomainTag:       t.DomainTag,
-			TaskStatus:      string(t.TaskStatus),
-			ConfidenceScore: t.ConfidenceScore,
-			CreatedAt:       t.CreatedAt.Format("2006-01-02T15:04:05Z"),
-			Provider:        t.Provider,
-			SubmittingAgent: t.SubmittingAgent,
-			Assignee:        t.Assignee,
-			TaskPickedUpBy:  t.TaskPickedUpBy,
-			TaskPickedUpAt:  taskPickedUpAt,
+			MemoryID:            t.MemoryID,
+			Content:             t.Content,
+			DomainTag:           t.DomainTag,
+			TaskStatus:          string(t.TaskStatus),
+			ConfidenceScore:     t.ConfidenceScore,
+			CreatedAt:           t.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			Provider:            t.Provider,
+			SubmittingAgent:     t.SubmittingAgent,
+			Assignee:            t.Assignee,
+			TaskPickedUpBy:      t.TaskPickedUpBy,
+			TaskPickedUpAt:      taskPickedUpAt,
+			TaskStatusUpdatedAt: taskStatusUpdatedAt,
 		})
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{"tasks": results, "total": len(results)})
+}
+
+// handleReorderTasksDashboard persists the human operator's within-column
+// ordering. Agent identities cannot use this local CEREBRUM preference surface.
+func (h *DashboardHandler) handleReorderTasksDashboard(w http.ResponseWriter, r *http.Request) {
+	if !h.isCEREBRUMOperatorRequest(r) {
+		writeError(w, http.StatusForbidden, "task order can only be changed from an authenticated CEREBRUM session")
+		return
+	}
+	var body struct {
+		TaskStatus string   `json:"task_status"`
+		TaskIDs    []string `json:"task_ids"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	ts := memory.TaskStatus(body.TaskStatus)
+	if !memory.IsValidTaskStatus(ts) {
+		writeError(w, http.StatusBadRequest, "task_status must be one of: planned, in_progress, done, dropped")
+		return
+	}
+	if len(body.TaskIDs) == 0 || len(body.TaskIDs) > 500 {
+		writeError(w, http.StatusBadRequest, "task_ids must contain between 1 and 500 cards")
+		return
+	}
+	orderStore, ok := h.store.(store.TaskBoardOrderStore)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "task ordering is not available on this datastore")
+		return
+	}
+	if err := orderStore.ReorderTasks(r.Context(), ts, body.TaskIDs); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if h.SSE != nil {
+		h.SSE.Broadcast(SSEEvent{Type: EventTask})
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{"task_status": body.TaskStatus, "task_ids": body.TaskIDs})
 }
 
 // handleUpdateTaskStatusDashboard updates a task's status from the dashboard.

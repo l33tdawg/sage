@@ -532,6 +532,15 @@ export async function updateTaskStatus(id, taskStatus) {
     return res.json();
 }
 
+export async function reorderTasks(taskStatus, taskIds) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/tasks/order`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_status: taskStatus, task_ids: taskIds }),
+    });
+    return res.json();
+}
+
 export async function createTask(content, domain) {
     const res = await fetch(`${API_BASE}/v1/dashboard/tasks`, {
         method: 'POST',
@@ -875,6 +884,35 @@ export function fedRevoke(chainId) { return fedPost(`/v1/dashboard/federation/co
 export function fedGetNetworkName() { return fedFetch('/v1/dashboard/federation/network-name'); }
 export function fedSetNetworkName(name) { return fedPut('/v1/dashboard/federation/network-name', { name }); }
 export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/status`); }
+
+// N-member Sharing & Sync group control plane. These routes remain
+// operator-only and SQLite-only; the UI surfaces 403/501 instead of silently
+// pretending group management is available.
+export function fedGroups() { return fedFetch('/v1/dashboard/federation/groups'); }
+export function fedGroupDomainAdd(groupId, domainTag, maxClearance) {
+    return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/domains`, {
+        domain_tag: domainTag, max_clearance: Number(maxClearance),
+    });
+}
+export function fedGroupDomainRemove(groupId, domainTag) {
+    return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/domains/remove`, { domain_tag: domainTag });
+}
+export function fedGroupSelfRole(groupId, role, selectedDomains) {
+    return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/self-role`, {
+        role, selected_domains: selectedDomains || [],
+    });
+}
+export function fedGroupMemberInvite(groupId, memberChain, memberPubkey, role, selectedDomains = [], ownedDomains = []) {
+    return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/members/invite`, {
+        member_chain: memberChain, member_pubkey: memberPubkey, role,
+        selected_domains: selectedDomains, owned_domains: ownedDomains,
+    });
+}
+export function fedGroupMemberRemove(groupId, memberChain) {
+    return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/roster`, {
+        entry_type: 'member_remove', payload: { member_chain: memberChain },
+    });
+}
 
 // Host wizard.
 export function fedHostCreate(endpoint, transport = 'lan') { return fedPost('/v1/dashboard/federation/join/host/create', { endpoint, transport }); }

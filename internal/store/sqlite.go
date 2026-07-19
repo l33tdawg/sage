@@ -698,6 +698,8 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	s.migrateTaskSupport(ctx)
 	s.migrateTaskAssignee(ctx)
 	s.migrateTaskPickup(ctx)
+	s.migrateTaskStatusUpdatedAt(ctx)
+	s.migrateTaskBoardPosition(ctx)
 	if err := s.migrateTaskAssignmentNotifications(ctx); err != nil {
 		return fmt.Errorf("migrate task assignment notifications: %w", err)
 	}
@@ -880,6 +882,32 @@ func (s *SQLiteStore) migrateTaskPickup(ctx context.Context) {
 	}
 }
 
+// migrateTaskStatusUpdatedAt adds the lifecycle clock used by the task board.
+// Legacy terminal cards get a fresh retention window on upgrade so an old
+// created_at value cannot make them disappear before the user sees them.
+func (s *SQLiteStore) migrateTaskStatusUpdatedAt(ctx context.Context) {
+	var count int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='task_status_updated_at'`).Scan(&count); err != nil || count > 0 {
+		return
+	}
+	if _, err := s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_status_updated_at TEXT`); err != nil {
+		return
+	}
+	_, _ = s.writeExecContext(ctx, `UPDATE memories
+		SET task_status_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE memory_type = 'task' AND task_status IN ('done','dropped')`)
+}
+
+func (s *SQLiteStore) migrateTaskBoardPosition(ctx context.Context) {
+	var count int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name='task_board_position'`).Scan(&count); err != nil || count > 0 {
+		return
+	}
+	_, _ = s.writeExecContext(ctx, `ALTER TABLE memories ADD COLUMN task_board_position INTEGER NOT NULL DEFAULT 0`)
+}
+
 // migrateTaskAssignmentNotifications adds a monotonic assignment generation
 // and a dedicated one-way notification inbox. These notices are deliberately
 // separate from pipeline work items: reading one requires no result and does
@@ -937,6 +965,17 @@ func (s *SQLiteStore) migrateTaskAssignmentNotifications(ctx context.Context) er
 		UPDATE memories SET task_requires_handoff = 1
 		WHERE memory_type = 'task' AND task_status IN ('done','dropped')`); err != nil {
 		return fmt.Errorf("backfill terminal task handoff gates: %w", err)
+	}
+	if _, err := s.writeExecContext(ctx, `
+		UPDATE memories SET assignee = CASE
+		  WHEN COALESCE(task_picked_up_by, '') != '' THEN task_picked_up_by
+		  WHEN EXISTS (SELECT 1 FROM network_agents a WHERE a.agent_id = memories.submitting_agent) THEN submitting_agent
+		  ELSE '' END
+		WHERE memory_type = 'task' AND task_status IN ('done','dropped')
+		  AND COALESCE(assignee, '') = ''
+		  AND (COALESCE(task_picked_up_by, '') != ''
+		       OR EXISTS (SELECT 1 FROM network_agents a WHERE a.agent_id = memories.submitting_agent))`); err != nil {
+		return fmt.Errorf("backfill terminal task attribution: %w", err)
 	}
 	// Workflow repair: in-progress without an owner is not actionable and can be
 	// mistaken for live assigned work. Return historical rows to human triage.
@@ -3975,20 +4014,31 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 	query := `UPDATE memories
 		SET task_requires_handoff = CASE
 		      WHEN task_status IN ('done','dropped') THEN 1 ELSE task_requires_handoff END,
+		    assignee = CASE WHEN task_status IN ('done','dropped') AND ? IN ('planned','in_progress')
+		      THEN '' ELSE assignee END,
+		    task_board_position = CASE WHEN task_status != ? THEN 0 ELSE task_board_position END,
+		    task_status_updated_at = CASE WHEN task_status != ?
+		      THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_status_updated_at END,
 		    task_status = ?
 		WHERE memory_id = ? AND memory_type = 'task'
-		  AND (? != 'in_progress' OR COALESCE(assignee, '') != '')`
-	args := []any{string(taskStatus), memoryID, string(taskStatus)}
+		  AND (? != 'in_progress' OR (task_status NOT IN ('done','dropped') AND COALESCE(assignee, '') != ''))`
+	args := []any{string(taskStatus), string(taskStatus), string(taskStatus), string(taskStatus), memoryID, string(taskStatus)}
 	if terminal {
-		// Terminal work has no current owner. Preserve task_picked_up_by/at as
-		// completion evidence, but clear assignee so a later reopen is visibly
-		// unassigned and must be handed off again to create a fresh notice.
+		// Keep the last assignee on terminal cards as durable attribution. A later
+		// reopen clears it in the non-terminal arm and requires a fresh handoff.
 		query = `UPDATE memories
 			SET task_status = ?,
+			    task_board_position = CASE WHEN task_status != ? THEN 0 ELSE task_board_position END,
+			    task_status_updated_at = CASE WHEN task_status != ?
+			      THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_status_updated_at END,
 			    task_assignment_version = task_assignment_version + CASE WHEN COALESCE(assignee, '') != '' THEN 1 ELSE 0 END,
-			    assignee = '', task_requires_handoff = 1
+			    assignee = CASE WHEN COALESCE(assignee, '') != '' THEN assignee
+			      WHEN COALESCE(task_picked_up_by, '') != '' THEN task_picked_up_by
+			      WHEN EXISTS (SELECT 1 FROM network_agents a WHERE a.agent_id = memories.submitting_agent) THEN submitting_agent
+			      ELSE '' END,
+			    task_requires_handoff = 1
 			WHERE memory_id = ? AND memory_type = 'task'`
-		args = []any{string(taskStatus), memoryID}
+		args = []any{string(taskStatus), string(taskStatus), string(taskStatus), memoryID}
 	}
 	result, err := s.writeExecContext(ctx, query, args...)
 	if err != nil {
@@ -4200,7 +4250,9 @@ func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int)
 		WHEN 'planned' THEN 2
 		WHEN 'done' THEN 3
 		WHEN 'dropped' THEN 4
-		ELSE 0 END, created_at DESC LIMIT ?`
+		ELSE 0 END,
+		CASE WHEN COALESCE(task_board_position, 0) = 0 THEN 0 ELSE 1 END,
+		task_board_position ASC, created_at DESC LIMIT ?`
 	args = append(args, limit)
 
 	rows, err := s.conn.QueryContext(ctx, query, args...)
@@ -4227,6 +4279,64 @@ func (s *SQLiteStore) GetAllTasks(ctx context.Context, domain string, limit int)
 	return records, nil
 }
 
+// ReorderTasks persists a complete visible ordering for one board column.
+// Cards not present in orderedIDs retain their relative order after the supplied
+// cards, which keeps a bounded UI request from losing older history.
+func (s *SQLiteStore) ReorderTasks(ctx context.Context, taskStatus memory.TaskStatus, orderedIDs []string) error {
+	if s.db != nil {
+		return s.RunInTx(ctx, func(tx OffchainStore) error {
+			return tx.(*SQLiteStore).ReorderTasks(ctx, taskStatus, orderedIDs)
+		})
+	}
+	rows, err := s.conn.QueryContext(ctx, `SELECT memory_id FROM memories
+		WHERE memory_type = 'task' AND status != 'deprecated' AND task_status = ?
+		ORDER BY CASE WHEN COALESCE(task_board_position, 0) = 0 THEN 0 ELSE 1 END,
+		         task_board_position ASC, created_at DESC`, string(taskStatus))
+	if err != nil {
+		return fmt.Errorf("read task board order: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	all := make([]string, 0)
+	valid := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("scan task board order: %w", err)
+		}
+		all = append(all, id)
+		valid[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read task board order: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close task board order rows: %w", err)
+	}
+	seen := make(map[string]struct{}, len(orderedIDs))
+	final := make([]string, 0, len(all))
+	for _, id := range orderedIDs {
+		if _, ok := valid[id]; !ok {
+			return fmt.Errorf("task %s is not a board card in %s", id, taskStatus)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("duplicate task in board order: %s", id)
+		}
+		seen[id] = struct{}{}
+		final = append(final, id)
+	}
+	for _, id := range all {
+		if _, included := seen[id]; !included {
+			final = append(final, id)
+		}
+	}
+	for i, id := range final {
+		if _, err := s.conn.ExecContext(ctx, `UPDATE memories SET task_board_position = ? WHERE memory_id = ?`, i+1, id); err != nil {
+			return fmt.Errorf("persist task board order: %w", err)
+		}
+	}
+	return nil
+}
+
 // populateTaskAssignees fills task board-only fields that are not part of
 // scanMemoryRow's fixed column set.
 func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memory.MemoryRecord) error {
@@ -4240,28 +4350,30 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 		args[i] = rec.MemoryID
 	}
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT memory_id, COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at
+		`SELECT memory_id, COALESCE(assignee, ''), COALESCE(task_picked_up_by, ''), task_picked_up_at, task_status_updated_at
 		 FROM memories WHERE memory_id IN (`+strings.Join(ph, ",")+`)`, args...)
 	if err != nil {
 		return fmt.Errorf("query task assignment fields: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	type taskBoardFields struct {
-		assignee   string
-		pickedBy   string
-		pickedUpAt *time.Time
+		assignee        string
+		pickedBy        string
+		pickedUpAt      *time.Time
+		statusUpdatedAt *time.Time
 	}
 	byID := make(map[string]taskBoardFields, len(records))
 	for rows.Next() {
 		var id, a, pickedBy string
-		var pickedAt *string
-		if err := rows.Scan(&id, &a, &pickedBy, &pickedAt); err != nil {
+		var pickedAt, statusUpdatedAt *string
+		if err := rows.Scan(&id, &a, &pickedBy, &pickedAt, &statusUpdatedAt); err != nil {
 			return fmt.Errorf("scan task assignment fields: %w", err)
 		}
 		byID[id] = taskBoardFields{
-			assignee:   a,
-			pickedBy:   pickedBy,
-			pickedUpAt: parseTimePtr(pickedAt),
+			assignee:        a,
+			pickedBy:        pickedBy,
+			pickedUpAt:      parseTimePtr(pickedAt),
+			statusUpdatedAt: parseTimePtr(statusUpdatedAt),
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -4272,6 +4384,7 @@ func (s *SQLiteStore) populateTaskAssignees(ctx context.Context, records []*memo
 		rec.Assignee = fields.assignee
 		rec.TaskPickedUpBy = fields.pickedBy
 		rec.TaskPickedUpAt = fields.pickedUpAt
+		rec.TaskStatusUpdatedAt = fields.statusUpdatedAt
 	}
 	return nil
 }
@@ -4284,6 +4397,9 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (
 	res, err := s.writeExecContext(ctx,
 		`UPDATE memories
 		 SET assignee = ?, task_status = 'in_progress',
+		     task_board_position = CASE WHEN task_status != 'in_progress' THEN 0 ELSE task_board_position END,
+		     task_status_updated_at = CASE WHEN task_status != 'in_progress'
+		       THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_status_updated_at END,
 		     task_picked_up_by = CASE
 		       WHEN COALESCE(assignee, '') = '' THEN ?
 		       WHEN COALESCE(task_picked_up_by, '') = '' THEN ?
@@ -4306,8 +4422,8 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (
 }
 
 // CompleteTaskAsAgent atomically completes/drops an open task only for its
-// current active assignee. It clears current ownership, preserves pickup
-// evidence, advances the assignment generation, and retires unread notices in
+// current active assignee. It preserves that assignee as terminal attribution,
+// advances the assignment generation, and retires unread notices in
 // the same transaction.
 func (s *SQLiteStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agentID string, status memory.TaskStatus) (bool, error) {
 	if status != memory.TaskStatusDone && status != memory.TaskStatusDropped {
@@ -4325,7 +4441,9 @@ func (s *SQLiteStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agentID
 	result, err := s.conn.ExecContext(ctx,
 		`UPDATE memories
 		 SET task_status = ?, task_assignment_version = task_assignment_version + 1,
-		     assignee = '', task_requires_handoff = 1
+		     task_board_position = 0,
+		     task_status_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+		     task_requires_handoff = 1
 		 WHERE memory_id = ? AND memory_type = 'task'
 		   AND task_status IN ('planned','in_progress') AND assignee = ?
 		   AND EXISTS (SELECT 1 FROM network_agents a
@@ -4413,11 +4531,15 @@ func (s *SQLiteStore) AssignTaskAndNotify(ctx context.Context, memoryID, assigne
 			newStatus = string(memory.TaskStatusInProgress)
 		}
 		if _, err = s.conn.ExecContext(ctx,
-			`UPDATE memories SET assignee = ?, task_assignment_version = ?, task_status = ?,
+			`UPDATE memories SET assignee = ?, task_assignment_version = ?,
+			 task_board_position = CASE WHEN task_status != ? THEN 0 ELSE task_board_position END,
+			 task_status_updated_at = CASE WHEN task_status != ?
+			   THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_status_updated_at END,
+			 task_status = ?,
 			 task_picked_up_by = '', task_picked_up_at = NULL,
 			 task_requires_handoff = CASE WHEN ? != '' THEN 0 ELSE task_requires_handoff END
 			 WHERE memory_id = ? AND memory_type = 'task'`,
-			assignee, version, newStatus, assignee, memoryID); err != nil {
+			assignee, version, newStatus, newStatus, newStatus, assignee, memoryID); err != nil {
 			return nil, fmt.Errorf("update task assignment: %w", err)
 		}
 		taskStatus = newStatus

@@ -1,0 +1,80 @@
+:root {
+  color-scheme: light dark;
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #f3faf7;
+  color: #10211b;
+  --background: #f3faf7;
+  --foreground: #10211b;
+  --muted: #405c52;
+  --accent: #087a55;
+  --border: #9bc7b6;
+  --panel: rgba(255, 255, 255, .82);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    background: #07110f;
+    color: #eefbf6;
+    --background: #07110f;
+    --foreground: #eefbf6;
+    --muted: #b9cbc5;
+    --accent: #78f2c4;
+    --border: #24453b;
+    --panel: rgba(12, 31, 26, .82);
+  }
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 20% 10%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 34rem),
+    var(--background);
+}
+
+main { width: min(44rem, calc(100vw - 3rem)); padding: 2rem 0; }
+.mark {
+  width: 3.5rem; height: 3.5rem; display: grid; place-items: center;
+  border: 1px solid var(--accent); border-radius: 1rem; color: var(--accent);
+  font: 700 1.5rem ui-monospace, monospace;
+}
+.eyebrow { margin-top: 2rem; color: var(--accent); letter-spacing: .12em; text-transform: uppercase; font-size: .75rem; }
+h1 { margin: .4rem 0 1.25rem; font-size: clamp(2rem, 5vw, 3.5rem); line-height: 1.05; }
+h2 { margin: 0; font-size: 1.05rem; }
+p { color: var(--muted); line-height: 1.6; }
+code { color: var(--foreground); }
+a { color: var(--accent); text-underline-offset: .2em; }
+a:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; border-radius: .15rem; }
+
+.state, aside {
+  padding: 1.25rem 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--panel);
+}
+.state { display: none; }
+#starting { display: block; }
+.state:target { display: block; }
+body:has(.state:target) #starting:not(:target) { display: none; }
+.state p:last-child, aside p:last-child { margin-bottom: 0; }
+
+.pulse {
+  width: 100%; height: 2px; margin: 2rem 0;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+@keyframes breathe { 0%, 100% { opacity: .28; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .pulse { animation: none; opacity: .7; } }
+@media (forced-colors: active) {
+  .mark, .state, aside { border: 1px solid CanvasText; }
+  a:focus-visible { outline-color: Highlight; }
+}
+@media (max-width: 32rem) {
+  main { width: min(100% - 2rem, 44rem); }
+  .state, aside { padding: 1rem; }
+}

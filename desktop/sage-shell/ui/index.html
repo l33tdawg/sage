@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>SAGE recovery</title>
+    <link rel="stylesheet" href="recovery.css">
+    <script src="recovery.js" defer></script>
+  </head>
+  <body>
+    <main aria-labelledby="shell-title">
+      <div class="mark" aria-hidden="true">S</div>
+      <p class="eyebrow">SAGE Native Preview</p>
+      <h1 id="shell-title">Your memory node stays in control</h1>
+
+      <section class="state" id="starting" role="status" aria-live="polite" aria-labelledby="starting-title">
+        <h2 id="starting-title">Connecting to your SAGE</h2>
+        <p>Verifying the per-user daemon before CEREBRUM is allowed to load.</p>
+      </section>
+      <section class="state" id="unavailable" role="alert" aria-labelledby="unavailable-title">
+        <h2 id="unavailable-title">The SAGE daemon is unavailable</h2>
+        <p>SAGE could not start or attach to your node. This window keeps checking but will not launch a second daemon.</p>
+        <p>Bundled-daemon output is preserved in <code>$SAGE_HOME/logs/sage.log</code> (normally <code>~/.sage/logs/sage.log</code>).</p>
+      </section>
+      <section class="state" id="locked" role="status" aria-live="polite" aria-labelledby="locked-title">
+        <h2 id="locked-title">Your vault is locked</h2>
+        <p>Unlock through the existing SAGE recovery flow. The native shell never receives or forwards your vault passphrase.</p>
+      </section>
+      <section class="state" id="draining" role="status" aria-live="polite" aria-labelledby="draining-title">
+        <h2 id="draining-title">SAGE is restarting safely</h2>
+        <p>The daemon is draining active work. This window will verify the new process generation and restore your last route.</p>
+      </section>
+      <section class="state" id="failed" role="alert" aria-labelledby="failed-title">
+        <h2 id="failed-title">SAGE could not finish starting</h2>
+        <p>Your data directory is left in place. Inspect <code>$SAGE_HOME/logs/sage.log</code> (normally <code>~/.sage/logs/sage.log</code>); this window will keep checking for a recovered node.</p>
+      </section>
+      <section class="state" id="incompatible" role="alert" aria-labelledby="incompatible-title">
+        <h2 id="incompatible-title">This shell and daemon are incompatible</h2>
+        <p>No unverified page was loaded. Install a matching SAGE release, or continue in your browser when the authenticated daemon supplied a safe CEREBRUM address.</p>
+        <p><a id="browser-fallback" hidden target="_blank" rel="noopener noreferrer">Open CEREBRUM in your browser</a></p>
+      </section>
+
+      <div class="pulse" aria-hidden="true"></div>
+      <aside aria-labelledby="safe-title">
+        <h2 id="safe-title">What remains safe</h2>
+        <p>Browser CEREBRUM, CLI, REST, and MCP remain independent. Closing this preview does not stop the memory node.</p>
+        <p><a href="https://github.com/l33tdawg/sage#readme" target="_blank" rel="noopener noreferrer">Open SAGE recovery documentation in your browser</a></p>
+      </aside>
+    </main>
+  </body>
+</html>

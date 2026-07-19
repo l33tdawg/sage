@@ -1,4 +1,4 @@
-.PHONY: build build-all test test-cometbft-patch lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism v119-chaos v119-state-sync v119-multiprocess-app benchmark benchmark-k6 sdk-test clean help
+.PHONY: build build-all test test-cometbft-patch lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism v119-chaos v119-state-sync v119-multiprocess-app benchmark benchmark-k6 sdk-test native-shell-quality acceptance-guard clean help
 
 BINARY=bin/amid
 COMPOSE_FILE=deploy/docker-compose.yml
@@ -114,6 +114,13 @@ bench-locomo: bench-locomo-fetch ## Run full LoCoMo benchmark; writes bench/resu
 
 sdk-test: ## Run Python SDK tests
 	cd sdk/python && pip install -e ".[dev]" && pytest -v
+
+native-shell-quality: ## Run Go/Rust native-shell contract, lint, test, and release-build gates
+	bash scripts/native-shell-quality.sh
+
+acceptance-guard: ## Run ACCEPTANCE_COMMAND with isolated HOME/SAGE_HOME and verify global endpoint cleanup
+	@test -n "$(ACCEPTANCE_COMMAND)" || (echo "usage: make acceptance-guard ACCEPTANCE_COMMAND='<command>'" >&2; exit 64)
+	bash scripts/acceptance-endpoint-guard.sh bash -lc "$(ACCEPTANCE_COMMAND)"
 
 clean: ## Remove build artifacts
 	rm -rf bin/ deploy/genesis/

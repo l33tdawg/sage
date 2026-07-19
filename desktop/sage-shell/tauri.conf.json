@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SAGE Native Preview",
+  "version": "0.1.0",
+  "identifier": "com.sage.native-preview",
+  "build": {
+    "frontendDist": "ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+      "capabilities": ["main"]
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["sage"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "Productivity",
+    "copyright": "Copyright 2026 Dhillon Andrew Kannabhiran",
+    "resources": [
+      "binaries/*"
+    ],
+    "icon": [
+      "../../extension/chrome/icons/icon128.png",
+      "../../installer/macos/AppIcon.icns",
+      "../../installer/windows/sage.ico"
+    ],
+    "longDescription": "An additive native window for the local SAGE CEREBRUM interface.",
+    "shortDescription": "Native CEREBRUM window"
+  }
+}

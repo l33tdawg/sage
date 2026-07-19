@@ -17,6 +17,7 @@ The central documentation resource for **SAGE** — Sovereign Agent Governed Exp
 | Read + navigate the CEREBRUM brain view (MRI, node encoding, train of thought) | [`BRAIN.md`](BRAIN.md) |
 | Bootstrap an admin / org / clearance setup | [`ADMIN_BOOTSTRAP.md`](ADMIN_BOOTSTRAP.md) |
 | Configure lifecycle hooks | [`HOOKS.md`](HOOKS.md) |
+| Review the native desktop architecture | [`desktop-shell-decision.md`](desktop-shell-decision.md), [`native-app-daemon-contract.md`](native-app-daemon-contract.md), [`native-shell-quality-gates.md`](native-shell-quality-gates.md) |
 
 ---
 

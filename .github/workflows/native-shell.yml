@@ -1,0 +1,174 @@
+name: Native shell quality
+
+on:
+  pull_request:
+    paths:
+      - "desktop/sage-shell/**"
+      - "internal/shellcontrol/**"
+      - "internal/**"
+      - "cmd/sage-gui/**"
+      - "api/**"
+      - "web/**"
+      - "go.mod"
+      - "go.sum"
+      - "scripts/native-shell-quality.sh"
+      - "scripts/stage-native-shell-daemon.sh"
+      - "scripts/verify-native-shell-bundle.sh"
+      - "scripts/verify-native-shell-bundle.test.sh"
+      - "scripts/acceptance-endpoint-guard.sh"
+      - ".github/workflows/native-shell.yml"
+  push:
+    branches: [main]
+    paths:
+      - "desktop/sage-shell/**"
+      - "internal/shellcontrol/**"
+      - "internal/**"
+      - "cmd/sage-gui/**"
+      - "api/**"
+      - "web/**"
+      - "go.mod"
+      - "go.sum"
+      - "scripts/native-shell-quality.sh"
+      - "scripts/stage-native-shell-daemon.sh"
+      - "scripts/verify-native-shell-bundle.sh"
+      - "scripts/verify-native-shell-bundle.test.sh"
+      - "scripts/acceptance-endpoint-guard.sh"
+      - ".github/workflows/native-shell.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile-and-contract:
+    env:
+      NATIVE_SHELL_VERSION: 11.11.0-ci.${{ github.run_number }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            rust-target: aarch64-apple-darwin
+            bundle: app
+          - os: windows-2025
+            rust-target: x86_64-pc-windows-msvc
+            bundle: nsis
+          - os: ubuntu-24.04
+            rust-target: x86_64-unknown-linux-gnu
+            bundle: deb,appimage
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-19
+        with:
+          targets: ${{ matrix.rust-target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 2026-07-19
+        with:
+          workspaces: desktop/sage-shell
+      - name: Install Linux WebView build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Go control-contract tests
+        shell: bash
+        run: |
+          go test ./internal/shellcontrol -count=1
+          go test ./cmd/sage-gui -run 'Test(LocalAgentKeyResolver|ShellStartupProof)' -count=1
+      - name: Rust format
+        run: cargo fmt --manifest-path desktop/sage-shell/Cargo.toml -- --check
+      - name: Stage bundled daemon resource
+        shell: bash
+        env:
+          SAGE_DAEMON_VERSION: ${{ env.NATIVE_SHELL_VERSION }}
+        run: scripts/stage-native-shell-daemon.sh ${{ matrix.rust-target }}
+      - name: Rust test and lint
+        run: |
+          cargo test --locked --manifest-path desktop/sage-shell/Cargo.toml
+          cargo test --locked --target ${{ matrix.rust-target }} --manifest-path desktop/sage-shell/Cargo.toml --no-run
+          cargo clippy --locked --target ${{ matrix.rust-target }} --manifest-path desktop/sage-shell/Cargo.toml --all-targets -- -D warnings
+      - name: Install pinned Tauri packager
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build unsigned installable package smoke
+        shell: bash
+        working-directory: desktop/sage-shell
+        run: |
+          cargo tauri build --ci \
+            --target ${{ matrix.rust-target }} \
+            --bundles ${{ matrix.bundle }} \
+            --config "{\"version\":\"${NATIVE_SHELL_VERSION}\"}"
+      - name: Verify bundled daemon release pair
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          scripts/verify-native-shell-bundle.sh \
+            ${{ matrix.rust-target }} \
+            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+            "${NATIVE_SHELL_VERSION}" \
+            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair.json \
+            ${{ matrix.bundle }}
+      - name: Verify Linux package release pairs
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for package_kind in deb appimage; do
+            scripts/verify-native-shell-bundle.sh \
+              ${{ matrix.rust-target }} \
+              desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+              "${NATIVE_SHELL_VERSION}" \
+              "desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair-${package_kind}.json" \
+              "${package_kind}"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-shell-${{ runner.os }}-${{ matrix.rust-target }}
+          path: desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/**
+          if-no-files-found: error
+
+  gate-definition:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-19
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 2026-07-19
+        with:
+          workspaces: desktop/sage-shell
+      - name: Guard acceptance tests from the global Codex endpoint
+        shell: bash
+        run: |
+          test_bin="${RUNNER_TEMP}/sage-gui-native-shell.test"
+          go test -c ./cmd/sage-gui -o "${test_bin}"
+          scripts/acceptance-endpoint-guard.sh "${test_bin}" \
+            -test.run '^TestSelfHealKnownMCPConfigs_' -test.count=1
+      - name: Audit locked Rust dependencies
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file desktop/sage-shell/Cargo.lock
+      - name: Generate license-bearing CycloneDX SBOM
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --manifest-path desktop/sage-shell/Cargo.toml \
+            --format json --target all --license-strict \
+            --override-filename native-shell.cdx
+      - name: Gate records are published
+        run: |
+          scripts/verify-native-shell-bundle.test.sh
+          test -s docs/desktop-shell-decision.md
+          test -s docs/native-app-daemon-contract.md
+          test -s docs/native-shell-quality-gates.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-shell-cyclonedx-sbom
+          path: desktop/sage-shell/native-shell.cdx.json
+          if-no-files-found: error
