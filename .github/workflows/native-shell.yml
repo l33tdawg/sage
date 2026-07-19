@@ -110,7 +110,7 @@ jobs:
           cargo install cargo-cyclonedx --version 0.5.9 --locked
           cargo cyclonedx --manifest-path desktop/sage-shell/Cargo.toml \
             --format json --target all --license-strict \
-            --override-filename native-shell.cdx.json
+            --override-filename native-shell.cdx
       - name: Gate records are published
         run: |
           test -s docs/desktop-shell-decision.md

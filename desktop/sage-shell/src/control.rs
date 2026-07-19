@@ -282,9 +282,8 @@ fn windows_pipe_suffix(sid: &str, canonical_home: &str) -> String {
 fn current_user_sid() -> Result<String, String> {
     use std::{ptr, slice};
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
-    use windows_sys::Win32::Security::{
-        ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser,
-    };
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows_sys::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     unsafe {
