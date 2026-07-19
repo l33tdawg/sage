@@ -3,6 +3,7 @@ module github.com/l33tdawg/sage
 go 1.25.7
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/cometbft/cometbft v0.38.23
 	github.com/cometbft/cometbft-db v1.0.4
 	github.com/dgraph-io/badger/v4 v4.9.4

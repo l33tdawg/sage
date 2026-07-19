@@ -76,6 +76,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+desktop/sage-shell/target/
+desktop/sage-shell/gen/
 .eggs/
 *.egg
 .venv/
@@ -120,6 +122,9 @@ docs/*
 !docs/FEDERATION.md
 !docs/ROADMAP.md
 !docs/v11.9-multiprocess-fault-harness.md
+!docs/desktop-shell-decision.md
+!docs/native-app-daemon-contract.md
+!docs/native-shell-quality-gates.md
 # Agent-facing code reference (public)
 !docs/reference/
 # Architecture diagram (rendered PNG embedded in ARCHITECTURE.md; .mmd source kept local/untracked)

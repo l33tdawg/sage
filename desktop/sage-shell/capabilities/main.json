@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "No renderer-to-native authority. Navigation is owned by Rust.",
+  "windows": ["main"],
+  "permissions": []
+}
