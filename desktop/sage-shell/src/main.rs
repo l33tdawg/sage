@@ -812,16 +812,12 @@ mod tests {
     fn browser_fallback_keeps_the_spawn_proof_boundary() {
         let matching = control::StatusError::Incompatible {
             message: "version skew".into(),
-            browser_origin: Some(Box::new(
-                Url::parse("http://127.0.0.1:8080").unwrap(),
-            )),
+            browser_origin: Some(Box::new(Url::parse("http://127.0.0.1:8080").unwrap())),
             startup_proof: Some("expected".into()),
         };
         let missing = control::StatusError::Incompatible {
             message: "version skew".into(),
-            browser_origin: Some(Box::new(
-                Url::parse("http://127.0.0.1:8080").unwrap(),
-            )),
+            browser_origin: Some(Box::new(Url::parse("http://127.0.0.1:8080").unwrap())),
             startup_proof: None,
         };
 
