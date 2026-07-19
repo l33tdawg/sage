@@ -219,14 +219,11 @@ fn supervise<R: tauri::Runtime>(
                 } else {
                     if !launch_attempted {
                         launch_attempted = true;
-                        match launch_bundled_daemon(&app, &sage_home) {
-                            Ok(attempt) => {
-                                launch_attempt = Some(attempt);
-                                show_recovery(&app, &session, RecoveryView::Starting, None);
-                                thread::sleep(Duration::from_millis(250));
-                                continue;
-                            }
-                            Err(_) => {}
+                        if let Ok(attempt) = launch_bundled_daemon(&app, &sage_home) {
+                            launch_attempt = Some(attempt);
+                            show_recovery(&app, &session, RecoveryView::Starting, None);
+                            thread::sleep(Duration::from_millis(250));
+                            continue;
                         }
                     }
                     RecoveryView::Unavailable
@@ -815,12 +812,16 @@ mod tests {
     fn browser_fallback_keeps_the_spawn_proof_boundary() {
         let matching = control::StatusError::Incompatible {
             message: "version skew".into(),
-            browser_origin: Some(Url::parse("http://127.0.0.1:8080").unwrap()),
+            browser_origin: Some(Box::new(
+                Url::parse("http://127.0.0.1:8080").unwrap(),
+            )),
             startup_proof: Some("expected".into()),
         };
         let missing = control::StatusError::Incompatible {
             message: "version skew".into(),
-            browser_origin: Some(Url::parse("http://127.0.0.1:8080").unwrap()),
+            browser_origin: Some(Box::new(
+                Url::parse("http://127.0.0.1:8080").unwrap(),
+            )),
             startup_proof: None,
         };
 

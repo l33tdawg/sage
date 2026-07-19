@@ -46,7 +46,7 @@ pub enum StatusError {
     Unavailable(String),
     Incompatible {
         message: String,
-        browser_origin: Option<url::Url>,
+        browser_origin: Option<Box<url::Url>>,
         startup_proof: Option<String>,
     },
 }
@@ -59,7 +59,7 @@ impl StatusError {
     pub fn browser_origin(&self) -> Option<&url::Url> {
         match self {
             Self::Unavailable(_) => None,
-            Self::Incompatible { browser_origin, .. } => browser_origin.as_ref(),
+            Self::Incompatible { browser_origin, .. } => browser_origin.as_deref(),
         }
     }
 
@@ -95,7 +95,7 @@ pub fn status(sage_home: &std::path::Path) -> Result<Status, StatusError> {
             startup_proof: None,
         })?;
     if let Err(message) = validate(&status) {
-        let browser_origin = browser_fallback_origin(&status);
+        let browser_origin = browser_fallback_origin(&status).map(Box::new);
         let startup_proof =
             valid_startup_proof(&status.startup_proof).then(|| status.startup_proof.clone());
         return Err(StatusError::Incompatible {
