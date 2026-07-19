@@ -44,19 +44,37 @@ pub struct Status {
 #[derive(Debug)]
 pub enum StatusError {
     Unavailable(String),
-    Incompatible(String),
+    Incompatible {
+        message: String,
+        browser_origin: Option<url::Url>,
+        startup_proof: Option<String>,
+    },
 }
 
 impl StatusError {
     pub fn is_incompatible(&self) -> bool {
-        matches!(self, Self::Incompatible(_))
+        matches!(self, Self::Incompatible { .. })
+    }
+
+    pub fn browser_origin(&self) -> Option<&url::Url> {
+        match self {
+            Self::Unavailable(_) => None,
+            Self::Incompatible { browser_origin, .. } => browser_origin.as_ref(),
+        }
+    }
+
+    pub fn startup_proof(&self) -> Option<&str> {
+        match self {
+            Self::Unavailable(_) => None,
+            Self::Incompatible { startup_proof, .. } => startup_proof.as_deref(),
+        }
     }
 }
 
 impl std::fmt::Display for StatusError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let message = match self {
-            Self::Unavailable(message) | Self::Incompatible(message) => message,
+            Self::Unavailable(message) | Self::Incompatible { message, .. } => message,
         };
         formatter.write_str(message)
     }
@@ -70,10 +88,32 @@ pub fn status(sage_home: &std::path::Path) -> Result<Status, StatusError> {
         .map_err(|error| StatusError::Unavailable(error.to_string()))?;
     write_frame(&mut *stream, request).map_err(StatusError::Unavailable)?;
     let response = read_frame(&mut *stream).map_err(StatusError::Unavailable)?;
-    let status: Status = serde_json::from_slice(&response)
-        .map_err(|error| StatusError::Incompatible(error.to_string()))?;
-    validate(&status).map_err(StatusError::Incompatible)?;
+    let status: Status = serde_json::from_slice(&response).map_err(|error| {
+        StatusError::Incompatible {
+            message: error.to_string(),
+            browser_origin: None,
+            startup_proof: None,
+        }
+    })?;
+    if let Err(message) = validate(&status) {
+        let browser_origin = browser_fallback_origin(&status);
+        let startup_proof = valid_startup_proof(&status.startup_proof)
+            .then(|| status.startup_proof.clone());
+        return Err(StatusError::Incompatible {
+            message,
+            browser_origin,
+            startup_proof,
+        });
+    }
     Ok(status)
+}
+
+fn browser_fallback_origin(status: &Status) -> Option<url::Url> {
+    if status.state.can_render() {
+        validate_origin(&status.ui_origin).ok()
+    } else {
+        None
+    }
 }
 
 fn validate(status: &Status) -> Result<(), String> {
@@ -587,6 +627,31 @@ mod tests {
         ] {
             assert!(validate_origin(unsafe_origin).is_err(), "{unsafe_origin}");
         }
+    }
+
+    #[test]
+    fn incompatible_ready_status_can_retain_only_a_safe_browser_origin() {
+        let status = Status {
+            control_protocol: 99,
+            daemon_version: "99.0.0".into(),
+            api_schema: 99,
+            min_shell_protocol: 99,
+            max_shell_protocol: 99,
+            instance_generation: "A".repeat(43),
+            state: DaemonState::Ready,
+            ui_origin: "http://127.0.0.1:8080".into(),
+            startup_proof: String::new(),
+        };
+        assert_eq!(
+            browser_fallback_origin(&status).as_ref().map(url::Url::as_str),
+            Some("http://127.0.0.1:8080/")
+        );
+
+        let unsafe_status = Status {
+            ui_origin: "http://example.com:8080".into(),
+            ..status
+        };
+        assert!(browser_fallback_origin(&unsafe_status).is_none());
     }
 
     #[test]

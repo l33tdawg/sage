@@ -108,5 +108,11 @@ instance lock remains authoritative. If an already-starting daemon wins that
 race, the losing child exits and the shell attaches through SSCP instead. A
 startup timeout does not start a second daemon. Daemon loss becomes visible
 within two seconds and leaves the shell open with retry, browser fallback, and
-log-location guidance. Window close and explicit "Stop SAGE node" remain
-separate operations; SSCP/1 provides no stop operation.
+log-location guidance. Output from a daemon started by the shell is appended to
+the existing `$SAGE_HOME/logs/sage.log`. A browser-fallback action is shown only
+when an authenticated SSCP response supplied a validated, ready loopback UI
+origin; the shell never guesses the configured REST port. For a shell-launched
+daemon the fallback remains withheld until startup proof succeeds, unless the
+child's dedicated lock-contention exit proves that an existing daemon won the
+race. Window close and explicit "Stop SAGE node" remain separate operations;
+SSCP/1 provides no stop operation.

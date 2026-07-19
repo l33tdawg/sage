@@ -3,6 +3,7 @@
 mod control;
 
 use std::collections::VecDeque;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -23,6 +24,16 @@ struct OriginPin {
     scheme: String,
     host: String,
     port: u16,
+}
+
+impl OriginPin {
+    fn from_url(url: &Url) -> Self {
+        Self {
+            scheme: url.scheme().to_owned(),
+            host: url.host_str().expect("validated host").to_owned(),
+            port: url.port().expect("validated explicit port"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +67,7 @@ struct ShellSession {
     pending_routes: VecDeque<String>,
     last_route: Option<String>,
     recovery_view: Option<RecoveryView>,
+    browser_fallback: Option<OriginPin>,
 }
 
 type SharedSession = Arc<Mutex<ShellSession>>;
@@ -130,11 +142,14 @@ fn main() {
                     .use_https_scheme(true)
                     .devtools(cfg!(debug_assertions))
                     .on_navigation(move |url| navigation_allowed(url, &nav_session))
-                    .on_new_window(|url, _| {
-                        if safe_external_url(&url) {
-                            open_external(url.as_str());
+                    .on_new_window({
+                        let external_session = Arc::clone(&session);
+                        move |url, _| {
+                            if external_url_allowed(&url, &external_session) {
+                                open_external(url.as_str());
+                            }
+                            tauri::webview::NewWindowResponse::Deny
                         }
-                        tauri::webview::NewWindowResponse::Deny
                     })
                     .build()?;
 
@@ -204,7 +219,7 @@ fn supervise<R: tauri::Runtime>(
                 } else {
                     if !launch_attempted {
                         launch_attempted = true;
-                        match launch_bundled_daemon(&app) {
+                        match launch_bundled_daemon(&app, &sage_home) {
                             Ok(attempt) => {
                                 launch_attempt = Some(attempt);
                                 show_recovery(&app, &session, RecoveryView::Starting, None);
@@ -216,11 +231,41 @@ fn supervise<R: tauri::Runtime>(
                     }
                     RecoveryView::Unavailable
                 };
-                show_recovery(&app, &session, view, None);
+                if view == RecoveryView::Incompatible {
+                    let browser_fallback_allowed =
+                        launch_attempt_allows_browser_fallback(&error, &mut launch_attempt);
+                    let browser_fallback = if browser_fallback_allowed {
+                        error.browser_origin().map(OriginPin::from_url)
+                    } else {
+                        None
+                    };
+                    show_recovery_with_browser(
+                        &app,
+                        &session,
+                        view,
+                        None,
+                        browser_fallback,
+                    );
+                } else {
+                    show_recovery(&app, &session, view, None);
+                }
             }
         }
         thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn launch_attempt_allows_browser_fallback(
+    error: &control::StatusError,
+    launch_attempt: &mut Option<LaunchAttempt>,
+) -> bool {
+    let Some(attempt) = launch_attempt.as_mut() else {
+        return true;
+    };
+    // A browser handoff still requires the startup proof unless the child
+    // conclusively lost the daemon instance-lock race.
+    error.startup_proof() == Some(attempt.expected_proof.as_str())
+        || attempt.allows_existing_attachment().unwrap_or(false)
 }
 
 fn status_matches_launch_attempt(
@@ -242,8 +287,15 @@ fn status_matches_launch_attempt(
 
 fn launch_bundled_daemon<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
+    sage_home: &std::path::Path,
 ) -> Result<LaunchAttempt, String> {
     let daemon = bundled_daemon_path(app)?;
+    let mut launch_log = open_launch_log(sage_home)?;
+    writeln!(launch_log, "\n--- SAGE native shell daemon launch ---")
+        .map_err(|error| format!("write native-shell launch log: {error}"))?;
+    let launch_stdout = launch_log
+        .try_clone()
+        .map_err(|error| format!("duplicate native-shell launch log: {error}"))?;
     let mut challenge = [0u8; 32];
     getrandom::fill(&mut challenge).map_err(|error| error.to_string())?;
     let expected_proof = control::startup_proof(&challenge);
@@ -252,8 +304,8 @@ fn launch_bundled_daemon<R: tauri::Runtime>(
         .env("SAGE_NO_BROWSER", "1")
         .env(SHELL_STARTUP_CHALLENGE_ENV, "1")
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(launch_stdout))
+        .stderr(Stdio::from(launch_log))
         .spawn()
         .map_err(|error| format!("start bundled SAGE daemon: {error}"))?;
     let Some(mut stdin) = child.stdin.take() else {
@@ -275,6 +327,33 @@ fn launch_bundled_daemon<R: tauri::Runtime>(
         child: Some(child),
         attach_existing: false,
     })
+}
+
+fn open_launch_log(sage_home: &std::path::Path) -> Result<File, String> {
+    let log_dir = sage_home.join("logs");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(&log_dir)
+            .map_err(|error| format!("create SAGE log directory: {error}"))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|error| format!("create SAGE log directory: {error}"))?;
+
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(log_dir.join("sage.log"))
+        .map_err(|error| format!("open SAGE launch log: {error}"))
 }
 
 fn bundled_daemon_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
@@ -312,11 +391,7 @@ fn attach_ready<R: tauri::Runtime>(
         show_recovery(app, session, RecoveryView::Incompatible, None);
         return;
     };
-    let pin = OriginPin {
-        scheme: origin.scheme().to_owned(),
-        host: origin.host_str().expect("validated host").to_owned(),
-        port: origin.port().expect("validated explicit port"),
-    };
+    let pin = OriginPin::from_url(&origin);
 
     let current_url = window.url().ok();
     let (should_navigate, route) = {
@@ -329,6 +404,7 @@ fn attach_ready<R: tauri::Runtime>(
         state.generation = Some(status.instance_generation.clone());
         state.attached = true;
         state.recovery_view = None;
+        state.browser_fallback = None;
         let route = state
             .pending_routes
             .pop_front()
@@ -353,6 +429,16 @@ fn show_recovery<R: tauri::Runtime>(
     view: RecoveryView,
     generation: Option<String>,
 ) {
+    show_recovery_with_browser(app, session, view, generation, None);
+}
+
+fn show_recovery_with_browser<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    session: &SharedSession,
+    view: RecoveryView,
+    generation: Option<String>,
+    browser_fallback: Option<OriginPin>,
+) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
@@ -360,17 +446,20 @@ fn show_recovery<R: tauri::Runtime>(
     let should_navigate = {
         let mut state = session.lock().expect("shell session lock");
         remember_current_route(&mut state, current_url.as_ref());
-        let changed = state.recovery_view != Some(view) || state.attached;
+        let changed = state.recovery_view != Some(view)
+            || state.attached
+            || state.browser_fallback != browser_fallback;
         state.pin = None;
         state.attached = false;
         if let Some(generation) = generation {
             state.generation = Some(generation);
         }
         state.recovery_view = Some(view);
+        state.browser_fallback = browser_fallback.clone();
         changed
     };
     if should_navigate {
-        let _ = window.navigate(recovery_url(view));
+        let _ = window.navigate(recovery_url(view, browser_fallback.as_ref()));
     }
 }
 
@@ -464,18 +553,24 @@ fn format_host(host: &str) -> String {
 }
 
 #[cfg(windows)]
-fn recovery_url(view: RecoveryView) -> Url {
-    Url::parse(&format!(
-        "https://tauri.localhost/index.html#{}",
-        view.fragment()
-    ))
-    .expect("static recovery URL")
+fn recovery_base_url() -> Url {
+    Url::parse("https://tauri.localhost/index.html").expect("static recovery URL")
 }
 
 #[cfg(not(windows))]
-fn recovery_url(view: RecoveryView) -> Url {
-    Url::parse(&format!("tauri://localhost/index.html#{}", view.fragment()))
-        .expect("static recovery URL")
+fn recovery_base_url() -> Url {
+    Url::parse("tauri://localhost/index.html").expect("static recovery URL")
+}
+
+fn recovery_url(view: RecoveryView, browser_fallback: Option<&OriginPin>) -> Url {
+    let mut url = recovery_base_url();
+    if let Some(pin) = browser_fallback {
+        let browser_url = pinned_ui_url(pin, None);
+        url.query_pairs_mut()
+            .append_pair("browser", browser_url.as_str());
+    }
+    url.set_fragment(Some(view.fragment()));
+    url
 }
 
 fn route_from_args<I, S>(args: I) -> Option<String>
@@ -489,6 +584,19 @@ where
 
 fn safe_external_url(url: &Url) -> bool {
     url.scheme() == "https" && url.username().is_empty() && url.password().is_none()
+}
+
+fn external_url_allowed(url: &Url, session: &SharedSession) -> bool {
+    if safe_external_url(url) {
+        return true;
+    }
+    let state = session.lock().expect("shell session lock");
+    state.browser_fallback.as_ref().is_some_and(|pin| {
+        url_matches_pin(url, pin)
+            && url.path() == "/ui/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -619,6 +727,75 @@ mod tests {
     }
 
     #[test]
+    fn browser_fallback_is_exactly_the_authenticated_ui_root() {
+        let session = Arc::new(Mutex::new(ShellSession {
+            browser_fallback: Some(OriginPin {
+                scheme: "http".into(),
+                host: "127.0.0.1".into(),
+                port: 8080,
+            }),
+            ..ShellSession::default()
+        }));
+        assert!(external_url_allowed(
+            &Url::parse("http://127.0.0.1:8080/ui/").unwrap(),
+            &session
+        ));
+        assert!(!external_url_allowed(
+            &Url::parse("http://127.0.0.1:8080/v1/memory").unwrap(),
+            &session
+        ));
+        assert!(!external_url_allowed(
+            &Url::parse("http://127.0.0.1:8081/ui/").unwrap(),
+            &session
+        ));
+    }
+
+    #[test]
+    fn recovery_url_carries_only_the_validated_browser_fallback() {
+        let pin = OriginPin {
+            scheme: "http".into(),
+            host: "127.0.0.1".into(),
+            port: 8080,
+        };
+        let url = recovery_url(RecoveryView::Incompatible, Some(&pin));
+        assert_eq!(url.fragment(), Some("incompatible"));
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "browser")
+                .map(|(_, value)| value.into_owned()),
+            Some("http://127.0.0.1:8080/ui/".into())
+        );
+    }
+
+    #[test]
+    fn launch_output_uses_the_existing_sage_log_location() {
+        let home = std::env::temp_dir().join(format!(
+            "sage-shell-launch-log-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut log = open_launch_log(&home).expect("open launch log");
+        writeln!(log, "fixture launch output").expect("write launch log");
+        drop(log);
+
+        let path = home.join("logs").join("sage.log");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read launch log"),
+            "fixture launch output\n"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("stat launch log")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0);
+        }
+        std::fs::remove_dir_all(home).expect("remove launch log fixture");
+    }
+
+    #[test]
     fn pending_routes_are_bounded_and_ordered() {
         let session = Arc::new(Mutex::new(ShellSession::default()));
         for index in 0..(MAX_PENDING_ROUTES + 2) {
@@ -636,5 +813,45 @@ mod tests {
         )));
         assert!(!allows_existing_attachment_exit_code(Some(1)));
         assert!(!allows_existing_attachment_exit_code(None));
+    }
+
+    #[test]
+    fn browser_fallback_keeps_the_spawn_proof_boundary() {
+        let matching = control::StatusError::Incompatible {
+            message: "version skew".into(),
+            browser_origin: Some(Url::parse("http://127.0.0.1:8080").unwrap()),
+            startup_proof: Some("expected".into()),
+        };
+        let missing = control::StatusError::Incompatible {
+            message: "version skew".into(),
+            browser_origin: Some(Url::parse("http://127.0.0.1:8080").unwrap()),
+            startup_proof: None,
+        };
+
+        let mut ordinary_attach = None;
+        assert!(launch_attempt_allows_browser_fallback(
+            &missing,
+            &mut ordinary_attach
+        ));
+
+        let mut spawned = Some(LaunchAttempt {
+            expected_proof: "expected".into(),
+            child: None,
+            attach_existing: false,
+        });
+        assert!(launch_attempt_allows_browser_fallback(
+            &matching,
+            &mut spawned
+        ));
+        assert!(!launch_attempt_allows_browser_fallback(
+            &missing,
+            &mut spawned
+        ));
+
+        spawned.as_mut().unwrap().attach_existing = true;
+        assert!(launch_attempt_allows_browser_fallback(
+            &missing,
+            &mut spawned
+        ));
     }
 }

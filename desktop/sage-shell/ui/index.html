@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>SAGE recovery</title>
     <link rel="stylesheet" href="recovery.css">
+    <script src="recovery.js" defer></script>
   </head>
   <body>
     <main aria-labelledby="shell-title">
@@ -18,7 +19,8 @@
       </section>
       <section class="state" id="unavailable" role="alert" aria-labelledby="unavailable-title">
         <h2 id="unavailable-title">The SAGE daemon is unavailable</h2>
-        <p>SAGE could not start or attach to your node. This window keeps checking but will not launch a second daemon. Start SAGE normally, or use the CEREBRUM URL printed by <code>sage-gui serve</code> in your browser.</p>
+        <p>SAGE could not start or attach to your node. This window keeps checking but will not launch a second daemon.</p>
+        <p>Bundled-daemon output is preserved in <code>$SAGE_HOME/logs/sage.log</code> (normally <code>~/.sage/logs/sage.log</code>).</p>
       </section>
       <section class="state" id="locked" role="status" aria-live="polite" aria-labelledby="locked-title">
         <h2 id="locked-title">Your vault is locked</h2>
@@ -30,11 +32,12 @@
       </section>
       <section class="state" id="failed" role="alert" aria-labelledby="failed-title">
         <h2 id="failed-title">SAGE could not finish starting</h2>
-        <p>Your data directory is left in place. Start <code>sage-gui serve</code> normally to inspect daemon output, then return here.</p>
+        <p>Your data directory is left in place. Inspect <code>$SAGE_HOME/logs/sage.log</code> (normally <code>~/.sage/logs/sage.log</code>); this window will keep checking for a recovered node.</p>
       </section>
       <section class="state" id="incompatible" role="alert" aria-labelledby="incompatible-title">
         <h2 id="incompatible-title">This shell and daemon are incompatible</h2>
-        <p>No unverified page was loaded. Install a matching SAGE release, or continue with the browser URL printed by the daemon.</p>
+        <p>No unverified page was loaded. Install a matching SAGE release, or continue in your browser when the authenticated daemon supplied a safe CEREBRUM address.</p>
+        <p><a id="browser-fallback" hidden target="_blank" rel="noopener noreferrer">Open CEREBRUM in your browser</a></p>
       </section>
 
       <div class="pulse" aria-hidden="true"></div>
