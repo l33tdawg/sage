@@ -10,7 +10,9 @@ The tracked preview now enforces locked dependency compilation, Rust
 format/test/Clippy, full platform shell-control tests, isolated Codex endpoint
 acceptance tests, dependency audit, a license-bearing CycloneDX SBOM, and
 unsigned package construction on the declared macOS, Windows, and Linux
-targets. Those checks establish the foundation; they are not release evidence.
+targets. Each constructed package is unpacked and must contain exactly one
+bundled daemon whose embedded version matches the shell package version. Those
+checks establish the foundation; they are not release evidence.
 
 Runtime promotion remains open until the install/launch/deep-link/offline,
 performance, assistive-technology, signing/notarization, update/rollback, and

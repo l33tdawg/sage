@@ -13,6 +13,8 @@ on:
       - "go.sum"
       - "scripts/native-shell-quality.sh"
       - "scripts/stage-native-shell-daemon.sh"
+      - "scripts/verify-native-shell-bundle.sh"
+      - "scripts/verify-native-shell-bundle.test.sh"
       - "scripts/acceptance-endpoint-guard.sh"
       - ".github/workflows/native-shell.yml"
   push:
@@ -28,6 +30,8 @@ on:
       - "go.sum"
       - "scripts/native-shell-quality.sh"
       - "scripts/stage-native-shell-daemon.sh"
+      - "scripts/verify-native-shell-bundle.sh"
+      - "scripts/verify-native-shell-bundle.test.sh"
       - "scripts/acceptance-endpoint-guard.sh"
       - ".github/workflows/native-shell.yml"
   workflow_dispatch:
@@ -37,6 +41,8 @@ permissions:
 
 jobs:
   compile-and-contract:
+    env:
+      NATIVE_SHELL_VERSION: 11.11.0-ci.${{ github.run_number }}
     strategy:
       fail-fast: false
       matrix:
@@ -87,11 +93,23 @@ jobs:
       - name: Stage bundled daemon
         shell: bash
         env:
-          SAGE_DAEMON_VERSION: 11.11.0-ci.${{ github.run_number }}
+          SAGE_DAEMON_VERSION: ${{ env.NATIVE_SHELL_VERSION }}
         run: scripts/stage-native-shell-daemon.sh ${{ matrix.rust-target }}
       - name: Build unsigned installable package smoke
+        shell: bash
         working-directory: desktop/sage-shell
-        run: cargo tauri build --ci --target ${{ matrix.rust-target }} --bundles ${{ matrix.bundle }}
+        run: |
+          cargo tauri build --ci \
+            --target ${{ matrix.rust-target }} \
+            --bundles ${{ matrix.bundle }} \
+            --config "{\"version\":\"${NATIVE_SHELL_VERSION}\"}"
+      - name: Verify bundled daemon release pair
+        shell: bash
+        run: |
+          scripts/verify-native-shell-bundle.sh \
+            ${{ matrix.rust-target }} \
+            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+            "${NATIVE_SHELL_VERSION}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-shell-${{ runner.os }}-${{ matrix.rust-target }}
@@ -130,6 +148,7 @@ jobs:
             --override-filename native-shell.cdx
       - name: Gate records are published
         run: |
+          scripts/verify-native-shell-bundle.test.sh
           test -s docs/desktop-shell-decision.md
           test -s docs/native-app-daemon-contract.md
           test -s docs/native-shell-quality-gates.md

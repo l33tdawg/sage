@@ -36,5 +36,6 @@ cargo build --locked --release --manifest-path "${MANIFEST}"
 # the compile gate lets contributors run Rust checks without leaving a binary
 # in the working tree, while CI's package job exercises the real bundle path.
 scripts/stage-native-shell-daemon.sh "$(rustc -vV | sed -n 's/^host: //p')"
+scripts/verify-native-shell-bundle.test.sh
 
 bash -n scripts/acceptance-endpoint-guard.sh
