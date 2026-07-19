@@ -114,7 +114,7 @@ func validatedFederationListenAddr(configured string) (string, error) {
 	return addr, nil
 }
 
-func runServe() (rerr error) {
+func runServe(startupProof string) (rerr error) {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -138,7 +138,7 @@ func runServe() (rerr error) {
 	// endpoint must not take the daemon, browser CEREBRUM, CLI, or MCP down.
 	// The endpoint starts only after main owns the existing instance lock.
 	var nativeControl *shellcontrol.Server
-	nativeControl, controlErr := shellcontrol.Start(SageHome(), version, restBaseURL(cfg.RESTAddr))
+	nativeControl, controlErr := shellcontrol.Start(SageHome(), version, restBaseURL(cfg.RESTAddr), startupProof)
 	if controlErr != nil {
 		logger.Warn().Err(controlErr).Msg("native shell control endpoint unavailable — browser CEREBRUM remains available")
 	} else {

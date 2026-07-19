@@ -13,7 +13,7 @@ import (
 )
 
 func TestWindowsNamedPipeStatusAndClose(t *testing.T) {
-	server, err := Start(t.TempDir(), "11.11.0-test", "http://127.0.0.1:8080")
+	server, err := Start(t.TempDir(), "11.11.0-test", "http://127.0.0.1:8080", "")
 	require.NoError(t, err)
 
 	timeout := time.Second

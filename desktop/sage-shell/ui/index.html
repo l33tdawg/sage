@@ -18,7 +18,7 @@
       </section>
       <section class="state" id="unavailable" role="alert" aria-labelledby="unavailable-title">
         <h2 id="unavailable-title">The SAGE daemon is unavailable</h2>
-        <p>This window keeps retrying without starting a second node. Start SAGE normally, or use the CEREBRUM URL printed by <code>sage-gui serve</code> in your browser.</p>
+        <p>SAGE could not start or attach to your node. This window keeps checking but will not launch a second daemon. Start SAGE normally, or use the CEREBRUM URL printed by <code>sage-gui serve</code> in your browser.</p>
       </section>
       <section class="state" id="locked" role="status" aria-live="polite" aria-labelledby="locked-title">
         <h2 id="locked-title">Your vault is locked</h2>
@@ -30,7 +30,7 @@
       </section>
       <section class="state" id="failed" role="alert" aria-labelledby="failed-title">
         <h2 id="failed-title">SAGE could not finish starting</h2>
-        <p>Your data directory is left in place. Review the daemon output and logs under <code>SAGE_HOME</code>, then restart SAGE normally.</p>
+        <p>Your data directory is left in place. Start <code>sage-gui serve</code> normally to inspect daemon output, then return here.</p>
       </section>
       <section class="state" id="incompatible" role="alert" aria-labelledby="incompatible-title">
         <h2 id="incompatible-title">This shell and daemon are incompatible</h2>

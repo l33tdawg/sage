@@ -29,8 +29,10 @@ Browser CEREBRUM, CLI, MCP, and REST continue to work without the shell.
 
 When the shell starts a bundled daemon, a 256-bit startup challenge is sent on
 an inherited anonymous pipe/handle. It is never placed in argv, environment,
-URL, log output, or a persistent file. Attaching to an existing daemon relies
-on endpoint ownership/ACL plus SSCP negotiation and a fresh instance generation.
+URL, log output, or a persistent file. The daemon returns only its lowercase
+SHA-256 proof in SSCP; the shell requires that proof before treating its spawned
+process as ready. Attaching to an existing daemon relies on endpoint
+ownership/ACL plus SSCP negotiation and a fresh instance generation.
 
 ## Framing and limits
 
@@ -56,14 +58,16 @@ The response is:
   "max_shell_protocol": 1,
   "instance_generation": "base64url-256-bit-random",
   "state": "starting|locked|ready|degraded|draining|failed",
-  "ui_origin": "http://127.0.0.1:8080"
+  "ui_origin": "http://127.0.0.1:8080",
+  "startup_proof": "optional-lowercase-sha256-of-shell-startup-challenge"
 }
 ```
 
 `ui_origin` is present only for `ready` or `degraded`, is loopback HTTP, has no
-userinfo/query/fragment, and is canonicalized before comparison. A later
-protocol may add bounded restart/stop and one-time launch tickets, but SSCP/1
-intentionally cannot mutate daemon state.
+userinfo/query/fragment, and is canonicalized before comparison. `startup_proof`
+is omitted for ordinary daemon starts and is never a credential. A later protocol
+may add bounded restart/stop and one-time launch tickets, but SSCP/1 intentionally
+cannot mutate daemon state.
 
 ## Compatibility
 
@@ -97,7 +101,12 @@ RBAC role, agent identity, federation identity, or signing authority.
 ## Lifecycle and recovery
 
 Repeated launch focuses the one window and queues a validated `sage://` route.
-A startup timeout does not start a second daemon. Daemon loss becomes visible
+On its first unavailable control check, the shell may start exactly one fixed
+daemon executable bundled in its resource directory with `serve` and
+`SAGE_NO_BROWSER=1`; it never resolves a command from `PATH`. The daemon's
+instance lock remains authoritative. If an already-starting daemon wins that
+race, the losing child exits and the shell attaches through SSCP instead. A
+startup timeout does not start a second daemon. Daemon loss becomes visible
 within two seconds and leaves the shell open with retry, browser fallback, and
 log-location guidance. Window close and explicit "Stop SAGE node" remain
 separate operations; SSCP/1 provides no stop operation.

@@ -1,5 +1,4 @@
 use serde::Deserialize;
-#[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -36,6 +35,10 @@ pub struct Status {
     pub state: DaemonState,
     #[serde(default)]
     pub ui_origin: String,
+    // Present only for a daemon this shell launched with an inherited startup
+    // challenge. It is a SHA-256 proof, never the challenge itself.
+    #[serde(default)]
+    pub startup_proof: String,
 }
 
 #[derive(Debug)]
@@ -89,7 +92,24 @@ fn validate(status: &Status) -> Result<(), String> {
     } else if !status.ui_origin.is_empty() {
         return Err("daemon exposed a UI origin before readiness".into());
     }
+    if !status.startup_proof.is_empty() && !valid_startup_proof(&status.startup_proof) {
+        return Err("daemon returned an invalid native-shell startup proof".into());
+    }
     Ok(())
+}
+
+pub fn startup_proof(challenge: &[u8; 32]) -> String {
+    Sha256::digest(challenge)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn valid_startup_proof(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 fn valid_generation(value: &str) -> bool {
@@ -578,6 +598,18 @@ mod tests {
         assert!(valid_generation(&"A".repeat(43)));
         assert!(!valid_generation(&"B".repeat(43)));
         assert!(!valid_generation(&"A".repeat(42)));
+    }
+
+    #[test]
+    fn startup_proof_is_a_canonical_sha256_hex_digest() {
+        assert_eq!(
+            startup_proof(&[0xA5; 32]),
+            "fc8b64001c5fdd0f2f40fb67dae4a865a2c5bd17836676d6d5b58b7917e33717"
+        );
+        assert!(valid_startup_proof(
+            "fc8b64001c5fdd0f2f40fb67dae4a865a2c5bd17836676d6d5b58b7917e33717"
+        ));
+        assert!(!valid_startup_proof("FC8B6400"));
     }
 
     #[test]

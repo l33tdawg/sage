@@ -14,11 +14,10 @@ targets. Those checks establish the foundation; they are not release evidence.
 
 Runtime promotion remains open until the install/launch/deep-link/offline,
 performance, assistive-technology, signing/notarization, update/rollback, and
-uninstall-preservation rows below have immutable platform results. Windows has
-an additional explicit blocker: named-pipe reads and writes need overlapped,
-cancellable deadlines plus stalled/partial-frame tests. The background
-supervisor keeps the UI responsive today, but that does not satisfy the
-protocol deadline or permit Windows promotion.
+uninstall-preservation rows below have immutable platform results. Windows
+named-pipe reads and writes now use overlapped cancellable deadlines with native
+stalled/partial-frame tests in the code gate; the Windows package/runtime row
+still needs immutable runner evidence before promotion.
 
 ## Supported matrix
 

@@ -17,7 +17,7 @@ import (
 
 func TestStatusProtocolAndEndpointPermissions(t *testing.T) {
 	home := shortTempDir(t)
-	server, err := Start(home, "11.11.0-test", "http://127.0.0.1:8080")
+	server, err := Start(home, "11.11.0-test", "http://127.0.0.1:8080", "")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
 
@@ -39,7 +39,7 @@ func TestStatusProtocolAndEndpointPermissions(t *testing.T) {
 }
 
 func TestRejectsUnknownAndOversizedFrames(t *testing.T) {
-	server, err := Start(shortTempDir(t), "dev", "http://localhost:8080")
+	server, err := Start(shortTempDir(t), "dev", "http://localhost:8080", "")
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, server.Close()) })
 
@@ -69,9 +69,20 @@ func TestRejectsNonLoopbackOrDecoratedOrigin(t *testing.T) {
 	for _, origin := range []string{
 		"https://127.0.0.1:8080", "http://192.168.1.2:8080", "http://127.0.0.1:8080/ui", "http://user@localhost:8080",
 	} {
-		_, err := Start(shortTempDir(t), "dev", origin)
+		_, err := Start(shortTempDir(t), "dev", origin, "")
 		assert.Error(t, err, origin)
 	}
+}
+
+func TestStartupProofIsOptionalButStrictWhenPresent(t *testing.T) {
+	proof := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	server, err := Start(shortTempDir(t), "dev", "http://localhost:8080", proof)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, server.Close()) })
+	assert.Equal(t, proof, requestStatus(t, server.Endpoint()).StartupProof)
+
+	_, err = Start(shortTempDir(t), "dev", "http://localhost:8080", "UPPERCASE")
+	assert.ErrorContains(t, err, "startup proof")
 }
 
 func TestCleanupDoesNotRemoveReplacementSocket(t *testing.T) {

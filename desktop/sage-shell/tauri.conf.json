@@ -24,6 +24,9 @@
     "active": true,
     "category": "Productivity",
     "copyright": "Copyright 2026 Dhillon Andrew Kannabhiran",
+    "resources": [
+      "binaries/*"
+    ],
     "icon": [
       "../../extension/chrome/icons/icon128.png",
       "../../installer/macos/AppIcon.icns",

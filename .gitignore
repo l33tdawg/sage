@@ -78,6 +78,7 @@ dist/
 build/
 desktop/sage-shell/target/
 desktop/sage-shell/gen/
+desktop/sage-shell/binaries/
 .eggs/
 *.egg
 .venv/

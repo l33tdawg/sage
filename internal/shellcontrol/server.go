@@ -48,15 +48,17 @@ type Response struct {
 	InstanceGeneration string `json:"instance_generation"`
 	State              State  `json:"state"`
 	UIOrigin           string `json:"ui_origin,omitempty"`
+	StartupProof       string `json:"startup_proof,omitempty"`
 }
 
 type Server struct {
-	listener   net.Listener
-	endpoint   string
-	cleanup    func() error
-	version    string
-	origin     string
-	generation string
+	listener     net.Listener
+	endpoint     string
+	cleanup      func() error
+	version      string
+	origin       string
+	generation   string
+	startupProof string
 
 	mu    sync.RWMutex
 	state State
@@ -64,10 +66,13 @@ type Server struct {
 	once  sync.Once
 }
 
-func Start(sageHome, daemonVersion, uiOrigin string) (*Server, error) {
+func Start(sageHome, daemonVersion, uiOrigin, startupProof string) (*Server, error) {
 	origin, err := canonicalLoopbackOrigin(uiOrigin)
 	if err != nil {
 		return nil, err
+	}
+	if startupProof != "" && !validStartupProof(startupProof) {
+		return nil, fmt.Errorf("native-shell startup proof must be a lowercase SHA-256 hex digest")
 	}
 	generationRaw := make([]byte, 32)
 	if _, randErr := rand.Read(generationRaw); randErr != nil {
@@ -79,7 +84,7 @@ func Start(sageHome, daemonVersion, uiOrigin string) (*Server, error) {
 	}
 	s := &Server{
 		listener: listener, endpoint: endpoint, cleanup: cleanup, version: daemonVersion,
-		origin: origin, generation: base64.RawURLEncoding.EncodeToString(generationRaw),
+		origin: origin, generation: base64.RawURLEncoding.EncodeToString(generationRaw), startupProof: startupProof,
 		state: StateStarting, done: make(chan struct{}),
 	}
 	go s.serve()
@@ -162,6 +167,7 @@ func (s *Server) handle(conn net.Conn) {
 		ControlProtocol: ControlProtocol, DaemonVersion: s.version, APISchema: APISchema,
 		MinShellProtocol: ShellProtocol, MaxShellProtocol: ShellProtocol,
 		InstanceGeneration: s.generation, State: state,
+		StartupProof: s.startupProof,
 	}
 	if state == StateReady || state == StateDegraded {
 		resp.UIOrigin = s.origin
@@ -170,6 +176,18 @@ func (s *Server) handle(conn net.Conn) {
 	if err == nil {
 		_ = writeFrame(conn, encoded)
 	}
+}
+
+func validStartupProof(proof string) bool {
+	if len(proof) != 64 {
+		return false
+	}
+	for _, char := range proof {
+		if !(char >= '0' && char <= '9') && !(char >= 'a' && char <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func readFrame(r io.Reader) ([]byte, error) {

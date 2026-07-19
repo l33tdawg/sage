@@ -45,7 +45,11 @@ func main() {
 		lock, err = acquireInstanceLock(SageHome())
 		if err == nil {
 			defer func() { _ = lock.Close() }()
-			err = runServe()
+			var startupProof string
+			startupProof, err = shellStartupProofFromEnvironment()
+			if err == nil {
+				err = runServe(startupProof)
+			}
 		}
 		if errors.Is(err, errCoordinatedRestart) {
 			execPath, pathErr := os.Executable()

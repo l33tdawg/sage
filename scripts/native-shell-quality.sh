@@ -22,7 +22,7 @@ cd "${REPO_ROOT}"
 
 env GOCACHE="${SHELL_GOCACHE}" go test ./internal/shellcontrol -count=1
 env GOCACHE="${SHELL_GOCACHE}" go test ./cmd/sage-gui \
-  -run 'TestLocalAgentKeyResolver' -count=1
+  -run 'Test(LocalAgentKeyResolver|ShellStartupProof)' -count=1
 env GOCACHE="${SHELL_GOCACHE}" go test -c ./cmd/sage-gui -o "${SAGE_GUI_TEST_BIN}"
 scripts/acceptance-endpoint-guard.sh "${SAGE_GUI_TEST_BIN}" \
   -test.run '^TestSelfHealKnownMCPConfigs_' -test.count=1
@@ -31,5 +31,10 @@ cargo fmt --manifest-path "${MANIFEST}" -- --check
 cargo clippy --locked --manifest-path "${MANIFEST}" --all-targets -- -D warnings
 cargo test --locked --manifest-path "${MANIFEST}"
 cargo build --locked --release --manifest-path "${MANIFEST}"
+
+# Package builds embed only a staged same-platform daemon. Keeping this outside
+# the compile gate lets contributors run Rust checks without leaving a binary
+# in the working tree, while CI's package job exercises the real bundle path.
+scripts/stage-native-shell-daemon.sh "$(rustc -vV | sed -n 's/^host: //p')"
 
 bash -n scripts/acceptance-endpoint-guard.sh

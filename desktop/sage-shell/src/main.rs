@@ -3,7 +3,9 @@
 mod control;
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -13,6 +15,7 @@ use url::Url;
 
 const MAX_PENDING_ROUTES: usize = 32;
 const MAX_ROUTE_BYTES: usize = 2_048;
+const SHELL_STARTUP_CHALLENGE_ENV: &str = "SAGE_SHELL_STARTUP_CHALLENGE";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OriginPin {
@@ -55,6 +58,34 @@ struct ShellSession {
 }
 
 type SharedSession = Arc<Mutex<ShellSession>>;
+
+struct LaunchAttempt {
+    expected_proof: String,
+    child: Option<Child>,
+}
+
+impl LaunchAttempt {
+    fn exited(&mut self) -> Result<bool, String> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(true);
+        };
+        match child.try_wait().map_err(|error| error.to_string())? {
+            Some(_) => {
+                self.child = None;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn hand_off(mut self) {
+        if let Some(mut child) = self.child.take() {
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
 
 fn main() {
     let session = Arc::new(Mutex::new(ShellSession::default()));
@@ -122,25 +153,57 @@ fn supervise<R: tauri::Runtime>(
     sage_home: PathBuf,
     session: SharedSession,
 ) {
+    let mut launch_attempt = None;
+    let mut launch_attempted = false;
     loop {
         match control::status(&sage_home) {
             Ok(status) if status.state.can_render() => {
-                attach_ready(&app, &session, &status);
+                if status_matches_launch_attempt(&status, &mut launch_attempt) {
+                    if let Some(attempt) = launch_attempt.take() {
+                        attempt.hand_off();
+                    }
+                    attach_ready(&app, &session, &status);
+                } else {
+                    show_recovery(&app, &session, RecoveryView::Incompatible, None);
+                }
             }
             Ok(status) => {
-                let view = match status.state {
-                    control::DaemonState::Starting => RecoveryView::Starting,
-                    control::DaemonState::Locked => RecoveryView::Locked,
-                    control::DaemonState::Draining => RecoveryView::Draining,
-                    control::DaemonState::Failed => RecoveryView::Failed,
-                    control::DaemonState::Ready | control::DaemonState::Degraded => unreachable!(),
-                };
-                show_recovery(&app, &session, view, Some(status.instance_generation));
+                if status_matches_launch_attempt(&status, &mut launch_attempt) {
+                    let view = match status.state {
+                        control::DaemonState::Starting => RecoveryView::Starting,
+                        control::DaemonState::Locked => RecoveryView::Locked,
+                        control::DaemonState::Draining => RecoveryView::Draining,
+                        control::DaemonState::Failed => RecoveryView::Failed,
+                        control::DaemonState::Ready | control::DaemonState::Degraded => {
+                            unreachable!()
+                        }
+                    };
+                    show_recovery(&app, &session, view, Some(status.instance_generation));
+                } else {
+                    show_recovery(&app, &session, RecoveryView::Incompatible, None);
+                }
             }
             Err(error) => {
+                if let Some(attempt) = launch_attempt.as_mut()
+                    && attempt.exited().unwrap_or(false)
+                {
+                    launch_attempt = None;
+                }
                 let view = if error.is_incompatible() {
                     RecoveryView::Incompatible
                 } else {
+                    if !launch_attempted {
+                        launch_attempted = true;
+                        match launch_bundled_daemon(&app) {
+                            Ok(attempt) => {
+                                launch_attempt = Some(attempt);
+                                show_recovery(&app, &session, RecoveryView::Starting, None);
+                                thread::sleep(Duration::from_millis(250));
+                                continue;
+                            }
+                            Err(_) => {}
+                        }
+                    }
                     RecoveryView::Unavailable
                 };
                 show_recovery(&app, &session, view, None);
@@ -148,6 +211,82 @@ fn supervise<R: tauri::Runtime>(
         }
         thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn status_matches_launch_attempt(
+    status: &control::Status,
+    launch_attempt: &mut Option<LaunchAttempt>,
+) -> bool {
+    let Some(attempt) = launch_attempt.as_mut() else {
+        return true;
+    };
+    if status.startup_proof == attempt.expected_proof {
+        return true;
+    }
+    // A daemon that was already acquiring the authoritative instance lock can
+    // win a race with our bounded launch. Once the losing child has exited,
+    // attach through the authenticated endpoint like any ordinary existing
+    // daemon; never issue a second launch.
+    attempt.exited().unwrap_or(false)
+}
+
+fn launch_bundled_daemon<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<LaunchAttempt, String> {
+    let daemon = bundled_daemon_path(app)?;
+    let mut challenge = [0u8; 32];
+    getrandom::fill(&mut challenge).map_err(|error| error.to_string())?;
+    let expected_proof = control::startup_proof(&challenge);
+    let mut child = Command::new(daemon)
+        .arg("serve")
+        .env("SAGE_NO_BROWSER", "1")
+        .env(SHELL_STARTUP_CHALLENGE_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("start bundled SAGE daemon: {error}"))?;
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("bundled SAGE daemon did not expose its startup pipe".into());
+    };
+    if let Err(error) = stdin.write_all(&challenge) {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("send native-shell startup challenge: {error}"));
+    }
+    // Closing the anonymous pipe is part of the one-shot protocol. The daemon
+    // reads exactly 32 bytes before it creates the control endpoint.
+    drop(stdin);
+    Ok(LaunchAttempt {
+        expected_proof,
+        child: Some(child),
+    })
+}
+
+fn bundled_daemon_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
+    let filename = if cfg!(windows) { "sage-gui.exe" } else { "sage-gui" };
+    let path = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("locate bundled SAGE daemon: {error}"))?
+        .join("binaries")
+        .join(filename);
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("bundled SAGE daemon is unavailable: {error}"))?;
+    if !metadata.is_file() {
+        return Err("bundled SAGE daemon path is not a regular file".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err("bundled SAGE daemon is not executable".into());
+        }
+    }
+    Ok(path)
 }
 
 fn attach_ready<R: tauri::Runtime>(
