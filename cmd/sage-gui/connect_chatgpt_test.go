@@ -14,6 +14,7 @@ import (
 func TestWriteChatGPTDesktopConfig_AppWideAndPreservesOtherServers(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	configPath := filepath.Join(home, ".codex", "config.toml")
 	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0755))
 	require.NoError(t, os.WriteFile(configPath, []byte("[mcp_servers.other]\ncommand = \"other\"\n"), 0600))
@@ -111,6 +112,7 @@ func TestSafeWriteFile_RejectsFinalSymlinkAndReplacesHardlinkAtomically(t *testi
 func TestWriteChatGPTDesktopConfig_RejectsSymlinkedConfigDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	realDir := t.TempDir()
 	require.NoError(t, os.Symlink(realDir, filepath.Join(home, ".codex")))
 	_, err := writeChatGPTDesktopConfig("/tmp/sage-home", "/bin/sage-gui")
@@ -121,6 +123,7 @@ func TestWriteChatGPTDesktopConfig_RejectsSymlinkedConfigDir(t *testing.T) {
 func TestWriteChatGPTDesktopConfig_CreatesUserConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 
 	files, err := writeChatGPTDesktopConfig("/tmp/sage-home", "/usr/local/bin/sage-gui")
 	require.NoError(t, err)
@@ -146,4 +149,49 @@ func TestProjectMCPConfigsUseDistinctStableIdentityAndProjectName(t *testing.T) 
 	block := codexSageConfigBlock(configA, "/Applications/SAGE.app/Contents/MacOS/sage-gui", sageHome, "codex")
 	assert.Contains(t, block, `SAGE_IDENTITY_PATH = "`+identityA+`"`)
 	assert.Contains(t, block, `SAGE_PROJECT = "synth-lab"`)
+}
+
+func TestSelfHealKnownMCPConfigs_IsolatedNodeCannotTouchGlobalCodexEndpoint(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	globalConfig := filepath.Join(home, ".codex", "config.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(globalConfig), 0755))
+	original := []byte(`[mcp_servers.sage]
+command = "/Applications/SAGE.app/Contents/MacOS/sage-gui"
+args = ["mcp"]
+
+[mcp_servers.sage.env]
+SAGE_HOME = "` + filepath.Join(home, ".sage") + `"
+SAGE_API_URL = "http://localhost:8080"
+`)
+	require.NoError(t, os.WriteFile(globalConfig, original, 0600))
+
+	isolatedSageHome := filepath.Join(t.TempDir(), "acceptance-node")
+	errs := selfHealKnownMCPConfigs(isolatedSageHome, "/tmp/acceptance/sage-gui")
+	require.Empty(t, errs)
+	after, err := os.ReadFile(globalConfig)
+	require.NoError(t, err)
+	assert.Equal(t, original, after,
+		"an acceptance node must leave the global Codex endpoint byte-identical")
+}
+
+func TestSelfHealKnownMCPConfigs_DefaultNodeStillRefreshesGlobalCodexEndpoint(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	defaultSageHome := filepath.Join(home, ".sage")
+	globalConfig := filepath.Join(home, ".codex", "config.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(globalConfig), 0755))
+	require.NoError(t, os.WriteFile(globalConfig, []byte(`[mcp_servers.sage]
+command = "/old/sage-gui"
+args = ["mcp"]
+`), 0600))
+
+	errs := selfHealKnownMCPConfigs(defaultSageHome, "/Applications/SAGE.app/Contents/MacOS/sage-gui")
+	require.Empty(t, errs)
+	after, err := os.ReadFile(globalConfig)
+	require.NoError(t, err)
+	assert.Contains(t, string(after), `command = "/Applications/SAGE.app/Contents/MacOS/sage-gui"`)
+	assert.Contains(t, string(after), `SAGE_API_URL = "http://localhost:8080"`)
 }

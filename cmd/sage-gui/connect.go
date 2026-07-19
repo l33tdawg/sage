@@ -232,6 +232,16 @@ func selfHealKnownMCPConfigs(sageHome, execPath string) []error {
 	if err != nil {
 		return []error{err}
 	}
+	// App-scoped MCP configuration belongs to the operator's primary, per-user
+	// node. Acceptance fixtures and secondary profiles deliberately run with a
+	// non-default SAGE_HOME; allowing one of those nodes to refresh ~/.codex (or
+	// another global client config) can pin an already-running MCP process to the
+	// fixture's temporary API port even after the file is restored. Explicit
+	// dashboard Connect actions remain available for custom profiles, but an
+	// isolated node must never mutate global client state merely by booting.
+	if !sameFilesystemPath(sageHome, filepath.Join(home, ".sage")) {
+		return nil
+	}
 	type target struct {
 		path     string
 		provider string
@@ -279,6 +289,26 @@ func selfHealKnownMCPConfigs(sageHome, execPath string) []error {
 		}
 	}
 	return errs
+}
+
+// sameFilesystemPath compares cleaned absolute paths and, when both sides
+// exist, their symlink-resolved targets. It is intentionally fail-closed: an
+// invalid or unresolvable relative path cannot authorize global config writes.
+func sameFilesystemPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	leftAbs = filepath.Clean(leftAbs)
+	rightAbs = filepath.Clean(rightAbs)
+	if leftAbs == rightAbs {
+		return true
+	}
+	leftResolved, leftResolveErr := filepath.EvalSymlinks(leftAbs)
+	rightResolved, rightResolveErr := filepath.EvalSymlinks(rightAbs)
+	return leftResolveErr == nil && rightResolveErr == nil &&
+		filepath.Clean(leftResolved) == filepath.Clean(rightResolved)
 }
 
 // safeWriteFile atomically replaces path from a same-directory 0600 temp file.

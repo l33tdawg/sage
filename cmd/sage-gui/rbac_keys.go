@@ -64,13 +64,31 @@ func adminSigningKeyAt(path string) ed25519.PrivateKey {
 // exposes key material; it reports (nil, false) for any agent whose key is not
 // on this node (e.g. a remote federated agent).
 func localAgentKeyResolverWithOperator(operatorKeyPath string) func(agentID string) (ed25519.PrivateKey, bool) {
+	return localAgentKeyResolverWithOperatorCache(operatorKeyPath, time.Second, time.Now)
+}
+
+type localAgentKeyCacheEntry struct {
+	key       ed25519.PrivateKey
+	found     bool
+	expiresAt time.Time
+}
+
+// localAgentKeyResolverWithOperatorCache is split out so the bounded freshness
+// and negative-cache behavior can be tested without sleeping. Cache expiry is
+// per requested agent: one recently missed identity must not suppress a scan
+// for a different identity, while both positive and negative answers avoid
+// repeated directory walks for cacheTTL.
+func localAgentKeyResolverWithOperatorCache(
+	operatorKeyPath string,
+	cacheTTL time.Duration,
+	now func() time.Time,
+) func(agentID string) (ed25519.PrivateKey, bool) {
 	var (
-		mu       sync.Mutex
-		byID     map[string]ed25519.PrivateKey
-		lastScan time.Time
+		mu    sync.Mutex
+		cache = make(map[string]localAgentKeyCacheEntry)
 	)
-	load := func() {
-		byID = make(map[string]ed25519.PrivateKey)
+	scan := func() map[string]ed25519.PrivateKey {
+		byID := make(map[string]ed25519.PrivateKey)
 		add := func(path string) {
 			k, ok := parseKeyFile(path)
 			if !ok {
@@ -98,22 +116,36 @@ func localAgentKeyResolverWithOperator(operatorKeyPath string) func(agentID stri
 				add(filepath.Join(agentsDir, e.Name(), "agent.key"))
 			}
 		}
-		lastScan = time.Now()
+		return byID
 	}
 	return func(agentID string) (ed25519.PrivateKey, bool) {
 		mu.Lock()
 		defer mu.Unlock()
-		if byID == nil {
-			load()
+		nowAt := now()
+		if entry, ok := cache[agentID]; ok && nowAt.Before(entry.expiresAt) {
+			return entry.key, entry.found
+		}
+		byID := scan()
+		next := make(map[string]localAgentKeyCacheEntry, len(byID)+1)
+		for id, key := range byID {
+			expiresAt := nowAt.Add(cacheTTL)
+			if previous, exists := cache[id]; exists && previous.found && nowAt.Before(previous.expiresAt) {
+				// A scan for another identity may refresh the key bytes, but it must
+				// not indefinitely extend this identity's own rotation deadline.
+				expiresAt = previous.expiresAt
+			}
+			next[id] = localAgentKeyCacheEntry{key: key, found: true, expiresAt: expiresAt}
+		}
+		for id, previous := range cache {
+			if !previous.found && nowAt.Before(previous.expiresAt) {
+				next[id] = previous
+			}
 		}
 		k, ok := byID[agentID]
-		// Agent bundles can be created after dashboard startup. Refresh on a
-		// miss (rate-limited globally) so a newly local agent becomes eligible
-		// for an explicit admin override without restarting CEREBRUM.
-		if !ok && time.Since(lastScan) >= time.Second {
-			load()
-			k, ok = byID[agentID]
+		if !ok {
+			next[agentID] = localAgentKeyCacheEntry{expiresAt: nowAt.Add(cacheTTL)}
 		}
+		cache = next
 		return k, ok
 	}
 }
