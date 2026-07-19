@@ -83,6 +83,11 @@ jobs:
           go test ./cmd/sage-gui -run 'Test(LocalAgentKeyResolver|ShellStartupProof)' -count=1
       - name: Rust format
         run: cargo fmt --manifest-path desktop/sage-shell/Cargo.toml -- --check
+      - name: Stage bundled daemon resource
+        shell: bash
+        env:
+          SAGE_DAEMON_VERSION: ${{ env.NATIVE_SHELL_VERSION }}
+        run: scripts/stage-native-shell-daemon.sh ${{ matrix.rust-target }}
       - name: Rust test and lint
         run: |
           cargo test --locked --manifest-path desktop/sage-shell/Cargo.toml
@@ -90,11 +95,6 @@ jobs:
           cargo clippy --locked --target ${{ matrix.rust-target }} --manifest-path desktop/sage-shell/Cargo.toml --all-targets -- -D warnings
       - name: Install pinned Tauri packager
         run: cargo install tauri-cli --version 2.11.4 --locked
-      - name: Stage bundled daemon
-        shell: bash
-        env:
-          SAGE_DAEMON_VERSION: ${{ env.NATIVE_SHELL_VERSION }}
-        run: scripts/stage-native-shell-daemon.sh ${{ matrix.rust-target }}
       - name: Build unsigned installable package smoke
         shell: bash
         working-directory: desktop/sage-shell

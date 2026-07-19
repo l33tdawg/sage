@@ -11,8 +11,9 @@ format/test/Clippy, full platform shell-control tests, isolated Codex endpoint
 acceptance tests, dependency audit, a license-bearing CycloneDX SBOM, and
 unsigned package construction on the declared macOS, Windows, and Linux
 targets. Each constructed package is unpacked and must contain exactly one
-bundled daemon whose embedded version matches the version supplied to the shell
-package build. Those checks emit a machine-readable release-pair record beside
+bundled daemon whose embedded Go OS/architecture matches the declared target
+and whose embedded version matches the version supplied to the shell package
+build. Those checks emit a machine-readable release-pair record beside
 the package with the target, build version, packaged shell artifact size/hash,
 and bundled daemon path/size/hash. They establish the foundation; unsigned CI
 artifacts and their records are not release evidence.

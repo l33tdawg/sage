@@ -28,7 +28,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 case "${TARGET_TRIPLE}" in
-  *apple-darwin)
+  aarch64-apple-darwin)
+    EXPECTED_GOOS=darwin
+    EXPECTED_GOARCH=arm64
     SEARCH_ROOT=${BUNDLE_ROOT}/macos
     DAEMON_NAME=sage-gui
     DAEMON_PATTERN='*/Contents/Resources/binaries/sage-gui'
@@ -46,7 +48,9 @@ case "${TARGET_TRIPLE}" in
     SHELL_ARTIFACT=$(find "${APP_PATH}/Contents/MacOS" -maxdepth 1 -type f | head -1)
     SHELL_ARTIFACT_KIND=app-executable
     ;;
-  *unknown-linux-gnu)
+  x86_64-unknown-linux-gnu)
+    EXPECTED_GOOS=linux
+    EXPECTED_GOARCH=amd64
     command -v dpkg-deb >/dev/null
     PACKAGE=$(find "${BUNDLE_ROOT}/deb" -maxdepth 1 -type f -name '*.deb' | head -1)
     if [ -z "${PACKAGE}" ]; then
@@ -61,7 +65,9 @@ case "${TARGET_TRIPLE}" in
     SHELL_ARTIFACT=${PACKAGE}
     SHELL_ARTIFACT_KIND=deb
     ;;
-  *pc-windows-msvc)
+  x86_64-pc-windows-msvc)
+    EXPECTED_GOOS=windows
+    EXPECTED_GOARCH=amd64
     command -v 7z >/dev/null
     PACKAGE=$(find "${BUNDLE_ROOT}/nsis" -maxdepth 1 -type f -iname '*setup*.exe' | head -1)
     if [ -z "${PACKAGE}" ]; then
@@ -94,14 +100,31 @@ if [ "${DAEMON_COUNT}" -ne 1 ]; then
 fi
 DAEMON_PATH=$(find "${SEARCH_ROOT}" -type f -path "${DAEMON_PATTERN}" | head -1)
 
-VERSION_OUTPUT=$("${DAEMON_PATH}" version)
-case "${VERSION_OUTPUT}" in
-  "sage-gui ${EXPECTED_VERSION} "*) ;;
-  *)
-    echo "bundled daemon version mismatch: expected ${EXPECTED_VERSION}, got ${VERSION_OUTPUT}" >&2
+BUILD_INFO=
+if BUILD_INFO=$(go version -m "${DAEMON_PATH}" 2>/dev/null); then
+  BUILD_GOOS=$(printf '%s\n' "${BUILD_INFO}" | awk '$1 == "build" && $2 ~ /^GOOS=/ { sub(/^GOOS=/, "", $2); print $2; exit }')
+  BUILD_GOARCH=$(printf '%s\n' "${BUILD_INFO}" | awk '$1 == "build" && $2 ~ /^GOARCH=/ { sub(/^GOARCH=/, "", $2); print $2; exit }')
+  BUILD_VERSION=$(printf '%s\n' "${BUILD_INFO}" | sed -n 's/.*-X main\.version=\([^ "\t]*\).*/\1/p' | head -1)
+  if [ "${BUILD_GOOS}" != "${EXPECTED_GOOS}" ] || [ "${BUILD_GOARCH}" != "${EXPECTED_GOARCH}" ]; then
+    echo "bundled daemon target mismatch: expected ${EXPECTED_GOOS}/${EXPECTED_GOARCH}, got ${BUILD_GOOS:-unknown}/${BUILD_GOARCH:-unknown}" >&2
     exit 1
-    ;;
-esac
+  fi
+  if [ "${BUILD_VERSION}" != "${EXPECTED_VERSION}" ]; then
+    echo "bundled daemon metadata version mismatch: expected ${EXPECTED_VERSION}, got ${BUILD_VERSION:-unknown}" >&2
+    exit 1
+  fi
+fi
+
+if [ -z "${BUILD_INFO}" ]; then
+  VERSION_OUTPUT=$("${DAEMON_PATH}" version)
+  case "${VERSION_OUTPUT}" in
+    "sage-gui ${EXPECTED_VERSION} "*) ;;
+    *)
+      echo "bundled daemon version mismatch: expected ${EXPECTED_VERSION}, got ${VERSION_OUTPUT}" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then

@@ -13,8 +13,25 @@ fi
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 TARGET_TRIPLE=$1
 case "${TARGET_TRIPLE}" in
-  *windows*) DAEMON_NAME=sage-gui.exe ;;
-  *) DAEMON_NAME=sage-gui ;;
+  aarch64-apple-darwin)
+    GO_OS=darwin
+    GO_ARCH=arm64
+    DAEMON_NAME=sage-gui
+    ;;
+  x86_64-pc-windows-msvc)
+    GO_OS=windows
+    GO_ARCH=amd64
+    DAEMON_NAME=sage-gui.exe
+    ;;
+  x86_64-unknown-linux-gnu)
+    GO_OS=linux
+    GO_ARCH=amd64
+    DAEMON_NAME=sage-gui
+    ;;
+  *)
+    echo "unsupported native-shell target triple: ${TARGET_TRIPLE}" >&2
+    exit 2
+    ;;
 esac
 
 VERSION=${SAGE_DAEMON_VERSION:-$(git -C "${REPO_ROOT}" describe --tags --always)}
@@ -35,7 +52,8 @@ fi
 
 rm -rf -- "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"
-env GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/sage-native-shell-gocache}" go build \
+env CGO_ENABLED=0 GOOS="${GO_OS}" GOARCH="${GO_ARCH}" \
+  GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/sage-native-shell-gocache}" go build \
   -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
   -o "${OUTPUT_DIR}/${DAEMON_NAME}" \
   ./cmd/sage-gui
