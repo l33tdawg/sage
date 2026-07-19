@@ -11,8 +11,11 @@ format/test/Clippy, full platform shell-control tests, isolated Codex endpoint
 acceptance tests, dependency audit, a license-bearing CycloneDX SBOM, and
 unsigned package construction on the declared macOS, Windows, and Linux
 targets. Each constructed package is unpacked and must contain exactly one
-bundled daemon whose embedded version matches the shell package version. Those
-checks establish the foundation; they are not release evidence.
+bundled daemon whose embedded version matches the version supplied to the shell
+package build. Those checks emit a machine-readable release-pair record beside
+the package with the target, build version, packaged shell artifact size/hash,
+and bundled daemon path/size/hash. They establish the foundation; unsigned CI
+artifacts and their records are not release evidence.
 
 Runtime promotion remains open until the install/launch/deep-link/offline,
 performance, assistive-technology, signing/notarization, update/rollback, and
