@@ -18,6 +18,31 @@ the package with the target, build version, packaged shell artifact size/hash,
 and bundled daemon path/size/hash. They establish the foundation; unsigned CI
 artifacts and their records are not release evidence.
 
+The tagged release workflow now enforces that distinction from v11.11 onward.
+It version-locks the Tauri and Cargo metadata to the tag, constructs private
+per-platform package-pair and SBOM evidence, and then fails closed at the named
+native standalone production-promotion gate. Those unsigned preview artifacts
+are deliberately excluded from public GitHub release staging. The hold may be
+removed only when the signed installed-runtime, recovery, performance, and
+accessibility evidence below is produced and validated in the same publication
+dependency chain. By release-owner decision, this freezes the entire v11.11
+publication graph—not only the native assets—so Docker, SDK, MCP, legacy
+installers, and the GitHub release cannot get ahead of standalone readiness.
+Recovery runs for tags older than v11.11 remain supported. The temporary hold
+also fails closed for later versions until their shell/daemon compatibility and
+promotion path deliberately replace it; it must not be carried unchanged into
+v12.
+
+GitHub Dependabot alert 37 (`RUSTSEC-2024-0429` /
+`GHSA-wrw7-89jp-8q8g`) is also an active promotion blocker. The Linux Tauri
+stack currently receives `glib` 0.18.5 through Wry/WebKitGTK; the affected safe
+iterator API can trigger undefined behavior and optimized-build crashes. As of
+this gate record, current Wry 0.55.1 still pins the affected GTK/glib family and
+upstream issue `tauri-apps/wry#1769` remains open, so no compatible dependency
+upgrade exists. The alert must remain open until a tested upstream migration or
+reviewed backport removes the affected code; it must not be dismissed merely to
+make release status green.
+
 Runtime promotion remains open until the install/launch/deep-link/offline,
 performance, assistive-technology, signing/notarization, update/rollback, and
 uninstall-preservation rows below have immutable platform results. Windows
