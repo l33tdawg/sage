@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ]; then
-  echo "usage: $0 <rust-target-triple> <bundle-root> <expected-version> [evidence-json]" >&2
+if [ "$#" -lt 3 ] || [ "$#" -gt 5 ]; then
+  echo "usage: $0 <rust-target-triple> <bundle-root> <expected-version> [evidence-json] [package-kind]" >&2
   exit 2
 fi
 
@@ -13,11 +13,13 @@ TARGET_TRIPLE=$1
 BUNDLE_ROOT=$2
 EXPECTED_VERSION=$3
 EVIDENCE_JSON=${4:-}
+PACKAGE_KIND=${5:-}
 
 if [ ! -d "${BUNDLE_ROOT}" ]; then
   echo "native-shell bundle root does not exist: ${BUNDLE_ROOT}" >&2
   exit 1
 fi
+BUNDLE_ROOT=$(cd "${BUNDLE_ROOT}" && pwd -P)
 
 EXTRACT_ROOT=
 cleanup() {
@@ -29,6 +31,10 @@ trap cleanup EXIT INT TERM
 
 case "${TARGET_TRIPLE}" in
   aarch64-apple-darwin)
+    if [ -n "${PACKAGE_KIND}" ] && [ "${PACKAGE_KIND}" != app ]; then
+      echo "unsupported package kind for ${TARGET_TRIPLE}: ${PACKAGE_KIND}" >&2
+      exit 2
+    fi
     EXPECTED_GOOS=darwin
     EXPECTED_GOARCH=arm64
     SEARCH_ROOT=${BUNDLE_ROOT}/macos
@@ -51,29 +57,63 @@ case "${TARGET_TRIPLE}" in
   x86_64-unknown-linux-gnu)
     EXPECTED_GOOS=linux
     EXPECTED_GOARCH=amd64
-    command -v dpkg-deb >/dev/null
-    PACKAGE=$(find "${BUNDLE_ROOT}/deb" -maxdepth 1 -type f -name '*.deb' | head -1)
-    if [ -z "${PACKAGE}" ]; then
-      echo "native-shell Debian package is missing" >&2
-      exit 1
-    fi
-    EXTRACT_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sage-native-deb.XXXXXX")
-    dpkg-deb -x "${PACKAGE}" "${EXTRACT_ROOT}"
-    SEARCH_ROOT=${EXTRACT_ROOT}
     DAEMON_NAME=sage-gui
     DAEMON_PATTERN='*/binaries/sage-gui'
-    SHELL_ARTIFACT=${PACKAGE}
-    SHELL_ARTIFACT_KIND=deb
+    case "${PACKAGE_KIND:-deb}" in
+      deb)
+        command -v dpkg-deb >/dev/null
+        PACKAGE_COUNT=$(find "${BUNDLE_ROOT}/deb" -maxdepth 1 -type f -name '*.deb' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${PACKAGE_COUNT}" -ne 1 ]; then
+          echo "native-shell bundle must contain exactly one Debian package; found ${PACKAGE_COUNT}" >&2
+          exit 1
+        fi
+        PACKAGE=$(find "${BUNDLE_ROOT}/deb" -maxdepth 1 -type f -name '*.deb' | head -1)
+        EXTRACT_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sage-native-deb.XXXXXX")
+        dpkg-deb -x "${PACKAGE}" "${EXTRACT_ROOT}"
+        SEARCH_ROOT=${EXTRACT_ROOT}
+        SHELL_ARTIFACT=${PACKAGE}
+        SHELL_ARTIFACT_KIND=deb
+        ;;
+      appimage)
+        PACKAGE_COUNT=$(find "${BUNDLE_ROOT}/appimage" -maxdepth 1 -type f -name '*.AppImage' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${PACKAGE_COUNT}" -ne 1 ]; then
+          echo "native-shell bundle must contain exactly one AppImage; found ${PACKAGE_COUNT}" >&2
+          exit 1
+        fi
+        PACKAGE=$(find "${BUNDLE_ROOT}/appimage" -maxdepth 1 -type f -name '*.AppImage' | head -1)
+        if [ ! -x "${PACKAGE}" ]; then
+          echo "native-shell AppImage is not executable: ${PACKAGE}" >&2
+          exit 1
+        fi
+        EXTRACT_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sage-native-appimage.XXXXXX")
+        (
+          cd "${EXTRACT_ROOT}"
+          "${PACKAGE}" --appimage-extract >/dev/null
+        )
+        SEARCH_ROOT=${EXTRACT_ROOT}/squashfs-root
+        SHELL_ARTIFACT=${PACKAGE}
+        SHELL_ARTIFACT_KIND=appimage
+        ;;
+      *)
+        echo "unsupported package kind for ${TARGET_TRIPLE}: ${PACKAGE_KIND}" >&2
+        exit 2
+        ;;
+    esac
     ;;
   x86_64-pc-windows-msvc)
+    if [ -n "${PACKAGE_KIND}" ] && [ "${PACKAGE_KIND}" != nsis ]; then
+      echo "unsupported package kind for ${TARGET_TRIPLE}: ${PACKAGE_KIND}" >&2
+      exit 2
+    fi
     EXPECTED_GOOS=windows
     EXPECTED_GOARCH=amd64
     command -v 7z >/dev/null
-    PACKAGE=$(find "${BUNDLE_ROOT}/nsis" -maxdepth 1 -type f -iname '*setup*.exe' | head -1)
-    if [ -z "${PACKAGE}" ]; then
-      echo "native-shell NSIS package is missing" >&2
+    PACKAGE_COUNT=$(find "${BUNDLE_ROOT}/nsis" -maxdepth 1 -type f -iname '*setup*.exe' 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${PACKAGE_COUNT}" -ne 1 ]; then
+      echo "native-shell bundle must contain exactly one NSIS package; found ${PACKAGE_COUNT}" >&2
       exit 1
     fi
+    PACKAGE=$(find "${BUNDLE_ROOT}/nsis" -maxdepth 1 -type f -iname '*setup*.exe' | head -1)
     EXTRACT_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sage-native-nsis.XXXXXX")
     7z x -y "-o${EXTRACT_ROOT}" "${PACKAGE}" >/dev/null
     SEARCH_ROOT=${EXTRACT_ROOT}

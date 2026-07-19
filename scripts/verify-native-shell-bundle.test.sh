@@ -40,3 +40,26 @@ if "${REPO_ROOT}/scripts/verify-native-shell-bundle.sh" \
   echo "bundle verifier accepted a mismatched daemon version" >&2
   exit 1
 fi
+
+APPIMAGE_PATH=${FIXTURE_ROOT}/bundle/appimage/SAGE_11.11.0-test.1_amd64.AppImage
+APPIMAGE_EVIDENCE_PATH=${FIXTURE_ROOT}/bundle/native-shell-pair-appimage.json
+mkdir -p "$(dirname "${APPIMAGE_PATH}")"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'test "${1:-}" = "--appimage-extract"' \
+  'mkdir -p squashfs-root/usr/lib/SAGE/binaries' \
+  'printf '\''%s\n'\'' '\''#!/usr/bin/env bash'\'' '\''echo "sage-gui 11.11.0-test.1 (commit fixture, built fixture)"'\'' > squashfs-root/usr/lib/SAGE/binaries/sage-gui' \
+  'chmod +x squashfs-root/usr/lib/SAGE/binaries/sage-gui' > "${APPIMAGE_PATH}"
+chmod +x "${APPIMAGE_PATH}"
+
+"${REPO_ROOT}/scripts/verify-native-shell-bundle.sh" \
+  x86_64-unknown-linux-gnu \
+  "${FIXTURE_ROOT}/bundle" \
+  11.11.0-test.1 \
+  "${APPIMAGE_EVIDENCE_PATH}" \
+  appimage
+
+test -s "${APPIMAGE_EVIDENCE_PATH}"
+grep -F '"kind": "appimage"' "${APPIMAGE_EVIDENCE_PATH}" >/dev/null
+grep -F '"path": "appimage/SAGE_11.11.0-test.1_amd64.AppImage"' "${APPIMAGE_EVIDENCE_PATH}" >/dev/null
+grep -F '"package_path": "usr/lib/SAGE/binaries/sage-gui"' "${APPIMAGE_EVIDENCE_PATH}" >/dev/null

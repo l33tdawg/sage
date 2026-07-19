@@ -55,7 +55,7 @@ jobs:
             bundle: nsis
           - os: ubuntu-24.04
             rust-target: x86_64-unknown-linux-gnu
-            bundle: deb
+            bundle: deb,appimage
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -104,13 +104,27 @@ jobs:
             --bundles ${{ matrix.bundle }} \
             --config "{\"version\":\"${NATIVE_SHELL_VERSION}\"}"
       - name: Verify bundled daemon release pair
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           scripts/verify-native-shell-bundle.sh \
             ${{ matrix.rust-target }} \
             desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
             "${NATIVE_SHELL_VERSION}" \
-            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair.json
+            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair.json \
+            ${{ matrix.bundle }}
+      - name: Verify Linux package release pairs
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for package_kind in deb appimage; do
+            scripts/verify-native-shell-bundle.sh \
+              ${{ matrix.rust-target }} \
+              desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+              "${NATIVE_SHELL_VERSION}" \
+              "desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair-${package_kind}.json" \
+              "${package_kind}"
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-shell-${{ runner.os }}-${{ matrix.rust-target }}
