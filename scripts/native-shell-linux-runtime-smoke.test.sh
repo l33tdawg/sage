@@ -9,12 +9,19 @@ for required in \
   'sudo dpkg -i' \
   'sudo dpkg --remove' \
   'APPIMAGE_EXTRACT_AND_RUN=1' \
+  'SAGE_CMT_RPC_ADDR=' \
+  'SAGE_CMT_P2P_ADDR=' \
+  'SSCP status schema is not exact' \
+  'SSCP daemon is not renderable' \
+  'SSCP startup proof is missing or malformed' \
   'shell-control.sock' \
   "stat -c '%a'" \
   'instance_generation' \
   'require_relaunch_exit' \
   'preserve.sentinel' \
-  'matching_smoke_pids'; do
+  'matching_smoke_pids' \
+  'APPIMAGE_GENERATION' \
+  'REINSTALLED_GENERATION'; do
   grep -Fq "${required}" "${HARNESS}"
 done
 
