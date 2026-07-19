@@ -4295,7 +4295,7 @@ func (s *SQLiteStore) ReorderTasks(ctx context.Context, taskStatus memory.TaskSt
 	if err != nil {
 		return fmt.Errorf("read task board order: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	all := make([]string, 0)
 	valid := make(map[string]struct{})
 	for rows.Next() {

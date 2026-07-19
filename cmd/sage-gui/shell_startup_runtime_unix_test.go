@@ -106,16 +106,16 @@ func requestShellStartupStatus(connection net.Conn) (shellStartupStatus, error) 
 	if err != nil {
 		return shellStartupStatus{}, err
 	}
-	if err := writeShellStartupFrame(connection, request); err != nil {
-		return shellStartupStatus{}, err
+	if writeErr := writeShellStartupFrame(connection, request); writeErr != nil {
+		return shellStartupStatus{}, writeErr
 	}
 	response, err := readShellStartupFrame(connection)
 	if err != nil {
 		return shellStartupStatus{}, err
 	}
 	var status shellStartupStatus
-	if err := json.Unmarshal(response, &status); err != nil {
-		return shellStartupStatus{}, err
+	if unmarshalErr := json.Unmarshal(response, &status); unmarshalErr != nil {
+		return shellStartupStatus{}, unmarshalErr
 	}
 	return status, nil
 }
