@@ -1,6 +1,7 @@
 use serde::Deserialize;
 #[cfg(any(windows, test))]
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::time::Duration;
 
@@ -164,15 +165,25 @@ pub fn validate_origin(raw: &str) -> Result<url::Url, String> {
     Ok(parsed)
 }
 
-trait ControlStream: Read + Write + Send {
-    fn set_timeouts(&self, duration: Duration) -> std::io::Result<()>;
+trait ControlStream: Send {
+    fn set_timeouts(&mut self, duration: Duration) -> std::io::Result<()>;
+    fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()>;
+    fn read_exact(&mut self, payload: &mut [u8]) -> std::io::Result<()>;
 }
 
 #[cfg(unix)]
 impl ControlStream for std::os::unix::net::UnixStream {
-    fn set_timeouts(&self, duration: Duration) -> std::io::Result<()> {
+    fn set_timeouts(&mut self, duration: Duration) -> std::io::Result<()> {
         self.set_read_timeout(Some(duration))?;
         self.set_write_timeout(Some(duration))
+    }
+
+    fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+        Write::write_all(self, payload)
+    }
+
+    fn read_exact(&mut self, payload: &mut [u8]) -> std::io::Result<()> {
+        Read::read_exact(self, payload)
     }
 }
 
@@ -203,26 +214,215 @@ fn connect(sage_home: &std::path::Path) -> Result<Box<dyn ControlStream>, String
 }
 
 #[cfg(windows)]
-impl ControlStream for std::fs::File {
-    fn set_timeouts(&self, _duration: Duration) -> std::io::Result<()> {
-        // std::fs::File does not expose a cancellable named-pipe deadline.
-        // Windows runtime promotion remains blocked on the native timeout test
-        // in native-shell-quality-gates.md; the UI thread itself never blocks.
+struct WindowsPipe {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    timeout: Duration,
+}
+
+#[cfg(windows)]
+impl WindowsPipe {
+    fn connect(path: &str, timeout: Duration) -> std::io::Result<Self> {
+        use std::time::Instant;
+        use windows_sys::Win32::Foundation::{
+            ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING,
+        };
+
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let handle = unsafe {
+                CreateFileW(
+                    wide.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_OVERLAPPED,
+                    0,
+                )
+            };
+            if handle != INVALID_HANDLE_VALUE {
+                return Ok(Self { handle, timeout });
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_PIPE_BUSY as i32) {
+                return Err(error);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out connecting to SAGE control pipe",
+                ));
+            }
+            // CreateFileW is immediate for an available named-pipe instance and
+            // returns ERROR_PIPE_BUSY otherwise. Keep the retry cancellable by
+            // sleeping only a bounded remaining slice, never with an infinite
+            // WaitNamedPipeW call.
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+    }
+
+    fn transfer(
+        &self,
+        payload: &mut [u8],
+        read: bool,
+        timeout: Duration,
+    ) -> std::io::Result<usize> {
+        use windows_sys::Win32::Foundation::{
+            ERROR_IO_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        };
+        use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+        use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+        use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+
+        if payload.is_empty() {
+            return Ok(0);
+        }
+        let event = unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) };
+        if event == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        struct Event(windows_sys::Win32::Foundation::HANDLE);
+        impl Drop for Event {
+            fn drop(&mut self) {
+                unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+            }
+        }
+        let event = Event(event);
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        overlapped.hEvent = event.0;
+        let started = unsafe {
+            if read {
+                ReadFile(
+                    self.handle,
+                    payload.as_mut_ptr(),
+                    payload.len() as u32,
+                    std::ptr::null_mut(),
+                    &mut overlapped,
+                )
+            } else {
+                WriteFile(
+                    self.handle,
+                    payload.as_ptr(),
+                    payload.len() as u32,
+                    std::ptr::null_mut(),
+                    &mut overlapped,
+                )
+            }
+        };
+        let mut transferred = 0u32;
+        if started == 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_IO_PENDING as i32) {
+                return Err(error);
+            }
+            let wait = unsafe { WaitForSingleObject(event.0, timeout_millis(timeout)) };
+            if wait == WAIT_TIMEOUT {
+                // Do not drop the buffer while Windows may still own it. The
+                // cancellation plus completion drain makes the deadline safe.
+                unsafe {
+                    let _ = CancelIoEx(self.handle, &overlapped);
+                    let _ = GetOverlappedResult(self.handle, &overlapped, &mut transferred, 1);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "SAGE control pipe operation timed out",
+                ));
+            }
+            if wait != WAIT_OBJECT_0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        if unsafe { GetOverlappedResult(self.handle, &overlapped, &mut transferred, 0) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(transferred as usize)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsPipe {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(self.handle) };
+    }
+}
+
+#[cfg(windows)]
+impl ControlStream for WindowsPipe {
+    fn set_timeouts(&mut self, duration: Duration) -> std::io::Result<()> {
+        self.timeout = duration;
+        Ok(())
+    }
+
+    fn write_all(&mut self, payload: &[u8]) -> std::io::Result<()> {
+        let deadline = std::time::Instant::now() + self.timeout;
+        let mut offset = 0;
+        while offset < payload.len() {
+            let mut chunk = payload[offset..].to_vec();
+            let transferred =
+                self.transfer(&mut chunk, false, remaining_timeout(deadline)?)?;
+            if transferred == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "SAGE control pipe wrote zero bytes",
+                ));
+            }
+            offset += transferred;
+        }
+        Ok(())
+    }
+
+    fn read_exact(&mut self, payload: &mut [u8]) -> std::io::Result<()> {
+        let deadline = std::time::Instant::now() + self.timeout;
+        let mut offset = 0;
+        while offset < payload.len() {
+            let transferred = self.transfer(
+                &mut payload[offset..],
+                true,
+                remaining_timeout(deadline)?,
+            )?;
+            if transferred == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "SAGE control pipe closed mid-frame",
+                ));
+            }
+            offset += transferred;
+        }
         Ok(())
     }
 }
 
 #[cfg(windows)]
-fn connect(_sage_home: &std::path::Path) -> Result<Box<dyn ControlStream>, String> {
+fn timeout_millis(duration: Duration) -> u32 {
+    duration.as_millis().min(u128::from(u32::MAX)) as u32
+}
+
+#[cfg(windows)]
+fn remaining_timeout(deadline: std::time::Instant) -> std::io::Result<Duration> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "SAGE control pipe operation timed out",
+        ))
+    } else {
+        Ok(remaining)
+    }
+}
+
+#[cfg(windows)]
+fn connect(sage_home: &std::path::Path) -> Result<Box<dyn ControlStream>, String> {
     let sid = current_user_sid()?;
-    let home = windows_home_identity(_sage_home)?;
+    let home = windows_home_identity(sage_home)?;
     let suffix = windows_pipe_suffix(&sid, &home);
     let path = format!(r"\\.\pipe\sage-shell-control-{suffix}");
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)
-        .map(|file| Box::new(file) as Box<dyn ControlStream>)
+    WindowsPipe::connect(&path, Duration::from_secs(1))
+        .map(|pipe| Box::new(pipe) as Box<dyn ControlStream>)
         .map_err(|error| error.to_string())
 }
 
@@ -327,10 +527,12 @@ fn write_frame(stream: &mut dyn ControlStream, payload: &[u8]) -> Result<(), Str
     if payload.is_empty() || payload.len() > MAX_FRAME {
         return Err("invalid request frame size".into());
     }
+    let mut frame = Vec::with_capacity(4 + payload.len());
+    frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    frame.extend_from_slice(payload);
     stream
-        .write_all(&(payload.len() as u32).to_be_bytes())
-        .map_err(|error| error.to_string())?;
-    stream.write_all(payload).map_err(|error| error.to_string())
+        .write_all(&frame)
+        .map_err(|error| error.to_string())
 }
 
 fn read_frame(stream: &mut dyn ControlStream) -> Result<Vec<u8>, String> {
@@ -388,5 +590,136 @@ mod tests {
             windows_pipe_suffix("S-1-5-21-123", r"c:\users\sage\.sage"),
             windows_pipe_suffix("S-1-5-21-123", r"d:\fixture\sage-home")
         );
+    }
+
+    #[cfg(windows)]
+    static TEST_PIPE_SEQUENCE: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    #[cfg(windows)]
+    fn stalled_pipe_server(partial: &[u8]) -> (String, std::thread::JoinHandle<()>) {
+        use std::sync::mpsc;
+        use std::time::Duration;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, ERROR_PIPE_CONNECTED, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::Storage::FileSystem::WriteFile;
+        use windows_sys::Win32::System::Pipes::{
+            ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE, PIPE_WAIT,
+        };
+
+        let name = format!(
+            r"\\.\pipe\sage-shell-control-test-{}-{}",
+            std::process::id(),
+            TEST_PIPE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let path: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let partial = partial.to_vec();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let join = std::thread::spawn(move || {
+            let pipe = unsafe {
+                CreateNamedPipeW(
+                    path.as_ptr(),
+                    PIPE_ACCESS_DUPLEX,
+                    PIPE_TYPE_BYTE | PIPE_WAIT,
+                    1,
+                    MAX_FRAME as u32,
+                    1,
+                    0,
+                    std::ptr::null(),
+                )
+            };
+            assert_ne!(pipe, INVALID_HANDLE_VALUE, "create stalled test pipe");
+            ready_tx.send(()).expect("publish stalled test pipe");
+            let connected = unsafe { ConnectNamedPipe(pipe, std::ptr::null_mut()) };
+            if connected == 0 {
+                let error = std::io::Error::last_os_error();
+                assert_eq!(error.raw_os_error(), Some(ERROR_PIPE_CONNECTED as i32));
+            }
+            if !partial.is_empty() {
+                let mut written = 0u32;
+                assert_ne!(
+                    unsafe {
+                        WriteFile(
+                            pipe,
+                            partial.as_ptr(),
+                            partial.len() as u32,
+                            &mut written,
+                            std::ptr::null_mut(),
+                        )
+                    },
+                    0,
+                    "write partial test frame"
+                );
+                assert_eq!(written as usize, partial.len());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+            unsafe {
+                let _ = DisconnectNamedPipe(pipe);
+                let _ = CloseHandle(pipe);
+            }
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stalled test pipe must be ready");
+        (name, join)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_deadline_cancels_a_stalled_frame() {
+        let (name, server) = stalled_pipe_server(&[]);
+        let mut pipe =
+            WindowsPipe::connect(&name, Duration::from_secs(1)).expect("connect test pipe");
+        pipe.set_timeouts(Duration::from_millis(50))
+            .expect("set test deadline");
+        let started = std::time::Instant::now();
+        let mut frame = [0u8; 4];
+        let error = pipe
+            .read_exact(&mut frame)
+            .expect_err("stalled frame must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        drop(pipe);
+        server.join().expect("stalled server exits");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_deadline_cancels_a_stalled_write() {
+        let (name, server) = stalled_pipe_server(&[]);
+        let mut pipe =
+            WindowsPipe::connect(&name, Duration::from_secs(1)).expect("connect test pipe");
+        pipe.set_timeouts(Duration::from_millis(50))
+            .expect("set test deadline");
+        let started = std::time::Instant::now();
+        let payload = vec![0xA5; MAX_FRAME];
+        let error = pipe
+            .write_all(&payload)
+            .expect_err("unread pipe must time out a full frame write");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        drop(pipe);
+        server.join().expect("stalled server exits");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_pipe_deadline_cancels_a_partial_frame() {
+        let (name, server) = stalled_pipe_server(&[0, 0]);
+        let mut pipe =
+            WindowsPipe::connect(&name, Duration::from_secs(1)).expect("connect test pipe");
+        pipe.set_timeouts(Duration::from_millis(50))
+            .expect("set test deadline");
+        let started = std::time::Instant::now();
+        let mut frame = [0u8; 4];
+        let error = pipe
+            .read_exact(&mut frame)
+            .expect_err("partial frame must time out");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_millis(200));
+        drop(pipe);
+        server.join().expect("partial-frame server exits");
     }
 }
