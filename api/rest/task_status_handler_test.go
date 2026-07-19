@@ -73,5 +73,5 @@ func TestRESTTaskStatusEnforcesActiveCurrentOwnerAndNoAgentReopen(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	require.Equal(t, memory.TaskStatusDone, tasks[0].TaskStatus)
-	require.Empty(t, tasks[0].Assignee)
+	require.Equal(t, "agent-a", tasks[0].Assignee)
 }

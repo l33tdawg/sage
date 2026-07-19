@@ -1437,9 +1437,10 @@ allowed to read a non-public task. SQLite commits the assignee, monotonic
 assignment generation, in-progress transition, pickup reset, retirement of the
 prior notice, and new one-way notice atomically. Repeating the same assignment
 is a true no-op that preserves pickup evidence and does not duplicate notices.
-Moving a task to `done` or `dropped` clears its current assignee while retaining
-pickup evidence; reopening therefore remains unassigned until the operator
-hands it off again, which creates a fresh generation and notice.
+Moving a task to `done` or `dropped` retains its current assignee as terminal
+attribution alongside the pickup evidence. Reopening clears that historical
+assignee and remains unassigned until the operator hands it off again, which
+creates a fresh generation and notice.
 For signed agents, the scoped backlog contains only tasks whose assignee exactly
 matches the verified agent ID. `in_progress`, `done`, and `dropped` all require
 that same current active assignee, using an atomic owner/status transition.

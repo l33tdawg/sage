@@ -54,19 +54,24 @@ func TestShellStartupProofRuntimePublishesSSCPProof(t *testing.T) {
 	t.Cleanup(func() {
 		if !finished && command.Process != nil {
 			_ = command.Process.Kill()
-			_, _ = command.Process.Wait()
+			_ = command.Wait()
 		}
 	})
 
 	status, err := waitForShellStatus(filepath.Join(home, "run", "shell-control.sock"), 8*time.Second)
-	require.NoErrorf(t, err, "daemon stderr: %s", stderr.String())
+	if err != nil {
+		_ = command.Process.Kill()
+		waitErr := command.Wait()
+		finished = true
+		t.Fatalf("wait for shell status: %v; reap daemon: %v; daemon stderr: %s", err, waitErr, stderr.String())
+	}
 	assert.Equal(t, "starting", status.State)
 	assert.Equal(t, expectedProof, status.StartupProof)
 
 	require.NoError(t, command.Process.Kill())
-	_, err = command.Process.Wait()
-	require.NoError(t, err)
+	err = command.Wait()
 	finished = true
+	require.Error(t, err)
 }
 
 type shellStartupStatus struct {
