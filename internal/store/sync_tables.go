@@ -84,6 +84,21 @@ type SyncOutboxItem struct {
 	OriginChainID string
 }
 
+// SyncPeerDeliveryStatus is the peer-wide delivery projection used by the
+// operator control plane. The v11.8 outbox predates first-class group IDs, so
+// these counts deliberately describe the exact peer rather than pretending an
+// overlapping domain can be attributed to one group. Backlog is the work that
+// can still make progress without an operator requeue (pending + delivering).
+type SyncPeerDeliveryStatus struct {
+	Pending         int    `json:"pending"`
+	Delivering      int    `json:"delivering"`
+	Delivered       int    `json:"delivered"`
+	Rejected        int    `json:"rejected"`
+	Failed          int    `json:"failed"`
+	Backlog         int    `json:"backlog"`
+	LastDeliveredAt string `json:"last_delivered_at,omitempty"`
+}
+
 // SyncOrigin records where a synced copy came from and what the admission
 // decision was. LocalMemoryID is set only for admitted copies.
 type SyncOrigin struct {
@@ -202,6 +217,7 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		next_attempt_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 		last_error      TEXT,
 		created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		delivered_at    TEXT NOT NULL DEFAULT '',
 		PRIMARY KEY (remote_chain_id, memory_id)
 	)`)
 	_, _ = s.writeExecContext(ctx,
@@ -309,6 +325,13 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 	if err := s.conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM pragma_table_info('sync_outbox') WHERE name='origin_chain_id'`).Scan(&hasOriginChain); err == nil && hasOriginChain == 0 {
 		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_outbox ADD COLUMN origin_chain_id TEXT NOT NULL DEFAULT ''`)
+	}
+	// Existing v11.5-v11.10 rows have no trustworthy terminal timestamp. Preserve
+	// them with an empty value and timestamp only future successful transitions.
+	var hasDeliveredAt int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pragma_table_info('sync_outbox') WHERE name='delivered_at'`).Scan(&hasDeliveredAt); err == nil && hasDeliveredAt == 0 {
+		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_outbox ADD COLUMN delivered_at TEXT NOT NULL DEFAULT ''`)
 	}
 	// Existing host-managed links used the bilateral v1 interpretation. Preserve
 	// that behavior until their host explicitly publishes a v2 policy; fresh
@@ -1176,12 +1199,62 @@ func (s *SQLiteStore) MarkSyncOutboxFailed(ctx context.Context, remoteChainID, m
 
 func (s *SQLiteStore) setSyncOutboxState(ctx context.Context, remoteChainID, memoryID, state, lastErr string) error {
 	_, err := s.writeExecContext(ctx,
-		`UPDATE sync_outbox SET state = ?, last_error = ? WHERE remote_chain_id = ? AND memory_id = ?`,
-		state, lastErr, remoteChainID, memoryID)
+		`UPDATE sync_outbox
+		    SET state = ?, last_error = ?,
+		        delivered_at = CASE
+		            WHEN ? = 'delivered' AND state != 'delivered' AND delivered_at = ''
+		                THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		            WHEN ? != 'delivered' THEN ''
+		            ELSE delivered_at END
+		  WHERE remote_chain_id = ? AND memory_id = ?`,
+		state, lastErr, state, state, remoteChainID, memoryID)
 	if err != nil {
 		return fmt.Errorf("set sync outbox state %s: %w", state, err)
 	}
 	return nil
+}
+
+// GetSyncPeerDeliveryStatus returns an honest peer-wide operational aggregate.
+// It intentionally does not claim group-specific attribution: sync_outbox has
+// always been keyed by (peer,memory), and the same domain may be present in more
+// than one group. New successful transitions carry delivered_at; upgraded rows
+// that were already terminal remain counted but have no fabricated timestamp.
+func (s *SQLiteStore) GetSyncPeerDeliveryStatus(ctx context.Context, remoteChainID string) (SyncPeerDeliveryStatus, error) {
+	var out SyncPeerDeliveryStatus
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT state, COUNT(*), COALESCE(MAX(delivered_at), '')
+		  FROM sync_outbox
+		 WHERE remote_chain_id = ?
+		 GROUP BY state`, remoteChainID)
+	if err != nil {
+		return out, fmt.Errorf("get sync peer delivery status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var state, lastDeliveredAt string
+		var count int
+		if err := rows.Scan(&state, &count, &lastDeliveredAt); err != nil {
+			return SyncPeerDeliveryStatus{}, fmt.Errorf("scan sync peer delivery status: %w", err)
+		}
+		switch state {
+		case SyncStatePending:
+			out.Pending = count
+		case SyncStateDelivering:
+			out.Delivering = count
+		case SyncStateDelivered:
+			out.Delivered = count
+			out.LastDeliveredAt = lastDeliveredAt
+		case SyncStateRejected:
+			out.Rejected = count
+		case SyncStateFailed:
+			out.Failed = count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return SyncPeerDeliveryStatus{}, fmt.Errorf("iterate sync peer delivery status: %w", err)
+	}
+	out.Backlog = out.Pending + out.Delivering
+	return out, nil
 }
 
 // MarkSyncOutboxRetry returns a claimed row to pending with an explicit

@@ -4,11 +4,21 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/l33tdawg/sage/internal/store"
 )
+
+type groupListTestDriver struct {
+	FederationJoinDriver
+	localChainID string
+}
+
+func (d groupListTestDriver) LocalChainID() string { return d.localChainID }
 
 func TestFederationGroupRouteAcceptsOnlyOperatorEd25519Signature(t *testing.T) {
 	h, _ := newTestHandler(t)
@@ -40,8 +50,8 @@ func TestFederationGroupRouteAcceptsOnlyOperatorEd25519Signature(t *testing.T) {
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rr = httptest.NewRecorder()
 	router.ServeHTTP(rr, req)
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("unsigned loopback request status=%d", rr.Code)
+	if rr.Code != http.StatusNotImplemented {
+		t.Fatalf("authenticated local CEREBRUM did not reach group surface: status=%d", rr.Code)
 	}
 }
 
@@ -84,8 +94,8 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 				t.Fatalf("nonoperator status=%d", got)
 			}
 
-			// Neither loopback browser shape nor a no-Origin local process is an
-			// operator credential (including encryption-off nodes).
+			// A raw local process without CEREBRUM browser provenance is not an
+			// operator credential. An exact same-origin local CEREBRUM request is.
 			for _, browser := range []bool{false, true} {
 				req = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 				req.RemoteAddr = "127.0.0.1:43210"
@@ -94,8 +104,12 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 					req.Header.Set("Origin", "http://localhost:8080")
 					req.Header.Set("Sec-Fetch-Site", "same-origin")
 				}
-				if got := call(req); got != http.StatusForbidden {
-					t.Fatalf("unsigned loopback browser=%v status=%d", browser, got)
+				want := http.StatusForbidden
+				if browser {
+					want = http.StatusNotImplemented
+				}
+				if got := call(req); got != want {
+					t.Fatalf("unsigned loopback browser=%v status=%d want=%d", browser, got, want)
 				}
 			}
 
@@ -107,6 +121,117 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 				t.Fatalf("operator did not cross auth boundary: status=%d", got)
 			}
 		})
+	}
+}
+
+func TestFederationGroupListReportsDurableProgressAndPeerDelivery(t *testing.T) {
+	ctx := context.Background()
+	h, ss := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
+	h.Federation = groupListTestDriver{localChainID: "chain-local"}
+
+	requireNoError := func(label string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+	}
+	requireNoError("upsert group", ss.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "group-1", ControllerChainID: "chain-local", ControllerAgentPubkey: strings.Repeat("1", 64),
+		Epoch: "epoch-7", RosterRevision: 7, RosterJournalHead: "head-7", DisplayName: "Studio",
+	}))
+	requireNoError("upsert local member", ss.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "group-1", MemberChainID: "chain-local", MemberAgentPubkey: strings.Repeat("2", 64),
+		Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive, JoinedRevision: 1,
+		LastAckedRosterRevision: 7, LastSeenJournalHead: "head-7", LastSyncAt: "2026-07-19T06:00:00Z",
+	}))
+	requireNoError("upsert remote member", ss.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "group-1", MemberChainID: "chain-remote", MemberAgentPubkey: strings.Repeat("3", 64),
+		Role: store.GroupRoleSelectiveSync, MemberState: store.GroupMemberActive, JoinedRevision: 2,
+		LastAckedRosterRevision: 5, LastSeenJournalHead: "head-5", LastSyncAt: "2026-07-19T05:00:00Z",
+	}))
+	requireNoError("upsert domain", ss.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
+		GroupID: "group-1", DomainTag: "studio", OwnerChainID: "chain-local", MaxClearance: 2, AddedRevision: 3,
+	}))
+	for _, memoryID := range []string{"delivered-memory", "pending-memory"} {
+		if _, err := ss.EnqueueSyncOutbox(ctx, "chain-remote", memoryID); err != nil {
+			t.Fatalf("enqueue %s: %v", memoryID, err)
+		}
+	}
+	requireNoError("mark delivered", ss.MarkSyncOutboxDelivered(ctx, "chain-remote", "delivered-memory"))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/federation/groups", nil)
+	req = req.WithContext(context.WithValue(req.Context(), verifiedDashboardAgentKey{}, h.NodeOperatorAgentID))
+	rr := httptest.NewRecorder()
+	h.handleFedGroupList(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("group list status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var response struct {
+		LocalChainID string `json:"local_chain_id"`
+		Groups       []struct {
+			GroupID           string                `json:"group_id"`
+			RosterRevision    int64                 `json:"roster_revision"`
+			RosterJournalHead string                `json:"roster_journal_head"`
+			Members           []syncGroupMemberView `json:"members"`
+			SharedDomains     []struct {
+				DomainTag string `json:"domain_tag"`
+			} `json:"shared_domains"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode group list: %v", err)
+	}
+	if response.LocalChainID != "chain-local" || len(response.Groups) != 1 {
+		t.Fatalf("group response = %+v", response)
+	}
+	group := response.Groups[0]
+	if group.GroupID != "group-1" || group.RosterRevision != 7 || group.RosterJournalHead != "head-7" {
+		t.Fatalf("group progress = %+v", group)
+	}
+	if len(group.SharedDomains) != 1 || group.SharedDomains[0].DomainTag != "studio" || len(group.Members) != 2 {
+		t.Fatalf("group contents = %+v", group)
+	}
+	members := make(map[string]syncGroupMemberView, len(group.Members))
+	for _, member := range group.Members {
+		members[member.ChainID] = member
+	}
+	local := members["chain-local"]
+	if local.Health != "healthy" || local.CatchUpState != "current" || local.RosterRevisionLag != 0 || !local.RosterHeadCurrent || local.PeerDelivery != nil {
+		t.Fatalf("local member projection = %+v", local)
+	}
+	remote := members["chain-remote"]
+	if remote.Health != "catching_up" || remote.CatchUpState != "catching_up" || remote.RosterRevisionLag != 2 || remote.RosterHeadCurrent {
+		t.Fatalf("remote member progress = %+v", remote)
+	}
+	if remote.PeerDelivery == nil || remote.PeerDelivery.Delivered != 1 || remote.PeerDelivery.Pending != 1 || remote.PeerDelivery.Backlog != 1 || remote.PeerDelivery.LastDeliveredAt == "" {
+		t.Fatalf("remote delivery projection = %+v", remote.PeerDelivery)
+	}
+}
+
+func TestSyncGroupMemberProgressFailsClosedForUnknownAndUnseenState(t *testing.T) {
+	group := store.SyncGroup{RosterRevision: 3, RosterJournalHead: "head-3"}
+	unseen := syncGroupMemberProgress(group, store.SyncGroupMember{
+		MemberChainID: "remote", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive,
+		LastAckedRosterRevision: 3, LastSeenJournalHead: "head-3",
+	}, "local")
+	if unseen.CatchUpState != "current" || unseen.Health != "unknown" {
+		t.Fatalf("unseen active member = %+v", unseen)
+	}
+	future := syncGroupMemberProgress(group, store.SyncGroupMember{
+		MemberChainID: "remote", Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive,
+		LastAckedRosterRevision: 99, LastSeenJournalHead: "head-3", LastSyncAt: "2026-07-19T00:00:00Z",
+	}, "local")
+	if future.CatchUpState != "unknown" || future.Health != "unknown" {
+		t.Fatalf("future revision must fail closed = %+v", future)
+	}
+	unknown := syncGroupMemberProgress(group, store.SyncGroupMember{
+		MemberChainID: "remote", Role: store.GroupRoleFullSync, MemberState: "future-state",
+		LastAckedRosterRevision: 99, LastSeenJournalHead: "head-3",
+	}, "local")
+	if unknown.CatchUpState != "unknown" || unknown.Health != "unknown" || unknown.RosterRevisionLag != 0 {
+		t.Fatalf("unknown member state = %+v", unknown)
 	}
 }
 

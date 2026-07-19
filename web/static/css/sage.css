@@ -4679,6 +4679,45 @@ input[type="range"]::-moz-range-thumb {
 .fed-peer-revoke-notice p { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
 .fed-peer-revoke-notice .btn { flex: none; }
 
+/* N-member Sharing & Sync control plane */
+.fed-groups { margin: 24px 0; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); }
+.fed-groups-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.fed-groups-head h2 { margin: 0 0 5px; font-size: 17px; }
+.fed-groups-head p { margin: 0 0 14px; max-width: 760px; font-size: 12px; line-height: 1.5; }
+.fed-group-empty { padding: 14px 0 2px; font-size: 12px; }
+.fed-group-card { margin-top: 10px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--surface-inset, rgba(127,127,127,.04)); }
+.fed-group-summary { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 14px; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.fed-group-summary:hover, .fed-group-summary:focus-visible { background: rgba(127,127,127,.06); }
+.fed-group-summary span:first-child { display: flex; flex-direction: column; min-width: 0; gap: 3px; }
+.fed-group-summary small { color: var(--text-muted); font-size: 11px; font-weight: 400; }
+.fed-group-detail { padding: 0 14px 16px; border-top: 1px solid var(--border); }
+.fed-group-detail h3 { margin: 18px 0 8px; font-size: 13px; }
+.fed-group-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 14px 0; }
+.fed-group-facts div { min-width: 0; }
+.fed-group-facts dt { color: var(--text-muted); font-size: 10.5px; }
+.fed-group-facts dd { overflow: hidden; margin: 2px 0 0; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.fed-group-table-wrap { overflow-x: auto; }
+.fed-group-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 11px; }
+.fed-group-table th, .fed-group-table td { padding: 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
+.fed-group-table thead th { color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.fed-group-table tbody th { font-weight: 500; }
+.fed-group-local, .fed-group-health { display: inline-flex; margin-left: 7px; padding: 2px 6px; border-radius: 999px; background: rgba(16,185,129,.12); color: var(--accent); font-size: 9px; font-weight: 700; }
+.fed-group-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.fed-group-controls form, .fed-group-invite { padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-surface); }
+.fed-group-controls h4, .fed-group-invite h3 { margin: 0 0 9px; font-size: 12px; }
+.fed-group-controls label, .fed-group-invite label { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; color: var(--text-muted); font-size: 10.5px; }
+.fed-group-controls input, .fed-group-controls select, .fed-group-invite input, .fed-group-invite select { min-width: 0; padding: 7px 8px; border: 1px solid var(--border-light); border-radius: 6px; background: var(--bg-deep); color: var(--text); }
+.fed-group-domains { display: grid; gap: 7px; padding: 0; list-style: none; }
+.fed-group-domains li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius); }
+.fed-group-domains span { display: flex; flex-direction: column; gap: 2px; }
+.fed-group-domains small { color: var(--text-muted); font-size: 10px; }
+.fed-group-invite { margin-top: 14px; }
+.fed-group-invite > p { margin: -3px 0 10px; font-size: 11px; }
+@media (max-width: 760px) {
+    .fed-group-facts, .fed-group-controls { grid-template-columns: 1fr; }
+    .fed-groups-head { align-items: stretch; flex-direction: column; }
+}
+
 /* Wizard shell */
 /* Network name (friendly rename) */
 .fed-netname { margin: 12px 0; padding: 14px 16px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }

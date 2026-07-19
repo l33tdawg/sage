@@ -274,6 +274,27 @@ test('federation keeps temporary pause separate from permanent revocation and hi
     assert.match(page, /ended_at/);
 });
 
+test('Sharing & Sync groups expose health and guarded operator controls', () => {
+    const panel = appSource.slice(appSource.indexOf('function SharingSyncGroupsPanel('), appSource.indexOf('// FederationPage'));
+    assert.match(apiSource, /export function fedGroups\(\)/);
+    assert.match(apiSource, /groups\/\$\{encodeURIComponent\(groupId\)\}\/domains/);
+    assert.match(apiSource, /entry_type: 'member_remove', payload: \{ member_chain: memberChain \}/);
+    assert.match(panel, /Sharing & Sync groups/);
+    assert.match(panel, /Members and catch-up/);
+    assert.match(panel, /member\.peer_delivery\.backlog/);
+    assert.match(panel, /last_delivered_at/,
+        'last successful sync must come from a real delivered outbox transition');
+    assert.match(panel, /<table class="fed-group-table">/);
+    assert.match(panel, /<th scope="col">Health<\/th>/);
+    assert.match(panel, /showConfirmation\('Remove '/);
+    assert.match(panel, /showConfirmation\('Stop sharing/);
+    assert.match(panel, /remote operator must cryptographically co-sign/);
+    assert.match(panel, /Invite or retry member bootstrap/);
+    assert.match(panel, /const saved = await mutate[\s\S]*if \(saved\) patchDraft/,
+        'failed mutations must preserve the operator draft for correction and retry');
+    assert.match(appSource, /<\$\{SharingSyncGroupsPanel\} \/>/);
+});
+
 test('federation ceremony controls expose accessible dialog, focus, and table semantics', () => {
     assert.match(appSource, /aria-label=\$\{rendered \? 'Enlarge connection QR code' : null\}/);
     assert.match(appSource, /role=\$\{rendered \? 'button' : null\} tabindex=\$\{rendered \? '0' : '-1'\}/,
