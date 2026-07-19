@@ -44,6 +44,9 @@ jobs:
       tag: ${{ steps.metadata.outputs.tag }}
       version: ${{ steps.metadata.outputs.version }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
+      native_shell_version: ${{ steps.metadata.outputs.native_shell_version }}
+      native_shell_release_class: ${{ steps.metadata.outputs.native_shell_release_class }}
+      native_shell_required: ${{ steps.metadata.outputs.native_shell_required }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -96,13 +99,47 @@ jobs:
           SERVER_IMAGE_COUNT=$(jq -er '[.packages[] | select(.registryType == "oci")] | length' server.json)
           SERVER_IMAGE=$(jq -er '.packages[] | select(.registryType == "oci") | .identifier' server.json)
           DASHBOARD_VERSION=$(sed -nE "s/^const SAGE_VERSION = 'v([^']+)';$/\1/p" web/static/js/app.js | head -1)
+          VERSION_CORE=${VERSION%%-*}
+          VERSION_MAJOR=${VERSION_CORE%%.*}
+          VERSION_REMAINDER=${VERSION_CORE#*.}
+          VERSION_MINOR=${VERSION_REMAINDER%%.*}
+          NATIVE_SHELL_REQUIRED=false
+          if [ "${VERSION_MAJOR}" -gt 11 ] ||
+             { [ "${VERSION_MAJOR}" -eq 11 ] && [ "${VERSION_MINOR}" -ge 11 ]; }; then
+            NATIVE_SHELL_REQUIRED=true
+          fi
+          NATIVE_SHELL_VERSION=not-required
+          NATIVE_SHELL_CRATE_VERSION=not-required
+          NATIVE_SHELL_PRODUCT_NAME=not-required
+          NATIVE_SHELL_IDENTIFIER=not-required
+          if [ "${NATIVE_SHELL_REQUIRED}" = true ]; then
+            NATIVE_SHELL_VERSION=$(jq -er '.version' desktop/sage-shell/tauri.conf.json)
+            NATIVE_SHELL_CRATE_VERSION=$(sed -nE 's/^version = "([^"]+)"$/\1/p' desktop/sage-shell/Cargo.toml | head -1)
+            NATIVE_SHELL_PRODUCT_NAME=$(jq -er '.productName' desktop/sage-shell/tauri.conf.json)
+            NATIVE_SHELL_IDENTIFIER=$(jq -er '.identifier' desktop/sage-shell/tauri.conf.json)
+          fi
 
-          echo "tag=${VERSION} pyproject=${SDK_VERSION} __init__=${INIT_VERSION} server=${SERVER_VERSION} dashboard=${DASHBOARD_VERSION}"
+          echo "tag=${VERSION} pyproject=${SDK_VERSION} __init__=${INIT_VERSION} server=${SERVER_VERSION} dashboard=${DASHBOARD_VERSION} native_shell=${NATIVE_SHELL_VERSION}"
           if [ "${VERSION}" != "${SDK_VERSION}" ] ||
              [ "${VERSION}" != "${INIT_VERSION}" ] ||
              [ "${VERSION}" != "${SERVER_VERSION}" ] ||
              [ "${VERSION}" != "${DASHBOARD_VERSION}" ]; then
             echo "::error::Release metadata drift — bump the Python SDK, server.json, and dashboard fallback to ${VERSION} before tagging"
+            exit 1
+          fi
+          if [ "${NATIVE_SHELL_REQUIRED}" = true ] &&
+             { [ "${VERSION}" != "${NATIVE_SHELL_VERSION}" ] ||
+               [ "${VERSION}" != "${NATIVE_SHELL_CRATE_VERSION}" ]; }; then
+            echo "::error::Native shell metadata drift — bump desktop/sage-shell/tauri.conf.json and Cargo.toml to ${VERSION} before tagging"
+            exit 1
+          fi
+          # The native shell has not passed signing, installed-runtime, update,
+          # rollback, or accessibility promotion. Its package evidence must keep
+          # the explicit preview identity until that separate promotion lands.
+          if [ "${NATIVE_SHELL_REQUIRED}" = true ] &&
+             { [ "${NATIVE_SHELL_PRODUCT_NAME}" != "SAGE Native Preview" ] ||
+               [ "${NATIVE_SHELL_IDENTIFIER}" != "com.sage.native-preview" ]; }; then
+            echo "::error::Unsigned native shell evidence must retain the SAGE Native Preview identity; production identity requires signed/runtime promotion evidence"
             exit 1
           fi
           if [ "${SERVER_IMAGE_COUNT}" -ne 1 ] ||
@@ -131,6 +168,13 @@ jobs:
           echo "tag=${RELEASE_TAG}" >> "${GITHUB_OUTPUT}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${PRERELEASE}" >> "${GITHUB_OUTPUT}"
+          echo "native_shell_version=${NATIVE_SHELL_VERSION}" >> "${GITHUB_OUTPUT}"
+          if [ "${NATIVE_SHELL_REQUIRED}" = true ]; then
+            echo "native_shell_release_class=unsigned-preview-evidence" >> "${GITHUB_OUTPUT}"
+          else
+            echo "native_shell_release_class=not-required" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "native_shell_required=${NATIVE_SHELL_REQUIRED}" >> "${GITHUB_OUTPUT}"
 
   lint:
     name: Lint
@@ -201,6 +245,186 @@ jobs:
     needs: [release-metadata, lint, test, frontend-static, v119-fault-gates]
     steps:
       - run: echo "All source, race, lint, frontend, and v11.9 fault gates passed."
+
+  native-shell-release-evidence:
+    name: Build Unsigned Native Shell Release Evidence (${{ matrix.id }})
+    if: needs.release-metadata.outputs.native_shell_required == 'true'
+    runs-on: ${{ matrix.os }}
+    needs: [quality-gate, release-metadata]
+    timeout-minutes: 45
+    env:
+      NATIVE_SHELL_VERSION: ${{ needs.release-metadata.outputs.native_shell_version }}
+      NATIVE_SHELL_RELEASE_CLASS: ${{ needs.release-metadata.outputs.native_shell_release_class }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: macos-arm64
+            os: macos-14
+            rust-target: aarch64-apple-darwin
+            bundles: app
+          - id: windows-x64
+            os: windows-2025
+            rust-target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - id: linux-x64
+            os: ubuntu-24.04
+            rust-target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.release_tag) || github.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # vstable-2026-07-19
+        with:
+          targets: ${{ matrix.rust-target }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: desktop/sage-shell
+      - name: Install Linux WebView build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Test native shell control contract
+        shell: bash
+        run: |
+          go test ./internal/shellcontrol -count=1
+          go test ./cmd/sage-gui -run 'Test(LocalAgentKeyResolver|ShellStartupProof)' -count=1
+      - name: Test and lint the locked native shell
+        shell: bash
+        run: |
+          cargo fmt --manifest-path desktop/sage-shell/Cargo.toml -- --check
+          cargo test --locked --manifest-path desktop/sage-shell/Cargo.toml
+          cargo test --locked --target ${{ matrix.rust-target }} \
+            --manifest-path desktop/sage-shell/Cargo.toml --no-run
+          cargo clippy --locked --target ${{ matrix.rust-target }} \
+            --manifest-path desktop/sage-shell/Cargo.toml --all-targets -- -D warnings
+      - name: Audit locked native dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file desktop/sage-shell/Cargo.lock
+      - name: Stage version-matched bundled daemon
+        shell: bash
+        env:
+          SAGE_DAEMON_VERSION: ${{ env.NATIVE_SHELL_VERSION }}
+        run: scripts/stage-native-shell-daemon.sh ${{ matrix.rust-target }}
+      - name: Install pinned Tauri packager
+        shell: bash
+        run: cargo install tauri-cli --version 2.11.4 --locked
+      - name: Build unsigned preview package evidence
+        shell: bash
+        working-directory: desktop/sage-shell
+        run: |
+          cargo tauri build --ci \
+            --target ${{ matrix.rust-target }} \
+            --bundles ${{ matrix.bundles }} \
+            --config "{\"version\":\"${NATIVE_SHELL_VERSION}\"}"
+      - name: Verify macOS or Windows native release pair
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          scripts/verify-native-shell-bundle.sh \
+            ${{ matrix.rust-target }} \
+            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+            "${NATIVE_SHELL_VERSION}" \
+            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair.json \
+            ${{ matrix.bundles }}
+      - name: Verify Linux native release pairs
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for package_kind in deb appimage; do
+            scripts/verify-native-shell-bundle.sh \
+              ${{ matrix.rust-target }} \
+              desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+              "${NATIVE_SHELL_VERSION}" \
+              "desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair-${package_kind}.json" \
+              "${package_kind}"
+          done
+      - name: Generate native dependency SBOM
+        shell: bash
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --manifest-path desktop/sage-shell/Cargo.toml \
+            --format json --target all --license-strict \
+            --override-filename native-shell-${{ matrix.id }}.cdx
+          jq -e --arg version "${NATIVE_SHELL_VERSION}" \
+            '.bomFormat == "CycloneDX" and .metadata.component.name == "sage-shell" and .metadata.component.version == $version' \
+            "desktop/sage-shell/native-shell-${{ matrix.id }}.cdx.json"
+      - name: Stage immutable unsigned evidence
+        shell: bash
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/native-shell-release-evidence/${{ matrix.id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${EVIDENCE_DIR}"
+          cp -a "desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle" \
+            "${EVIDENCE_DIR}/bundle"
+          cp "desktop/sage-shell/native-shell-${{ matrix.id }}.cdx.json" "${EVIDENCE_DIR}/"
+          cat > "${EVIDENCE_DIR}/UNSIGNED-NATIVE-SHELL-EVIDENCE.txt" <<'EOF'
+          UNSIGNED PREVIEW EVIDENCE ONLY
+          These native shell packages are not production release assets.
+          Signing, notarization, installed-runtime, update/rollback, accessibility,
+          and recovery promotion evidence remains mandatory before standalone release.
+          EOF
+          (
+            cd "${EVIDENCE_DIR}"
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort |
+              while IFS= read -r evidence_file; do
+                if command -v sha256sum >/dev/null 2>&1; then
+                  sha256sum "${evidence_file}"
+                else
+                  shasum -a 256 "${evidence_file}"
+                fi
+              done > SHA256SUMS
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -c SHA256SUMS
+            else
+              shasum -a 256 -c SHA256SUMS
+            fi
+          )
+      - name: Upload private unsigned native evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-evidence-native-shell-${{ matrix.id }}
+          path: ${{ runner.temp }}/native-shell-release-evidence/${{ matrix.id }}
+          if-no-files-found: error
+          retention-days: 7
+
+  native-shell-production-promotion:
+    name: Native Standalone Production Promotion Gate
+    runs-on: ubuntu-latest
+    needs: [release-metadata, native-shell-release-evidence]
+    if: >-
+      ${{ always() &&
+          needs.release-metadata.result == 'success' &&
+          (needs.release-metadata.outputs.native_shell_required != 'true' ||
+           needs.native-shell-release-evidence.result == 'success') }}
+    steps:
+      # v11.11 is deliberately a whole-release hold, not merely exclusion of
+      # native assets: no Docker, SDK, MCP, legacy installer, or GitHub release
+      # may publish until this job has real signed/runtime promotion evidence.
+      - name: Block standalone publication pending signed runtime evidence
+        env:
+          NATIVE_SHELL_VERSION: ${{ needs.release-metadata.outputs.native_shell_version }}
+          NATIVE_SHELL_RELEASE_CLASS: ${{ needs.release-metadata.outputs.native_shell_release_class }}
+        run: |
+          set -euo pipefail
+          if [ "${NATIVE_SHELL_RELEASE_CLASS}" = "not-required" ]; then
+            echo "Native standalone promotion does not apply before v11.11.0."
+            exit 0
+          fi
+          test "${NATIVE_SHELL_RELEASE_CLASS}" = "unsigned-preview-evidence"
+          echo "::error::Native standalone release ${NATIVE_SHELL_VERSION} is blocked: the package matrix is unsigned preview evidence only. Signed/notarized packages, installed-runtime acceptance, update/rollback, accessibility, performance, and recovery evidence must be implemented and validated before publication."
+          exit 1
 
   goreleaser-prepare:
     name: Prepare GoReleaser Tarballs
@@ -574,6 +798,7 @@ jobs:
       - docker-image
       - python-package
       - mcp-package
+      - native-shell-production-promotion
     steps:
       - name: Download every private release input
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -584,6 +809,7 @@ jobs:
       - name: Verify complete artifact inventory and checksums
         env:
           RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+          NATIVE_SHELL_REQUIRED: ${{ needs.release-metadata.outputs.native_shell_required }}
           PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           set -euo pipefail
@@ -607,6 +833,76 @@ jobs:
           test -s staged/release-package-mcp/mcp-publisher
           jq -e --arg version "${RELEASE_VERSION}" '.version == $version' \
              staged/release-package-mcp/server.json
+
+          verify_native_release_pair() {
+            local evidence_root=$1
+            local evidence_file=$2
+            local expected_target=$3
+            local expected_kind=$4
+            local relative_path expected_sha256 actual_sha256
+
+            test -s "${evidence_file}"
+            jq -e --arg target "${expected_target}" --arg version "${RELEASE_VERSION}" --arg kind "${expected_kind}" '
+              .schema == "dev.sage.native-shell.release-pair/v1" and
+              .target == $target and
+              .build_version == $version and
+              .shell_artifact.kind == $kind and
+              (.shell_artifact.path | type == "string" and length > 0) and
+              (.shell_artifact.size_bytes | type == "number" and . > 0) and
+              (.shell_artifact.sha256 | test("^[0-9a-f]{64}$")) and
+              (.bundled_daemon.name | type == "string" and length > 0) and
+              (.bundled_daemon.package_path | type == "string" and length > 0) and
+              (.bundled_daemon.size_bytes | type == "number" and . > 0) and
+              (.bundled_daemon.sha256 | test("^[0-9a-f]{64}$"))
+            ' "${evidence_file}" > /dev/null
+
+            relative_path=$(jq -er '.shell_artifact.path' "${evidence_file}")
+            case "${relative_path}" in
+              ''|/*|*..*|*\\*)
+                echo "::error::Unsafe native shell artifact path in ${evidence_file}: ${relative_path}"
+                exit 1
+                ;;
+            esac
+            expected_sha256=$(jq -er '.shell_artifact.sha256' "${evidence_file}")
+            test -f "${evidence_root}/bundle/${relative_path}"
+            actual_sha256=$(sha256sum "${evidence_root}/bundle/${relative_path}" | awk '{print $1}')
+            test "${actual_sha256}" = "${expected_sha256}"
+          }
+
+          if [ "${NATIVE_SHELL_REQUIRED}" = true ]; then
+            for evidence_id in macos-arm64 windows-x64 linux-x64; do
+              evidence_root="staged/release-evidence-native-shell-${evidence_id}"
+              test -f "${evidence_root}/SHA256SUMS"
+              test -s "${evidence_root}/UNSIGNED-NATIVE-SHELL-EVIDENCE.txt"
+              grep -Fx 'UNSIGNED PREVIEW EVIDENCE ONLY' \
+                "${evidence_root}/UNSIGNED-NATIVE-SHELL-EVIDENCE.txt"
+              (
+                cd "${evidence_root}"
+                sha256sum -c SHA256SUMS
+              )
+              jq -e --arg version "${RELEASE_VERSION}" '
+                .bomFormat == "CycloneDX" and
+                .metadata.component.name == "sage-shell" and
+                .metadata.component.version == $version
+              ' "${evidence_root}/native-shell-${evidence_id}.cdx.json" > /dev/null
+            done
+            verify_native_release_pair \
+              staged/release-evidence-native-shell-macos-arm64 \
+              staged/release-evidence-native-shell-macos-arm64/bundle/native-shell-release-pair.json \
+              aarch64-apple-darwin app
+            verify_native_release_pair \
+              staged/release-evidence-native-shell-windows-x64 \
+              staged/release-evidence-native-shell-windows-x64/bundle/native-shell-release-pair.json \
+              x86_64-pc-windows-msvc nsis
+            verify_native_release_pair \
+              staged/release-evidence-native-shell-linux-x64 \
+              staged/release-evidence-native-shell-linux-x64/bundle/native-shell-release-pair-deb.json \
+              x86_64-unknown-linux-gnu deb
+            verify_native_release_pair \
+              staged/release-evidence-native-shell-linux-x64 \
+              staged/release-evidence-native-shell-linux-x64/bundle/native-shell-release-pair-appimage.json \
+              x86_64-unknown-linux-gnu appimage
+          fi
 
           # PyPI is immutable. If this is a recovery run and the version is
           # already present, require every public digest to match the exact
