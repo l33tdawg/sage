@@ -37,6 +37,16 @@ func listenEndpoint(sageHome string) (net.Listener, string, func() error, error)
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("listen on native-shell control socket: %w", err)
 	}
+	unixListener, ok := listener.(*net.UnixListener)
+	if !ok {
+		listener.Close()
+		_ = os.Remove(endpoint)
+		return nil, "", nil, fmt.Errorf("native-shell control endpoint is not a Unix listener")
+	}
+	// Cleanup below verifies that the path still identifies our socket. The
+	// standard library's default unlink-on-close behavior would bypass that
+	// check and can remove a replacement endpoint on Unix.
+	unixListener.SetUnlinkOnClose(false)
 	if err := os.Chmod(endpoint, 0600); err != nil {
 		listener.Close()
 		_ = os.Remove(endpoint)
@@ -60,7 +70,7 @@ func listenEndpoint(sageHome string) (net.Listener, string, func() error, error)
 		}
 		return os.Remove(endpoint)
 	}
-	return listener, endpoint, cleanup, nil
+	return unixListener, endpoint, cleanup, nil
 }
 
 func verifyPeer(conn net.Conn) error {

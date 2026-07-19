@@ -51,9 +51,11 @@ fixture_mcp_processes() {
   # ps may be restricted in a sandbox. That is a verification failure rather
   # than permission to claim cleanup succeeded.
   local listing
-  if ! listing=$(ps eww -axo pid=,command= 2>/dev/null); then
-    return 2
-  fi
+  case "$(uname -s)" in
+  Darwin) listing=$(ps eww -axo pid=,command= 2>/dev/null) || return 2 ;;
+  Linux) listing=$(ps eww -eo pid=,args= 2>/dev/null) || return 2 ;;
+  *) return 2 ;;
+  esac
   printf '%s\n' "${listing}" | awk -v guard="${GUARD_DIR}" -v api="${ACCEPTANCE_API_URL}" '
     /sage-gui[[:space:]]+mcp/ && (index($0, guard) || index($0, api)) { print "pid=" $1 }
   '

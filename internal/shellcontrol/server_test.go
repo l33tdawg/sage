@@ -77,7 +77,8 @@ func TestRejectsNonLoopbackOrDecoratedOrigin(t *testing.T) {
 func TestCleanupDoesNotRemoveReplacementSocket(t *testing.T) {
 	listener, endpoint, cleanup, err := listenEndpoint(shortTempDir(t))
 	require.NoError(t, err)
-	require.NoError(t, listener.Close())
+	t.Cleanup(func() { require.NoError(t, listener.Close()) })
+	require.NoError(t, os.Remove(endpoint))
 	replacement, err := net.Listen("unix", endpoint)
 	require.NoError(t, err)
 	t.Cleanup(func() {

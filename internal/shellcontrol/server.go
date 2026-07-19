@@ -103,9 +103,14 @@ func (s *Server) SetState(state State) error {
 func (s *Server) Close() error {
 	var err error
 	s.once.Do(func() {
+		// Unlink the endpoint while our listener is still open, so cleanup can
+		// verify the path still names the socket we created. Unix listeners have
+		// automatic unlink disabled; otherwise Close could delete a replacement
+		// socket created by another process.
+		cleanupErr := s.cleanup()
 		err = s.listener.Close()
 		<-s.done
-		if cleanupErr := s.cleanup(); err == nil {
+		if err == nil {
 			err = cleanupErr
 		}
 	})
