@@ -22,6 +22,13 @@ var (
 	optionalCommandHandler func([]string) (bool, error)
 )
 
+// nativeShellAlreadyRunningExitCode is the only sidecar exit result that
+// permits the shell to stop requiring its startup proof and return to ordinary
+// SSCP attachment. It means this process never owned the daemon lock.
+const nativeShellAlreadyRunningExitCode = 73
+
+var errInstanceLockHeld = errors.New("SAGE instance lock is already held")
+
 func main() {
 	if len(os.Args) < 2 {
 		printUsage()
@@ -139,8 +146,15 @@ func main() {
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		os.Exit(serveExitCode(err))
 	}
+}
+
+func serveExitCode(err error) int {
+	if errors.Is(err, errInstanceLockHeld) {
+		return nativeShellAlreadyRunningExitCode
+	}
+	return 1
 }
 
 func rollbackPendingUpdateAfterIndexInvalidation(execPath string) (bool, error) {

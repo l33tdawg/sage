@@ -5,7 +5,12 @@ on:
     paths:
       - "desktop/sage-shell/**"
       - "internal/shellcontrol/**"
+      - "internal/**"
       - "cmd/sage-gui/**"
+      - "api/**"
+      - "web/**"
+      - "go.mod"
+      - "go.sum"
       - "scripts/native-shell-quality.sh"
       - "scripts/stage-native-shell-daemon.sh"
       - "scripts/acceptance-endpoint-guard.sh"
@@ -15,7 +20,12 @@ on:
     paths:
       - "desktop/sage-shell/**"
       - "internal/shellcontrol/**"
+      - "internal/**"
       - "cmd/sage-gui/**"
+      - "api/**"
+      - "web/**"
+      - "go.mod"
+      - "go.sum"
       - "scripts/native-shell-quality.sh"
       - "scripts/stage-native-shell-daemon.sh"
       - "scripts/acceptance-endpoint-guard.sh"
@@ -76,6 +86,8 @@ jobs:
         run: cargo install tauri-cli --version 2.11.4 --locked
       - name: Stage bundled daemon
         shell: bash
+        env:
+          SAGE_DAEMON_VERSION: 11.11.0-ci.${{ github.run_number }}
         run: scripts/stage-native-shell-daemon.sh ${{ matrix.rust-target }}
       - name: Build unsigned installable package smoke
         working-directory: desktop/sage-shell

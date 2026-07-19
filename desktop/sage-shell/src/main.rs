@@ -16,6 +16,7 @@ use url::Url;
 const MAX_PENDING_ROUTES: usize = 32;
 const MAX_ROUTE_BYTES: usize = 2_048;
 const SHELL_STARTUP_CHALLENGE_ENV: &str = "SAGE_SHELL_STARTUP_CHALLENGE";
+const DAEMON_ALREADY_RUNNING_EXIT_CODE: i32 = 73;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OriginPin {
@@ -62,20 +63,27 @@ type SharedSession = Arc<Mutex<ShellSession>>;
 struct LaunchAttempt {
     expected_proof: String,
     child: Option<Child>,
+    attach_existing: bool,
 }
 
 impl LaunchAttempt {
-    fn exited(&mut self) -> Result<bool, String> {
+    fn observe_exit(&mut self) -> Result<(), String> {
         let Some(child) = self.child.as_mut() else {
-            return Ok(true);
+            return Ok(());
         };
         match child.try_wait().map_err(|error| error.to_string())? {
-            Some(_) => {
+            Some(status) => {
+                self.attach_existing = allows_existing_attachment_exit_code(status.code());
                 self.child = None;
-                Ok(true)
+                Ok(())
             }
-            None => Ok(false),
+            None => Ok(()),
         }
+    }
+
+    fn allows_existing_attachment(&mut self) -> Result<bool, String> {
+        self.observe_exit()?;
+        Ok(self.attach_existing)
     }
 
     fn hand_off(mut self) {
@@ -85,6 +93,10 @@ impl LaunchAttempt {
             });
         }
     }
+}
+
+fn allows_existing_attachment_exit_code(code: Option<i32>) -> bool {
+    code == Some(DAEMON_ALREADY_RUNNING_EXIT_CODE)
 }
 
 fn main() {
@@ -184,10 +196,8 @@ fn supervise<R: tauri::Runtime>(
                 }
             }
             Err(error) => {
-                if let Some(attempt) = launch_attempt.as_mut()
-                    && attempt.exited().unwrap_or(false)
-                {
-                    launch_attempt = None;
+                if let Some(attempt) = launch_attempt.as_mut() {
+                    let _ = attempt.observe_exit();
                 }
                 let view = if error.is_incompatible() {
                     RecoveryView::Incompatible
@@ -224,10 +234,10 @@ fn status_matches_launch_attempt(
         return true;
     }
     // A daemon that was already acquiring the authoritative instance lock can
-    // win a race with our bounded launch. Once the losing child has exited,
-    // attach through the authenticated endpoint like any ordinary existing
-    // daemon; never issue a second launch.
-    attempt.exited().unwrap_or(false)
+    // win a race with our bounded launch. Only the dedicated lock-contention
+    // exit result means this child never owned the daemon; any other child exit
+    // leaves the startup proof mandatory and fails closed.
+    attempt.allows_existing_attachment().unwrap_or(false)
 }
 
 fn launch_bundled_daemon<R: tauri::Runtime>(
@@ -263,6 +273,7 @@ fn launch_bundled_daemon<R: tauri::Runtime>(
     Ok(LaunchAttempt {
         expected_proof,
         child: Some(child),
+        attach_existing: false,
     })
 }
 
@@ -616,5 +627,14 @@ mod tests {
         let state = session.lock().unwrap();
         assert_eq!(state.pending_routes.len(), MAX_PENDING_ROUTES);
         assert_eq!(state.pending_routes.front().unwrap(), "/tasks/2");
+    }
+
+    #[test]
+    fn only_explicit_lock_contention_allows_attachment_without_proof() {
+        assert!(allows_existing_attachment_exit_code(Some(
+            DAEMON_ALREADY_RUNNING_EXIT_CODE
+        )));
+        assert!(!allows_existing_attachment_exit_code(Some(1)));
+        assert!(!allows_existing_attachment_exit_code(None));
     }
 }

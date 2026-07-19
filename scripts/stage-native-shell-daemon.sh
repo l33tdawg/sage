@@ -22,8 +22,22 @@ COMMIT=$(git -C "${REPO_ROOT}" rev-parse --short HEAD)
 BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 OUTPUT_DIR=${REPO_ROOT}/desktop/sage-shell/binaries
 
+VERSION_CORE=${VERSION#v}
+SEMVER_PATTERN='^11\.(10|11)\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+if [[ ! "${VERSION_CORE}" =~ ${SEMVER_PATTERN} ]]; then
+  echo "SAGE_DAEMON_VERSION must be an SSCP-compatible v11.10.x or v11.11.x semver, got: ${VERSION}" >&2
+  exit 2
+fi
+if [ "${OUTPUT_DIR}" != "${REPO_ROOT}/desktop/sage-shell/binaries" ]; then
+  echo "refusing to stage daemon outside the native-shell resource directory" >&2
+  exit 2
+fi
+
+rm -rf -- "${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}"
 env GOCACHE="${GOCACHE:-${TMPDIR:-/tmp}/sage-native-shell-gocache}" go build \
   -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
   -o "${OUTPUT_DIR}/${DAEMON_NAME}" \
   ./cmd/sage-gui
+test -f "${OUTPUT_DIR}/${DAEMON_NAME}"
+test "$(find "${OUTPUT_DIR}" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = 1
