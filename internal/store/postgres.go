@@ -2335,14 +2335,26 @@ func (s *PostgresStore) ListMemoriesByTag(ctx context.Context, tag string, limit
 	return s.ListMemories(ctx, ListOptions{Tag: tag, Limit: limit, Offset: offset})
 }
 
-func (s *PostgresStore) FindByContentHash(_ context.Context, _ string) (bool, error) {
-	return false, nil // TODO: implement for postgres
+// FindByContentHash checks the same committed-only dedup predicate as SQLite.
+// The voter runs while its candidate is still proposed, so including proposed
+// rows would make every new memory look like a duplicate of itself.
+func (s *PostgresStore) FindByContentHash(ctx context.Context, contentHash string) (bool, error) {
+	hashBytes, err := hex.DecodeString(contentHash)
+	if err != nil {
+		return false, fmt.Errorf("decode content hash: %w", err)
+	}
+	var exists bool
+	if err := s.db.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM memories WHERE content_hash = $1 AND status = 'committed')`,
+		hashBytes,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("find committed content hash: %w", err)
+	}
+	return exists, nil
 }
 
-// RepairSelfDupRejected is a no-op for postgres: the dedup self-match bug it
-// repairs never fired here (FindByContentHash is an always-false stub on this
-// backend), and the repair is gated single-node anyway — postgres backs
-// multi-node production daemons.
+// RepairSelfDupRejected is a no-op for Postgres because the repair is a
+// single-node legacy migration; Postgres backs multi-node production daemons.
 func (s *PostgresStore) RepairSelfDupRejected(_ context.Context, _ string, _ func(memoryID string) error) (int, error) {
 	return 0, nil
 }
