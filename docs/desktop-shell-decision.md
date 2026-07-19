@@ -1,7 +1,7 @@
 # ADR: Additive native CEREBRUM shell
 
-**Status:** Accepted for implementation, release remains gated  
-**Date:** 2026-07-19  
+**Status:** Accepted for implementation, release remains gated
+**Date:** 2026-07-19
 **Target:** v11.11 native foundation
 
 ## Decision

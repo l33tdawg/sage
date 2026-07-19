@@ -1,6 +1,6 @@
 # Native app-daemon trust and compatibility contract
 
-**Contract:** SAGE Shell Control Protocol 1 (SSCP/1)  
+**Contract:** SAGE Shell Control Protocol 1 (SSCP/1)
 **Scope:** native shell lifecycle only; never application administration
 
 ## Boundaries
