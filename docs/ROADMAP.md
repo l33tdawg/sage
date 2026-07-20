@@ -178,6 +178,15 @@ are recorded in [`desktop-shell-decision.md`](desktop-shell-decision.md),
 [`native-shell-quality-gates.md`](native-shell-quality-gates.md). The tracked
 Tauri foundation remains an opt-in preview until that full matrix passes.
 
+**The native shell is alpha and does not gate releases.** Browser CEREBRUM is
+the product; the shell is a background track through v11.11–v11.13. It is built
+and runtime-tested in CI, never staged as a public release asset, and not
+intended for end-user use. Releases continue shipping bug fixes and capabilities
+on their normal cadence — federation, agent-to-agent messaging, and the rest of
+the roadmap do not queue behind desktop packaging. The signing, notarization,
+update/rollback, recovery, performance, and accessibility bar applies at **first
+distribution of the shell**, which is v12.
+
 ### v11.12 - consumer onboarding and recovery
 
 Make first run and recovery survivable by someone who has never used SAGE, natively and without a terminal. Guided create-or-join, connect-an-AI-tool, and choose-what-is-private-or-shared flows; recovery-key backup and restore; and honest, consistent dialogs for destructive or privacy-affecting actions that explain what happened, what remains safe, and the next step. Plain language and safe defaults throughout. The gate includes clean-machine onboarding and recovery usability tests with real nontechnical users — the same bar v12 sets, brought forward so it is proven early rather than at the end.

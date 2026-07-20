@@ -409,10 +409,22 @@ jobs:
           (needs.release-metadata.outputs.native_shell_required != 'true' ||
            needs.native-shell-release-evidence.result == 'success') }}
     steps:
-      # v11.11 is deliberately a whole-release hold, not merely exclusion of
-      # native assets: no Docker, SDK, MCP, legacy installer, or GitHub release
-      # may publish until this job has real signed/runtime promotion evidence.
-      - name: Block standalone publication pending signed runtime evidence
+      # The native shell is ALPHA through the v11.11-v11.13 bridge. It is built
+      # and tested in CI, and is deliberately never staged as a public release
+      # asset: stage-github-release downloads only `release-assets-*`, and
+      # release-workflow.test.mjs asserts native evidence is excluded from it.
+      #
+      # This job therefore does not block the release. Blocking every other
+      # channel (Docker, SDK, MCP, legacy installers, the GitHub release) on
+      # productizing an artifact that no user receives bought nothing and only
+      # prevented v11.11 from shipping at all.
+      #
+      # It stays as a fail-closed guard on the one thing that does matter: if a
+      # future change ever tries to DISTRIBUTE the native shell, it must first
+      # carry the signing/notarization, installed-runtime, update/rollback and
+      # recovery evidence in docs/native-shell-quality-gates.md. That bar
+      # applies at first distribution, which the roadmap places at v12.
+      - name: Confirm the native shell is alpha and not distributed
         env:
           NATIVE_SHELL_VERSION: ${{ needs.release-metadata.outputs.native_shell_version }}
           NATIVE_SHELL_RELEASE_CLASS: ${{ needs.release-metadata.outputs.native_shell_release_class }}
@@ -422,9 +434,11 @@ jobs:
             echo "Native standalone promotion does not apply before v11.11.0."
             exit 0
           fi
-          test "${NATIVE_SHELL_RELEASE_CLASS}" = "unsigned-preview-evidence"
-          echo "::error::Native standalone release ${NATIVE_SHELL_VERSION} is blocked: the package matrix is unsigned preview evidence only. Signed/notarized packages, installed-runtime acceptance, dependency-advisory closure (including RUSTSEC-2024-0429), update/rollback, accessibility, performance, and recovery evidence must be implemented and validated before publication."
-          exit 1
+          if [ "${NATIVE_SHELL_RELEASE_CLASS}" != "unsigned-preview-evidence" ]; then
+            echo "::error::Native shell release class is '${NATIVE_SHELL_RELEASE_CLASS}', which means this release intends to distribute the native shell. Distribution requires signed/notarized packages, installed-runtime acceptance, update/rollback, and recovery evidence first; see docs/native-shell-quality-gates.md."
+            exit 1
+          fi
+          echo "Native shell ${NATIVE_SHELL_VERSION} is alpha CI evidence and is not distributed in this release; the rest of the publication graph proceeds."
 
   goreleaser-prepare:
     name: Prepare GoReleaser Tarballs

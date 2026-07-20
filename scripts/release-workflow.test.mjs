@@ -140,10 +140,15 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   ]);
   assert.match(promotion, /always\(\)/);
   assert.match(promotion, /Native standalone promotion does not apply before v11\.11\.0/);
-  assert.match(promotion, /Native standalone release .* is blocked/);
-  assert.match(promotion, /v11\.11 is deliberately a whole-release hold/);
-  assert.match(promotion, /RUSTSEC-2024-0429/);
-  assert.match(promotion, /Signed\/notarized packages, installed-runtime acceptance/);
+  // The native shell is alpha through the v11.11-v11.13 bridge: built in CI,
+  // never staged as a public asset. The gate must NOT block the release, or
+  // every other channel is held hostage to an artifact no user receives.
+  assert.doesNotMatch(promotion, /whole-release hold/);
+  assert.match(promotion, /is alpha CI evidence and is not distributed/);
+  // ...but it must still fail closed the moment a release intends to DISTRIBUTE
+  // the shell without the signing/runtime/rollback/recovery evidence.
+  assert.match(promotion, /NATIVE_SHELL_RELEASE_CLASS\}" != "unsigned-preview-evidence"/);
+  assert.match(promotion, /Distribution requires signed\/notarized packages/);
   assert.match(promotion, /exit 1/);
 
   assertNeeds('publication-gate', ['native-shell-production-promotion']);
