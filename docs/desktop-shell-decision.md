@@ -13,8 +13,16 @@ visible startup/recovery state; it does not own consensus, storage, MCP, RBAC,
 updates, validator material, or the vault passphrase.
 
 This is a conditional implementation decision, not permission to publish an
-untested desktop product. macOS, Windows, and the declared Linux floor must all
-pass the gates in `native-shell-quality-gates.md` before a release is promoted.
+untested desktop product. macOS and Windows must both pass the gates in
+`native-shell-quality-gates.md` before a release is promoted.
+
+v11.11 does not distribute a Linux native shell. The Linux target still builds
+and runs its installed-package lifecycle smoke in CI for regression coverage,
+but produces no release evidence, so no Linux floor gates this release. Linux
+users are served by browser CEREBRUM and the CLI. A distributed Linux shell
+returns only when upstream Wry ships GTK4/webkitgtk-6.0; the reasoning and the
+conditional `RUSTSEC-2024-0429` dismissal are recorded in
+`native-shell-quality-gates.md`.
 
 ## Evidence
 

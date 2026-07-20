@@ -267,10 +267,11 @@ jobs:
             os: windows-2025
             rust-target: x86_64-pc-windows-msvc
             bundles: nsis
-          - id: linux-x64
-            os: ubuntu-24.04
-            rust-target: x86_64-unknown-linux-gnu
-            bundles: deb,appimage
+          # No linux-x64 entry: v11.11 does not distribute a Linux native shell.
+          # Linux still builds and runs its installed-package lifecycle smoke in
+          # .github/workflows/native-shell.yml for cross-platform regression
+          # coverage; it is simply never staged as release evidence. See
+          # docs/native-shell-quality-gates.md.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -423,7 +424,7 @@ jobs:
             exit 0
           fi
           test "${NATIVE_SHELL_RELEASE_CLASS}" = "unsigned-preview-evidence"
-          echo "::error::Native standalone release ${NATIVE_SHELL_VERSION} is blocked: the package matrix is unsigned preview evidence only. Signed/notarized packages, installed-runtime acceptance, dependency-advisory closure (including RUSTSEC-2024-0429), update/rollback, accessibility, performance, and recovery evidence must be implemented and validated before publication."
+          echo "::error::Native standalone release ${NATIVE_SHELL_VERSION} is blocked: the macOS and Windows package matrix is unsigned preview evidence only. Signed/notarized packages, installed-runtime acceptance, dependency-advisory closure, update/rollback, accessibility, performance, and recovery evidence must be implemented and validated before publication. v11.11 does not distribute a Linux native shell; see docs/native-shell-quality-gates.md."
           exit 1
 
   goreleaser-prepare:

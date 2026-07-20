@@ -178,6 +178,16 @@ are recorded in [`desktop-shell-decision.md`](desktop-shell-decision.md),
 [`native-shell-quality-gates.md`](native-shell-quality-gates.md). The tracked
 Tauri foundation remains an opt-in preview until that full matrix passes.
 
+**Platform scope: v11.11 distributes a native shell on macOS and Windows only.**
+Linux is deliberately excluded. Linux users are served by browser CEREBRUM and
+the CLI, both fully supported and unaffected — this narrows the native shell,
+not the platform. The Linux target still builds and runs its full
+installed-package lifecycle smoke in CI so cross-platform regressions in the
+shared shell and SSCP code are still caught; it is simply never published. A
+distributed Linux shell returns only when upstream Wry ships
+GTK4/webkitgtk-6.0 (`tauri-apps/wry#1769`); SAGE will not fork or vendor the web
+view layer to get there sooner.
+
 ### v11.12 - consumer onboarding and recovery
 
 Make first run and recovery survivable by someone who has never used SAGE, natively and without a terminal. Guided create-or-join, connect-an-AI-tool, and choose-what-is-private-or-shared flows; recovery-key backup and restore; and honest, consistent dialogs for destructive or privacy-affecting actions that explain what happened, what remains safe, and the next step. Plain language and safe defaults throughout. The gate includes clean-machine onboarding and recovery usability tests with real nontechnical users — the same bar v12 sets, brought forward so it is proven early rather than at the end.
