@@ -94,6 +94,72 @@ test('metadata, source, race, frontend, and fault checks converge before packagi
   }
 });
 
+test('native shell evidence is version-locked, private, and cannot promote an unsigned standalone release', () => {
+  const metadata = job('release-metadata');
+  const evidence = job('native-shell-release-evidence');
+  const promotion = job('native-shell-production-promotion');
+  const publication = job('publication-gate');
+
+  assert.match(metadata, /NATIVE_SHELL_VERSION=.*tauri\.conf\.json/);
+  assert.match(metadata, /NATIVE_SHELL_CRATE_VERSION=.*Cargo\.toml/);
+  assert.match(metadata, /Native shell metadata drift/);
+  assert.match(metadata, /SAGE Native Preview/);
+  assert.match(metadata, /native_shell_release_class=unsigned-preview-evidence/);
+  assert.match(metadata, /native_shell_required=\$\{NATIVE_SHELL_REQUIRED\}/);
+  assert.match(metadata, /VERSION_MINOR.*-ge 11/);
+  const nativeRequirement = metadata.indexOf('NATIVE_SHELL_REQUIRED=false');
+  const gatedNativeReads = metadata.indexOf(
+    'if [ "${NATIVE_SHELL_REQUIRED}" = true ]; then\n            NATIVE_SHELL_VERSION=',
+  );
+  assert.ok(nativeRequirement >= 0 && gatedNativeReads > nativeRequirement);
+  assert.doesNotMatch(metadata.slice(0, nativeRequirement), /desktop\/sage-shell/);
+
+  assertNeeds('native-shell-release-evidence', ['quality-gate', 'release-metadata']);
+  assert.match(evidence, /if: needs\.release-metadata\.outputs\.native_shell_required == 'true'/);
+  assert.match(evidence, /id: macos-arm64/);
+  assert.match(evidence, /id: windows-x64/);
+  assert.match(evidence, /id: linux-x64/);
+  assert.match(evidence, /SAGE_DAEMON_VERSION/);
+  assert.match(evidence, /go test \.\/internal\/shellcontrol/);
+  assert.match(evidence, /cargo fmt --manifest-path/);
+  assert.match(evidence, /components: rustfmt, clippy/);
+  assert.match(evidence, /cargo audit --file desktop\/sage-shell\/Cargo\.lock/);
+  assert.match(evidence, /cargo tauri build --ci/);
+  assert.match(evidence, /verify-native-shell-bundle\.sh/);
+  assert.match(evidence, /cargo cyclonedx/);
+  assert.match(evidence, /UNSIGNED PREVIEW EVIDENCE ONLY/);
+  assert.match(evidence, /find \. -type f ! -name SHA256SUMS/);
+  assert.match(evidence, /command -v sha256sum/);
+  assert.match(evidence, /shasum -a 256 -c SHA256SUMS/);
+  assert.match(evidence, /name: release-evidence-native-shell-\$\{\{ matrix\.id \}\}/);
+  assert.doesNotMatch(evidence, /name: release-assets-native-shell/);
+
+  assertNeeds('native-shell-production-promotion', [
+    'release-metadata',
+    'native-shell-release-evidence',
+  ]);
+  assert.match(promotion, /always\(\)/);
+  assert.match(promotion, /Native standalone promotion does not apply before v11\.11\.0/);
+  assert.match(promotion, /Native standalone release .* is blocked/);
+  assert.match(promotion, /v11\.11 is deliberately a whole-release hold/);
+  assert.match(promotion, /RUSTSEC-2024-0429/);
+  assert.match(promotion, /Signed\/notarized packages, installed-runtime acceptance/);
+  assert.match(promotion, /exit 1/);
+
+  assertNeeds('publication-gate', ['native-shell-production-promotion']);
+  assert.match(publication, /verify_native_release_pair\(\)/);
+  assert.match(publication, /NATIVE_SHELL_REQUIRED:.*native_shell_required/);
+  assert.match(publication, /if \[ "\$\{NATIVE_SHELL_REQUIRED\}" = true \]; then/);
+  assert.match(publication, /native-shell-release-pair-deb\.json/);
+  assert.match(publication, /native-shell-release-pair-appimage\.json/);
+  assert.match(publication, /sha256sum -c SHA256SUMS/);
+  assert.match(publication, /native-shell-\$\{evidence_id\}\.cdx\.json/);
+
+  const publicStaging = job('stage-github-release');
+  assert.match(publicStaging, /pattern: release-assets-\*/);
+  assert.doesNotMatch(publicStaging, /release-evidence-native-shell/);
+});
+
 test('manual release recovery checks out the immutable tag in every source job', () => {
   assert.match(workflow, /workflow_dispatch:\n    inputs:\n      release_tag:/);
   assert.match(workflow, /RELEASE_TAG:.*inputs\.release_tag.*github\.ref_name/);
@@ -248,6 +314,7 @@ test('all private artifacts converge at one publication gate', () => {
     'docker-image',
     'python-package',
     'mcp-package',
+    'native-shell-production-promotion',
   ]);
   assert.match(job('publication-gate'), /sha256sum -c checksums\.txt/);
   assert.match(job('publication-gate'), /PYPI_API_TOKEN/);
