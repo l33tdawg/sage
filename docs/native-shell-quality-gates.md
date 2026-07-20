@@ -6,12 +6,23 @@ Browser CEREBRUM and the existing Go release matrix remain mandatory.
 
 ## Current enforcement status
 
+**v11.11 distributes a native shell on macOS and Windows only.** Linux is
+deliberately not a distributed native-shell platform for this release: Linux
+users are served by browser CEREBRUM and the CLI, both of which remain fully
+supported and are unaffected by this decision. Linux still compiles and runs its
+full installed-package lifecycle smoke in
+[`native-shell.yml`](../.github/workflows/native-shell.yml) so cross-platform
+regressions in the shared shell and SSCP code are still caught — it is simply
+never staged as release evidence and never published. See
+[Linux re-entry](#linux-re-entry) below.
+
 The tracked preview now enforces locked dependency compilation, Rust
 format/test/Clippy, full platform shell-control tests, isolated Codex endpoint
 acceptance tests, dependency audit, a license-bearing CycloneDX SBOM, and
-unsigned package construction on the declared macOS, Windows, and Linux
-targets. Each constructed package is unpacked and must contain exactly one
-bundled daemon whose embedded Go OS/architecture matches the declared target
+unsigned package construction on the declared macOS and Windows targets, plus
+the non-distributed Linux CI target. Each constructed package is unpacked and
+must contain exactly one bundled daemon whose embedded Go OS/architecture
+matches the declared target
 and whose embedded version matches the version supplied to the shell package
 build. Those checks emit a machine-readable release-pair record beside
 the package with the target, build version, packaged shell artifact size/hash,
@@ -33,15 +44,56 @@ also fails closed for later versions until their shell/daemon compatibility and
 promotion path deliberately replace it; it must not be carried unchanged into
 v12.
 
-GitHub Dependabot alert 37 (`RUSTSEC-2024-0429` /
-`GHSA-wrw7-89jp-8q8g`) is also an active promotion blocker. The Linux Tauri
-stack currently receives `glib` 0.18.5 through Wry/WebKitGTK; the affected safe
-iterator API can trigger undefined behavior and optimized-build crashes. As of
-this gate record, current Wry 0.55.1 still pins the affected GTK/glib family and
-upstream issue `tauri-apps/wry#1769` remains open, so no compatible dependency
-upgrade exists. The alert must remain open until a tested upstream migration or
-reviewed backport removes the affected code; it must not be dismissed merely to
-make release status green.
+### `RUSTSEC-2024-0429` (glib) — dismissed, not fixed
+
+GitHub Dependabot alert 37 (`RUSTSEC-2024-0429` / `GHSA-wrw7-89jp-8q8g`)
+concerns `glib` 0.18.5, which the Linux Tauri stack receives through
+Wry/WebKitGTK; the affected safe iterator API can trigger undefined behavior and
+optimized-build crashes.
+
+**The alert was dismissed as not-used on the decision that v11.11 does not
+distribute a Linux native shell.** It was not fixed, and the vulnerable code is
+still compiled by the non-distributed Linux CI build. This is a scope decision,
+not a remediation. It rests on two verified facts:
+
+- Wry declares its whole GTK chain under
+  `cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd",
+  target_os = "openbsd", target_os = "netbsd"))`. macOS resolves the web view
+  through WKWebView and Windows through WebView2, so **neither distributed
+  target compiles `gtk`, `webkit2gtk`, `soup3`, or `glib` at all**.
+- No user receives the affected code, because the only artifact containing it is
+  never published.
+
+There is no upgrade path, and this is a hard version wall rather than a pending
+release: Wry 0.55.1 is the latest published version and requires `gtk ^0.18`;
+the GTK3 Rust binding line is capped at `gtk` 0.18.2, last released 2024-12-09,
+which pins `glib` 0.18.x. The advisory is first fixed in `glib` 0.20.0, and
+`glib` 0.20+ belongs to the GTK4 line — a differently named `gtk4` crate, not a
+newer `gtk`. `cargo update`, a `--precise` pin, and a `[patch.crates-io]`
+override all fail: the first two are semver-excluded by `gtk ^0.18`, and the
+third compile-fails because `gtk`/`gdk`/`cairo-rs` 0.18 are not written against
+the glib 0.20+ API.
+
+`cargo audit` reads the lockfile rather than the per-target build graph, so it
+still reports this advisory on every platform's CI run. That is expected and
+must not be silenced.
+
+> **This dismissal is conditional and must be revisited.** If a Linux native
+> shell is ever distributed again, this alert must be re-opened and treated as
+> release-blocking before that artifact ships. Do not treat the dismissed state
+> as a standing judgement that the advisory is harmless.
+
+### Linux re-entry
+
+A distributed Linux native shell returns only when **upstream Wry ships
+GTK4/webkitgtk-6.0 support**, tracked in `tauri-apps/wry#1769` (open, no
+activity since 2026-07-15). That migration also clears this advisory, because
+the `gtk4` line depends on `glib ^0.22`.
+
+SAGE does not plan to fork or vendor Wry onto GTK4. Owning a fork of the web
+view layer in a security-sensitive component is a worse position than not
+shipping the platform. Until upstream moves, Linux native shell work stays out
+of scope and Linux users are served by browser CEREBRUM and the CLI.
 
 Runtime promotion remains open until the install/launch/deep-link/offline,
 performance, assistive-technology, signing/notarization, update/rollback, and
@@ -108,7 +160,7 @@ is not by itself evidence.
 |---|---|---|
 | macOS | oldest Apple-supported macOS that SAGE declares for the release; Intel and Apple Silicon where distributed | signed `.app`, notarized/stapled DMG, clean install, Gatekeeper launch, rollback |
 | Windows | Windows 11 x64 and arm64 where distributed | signed NSIS installer, clean install/uninstall, SmartScreen/signature check, rollback |
-| Linux | Ubuntu 24.04 LTS x64 plus each architecture distributed | AppImage and Debian package, offline launch, uninstall preserving `~/.sage` |
+| Linux | **not distributed in v11.11** | none — build and installed-runtime smoke run in CI for regression coverage only, and are never release evidence |
 
 The exact OS image identifiers, WebView versions, CPU/RAM, and artifact hashes
 must appear in the release evidence. “Builds on a developer machine” is not a
@@ -159,7 +211,7 @@ Automated semantic checks supplement, never replace, the OS smoke matrix:
   appropriate live region without stealing focus;
 - 200% zoom, high contrast, light/dark mode, and OS reduced-motion work without
   clipping or lost content;
-- VoiceOver (macOS), Narrator (Windows), and Orca (Linux) can launch, identify
+- VoiceOver (macOS) and Narrator (Windows) can launch, identify
   daemon state, reach browser fallback, navigate primary CEREBRUM areas, and
   recover from daemon loss;
 - camera denial/revocation and every permission error remain operable without a

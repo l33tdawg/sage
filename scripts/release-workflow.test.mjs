@@ -118,12 +118,23 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(evidence, /if: needs\.release-metadata\.outputs\.native_shell_required == 'true'/);
   assert.match(evidence, /id: macos-arm64/);
   assert.match(evidence, /id: windows-x64/);
-  assert.match(evidence, /id: linux-x64/);
+  // v11.11 distributes a native shell on macOS and Windows only. Linux still
+  // builds and runs its installed-package lifecycle smoke in native-shell.yml,
+  // but is never staged as release evidence. Assert the deliberate absence so a
+  // Linux entry cannot reappear in the shipping matrix without the scope
+  // decision in docs/native-shell-quality-gates.md being revisited.
+  assert.doesNotMatch(evidence, /id: linux-x64/);
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
   assert.match(evidence, /go test \.\/internal\/shellcontrol/);
   assert.match(evidence, /cargo fmt --manifest-path/);
   assert.match(evidence, /components: rustfmt, clippy/);
   assert.match(evidence, /cargo audit --file desktop\/sage-shell\/Cargo\.lock/);
+  // Regression guard: the dependency audit was once gated on
+  // `runner.os == 'Linux'`, so dropping the Linux matrix entry silently
+  // disabled it for releases. cargo audit reads the lockfile and is
+  // platform-independent, so it must never be gated on a runner OS again.
+  assert.doesNotMatch(evidence, /if: runner\.os == 'Linux'/);
+  assert.match(evidence, /if: matrix\.id == 'macos-arm64'\n\s+shell: bash\n\s+run: \|\n\s+cargo install cargo-audit/);
   assert.match(evidence, /cargo tauri build --ci/);
   assert.match(evidence, /verify-native-shell-bundle\.sh/);
   assert.match(evidence, /cargo cyclonedx/);
@@ -142,7 +153,12 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(promotion, /Native standalone promotion does not apply before v11\.11\.0/);
   assert.match(promotion, /Native standalone release .* is blocked/);
   assert.match(promotion, /v11\.11 is deliberately a whole-release hold/);
-  assert.match(promotion, /RUSTSEC-2024-0429/);
+  // RUSTSEC-2024-0429 is no longer named here: it was dismissed as not-used once
+  // v11.11 stopped distributing a Linux native shell, which is the only artifact
+  // that compiles the affected glib. The gate still requires dependency-advisory
+  // closure generally, and still fails closed.
+  assert.match(promotion, /dependency-advisory closure/);
+  assert.match(promotion, /does not distribute a Linux native shell/);
   assert.match(promotion, /Signed\/notarized packages, installed-runtime acceptance/);
   assert.match(promotion, /exit 1/);
 
@@ -150,8 +166,12 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(publication, /verify_native_release_pair\(\)/);
   assert.match(publication, /NATIVE_SHELL_REQUIRED:.*native_shell_required/);
   assert.match(publication, /if \[ "\$\{NATIVE_SHELL_REQUIRED\}" = true \]; then/);
-  assert.match(publication, /native-shell-release-pair-deb\.json/);
-  assert.match(publication, /native-shell-release-pair-appimage\.json/);
+  // The publication gate must not verify Linux evidence that is never produced:
+  // a missing linux-x64 artifact would fail the gate on a missing file.
+  assert.doesNotMatch(publication, /native-shell-release-pair-deb\.json/);
+  assert.doesNotMatch(publication, /native-shell-release-pair-appimage\.json/);
+  assert.doesNotMatch(publication, /release-evidence-native-shell-linux-x64/);
+  assert.match(publication, /for evidence_id in macos-arm64 windows-x64; do/);
   assert.match(publication, /sha256sum -c SHA256SUMS/);
   assert.match(publication, /native-shell-\$\{evidence_id\}\.cdx\.json/);
 
