@@ -77,6 +77,31 @@ The exact OS build, architecture, and WebKit/WebView version observed on each ru
 are recorded in the uploaded runtime diagnostics so the constraint above is
 checkable rather than asserted.
 
+### Offline startup (macOS)
+
+macOS additionally runs an offline startup smoke. It launches the shell with
+every proxy variable pointed at a dead loopback port, waits for the daemon to
+report a renderable SSCP state, and holds a settle window after ready — proving
+the app boots and becomes usable with no reachable external service.
+
+Throughout, it **continuously samples** the internet sockets of every process
+running the exact staged shell executable or the exact bundled daemon path, and
+fails on any non-loopback endpoint. Sampling is continuous rather than a single
+end-state check because a one-shot check cannot see a transient boot-time
+request. Wildcard binds are reported as well as outbound connections. As
+everywhere else, processes are matched on absolute executable path, never name.
+
+Enforcement limit, stated plainly: macOS has no unprivileged per-process network
+namespace, so this harness does **not** kernel-block egress. It proves *no
+external socket was observed and startup did not require one* — not *egress was
+impossible*. The Linux `unshare -n` approach would be strictly stronger, but
+Linux is not a distributed platform for this release.
+
+The detector is verified in both directions against a synthetic bundle: a
+deliberate outbound connection is caught and reported with the offending socket,
+and a realistic loopback-only topology passes. A run that observes zero sockets
+is not by itself evidence.
+
 ## Supported matrix
 
 | Platform | Build/install floor | Required package evidence |
