@@ -128,6 +128,22 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   // docs/native-shell-quality-gates.md being revisited.
   assert.doesNotMatch(evidence, /id: linux-x64/);
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
+  // The daemon MUST be staged before the Rust build. tauri's build script
+  // resolves the bundle.resources glob "binaries/*" at compile time, so cargo
+  // test/clippy die with "glob pattern binaries/* path not found" if staging has
+  // not run. This job only executes for version >= 11.11, so the wrong order sat
+  // latent until v11.11.0 became the first tag to run it -- and it failed both
+  // the macOS and Windows evidence builds, skipping every publication step.
+  // Nothing else exercises this path: it cannot run on a PR.
+  {
+    const staged = evidence.indexOf('Stage version-matched bundled daemon');
+    const built = evidence.indexOf('Test and lint the locked native shell');
+    assert.ok(staged >= 0 && built >= 0, 'evidence job lost a required step');
+    assert.ok(
+      staged < built,
+      'the bundled daemon must be staged before the Rust build, or tauri fails to resolve binaries/*',
+    );
+  }
   assert.match(evidence, /go test \.\/internal\/shellcontrol/);
   assert.match(evidence, /cargo fmt --manifest-path/);
   assert.match(evidence, /components: rustfmt, clippy/);

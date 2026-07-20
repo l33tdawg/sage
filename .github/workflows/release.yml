@@ -292,6 +292,17 @@ jobs:
         run: |
           go test ./internal/shellcontrol -count=1
           go test ./cmd/sage-gui -run 'Test(LocalAgentKeyResolver|ShellStartupProof)' -count=1
+      # MUST precede the Rust build: tauri's build script resolves the
+      # bundle.resources glob "binaries/*" at compile time, so cargo test/clippy
+      # fail with "glob pattern binaries/* path not found" if the daemon has not
+      # been staged yet. native-shell.yml has always had this order; this job did
+      # not, and it went unnoticed because the job only runs for version >= 11.11,
+      # so v11.11.0 was the first tag ever to execute it.
+      - name: Stage version-matched bundled daemon
+        shell: bash
+        env:
+          SAGE_DAEMON_VERSION: ${{ env.NATIVE_SHELL_VERSION }}
+        run: scripts/stage-native-shell-daemon.sh ${{ matrix.rust-target }}
       - name: Test and lint the locked native shell
         shell: bash
         run: |
@@ -312,11 +323,6 @@ jobs:
         run: |
           cargo install cargo-audit --version 0.22.2 --locked
           cargo audit --file desktop/sage-shell/Cargo.lock
-      - name: Stage version-matched bundled daemon
-        shell: bash
-        env:
-          SAGE_DAEMON_VERSION: ${{ env.NATIVE_SHELL_VERSION }}
-        run: scripts/stage-native-shell-daemon.sh ${{ matrix.rust-target }}
       - name: Install pinned Tauri packager
         shell: bash
         run: cargo install tauri-cli --version 2.11.4 --locked
