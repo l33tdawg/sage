@@ -24,6 +24,7 @@ for required in \
   'Get-ExactProcessHandle' \
   '$firstDaemon' \
   '$reinstallDaemon' \
+  'reinstalled bundled daemon did not survive normal shell close' \
   '$Process.Kill($true)' \
   'taskkill.exe /PID' \
   'preserve.sentinel' \

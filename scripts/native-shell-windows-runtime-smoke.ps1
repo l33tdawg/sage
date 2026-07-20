@@ -415,7 +415,9 @@ try {
     Assert-True ($reinstallResult.Status.instance_generation -cne $firstGeneration) 'reinstall reused a stale daemon generation'
     Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $nodeDataRoot 'preserve.sentinel')) -ceq 'native-shell-uninstall-preservation') 'reinstall modified SAGE_HOME'
 
-    Stop-LaunchedTree $reinstalled $shellExe.FullName 'reinstalled native shell'
+    Assert-True ($reinstalled.CloseMainWindow()) 'reinstalled native shell did not expose a closeable main window'
+    Assert-True ($reinstalled.WaitForExit(10000)) 'reinstalled native shell did not exit after normal window close'
+    Assert-True (-not $reinstallDaemon.HasExited) 'reinstalled bundled daemon did not survive normal shell close'
     Stop-LaunchedTree $reinstallDaemon $daemonPath 'reinstalled bundled daemon'
     Wait-PipeGone $pipeName
     Invoke-Installer $uninstaller.FullName @('/S')
