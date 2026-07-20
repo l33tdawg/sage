@@ -201,8 +201,19 @@ function Stop-AllExactPath([string]$ExpectedPath) {
 function Wait-PipeGone([string]$PipeName) {
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     $path = "\\.\pipe\$PipeName"
+    $genericReadWrite = [uint32]3221225472
+    $openExisting = [uint32]3
+    $overlapped = [uint32]1073741824
     while ([DateTime]::UtcNow -lt $deadline) {
-        $handle = [SagePipeNative]::CreateFileW($path, 0xC0000000, 0, [IntPtr]::Zero, 3, 0x40000000, [IntPtr]::Zero)
+        $handle = [SagePipeNative]::CreateFileW(
+            $path,
+            $genericReadWrite,
+            [uint32]0,
+            [IntPtr]::Zero,
+            $openExisting,
+            $overlapped,
+            [IntPtr]::Zero
+        )
         if ($handle -ne [IntPtr](-1)) {
             [void][SagePipeNative]::CloseHandle($handle)
         } else {

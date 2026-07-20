@@ -8,6 +8,7 @@ test -s "${HARNESS}"
 for required in \
   'GetNamedPipeServerProcessId' \
   'CreateFileW' \
+  '[uint32]3221225472' \
   'e4ec5178983b20c1' \
   'profileBResult' \
   'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SAGE Native Preview' \
