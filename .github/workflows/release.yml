@@ -894,10 +894,16 @@ jobs:
                 .metadata.component.version == $version
               ' "${evidence_root}/native-shell-${evidence_id}.cdx.json" > /dev/null
             done
+            # "app-executable", not "app": verify-native-shell-bundle.sh records
+            # the artifact KIND it measured (the .app's inner executable), which is
+            # not the same string as the tauri --bundles value. This gate had never
+            # executed before v11.11.0 -- it only runs for version >= 11.11 -- so the
+            # mismatch sat latent and failed the first real release at the
+            # publication gate, after every build had already succeeded.
             verify_native_release_pair \
               staged/release-evidence-native-shell-macos-arm64 \
               staged/release-evidence-native-shell-macos-arm64/bundle/native-shell-release-pair.json \
-              aarch64-apple-darwin app
+              aarch64-apple-darwin app-executable
             verify_native_release_pair \
               staged/release-evidence-native-shell-windows-x64 \
               staged/release-evidence-native-shell-windows-x64/bundle/native-shell-release-pair.json \

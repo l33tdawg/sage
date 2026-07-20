@@ -17,6 +17,10 @@ const windowsInstaller = readFileSync(
   'utf8',
 );
 const rootDockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
+const bundleVerifier = readFileSync(
+  new URL('../scripts/verify-native-shell-bundle.sh', import.meta.url),
+  'utf8',
+);
 const v119Chaos = readFileSync(
   new URL('../deploy/scripts/run-v11.9-chaos.sh', import.meta.url),
   'utf8',
@@ -197,6 +201,34 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   const publicStaging = job('stage-github-release');
   assert.match(publicStaging, /pattern: release-assets-\*/);
   assert.doesNotMatch(publicStaging, /release-evidence-native-shell/);
+});
+
+test('publication gate expects the artifact kinds the bundle verifier actually records', () => {
+  // verify-native-shell-bundle.sh writes the KIND it measured into the
+  // release-pair record; the publication gate asserts .shell_artifact.kind
+  // equals a string hard-coded in release.yml. Nothing declares those strings in
+  // one place, so they drifted: the gate expected "app" while the verifier
+  // records "app-executable" for a macOS .app. Neither file is exercised by PR
+  // CI -- the evidence and publication jobs only run for version >= 11.11 on a
+  // real tag -- so the mismatch failed the first genuine release, after every
+  // build job had already gone green.
+  const recorded = new Set(
+    [...bundleVerifier.matchAll(/SHELL_ARTIFACT_KIND=([A-Za-z0-9-]+)/g)].map((m) => m[1]),
+  );
+  assert.ok(recorded.size > 0, 'could not read any SHELL_ARTIFACT_KIND from the bundle verifier');
+
+  const publication = job('publication-gate');
+  const expected = [...publication.matchAll(/^\s+\S+ (\S+)$/gm)]
+    .map((m) => m[1])
+    .filter((token) => /^(app|app-executable|dmg|nsis|deb|appimage)$/.test(token));
+  assert.ok(expected.length > 0, 'could not read any expected artifact kind from the publication gate');
+
+  for (const kind of expected) {
+    assert.ok(
+      recorded.has(kind),
+      `publication gate expects artifact kind "${kind}", which verify-native-shell-bundle.sh never records (it records: ${[...recorded].sort().join(', ')})`,
+    );
+  }
 });
 
 test('manual release recovery checks out the immutable tag in every source job', () => {

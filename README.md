@@ -51,6 +51,12 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.11.1
+
+**Release-pipeline fix for v11.11.0.** v11.11.0 was tagged but never published: the release workflow's native-shell evidence and publication jobs only execute for version 11.11 and above, so v11.11.0 was the first tag in the project's history to run them, and two latent defects surfaced in a path no pull request can exercise. The bundled daemon was staged after the Rust build that consumes it, and the publication gate expected an artifact-kind string the bundle verifier never records. Both are fixed and pinned by tests. No user received v11.11.0 on any channel.
+
+Everything below shipped in this release.
+
 ## What's New in v11.11.0
 
 **The Sharing & Sync control plane is complete, and the desktop shell foundation lands as an opt-in alpha that nothing depends on.** Browser CEREBRUM remains the product; the native shell is a background track that is built and runtime-tested in CI but not distributed and not intended for end-user use.
@@ -61,7 +67,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 - **Native shell foundation (alpha, not distributed).** A Tauri 2 shell starts the bundled daemon through an authenticated SSCP startup proof, owns one window with fail-closed navigation pinned to the exact authenticated loopback origin, keeps a visible recovery surface, and hands off to an existing instance on relaunch. Its installed-package lifecycle is proven on hosted runners for macOS, Windows, and Linux — install, launch, single-instance handoff, ordinary close with daemon survival, uninstall preserving the node data root, and reinstall to a genuinely new instance generation. macOS additionally proves offline startup with no external requests. Every package is unpacked and must contain exactly one bundled daemon whose embedded OS/architecture and version match the build.
 - **The shell does not gate releases.** v11.11 distributes no native shell, so signing, notarization, update/rollback, recovery, performance, and accessibility evidence are the bar for *distributing* it — which the roadmap places at v12 — not a v11.11 shipping requirement. Federation, agent-to-agent messaging, and the rest of the roadmap do not queue behind desktop packaging.
 
-This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.0.
+This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.1.
 
 ## What's New in v11.10.0
 
@@ -551,7 +557,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.1`.
 
 ### Upgrading from an older version?
 
