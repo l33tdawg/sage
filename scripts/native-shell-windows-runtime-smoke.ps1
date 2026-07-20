@@ -36,7 +36,7 @@ function Get-One($Items, [string]$Label) {
 function Get-FreePorts {
     $listeners = @()
     try {
-        1..3 | ForEach-Object {
+        1..4 | ForEach-Object {
             $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
             $listener.Start()
             $listeners += $listener
@@ -322,6 +322,10 @@ try {
     Wait-PipeGone $profileBPipe
     $profileBPorts = @(Get-FreePorts)
     $profileBOrigin = "http://127.0.0.1:$($profileBPorts[0])"
+    Set-Content -LiteralPath (Join-Path $profileBHome 'config.yaml') -Value @(
+        'quorum:'
+        "  tls_addr: `"127.0.0.1:$($profileBPorts[3])`""
+    )
     $profileBDaemon = Start-Daemon $daemonPath $profileBHome $profileBPorts
     $profileBResult = Read-ReadyStatus $profileBPipe $profileBOrigin $ExpectedVersion $false
     Assert-True ($profileBResult.ServerPid -eq $profileBDaemon.Id) 'profile-B SSCP server PID did not match the directly launched daemon'

@@ -11,6 +11,8 @@ for required in \
   '[uint32]3221225472' \
   'e4ec5178983b20c1' \
   'profileBResult' \
+  'profileBPorts[3]' \
+  'tls_addr:' \
   'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SAGE Native Preview' \
   'NamedPipeClientStream' \
   'SAGE_CMT_RPC_ADDR' \
