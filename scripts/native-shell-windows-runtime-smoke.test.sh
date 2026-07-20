@@ -21,6 +21,9 @@ for required in \
   'CloseMainWindow' \
   'Stop-ExactTree' \
   'Stop-LaunchedTree' \
+  'Get-ExactProcessHandle' \
+  '$firstDaemon' \
+  '$reinstallDaemon' \
   '$Process.Kill($true)' \
   'taskkill.exe /PID' \
   'preserve.sentinel' \

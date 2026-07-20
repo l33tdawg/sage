@@ -157,6 +157,19 @@ function Assert-ServerPath($Result, [string]$ExpectedPath) {
     Assert-True ($actual.Equals([IO.Path]::GetFullPath($ExpectedPath), [StringComparison]::OrdinalIgnoreCase)) "SSCP server path mismatch: $actual"
 }
 
+function Get-ExactProcessHandle([int]$ProcessId, [string]$ExpectedPath, [string]$Label) {
+    $process = [Diagnostics.Process]::GetProcessById($ProcessId)
+    try {
+        [void]$process.Handle
+        $actual = [IO.Path]::GetFullPath($process.MainModule.FileName)
+        Assert-True ($actual.Equals([IO.Path]::GetFullPath($ExpectedPath), [StringComparison]::OrdinalIgnoreCase)) "${Label} path mismatch: $actual"
+        return $process
+    } catch {
+        $process.Dispose()
+        throw
+    }
+}
+
 function Start-Shell([string]$ShellPath, [string]$NodeDataRoot, [int[]]$Ports) {
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $ShellPath
@@ -192,7 +205,7 @@ function Stop-ExactTree([int]$ProcessId, [string]$ExpectedPath) {
 
 function Stop-LaunchedTree([Diagnostics.Process]$Process, [string]$ExpectedPath, [string]$Label) {
     Assert-True (-not $Process.HasExited) "${Label} exited before its explicit stop"
-    $actual = Get-ExecutablePath $Process.Id
+    $actual = [IO.Path]::GetFullPath($Process.MainModule.FileName)
     Assert-True ($actual.Equals([IO.Path]::GetFullPath($ExpectedPath), [StringComparison]::OrdinalIgnoreCase)) "refusing to stop ${Label} from unexpected path: $actual"
     $Process.Kill($true)
     Assert-True ($Process.WaitForExit(10000)) "${Label} tree did not exit after its explicit stop"
@@ -292,6 +305,7 @@ $webviewVersion = Get-WebViewVersion
 $installed = $false
 $installAttempted = $false
 $shellProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
+$daemonProcesses = [Collections.Generic.List[Diagnostics.Process]]::new()
 $serverPids = [Collections.Generic.List[int]]::new()
 $daemonPath = $null
 $uninstaller = $null
@@ -322,6 +336,8 @@ try {
     $firstResult = Read-ReadyStatus $pipeName $origin $ExpectedVersion
     Assert-True (-not $first.HasExited) 'installed native shell exited before attachment evidence'
     Assert-ServerPath $firstResult $daemonPath
+    $firstDaemon = Get-ExactProcessHandle $firstResult.ServerPid $daemonPath 'installed bundled daemon'
+    $daemonProcesses.Add($firstDaemon)
     $serverPids.Add($firstResult.ServerPid)
     $firstGeneration = $firstResult.Status.instance_generation
 
@@ -335,6 +351,7 @@ try {
         "  tls_addr: `"127.0.0.1:$($profileBPorts[3])`""
     )
     $profileBDaemon = Start-Daemon $daemonPath $profileBHome $profileBPorts
+    $daemonProcesses.Add($profileBDaemon)
     $profileBResult = Read-ReadyStatus $profileBPipe $profileBOrigin $ExpectedVersion $false
     Assert-True ($profileBResult.ServerPid -eq $profileBDaemon.Id) 'profile-B SSCP server PID did not match the directly launched daemon'
     Assert-ServerPath $profileBResult $daemonPath
@@ -370,7 +387,7 @@ try {
 
     Stop-LaunchedTree $profileBDaemon $daemonPath 'profile-B daemon'
     Wait-PipeGone $profileBPipe
-    Stop-ExactTree $daemonOnly.ServerPid $daemonPath
+    Stop-LaunchedTree $firstDaemon $daemonPath 'installed bundled daemon'
     Wait-PipeGone $pipeName
     Invoke-Installer $uninstaller.FullName @('/S')
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
@@ -392,12 +409,14 @@ try {
     $reinstallResult = Read-ReadyStatus $pipeName $origin $ExpectedVersion
     Assert-True (-not $reinstalled.HasExited) 'reinstalled native shell exited before attachment evidence'
     Assert-ServerPath $reinstallResult $daemonPath
+    $reinstallDaemon = Get-ExactProcessHandle $reinstallResult.ServerPid $daemonPath 'reinstalled bundled daemon'
+    $daemonProcesses.Add($reinstallDaemon)
     $serverPids.Add($reinstallResult.ServerPid)
     Assert-True ($reinstallResult.Status.instance_generation -cne $firstGeneration) 'reinstall reused a stale daemon generation'
     Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $nodeDataRoot 'preserve.sentinel')) -ceq 'native-shell-uninstall-preservation') 'reinstall modified SAGE_HOME'
 
-    Stop-ExactTree $reinstalled.Id $shellExe.FullName
-    Stop-ExactTree $reinstallResult.ServerPid $daemonPath
+    Stop-LaunchedTree $reinstalled $shellExe.FullName 'reinstalled native shell'
+    Stop-LaunchedTree $reinstallDaemon $daemonPath 'reinstalled bundled daemon'
     Wait-PipeGone $pipeName
     Invoke-Installer $uninstaller.FullName @('/S')
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
@@ -415,7 +434,7 @@ try {
     }
     foreach ($process in $shellProcesses) {
         try {
-            if (-not $process.HasExited) { Stop-ExactTree $process.Id $process.StartInfo.FileName }
+            if (-not $process.HasExited) { Stop-LaunchedTree $process $process.StartInfo.FileName 'native shell' }
         } catch { Write-Warning $_ }
     }
     try { Stop-AllExactPath $daemonPath } catch { Write-Warning $_ }
@@ -424,6 +443,7 @@ try {
             try { Stop-ExactTree $serverPid $daemonPath } catch { Write-Warning $_ }
         }
     }
+    foreach ($process in $daemonProcesses) { $process.Dispose() }
     if (($installed -or $installAttempted) -and (Test-Path -LiteralPath $installRoot)) {
         try {
             $cleanupUninstaller = Get-One (Get-ChildItem -LiteralPath $installRoot -File -Filter '*.exe' | Where-Object Name -Match '(?i)^uninstall.*\.exe$') 'cleanup NSIS uninstaller'
