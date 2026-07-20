@@ -1,6 +1,6 @@
 # ADR: Additive native CEREBRUM shell
 
-**Status:** Accepted for implementation, release remains gated
+**Status:** Accepted for implementation; the shell is alpha and does not gate releases
 **Date:** 2026-07-19
 **Target:** v11.11 native foundation
 
@@ -14,11 +14,14 @@ updates, validator material, or the vault passphrase.
 
 This is a conditional implementation decision, not permission to publish an
 untested desktop product. macOS and Windows must both pass the gates in
-`native-shell-quality-gates.md` before a release is promoted.
+`native-shell-quality-gates.md` before the shell is **distributed** — which the
+roadmap places at v12.
 
-v11.11 does not distribute a Linux native shell. The Linux target still builds
-and runs its installed-package lifecycle smoke in CI for regression coverage,
-but produces no release evidence, so no Linux floor gates this release. Linux
+**v11.11 distributes no native shell on any platform, so no shell gate blocks
+this release.** The shell is alpha: built and runtime-tested in CI, never staged
+as a public release asset. macOS and Windows are its target platforms; Linux is
+not. The Linux target still builds and runs its installed-package lifecycle
+smoke in CI for regression coverage, but produces no release evidence. Linux
 users are served by browser CEREBRUM and the CLI. A distributed Linux shell
 returns only when upstream Wry ships GTK4/webkitgtk-6.0; the reasoning and the
 conditional `RUSTSEC-2024-0429` dismissal are recorded in

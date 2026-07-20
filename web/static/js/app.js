@@ -13041,7 +13041,9 @@ function SharingSyncGroupsPanel() {
             const groupId = group.group_id;
             const draft = drafts[groupId] || {};
             const panelId = 'sharing-sync-group-' + groupIndex;
-            // Seed the selective-domains field from the node's ACTIVE consent set.
+            // Seed the selective-domains field from the node's full selector set
+            // (consent_domains is served from the PENDING table, a strict superset of
+            // the promoted one -- see syncGroupMemberView in web/federation_join.go).
             // drafts start empty and are only written by operator keystrokes, so an
             // untouched field previously rendered blank and submitted
             // selected_domains: [] -- silently clearing an existing consent set on

@@ -253,9 +253,11 @@ instrumentation that does not exist yet: the shell emits no paint, interactive,
 recovery-shown, or frame-timing signal, so they cannot be observed from outside
 the process at all. Building that instrumentation is the v11.14 hardening work.
 
-v11.11 records the measurable rows as evidence on every native-shell CI run so
-the ceilings are calibrated against real numbers before v11.14 makes them
-blocking. A recorded row that is merely absent is not a pass.
+No harness measures any of these rows yet, including the RSS row that blocks
+from v11.11 — that instrumentation is still to be written. Until it exists this
+table is a set budget, not a measured one, and nothing here should be read as
+evidence that the ceilings have been met. Calibrating the ceilings against real
+numbers is a prerequisite for v11.14 making them blocking.
 
 From v11.14, three consecutive benchmark runs must pass. A regression of more
 than 10% against the last published release fails even when the absolute ceiling
