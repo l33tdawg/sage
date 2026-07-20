@@ -29,4 +29,9 @@ if grep -Eq 'taskkill\.exe[[:space:]]+/IM|Get-Process[[:space:]]+sage-gui|Stop-P
   exit 1
 fi
 
+if grep -Eiq '\$(sage)?home([[:space:]]|[),=])' "${HARNESS}"; then
+  echo 'Windows runtime harness shadows the read-only PowerShell HOME variable' >&2
+  exit 1
+fi
+
 echo 'native-shell Windows runtime harness contract tests passed'

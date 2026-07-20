@@ -47,26 +47,26 @@ function Get-FreePorts {
     }
 }
 
-function Get-PipeNameForIdentity([string]$Sid, [string]$SageHome) {
-    $home = [IO.Path]::GetFullPath($SageHome).Replace('/', '\').ToLowerInvariant()
-    if ($home.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
-        $home = '\\' + $home.Substring(8)
-    } elseif ($home.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
-        $home = $home.Substring(4)
+function Get-PipeNameForIdentity([string]$Sid, [string]$NodeDataRoot) {
+    $canonicalRoot = [IO.Path]::GetFullPath($NodeDataRoot).Replace('/', '\').ToLowerInvariant()
+    if ($canonicalRoot.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        $canonicalRoot = '\\' + $canonicalRoot.Substring(8)
+    } elseif ($canonicalRoot.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        $canonicalRoot = $canonicalRoot.Substring(4)
     }
-    $root = [IO.Path]::GetPathRoot($home)
-    while ($home.Length -gt $root.Length -and $home.EndsWith('\')) {
-        $home = $home.Substring(0, $home.Length - 1)
+    $root = [IO.Path]::GetPathRoot($canonicalRoot)
+    while ($canonicalRoot.Length -gt $root.Length -and $canonicalRoot.EndsWith('\')) {
+        $canonicalRoot = $canonicalRoot.Substring(0, $canonicalRoot.Length - 1)
     }
-    $bytes = [Text.Encoding]::UTF8.GetBytes($Sid + [char]0 + $home)
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Sid + [char]0 + $canonicalRoot)
     $hash = [Security.Cryptography.SHA256]::HashData($bytes)
     $suffix = -join ($hash[0..7] | ForEach-Object { $_.ToString('x2') })
     return "sage-shell-control-$suffix"
 }
 
-function Get-PipeName([string]$SageHome) {
+function Get-PipeName([string]$NodeDataRoot) {
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    return Get-PipeNameForIdentity $sid $SageHome
+    return Get-PipeNameForIdentity $sid $NodeDataRoot
 }
 
 function Read-Exact($Stream, [int]$Count, [Threading.CancellationToken]$Token) {
@@ -157,11 +157,11 @@ function Assert-ServerPath($Result, [string]$ExpectedPath) {
     Assert-True ($actual.Equals([IO.Path]::GetFullPath($ExpectedPath), [StringComparison]::OrdinalIgnoreCase)) "SSCP server path mismatch: $actual"
 }
 
-function Start-Shell([string]$ShellPath, [string]$SageHome, [int[]]$Ports) {
+function Start-Shell([string]$ShellPath, [string]$NodeDataRoot, [int[]]$Ports) {
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $ShellPath
     $start.UseShellExecute = $false
-    $start.Environment['SAGE_HOME'] = $SageHome
+    $start.Environment['SAGE_HOME'] = $NodeDataRoot
     $start.Environment['SAGE_NO_BROWSER'] = '1'
     $start.Environment['REST_ADDR'] = "127.0.0.1:$($Ports[0])"
     $start.Environment['SAGE_CMT_RPC_ADDR'] = "tcp://127.0.0.1:$($Ports[1])"
@@ -169,12 +169,12 @@ function Start-Shell([string]$ShellPath, [string]$SageHome, [int[]]$Ports) {
     return [Diagnostics.Process]::Start($start)
 }
 
-function Start-Daemon([string]$DaemonPath, [string]$SageHome, [int[]]$Ports) {
+function Start-Daemon([string]$DaemonPath, [string]$NodeDataRoot, [int[]]$Ports) {
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $DaemonPath
     $start.ArgumentList.Add('serve')
     $start.UseShellExecute = $false
-    $start.Environment['SAGE_HOME'] = $SageHome
+    $start.Environment['SAGE_HOME'] = $NodeDataRoot
     $start.Environment['SAGE_NO_BROWSER'] = '1'
     $start.Environment['REST_ADDR'] = "127.0.0.1:$($Ports[0])"
     $start.Environment['SAGE_CMT_RPC_ADDR'] = "tcp://127.0.0.1:$($Ports[1])"
@@ -239,11 +239,11 @@ function Get-WebViewVersion {
 $setup = Get-One (Get-ChildItem -LiteralPath (Join-Path $BundleRoot 'nsis') -File | Where-Object Name -Match '(?i)setup.*\.exe$') 'NSIS installer'
 $smokeRoot = Join-Path $env:RUNNER_TEMP ("sage-native-shell-windows-runtime.{0}" -f [Guid]::NewGuid().ToString('N'))
 $installRoot = Join-Path $smokeRoot 'install'
-$sageHome = Join-Path $smokeRoot 'home'
+$nodeDataRoot = Join-Path $smokeRoot 'home'
 $profileBHome = Join-Path $smokeRoot 'profile-b'
 $diagnostics = Join-Path $smokeRoot 'diagnostics'
-New-Item -ItemType Directory -Path $sageHome, $profileBHome, $diagnostics | Out-Null
-Set-Content -LiteralPath (Join-Path $sageHome 'preserve.sentinel') -Value 'native-shell-uninstall-preservation' -NoNewline
+New-Item -ItemType Directory -Path $nodeDataRoot, $profileBHome, $diagnostics | Out-Null
+Set-Content -LiteralPath (Join-Path $nodeDataRoot 'preserve.sentinel') -Value 'native-shell-uninstall-preservation' -NoNewline
 Assert-True (-not (Test-Path -LiteralPath $installRoot)) "install root already exists: $installRoot"
 
 $productKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SAGE Native Preview'
@@ -296,9 +296,9 @@ try {
     $daemonPath = (Get-One (Get-ChildItem -LiteralPath $installRoot -Recurse -File -Filter 'sage-gui.exe' | Where-Object FullName -Match '(?i)[\\/]binaries[\\/]sage-gui\.exe$') 'installed bundled daemon').FullName
     $ports = @(Get-FreePorts)
     $origin = "http://127.0.0.1:$($ports[0])"
-    $pipeName = Get-PipeName $sageHome
+    $pipeName = Get-PipeName $nodeDataRoot
 
-    $first = Start-Shell $shellExe.FullName $sageHome $ports
+    $first = Start-Shell $shellExe.FullName $nodeDataRoot $ports
     $shellProcesses.Add($first)
     $firstResult = Read-ReadyStatus $pipeName $origin $ExpectedVersion
     Assert-True (-not $first.HasExited) 'installed native shell exited before attachment evidence'
@@ -318,7 +318,7 @@ try {
     Assert-True ($profileBResult.Status.instance_generation -cne $firstGeneration) 'distinct profiles reused one daemon generation'
     $serverPids.Add($profileBResult.ServerPid)
 
-    $second = Start-Shell $shellExe.FullName $sageHome $ports
+    $second = Start-Shell $shellExe.FullName $nodeDataRoot $ports
     $shellProcesses.Add($second)
     Assert-True ($second.WaitForExit(10000)) 'second native-shell launch did not hand off to the existing instance'
     Assert-True ($second.ExitCode -eq 0) "second native-shell launch exited with status $($second.ExitCode)"
@@ -355,7 +355,7 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'NSIS uninstall left the install root behind'
     Assert-True (-not (Test-Path $productKey)) 'NSIS uninstall left its current-user product record behind'
     $installed = $false
-    Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $sageHome 'preserve.sentinel')) -ceq 'native-shell-uninstall-preservation') 'NSIS uninstall modified SAGE_HOME'
+    Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $nodeDataRoot 'preserve.sentinel')) -ceq 'native-shell-uninstall-preservation') 'NSIS uninstall modified SAGE_HOME'
 
     $installAttempted = $true
     Invoke-Installer $setup.FullName @('/S', "/D=$installRoot")
@@ -364,14 +364,14 @@ try {
     $uninstaller = Get-One (Get-ChildItem -LiteralPath $installRoot -File -Filter '*.exe' | Where-Object Name -Match '(?i)^uninstall.*\.exe$') 'reinstalled NSIS uninstaller'
     $shellExe = Get-One (Get-ChildItem -LiteralPath $installRoot -File -Filter '*.exe' | Where-Object Name -NotMatch '(?i)^uninstall.*\.exe$') 'reinstalled native shell executable'
     $daemonPath = (Get-One (Get-ChildItem -LiteralPath $installRoot -Recurse -File -Filter 'sage-gui.exe' | Where-Object FullName -Match '(?i)[\\/]binaries[\\/]sage-gui\.exe$') 'reinstalled bundled daemon').FullName
-    $reinstalled = Start-Shell $shellExe.FullName $sageHome $ports
+    $reinstalled = Start-Shell $shellExe.FullName $nodeDataRoot $ports
     $shellProcesses.Add($reinstalled)
     $reinstallResult = Read-ReadyStatus $pipeName $origin $ExpectedVersion
     Assert-True (-not $reinstalled.HasExited) 'reinstalled native shell exited before attachment evidence'
     Assert-ServerPath $reinstallResult $daemonPath
     $serverPids.Add($reinstallResult.ServerPid)
     Assert-True ($reinstallResult.Status.instance_generation -cne $firstGeneration) 'reinstall reused a stale daemon generation'
-    Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $sageHome 'preserve.sentinel')) -ceq 'native-shell-uninstall-preservation') 'reinstall modified SAGE_HOME'
+    Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $nodeDataRoot 'preserve.sentinel')) -ceq 'native-shell-uninstall-preservation') 'reinstall modified SAGE_HOME'
 
     Stop-ExactTree $reinstalled.Id $shellExe.FullName
     Stop-ExactTree $reinstallResult.ServerPid $daemonPath
@@ -382,11 +382,11 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $installRoot)) 'final NSIS uninstall left the install root behind'
     Assert-True (-not (Test-Path $productKey)) 'final NSIS uninstall left its current-user product record behind'
     $installed = $false
-    Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $sageHome 'preserve.sentinel')) -ceq 'native-shell-uninstall-preservation') 'final NSIS uninstall modified SAGE_HOME'
+    Assert-True ((Get-Content -Raw -LiteralPath (Join-Path $nodeDataRoot 'preserve.sentinel')) -ceq 'native-shell-uninstall-preservation') 'final NSIS uninstall modified SAGE_HOME'
 
     Write-Output "native-shell Windows installed runtime smoke passed first=$firstGeneration reinstall=$($reinstallResult.Status.instance_generation)"
 } finally {
-    $daemonLog = Join-Path $sageHome 'logs\sage.log'
+    $daemonLog = Join-Path $nodeDataRoot 'logs\sage.log'
     if (Test-Path -LiteralPath $daemonLog) {
         Get-Content -LiteralPath $daemonLog -Tail 400 | Set-Content -LiteralPath (Join-Path $diagnostics 'daemon-tail.log')
     }
