@@ -20,6 +20,8 @@ for required in \
   'startup_proof' \
   'CloseMainWindow' \
   'Stop-ExactTree' \
+  'Stop-LaunchedTree' \
+  '$Process.Kill($true)' \
   'taskkill.exe /PID' \
   'preserve.sentinel' \
   'reinstall reused a stale daemon generation' \

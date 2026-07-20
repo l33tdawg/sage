@@ -190,6 +190,14 @@ function Stop-ExactTree([int]$ProcessId, [string]$ExpectedPath) {
     if ($LASTEXITCODE -ne 0) { throw "taskkill failed for verified PID $ProcessId" }
 }
 
+function Stop-LaunchedTree([Diagnostics.Process]$Process, [string]$ExpectedPath, [string]$Label) {
+    Assert-True (-not $Process.HasExited) "${Label} exited before its explicit stop"
+    $actual = Get-ExecutablePath $Process.Id
+    Assert-True ($actual.Equals([IO.Path]::GetFullPath($ExpectedPath), [StringComparison]::OrdinalIgnoreCase)) "refusing to stop ${Label} from unexpected path: $actual"
+    $Process.Kill($true)
+    Assert-True ($Process.WaitForExit(10000)) "${Label} tree did not exit after its explicit stop"
+}
+
 function Stop-AllExactPath([string]$ExpectedPath) {
     if (-not $ExpectedPath) { return }
     $fullExpected = [IO.Path]::GetFullPath($ExpectedPath)
@@ -360,7 +368,7 @@ try {
     }
     $safeStatus | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $diagnostics 'first-install.json')
 
-    Stop-ExactTree $profileBResult.ServerPid $daemonPath
+    Stop-LaunchedTree $profileBDaemon $daemonPath 'profile-B daemon'
     Wait-PipeGone $profileBPipe
     Stop-ExactTree $daemonOnly.ServerPid $daemonPath
     Wait-PipeGone $pipeName
