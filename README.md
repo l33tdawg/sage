@@ -51,6 +51,18 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.11.0
+
+**The Sharing & Sync control plane is complete, and the desktop shell foundation lands as an opt-in alpha that nothing depends on.** Browser CEREBRUM remains the product; the native shell is a background track that is built and runtime-tested in CI but not distributed and not intended for end-user use.
+
+- **CEREBRUM sharing and sync controls completed.** The Sharing & Sync surface finishes the control plane over synchronization groups, member roles, selective-sync state, shared domains, ownership, and catch-up position.
+- **Storage and task-board correctness.** Postgres now enforces the same content-hash dedup parity as SQLite, so the two backends no longer disagree about what counts as a duplicate memory. The task board persists lifecycle and ordering correctly, and terminal tasks retain their original agent attribution instead of losing authorship on completion.
+- **Tighter local trust boundary.** Acceptance endpoints are isolated from the globally configured Codex endpoint, and RBAC key caching is bounded rather than growing without limit.
+- **Native shell foundation (alpha, not distributed).** A Tauri 2 shell starts the bundled daemon through an authenticated SSCP startup proof, owns one window with fail-closed navigation pinned to the exact authenticated loopback origin, keeps a visible recovery surface, and hands off to an existing instance on relaunch. Its installed-package lifecycle is proven on hosted runners for macOS, Windows, and Linux — install, launch, single-instance handoff, ordinary close with daemon survival, uninstall preserving the node data root, and reinstall to a genuinely new instance generation. macOS additionally proves offline startup with no external requests. Every package is unpacked and must contain exactly one bundled daemon whose embedded OS/architecture and version match the build.
+- **The shell does not gate releases.** v11.11 distributes no native shell, so signing, notarization, update/rollback, recovery, performance, and accessibility evidence are the bar for *distributing* it — which the roadmap places at v12 — not a v11.11 shipping requirement. Federation, agent-to-agent messaging, and the rest of the roadmap do not queue behind desktop packaging.
+
+This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.0.
+
 ## What's New in v11.10.0
 
 **Federation now feels like connecting two colleagues' SAGE nodes, not configuring infrastructure.** The reciprocal QR ceremony derives the exact listener or internet/P2P route, survives retries and rapid confirmation, and creates trust with zero implicit sharing. CEREBRUM keeps Read, Copy, Pause/Resume, and permanent revoke distinct, preserves saved choices while paused, explains peer revocation on both sides, and keeps historical connections out of the active list.
@@ -539,7 +551,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.10.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.0`.
 
 ### Upgrading from an older version?
 
