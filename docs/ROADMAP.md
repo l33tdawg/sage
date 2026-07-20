@@ -187,15 +187,16 @@ the roadmap do not queue behind desktop packaging. The signing, notarization,
 update/rollback, recovery, performance, and accessibility bar applies at **first
 distribution of the shell**, which is v12.
 
-**Platform scope: v11.11 distributes a native shell on macOS and Windows only.**
-Linux is deliberately excluded. Linux users are served by browser CEREBRUM and
-the CLI, both fully supported and unaffected — this narrows the native shell,
-not the platform. The Linux target still builds and runs its full
+**Platform scope: macOS and Windows are the shell's target platforms; Linux is
+not.** v11.11 distributes no native shell on any platform — see the paragraph
+above — so this is scope for the eventual distribution at v12, and for what CI
+produces release evidence for in the meantime. Linux users are served by browser
+CEREBRUM and the CLI, both fully supported and unaffected: this narrows the
+native shell, not the platform. The Linux target still builds and runs its full
 installed-package lifecycle smoke in CI so cross-platform regressions in the
-shared shell and SSCP code are still caught; it is simply never published. A
-distributed Linux shell returns only when upstream Wry ships
-GTK4/webkitgtk-6.0 (`tauri-apps/wry#1769`); SAGE will not fork or vendor the web
-view layer to get there sooner.
+shared shell and SSCP code are still caught. Linux re-enters the target set only
+when upstream Wry ships GTK4/webkitgtk-6.0 (`tauri-apps/wry#1769`); SAGE will not
+fork or vendor the web view layer to get there sooner.
 
 ### v11.12 - consumer onboarding and recovery
 

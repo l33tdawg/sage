@@ -1239,6 +1239,12 @@ type syncGroupMemberView struct {
 	CatchUpState            string                        `json:"catch_up_state"`
 	Health                  string                        `json:"health"`
 	PeerDelivery            *store.SyncPeerDeliveryStatus `json:"peer_delivery,omitempty"`
+	// ConsentDomains is the member's ACTIVE selective-sync consent set. It is
+	// always serialized, never omitempty: the dashboard seeds its "Selective
+	// domains" draft from this field, and an absent field is indistinguishable
+	// from an empty set. Without it the input rendered blank and "Apply role"
+	// submitted selected_domains: [], silently clearing an existing consent set.
+	ConsentDomains []string `json:"consent_domains"`
 }
 
 // syncGroupMemberProgress converts durable journal cursors into display state.
@@ -1347,6 +1353,15 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 		}
 		for _, mem := range members {
 			member := syncGroupMemberProgress(g, mem, local)
+			consent, cErr := ss.ListGroupMemberConsentDomains(ctx, g.GroupID, mem.MemberChainID)
+			if cErr != nil {
+				fedWriteErr(w, http.StatusInternalServerError, "Failed to read member consent domains.")
+				return
+			}
+			if consent == nil {
+				consent = []string{}
+			}
+			member.ConsentDomains = consent
 			if mem.MemberChainID != local {
 				delivery, found := peerDelivery[mem.MemberChainID]
 				if !found {
