@@ -17,6 +17,8 @@ on:
       - "scripts/verify-native-shell-bundle.test.sh"
       - "scripts/native-shell-linux-runtime-smoke.sh"
       - "scripts/native-shell-linux-runtime-smoke.test.sh"
+      - "scripts/native-shell-macos-runtime-smoke.sh"
+      - "scripts/native-shell-macos-runtime-smoke.test.sh"
       - "scripts/native-shell-windows-runtime-smoke.ps1"
       - "scripts/native-shell-windows-runtime-smoke.test.sh"
       - "scripts/acceptance-endpoint-guard.sh"
@@ -38,6 +40,8 @@ on:
       - "scripts/verify-native-shell-bundle.test.sh"
       - "scripts/native-shell-linux-runtime-smoke.sh"
       - "scripts/native-shell-linux-runtime-smoke.test.sh"
+      - "scripts/native-shell-macos-runtime-smoke.sh"
+      - "scripts/native-shell-macos-runtime-smoke.test.sh"
       - "scripts/native-shell-windows-runtime-smoke.ps1"
       - "scripts/native-shell-windows-runtime-smoke.test.sh"
       - "scripts/acceptance-endpoint-guard.sh"
@@ -57,7 +61,7 @@ jobs:
         include:
           - os: macos-14
             rust-target: aarch64-apple-darwin
-            bundle: app
+            bundle: app,dmg
           - os: windows-2025
             rust-target: x86_64-pc-windows-msvc
             bundle: nsis
@@ -112,7 +116,7 @@ jobs:
             --bundles ${{ matrix.bundle }} \
             --config "{\"version\":\"${NATIVE_SHELL_VERSION}\"}"
       - name: Verify bundled daemon release pair
-        if: runner.os != 'Linux'
+        if: runner.os == 'Windows'
         shell: bash
         run: |
           scripts/verify-native-shell-bundle.sh \
@@ -121,6 +125,18 @@ jobs:
             "${NATIVE_SHELL_VERSION}" \
             desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair.json \
             ${{ matrix.bundle }}
+      - name: Verify macOS package release pairs
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          for package_kind in app dmg; do
+            scripts/verify-native-shell-bundle.sh \
+              ${{ matrix.rust-target }} \
+              desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+              "${NATIVE_SHELL_VERSION}" \
+              "desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair-${package_kind}.json" \
+              "${package_kind}"
+          done
       - name: Verify Linux package release pairs
         if: runner.os == 'Linux'
         shell: bash
@@ -146,6 +162,21 @@ jobs:
         with:
           name: native-shell-Linux-runtime-diagnostics-${{ matrix.rust-target }}
           path: ${{ runner.temp }}/sage-native-shell-runtime.*
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Run installed macOS package lifecycle smoke
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          scripts/native-shell-macos-runtime-smoke.sh \
+            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+            "${NATIVE_SHELL_VERSION}"
+      - name: Upload installed macOS runtime diagnostics
+        if: runner.os == 'macOS' && always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-shell-macOS-runtime-diagnostics-${{ matrix.rust-target }}
+          path: ${{ runner.temp }}/sage-native-shell-macos-runtime.*/diagnostics
           if-no-files-found: warn
           retention-days: 7
       - name: Run installed Windows package lifecycle smoke
@@ -201,6 +232,7 @@ jobs:
         run: |
           scripts/verify-native-shell-bundle.test.sh
           scripts/native-shell-linux-runtime-smoke.test.sh
+          scripts/native-shell-macos-runtime-smoke.test.sh
           scripts/native-shell-windows-runtime-smoke.test.sh
           test -s docs/desktop-shell-decision.md
           test -s docs/native-app-daemon-contract.md

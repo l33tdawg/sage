@@ -22,7 +22,13 @@ fi
 BUNDLE_ROOT=$(cd "${BUNDLE_ROOT}" && pwd -P)
 
 EXTRACT_ROOT=
+DMG_MOUNT=
 cleanup() {
+  if [ -n "${DMG_MOUNT}" ] && [ -d "${DMG_MOUNT}" ]; then
+    hdiutil detach "${DMG_MOUNT}" -quiet 2>/dev/null ||
+      hdiutil detach "${DMG_MOUNT}" -force -quiet 2>/dev/null || true
+    DMG_MOUNT=
+  fi
   if [ -n "${EXTRACT_ROOT}" ] && [ -d "${EXTRACT_ROOT}" ]; then
     rm -rf -- "${EXTRACT_ROOT}"
   fi
@@ -31,15 +37,33 @@ trap cleanup EXIT INT TERM
 
 case "${TARGET_TRIPLE}" in
   aarch64-apple-darwin)
-    if [ -n "${PACKAGE_KIND}" ] && [ "${PACKAGE_KIND}" != app ]; then
-      echo "unsupported package kind for ${TARGET_TRIPLE}: ${PACKAGE_KIND}" >&2
-      exit 2
-    fi
     EXPECTED_GOOS=darwin
     EXPECTED_GOARCH=arm64
-    SEARCH_ROOT=${BUNDLE_ROOT}/macos
     DAEMON_NAME=sage-gui
     DAEMON_PATTERN='*/Contents/Resources/binaries/sage-gui'
+    case "${PACKAGE_KIND:-app}" in
+      app)
+        SEARCH_ROOT=${BUNDLE_ROOT}/macos
+        ;;
+      dmg)
+        command -v hdiutil >/dev/null
+        PACKAGE_COUNT=$(find "${BUNDLE_ROOT}/dmg" -maxdepth 1 -type f -name '*.dmg' 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${PACKAGE_COUNT}" -ne 1 ]; then
+          echo "native-shell bundle must contain exactly one DMG; found ${PACKAGE_COUNT}" >&2
+          exit 1
+        fi
+        PACKAGE=$(find "${BUNDLE_ROOT}/dmg" -maxdepth 1 -type f -name '*.dmg' | head -1)
+        EXTRACT_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/sage-native-dmg.XXXXXX")
+        DMG_MOUNT=${EXTRACT_ROOT}/mnt
+        mkdir -p "${DMG_MOUNT}"
+        hdiutil attach "${PACKAGE}" -nobrowse -readonly -noautoopen -mountpoint "${DMG_MOUNT}" >/dev/null
+        SEARCH_ROOT=${DMG_MOUNT}
+        ;;
+      *)
+        echo "unsupported package kind for ${TARGET_TRIPLE}: ${PACKAGE_KIND}" >&2
+        exit 2
+        ;;
+    esac
     APP_COUNT=$(find "${SEARCH_ROOT}" -maxdepth 1 -type d -name '*.app' 2>/dev/null | wc -l | tr -d ' ')
     if [ "${APP_COUNT}" -ne 1 ]; then
       echo "native-shell bundle must contain exactly one macOS app; found ${APP_COUNT}" >&2
@@ -51,8 +75,13 @@ case "${TARGET_TRIPLE}" in
       echo "native-shell macOS app must contain exactly one shell executable; found ${SHELL_ARTIFACT_COUNT}" >&2
       exit 1
     fi
-    SHELL_ARTIFACT=$(find "${APP_PATH}/Contents/MacOS" -maxdepth 1 -type f | head -1)
-    SHELL_ARTIFACT_KIND=app-executable
+    if [ "${PACKAGE_KIND:-app}" = dmg ]; then
+      SHELL_ARTIFACT=${PACKAGE}
+      SHELL_ARTIFACT_KIND=dmg
+    else
+      SHELL_ARTIFACT=$(find "${APP_PATH}/Contents/MacOS" -maxdepth 1 -type f | head -1)
+      SHELL_ARTIFACT_KIND=app-executable
+    fi
     ;;
   x86_64-unknown-linux-gnu)
     EXPECTED_GOOS=linux

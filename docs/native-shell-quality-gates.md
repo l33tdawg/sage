@@ -47,8 +47,35 @@ Runtime promotion remains open until the install/launch/deep-link/offline,
 performance, assistive-technology, signing/notarization, update/rollback, and
 uninstall-preservation rows below have immutable platform results. Windows
 named-pipe reads and writes now use overlapped cancellable deadlines with native
-stalled/partial-frame tests in the code gate; the Windows package/runtime row
-still needs immutable runner evidence before promotion.
+stalled/partial-frame tests in the code gate.
+
+All three platforms now run an installed-package lifecycle smoke on a hosted
+runner. Each one installs from the constructed package, launches the installed
+executable against an isolated `SAGE_HOME`, proves single-instance handoff
+(a second launch exits cleanly and the instance generation is unchanged), proves
+the daemon survives an ordinary shell close, uninstalls, confirms the node data
+root is preserved byte-for-byte, and reinstalls to a genuinely new generation.
+The macOS harness mounts the built DMG and installs by copying the app out of
+it, and derives the serving daemon PID from the control socket with
+`LOCAL_PEERPID` — the direct analogue of the Windows `GetNamedPipeServerProcessId`
+check — so cleanup only ever signals an exact, socket-derived PID whose
+executable path matches the bundled daemon. No harness matches a process by name.
+
+These runs are *constrained* evidence and must not be read as more than they are:
+
+- they are **unsigned**. They prove nothing about code signing, notarization,
+  stapling, Gatekeeper, or SmartScreen, and they are not rollback or
+  update-failure evidence;
+- macOS runs **arm64 only** on the declared runner image, installs into an
+  isolated root rather than `/Applications`, and does not exercise Intel, deep
+  links, or LaunchServices registration;
+- the Windows row remains limited to the runner image's edition and cannot
+  complete the Windows 11 / arm64 / signing / SmartScreen matrix;
+- none of them measure the performance budgets or the accessibility gates below.
+
+The exact OS build, architecture, and WebKit/WebView version observed on each run
+are recorded in the uploaded runtime diagnostics so the constraint above is
+checkable rather than asserted.
 
 ## Supported matrix
 
