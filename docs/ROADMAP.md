@@ -178,6 +178,15 @@ are recorded in [`desktop-shell-decision.md`](desktop-shell-decision.md),
 [`native-shell-quality-gates.md`](native-shell-quality-gates.md). The tracked
 Tauri foundation remains an opt-in preview until that full matrix passes.
 
+**The native shell is alpha and does not gate releases.** Browser CEREBRUM is
+the product; the shell is a background track through v11.11–v11.13. It is built
+and runtime-tested in CI, never staged as a public release asset, and not
+intended for end-user use. Releases continue shipping bug fixes and capabilities
+on their normal cadence — federation, agent-to-agent messaging, and the rest of
+the roadmap do not queue behind desktop packaging. The signing, notarization,
+update/rollback, recovery, performance, and accessibility bar applies at **first
+distribution of the shell**, which is v12.
+
 **Platform scope: v11.11 distributes a native shell on macOS and Windows only.**
 Linux is deliberately excluded. Linux users are served by browser CEREBRUM and
 the CLI, both fully supported and unaffected — this narrows the native shell,

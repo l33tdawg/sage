@@ -35,20 +35,39 @@ the package with the target, build version, packaged shell artifact size/hash,
 and bundled daemon path/size/hash. They establish the foundation; unsigned CI
 artifacts and their records are not release evidence.
 
-The tagged release workflow now enforces that distinction from v11.11 onward.
-It version-locks the Tauri and Cargo metadata to the tag, constructs private
-per-platform package-pair and SBOM evidence, and then fails closed at the named
-native standalone production-promotion gate. Those unsigned preview artifacts
-are deliberately excluded from public GitHub release staging. The hold may be
-removed only when the signed installed-runtime, recovery, performance, and
-accessibility evidence below is produced and validated in the same publication
-dependency chain. By release-owner decision, this freezes the entire v11.11
-publication graph—not only the native assets—so Docker, SDK, MCP, legacy
-installers, and the GitHub release cannot get ahead of standalone readiness.
-Recovery runs for tags older than v11.11 remain supported. The temporary hold
-also fails closed for later versions until their shell/daemon compatibility and
-promotion path deliberately replace it; it must not be carried unchanged into
-v12.
+## The native shell is alpha and does not gate releases
+
+**Browser CEREBRUM is the product. The native shell is a background track.**
+Through the v11.11–v11.13 bridge the shell is **alpha**: built, linted, and
+runtime-tested in CI, never staged as a public release asset, and not intended
+for end-user use. Users stay on the web version, and normal releases continue to
+ship bug fixes and capabilities on their usual cadence — federation, agent
+messaging, and the rest of the roadmap do not wait behind desktop packaging.
+
+The tagged release workflow version-locks the Tauri and Cargo metadata to the
+tag and constructs private per-platform package-pair and SBOM evidence. Those
+artifacts are deliberately excluded from public GitHub release staging:
+`stage-github-release` downloads only `release-assets-*`, and
+`release-workflow.test.mjs` asserts native evidence never appears there. The
+identity is pinned to `SAGE Native Preview` / `com.sage.native-preview` at the
+metadata gate.
+
+An earlier revision of this record froze the **entire** v11.11 publication graph
+— Docker, SDK, MCP, legacy installers, and the GitHub release — until the native
+shell carried signed, runtime, recovery, performance, and accessibility
+evidence. That was a mistake and has been removed. It blocked every shipping
+channel on productizing an artifact **no user receives**, which bought nothing:
+the exclusion from public staging and the pinned preview identity already
+prevent an unsigned shell from reaching anyone.
+
+The promotion gate remains, but fail-closed on the thing that actually matters:
+if a release ever declares a native release class other than
+`unsigned-preview-evidence` — i.e. it intends to **distribute** the shell — it
+fails until the signing/notarization, installed-runtime, update/rollback, and
+recovery evidence below exists. **That bar applies at first distribution, which
+the roadmap places at v12**, not at every release that merely builds the shell.
+
+Recovery runs for tags older than v11.11 remain supported.
 
 ### `RUSTSEC-2024-0429` (glib) — dismissed, not fixed
 
@@ -101,12 +120,13 @@ view layer in a security-sensitive component is a worse position than not
 shipping the platform. Until upstream moves, Linux native shell work stays out
 of scope and Linux users are served by browser CEREBRUM and the CLI.
 
-Runtime promotion for **v11.11** remains open until the
-install/launch/deep-link/offline, signing/notarization, update/rollback, and
-uninstall-preservation rows below have immutable platform results, plus the one
-performance row that blocks from v11.11 (incremental shell RSS). Windows
-named-pipe reads and writes now use overlapped cancellable deadlines with native
-stalled/partial-frame tests in the code gate.
+The install/launch/deep-link/offline, performance, assistive-technology,
+signing/notarization, update/rollback, and uninstall-preservation rows below are
+the bar for **distributing** the native shell. They are not a v11.11 shipping
+requirement, because v11.11 does not distribute it. Work through them as the
+bridge releases land; they become release-blocking at first distribution.
+Windows named-pipe reads and writes now use overlapped cancellable deadlines
+with native stalled/partial-frame tests in the code gate.
 
 The remaining performance budgets and the accessibility gates become
 release-blocking from **v11.14**, which the roadmap designates as the
