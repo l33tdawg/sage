@@ -799,6 +799,62 @@ mod tests {
         assert_eq!(state.pending_routes.front().unwrap(), "/tasks/2");
     }
 
+    // The single-instance plugin hands a second launch's argv to
+    // route_from_args and enqueues whatever it returns. That seam is what makes
+    // `open sage://tasks` reach an already-running window, and it is not
+    // reachable from the black-box package harnesses: the route is delivered to
+    // the webview as a URL fragment, so it never reaches the daemon and leaves
+    // no observable trace outside this process.
+    #[test]
+    fn a_relaunch_forwards_only_a_bounded_route_from_its_arguments() {
+        // A real second launch: argv[0] is the executable, not a route.
+        assert_eq!(
+            route_from_args(["/Applications/SAGE.app/Contents/MacOS/SAGE", "sage://tasks"]),
+            Some("/tasks".into())
+        );
+        // The first valid route wins rather than the last.
+        assert_eq!(
+            route_from_args(["sage", "sage://brain", "sage://settings"]),
+            Some("/brain".into())
+        );
+        // Ordinary launches carry no route at all.
+        assert_eq!(
+            route_from_args(["/Applications/SAGE.app/Contents/MacOS/SAGE"]),
+            None
+        );
+        assert_eq!(route_from_args(Vec::<String>::new()), None);
+        // Rejected deep links must not become routes just because they arrived
+        // through argv instead of the OS handler.
+        assert_eq!(route_from_args(["sage", "sage://admin/root"]), None);
+        assert_eq!(
+            route_from_args(["sage", "sage://search/a?token=secret"]),
+            None
+        );
+        assert_eq!(route_from_args(["sage", "javascript:alert(1)"]), None);
+        assert_eq!(route_from_args(["sage", "file:///etc/passwd"]), None);
+        assert_eq!(route_from_args(["sage", "--some-flag", "not-a-url"]), None);
+        // A rejected argument must not mask a later valid one.
+        assert_eq!(
+            route_from_args(["sage", "sage://admin/root", "sage://tasks"]),
+            Some("/tasks".into())
+        );
+    }
+
+    #[test]
+    fn a_forwarded_relaunch_route_reaches_the_pending_queue() {
+        let session = Arc::new(Mutex::new(ShellSession::default()));
+        if let Some(route) = route_from_args(["sage", "sage://search/agent-123"]) {
+            enqueue_route(&session, route);
+        }
+        // A rejected link in the same position must enqueue nothing.
+        if let Some(route) = route_from_args(["sage", "sage://admin/root"]) {
+            enqueue_route(&session, route);
+        }
+        let state = session.lock().unwrap();
+        assert_eq!(state.pending_routes.len(), 1);
+        assert_eq!(state.pending_routes.front().unwrap(), "/search/agent-123");
+    }
+
     #[test]
     fn only_explicit_lock_contention_allows_attachment_without_proof() {
         assert!(allows_existing_attachment_exit_code(Some(

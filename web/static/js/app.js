@@ -24,7 +24,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.10.0';
+const SAGE_VERSION = 'v11.11.0';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -2270,12 +2270,28 @@ function TasksPage({ sse }) {
         }
     }
 
-    async function reorderTask(task, direction) {
+    async function reorderTask(task, direction, visibleColumnTasks) {
 		if (reorderingColumn) return;
+        // Bounds and neighbours must come from the VISIBLE column, because that is
+        // what the up/down buttons are indexed against. Applying a filtered-space
+        // step of +/-1 to the unfiltered array made the move a silent no-op
+        // whenever a hidden card sat between two visible ones - which the default
+        // view hits routinely via the 7-day done retention, plus domain and agent
+        // filters.
+        const visible = Array.isArray(visibleColumnTasks) && visibleColumnTasks.length
+            ? visibleColumnTasks
+            : tasks.filter(t => t.task_status === task.task_status);
+        const visibleFrom = visible.findIndex(t => t.memory_id === task.memory_id);
+        const visibleTo = visibleFrom + direction;
+        if (visibleFrom < 0 || visibleTo < 0 || visibleTo >= visible.length) return;
+        const neighbourID = visible[visibleTo].memory_id;
+
+        // Swap the two visible cards within the FULL column ordering, leaving any
+        // hidden cards between them exactly where they are.
         const columnTasks = tasks.filter(t => t.task_status === task.task_status);
         const from = columnTasks.findIndex(t => t.memory_id === task.memory_id);
-        const to = from + direction;
-        if (from < 0 || to < 0 || to >= columnTasks.length) return;
+        const to = columnTasks.findIndex(t => t.memory_id === neighbourID);
+        if (from < 0 || to < 0) return;
         [columnTasks[from], columnTasks[to]] = [columnTasks[to], columnTasks[from]];
         const orderedIDs = columnTasks.map(t => t.memory_id);
         const rank = new Map(orderedIDs.map((id, index) => [id, index]));
@@ -2618,9 +2634,9 @@ function TasksPage({ sse }) {
                                         `}
 						<div class="kanban-card-actions">
 							<button class="kanban-action kanban-order-action" title="Move task up" aria-label=${`Move ${taskSummary(task)} up`}
-								disabled=${taskIndex === 0 || reorderingColumn === task.task_status} onClick=${e => { e.stopPropagation(); reorderTask(task, -1); }}>↑</button>
+								disabled=${taskIndex === 0 || reorderingColumn === task.task_status} onClick=${e => { e.stopPropagation(); reorderTask(task, -1, colTasks); }}>↑</button>
 							<button class="kanban-action kanban-order-action" title="Move task down" aria-label=${`Move ${taskSummary(task)} down`}
-								disabled=${taskIndex === colTasks.length - 1 || reorderingColumn === task.task_status} onClick=${e => { e.stopPropagation(); reorderTask(task, 1); }}>↓</button>
+								disabled=${taskIndex === colTasks.length - 1 || reorderingColumn === task.task_status} onClick=${e => { e.stopPropagation(); reorderTask(task, 1, colTasks); }}>↓</button>
 							<span style="font-size:10px;color:var(--text-muted);">Status:</span>
 							<select class="kanban-status-select"
 								value=${task.task_status}
@@ -13025,6 +13041,20 @@ function SharingSyncGroupsPanel() {
             const groupId = group.group_id;
             const draft = drafts[groupId] || {};
             const panelId = 'sharing-sync-group-' + groupIndex;
+            // Seed the selective-domains field from the node's full selector set
+            // (consent_domains is served from the PENDING table, a strict superset of
+            // the promoted one -- see syncGroupMemberView in web/federation_join.go).
+            // drafts start empty and are only written by operator keystrokes, so an
+            // untouched field previously rendered blank and submitted
+            // selected_domains: [] -- silently clearing an existing consent set on
+            // any "Apply role", including a role change that should not touch it.
+            // An explicit '' typed by the operator is still respected, because only
+            // `undefined` falls back.
+            const localMember = (group.members || []).find(member => member.chain_id === localChain);
+            const localConsent = (localMember && localMember.consent_domains) || [];
+            const selectedDomainsValue = draft.selectedDomains !== undefined
+                ? draft.selectedDomains
+                : localConsent.join(', ');
             return html`<article class="fed-group-card" key=${groupId}>
                 <button class="fed-group-summary" aria-expanded=${openGroup === groupId} aria-controls=${panelId} onClick=${() => setOpenGroup(openGroup === groupId ? '' : groupId)}>
                     <span><strong>${group.display_name || groupId}</strong><small>${(group.members || []).length} members · ${(group.shared_domains || []).length} shared domains · local role ${group.local_role || 'unknown'}</small></span>
@@ -13056,11 +13086,11 @@ function SharingSyncGroupsPanel() {
                             event.preventDefault();
                             const role = draft.role || group.local_role || 'enrolled-no-sync';
                             if (!await showConfirmation('Change this node’s role in ' + (group.display_name || groupId) + ' to ' + role + '? Selective domains are an explicit receive-consent subset.', { title: 'Change synchronization role?', confirmLabel: 'Apply role', tone: 'primary' })) return;
-                            mutate(groupId + ':role', () => fedGroupSelfRole(groupId, role, domains(draft.selectedDomains)), 'Local synchronization role updated');
+                            mutate(groupId + ':role', () => fedGroupSelfRole(groupId, role, domains(selectedDomainsValue)), 'Local synchronization role updated');
                         }}>
                             <h4>This node’s synchronization role</h4>
                             <label>Role<select value=${draft.role || group.local_role || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { role: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
-                            <label>Selective domains<input value=${draft.selectedDomains || ''} onInput=${event => patchDraft(groupId, { selectedDomains: event.target.value })} placeholder="comma separated" /></label>
+                            <label>Selective domains<input value=${selectedDomainsValue} onInput=${event => patchDraft(groupId, { selectedDomains: event.target.value })} placeholder="comma separated" /></label>
                             <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Apply role</button>
                         </form>
                         <form onSubmit=${async event => {

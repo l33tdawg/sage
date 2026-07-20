@@ -1239,6 +1239,22 @@ type syncGroupMemberView struct {
 	CatchUpState            string                        `json:"catch_up_state"`
 	Health                  string                        `json:"health"`
 	PeerDelivery            *store.SyncPeerDeliveryStatus `json:"peer_delivery,omitempty"`
+	// ConsentDomains is the member's full selective-sync SELECTOR set, read from
+	// the pending table rather than the promoted one. Those differ: a selector is
+	// promoted into the active set only once its domain is inside a live shared
+	// root, and a group is seeded before any domain_add, so a freshly joined
+	// selective-sync member's ACTIVE set is empty by construction while its
+	// selectors sit in pending. Seeding the dashboard from the active set would
+	// therefore still render blank for exactly the case this field exists to fix.
+	//
+	// Pending is also what round-trips: ReplaceGroupMemberConsentDomains deletes
+	// every pending row before re-inserting the submitted set, so an "Apply role"
+	// carrying the active subset would silently destroy the unpromoted selectors.
+	//
+	// Always serialized, never omitempty: absent and empty must stay
+	// distinguishable, since the dashboard treats undefined as "seed me" and an
+	// empty array as "the operator really has no selectors".
+	ConsentDomains []string `json:"consent_domains"`
 }
 
 // syncGroupMemberProgress converts durable journal cursors into display state.
@@ -1347,6 +1363,15 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 		}
 		for _, mem := range members {
 			member := syncGroupMemberProgress(g, mem, local)
+			consent, cErr := ss.ListPendingGroupMemberConsentDomains(ctx, g.GroupID, mem.MemberChainID)
+			if cErr != nil {
+				fedWriteErr(w, http.StatusInternalServerError, "Failed to read member consent domains.")
+				return
+			}
+			if consent == nil {
+				consent = []string{}
+			}
+			member.ConsentDomains = consent
 			if mem.MemberChainID != local {
 				delivery, found := peerDelivery[mem.MemberChainID]
 				if !found {

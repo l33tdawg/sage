@@ -118,12 +118,26 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(evidence, /if: needs\.release-metadata\.outputs\.native_shell_required == 'true'/);
   assert.match(evidence, /id: macos-arm64/);
   assert.match(evidence, /id: windows-x64/);
-  assert.match(evidence, /id: linux-x64/);
+  // macOS and Windows are the shell's target platforms; Linux is not. (v11.11
+  // distributes no shell on any platform -- the shell is alpha -- so this is the
+  // scope for the eventual v12 distribution and for what CI produces release
+  // evidence for meanwhile.) Linux still builds and runs its installed-package
+  // lifecycle smoke in native-shell.yml, but is never staged as release
+  // evidence. Assert the deliberate absence so a Linux entry cannot reappear in
+  // the evidence matrix without the scope decision in
+  // docs/native-shell-quality-gates.md being revisited.
+  assert.doesNotMatch(evidence, /id: linux-x64/);
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
   assert.match(evidence, /go test \.\/internal\/shellcontrol/);
   assert.match(evidence, /cargo fmt --manifest-path/);
   assert.match(evidence, /components: rustfmt, clippy/);
   assert.match(evidence, /cargo audit --file desktop\/sage-shell\/Cargo\.lock/);
+  // Regression guard: the dependency audit was once gated on
+  // `runner.os == 'Linux'`, so dropping the Linux matrix entry silently
+  // disabled it for releases. cargo audit reads the lockfile and is
+  // platform-independent, so it must never be gated on a runner OS again.
+  assert.doesNotMatch(evidence, /if: runner\.os == 'Linux'/);
+  assert.match(evidence, /if: matrix\.id == 'macos-arm64'\n\s+shell: bash\n\s+run: \|\n\s+cargo install cargo-audit/);
   assert.match(evidence, /cargo tauri build --ci/);
   assert.match(evidence, /verify-native-shell-bundle\.sh/);
   assert.match(evidence, /cargo cyclonedx/);
@@ -140,18 +154,27 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   ]);
   assert.match(promotion, /always\(\)/);
   assert.match(promotion, /Native standalone promotion does not apply before v11\.11\.0/);
-  assert.match(promotion, /Native standalone release .* is blocked/);
-  assert.match(promotion, /v11\.11 is deliberately a whole-release hold/);
-  assert.match(promotion, /RUSTSEC-2024-0429/);
-  assert.match(promotion, /Signed\/notarized packages, installed-runtime acceptance/);
+  // The native shell is alpha through the v11.11-v11.13 bridge: built in CI,
+  // never staged as a public asset. The gate must NOT block the release, or
+  // every other channel is held hostage to an artifact no user receives.
+  assert.doesNotMatch(promotion, /whole-release hold/);
+  assert.match(promotion, /is alpha CI evidence and is not distributed/);
+  // ...but it must still fail closed the moment a release intends to DISTRIBUTE
+  // the shell without the signing/runtime/rollback/recovery evidence.
+  assert.match(promotion, /NATIVE_SHELL_RELEASE_CLASS\}" != "unsigned-preview-evidence"/);
+  assert.match(promotion, /Distribution requires signed\/notarized packages/);
   assert.match(promotion, /exit 1/);
 
   assertNeeds('publication-gate', ['native-shell-production-promotion']);
   assert.match(publication, /verify_native_release_pair\(\)/);
   assert.match(publication, /NATIVE_SHELL_REQUIRED:.*native_shell_required/);
   assert.match(publication, /if \[ "\$\{NATIVE_SHELL_REQUIRED\}" = true \]; then/);
-  assert.match(publication, /native-shell-release-pair-deb\.json/);
-  assert.match(publication, /native-shell-release-pair-appimage\.json/);
+  // The publication gate must not verify Linux evidence that is never produced:
+  // a missing linux-x64 artifact would fail the gate on a missing file.
+  assert.doesNotMatch(publication, /native-shell-release-pair-deb\.json/);
+  assert.doesNotMatch(publication, /native-shell-release-pair-appimage\.json/);
+  assert.doesNotMatch(publication, /release-evidence-native-shell-linux-x64/);
+  assert.match(publication, /for evidence_id in macos-arm64 windows-x64; do/);
   assert.match(publication, /sha256sum -c SHA256SUMS/);
   assert.match(publication, /native-shell-\$\{evidence_id\}\.cdx\.json/);
 

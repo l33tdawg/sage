@@ -4,50 +4,137 @@ These gates are release criteria, not aspirational telemetry. A native package
 is not promoted on any platform without immutable CI evidence for that platform.
 Browser CEREBRUM and the existing Go release matrix remain mandatory.
 
+Each gate names the release it blocks from. Most block from v11.11; the
+performance budgets beyond incremental shell RSS, and the accessibility gates,
+block from v11.14 — the roadmap's designated hardening pass. A gate that blocks
+later is still a gate: v11.11 must set it, establish the architecture behind it,
+record what is measurable, and ship nothing that forecloses it.
+
 ## Current enforcement status
+
+**v11.11 distributes no native shell on any platform.** The shell is alpha; see
+"The native shell is alpha and does not gate releases" below. macOS and Windows
+are its *target* platforms — the scope for the eventual distribution at v12, and
+what CI produces release evidence for meanwhile. **Linux is not a target
+platform.** Linux users are served by browser CEREBRUM and the CLI, both fully
+supported and unaffected by this decision. Linux still compiles and runs its
+full installed-package lifecycle smoke in
+[`native-shell.yml`](../.github/workflows/native-shell.yml) so cross-platform
+regressions in the shared shell and SSCP code are still caught — it is simply
+never staged as release evidence. See [Linux re-entry](#linux-re-entry) below.
 
 The tracked preview now enforces locked dependency compilation, Rust
 format/test/Clippy, full platform shell-control tests, isolated Codex endpoint
 acceptance tests, dependency audit, a license-bearing CycloneDX SBOM, and
-unsigned package construction on the declared macOS, Windows, and Linux
-targets. Each constructed package is unpacked and must contain exactly one
-bundled daemon whose embedded Go OS/architecture matches the declared target
+unsigned package construction on the declared macOS and Windows targets, plus
+the non-distributed Linux CI target. Each constructed package is unpacked and
+must contain exactly one bundled daemon whose embedded Go OS/architecture
+matches the declared target
 and whose embedded version matches the version supplied to the shell package
 build. Those checks emit a machine-readable release-pair record beside
 the package with the target, build version, packaged shell artifact size/hash,
 and bundled daemon path/size/hash. They establish the foundation; unsigned CI
 artifacts and their records are not release evidence.
 
-The tagged release workflow now enforces that distinction from v11.11 onward.
-It version-locks the Tauri and Cargo metadata to the tag, constructs private
-per-platform package-pair and SBOM evidence, and then fails closed at the named
-native standalone production-promotion gate. Those unsigned preview artifacts
-are deliberately excluded from public GitHub release staging. The hold may be
-removed only when the signed installed-runtime, recovery, performance, and
-accessibility evidence below is produced and validated in the same publication
-dependency chain. By release-owner decision, this freezes the entire v11.11
-publication graph—not only the native assets—so Docker, SDK, MCP, legacy
-installers, and the GitHub release cannot get ahead of standalone readiness.
-Recovery runs for tags older than v11.11 remain supported. The temporary hold
-also fails closed for later versions until their shell/daemon compatibility and
-promotion path deliberately replace it; it must not be carried unchanged into
-v12.
+## The native shell is alpha and does not gate releases
 
-GitHub Dependabot alert 37 (`RUSTSEC-2024-0429` /
-`GHSA-wrw7-89jp-8q8g`) is also an active promotion blocker. The Linux Tauri
-stack currently receives `glib` 0.18.5 through Wry/WebKitGTK; the affected safe
-iterator API can trigger undefined behavior and optimized-build crashes. As of
-this gate record, current Wry 0.55.1 still pins the affected GTK/glib family and
-upstream issue `tauri-apps/wry#1769` remains open, so no compatible dependency
-upgrade exists. The alert must remain open until a tested upstream migration or
-reviewed backport removes the affected code; it must not be dismissed merely to
-make release status green.
+**Browser CEREBRUM is the product. The native shell is a background track.**
+Through the v11.11–v11.13 bridge the shell is **alpha**: built, linted, and
+runtime-tested in CI, never staged as a public release asset, and not intended
+for end-user use. Users stay on the web version, and normal releases continue to
+ship bug fixes and capabilities on their usual cadence — federation, agent
+messaging, and the rest of the roadmap do not wait behind desktop packaging.
 
-Runtime promotion remains open until the install/launch/deep-link/offline,
-performance, assistive-technology, signing/notarization, update/rollback, and
-uninstall-preservation rows below have immutable platform results. Windows
-named-pipe reads and writes now use overlapped cancellable deadlines with native
-stalled/partial-frame tests in the code gate.
+The tagged release workflow version-locks the Tauri and Cargo metadata to the
+tag and constructs private per-platform package-pair and SBOM evidence. Those
+artifacts are deliberately excluded from public GitHub release staging:
+`stage-github-release` downloads only `release-assets-*`, and
+`release-workflow.test.mjs` asserts native evidence never appears there. The
+identity is pinned to `SAGE Native Preview` / `com.sage.native-preview` at the
+metadata gate.
+
+An earlier revision of this record froze the **entire** v11.11 publication graph
+— Docker, SDK, MCP, legacy installers, and the GitHub release — until the native
+shell carried signed, runtime, recovery, performance, and accessibility
+evidence. That was a mistake and has been removed. It blocked every shipping
+channel on productizing an artifact **no user receives**, which bought nothing:
+the exclusion from public staging and the pinned preview identity already
+prevent an unsigned shell from reaching anyone.
+
+The promotion gate remains, but fail-closed on the thing that actually matters:
+if a release ever declares a native release class other than
+`unsigned-preview-evidence` — i.e. it intends to **distribute** the shell — it
+fails until the signing/notarization, installed-runtime, update/rollback, and
+recovery evidence below exists. **That bar applies at first distribution, which
+the roadmap places at v12**, not at every release that merely builds the shell.
+
+Recovery runs for tags older than v11.11 remain supported.
+
+### `RUSTSEC-2024-0429` (glib) — dismissed, not fixed
+
+GitHub Dependabot alert 37 (`RUSTSEC-2024-0429` / `GHSA-wrw7-89jp-8q8g`)
+concerns `glib` 0.18.5, which the Linux Tauri stack receives through
+Wry/WebKitGTK; the affected safe iterator API can trigger undefined behavior and
+optimized-build crashes.
+
+**The alert was dismissed as not-used on the decision that v11.11 does not
+distribute a Linux native shell.** It was not fixed, and the vulnerable code is
+still compiled by the non-distributed Linux CI build. This is a scope decision,
+not a remediation. It rests on two verified facts:
+
+- Wry declares its whole GTK chain under
+  `cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd",
+  target_os = "openbsd", target_os = "netbsd"))`. macOS resolves the web view
+  through WKWebView and Windows through WebView2, so **neither target platform
+  compiles `gtk`, `webkit2gtk`, `soup3`, or `glib` at all**.
+- No user receives the affected code, because the only artifact containing it is
+  never published.
+
+There is no upgrade path, and this is a hard version wall rather than a pending
+release: Wry 0.55.1 is the latest published version and requires `gtk ^0.18`;
+the GTK3 Rust binding line is capped at `gtk` 0.18.2, last released 2024-12-09,
+which pins `glib` 0.18.x. The advisory is first fixed in `glib` 0.20.0, and
+`glib` 0.20+ belongs to the GTK4 line — a differently named `gtk4` crate, not a
+newer `gtk`. `cargo update`, a `--precise` pin, and a `[patch.crates-io]`
+override all fail: the first two are semver-excluded by `gtk ^0.18`, and the
+third compile-fails because `gtk`/`gdk`/`cairo-rs` 0.18 are not written against
+the glib 0.20+ API.
+
+`cargo audit` reads the lockfile rather than the per-target build graph, so it
+still reports this advisory on every platform's CI run. That is expected and
+must not be silenced.
+
+> **This dismissal is conditional and must be revisited.** If a Linux native
+> shell is ever distributed again, this alert must be re-opened and treated as
+> release-blocking before that artifact ships. Do not treat the dismissed state
+> as a standing judgement that the advisory is harmless.
+
+### Linux re-entry
+
+A distributed Linux native shell returns only when **upstream Wry ships
+GTK4/webkitgtk-6.0 support**, tracked in `tauri-apps/wry#1769` (open, no
+activity since 2026-07-15). That migration also clears this advisory, because
+the `gtk4` line depends on `glib ^0.22`.
+
+SAGE does not plan to fork or vendor Wry onto GTK4. Owning a fork of the web
+view layer in a security-sensitive component is a worse position than not
+shipping the platform. Until upstream moves, Linux native shell work stays out
+of scope and Linux users are served by browser CEREBRUM and the CLI.
+
+The install/launch/deep-link/offline, performance, assistive-technology,
+signing/notarization, update/rollback, and uninstall-preservation rows below are
+the bar for **distributing** the native shell. They are not a v11.11 shipping
+requirement, because v11.11 does not distribute it. Work through them as the
+bridge releases land; they become release-blocking at first distribution.
+Windows named-pipe reads and writes now use overlapped cancellable deadlines
+with native stalled/partial-frame tests in the code gate.
+
+The remaining performance budgets and the accessibility gates become
+release-blocking from **v11.14**, which the roadmap designates as the
+accessibility/performance/offline hardening pass. v11.11 sets those budgets,
+establishes the architecture, and records what is measurable; it does not
+enforce them. See the notes on each section below — that phasing is the
+roadmap's, and it is not licence to ship something that forecloses them.
 
 All three platforms now run an installed-package lifecycle smoke on a hosted
 runner. Each one installs from the constructed package, launches the installed
@@ -108,7 +195,7 @@ is not by itself evidence.
 |---|---|---|
 | macOS | oldest Apple-supported macOS that SAGE declares for the release; Intel and Apple Silicon where distributed | signed `.app`, notarized/stapled DMG, clean install, Gatekeeper launch, rollback |
 | Windows | Windows 11 x64 and arm64 where distributed | signed NSIS installer, clean install/uninstall, SmartScreen/signature check, rollback |
-| Linux | Ubuntu 24.04 LTS x64 plus each architecture distributed | AppImage and Debian package, offline launch, uninstall preserving `~/.sage` |
+| Linux | **not distributed in v11.11** | none — build and installed-runtime smoke run in CI for regression coverage only, and are never release evidence |
 
 The exact OS image identifiers, WebView versions, CPU/RAM, and artifact hashes
 must appear in the release evidence. “Builds on a developer machine” is not a
@@ -131,26 +218,66 @@ platform pass.
 
 ## Performance budgets
 
+These budgets are set in v11.11 and enforced in v11.14. That split is the
+roadmap's, not a relaxation: v11.11 "set budgets ... and establish [the]
+architecture now even though v11.14 performs the full hardening pass", and
+v11.14 "hold[s] the v11.11 performance budgets for the embedded experience on
+large memory stores and the 3D connectome view". Nothing below is being
+weakened; the column records the release at which each becomes release-blocking.
+
 Report p50/p95 and raw samples on named baseline hardware. Separate shell cost
 from daemon boot, model boot, consensus, and queries.
 
-| Measure | Blocking budget |
-|---|---:|
-| Warm re-open to focused existing window | <= 500 ms p95 |
-| Cold launch to bundled recovery paint | <= 1,000 ms p95 |
-| Ready daemon to interactive CEREBRUM | <= 2,000 ms p95 |
-| Daemon loss to visible recovery action | <= 2,000 ms |
-| Settled shell idle CPU | <= 1% p95 |
-| Incremental shell RSS, daemon excluded | <= 200 MiB p95 |
-| Shell/navigation input response | <= 100 ms p95 |
-| Native overhead over same browser action | <= 25 ms p95 |
-| MRI frame pacing | >= 55 FPS median; no recurring >100 ms stalls |
+| Measure | Budget | Blocking from | Measurable today? |
+|---|---:|---|---|
+| Incremental shell RSS, daemon excluded | <= 200 MiB p95 | **v11.11** | yes — process RSS |
+| Settled shell idle CPU | <= 1% p95 | v11.14 | yes — sampled over the settle window |
+| Warm re-open to focused existing window | <= 500 ms p95 | v11.14 | partly — handoff is timable, "focused" needs a frontmost-window check |
+| Cold launch to bundled recovery paint | <= 1,000 ms p95 | v11.14 | no — needs a paint signal |
+| Ready daemon to interactive CEREBRUM | <= 2,000 ms p95 | v11.14 | no — needs an interactive signal |
+| Daemon loss to visible recovery action | <= 2,000 ms | v11.14 | no — needs a recovery-shown signal |
+| Shell/navigation input response | <= 100 ms p95 | v11.14 | no — needs UI automation and marks |
+| Native overhead over same browser action | <= 25 ms p95 | v11.14 | no — needs both paths instrumented |
+| MRI frame pacing | >= 55 FPS median; no recurring >100 ms stalls | v11.14 | no — needs frame timing and a real GPU |
 
-Three consecutive benchmark runs must pass. A regression of more than 10%
-against the last published release fails even when the absolute ceiling passes,
-unless the release record accepts the tradeoff with evidence.
+**RSS blocks from v11.11 because it is the premise of the framework decision,
+not because it is convenient.** `desktop-shell-decision.md` rejected Electron at
+358,720 KiB against this exact 200 MiB ceiling and selected Tauri at 142,544 KiB;
+the promoted foundation measured 128,448 KiB. If the shipped shell drifts past
+200 MiB, SAGE has taken on Rust and a per-platform WebView matrix — and given up
+Electron's stronger tooling and accessibility — for a benefit it no longer has.
+That makes RSS the one performance number with a decision riding on it today.
+
+Six of the nine measures are **not** blocked on hardware. They are blocked on
+instrumentation that does not exist yet: the shell emits no paint, interactive,
+recovery-shown, or frame-timing signal, so they cannot be observed from outside
+the process at all. Building that instrumentation is the v11.14 hardening work.
+
+No harness measures any of these rows yet, including the RSS row that blocks
+from v11.11 — that instrumentation is still to be written. Until it exists this
+table is a set budget, not a measured one, and nothing here should be read as
+evidence that the ceilings have been met. Calibrating the ceilings against real
+numbers is a prerequisite for v11.14 making them blocking.
+
+From v11.14, three consecutive benchmark runs must pass. A regression of more
+than 10% against the last published release fails even when the absolute ceiling
+passes, unless the release record accepts the tradeoff with evidence. Hosted CI
+runners are acceptable for the RSS row; the latency and frame-pacing rows
+require a named baseline machine, because runner variance is wider than those
+budgets.
 
 ## Accessibility gates
+
+These follow the same split as the performance budgets, and for the same
+roadmap reason: v11.11 "establish[es] keyboard navigation, focus visibility,
+screen-reader naming, and reduced-motion architecture now even though v11.14
+performs the full hardening pass", and v11.14 "meet[s] the accessibility bar v12
+treats as a release criterion". **The requirements below become release-blocking
+from v11.14.** v11.11 must establish the architecture that makes them
+achievable, and must not ship anything that forecloses them.
+
+The screen-reader matrix cannot be automated on hosted runners and needs a
+manual pass on a named machine regardless of release.
 
 Automated semantic checks supplement, never replace, the OS smoke matrix:
 
@@ -159,7 +286,7 @@ Automated semantic checks supplement, never replace, the OS smoke matrix:
   appropriate live region without stealing focus;
 - 200% zoom, high contrast, light/dark mode, and OS reduced-motion work without
   clipping or lost content;
-- VoiceOver (macOS), Narrator (Windows), and Orca (Linux) can launch, identify
+- VoiceOver (macOS) and Narrator (Windows) can launch, identify
   daemon state, reach browser fallback, navigate primary CEREBRUM areas, and
   recover from daemon loss;
 - camera denial/revocation and every permission error remain operable without a

@@ -210,6 +210,82 @@ func TestFederationGroupListReportsDurableProgressAndPeerDelivery(t *testing.T) 
 	}
 }
 
+// The dashboard seeds its "Selective domains" field from consent_domains and
+// submits whatever it holds back through ReplaceGroupMemberConsentDomains, which
+// deletes every pending row before re-inserting. So this handler must serve the
+// PENDING selector set, not the promoted one: a selector is promoted only once its
+// domain sits inside a live shared root, and enrollment seeds a group before any
+// domain_add, so a freshly joined selective-sync member's promoted set is empty by
+// construction. Serving the promoted set renders the field blank and the first
+// "Apply role" destroys the member's invitee-signed selectors.
+//
+// This wiring has silently regressed once already and survived a full audit,
+// because every other test asserts at the store layer and passes with either
+// getter wired in here.
+func TestFederationGroupListServesPendingConsentSelectors(t *testing.T) {
+	ctx := context.Background()
+	h, ss := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
+	h.Federation = groupListTestDriver{localChainID: "chain-local"}
+
+	requireNoError := func(label string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+	}
+	requireNoError("upsert group", ss.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "group-1", ControllerChainID: "chain-local", ControllerAgentPubkey: strings.Repeat("1", 64),
+		Epoch: "epoch-1", RosterRevision: 1, RosterJournalHead: "head-1", DisplayName: "Studio",
+	}))
+	requireNoError("upsert local member", ss.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "group-1", MemberChainID: "chain-local", MemberAgentPubkey: strings.Repeat("2", 64),
+		Role: store.GroupRoleSelectiveSync, MemberState: store.GroupMemberActive, JoinedRevision: 1,
+		LastAckedRosterRevision: 1, LastSeenJournalHead: "head-1",
+	}))
+	// No domain_add has happened, so "hr" stays pending and is never promoted.
+	// This is exactly the state a freshly joined selective-sync node is in.
+	requireNoError("record consent selectors", ss.ReplaceGroupMemberConsentDomains(
+		ctx, "group-1", "chain-local", []string{"hr"}, 1))
+
+	promoted, err := ss.ListGroupMemberConsentDomains(ctx, "group-1", "chain-local")
+	requireNoError("list promoted", err)
+	if len(promoted) != 0 {
+		t.Fatalf("precondition failed: expected no promoted selectors, got %v", promoted)
+	}
+	pending, err := ss.ListPendingGroupMemberConsentDomains(ctx, "group-1", "chain-local")
+	requireNoError("list pending", err)
+	if len(pending) != 1 || pending[0] != "hr" {
+		t.Fatalf("precondition failed: expected pending [hr], got %v", pending)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/federation/groups", nil)
+	req = req.WithContext(context.WithValue(req.Context(), verifiedDashboardAgentKey{}, h.NodeOperatorAgentID))
+	rr := httptest.NewRecorder()
+	h.handleFedGroupList(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("group list status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var response struct {
+		Groups []struct {
+			Members []syncGroupMemberView `json:"members"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode group list: %v", err)
+	}
+	if len(response.Groups) != 1 || len(response.Groups[0].Members) != 1 {
+		t.Fatalf("group response = %+v", response)
+	}
+	local := response.Groups[0].Members[0]
+	if len(local.ConsentDomains) != 1 || local.ConsentDomains[0] != "hr" {
+		t.Fatalf("consent_domains = %v, want [hr]; the handler is serving the promoted "+
+			"set instead of the pending selector set, so the dashboard field renders blank "+
+			"and Apply role will destroy the member's selectors", local.ConsentDomains)
+	}
+}
+
 func TestSyncGroupMemberProgressFailsClosedForUnknownAndUnseenState(t *testing.T) {
 	group := store.SyncGroup{RosterRevision: 3, RosterJournalHead: "head-3"}
 	unseen := syncGroupMemberProgress(group, store.SyncGroupMember{

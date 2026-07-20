@@ -399,6 +399,9 @@ CREATE INDEX idx_memories_domain ON memories (domain_tag);
 CREATE INDEX idx_memories_status ON memories (status);
 CREATE INDEX IF NOT EXISTS idx_memories_assignee ON memories (assignee) WHERE assignee != '';
 CREATE INDEX IF NOT EXISTS idx_memories_task_picked_up_by ON memories (task_picked_up_by) WHERE task_picked_up_by != '';
+-- Serves FindByContentHash, which voter.Run evaluates per pending memory on a
+-- 2s poll. Partial predicate matches the dedup query exactly.
+CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories (content_hash) WHERE status = 'committed';
 
 -- HNSW index for vector similarity search
 CREATE INDEX idx_memories_embedding_hnsw ON memories

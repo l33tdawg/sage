@@ -276,6 +276,12 @@ var postgresTaskAssignmentSchema = []string{
 	`ALTER TABLE memories ADD COLUMN IF NOT EXISTS task_board_position BIGINT NOT NULL DEFAULT 0`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_assignee ON memories (assignee) WHERE assignee != ''`,
 	`CREATE INDEX IF NOT EXISTS idx_memories_task_picked_up_by ON memories (task_picked_up_by) WHERE task_picked_up_by != ''`,
+	// FindByContentHash became a live query in v11.11 (it previously returned a
+	// constant false), and voter.Run evaluates it per pending memory on a 2s
+	// poll. Without this index that is a sequential scan of a table carrying
+	// content TEXT plus a 768-dimension vector. Partial on status='committed'
+	// because that is exactly the predicate the dedup query uses.
+	`CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories (content_hash) WHERE status = 'committed'`,
 	`CREATE TABLE IF NOT EXISTS agent_notifications (
 		notification_id TEXT PRIMARY KEY,
 		agent_id TEXT NOT NULL,
@@ -399,6 +405,24 @@ const postgresInsertMemorySQL = `INSERT INTO memories (memory_id, submitting_age
 		submitting_agent = EXCLUDED.submitting_agent,
 		status = EXCLUDED.status,
 		created_at = EXCLUDED.created_at,
+		-- content/hash/domain/type/confidence are overwritten so a co-commit
+		-- squat-reclaim (which rewrites Badger's content hash to the co-commit's)
+		-- also replaces the squatter's off-chain content, keeping the Postgres
+		-- mirror consistent with the committed on-chain hash. This must stay in
+		-- lockstep with the identical SQLite clause: without it FindByContentHash
+		-- reads a stale hash, SQLite and Postgres validators disagree about what
+		-- is a duplicate, and MergeProjectionSupplementary's
+		-- "memory_id = $1 AND content_hash = $8" predicate matches zero rows and
+		-- panics the node with "consensus cannot advance". Safe for the other
+		-- conflict callers too: content-hash IDs collide only on identical
+		-- content; UUID IDs (task/journal/import) never collide; and the on-chain
+		-- submit path rewrites the Badger hash in lockstep - so overwriting the
+		-- mirror keeps it consistent rather than losing data.
+		content = EXCLUDED.content,
+		content_hash = EXCLUDED.content_hash,
+		domain_tag = EXCLUDED.domain_tag,
+		memory_type = EXCLUDED.memory_type,
+		confidence_score = EXCLUDED.confidence_score,
 		embedding = COALESCE(EXCLUDED.embedding, memories.embedding),
 		embedding_hash = COALESCE(EXCLUDED.embedding_hash, memories.embedding_hash),
 		provider = COALESCE(NULLIF(EXCLUDED.provider, ''), memories.provider),

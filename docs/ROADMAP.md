@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.10.0 is the current release.** It closes the independent-chain federation product loop with a retry-safe ceremony, manageable directional Read/Copy sharing, Pause/Resume and revocation feedback, plus durable agent-to-agent inbox delivery across explicitly accepted federation contacts. The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. The native-shell productization bridge is retargeted to v11.11–v11.14; none of those planned releases is promised or dated.
+**Status (2026-07):** **v11.11.0 is the current release.** It closes the independent-chain federation product loop with a retry-safe ceremony, manageable directional Read/Copy sharing, Pause/Resume and revocation feedback, plus durable agent-to-agent inbox delivery across explicitly accepted federation contacts. The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. The native-shell productization bridge is retargeted to v11.11–v11.14; none of those planned releases is promised or dated.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -177,6 +177,26 @@ are recorded in [`desktop-shell-decision.md`](desktop-shell-decision.md),
 [`native-app-daemon-contract.md`](native-app-daemon-contract.md), and
 [`native-shell-quality-gates.md`](native-shell-quality-gates.md). The tracked
 Tauri foundation remains an opt-in preview until that full matrix passes.
+
+**The native shell is alpha and does not gate releases.** Browser CEREBRUM is
+the product; the shell is a background track through v11.11–v11.13. It is built
+and runtime-tested in CI, never staged as a public release asset, and not
+intended for end-user use. Releases continue shipping bug fixes and capabilities
+on their normal cadence — federation, agent-to-agent messaging, and the rest of
+the roadmap do not queue behind desktop packaging. The signing, notarization,
+update/rollback, recovery, performance, and accessibility bar applies at **first
+distribution of the shell**, which is v12.
+
+**Platform scope: macOS and Windows are the shell's target platforms; Linux is
+not.** v11.11 distributes no native shell on any platform — see the paragraph
+above — so this is scope for the eventual distribution at v12, and for what CI
+produces release evidence for in the meantime. Linux users are served by browser
+CEREBRUM and the CLI, both fully supported and unaffected: this narrows the
+native shell, not the platform. The Linux target still builds and runs its full
+installed-package lifecycle smoke in CI so cross-platform regressions in the
+shared shell and SSCP code are still caught. Linux re-enters the target set only
+when upstream Wry ships GTK4/webkitgtk-6.0 (`tauri-apps/wry#1769`); SAGE will not
+fork or vendor the web view layer to get there sooner.
 
 ### v11.12 - consumer onboarding and recovery
 
