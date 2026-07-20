@@ -34,14 +34,37 @@ promotion path deliberately replace it; it must not be carried unchanged into
 v12.
 
 GitHub Dependabot alert 37 (`RUSTSEC-2024-0429` /
-`GHSA-wrw7-89jp-8q8g`) is also an active promotion blocker. The Linux Tauri
-stack currently receives `glib` 0.18.5 through Wry/WebKitGTK; the affected safe
-iterator API can trigger undefined behavior and optimized-build crashes. As of
-this gate record, current Wry 0.55.1 still pins the affected GTK/glib family and
-upstream issue `tauri-apps/wry#1769` remains open, so no compatible dependency
-upgrade exists. The alert must remain open until a tested upstream migration or
-reviewed backport removes the affected code; it must not be dismissed merely to
-make release status green.
+`GHSA-wrw7-89jp-8q8g`) is an active **Linux-only** promotion blocker. The Linux
+Tauri stack receives `glib` 0.18.5 through Wry/WebKitGTK; the affected safe
+iterator API can trigger undefined behavior and optimized-build crashes.
+
+By release-owner decision this blocker is scoped to the Linux artifacts, because
+the affected code is not built into the macOS or Windows packages at all. Wry
+declares its entire GTK chain under
+`cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd",
+target_os = "openbsd", target_os = "netbsd"))`; macOS resolves the web view
+through WKWebView and Windows through WebView2, so neither target compiles
+`gtk`, `webkit2gtk`, `soup3`, or `glib`. The scoping rests on that target gate,
+not on a severity judgement — if a future Wry release brings the affected family
+onto another target, the blocker widens again automatically.
+
+No compatible dependency upgrade exists, and this is a hard version wall rather
+than a pending release: Wry 0.55.1 is the latest published version and requires
+`gtk ^0.18`; the GTK3 Rust binding line is capped at `gtk` 0.18.2, last released
+2024-12-09, which pins `glib` 0.18.x. The advisory is first fixed in `glib`
+0.20.0, and `glib` 0.20+ belongs to the GTK4 line. Escaping therefore requires
+Wry migrating to GTK4/webkitgtk-6.0, tracked upstream in `tauri-apps/wry#1769`,
+which remains open with no activity since 2026-07-15.
+
+`cargo audit` reads the lockfile rather than the per-target build graph, so it
+reports this advisory on every platform's run regardless of the scoping above.
+That is expected and must not be silenced.
+
+The alert must remain open until a tested upstream migration or reviewed
+backport removes the affected code; it must not be dismissed merely to make
+release status green. Narrowing this blocker to Linux does **not** release any
+other hold — the native standalone production-promotion gate above still fails
+closed and still freezes the entire v11.11 publication graph on its own.
 
 Runtime promotion remains open until the install/launch/deep-link/offline,
 performance, assistive-technology, signing/notarization, update/rollback, and

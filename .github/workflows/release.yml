@@ -423,7 +423,7 @@ jobs:
             exit 0
           fi
           test "${NATIVE_SHELL_RELEASE_CLASS}" = "unsigned-preview-evidence"
-          echo "::error::Native standalone release ${NATIVE_SHELL_VERSION} is blocked: the package matrix is unsigned preview evidence only. Signed/notarized packages, installed-runtime acceptance, dependency-advisory closure (including RUSTSEC-2024-0429), update/rollback, accessibility, performance, and recovery evidence must be implemented and validated before publication."
+          echo "::error::Native standalone release ${NATIVE_SHELL_VERSION} is blocked: the package matrix is unsigned preview evidence only. Signed/notarized packages, installed-runtime acceptance, dependency-advisory closure (RUSTSEC-2024-0429 is scoped to the Linux artifacts; see docs/native-shell-quality-gates.md), update/rollback, accessibility, performance, and recovery evidence must be implemented and validated before publication."
           exit 1
 
   goreleaser-prepare:
