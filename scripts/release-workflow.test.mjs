@@ -118,11 +118,14 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(evidence, /if: needs\.release-metadata\.outputs\.native_shell_required == 'true'/);
   assert.match(evidence, /id: macos-arm64/);
   assert.match(evidence, /id: windows-x64/);
-  // v11.11 distributes a native shell on macOS and Windows only. Linux still
-  // builds and runs its installed-package lifecycle smoke in native-shell.yml,
-  // but is never staged as release evidence. Assert the deliberate absence so a
-  // Linux entry cannot reappear in the shipping matrix without the scope
-  // decision in docs/native-shell-quality-gates.md being revisited.
+  // macOS and Windows are the shell's target platforms; Linux is not. (v11.11
+  // distributes no shell on any platform -- the shell is alpha -- so this is the
+  // scope for the eventual v12 distribution and for what CI produces release
+  // evidence for meanwhile.) Linux still builds and runs its installed-package
+  // lifecycle smoke in native-shell.yml, but is never staged as release
+  // evidence. Assert the deliberate absence so a Linux entry cannot reappear in
+  // the evidence matrix without the scope decision in
+  // docs/native-shell-quality-gates.md being revisited.
   assert.doesNotMatch(evidence, /id: linux-x64/);
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
   assert.match(evidence, /go test \.\/internal\/shellcontrol/);

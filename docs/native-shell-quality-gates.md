@@ -12,15 +12,16 @@ record what is measurable, and ship nothing that forecloses it.
 
 ## Current enforcement status
 
-**v11.11 distributes a native shell on macOS and Windows only.** Linux is
-deliberately not a distributed native-shell platform for this release: Linux
-users are served by browser CEREBRUM and the CLI, both of which remain fully
-supported and are unaffected by this decision. Linux still compiles and runs its
+**v11.11 distributes no native shell on any platform.** The shell is alpha; see
+"The native shell is alpha and does not gate releases" below. macOS and Windows
+are its *target* platforms — the scope for the eventual distribution at v12, and
+what CI produces release evidence for meanwhile. **Linux is not a target
+platform.** Linux users are served by browser CEREBRUM and the CLI, both fully
+supported and unaffected by this decision. Linux still compiles and runs its
 full installed-package lifecycle smoke in
 [`native-shell.yml`](../.github/workflows/native-shell.yml) so cross-platform
 regressions in the shared shell and SSCP code are still caught — it is simply
-never staged as release evidence and never published. See
-[Linux re-entry](#linux-re-entry) below.
+never staged as release evidence. See [Linux re-entry](#linux-re-entry) below.
 
 The tracked preview now enforces locked dependency compilation, Rust
 format/test/Clippy, full platform shell-control tests, isolated Codex endpoint
@@ -84,8 +85,8 @@ not a remediation. It rests on two verified facts:
 - Wry declares its whole GTK chain under
   `cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd",
   target_os = "openbsd", target_os = "netbsd"))`. macOS resolves the web view
-  through WKWebView and Windows through WebView2, so **neither distributed
-  target compiles `gtk`, `webkit2gtk`, `soup3`, or `glib` at all**.
+  through WKWebView and Windows through WebView2, so **neither target platform
+  compiles `gtk`, `webkit2gtk`, `soup3`, or `glib` at all**.
 - No user receives the affected code, because the only artifact containing it is
   never published.
 
