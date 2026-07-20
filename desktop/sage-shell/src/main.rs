@@ -818,12 +818,18 @@ mod tests {
             Some("/brain".into())
         );
         // Ordinary launches carry no route at all.
-        assert_eq!(route_from_args(["/Applications/SAGE.app/Contents/MacOS/SAGE"]), None);
+        assert_eq!(
+            route_from_args(["/Applications/SAGE.app/Contents/MacOS/SAGE"]),
+            None
+        );
         assert_eq!(route_from_args(Vec::<String>::new()), None);
         // Rejected deep links must not become routes just because they arrived
         // through argv instead of the OS handler.
         assert_eq!(route_from_args(["sage", "sage://admin/root"]), None);
-        assert_eq!(route_from_args(["sage", "sage://search/a?token=secret"]), None);
+        assert_eq!(
+            route_from_args(["sage", "sage://search/a?token=secret"]),
+            None
+        );
         assert_eq!(route_from_args(["sage", "javascript:alert(1)"]), None);
         assert_eq!(route_from_args(["sage", "file:///etc/passwd"]), None);
         assert_eq!(route_from_args(["sage", "--some-flag", "not-a-url"]), None);
