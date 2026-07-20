@@ -287,11 +287,6 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: desktop/sage-shell
-      - name: Install Linux WebView build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Test native shell control contract
         shell: bash
         run: |
@@ -306,8 +301,13 @@ jobs:
             --manifest-path desktop/sage-shell/Cargo.toml --no-run
           cargo clippy --locked --target ${{ matrix.rust-target }} \
             --manifest-path desktop/sage-shell/Cargo.toml --all-targets -- -D warnings
+      # cargo audit reads the lockfile, not the built target graph, so it is
+      # platform-independent and runs exactly once. It must NOT be gated on a
+      # runner OS: this step was previously `runner.os == 'Linux'`, and dropping
+      # the Linux matrix entry would otherwise have silently disabled the
+      # release-path dependency audit entirely.
       - name: Audit locked native dependencies
-        if: runner.os == 'Linux'
+        if: matrix.id == 'macos-arm64'
         shell: bash
         run: |
           cargo install cargo-audit --version 0.22.2 --locked
@@ -329,7 +329,6 @@ jobs:
             --bundles ${{ matrix.bundles }} \
             --config "{\"version\":\"${NATIVE_SHELL_VERSION}\"}"
       - name: Verify macOS or Windows native release pair
-        if: runner.os != 'Linux'
         shell: bash
         run: |
           scripts/verify-native-shell-bundle.sh \
@@ -338,18 +337,6 @@ jobs:
             "${NATIVE_SHELL_VERSION}" \
             desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair.json \
             ${{ matrix.bundles }}
-      - name: Verify Linux native release pairs
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          for package_kind in deb appimage; do
-            scripts/verify-native-shell-bundle.sh \
-              ${{ matrix.rust-target }} \
-              desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
-              "${NATIVE_SHELL_VERSION}" \
-              "desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle/native-shell-release-pair-${package_kind}.json" \
-              "${package_kind}"
-          done
       - name: Generate native dependency SBOM
         shell: bash
         run: |
@@ -871,7 +858,7 @@ jobs:
           }
 
           if [ "${NATIVE_SHELL_REQUIRED}" = true ]; then
-            for evidence_id in macos-arm64 windows-x64 linux-x64; do
+            for evidence_id in macos-arm64 windows-x64; do
               evidence_root="staged/release-evidence-native-shell-${evidence_id}"
               test -f "${evidence_root}/SHA256SUMS"
               test -s "${evidence_root}/UNSIGNED-NATIVE-SHELL-EVIDENCE.txt"
@@ -895,14 +882,10 @@ jobs:
               staged/release-evidence-native-shell-windows-x64 \
               staged/release-evidence-native-shell-windows-x64/bundle/native-shell-release-pair.json \
               x86_64-pc-windows-msvc nsis
-            verify_native_release_pair \
-              staged/release-evidence-native-shell-linux-x64 \
-              staged/release-evidence-native-shell-linux-x64/bundle/native-shell-release-pair-deb.json \
-              x86_64-unknown-linux-gnu deb
-            verify_native_release_pair \
-              staged/release-evidence-native-shell-linux-x64 \
-              staged/release-evidence-native-shell-linux-x64/bundle/native-shell-release-pair-appimage.json \
-              x86_64-unknown-linux-gnu appimage
+            # No Linux verification: v11.11 does not distribute a Linux native
+            # shell, so no linux-x64 evidence artifact is produced. Verifying it
+            # here would fail the publication gate on a missing file. See
+            # docs/native-shell-quality-gates.md.
           fi
 
           # PyPI is immutable. If this is a recovery run and the version is
