@@ -510,6 +510,10 @@ func TestCreateSyncGroupStartsWithOnlyThisSAGE(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	attachBadger(t, m)
+	// This lightweight journal fixture intentionally has no on-disk TLS CA.
+	// Creating the owner's self-invite still binds the real local CA pin in
+	// production, so provide the deterministic fixture pin explicitly.
+	m.ownPinCache = bytes.Repeat([]byte{0x21}, 32)
 
 	groupID, err := m.CreateSyncGroup(ctx, "Family research")
 	if err != nil {

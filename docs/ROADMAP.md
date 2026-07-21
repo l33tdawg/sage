@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.11.4 is the current release.** It is an off-consensus federation UX/reliability patch: group removals converge at the removed SAGE, direct-revoke recovery is explicit, and remaining group members retain an accurate workspace view. The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. The native-shell productization bridge is retargeted to v11.11–v11.14; none of those planned releases is promised or dated.
+**Status (2026-07):** **v11.11.5 is the current release.** It is an off-consensus federation UX/reliability patch: group removals converge at the removed SAGE, direct-revoke recovery is explicit, and remaining group members retain an accurate workspace view. The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. The native-shell productization bridge is retargeted to v11.11–v11.14; none of those planned releases is promised or dated.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
