@@ -63,7 +63,8 @@ jobs:
     name: Real Comet/ABCI crash and partition gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: app-multiprocess
+    # Independent of app-multiprocess: no needs.app-multiprocess.* reference
+    # exists, so this edge only serialized two separate suites.
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
