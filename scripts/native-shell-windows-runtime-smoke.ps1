@@ -33,8 +33,12 @@ function Get-AuthenticodeStatusText([string]$Path) {
     $sig = $null
     try { $sig = Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop } catch { return 'unavailable' }
     if ($null -eq $sig) { return 'unavailable' }
-    if ($null -eq $sig.Status) { return 'unavailable' }
-    return $sig.Status.ToString()
+    # Access through the property collection: `$sig.Status` itself is a
+    # terminating StrictMode error when a provider returns an object without a
+    # Status member (as happened on windows-2025 for an unsigned NSIS bundle).
+    $statusProperty = $sig.PSObject.Properties['Status']
+    if ($null -eq $statusProperty -or $null -eq $statusProperty.Value) { return 'unavailable' }
+    return $statusProperty.Value.ToString()
 }
 
 function Assert-True([bool]$Condition, [string]$Message) {

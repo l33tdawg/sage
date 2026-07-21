@@ -42,6 +42,7 @@ if grep -Eq '\(Get-AuthenticodeSignature[^)]*\)\.Status' "${HARNESS}"; then
   echo 'Windows runtime harness reads .Status directly off Get-AuthenticodeSignature' >&2
   exit 1
 fi
+grep -Fq "\$sig.PSObject.Properties['Status']" "${HARNESS}"
 
 if grep -Eq 'taskkill\.exe[[:space:]]+/IM|Get-Process[[:space:]]+sage-gui|Stop-Process[[:space:]]+-Name' "${HARNESS}"; then
   echo 'Windows runtime harness contains broad process-name cleanup' >&2
