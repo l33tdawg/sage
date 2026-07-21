@@ -198,9 +198,26 @@ func TestIssue52_HealThenInitChain_EndToEnd(t *testing.T) {
 	// Step 2: ensureGenesisSeed is EXACTLY what runServe calls after migrate — it must
 	// heal the admin-less genesis. (Testing the helper, not the two functions
 	// separately, is what guards against the heal step being dropped from serve.)
+	// ensureGenesisSeed resolves agent.key through SageHome(), i.e. process-wide
+	// SAGE_HOME. This package mutates that variable in 60+ places across a dozen
+	// files, mixing t.Setenv with raw os.Setenv whose `defer os.Setenv(orig)`
+	// writes "" back when the variable was originally unset -- and SageHome()
+	// treats "" as "fall back to ~/.sage", which on a CI runner has no agent.key.
+	//
+	// This assertion has failed exactly once on CI (main, 2026-07-20) and has not
+	// reproduced in 50 single-test runs, 10 under -race, or 3 whole-package runs
+	// locally. Pin the preconditions so the next occurrence says WHICH one broke
+	// instead of a bare "Should be true".
+	require.Equal(t, sageHome, SageHome(),
+		"SAGE_HOME leaked: ensureGenesisSeed will look for agent.key in the wrong root")
+	require.FileExists(t, filepath.Join(SageHome(), "agent.key"),
+		"agent.key is not readable at the resolved SAGE_HOME, so the heal cannot seed an admin")
+
 	require.NoError(t, ensureGenesisSeed(cometHome, zerolog.Nop()))
 	healed := i52ReadGenesisAppState(t, cometHome)
-	require.True(t, genesisAppStateHasInitialAdmin(healed))
+	require.True(t, genesisAppStateHasInitialAdmin(healed),
+		"heal did not seed a chain admin; SAGE_HOME=%q resolved=%q genesis=%s",
+		os.Getenv("SAGE_HOME"), SageHome(), string(healed))
 	require.Contains(t, string(healed), adminID)
 
 	// Step 3: a fresh consensus app InitChains from the healed genesis and registers
