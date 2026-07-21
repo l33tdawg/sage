@@ -23,6 +23,20 @@ public static class SagePipeNative {
 }
 '@
 
+function Get-AuthenticodeStatusText([string]$Path) {
+    # Diagnostic metadata only -- it must never be able to fail the harness.
+    # Get-AuthenticodeSignature returns $null when the file is missing or is not a
+    # supported type, and under `Set-StrictMode -Version Latest` the resulting
+    # .Status read becomes a TERMINATING error: "The property 'Status' cannot be
+    # found on this object." That killed an otherwise-green lifecycle run on
+    # 2026-07-20 after every assertion had already passed.
+    $sig = $null
+    try { $sig = Get-AuthenticodeSignature -FilePath $Path -ErrorAction Stop } catch { return 'unavailable' }
+    if ($null -eq $sig) { return 'unavailable' }
+    if ($null -eq $sig.Status) { return 'unavailable' }
+    return $sig.Status.ToString()
+}
+
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
@@ -293,7 +307,7 @@ $webviewVersion = Get-WebViewVersion
     expected_version = $ExpectedVersion
     installer_path = $setup.FullName
     installer_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup.FullName).Hash.ToLowerInvariant()
-    authenticode = (Get-AuthenticodeSignature -FilePath $setup.FullName).Status.ToString()
+    authenticode = Get-AuthenticodeStatusText $setup.FullName
     image_os = $env:ImageOS
     image_version = $env:ImageVersion
     os_caption = $os.Caption
@@ -376,7 +390,7 @@ try {
 
     $safeStatus = [ordered]@{
         installer_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup.FullName).Hash.ToLowerInvariant()
-        authenticode = (Get-AuthenticodeSignature -FilePath $setup.FullName).Status.ToString()
+        authenticode = Get-AuthenticodeStatusText $setup.FullName
         daemon_version = $daemonOnly.Status.daemon_version
         state = $daemonOnly.Status.state
         ui_origin = $daemonOnly.Status.ui_origin
