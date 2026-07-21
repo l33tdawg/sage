@@ -178,14 +178,14 @@ func TestFederationConnectionEventSurvivesPurgeAndClearsOnlyOnFreshActivation(t 
 	}); setEventErr != nil {
 		t.Fatal(setEventErr)
 	}
-	if err := s.UpsertSyncGroup(ctx, SyncGroup{GroupID: "group-event", ControllerChainID: "chain-local", ControllerAgentPubkey: "local-key"}); err != nil {
-		t.Fatal(err)
+	if groupErr := s.UpsertSyncGroup(ctx, SyncGroup{GroupID: "group-event", ControllerChainID: "chain-local", ControllerAgentPubkey: "local-key"}); groupErr != nil {
+		t.Fatal(groupErr)
 	}
-	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{GroupID: "group-event", MemberChainID: "chain-local", MemberAgentPubkey: "local-key", Role: GroupRoleFullSync, MemberState: GroupMemberActive}); err != nil {
-		t.Fatal(err)
+	if localMemberErr := s.UpsertSyncGroupMember(ctx, SyncGroupMember{GroupID: "group-event", MemberChainID: "chain-local", MemberAgentPubkey: "local-key", Role: GroupRoleFullSync, MemberState: GroupMemberActive}); localMemberErr != nil {
+		t.Fatal(localMemberErr)
 	}
-	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{GroupID: "group-event", MemberChainID: binding.RemoteChainID, MemberAgentPubkey: binding.PeerAgentID, Role: GroupRoleEnrolledNoSync, MemberState: GroupMemberActive}); err != nil {
-		t.Fatal(err)
+	if remoteMemberErr := s.UpsertSyncGroupMember(ctx, SyncGroupMember{GroupID: "group-event", MemberChainID: binding.RemoteChainID, MemberAgentPubkey: binding.PeerAgentID, Role: GroupRoleEnrolledNoSync, MemberState: GroupMemberActive}); remoteMemberErr != nil {
+		t.Fatal(remoteMemberErr)
 	}
 	if purgeErr := s.PurgeSyncPeerState(ctx, binding.RemoteChainID); purgeErr != nil {
 		t.Fatal(purgeErr)

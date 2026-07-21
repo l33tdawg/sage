@@ -368,14 +368,15 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 		limit = SyncJournalMaxEntries
 	}
 	var entries []store.SyncGroupLogEntry
-	if scope == journalServeTerminalDomainOnly {
+	switch scope {
+	case journalServeTerminalDomainOnly:
 		fromSeq, genErr := removedDomainTerminalFromSeq(r.Context(), ss, req.GroupID, req.Subchain)
 		if genErr != nil {
 			httpError(w, http.StatusInternalServerError, "removed-domain generation lookup failed")
 			return
 		}
 		entries, err = ss.ListSyncGroupTerminalLog(r.Context(), req.GroupID, req.Subchain, fromSeq, req.AfterSeq, limit)
-	} else if scope == journalServeTerminalRosterRemoval {
+	case journalServeTerminalRosterRemoval:
 		entry, terminalErr := memberRemovalTerminalEntry(r.Context(), ss, req.GroupID, peer.ChainID)
 		if terminalErr != nil {
 			httpError(w, http.StatusInternalServerError, "member-removal terminal lookup failed")
@@ -384,7 +385,7 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 		if entry != nil && entry.Seq > req.AfterSeq {
 			entries = []store.SyncGroupLogEntry{*entry}
 		}
-	} else {
+	default:
 		entries, err = ss.ListSyncGroupLog(r.Context(), req.GroupID, req.Subchain, req.AfterSeq, limit)
 	}
 	if err != nil {
