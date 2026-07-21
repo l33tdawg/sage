@@ -28,10 +28,20 @@ for required in \
   '$Process.Kill($true)' \
   'taskkill.exe /PID' \
   'preserve.sentinel' \
+  'Get-AuthenticodeStatusText' \
   'reinstall reused a stale daemon generation' \
   "@('/S', \"/D=\$installRoot\")"; do
   grep -Fq "${required}" "${HARNESS}"
 done
+
+# Diagnostic metadata must never be able to fail the harness. A raw
+# (Get-AuthenticodeSignature ...).Status read is a TERMINATING error under
+# Set-StrictMode when the file is missing or unsupported, which killed an
+# otherwise-green run on 2026-07-20.
+if grep -Eq '\(Get-AuthenticodeSignature[^)]*\)\.Status' "${HARNESS}"; then
+  echo 'Windows runtime harness reads .Status directly off Get-AuthenticodeSignature' >&2
+  exit 1
+fi
 
 if grep -Eq 'taskkill\.exe[[:space:]]+/IM|Get-Process[[:space:]]+sage-gui|Stop-Process[[:space:]]+-Name' "${HARNESS}"; then
   echo 'Windows runtime harness contains broad process-name cleanup' >&2

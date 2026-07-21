@@ -50,7 +50,14 @@ jobs:
 
   v119-fault-gates:
     name: v11.9 Multi-Process Fault Gates
-    needs: test
+    # Deliberately NOT `needs: test`. Nothing here consumes a test output --
+    # there is no needs.test.* reference anywhere in this file -- so the edge
+    # only serialized two independent suites and left the runner idle for the
+    # whole ~17-minute test job. `build` still requires both, so the gate set is
+    # unchanged; only the ordering is.
+    #
+    # If this job ever starts consuming something `test` produces, restore the
+    # edge rather than relying on incidental ordering.
     uses: ./.github/workflows/v11.9-fault-gates.yml
     with:
       # PR/main green must carry the same evidence required before a release
