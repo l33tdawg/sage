@@ -117,18 +117,28 @@ var domainOwnerTypes = map[string]bool{
 	"domain_add": true, "domain_remove": true, "tombstone": true, "anchor": true,
 }
 
-// journalServeScope makes the removed-domain rule explicit. A prior non-owner
-// sharer may receive only the signed removal suffix, never the old journal body.
+// journalServeScope makes terminal revocation delivery explicit. A prior
+// non-owner sharer may receive only the signed domain-removal suffix, while a
+// removed member may receive only the single signed roster entry that removes
+// itself — never the rest of the roster after its entitlement ended.
 type journalServeScope uint8
 
 const (
 	journalServeDeny journalServeScope = iota
 	journalServeFull
-	journalServeTerminalOnly
+	journalServeTerminalDomainOnly
+	journalServeTerminalRosterRemoval
 )
 
 func isTerminalDomainEntryType(entryType string) bool {
 	return entryType == "domain_remove" || entryType == "tombstone" || entryType == "anchor"
+}
+
+func isTerminalJournalEntry(subchain, entryType string) bool {
+	if subchain == RosterSubchain {
+		return entryType == "member_remove"
+	}
+	return isTerminalDomainEntryType(entryType)
 }
 
 // removedDomainTerminalFromSeq maps the current immutable removal generation
@@ -194,7 +204,20 @@ func (m *Manager) journalSubchainServeScope(ctx context.Context, ss *store.SQLit
 	if err != nil {
 		return journalServeDeny, err
 	}
-	if member == nil || (member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing) {
+	if member == nil {
+		return journalServeDeny, nil
+	}
+	// The controller must deliver the signed member_remove entry to the person it
+	// just removed. Without this narrow terminal capability, the serve gate flips
+	// to deny before that guest can pull the event, leaving its local projection
+	// (and CEREBRUM card) permanently stale. It reveals no future roster entries.
+	if member.MemberState == store.GroupMemberRemoved {
+		if subchain == RosterSubchain {
+			return journalServeTerminalRosterRemoval, nil
+		}
+		return journalServeDeny, nil
+	}
+	if member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing {
 		return journalServeDeny, nil
 	}
 	if subchain == RosterSubchain {
@@ -246,9 +269,37 @@ func (m *Manager) journalSubchainServeScope(ctx context.Context, ss *store.SQLit
 		if err != nil || !wasEntitled {
 			return journalServeDeny, err
 		}
-		return journalServeTerminalOnly, nil
+		return journalServeTerminalDomainOnly, nil
 	}
 	return journalServeDeny, nil // not a group domain (active or removed)
+}
+
+// memberRemovalTerminalEntry finds the exact controller-signed roster removal
+// for memberChainID. A removed member is allowed to learn only this one terminal
+// record so it can converge its local projection; scanning is bounded just like a
+// normal journal pull and never returns unrelated roster history.
+func memberRemovalTerminalEntry(ctx context.Context, ss *store.SQLiteStore, groupID, memberChainID string) (*store.SyncGroupLogEntry, error) {
+	var after int64 = -1
+	for page := 0; page < syncJournalMaxPages; page++ {
+		entries, err := ss.ListSyncGroupLog(ctx, groupID, RosterSubchain, after, SyncJournalMaxEntries)
+		if err != nil {
+			return nil, err
+		}
+		if len(entries) == 0 {
+			return nil, nil
+		}
+		for i := range entries {
+			e := entries[i]
+			if e.EntryType == "member_remove" && parseJournalPayload(e.PayloadJSON)[pkMemberChain] == memberChainID {
+				return &e, nil
+			}
+		}
+		if len(entries) < SyncJournalMaxEntries {
+			return nil, nil
+		}
+		after = entries[len(entries)-1].Seq
+	}
+	return nil, fmt.Errorf("member-removal terminal search exceeded %d journal pages", syncJournalMaxPages)
 }
 
 // handleSyncJournal implements POST /fed/v1/sync/journal (behind peerAuth).
@@ -291,7 +342,8 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, "authorization failed")
 		return
 	}
-	if member == nil || (member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing) ||
+	memberRemovalTerminal := member != nil && member.MemberState == store.GroupMemberRemoved && req.Subchain == RosterSubchain
+	if member == nil || (!memberRemovalTerminal && member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing) ||
 		member.MemberAgentPubkey != peer.AgentID {
 		httpError(w, http.StatusForbidden, "not authorized for this journal sub-chain")
 		return
@@ -316,13 +368,22 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 		limit = SyncJournalMaxEntries
 	}
 	var entries []store.SyncGroupLogEntry
-	if scope == journalServeTerminalOnly {
+	if scope == journalServeTerminalDomainOnly {
 		fromSeq, genErr := removedDomainTerminalFromSeq(r.Context(), ss, req.GroupID, req.Subchain)
 		if genErr != nil {
 			httpError(w, http.StatusInternalServerError, "removed-domain generation lookup failed")
 			return
 		}
 		entries, err = ss.ListSyncGroupTerminalLog(r.Context(), req.GroupID, req.Subchain, fromSeq, req.AfterSeq, limit)
+	} else if scope == journalServeTerminalRosterRemoval {
+		entry, terminalErr := memberRemovalTerminalEntry(r.Context(), ss, req.GroupID, peer.ChainID)
+		if terminalErr != nil {
+			httpError(w, http.StatusInternalServerError, "member-removal terminal lookup failed")
+			return
+		}
+		if entry != nil && entry.Seq > req.AfterSeq {
+			entries = []store.SyncGroupLogEntry{*entry}
+		}
 	} else {
 		entries, err = ss.ListSyncGroupLog(r.Context(), req.GroupID, req.Subchain, req.AfterSeq, limit)
 	}
@@ -330,7 +391,8 @@ func (m *Manager) handleSyncJournal(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, "journal read failed")
 		return
 	}
-	resp := &SyncJournalResponse{Version: JournalWireVersion, Entries: make([]JournalEntryWire, 0, len(entries)), NextCursor: req.AfterSeq, TerminalOnly: scope == journalServeTerminalOnly}
+	terminalOnly := scope == journalServeTerminalDomainOnly || scope == journalServeTerminalRosterRemoval
+	resp := &SyncJournalResponse{Version: JournalWireVersion, Entries: make([]JournalEntryWire, 0, len(entries)), NextCursor: req.AfterSeq, TerminalOnly: terminalOnly}
 	for _, e := range entries {
 		resp.Entries = append(resp.Entries, storeToWire(e))
 	}
@@ -458,8 +520,10 @@ func (m *Manager) ingestTerminalJournalEntriesInTxLocked(ctx context.Context, ss
 }
 
 func (m *Manager) ingestTerminalJournalEntries(ctx context.Context, ss *store.SQLiteStore, groupID, subchain string, entries []store.SyncGroupLogEntry, transactionAndPolicyWriteHeld bool) (int, []string, []string, error) {
-	if _, ok := strings.CutPrefix(subchain, "domain:"); !ok {
-		return 0, nil, nil, fmt.Errorf("terminal journal response is valid only for a domain sub-chain")
+	if subchain != RosterSubchain {
+		if _, ok := strings.CutPrefix(subchain, "domain:"); !ok {
+			return 0, nil, nil, fmt.Errorf("terminal journal response is valid only for a domain sub-chain or roster removal")
+		}
 	}
 	gs, err := loadGroupApplyState(ctx, ss, groupID)
 	if err != nil {
@@ -470,8 +534,11 @@ func (m *Manager) ingestTerminalJournalEntries(ctx context.Context, ss *store.SQ
 	for i := range entries {
 		e := entries[i]
 		e.GroupID = groupID
-		if e.Subchain != subchain || !isTerminalDomainEntryType(e.EntryType) {
+		if e.Subchain != subchain || !isTerminalJournalEntry(subchain, e.EntryType) {
 			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("terminal response contains non-terminal entry %s/%d (%s)", e.Subchain, e.Seq, e.EntryType)
+		}
+		if subchain == RosterSubchain && parseJournalPayload(e.PayloadJSON)[pkMemberChain] != m.localChainID {
+			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("terminal roster removal does not target this member")
 		}
 		if len(e.PayloadJSON) > SyncJournalMaxPayloadBytes {
 			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("entry %s/%d payload %d bytes exceeds cap %d", subchain, e.Seq, len(e.PayloadJSON), SyncJournalMaxPayloadBytes)
@@ -508,6 +575,11 @@ func (m *Manager) ingestTerminalJournalEntries(ctx context.Context, ss *store.SQ
 			return appended, gs.evictedChains, gs.removedDomains, fmt.Errorf("append+apply terminal %s/%d (%s): %w", subchain, e.Seq, e.EntryType, appendErr)
 		}
 		appended++
+	}
+	if subchain == RosterSubchain && appended > 0 {
+		if err := ss.SetSyncGroupRosterJournalHead(ctx, groupID, entries[len(entries)-1].EntryHash); err != nil {
+			return appended, gs.evictedChains, gs.removedDomains, err
+		}
 	}
 	return appended, gs.evictedChains, gs.removedDomains, nil
 }
@@ -672,8 +744,8 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 		if len(resp.Entries) > SyncJournalMaxEntries {
 			return appended, fmt.Errorf("peer %s returned %d entries (max %d)", remoteChainID, len(resp.Entries), SyncJournalMaxEntries)
 		}
-		if resp.TerminalOnly && !strings.HasPrefix(subchain, "domain:") {
-			return appended, fmt.Errorf("peer %s returned terminal-only roster response", remoteChainID)
+		if resp.TerminalOnly && subchain != RosterSubchain && !strings.HasPrefix(subchain, "domain:") {
+			return appended, fmt.Errorf("peer %s returned terminal-only response for invalid sub-chain %q", remoteChainID, subchain)
 		}
 		if len(resp.Entries) == 0 {
 			n, evicted, removed, ingestErr := m.ingestPulledJournalPage(ctx, ss, remoteChainID, groupID, subchain, resp.TerminalOnly, nil, resp.RosterHead)
@@ -693,8 +765,11 @@ func (m *Manager) PullGroupJournal(ctx context.Context, remoteChainID, groupID, 
 			if !resp.TerminalOnly && wentry.Seq != after+1+int64(i) {
 				return appended, fmt.Errorf("peer %s: non-contiguous journal page at seq %d (want %d)", remoteChainID, wentry.Seq, after+1+int64(i))
 			}
-			if resp.TerminalOnly && (wentry.Seq <= after || !isTerminalDomainEntryType(wentry.EntryType)) {
+			if resp.TerminalOnly && (wentry.Seq <= after || !isTerminalJournalEntry(subchain, wentry.EntryType)) {
 				return appended, fmt.Errorf("peer %s returned invalid terminal journal entry %s/%d (%s)", remoteChainID, wentry.Subchain, wentry.Seq, wentry.EntryType)
+			}
+			if resp.TerminalOnly && subchain == RosterSubchain && parseJournalPayload(wentry.PayloadJSON)[pkMemberChain] != m.localChainID {
+				return appended, fmt.Errorf("peer %s returned a terminal roster removal for a different member", remoteChainID)
 			}
 			st = append(st, wireToStore(groupID, wentry))
 		}

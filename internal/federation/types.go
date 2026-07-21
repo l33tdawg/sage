@@ -119,8 +119,9 @@ type ReceiptPushResponse struct {
 // identity preflight (distinguishes "peer not upgraded/misconfigured" from
 // "peer unreachable" in the activation runbook).
 type StatusResponse struct {
-	ChainID string `json:"chain_id"`
-	Time    int64  `json:"time"`
+	ChainID     string `json:"chain_id"`
+	NetworkName string `json:"network_name,omitempty"`
+	Time        int64  `json:"time"`
 	// Capabilities advertises optional route groups (e.g. "sync"). Additive
 	// courtesy signal; the authoritative unsupported-peer detection is the
 	// 404/405/501 on the sync routes themselves (see CapabilitySync).

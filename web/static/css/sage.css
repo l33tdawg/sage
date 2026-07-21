@@ -4704,6 +4704,7 @@ input[type="range"]::-moz-range-thumb {
 .fed-conn-status.paused { background: var(--warning); box-shadow: 0 0 6px rgba(245, 158, 11, 0.55); }
 .fed-conn-status.off { background: var(--text-muted); }
 .fed-conn-name { font-weight: 600; }
+.fed-conn-role { padding: 2px 6px; border-radius: 999px; background: rgba(59,130,246,.12); color: var(--info, #60a5fa); font-size: 10px; font-weight: 700; white-space: nowrap; }
 .fed-conn-meta { font-size: 12px; }
 .fed-conn-off { flex: none; }
 .fed-past { margin-top: 14px; }
@@ -4725,7 +4726,9 @@ input[type="range"]::-moz-range-thumb {
 }
 .fed-peer-revoke-notice strong { color: var(--warning); font-size: 13.5px; }
 .fed-peer-revoke-notice p { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.45; }
-.fed-peer-revoke-notice .btn { flex: none; }
+.fed-peer-revoke-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.fed-peer-revoke-actions .btn { flex: none; }
+.fed-recovery-lead { margin: 0 0 14px; color: var(--text-muted); line-height: 1.55; }
 
 /* N-member Sharing & Sync control plane */
 .fed-groups { margin: 24px 0; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-surface); }
@@ -4740,10 +4743,19 @@ input[type="range"]::-moz-range-thumb {
 .fed-group-summary small { color: var(--text-muted); font-size: 11px; font-weight: 400; }
 .fed-group-detail { padding: 0 14px 16px; border-top: 1px solid var(--border); }
 .fed-group-detail h3 { margin: 18px 0 8px; font-size: 13px; }
-.fed-group-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin: 14px 0; }
-.fed-group-facts div { min-width: 0; }
-.fed-group-facts dt { color: var(--text-muted); font-size: 10.5px; }
-.fed-group-facts dd { overflow: hidden; margin: 2px 0 0; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.fed-group-connection-warning { margin: 14px 0 0; padding: 10px 11px; border: 1px solid rgba(245,158,11,.4); border-radius: var(--radius); background: rgba(245,158,11,.08); color: var(--text); font-size: 12px; line-height: 1.45; }
+.fed-group-rename { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.4fr) auto; align-items: end; gap: 10px 12px; margin: 14px 0 0; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-surface); }
+.fed-group-rename h3 { margin: 0 0 3px; }
+.fed-group-rename p { margin: 0; font-size: 11px; line-height: 1.4; }
+.fed-group-rename label { display: block; min-width: 0; }
+.fed-group-rename input { box-sizing: border-box; width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid var(--border-light); border-radius: 6px; background: var(--bg-deep); color: var(--text); }
+.fed-group-rename .btn { white-space: nowrap; }
+.fed-groups-actions { display: flex; gap: 8px; align-items: center; }
+.fed-group-create { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(220px, 1fr) minmax(220px, 1fr); gap: 12px; align-items: end; margin: 0 0 14px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-surface); }
+.fed-group-create h3 { margin: 0 0 4px; font-size: 14px; }
+.fed-group-create p { margin: 0; font-size: 12px; }
+.fed-group-create label { display: grid; gap: 6px; font-size: 12px; color: var(--text-muted); }
+.fed-group-create input, .fed-group-create select { width: 100%; }
 .fed-group-table-wrap { overflow-x: auto; }
 .fed-group-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 11px; }
 .fed-group-table th, .fed-group-table td { padding: 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
@@ -4762,7 +4774,8 @@ input[type="range"]::-moz-range-thumb {
 .fed-group-invite { margin-top: 14px; }
 .fed-group-invite > p { margin: -3px 0 10px; font-size: 11px; }
 @media (max-width: 760px) {
-    .fed-group-facts, .fed-group-controls { grid-template-columns: 1fr; }
+    .fed-group-controls, .fed-group-rename, .fed-group-create { grid-template-columns: 1fr; }
+    .fed-group-rename .btn { justify-self: start; }
     .fed-groups-head { align-items: stretch; flex-direction: column; }
 }
 
@@ -4964,6 +4977,7 @@ input[type="range"]::-moz-range-thumb {
     .fed-conn-past .fed-conn-meta { flex: 1; }
     .fed-past-time { width: 100%; margin-left: 19px; }
     .fed-peer-revoke-notice { align-items: flex-start; }
+    .fed-peer-revoke-actions { flex-wrap: wrap; }
 }
 
 /* Channel gate */
@@ -5047,6 +5061,8 @@ input[type="range"]::-moz-range-thumb {
     .fed-ceremony-progress-item:not(:last-child)::after { left: calc(50% + 18px); right: calc(-50% + 18px); top: 11px; }
     .fed-exchange-step, .fed-step { padding: 16px; }
     .fed-master, .fed-netname-view, .fed-peer-revoke-notice { align-items: flex-start; flex-direction: column; }
+    .fed-peer-revoke-actions { width: 100%; }
+    .fed-peer-revoke-actions .btn-primary { flex: 1; }
     .fed-roles { grid-template-columns: 1fr; }
     .fed-perm-grid { grid-template-columns: minmax(86px, 1fr) repeat(3, 38px); }
     .fed-perm-grid-copy-choice { grid-template-columns: minmax(66px, 1.4fr) repeat(4, minmax(0, 1fr)); }
@@ -5206,7 +5222,23 @@ input[type="range"]::-moz-range-thumb {
     pointer-events: none;
     z-index: 5;
 }
-.brain-empty-overlay .empty-state { pointer-events: auto; }
+.brain-empty-overlay .empty-state {
+    pointer-events: auto;
+    margin: 24px;
+    padding: 34px 32px;
+    border: 1px solid rgba(110, 182, 255, 0.22);
+    border-radius: var(--radius-lg);
+    background: linear-gradient(145deg, rgba(9, 17, 31, 0.94), rgba(12, 26, 45, 0.88));
+    box-shadow: 0 18px 54px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(10px) saturate(0.82);
+    -webkit-backdrop-filter: blur(10px) saturate(0.82);
+}
+.brain-empty-overlay .empty-state-hint { color: #b9c8df; }
+.brain-empty-overlay .empty-state-action { box-shadow: 0 2px 12px rgba(0, 0, 0, 0.28); }
+
+@media (max-width: 560px) {
+    .brain-empty-overlay .empty-state { margin: 16px; padding: 28px 22px; }
+}
 
 /* MRI wrapper - keeps flex sizing while hosting the empty overlay as a sibling
    of the renderer's mount div (mri-brain.js appends into .mri-stage untouched). */

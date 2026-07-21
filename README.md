@@ -51,6 +51,14 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.11.3
+
+**Federation removal now converges cleanly off-consensus.** When a group owner removes a SAGE, that member can retrieve only its own signed removal record, then immediately loses the group without losing an unrelated direct trusted connection. A restored pairing wakes roster reconciliation immediately, with a short anti-entropy safety net for transient outages. Remaining members keep their group, and CEREBRUM no longer counts an audit-only removed member as active.
+
+**Direct revoke recovery is explicit.** A guest whose host permanently revokes trust sees a named reconnect action and plain next steps: the host creates a fresh code and approves the new pairing. Temporary reachability failures continue to say that pairing is preserved.
+
+This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.3.
+
 ## What's New in v11.11.2
 
 **Sharing & Sync becomes operable at a glance.** Group owners can give a group a friendly, signed name; choose one or more existing controlled domains instead of typing fragile tags; see each member's friendly name, live reachability, and catch-up state; and add an already-trusted SAGE through a guided invitation without copying a chain ID or public key. Group names ride the established signed roster manifest, so v11.11.1 peers safely ignore the optional label while continuing to synchronize during a rolling patch upgrade.
@@ -565,7 +573,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.2`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.3`.
 
 ### Upgrading from an older version?
 

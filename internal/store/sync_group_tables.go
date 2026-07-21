@@ -205,6 +205,16 @@ func (s *SQLiteStore) migrateSyncGroupTables(ctx context.Context) {
 		last_sync_at                TEXT NOT NULL DEFAULT '',
 		PRIMARY KEY (group_id, member_chain_id)
 	)`)
+	// Retired legacy pair groups remain in the signed journal for audit/recovery,
+	// but never reappear after a fresh pairing. Multi-member groups are retained
+	// when one member leaves, because the controller and other members continue.
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS sync_group_retired (
+		group_id          TEXT PRIMARY KEY,
+		retired_for_chain TEXT NOT NULL,
+		reason            TEXT NOT NULL,
+		retired_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	)`)
 	_, _ = s.writeExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS sync_group_domain (
 		group_id         TEXT NOT NULL,
@@ -405,10 +415,12 @@ const syncGroupCols = `group_id, controller_chain_id, controller_agent_pubkey, e
 	roster_revision_floor, manifest_hash, roster_journal_head, anchored_head, min_quorum, quorum_mode,
 	display_name, created_at, updated_at`
 
-// GetSyncGroup returns one group, or (nil, nil) if absent.
+// GetSyncGroup returns one active group, or (nil, nil) if absent or retired.
+// A retired legacy pair must not be bootstrapped again after a fresh pairing.
 func (s *SQLiteStore) GetSyncGroup(ctx context.Context, groupID string) (*SyncGroup, error) {
 	g, err := scanSyncGroup(s.conn.QueryRowContext(ctx,
-		`SELECT `+syncGroupCols+` FROM sync_group WHERE group_id=?`, groupID))
+		`SELECT `+syncGroupCols+` FROM sync_group g WHERE g.group_id=?
+		 AND NOT EXISTS (SELECT 1 FROM sync_group_retired r WHERE r.group_id=g.group_id)`, groupID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -421,7 +433,9 @@ func (s *SQLiteStore) GetSyncGroup(ctx context.Context, groupID string) (*SyncGr
 // ListSyncGroups returns every group this node belongs to, newest first.
 func (s *SQLiteStore) ListSyncGroups(ctx context.Context) ([]SyncGroup, error) {
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT `+syncGroupCols+` FROM sync_group ORDER BY created_at DESC`)
+		`SELECT `+syncGroupCols+` FROM sync_group g
+		 WHERE NOT EXISTS (SELECT 1 FROM sync_group_retired r WHERE r.group_id=g.group_id)
+		 ORDER BY g.created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list sync groups: %w", err)
 	}

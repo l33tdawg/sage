@@ -94,6 +94,8 @@ func (m *Manager) startSyncDrainer(parent context.Context) {
 	// (runServe calls StartSyncDrainer, THEN SetSyncNotifier).
 	m.syncNudge = make(chan struct{}, 1)
 	nudge := m.syncNudge
+	m.syncJournalNudge = make(chan struct{}, 1)
+	journalNudge := m.syncJournalNudge
 
 	// A process can die after tx-34 commits but before node-local CA/seed/sync
 	// cleanup. Reconcile before workers start, then retry on every normal tick so
@@ -139,6 +141,8 @@ func (m *Manager) startSyncDrainer(parent context.Context) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				m.syncReconcileAll(ctx, ss)
+			case <-journalNudge:
 				m.syncReconcileAll(ctx, ss)
 			}
 		}
@@ -1108,7 +1112,9 @@ func (m *Manager) syncDrain(ctx context.Context, ss *store.SQLiteStore, agreemen
 // ---- anti-entropy reconciliation ----
 
 const (
-	syncReconcileInterval   = time.Hour
+	// A removal is a user-visible authorization change. Keep the safety-net
+	// short enough that a briefly offline member converges without a restart.
+	syncReconcileInterval   = 30 * time.Second
 	syncReconcileMaxPages   = 50  // per (peer, domain) per cycle
 	syncReconcileMaxEnqueue = 500 // per peer per cycle; the remainder next cycle
 	syncDigestTimeout       = 4 * time.Second

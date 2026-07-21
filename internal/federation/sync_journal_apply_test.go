@@ -129,13 +129,13 @@ func TestJournalApplyManifestAntiRollback(t *testing.T) {
 	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-ctl", ControllerAgentPubkey: hex.EncodeToString(ctlPub), RosterRevision: 7}); err != nil {
 		t.Fatalf("seed rev: %v", err)
 	}
-	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
+	e0 := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, map[string]string{pkDisplayName: "Studio Sync"})
 	stale := mustEntry(t, "g1", RosterSubchain, 1, e0.EntryHash, "manifest", "chain-ctl", ctlPub, ctlKey, manifestPayload(3, "hash3"))
 	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, e0, stale); err != nil || n != 2 {
 		t.Fatalf("stale manifest ingest: n=%d err=%v", n, err)
 	}
-	if g, _ := ms.GetSyncGroup(ctx, "g1"); g.RosterRevision != 7 {
-		t.Fatalf("stale manifest must NOT lower revision, got %d", g.RosterRevision)
+	if g, _ := ms.GetSyncGroup(ctx, "g1"); g.RosterRevision != 7 || g.DisplayName != "Studio Sync" {
+		t.Fatalf("genesis name must persist while stale manifest is skipped: %+v", g)
 	}
 	fwdPayload := manifestPayload(9, "hash9")
 	// An optional display name rides the established manifest entry so older

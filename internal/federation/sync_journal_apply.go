@@ -441,8 +441,23 @@ func (gs *groupApplyState) resolve(e store.SyncGroupLogEntry) ed25519.PublicKey 
 func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e store.SyncGroupLogEntry) error {
 	p := parseJournalPayload(e.PayloadJSON)
 	switch e.EntryType {
-	case "group_create", "anchor", "tombstone":
-		return nil // group row seeded by the ceremony; anchor/tombstone reserved
+	case "group_create":
+		// New groups carry a controller-authored friendly label in their signed
+		// genesis entry.  Older groups omit it, which remains valid and leaves
+		// their existing local label untouched during a replay.
+		if name, present := p[pkDisplayName]; present {
+			name = strings.TrimSpace(name)
+			if !validGroupDisplayName(name) {
+				return nil
+			}
+			if err := ss.SetSyncGroupDisplayName(ctx, gs.groupID, name); err != nil {
+				return err
+			}
+		}
+		return nil
+
+	case "anchor", "tombstone":
+		return nil // reserved
 
 	case "member_invite":
 		mc, mp := p[pkMemberChain], p[pkMemberPubkey]
@@ -773,6 +788,10 @@ func validateAuthoredEntry(e store.SyncGroupLogEntry) error {
 		var carried map[string]int64
 		if p[pkCarriedDomains] == "" || json.Unmarshal([]byte(p[pkCarriedDomains]), &carried) != nil {
 			return fmt.Errorf("epoch_rotate: malformed carried_domains re-attestation")
+		}
+	case "group_create":
+		if name, present := p[pkDisplayName]; present && !validGroupDisplayName(strings.TrimSpace(name)) {
+			return fmt.Errorf("group_create: display_name must be 1..96 non-control characters")
 		}
 	case "manifest":
 		if _, err := strconv.ParseInt(p[pkRosterRevision], 10, 64); err != nil {

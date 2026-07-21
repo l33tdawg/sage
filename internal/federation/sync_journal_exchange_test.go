@@ -636,6 +636,33 @@ func TestRemovedDomainPriorEntitledMemberGetsOnlyTerminalSuffix(t *testing.T) {
 	}
 }
 
+func TestRemovedMemberGetsOnlyItsTerminalRosterRemoval(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ctlPub, ctlKey := seedGroup(t, ms, "g1", "chain-ctl")
+	removedPub, _, _ := ed25519.GenerateKey(nil)
+	if err := ms.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "g1", MemberChainID: "chain-removed", MemberAgentPubkey: hex.EncodeToString(removedPub),
+		Role: store.GroupRoleEnrolledNoSync, MemberState: store.GroupMemberRemoved, JoinedRevision: 2, LeftRevision: 5,
+	}); err != nil {
+		t.Fatalf("removed member: %v", err)
+	}
+	// The old roster body exists locally but must not escape with the removal.
+	prior := mustEntry(t, "g1", RosterSubchain, 0, "", "group_create", "chain-ctl", ctlPub, ctlKey, nil)
+	removal := mustEntry(t, "g1", RosterSubchain, 1, prior.EntryHash, "member_remove", "chain-ctl", ctlPub, ctlKey,
+		map[string]string{pkMemberChain: "chain-removed"})
+	for _, entry := range []store.SyncGroupLogEntry{prior, removal} {
+		if err := ms.AppendSyncGroupLog(ctx, entry); err != nil {
+			t.Fatalf("append %s: %v", entry.EntryType, err)
+		}
+	}
+
+	rr, resp := journalAs(t, m, "chain-removed", SyncJournalRequest{GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
+	if rr.Code != http.StatusOK || resp == nil || !resp.TerminalOnly || len(resp.Entries) != 1 || resp.Entries[0].EntryType != "member_remove" || resp.Entries[0].Seq != 1 {
+		t.Fatalf("removed member terminal roster serve: code=%d resp=%+v", rr.Code, resp)
+	}
+}
+
 func TestPullTerminalRemovalSuffixConvergesWithoutOldDomainJournal(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
@@ -677,6 +704,31 @@ func TestPullTerminalRemovalSuffixConvergesWithoutOldDomainJournal(t *testing.T)
 	}
 	if got, _ := ms.GetSyncGroupSubchainHead(ctx, "g1", DomainSubchain("hr")); got == nil || got.EntryHash != d1.EntryHash {
 		t.Fatalf("terminal suffix did not advance local head: %+v", got)
+	}
+}
+
+func TestPullTerminalRosterRemovalHidesGroupFromRemovedGuest(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	ownerPub, ownerKey := seedGroup(t, ms, "g1", "chain-owner")
+	bindPullJournalPeer(t, m, ms, "g1", "chain-owner", ownerPub)
+
+	// The predecessor is deliberately absent locally. A removed guest still has
+	// to ingest the signed sparse removal and stop rendering the group.
+	removal := mustEntry(t, "g1", RosterSubchain, 1, "hidden-old-head", "member_remove", "chain-owner", ownerPub, ownerKey,
+		map[string]string{pkMemberChain: m.localChainID})
+	m.syncJournalFn = func(_ context.Context, _ string, req *SyncJournalRequest) (*SyncJournalResponse, error) {
+		if req.Subchain != RosterSubchain || req.Version != JournalWireVersion {
+			t.Fatalf("terminal roster pull request=%+v", req)
+		}
+		return &SyncJournalResponse{Version: JournalWireVersion, Entries: []JournalEntryWire{storeToWire(removal)}, NextCursor: 1, TerminalOnly: true}, nil
+	}
+	if n, err := m.PullGroupJournal(ctx, "chain-owner", "g1", RosterSubchain); err != nil || n != 1 {
+		t.Fatalf("pull terminal roster removal: n=%d err=%v", n, err)
+	}
+	local, err := ms.GetSyncGroupMember(ctx, "g1", m.localChainID)
+	if err != nil || local == nil || local.MemberState != store.GroupMemberRemoved {
+		t.Fatalf("local guest removal did not converge: member=%+v err=%v", local, err)
 	}
 }
 

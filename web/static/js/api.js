@@ -889,6 +889,7 @@ export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federati
 // operator-only and SQLite-only; the UI surfaces 403/501 instead of silently
 // pretending group management is available.
 export function fedGroups() { return fedFetch('/v1/dashboard/federation/groups'); }
+export function fedGroupCreate(name) { return fedPost('/v1/dashboard/federation/groups', { name }); }
 export function fedGroupDomainAdd(groupId, domainTag, maxClearance) {
     return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/domains`, {
         domain_tag: domainTag, max_clearance: Number(maxClearance),

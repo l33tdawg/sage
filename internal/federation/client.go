@@ -239,6 +239,11 @@ func (m *Manager) PeerStatus(ctx context.Context, remoteChainID string) (*Status
 	if err != nil {
 		return nil, err
 	}
+	// A status response is authenticated by the exact active agreement, so its
+	// cosmetic network label is safe to cache for the dashboard. This also heals
+	// labels missing from pre-friendly-name JOIN ceremonies without changing any
+	// trust or authorization state.
+	m.rememberPeerName(remoteChainID, out.NetworkName)
 	// Preserve the last authenticated contact projection for exact-address
 	// offline queueing. This is best-effort for general status callers; the
 	// target resolver performs the same refresh as a required operation using

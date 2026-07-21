@@ -10,15 +10,47 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/store"
 )
 
 type groupListTestDriver struct {
 	FederationJoinDriver
 	localChainID string
+	networkName  string
 }
 
 func (d groupListTestDriver) LocalChainID() string { return d.localChainID }
+func (d groupListTestDriver) NetworkName() string  { return d.networkName }
+
+type peerStatusTestDriver struct {
+	FederationJoinDriver
+}
+
+func (peerStatusTestDriver) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
+	return &federation.StatusResponse{NetworkName: "DKAN-TII", Time: 123}, nil
+}
+
+func TestFederationPeerStatusReturnsFriendlyNetworkName(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Federation = peerStatusTestDriver{}
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/federation/connections/chain-remote/status", nil)
+	rr := httptest.NewRecorder()
+	h.handleFedPeerStatus(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("peer status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Reachable   bool   `json:"reachable"`
+		NetworkName string `json:"network_name"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Reachable || got.NetworkName != "DKAN-TII" {
+		t.Fatalf("status must retain the authenticated friendly name: %+v", got)
+	}
+}
 
 func TestFederationGroupRouteAcceptsOnlyOperatorEd25519Signature(t *testing.T) {
 	h, _ := newTestHandler(t)
@@ -61,6 +93,7 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 		method, path, body string
 	}{
 		{http.MethodGet, "/v1/dashboard/federation/groups", ""},
+		{http.MethodPost, "/v1/dashboard/federation/groups", `{"name":"Studio"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/domains", `{"domain_tag":"hr"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/domains/remove", `{"domain_tag":"hr"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/self-role", `{"role":"full-sync"}`},
@@ -74,7 +107,11 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 				rr := httptest.NewRecorder()
 				switch tc.path {
 				case "/v1/dashboard/federation/groups":
-					h.handleFedGroupList(rr, req)
+					if tc.method == http.MethodPost {
+						h.handleFedGroupCreate(rr, req)
+					} else {
+						h.handleFedGroupList(rr, req)
+					}
 				case "/v1/dashboard/federation/groups/g1/domains":
 					h.handleFedGroupDomainAdd(rr, req)
 				case "/v1/dashboard/federation/groups/g1/domains/remove":
@@ -131,7 +168,7 @@ func TestFederationGroupListReportsDurableProgressAndPeerDelivery(t *testing.T) 
 	ctx := context.Background()
 	h, ss := newTestHandler(t)
 	h.NodeOperatorAgentID = strings.Repeat("a", 64)
-	h.Federation = groupListTestDriver{localChainID: "chain-local"}
+	h.Federation = groupListTestDriver{localChainID: "chain-local", networkName: "L33TDAWG-SAGE"}
 
 	requireNoError := func(label string, err error) {
 		t.Helper()
@@ -153,6 +190,7 @@ func TestFederationGroupListReportsDurableProgressAndPeerDelivery(t *testing.T) 
 		Role: store.GroupRoleSelectiveSync, MemberState: store.GroupMemberActive, JoinedRevision: 2,
 		LastAckedRosterRevision: 5, LastSeenJournalHead: "head-5", LastSyncAt: "2026-07-19T05:00:00Z",
 	}))
+	requireNoError("remember peer name", ss.SetPeerName(ctx, "chain-remote", "DKAN-TII"))
 	requireNoError("upsert domain", ss.UpsertSyncGroupDomain(ctx, store.SyncGroupDomain{
 		GroupID: "group-1", DomainTag: "studio", OwnerChainID: "chain-local", MaxClearance: 2, AddedRevision: 3,
 	}))
@@ -175,6 +213,7 @@ func TestFederationGroupListReportsDurableProgressAndPeerDelivery(t *testing.T) 
 		LocalChainID string `json:"local_chain_id"`
 		Groups       []struct {
 			GroupID           string                `json:"group_id"`
+			ControllerName    string                `json:"controller_display_name"`
 			RosterRevision    int64                 `json:"roster_revision"`
 			RosterJournalHead string                `json:"roster_journal_head"`
 			Members           []syncGroupMemberView `json:"members"`
@@ -190,7 +229,7 @@ func TestFederationGroupListReportsDurableProgressAndPeerDelivery(t *testing.T) 
 		t.Fatalf("group response = %+v", response)
 	}
 	group := response.Groups[0]
-	if group.GroupID != "group-1" || group.RosterRevision != 7 || group.RosterJournalHead != "head-7" {
+	if group.GroupID != "group-1" || group.ControllerName != "L33TDAWG-SAGE" || group.RosterRevision != 7 || group.RosterJournalHead != "head-7" {
 		t.Fatalf("group progress = %+v", group)
 	}
 	if len(group.SharedDomains) != 1 || group.SharedDomains[0].DomainTag != "studio" || len(group.Members) != 2 {
@@ -201,15 +240,107 @@ func TestFederationGroupListReportsDurableProgressAndPeerDelivery(t *testing.T) 
 		members[member.ChainID] = member
 	}
 	local := members["chain-local"]
-	if local.Health != "healthy" || local.CatchUpState != "current" || local.RosterRevisionLag != 0 || !local.RosterHeadCurrent || local.PeerDelivery != nil {
+	if local.DisplayName != "L33TDAWG-SAGE" || local.Health != "healthy" || local.CatchUpState != "current" || local.RosterRevisionLag != 0 || !local.RosterHeadCurrent || local.PeerDelivery != nil {
 		t.Fatalf("local member projection = %+v", local)
 	}
 	remote := members["chain-remote"]
-	if remote.Health != "catching_up" || remote.CatchUpState != "catching_up" || remote.RosterRevisionLag != 2 || remote.RosterHeadCurrent {
+	if remote.DisplayName != "DKAN-TII" || remote.Health != "catching_up" || remote.CatchUpState != "catching_up" || remote.RosterRevisionLag != 2 || remote.RosterHeadCurrent {
 		t.Fatalf("remote member progress = %+v", remote)
 	}
 	if remote.PeerDelivery == nil || remote.PeerDelivery.Delivered != 1 || remote.PeerDelivery.Pending != 1 || remote.PeerDelivery.Backlog != 1 || remote.PeerDelivery.LastDeliveredAt == "" {
 		t.Fatalf("remote delivery projection = %+v", remote.PeerDelivery)
+	}
+}
+
+func TestFederationGroupListHidesGroupFromRemovedLocalMember(t *testing.T) {
+	ctx := context.Background()
+	h, ss := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
+	h.Federation = groupListTestDriver{localChainID: "chain-guest", networkName: "L33TDAWG-SAGE"}
+
+	requireNoError := func(label string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+	}
+	requireNoError("upsert group", ss.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "group-removed", ControllerChainID: "chain-owner", ControllerAgentPubkey: strings.Repeat("1", 64),
+		Epoch: "epoch-1", RosterRevision: 4, RosterJournalHead: "head-remove", DisplayName: "Family research",
+	}))
+	requireNoError("upsert owner", ss.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "group-removed", MemberChainID: "chain-owner", MemberAgentPubkey: strings.Repeat("2", 64),
+		Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive, JoinedRevision: 1,
+	}))
+	requireNoError("upsert removed local member", ss.UpsertSyncGroupMember(ctx, store.SyncGroupMember{
+		GroupID: "group-removed", MemberChainID: "chain-guest", MemberAgentPubkey: strings.Repeat("3", 64),
+		Role: store.GroupRoleEnrolledNoSync, MemberState: store.GroupMemberRemoved, JoinedRevision: 2, LeftRevision: 4,
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/federation/groups", nil)
+	req = req.WithContext(context.WithValue(req.Context(), verifiedDashboardAgentKey{}, h.NodeOperatorAgentID))
+	rr := httptest.NewRecorder()
+	h.handleFedGroupList(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("group list status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Groups []json.RawMessage `json:"groups"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode group list: %v", err)
+	}
+	if len(response.Groups) != 0 {
+		t.Fatalf("removed local member must not render the group: %s", rr.Body.String())
+	}
+}
+
+func TestFederationGroupListOmitsRemovedRemoteMember(t *testing.T) {
+	ctx := context.Background()
+	h, ss := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
+	h.Federation = groupListTestDriver{localChainID: "chain-owner", networkName: "DKAN-TII"}
+
+	require := func(label string, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+	}
+	require("upsert group", ss.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "group-remaining", ControllerChainID: "chain-owner", ControllerAgentPubkey: strings.Repeat("1", 64),
+		Epoch: "epoch-1", RosterRevision: 4, RosterJournalHead: "head-remove", DisplayName: "Family research",
+	}))
+	for _, member := range []store.SyncGroupMember{
+		{GroupID: "group-remaining", MemberChainID: "chain-owner", MemberAgentPubkey: strings.Repeat("2", 64), Role: store.GroupRoleFullSync, MemberState: store.GroupMemberActive},
+		{GroupID: "group-remaining", MemberChainID: "chain-active", MemberAgentPubkey: strings.Repeat("3", 64), Role: store.GroupRoleEnrolledNoSync, MemberState: store.GroupMemberActive},
+		{GroupID: "group-remaining", MemberChainID: "chain-removed", MemberAgentPubkey: strings.Repeat("4", 64), Role: store.GroupRoleEnrolledNoSync, MemberState: store.GroupMemberRemoved, LeftRevision: 4},
+	} {
+		require("upsert member", ss.UpsertSyncGroupMember(ctx, member))
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/federation/groups", nil)
+	req = req.WithContext(context.WithValue(req.Context(), verifiedDashboardAgentKey{}, h.NodeOperatorAgentID))
+	rr := httptest.NewRecorder()
+	h.handleFedGroupList(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("group list status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Groups []struct {
+			Members []syncGroupMemberView `json:"members"`
+		} `json:"groups"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode group list: %v", err)
+	}
+	if len(response.Groups) != 1 || len(response.Groups[0].Members) != 2 {
+		t.Fatalf("remaining group must omit its removed member: %s", rr.Body.String())
+	}
+	for _, member := range response.Groups[0].Members {
+		if member.ChainID == "chain-removed" {
+			t.Fatalf("removed member leaked into owner group projection: %s", rr.Body.String())
+		}
 	}
 }
 

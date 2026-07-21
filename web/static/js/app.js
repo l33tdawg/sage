@@ -7,7 +7,7 @@ deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedGroups, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
+fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedGroups, fedGroupCreate, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
@@ -25,7 +25,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.11.2';
+const SAGE_VERSION = 'v11.11.3';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -10110,7 +10110,7 @@ function NetworkJoinGuestPanel({ onClose }) {
     const [token, setToken] = useState('');
     const [starting, setStarting] = useState(false);
     const [sas, setSas] = useState(null);
-    const [status, setStatus] = useState(null); // { state, sas, chain_id, error }
+    const [status, setStatus] = useState(null); // { state, sas, network_name, error }
     const [err, setErr] = useState(null);
     const [restarting, setRestarting] = useState(false);
     const pollRef = useRef(null);
@@ -10177,7 +10177,7 @@ function NetworkJoinGuestPanel({ onClose }) {
                     ${st === 'ready' && html`
                         <div style="text-align:center;">
                             <div style="font-size:38px;margin-bottom:8px;">✓</div>
-                            <h3 style="margin:0 0 8px;color:var(--accent-green);">Approved${status.chain_id ? html` — joining ${status.chain_id}` : ''}</h3>
+                            <h3 style="margin:0 0 8px;color:var(--accent-green);">Approved${status.network_name ? html` — joining ${status.network_name}` : ''}</h3>
                             <p style="color:var(--text-dim);">This node will restart to finish joining and start syncing the shared memory.</p>
                             <button class="btn btn-primary" onClick=${onRestart} disabled=${restarting}>
                                 ${restarting ? 'Restarting…' : 'Restart & finish joining'}
@@ -10920,7 +10920,7 @@ function OverviewPage({ sse }) {
             failed.fed && fedEverRef.current,
             html`<div class="chain-stats-grid">${fedTiles}</div>
                 ${connections.length ? html`<div style="margin-top:12px;">${connections.map(c => html`<div key=${c.remote_chain_id} style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-top:1px solid var(--border);font-size:13px;">
-                    <span style="font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.remote_chain_id}</span>
+                    <span style="font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${c.peer_name || 'Other SAGE'}</span>
                     ${pill(connTone(c), c.expired ? 'expired' : c.status)}
                 </div>`)}</div>` : html`<div style="margin-top:12px;color:var(--text-muted);font-size:13px;">No federated nodes yet.</div>`}`)}
 
@@ -11759,7 +11759,7 @@ function FedEndpointPicker({ candidates, endpoint, onPick }) {
 }
 
 // GuestJoinWizard - "Join a network". Maps to guest STEP 1-4.
-function GuestJoinWizard({ onExit }) {
+function GuestJoinWizard({ onExit, recoveryPeer }) {
     const wizardRef = useRef(null);
     const [step, setStep] = useState('scan');
     const [endpoint, setEndpoint, lanCandidates, endpointReady, endpointFailed] = useLanEndpoint();
@@ -11875,15 +11875,17 @@ function GuestJoinWizard({ onExit }) {
     return html`<div class="fed-wizard" ref=${wizardRef}>
         <div class="fed-wizard-head">
             <button class="btn fed-back" disabled=${busy} onClick=${exitGuest}>← Back</button>
-            <span class="fed-wizard-title">Join someone’s network</span>
+            <span class="fed-wizard-title">${recoveryPeer ? `Reconnect with ${recoveryPeer}` : 'Join someone’s network'}</span>
         </div>
         ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
         ${err && html`<div class="fed-err" role="alert">${err}</div>`}
 
         ${step === 'scan' && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h2>Scan their SAGE</h2>
-            <p class="muted">Point your camera at the connection code your colleague is showing you.</p>
+            <h2>${recoveryPeer ? `Reconnect with ${recoveryPeer}` : 'Scan their SAGE'}</h2>
+            ${recoveryPeer
+                ? html`<p class="fed-recovery-lead">Ask <strong>${recoveryPeer}</strong> to create a new connection code on their SAGE. Then scan it here, or paste the code they send you. They will need to approve the reconnection before anything can be shared.</p>`
+                : html`<p class="muted">Point your camera at the connection code your colleague is showing you.</p>`}
             ${tier4 && html`<div class="fed-tier4-note">Connecting remotely or using a pasted image? The short number check later protects against a code being swapped or relayed.</div>`}
             ${!endpointReady && html`<div class="muted">Finding this computer’s network address…</div>`}
             ${endpointMissing && html`<div class="fed-tier4-note" role="status">No local-network address was detected. You can still scan an Internet connection code. For a same-network connection, enter this computer’s reachable address below.</div>`}
@@ -11904,7 +11906,7 @@ function GuestJoinWizard({ onExit }) {
         ${step === 'return' && scan && html`<div class="fed-step">
             <${FedGreenRail} />
             <h3>Now let them scan you</h3>
-            <p class="muted">Connecting to <strong>${scan.host_name || scan.host_chain}</strong>${scan.host_name ? html` <span style="font-size:11px;">(id: <code>${scan.host_chain}</code>)</span>` : ''}. Hold this up to their camera, or send it for them to paste.</p>
+            <p class="muted">Connecting to <strong>${scan.host_name || 'the other SAGE'}</strong>. Hold this up to their camera, or send it for them to paste.</p>
             <${FedQr} text=${scan.return_uri} caption="Their SAGE scans this to check it's really you." />
             <div class="fed-step-actions">
                 <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : "They've scanned me — continue"}</button>
@@ -11936,7 +11938,7 @@ function GuestJoinWizard({ onExit }) {
 
         ${step === 'done' && html`<div class="fed-step fed-done">
             <div class="fed-done-check">✓</div>
-            <h2>You're connected to ${scan && scan.host_chain}</h2>
+            <h2>You're connected to ${(scan && scan.host_name) || 'the other SAGE'}</h2>
             <p class="muted">Trust is established. Each computer now manages what it shares. Open this connection to choose existing domains for live Read or optional Copy; disconnecting always stops future access. Connection-bound Write is reserved but not active yet.</p>
             <button class="btn btn-primary" onClick=${onExit}>Done</button>
         </div>`}
@@ -12152,8 +12154,8 @@ function HostJoinWizard({ onExit }) {
             title="You confirm them"
             instruction="Compare with the code on their screen, or have them read it aloud. Type it here to make sure neither scan was swapped."
             expectedCode=${view.code_g}
-            peerName=${view.guest_name || view.guest_chain}
-            peerID=${view.guest_name ? view.guest_chain : ''}
+            peerName=${view.guest_name || 'the other SAGE'}
+            peerID=""
             trustOnly=${true}
             tier4=${tier4}
             confirmLabel="Yes, they match - approve"
@@ -12165,13 +12167,13 @@ function HostJoinWizard({ onExit }) {
             <${FedGreenRail} />
             <h3>They confirm you</h3>
             ${view && view.code_h ? html`<${BigCode} code=${view.code_h} />` : html`<div class="fed-waiting"><span class="fed-spinner"></span> Preparing…</div>`}
-            <p class="fed-read-instr">Let ${(view && (view.guest_name || view.guest_chain)) || 'them'} compare this with their screen, or read it aloud. Don't send it as a pasted message.</p>
+            <p class="fed-read-instr">Let ${(view && view.guest_name) || 'the other SAGE'} compare this with their screen, or read it aloud. Don't send it as a pasted message.</p>
             <div class="fed-waiting"><span class="fed-spinner"></span> Waiting for their confirmation…</div>
         </div>`}
 
         ${step === 'done' && html`<div class="fed-step fed-done">
             <div class="fed-done-check">✓</div>
-            <h2>Connected to ${view && view.guest_chain}</h2>
+            <h2>Connected to ${(view && view.guest_name) || 'the other SAGE'}</h2>
             <h3>Trust is established</h3>
             <p class="muted">Permissions are separate from trust. Open this connection from Federation to choose which existing domains they may Read or Copy. They manage what they share back from their own computer; connection-bound Write is reserved but not active yet.</p>
             <button class="btn btn-primary" onClick=${onExit}>Done</button>
@@ -12274,7 +12276,10 @@ function normalizeFedPipeContactGrant(value) {
 // Each node edits only its own grants and observes the peer's grants read-only.
 function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const chain = conn.remote_chain_id;
-    const peerName = conn.peer_name || chain;
+    const peerName = conn.peer_name || 'Other SAGE';
+    const localIsHost = conn.local_role === 'host';
+    const roleKnown = conn.local_role === 'host' || conn.local_role === 'guest';
+    const relationshipRole = localIsHost ? 'This SAGE is the relationship host' : (conn.local_role === 'guest' ? `${peerName} is the relationship host` : 'This direct relationship needs its role restored');
     const [catalog, setCatalog] = useState(null);
     const [saved, setSaved] = useState(null);
     const [draft, setDraft] = useState(null);
@@ -12300,6 +12305,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const [refreshing, setRefreshing] = useState(false);
     const [err, setErr] = useState('');
     const [reloadToken, setReloadToken] = useState(0);
+    const [showGuestShareBack, setShowGuestShareBack] = useState(false);
 
     useEffect(() => {
         let live = true;
@@ -12614,18 +12620,19 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         } catch (e) { setSyncErr(String(e.message || e)); }
         setRefreshing(false);
     };
-	const localAgentContacts = localPipeContacts && Array.isArray(localPipeContacts.contacts) ? localPipeContacts.contacts : [];
+    const localAgentContacts = localPipeContacts && Array.isArray(localPipeContacts.contacts) ? localPipeContacts.contacts : [];
 	const remoteAgentContacts = remotePipeContacts && Array.isArray(remotePipeContacts.contacts) ? remotePipeContacts.contacts : [];
+	const showOutgoing = localIsHost || showGuestShareBack;
 
     return html`<div class="fed-permissions-panel">
         <div class="fed-permissions-intro">
-            <strong>Trust and permissions are separate.</strong> The connection proves who this computer is linked to. These domain permissions decide what may cross that trusted link, and either computer can change its own grants at any time.
+            <strong>${relationshipRole}.</strong> This is a direct 1:1 relationship, not a group. ${localIsHost ? `As host, you decide which of this SAGE’s domains ${peerName} can consume.` : (conn.local_role === 'guest' ? `As guest, this SAGE consumes only the domains ${peerName} explicitly shares.` : 'This older pairing has no trustworthy host/guest role, so outbound sharing is locked until its relationship role is restored.')}
         </div>
         ${conn.sharing_paused && html`<div class="fed-perm-pause-note">
             <strong>Sharing from this SAGE is paused.</strong> The saved domain choices below are preserved and take effect again when you resume.
         </div>`}
 
-		<section class="fed-perm-section fed-agent-section">
+		${localIsHost && html`<section class="fed-perm-section fed-agent-section">
 			<div class="fed-perm-section-head">
 				<div>
 					<h4>Agent work requests</h4>
@@ -12660,7 +12667,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
 				</div>
 				<div class="fed-agent-column fed-agent-remote">
 					<h5>Agents on ${peerName}</h5>
-					<p class="muted">These are the domain-owner agents their SAGE makes visible. Copying the exact address gives your agent a reliable route to that SAGE; CEREBRUM only manages the connection.</p>
+					<p class="muted">These are the domain-owner agents their SAGE makes visible. Copy a private routing address only when configuring an agent; CEREBRUM manages the connection.</p>
 					${!remotePipeKnown && html`<div class="fed-agent-empty muted">Their SAGE has not reported agent contacts yet.</div>`}
 					${remotePipeKnown && remoteAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">They are not exposing any domain-owner agents to this connection.</div>`}
 					${remoteAgentContacts.map(contact => {
@@ -12670,27 +12677,26 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
 							<div class="fed-agent-identity">
 								<strong>${contact.display_name || contact.handle || 'Remote agent'}</strong>
 								${contact.handle && html`<span class="fed-agent-handle muted">${contact.handle}</span>`}
-								<code title=${contact.address || ''}>${contact.address || contact.handle || 'Address unavailable'}</code>
 								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Shared-domain owner'}</span>
 							</div>
 							<div class="fed-agent-remote-actions">
 								<span class="fed-agent-readiness ${ready ? 'ready' : ''}">${ready ? 'Ready' : (remotePipeContacts.paused ? 'Paused' : (contact.available === false ? 'Unavailable' : 'Not accepting'))}</span>
 								<button class="btn" disabled=${!contact.address && !contact.handle}
 									aria-label=${`Copy address for ${contact.display_name || contact.handle || contact.agent_id} on ${peerName}`}
-									onClick=${() => copyPipeContact(contact)}>${copiedContact === contact.agent_id ? 'Copied' : 'Copy address'}</button>
+								onClick=${() => copyPipeContact(contact)}>${copiedContact === contact.agent_id ? 'Copied' : 'Copy routing address'}</button>
 							</div>
 						</div>`;
 					})}
 				</div>
 			</div>
 			${pipeContactErr && html`<div class="fed-err fed-perm-error" role="alert">${pipeContactErr}</div>`}
-		</section>
+		</section>`}
 
-        <section class="fed-perm-section">
+        ${showOutgoing ? html`<section class="fed-perm-section">
             <div class="fed-perm-section-head">
                 <div>
-                    <h4>What this computer shares with ${peerName}</h4>
-                    <p>Read allows live lookup. Copy offers synchronized local copies that the receiver may independently accept. Write remains unavailable until the chain can bind one exact submission to this trusted connection.</p>
+                    <h4>${localIsHost ? `Host sharing: this SAGE → ${peerName}` : `Optional: share this SAGE → host ${peerName}`}</h4>
+                    <p>${localIsHost ? `${peerName} is the guest. Choose which domains they can consume; they receive nothing unless you enable it here.` : `Guests do not share back by default. Enable a domain here only if you intentionally want the host to consume something from this SAGE.`} Read allows live lookup; Copy offers synchronized local copies that the receiver independently chooses to keep.</p>
                 </div>
             </div>
             <div class="fed-perm-toolbar">
@@ -12741,13 +12747,17 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 <button class="btn btn-primary" disabled=${(!dirty && !alignmentPending) || busy} onClick=${save}>${busy ? 'Saving…' : (!dirty && alignmentPending ? 'Retry copy alignment' : 'Save what I share')}</button>
                 <span class="muted">${dirty ? 'Unsaved permission changes' : (alignmentPending ? 'Copy delivery needs retry' : 'Saved')}</span>
             </div>
-        </section>
+        </section>` : html`<section class="fed-perm-section fed-guest-share-back">
+            <h4>You are the guest</h4>
+            <p class="muted">This SAGE is only consuming what ${peerName} shares. It is not sharing anything back.</p>
+            <button class="btn" onClick=${() => setShowGuestShareBack(true)}>Optionally share domains back to host…</button>
+        </section>`}
 
         <section class="fed-perm-section fed-perm-remote">
             <div class="fed-perm-section-head">
                 <div>
-                    <h4>What ${peerName} shares with this computer</h4>
-                    <p>They control Read and Copy permission on their computer. Write is reserved but not active yet. When Copy is offered, you independently choose whether this computer should actually keep a synchronized local copy.</p>
+                    <h4>${localIsHost ? `Guest ${peerName} → this SAGE (optional)` : `Host ${peerName} → this SAGE`}</h4>
+                    <p>${localIsHost ? `Guests do not share back by default. If ${peerName} deliberately opts in, their domains appear here.` : `${peerName} is the host and controls what this SAGE can consume. When Copy is offered, choose whether to keep a synchronized local copy here.`}</p>
                 </div>
                 <button class="btn" disabled=${refreshing} onClick=${refresh}>${refreshing ? 'Refreshing…' : 'Refresh'}</button>
             </div>
@@ -12756,7 +12766,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 <strong>${peerName} paused sharing.</strong> Effective Read and Copy access is off now. Their saved choices stay private on their SAGE and can resume when they turn sharing back on.
             </div>`}
             ${!remoteKnown && html`<div class="fed-perm-empty muted">Their SAGE has not reported its permission set yet.</div>`}
-            ${remoteKnown && !remotePaused && remoteRows.length === 0 && html`<div class="fed-perm-empty muted">They are not sharing any domains with this computer.</div>`}
+            ${remoteKnown && !remotePaused && remoteRows.length === 0 && html`<div class="fed-perm-empty muted">${localIsHost ? `${peerName} is not sharing anything back to this SAGE.` : `${peerName} is not sharing any domains with this SAGE.`}</div>`}
             ${remoteRows.length > 0 && html`<div>
                 <div class="fed-perm-table" role="table" aria-label=${`Domains ${peerName} shares with this computer`}>
                 <div class="fed-perm-grid fed-perm-grid-copy-choice fed-perm-grid-head" role="row">
@@ -12925,8 +12935,8 @@ function FederationMasterSwitch({ onChange }) {
 }
 
 // NetworkNameEditor - inline rename of THIS network's friendly label. The label
-// is what peers see during a join (instead of the raw chain id); the chain id
-// stays the immutable technical identity, shown small beneath.
+// is what peers see during a join. The immutable chain id remains protocol
+// plumbing and is deliberately absent from normal operator UI.
 function NetworkNameEditor() {
     const [st, setSt] = useState(null);   // {name, chain_id, configurable}
     const [editing, setEditing] = useState(false);
@@ -12934,7 +12944,7 @@ function NetworkNameEditor() {
     const [busy, setBusy] = useState(false);
     useEffect(() => { fedGetNetworkName().then(setSt).catch(() => setSt(null)); }, []);
     if (!st) return null;
-    const display = st.name || st.chain_id;
+    const display = st.name || 'Name this SAGE';
     const save = async () => {
         setBusy(true);
         try {
@@ -12951,7 +12961,6 @@ function NetworkNameEditor() {
                 <div>
                     <div class="fed-netname-label muted">Your network</div>
                     <div class="fed-netname-value">${display}</div>
-                    ${st.name ? html`<div class="fed-netname-id muted" title="The permanent technical id — this never changes">id: <code>${st.chain_id}</code></div>` : ''}
                 </div>
                 ${st.configurable && html`<button class="btn" onClick=${() => { setDraft(st.name || ''); setEditing(true); }}>${st.name ? 'Rename' : 'Give it a name'}</button>`}
             </div>
@@ -12965,7 +12974,7 @@ function NetworkNameEditor() {
                     <button class="btn btn-primary" disabled=${busy} onClick=${save}>${busy ? '…' : 'Save'}</button>
                     <button class="btn" disabled=${busy} onClick=${() => setEditing(false)}>Cancel</button>
                 </div>
-                <div class="muted" style="font-size:12px;margin-top:4px;">A friendly label only. It doesn't change your permanent id and isn't used to verify anyone — the scan/spoken code still does that.</div>
+                <div class="muted" style="font-size:12px;margin-top:4px;">This is the name people see for this SAGE. The scan or spoken code still verifies identity when you connect.</div>
             </div>
         `}
     </div>`;
@@ -12981,23 +12990,31 @@ function SharingSyncGroupsPanel() {
     const [busy, setBusy] = useState('');
     const [openGroup, setOpenGroup] = useState('');
     const [drafts, setDrafts] = useState({});
+    const [creating, setCreating] = useState(false);
+    const [newGroupName, setNewGroupName] = useState('');
+    const [newGroupMembers, setNewGroupMembers] = useState([]);
     const loadGroups = async () => {
         try {
             const [result, domainResult, connectionResult] = await Promise.all([
                 fedGroups(), fedShareableDomains(), fedConnections(),
             ]);
-            setGroups(Array.isArray(result.groups) ? result.groups : []);
+            const nextGroups = Array.isArray(result.groups) ? result.groups : [];
+            setGroups(nextGroups);
             setLocalChain(result.local_chain_id || '');
             setShareableDomains(Array.isArray(domainResult.domains) ? domainResult.domains.filter(domain => domain.can_share) : []);
-            const active = Array.isArray(connectionResult.connections)
-                ? connectionResult.connections.filter(connection => connection.status === 'active' && !connection.expired)
-                : [];
-            setConnections(active);
+            const allConnections = Array.isArray(connectionResult.connections) ? connectionResult.connections : [];
+            const active = allConnections.filter(connection => connection.status === 'active' && !connection.expired);
             const statuses = await Promise.all(active.map(async connection => {
                 try { return [connection.remote_chain_id, await fedPeerStatus(connection.remote_chain_id)]; }
                 catch (e) { return [connection.remote_chain_id, { reachable: false }]; }
             }));
-            setReachability(Object.fromEntries(statuses));
+            const statusByChain = Object.fromEntries(statuses);
+            setReachability(statusByChain);
+            const namedConnections = allConnections.map(connection => ({
+                ...connection,
+                peer_name: statusByChain[connection.remote_chain_id]?.network_name || connection.peer_name,
+            }));
+            setConnections(namedConnections);
             setError('');
         } catch (e) { setError(String(e.message || e)); }
     };
@@ -13023,24 +13040,65 @@ function SharingSyncGroupsPanel() {
         return false;
     };
     const selected = event => Array.from(event.currentTarget.selectedOptions).map(option => option.value);
-    const connectionFor = chain => connections.find(connection => connection.remote_chain_id === chain);
-    const memberName = chain => {
-        const connection = connectionFor(chain);
-        return connection && (connection.peer_name || connection.remote_chain_id) || chain;
+    const createGroup = async event => {
+        event.preventDefault();
+        const name = newGroupName.trim();
+        if (!name || newGroupMembers.length < 2) return;
+        setBusy('group:create'); setError('');
+        let groupId = '';
+        try {
+            const result = await fedGroupCreate(name);
+            groupId = result.group_id;
+            const members = connections.filter(connection => newGroupMembers.includes(connection.remote_chain_id));
+            const invitations = await Promise.allSettled(members.map(connection =>
+                fedGroupMemberInvite(result.group_id, connection.remote_chain_id, connection.peer_agent_id, 'enrolled-no-sync')
+            ));
+            const failed = invitations.filter(invitation => invitation.status === 'rejected');
+            if (failed.length > 0) {
+                const sent = invitations.length - failed.length;
+                setError(`Group setup is incomplete: invitations reached ${sent} of ${invitations.length} SAGEs. Open the setup below to retry the remaining invitations. Nothing is shared until every selected SAGE has accepted.`);
+                showToast('Group setup needs attention — no domains are shared', 'warning');
+            } else {
+                showToast('Group created; waiting for invited SAGEs to accept', 'success');
+            }
+        } catch (e) {
+            const message = String(e.message || e);
+            setError(message); showToast(message, 'error');
+        }
+        setNewGroupName(''); setNewGroupMembers([]); setCreating(false);
+        if (groupId) setOpenGroup(groupId);
+        await loadGroups();
+        setBusy('');
     };
+    const connectionFor = chain => connections.find(connection => connection.remote_chain_id === chain);
+    const friendlyName = (chain, suppliedName) => {
+        if (suppliedName) return suppliedName;
+        const connection = connectionFor(chain);
+        if (connection && connection.peer_name) return connection.peer_name;
+        return chain === localChain ? 'This SAGE' : 'Other SAGE';
+    };
+    const memberName = member => friendlyName(member.chain_id, member.display_name);
+    const groupName = group => String(group.display_name || '').trim() || 'Sharing group';
     const health = member => String(member.health || member.catch_up_state || member.state || 'unknown').replaceAll('_', ' ');
     const when = value => value ? new Date(value).toLocaleString() : 'No successful sync recorded';
 
     return html`<section class="fed-groups" aria-labelledby="sharing-sync-title">
         <div class="fed-groups-head"><div>
-            <h2 id="sharing-sync-title">Sharing & Sync groups</h2>
-            <p class="muted">Manage N-member sharing, roles, domains, catch-up progress, and health separately from one-to-one trust connections.</p>
-        </div><button class="btn" onClick=${loadGroups} disabled=${busy !== ''}>Refresh</button></div>
+            <h2 id="sharing-sync-title">Sharing groups</h2>
+            <p class="muted">Groups are for a shared workspace with several SAGEs. For a direct 1:1 relationship, use the directional permissions on that trusted SAGE instead.</p>
+        </div><div class="fed-groups-actions"><button class="btn btn-primary" onClick=${() => setCreating(!creating)} disabled=${busy !== ''}>${creating ? 'Cancel' : 'Create group'}</button><button class="btn" onClick=${loadGroups} disabled=${busy !== ''}>Refresh</button></div></div>
         ${error && html`<div class="fed-err" role="alert">Sharing & Sync: ${error}</div>`}
+        ${creating && html`<form class="fed-group-create" onSubmit=${createGroup}>
+            <div><h3>Create a sharing group</h3><p class="muted">Choose at least two trusted SAGEs to join this SAGE. This starts a setup: nothing is shared until each invite is accepted. For one other SAGE, use the direct relationship above instead.</p></div>
+            <label>Group name<input required maxlength="96" value=${newGroupName} placeholder="e.g. Family research" onInput=${event => setNewGroupName(event.target.value)} autofocus /></label>
+            <label>Add trusted SAGEs<select multiple size="4" value=${newGroupMembers} onChange=${event => setNewGroupMembers(selected(event))}>${connections.filter(connection => connection.peer_agent_id).map(connection => html`<option key=${connection.remote_chain_id} value=${connection.remote_chain_id}>${connection.peer_name || 'Other SAGE'}</option>`)}</select><small class="muted">Choose two or more. Each selected SAGE must accept; no domains are shared during setup.</small></label>
+            <div><button class="btn btn-primary" type="submit" disabled=${busy !== '' || newGroupMembers.length < 2}>${busy === 'group:create' ? 'Creating…' : 'Create group'}</button><button class="btn" type="button" disabled=${busy !== ''} onClick=${() => setCreating(false)}>Cancel</button></div>
+        </form>`}
         ${groups === null && !error && html`<div class="muted" role="status">Loading Sharing & Sync groups…</div>`}
-        ${groups && groups.length === 0 && html`<div class="fed-group-empty muted">No synchronization groups are configured. Existing one-to-one connections remain unchanged.</div>`}
+        ${groups && groups.length === 0 && html`<div class="fed-group-empty muted">No sharing groups yet. Direct relationships use their own permissions; create a group only when several trusted SAGEs need the same workspace.</div>`}
         ${groups && groups.map((group, groupIndex) => {
             const groupId = group.group_id;
+            const displayName = groupName(group);
             const draft = drafts[groupId] || {};
             const panelId = 'sharing-sync-group-' + groupIndex;
             // Seed the selective-domains field from the node's full selector set
@@ -13067,40 +13125,55 @@ function SharingSyncGroupsPanel() {
             const existingMembers = new Set((group.members || []).map(member => member.chain_id));
             const inviteCandidates = connections.filter(connection =>
                 !existingMembers.has(connection.remote_chain_id) && connection.peer_agent_id);
+            const remoteMembers = (group.members || []).filter(member => member.chain_id !== localChain);
+            const groupReady = remoteMembers.length >= 2 && remoteMembers.every(member => member.state === 'active');
+            const activeRemoteMembers = remoteMembers.filter(member => {
+                const connection = connectionFor(member.chain_id);
+                return connection && connection.status === 'active' && !connection.expired;
+            });
             const liveMembers = (group.members || []).filter(member => {
                 if (member.chain_id === localChain) return true;
                 return reachability[member.chain_id] && reachability[member.chain_id].reachable;
             }).length;
+            const groupConnected = remoteMembers.length === 0 || activeRemoteMembers.length > 0;
+            const groupConnectionSummary = !groupReady
+                ? 'setup in progress'
+                : (activeRemoteMembers.length === 0 ? 'connection needs attention' : `${liveMembers} reachable`);
+            const canManageSharing = groupConnected && groupReady;
+            const memberConnectionState = member => {
+                if (member.chain_id === localChain) return health(member);
+                const connection = connectionFor(member.chain_id);
+                if (!connection) return 'not connected';
+                if (connection.expired) return 'connection expired';
+                if (connection.status !== 'active') return 'connection ended';
+                if (!reachability[member.chain_id] || !reachability[member.chain_id].reachable) return 'offline';
+                return member.health === 'catching_up' ? 'online · syncing' : 'online · ' + health(member);
+            };
             return html`<article class="fed-group-card" key=${groupId}>
                 <button class="fed-group-summary" aria-expanded=${openGroup === groupId} aria-controls=${panelId} onClick=${() => setOpenGroup(openGroup === groupId ? '' : groupId)}>
-                    <span><strong>${group.display_name || 'Unnamed sharing group'}</strong><small>${(group.members || []).length} members · ${liveMembers} online · ${(group.shared_domains || []).length} shared domains · ${group.is_controller ? 'you manage this group' : 'controller managed elsewhere'}</small></span>
+                    <span><strong>${displayName}</strong><small>${(group.members || []).length} members · ${groupConnectionSummary} · ${(group.shared_domains || []).length} shared domains · ${group.is_controller ? 'you own this group' : `${friendlyName(group.controller_chain_id, group.controller_display_name)} owns this group`}</small></span>
                     <span aria-hidden="true">${openGroup === groupId ? '▾' : '▸'}</span>
                 </button>
                 ${openGroup === groupId && html`<div id=${panelId} class="fed-group-detail">
-                    <dl class="fed-group-facts">
-                        <div><dt>Group ID</dt><dd><code>${groupId}</code></dd></div>
-                        <div><dt>Controller</dt><dd>${memberName(group.controller_chain_id)} <code>${group.controller_chain_id}</code>${group.is_controller ? ' (this node)' : ''}</dd></div>
-                        <div><dt>Roster revision</dt><dd>${group.roster_revision ?? 'unknown'}</dd></div>
-                        <div><dt>Journal head</dt><dd><code>${group.roster_journal_head || 'not reported'}</code></dd></div>
-                        <div><dt>Epoch</dt><dd><code>${group.epoch}</code></dd></div>
-                    </dl>
+                    ${!groupReady && html`<p class="fed-group-connection-warning"><strong>Group setup in progress.</strong> Invite at least two trusted SAGEs and wait for every invite to be accepted. Nothing is shared until setup is complete.</p>`}
+                    ${groupReady && !groupConnected && html`<p class="fed-group-connection-warning"><strong>The group owner connection needs attention.</strong> This saved group is not currently live for this SAGE. Retry the trusted connection to ${friendlyName(group.controller_chain_id, group.controller_display_name)}; sharing changes stay locked until that owner link is active again.</p>`}
                     ${group.is_controller && html`<form class="fed-group-rename" onSubmit=${async event => {
                         event.preventDefault();
                         const name = String(draft.name || '').trim();
-                        if (!name) return;
+                        if (!groupConnected || !name) return;
                         if (!await showConfirmation('Rename this sharing group to “' + name + '”? The stable group ID stays unchanged.', { title: 'Rename sharing group?', confirmLabel: 'Rename group', tone: 'primary' })) return;
                         mutate(groupId + ':rename', () => fedGroupRename(groupId, name), 'Group renamed');
-                    }}><label>Group name<input required maxlength="96" value=${draft.name !== undefined ? draft.name : (group.display_name || '')} placeholder="e.g. Family research sync" onInput=${event => patchDraft(groupId, { name: event.target.value })} /></label><button class="btn" type="submit" disabled=${busy !== ''}>Rename group</button><small class="muted">The name is shared with every member. The technical group ID remains unchanged.</small></form>`}
+                    }}><div><h3>Group name</h3><p class="muted">Shared with every member of this group.</p></div><label><span class="sr-only">Group name</span><input required maxlength="96" disabled=${!groupConnected} value=${draft.name !== undefined ? draft.name : (group.display_name || '')} placeholder="e.g. Family research sync" onInput=${event => patchDraft(groupId, { name: event.target.value })} /></label><button class="btn" type="submit" disabled=${busy !== '' || !groupConnected}>Rename group</button></form>`}
                     <h3>Members and catch-up</h3>
                     <div class="fed-group-table-wrap"><table class="fed-group-table">
                         <thead><tr><th scope="col">Member</th><th scope="col">Role</th><th scope="col">Health</th><th scope="col">Backlog</th><th scope="col">Last successful sync</th><th scope="col">Actions</th></tr></thead>
                         <tbody>${(group.members || []).map(member => html`<tr key=${member.chain_id}>
-                            <th scope="row"><strong>${memberName(member.chain_id)}</strong><br /><code>${member.chain_id}</code>${member.chain_id === localChain && html`<span class="fed-group-local">this node</span>`}</th>
-                            <td>${member.role.replaceAll('-', ' ')}</td><td><span class="fed-group-health">${member.chain_id === localChain ? health(member) : (!reachability[member.chain_id] || !reachability[member.chain_id].reachable ? 'offline' : (member.health === 'catching_up' ? 'online · syncing' : 'online · ' + health(member)))}</span></td>
+                            <th scope="row"><strong>${memberName(member)}</strong>${member.chain_id === localChain && html`<span class="fed-group-local">this SAGE</span>`}</th>
+                            <td>${member.role.replaceAll('-', ' ')}</td><td><span class="fed-group-health">${memberConnectionState(member)}</span></td>
                             <td>${member.peer_delivery ? member.peer_delivery.backlog : '—'}</td>
                             <td><time datetime=${member.peer_delivery && member.peer_delivery.last_delivered_at || ''}>${when(member.peer_delivery && member.peer_delivery.last_delivered_at)}</time></td>
-                            <td>${group.is_controller && member.chain_id !== localChain && !['removed', 'left'].includes(member.state) && html`<button class="btn btn-danger" disabled=${busy !== ''} onClick=${async () => {
-                                if (!await showConfirmation('Remove ' + member.chain_id + ' from ' + (group.display_name || groupId) + '? Group delivery and consent are revoked; rejoining requires a fresh signed invite.', { title: 'Remove group member?', confirmLabel: 'Remove member', tone: 'danger' })) return;
+                            <td>${group.is_controller && member.chain_id !== localChain && !['removed', 'left'].includes(member.state) && html`<button class="btn btn-danger" disabled=${busy !== '' || !groupConnected} onClick=${async () => {
+                                if (!await showConfirmation('Remove ' + memberName(member) + ' from ' + displayName + '? Group delivery and consent are revoked; rejoining requires a fresh signed invite.', { title: 'Remove group member?', confirmLabel: 'Remove member', tone: 'danger' })) return;
                                 mutate(groupId + ':remove:' + member.chain_id, () => fedGroupMemberRemove(groupId, member.chain_id), 'Member removed and group access revoked');
                             }}>Remove</button>`}</td>
                         </tr>`)}</tbody>
@@ -13109,33 +13182,33 @@ function SharingSyncGroupsPanel() {
                         <form onSubmit=${async event => {
                             event.preventDefault();
                             const role = currentRole;
-                            if (!await showConfirmation('Change this node’s role in ' + (group.display_name || groupId) + ' to ' + role + '? Selective domains are an explicit receive-consent subset.', { title: 'Change synchronization role?', confirmLabel: 'Apply role', tone: 'primary' })) return;
+                            if (!canManageSharing || !await showConfirmation('Change this node’s role in ' + displayName + ' to ' + role + '? Selective domains are an explicit receive-consent subset.', { title: 'Change synchronization role?', confirmLabel: 'Apply role', tone: 'primary' })) return;
                             mutate(groupId + ':role', () => fedGroupSelfRole(groupId, role, selectedDomainsValue), 'Local synchronization role updated');
                         }}>
                             <h4>This node’s synchronization role</h4>
-                            <label>Role<select value=${currentRole} onChange=${event => patchDraft(groupId, { role: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
-                            ${currentRole === 'selective-sync' && html`<label>Domains this node receives<select multiple size="5" value=${selectedDomainsValue} onChange=${event => patchDraft(groupId, { selectedDomains: selected(event) })}>${shareableDomains.map(domain => html`<option value=${domain.domain} key=${domain.domain}>${domain.domain} · ${domain.memory_count || 0} memories</option>`)}</select><small class="muted">Choose existing domains. A selection becomes active when its owner shares it with this group.</small></label>`}
+                            <label>Role<select disabled=${!canManageSharing} value=${currentRole} onChange=${event => patchDraft(groupId, { role: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
+                            ${currentRole === 'selective-sync' && html`<label>Domains this node receives<select disabled=${!canManageSharing} multiple size="5" value=${selectedDomainsValue} onChange=${event => patchDraft(groupId, { selectedDomains: selected(event) })}>${shareableDomains.map(domain => html`<option value=${domain.domain} key=${domain.domain}>${domain.domain} · ${domain.memory_count || 0} memories</option>`)}</select><small class="muted">Choose existing domains. A selection becomes active when its owner shares it with this group.</small></label>`}
                             ${pendingOnly.length > 0 && html`<p class="fed-consent-pending">Waiting on the domain owner: <strong>${pendingOnly.join(', ')}</strong>. These selectors are saved, but nothing is delivered for them until that domain is shared with this group.</p>`}
-                            <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Apply role</button>
+                            <button class="btn btn-primary" type="submit" disabled=${busy !== '' || !canManageSharing}>Apply role</button>
                         </form>
                         <form onSubmit=${async event => {
                             event.preventDefault();
                             const domainsToShare = draft.domainsToShare || [];
-                            if (!domainsToShare.length || !await showConfirmation('Share ' + domainsToShare.join(', ') + ' with ' + (group.display_name || groupId) + '? Only existing domains you control are available.', { title: 'Share selected domains?', confirmLabel: 'Share domains', tone: 'primary' })) return;
+                            if (!canManageSharing || !domainsToShare.length || !await showConfirmation('Share ' + domainsToShare.join(', ') + ' with ' + displayName + '? Only existing domains you control are available.', { title: 'Share selected domains?', confirmLabel: 'Share domains', tone: 'primary' })) return;
                             const saved = await mutate(groupId + ':domain-add', () => Promise.all(domainsToShare.map(domain => fedGroupDomainAdd(groupId, domain, draft.clearance ?? 1))), 'Selected domains added');
                             if (saved) patchDraft(groupId, { domainsToShare: [] });
                         }}>
                             <h4>Share existing domains</h4>
-                            <label>Domains<select multiple required size="5" value=${draft.domainsToShare || []} onChange=${event => patchDraft(groupId, { domainsToShare: selected(event) })}>${shareableDomains.map(domain => html`<option value=${domain.domain} key=${domain.domain}>${domain.domain} · ${domain.memory_count || 0} memories</option>`)}</select><small class="muted">Only domains already on this SAGE and controlled by you are shown. Create a domain from Domains first if you need a new one.</small></label>
-                            <label>Maximum classification<select value=${draft.clearance ?? 1} onChange=${event => patchDraft(groupId, { clearance: event.target.value })}><option value="0">0 · Public</option><option value="1">1 · Internal</option><option value="2">2 · Confidential</option><option value="3">3 · Secret</option><option value="4">4 · Top secret</option></select></label>
-                            <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Add shared domain</button>
+                            <label>Domains<select disabled=${!canManageSharing} multiple required size="5" value=${draft.domainsToShare || []} onChange=${event => patchDraft(groupId, { domainsToShare: selected(event) })}>${shareableDomains.map(domain => html`<option value=${domain.domain} key=${domain.domain}>${domain.domain} · ${domain.memory_count || 0} memories</option>`)}</select><small class="muted">Only domains already on this SAGE and controlled by you are shown. Create a domain from Domains first if you need a new one.</small></label>
+                            <label>Maximum classification<select disabled=${!canManageSharing} value=${draft.clearance ?? 1} onChange=${event => patchDraft(groupId, { clearance: event.target.value })}><option value="0">0 · Public</option><option value="1">1 · Internal</option><option value="2">2 · Confidential</option><option value="3">3 · Secret</option><option value="4">4 · Top secret</option></select></label>
+                            <button class="btn btn-primary" type="submit" disabled=${busy !== '' || !canManageSharing}>Add shared domain</button>
                         </form>
                     </div>
                     <h3>Shared domains</h3>
                     ${(group.shared_domains || []).length === 0 && html`<p class="muted">No domains are shared through this group.</p>`}
                     <ul class="fed-group-domains">${(group.shared_domains || []).map(domain => html`<li key=${domain.domain_tag}>
-                        <span><strong>${domain.domain_tag}</strong><small>owner ${domain.owner_chain_id} · max classification ${domain.max_clearance}</small></span>
-                        ${domain.owner_chain_id === localChain && html`<button class="btn btn-danger" disabled=${busy !== ''} onClick=${async () => {
+                        <span><strong>${domain.domain_tag}</strong><small>owner ${friendlyName(domain.owner_chain_id)} · max classification ${domain.max_clearance}</small></span>
+                        ${domain.owner_chain_id === localChain && html`<button class="btn btn-danger" disabled=${busy !== '' || !canManageSharing} onClick=${async () => {
                             if (!await showConfirmation('Stop sharing “' + domain.domain_tag + '” through ' + (group.display_name || groupId) + '? Local data is preserved and group delivery stops.', { title: 'Remove shared domain?', confirmLabel: 'Stop sharing', tone: 'danger' })) return;
                             mutate(groupId + ':domain-remove:' + domain.domain_tag, () => fedGroupDomainRemove(groupId, domain.domain_tag), 'Shared domain removed');
                         }}>Stop sharing</button>`}
@@ -13143,21 +13216,21 @@ function SharingSyncGroupsPanel() {
                     ${group.is_controller && html`<form class="fed-group-invite" onSubmit=${async event => {
                         event.preventDefault();
                         const connection = connections.find(candidate => candidate.remote_chain_id === draft.inviteChain);
-                        if (!connection || !connection.peer_agent_id) return;
+                        if (!groupConnected || !connection || !connection.peer_agent_id) return;
                         const chain = connection.remote_chain_id;
                         const pubkey = connection.peer_agent_id;
                         const role = draft.inviteRole || 'enrolled-no-sync';
-                        if (!await showConfirmation('Invite or re-bootstrap ' + chain + ' in ' + (group.display_name || groupId) + ' as ' + role + '? The remote operator must cryptographically co-sign.', { title: 'Invite group member?', confirmLabel: 'Send invite', tone: 'primary' })) return;
+                        if (!await showConfirmation('Invite or re-bootstrap ' + friendlyName(chain, connection.peer_name) + ' in ' + displayName + ' as ' + role + '? The remote operator must cryptographically co-sign.', { title: 'Invite group member?', confirmLabel: 'Send invite', tone: 'primary' })) return;
                         const saved = await mutate(groupId + ':invite', () => fedGroupMemberInvite(groupId, chain, pubkey, role, draft.inviteSelected || [], draft.inviteOwned || []), 'Invitation sent — the member will appear as pending until they accept');
                         if (saved) patchDraft(groupId, { inviteChain: '', inviteSelected: [], inviteOwned: [] });
                     }}>
                         <h3>Add a member</h3><p class="muted">Choose a SAGE that is already trusted. Its verified operator identity is used automatically; the remote operator must still accept.</p>
-                        ${inviteCandidates.length > 0 ? html`<label>Trusted SAGE<select required value=${draft.inviteChain || ''} onChange=${event => patchDraft(groupId, { inviteChain: event.target.value })}><option value="" disabled>Select a trusted SAGE…</option>${inviteCandidates.map(connection => html`<option value=${connection.remote_chain_id} key=${connection.remote_chain_id}>${connection.peer_name || connection.remote_chain_id} · ${connection.remote_chain_id}</option>`)}</select></label>` : html`<p class="muted">Every trusted SAGE is already in this group, or no trusted SAGE is available. Pair a new SAGE above, then return here to add it.</p>`}
-                        <label>Role<select value=${draft.inviteRole || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { inviteRole: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
-                        ${draft.inviteRole === 'selective-sync' && html`<label>Domains they may receive<select multiple size="4" value=${draft.inviteSelected || []} onChange=${event => patchDraft(groupId, { inviteSelected: selected(event) })}>${(group.shared_domains || []).map(domain => html`<option value=${domain.domain_tag} key=${domain.domain_tag}>${domain.domain_tag}</option>`)}</select></label>`}
-                        <button class="btn btn-primary" type="submit" disabled=${busy !== '' || !inviteCandidates.length}>Invite member</button>
+                        ${inviteCandidates.length > 0 ? html`<label>Trusted SAGE<select disabled=${!groupConnected} required value=${draft.inviteChain || ''} onChange=${event => patchDraft(groupId, { inviteChain: event.target.value })}><option value="" disabled>Select a trusted SAGE…</option>${inviteCandidates.map(connection => html`<option value=${connection.remote_chain_id} key=${connection.remote_chain_id}>${connection.peer_name || 'Other SAGE'}</option>`)}</select></label>` : html`<p class="muted">Every trusted SAGE is already in this group, or no trusted SAGE is available. Pair a new SAGE above, then return here to add it.</p>`}
+                        <label>Role<select disabled=${!groupConnected} value=${draft.inviteRole || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { inviteRole: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
+                        ${draft.inviteRole === 'selective-sync' && html`<label>Domains they may receive<select disabled=${!groupConnected} multiple size="4" value=${draft.inviteSelected || []} onChange=${event => patchDraft(groupId, { inviteSelected: selected(event) })}>${(group.shared_domains || []).map(domain => html`<option value=${domain.domain_tag} key=${domain.domain_tag}>${domain.domain_tag}</option>`)}</select></label>`}
+                        <button class="btn btn-primary" type="submit" disabled=${busy !== '' || !groupConnected || !inviteCandidates.length}>Invite member</button>
                     </form>`}
-                    ${!group.is_controller && html`<p class="fed-consent-pending">Only <strong>${memberName(group.controller_chain_id)}</strong> controls membership for this group. Ask that node’s operator to use <em>Add a member</em>.</p>`}
+                    ${!group.is_controller && html`<p class="fed-consent-pending"><strong>${friendlyName(group.controller_chain_id, group.controller_display_name)}</strong> owns this group. You are a member; ask its owner to use <em>Add a member</em>.</p>`}
                 </div>`}
             </article>`;
         })}
@@ -13167,11 +13240,14 @@ function SharingSyncGroupsPanel() {
 // FederationPage - the 8th sidebar section landing: role fork + connections list.
 function FederationPage() {
     const [mode, setMode] = useState('landing'); // landing | guest | host
+    const [recoveryPeer, setRecoveryPeer] = useState('');
     const [conns, setConns] = useState(null);
     const [localChain, setLocalChain] = useState('');
     const [err, setErr] = useState('');
     const [remoteNotice, setRemoteNotice] = useState(null);
+    const [connectionReachability, setConnectionReachability] = useState({});
     const lastGoodConns = useRef(null);
+    const lastRemoteRevokeKey = useRef('');
 
     const load = async () => {
         try {
@@ -13181,7 +13257,7 @@ function FederationPage() {
             if (previous) {
                 const previouslyActive = new Set(previous.filter(c => c.status === 'active' && !c.expired).map(c => c.remote_chain_id));
                 next.filter(c => c.ended_by === 'revoked_by_peer' && previouslyActive.has(c.remote_chain_id))
-                    .forEach(c => showToast(`${c.peer_name || c.remote_chain_id} revoked this connection. Access has stopped.`, 'warning'));
+                    .forEach(c => showToast(`${c.peer_name || 'Other SAGE'} revoked this connection. Access has stopped.`, 'warning'));
             }
             const latestRemoteRevoke = next.filter(c => c.ended_by === 'revoked_by_peer')
                 .sort((a, b) => String(b.ended_at || '').localeCompare(String(a.ended_at || '')))[0] || null;
@@ -13190,10 +13266,19 @@ function FederationPage() {
                 let dismissed = false;
                 try { dismissed = localStorage.getItem(key) === '1'; } catch (e) {}
                 setRemoteNotice(dismissed ? null : { ...latestRemoteRevoke, dismissKey: key });
+                if (!dismissed && lastRemoteRevokeKey.current !== key) setShowPast(true);
+                lastRemoteRevokeKey.current = key;
             } else {
                 setRemoteNotice(null);
+                lastRemoteRevokeKey.current = '';
             }
             lastGoodConns.current = next;
+            const active = next.filter(connection => connection.status === 'active' && !connection.expired);
+            const probes = await Promise.all(active.map(async connection => {
+                try { return [connection.remote_chain_id, await fedPeerStatus(connection.remote_chain_id)]; }
+                catch (e) { return [connection.remote_chain_id, { reachable: false }]; }
+            }));
+            setConnectionReachability(Object.fromEntries(probes));
             setConns(next); setLocalChain(r.local_chain_id || ''); setErr('');
         }
         catch (e) {
@@ -13222,7 +13307,7 @@ function FederationPage() {
     const [fedOn, setFedOn] = useState(null); // master switch: null=unknown, then bool
     const pause = async (conn, paused) => {
         if (paused && !await showConfirmation(
-            `Pause sharing with ${conn.peer_name || conn.remote_chain_id}? Live Read, Copy, and agent work requests stop immediately. Your trusted pairing, selected domains, and per-agent work-request switches stay saved, so Resume is one click.`,
+            `Pause sharing with ${conn.peer_name || 'Other SAGE'}? Live Read, Copy, and agent work requests stop immediately. Your trusted pairing, selected domains, and per-agent work-request switches stay saved, so Resume is one click.`,
             { title: 'Pause sharing?', confirmLabel: 'Pause sharing', tone: 'primary' }
         )) return;
         setBusyChain(conn.remote_chain_id);
@@ -13233,20 +13318,38 @@ function FederationPage() {
         } catch (e) { showToast(String(e.message || e), 'error'); }
         setBusyChain('');
     };
-    const revoke = async (chain) => {
+    const revoke = async (conn) => {
+        const chain = conn.remote_chain_id;
+        const peerName = conn.peer_name || 'Other SAGE';
         if (!await showConfirmation(
-            `Permanently revoke trust with ${chain}? This stops access, notifies the peer when reachable, and requires the JOIN ceremony again if you reconnect. Use Pause sharing instead for a temporary stop.`,
+            `Permanently revoke trust with ${peerName}? This stops access, notifies the peer when reachable, and requires the JOIN ceremony again if you reconnect. Use Pause sharing instead for a temporary stop.`,
             { title: 'Revoke trust permanently?', confirmLabel: 'Revoke trust', tone: 'danger' }
         )) return;
         setBusyChain(chain);
         try {
             const result = await fedRevoke(chain);
             const note = result && result.peer_notified === false ? ' Peer notification could not be delivered.' : '';
-            showToast(`Trust revoked with ${chain}.${note}`, result && result.peer_notified === false ? 'warning' : 'success');
+            showToast(`Trust revoked with ${peerName}.${note}`, result && result.peer_notified === false ? 'warning' : 'success');
             setOpenChain('');
             await load();
         }
         catch (e) { showToast(String(e.message || e), 'error'); }
+        setBusyChain('');
+    };
+    const reconnect = async (conn) => {
+        const chain = conn.remote_chain_id;
+        const peerName = conn.peer_name || 'Other SAGE';
+        setBusyChain(chain);
+        try {
+            const status = await fedPeerStatus(chain);
+            setConnectionReachability(current => ({ ...current, [chain]: status }));
+            if (status.reachable) {
+                showToast(`Reached ${peerName}; the trusted pairing is active`, 'success');
+                await load();
+            } else {
+                showToast(`Couldn't reach ${peerName} yet. Your trusted pairing is still intact; make sure the other SAGE is running and reachable, then try again.`, 'warning');
+            }
+        } catch (e) { showToast(String(e.message || e), 'error'); }
         setBusyChain('');
     };
     const dismissRemoteNotice = () => {
@@ -13255,8 +13358,16 @@ function FederationPage() {
         }
         setRemoteNotice(null);
     };
+    const beginGuestRejoin = (connection) => {
+        setRecoveryPeer(connection && connection.peer_name ? connection.peer_name : 'the other SAGE');
+        setMode('guest');
+    };
+    const exitJoinWizard = () => {
+        setRecoveryPeer('');
+        setMode('landing');
+    };
 
-    if (mode === 'guest') return html`<div class="page fed-page"><${GuestJoinWizard} onExit=${() => setMode('landing')} /></div>`;
+    if (mode === 'guest') return html`<div class="page fed-page"><${GuestJoinWizard} recoveryPeer=${recoveryPeer} onExit=${exitJoinWizard} /></div>`;
     if (mode === 'host') return html`<div class="page fed-page"><${HostJoinWizard} onExit=${() => setMode('landing')} /></div>`;
 
     const liveConns = (conns || []).filter(c => c.status === 'active' && !c.expired);
@@ -13272,60 +13383,64 @@ function FederationPage() {
             ${err && html`<div class="fed-err" role="alert">Couldn't load connections: ${err}</div>`}
             ${remoteNotice && html`<div class="fed-peer-revoke-notice" role="status">
                 <div>
-                    <strong>${remoteNotice.peer_name || remoteNotice.remote_chain_id} ended this connection</strong>
-                    <p>${remoteNotice.ended_message || 'The other SAGE revoked the trusted link. Read and Copy access stopped immediately.'}</p>
+                    <strong>${remoteNotice.peer_name || 'Other SAGE'} ended this connection</strong>
+                    <p>${remoteNotice.ended_message || 'The other SAGE revoked the trusted link. Read and Copy access stopped immediately.'} To reconnect, ask them to create a new connection code, then scan or paste it here.</p>
                 </div>
-                <button class="btn" aria-label="Dismiss connection-ended notice" onClick=${dismissRemoteNotice}>Dismiss</button>
+                <div class="fed-peer-revoke-actions">
+                    ${fedOn && html`<button class="btn btn-primary" onClick=${() => beginGuestRejoin(remoteNotice)}>Reconnect with ${remoteNotice.peer_name || 'this SAGE'}</button>`}
+                    <button class="btn" aria-label="Dismiss connection-ended notice" onClick=${dismissRemoteNotice}>Dismiss</button>
+                </div>
             </div>`}
             ${fedOn === false && html`<div class="fed-off-note muted">Federation is off, so joining or hosting a connection is unavailable. Turn it on above to connect.</div>`}
             ${fedOn && html`<${FederationWarmup} onState=${(ready) => setWarming(!ready)} />`}
             ${fedOn && !warming && html`<div class="fed-roles">
                 <button class="fed-role-card" onClick=${() => setMode('guest')}>
                     <div class="fed-role-glyph">${icons.federation}</div>
-                    <div class="fed-role-title">Join someone's network</div>
-                    <div class="fed-role-desc">They'll show you a code to scan.</div>
+                    <div class="fed-role-title">Join another SAGE as guest</div>
+                    <div class="fed-role-desc">They are the host and choose what this SAGE can consume.</div>
                 </button>
                 <button class="fed-role-card" onClick=${() => setMode('host')}>
                     <div class="fed-role-glyph">${icons.federation}</div>
-                    <div class="fed-role-title">Let someone join mine</div>
-                    <div class="fed-role-desc">You'll show a code for them to scan.</div>
+                    <div class="fed-role-title">Host a guest SAGE</div>
+                    <div class="fed-role-desc">You choose which domains the guest can consume.</div>
                 </button>
             </div>`}
-            ${fedOn && html`<${SharingSyncGroupsPanel} />`}
-
             ${(fedOn || (conns && conns.length > 0)) && html`<div class="fed-conns">
-                <h3>Your connections <${HelpTip} text="Each row is a trusted link to another SAGE. Expanding it shows two directional permission sets: what this computer grants them, and what they grant this computer. Each side controls only its own domains." /></h3>
+                <h3>Your trusted SAGEs <${HelpTip} text="A trusted SAGE is a live, approved link to another SAGE. Its sharing and sync controls only work while this link is active." /></h3>
                 ${liveConns.length > 0 && html`<div class="fed-conns-explain muted">The scan and spoken code establish <strong>trust</strong>. Open a connection to manage domain permissions. <strong>Pause</strong> temporarily stops what you share without losing the pairing; permanent revocation lives inside the connection details.</div>`}
                 ${conns === null && html`<div class="muted">Loading…</div>`}
                 ${conns && liveConns.length === 0 && html`
                     <${EmptyState} icon="federation"
-                        headline="No active connections"
+                        headline="No trusted SAGE is connected"
                         hint=${fedOn
                             ? "Link your whole SAGE to another SAGE to share memories across networks. Join someone's network with a code they share, or host one and hand out a code."
                             : "Turn federation on above to link your whole SAGE to another SAGE and share memories across networks."}
                         actionLabel=${fedOn ? 'Join someone’s network' : null}
                         onAction=${fedOn ? (() => setMode('guest')) : null} />
-                    ${localChain && html`<div class="muted" style="text-align:center;margin-top:4px;">Your network id: <code>${localChain}</code></div>`}
                 `}
-                ${liveConns.map(c => html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
+                ${liveConns.map(c => {
+                    const reachable = connectionReachability[c.remote_chain_id]?.reachable !== false;
+                    const role = c.local_role === 'host' ? 'you are host' : (c.local_role === 'guest' ? 'you are guest' : 'direct relationship');
+                    return html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
                     <div class="fed-conn-row">
                         <button class="fed-conn-main fed-conn-expand" aria-expanded=${openChain === c.remote_chain_id}
                             aria-controls=${`fed-connection-${c.remote_chain_id}`}
                             onClick=${() => setOpenChain(openChain === c.remote_chain_id ? '' : c.remote_chain_id)}>
-                            <span class="fed-conn-status ${c.sharing_paused ? 'paused' : 'on'}"></span>
-                            <span class="fed-conn-name" title=${c.peer_name ? c.remote_chain_id : ''}>${c.peer_name || c.remote_chain_id}</span>
-                            <span class="fed-conn-meta muted">${c.sharing_paused ? 'sharing paused · pairing preserved' : 'active · manage domain permissions'}</span>
+                            <span class="fed-conn-status ${reachable ? (c.sharing_paused ? 'paused' : 'on') : 'off'}"></span>
+                            <span class="fed-conn-name">${c.peer_name || 'Other SAGE'}</span>
+                            <span class="fed-conn-role">${role}</span>
+                            <span class="fed-conn-meta muted">${!reachable ? 'can’t reach this SAGE · pairing preserved' : (c.sharing_paused ? 'sharing paused · pairing preserved' : 'connected · manage sharing')}</span>
                             <span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>
                         </button>
-                        <button class="btn fed-conn-off ${c.sharing_paused ? 'btn-primary' : ''}"
+                        <button class="btn fed-conn-off ${!reachable || c.sharing_paused ? 'btn-primary' : ''}"
                             disabled=${busyChain === c.remote_chain_id}
-                            aria-label=${`${c.sharing_paused ? 'Resume' : 'Pause'} sharing with ${c.peer_name || c.remote_chain_id}`}
-                            onClick=${() => pause(c, !c.sharing_paused)}>${busyChain === c.remote_chain_id ? 'Working…' : (c.sharing_paused ? 'Resume sharing' : 'Pause sharing')}</button>
+                            aria-label=${!reachable ? `Retry connection to ${c.peer_name || 'Other SAGE'}` : `${c.sharing_paused ? 'Resume' : 'Pause'} sharing with ${c.peer_name || 'Other SAGE'}`}
+                            onClick=${() => !reachable ? reconnect(c) : pause(c, !c.sharing_paused)}>${busyChain === c.remote_chain_id ? 'Working…' : (!reachable ? 'Retry connection' : (c.sharing_paused ? 'Resume sharing' : 'Pause sharing'))}</button>
                     </div>
                     ${openChain === c.remote_chain_id && html`<div id=${`fed-connection-${c.remote_chain_id}`}>
-                        <${FedPermissionsPanel} conn=${c} revokeBusy=${busyChain === c.remote_chain_id} onRevoke=${() => revoke(c.remote_chain_id)} />
+                        <${FedPermissionsPanel} conn=${c} revokeBusy=${busyChain === c.remote_chain_id} onRevoke=${() => revoke(c)} />
                     </div>`}
-                </div>`)}
+                </div>`; })}
                 ${pastConns.length > 0 && html`<div class="fed-past">
                     <button class="fed-past-toggle" onClick=${() => setShowPast(!showPast)} aria-expanded=${showPast} aria-controls="fed-past-connections">
                         <span>${showPast ? '▾' : '▸'}</span> Past connections (${pastConns.length})
@@ -13333,14 +13448,16 @@ function FederationPage() {
                     ${showPast && html`<div class="fed-past-list" id="fed-past-connections">
                         ${pastConns.map(c => html`<div class="fed-conn-row fed-conn-past" key=${c.remote_chain_id}>
                             <span class="fed-conn-status off"></span>
-                            <span class="fed-conn-name" title=${c.peer_name ? c.remote_chain_id : ''}>${c.peer_name || c.remote_chain_id}</span>
+                            <span class="fed-conn-name">${c.peer_name || 'Other SAGE'}</span>
                             <span class="fed-conn-meta muted">${c.expired ? 'expired' : (c.ended_by === 'revoked_by_peer' ? 'revoked by peer' : 'revoked')} · audit history</span>
                             ${c.ended_message && html`<span class="fed-past-reason muted">${c.ended_message}</span>`}
                             ${c.ended_at && html`<time class="fed-past-time muted" datetime=${c.ended_at}>${new Date(c.ended_at).toLocaleString()}</time>`}
+							${fedOn && html`<span class="fed-past-actions"><button class="btn" onClick=${() => beginGuestRejoin(c)}>Reconnect with ${c.peer_name || 'this SAGE'}</button></span>`}
                         </div>`)}
                     </div>`}
                 </div>`}
             </div>`}
+            ${fedOn && html`<${SharingSyncGroupsPanel} />`}
         </div>
     </div>`;
 }

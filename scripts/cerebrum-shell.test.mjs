@@ -251,18 +251,32 @@ test('federation agent contacts stay administrative and default-off', () => {
         'the federation panel must not grow a human chat composer');
 });
 
-test('federation keeps temporary pause separate from permanent revocation and hides past clutter', () => {
+test('federation keeps temporary pause separate from permanent revocation and makes peer revocation recoverable', () => {
     const page = appSource.slice(appSource.indexOf('function FederationPage('), appSource.indexOf('// PAGE_LABELS'));
     const panel = appSource.slice(appSource.indexOf('function FedPermissionsPanel('), appSource.indexOf('// FederationWarmup'));
     assert.match(apiSource, /connections\/\$\{encodeURIComponent\(chainId\)\}\/pause/);
     assert.match(page, /Resume sharing/);
-    assert.match(page, /aria-label=\$\{`\$\{c\.sharing_paused \? 'Resume' : 'Pause'\} sharing with/,
-        'pause controls must identify the connection they affect');
+    assert.match(page, /aria-label=\$\{!reachable \? `Retry connection to \$\{c\.peer_name/,
+        'connection controls must identify the SAGE they affect');
     assert.match(page, /pairing preserved/);
     assert.match(panel, /Revoke trust permanently/);
     assert.match(page, /Past connections \(\$\{pastConns\.length\}\)/);
-    assert.match(page, /showPast && html/,
-        'immutable past rows must remain collapsed until the operator asks for history');
+    assert.match(page, /if \(!dismissed && lastRemoteRevokeKey\.current !== key\) setShowPast\(true\)/,
+        'a newly received peer revocation must expose its audit record instead of hiding the recovery path');
+    assert.match(page, /Reconnect with \$\{remoteNotice\.peer_name \|\| 'this SAGE'\}/,
+        'the removal notice must offer the affected guest a direct recovery action');
+    assert.match(page, /beginGuestRejoin\(remoteNotice\)/,
+        'the recovery action must preserve the former host identity');
+    assert.match(page, /Reconnect with \$\{c\.peer_name \|\| 'this SAGE'\}/,
+        'the past connection row must use an unambiguous reconnect action');
+    assert.doesNotMatch(page, /Host a new guest/,
+        'a guest whose host revoked trust must not be offered the misleading inverse role as recovery');
+    const guestWizard = appSource.slice(appSource.indexOf('function GuestJoinWizard('), appSource.indexOf('// HostJoinWizard'));
+    assert.match(guestWizard, /function GuestJoinWizard\(\{ onExit, recoveryPeer \}\)/);
+    assert.match(guestWizard, /Ask <strong>\$\{recoveryPeer\}<\/strong> to create a new connection code/,
+        'the reconnect screen must explain that the former host must issue a fresh ceremony code');
+    assert.match(guestWizard, /They will need to approve the reconnection before anything can be shared/,
+        'the UI must explain both the safety boundary and the next human action');
     assert.match(panel, /remotePaused/);
     assert.match(panel, /paused sharing/);
     assert.match(page, /lastGoodConns/);
@@ -272,14 +286,20 @@ test('federation keeps temporary pause separate from permanent revocation and hi
     assert.match(page, /sage-fed-revoke-dismissed/,
         'peer revocation must have a persistent, dismissible explanation outside collapsed history');
     assert.match(page, /ended_at/);
+    assert.match(page, /const reconnect = async \(conn\)/,
+        'an intact but unreachable relationship must offer a retry path');
+    assert.match(page, /Join another SAGE as guest/);
+    assert.match(page, /Host a guest SAGE/);
 });
 
 test('Sharing & Sync groups expose health and guarded operator controls', () => {
     const panel = appSource.slice(appSource.indexOf('function SharingSyncGroupsPanel('), appSource.indexOf('// FederationPage'));
     assert.match(apiSource, /export function fedGroups\(\)/);
+    assert.match(apiSource, /export function fedGroupCreate\(name\)/,
+        'a group must be explicitly created instead of being implied by a connection');
     assert.match(apiSource, /groups\/\$\{encodeURIComponent\(groupId\)\}\/domains/);
     assert.match(apiSource, /entry_type: 'member_remove', payload: \{ member_chain: memberChain \}/);
-    assert.match(panel, /Sharing & Sync groups/);
+    assert.match(panel, /Sharing & Sync/);
     assert.match(panel, /Members and catch-up/);
     assert.match(panel, /member\.peer_delivery\.backlog/);
     assert.match(panel, /last_delivered_at/,
@@ -292,9 +312,34 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
     assert.match(apiSource, /export function fedGroupRename\(groupId, name\)/);
     assert.match(panel, /Group name/,
         'controllers must be able to give the group a friendly replicated label');
+    assert.match(panel, /const groupName = group => String\(group\.display_name \|\| ''\)\.trim\(\) \|\| 'Sharing group';/,
+        'legacy nameless groups need a neutral fallback instead of an alarming unnamed label');
+    assert.doesNotMatch(panel, /Unnamed sharing group/,
+        'new and legacy groups must not render an unresolved-name placeholder');
+    assert.match(panel, /class="fed-group-rename"/,
+        'rename controls need their own structured panel rather than flowing into group facts');
+    assert.match(panel, /connection needs attention/,
+        'a missing trust link must not be misrepresented as the other SAGE being offline');
+    assert.doesNotMatch(panel, /<code>\$\{groupId\}<\/code>/,
+        'group implementation IDs must never be shown to operators');
+    assert.doesNotMatch(panel, /\$\{group\.controller_chain_id\}/,
+        'controller protocol identities must never be shown to operators');
+    assert.doesNotMatch(panel, /<br \/><code>\$\{member\.chain_id\}<\/code>/,
+        'raw chain IDs must not displace the friendly member names in the roster');
     assert.match(panel, /Share existing domains/,
         'sharing must select existing controlled domains instead of accepting fragile free text');
     assert.match(panel, /Add a member/);
+    assert.match(panel, /Create a sharing group/);
+    assert.match(panel, /Add trusted SAGEs/,
+        'group membership must be chosen from existing trusted SAGEs');
+    assert.match(panel, /newGroupMembers\.length < 2/,
+        'a 1:1 relationship must not be accidentally turned into a group');
+    assert.match(appSource, /direct 1:1 relationship/,
+        'the direct relationship and group models must be visibly separate');
+    assert.match(appSource, /Guests do not share back by default/,
+        'guest-to-host sharing must be an explicit opt-in rather than an implied symmetric grant');
+    assert.match(appSource, /You are the guest/,
+        'guest connections must clearly explain their consumption-only default');
     assert.match(panel, /Select a trusted SAGE/,
         'adding a member must choose an established trust connection, not copy a key by hand');
     assert.match(panel, /online · syncing/,

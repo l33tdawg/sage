@@ -126,6 +126,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	// locally authored; the emit self-check refuses an entry whose resolver-pinned
 	// key is not this node's, so a caller can never author for another owner.
 	fr.Get("/v1/dashboard/federation/groups", h.handleFedGroupList)
+	fr.Post("/v1/dashboard/federation/groups", h.handleFedGroupCreate)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/domains", h.handleFedGroupDomainAdd)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/domains/remove", h.handleFedGroupDomainRemove)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/self-role", h.handleFedGroupSelfRole)
@@ -753,6 +754,7 @@ type FedConnection struct {
 	RemoteChainID  string   `json:"remote_chain_id"`
 	PeerName       string   `json:"peer_name,omitempty"`     // friendly label the peer chose (cosmetic)
 	PeerAgentID    string   `json:"peer_agent_id,omitempty"` // frozen JOIN operator key; group invite only
+	LocalRole      string   `json:"local_role,omitempty"`    // host or guest in the original JOIN ceremony
 	Endpoint       string   `json:"endpoint"`
 	MaxClearance   int      `json:"max_clearance"`
 	AllowedDomains []string `json:"allowed_domains"`
@@ -849,6 +851,7 @@ func (h *DashboardHandler) handleFedConnections(w http.ResponseWriter, _ *http.R
 			if ss := h.syncStore(); ss != nil {
 				if control, controlErr := ss.GetSyncControl(context.Background(), rec.RemoteChainID); controlErr == nil && control != nil {
 					conn.PeerAgentID = control.PeerAgentID
+					conn.LocalRole = control.Role
 				}
 				if event, eventErr := ss.GetFederationConnectionEvent(context.Background(), rec.RemoteChainID); eventErr == nil && event != nil {
 					conn.EndedBy = event.Event
@@ -920,7 +923,7 @@ func (h *DashboardHandler) handleFedPeerStatus(w http.ResponseWriter, r *http.Re
 		fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "reachable": false, "error": err.Error()})
 		return
 	}
-	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "reachable": true, "peer_time": st.Time})
+	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "reachable": true, "peer_time": st.Time, "network_name": st.NetworkName})
 }
 
 // --- Host wizard ------------------------------------------------------------
@@ -1171,6 +1174,7 @@ type groupManagementDriver interface {
 	EmitDomainRemove(ctx context.Context, groupID, domainTag string) (store.SyncGroupLogEntry, error)
 	EmitSelfRoleChange(ctx context.Context, groupID, role string, selectedDomains []string) (store.SyncGroupLogEntry, error)
 	EmitGroupRename(ctx context.Context, groupID, name string) (store.SyncGroupLogEntry, error)
+	CreateSyncGroup(ctx context.Context, name string) (string, error)
 	EmitRosterControl(ctx context.Context, groupID, entryType string, payload map[string]string) (store.SyncGroupLogEntry, error)
 	EmitMemberInvite(ctx context.Context, groupID, memberChain, memberPubkey, role string, selectedDomains, ownedDomains []string) (store.SyncGroupLogEntry, error)
 	EmitEpochRotate(ctx context.Context, groupID, newEpoch, incomingChain, incomingPubkey string) (store.SyncGroupLogEntry, error)
@@ -1234,8 +1238,31 @@ func groupEmitResult(e store.SyncGroupLogEntry) map[string]any {
 	}
 }
 
+func (h *DashboardHandler) handleFedGroupCreate(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected {\"name\": \"...\"}.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	groupID, err := d.CreateSyncGroup(ctx, body.Name)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusCreated, map[string]string{"group_id": groupID})
+}
+
 type syncGroupMemberView struct {
 	ChainID                 string                        `json:"chain_id"`
+	DisplayName             string                        `json:"display_name,omitempty"`
 	Role                    string                        `json:"role"`
 	State                   string                        `json:"state"`
 	JoinedRevision          int64                         `json:"joined_revision"`
@@ -1342,6 +1369,23 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 		return
 	}
 	local := h.Federation.LocalChainID()
+	// A group is not a second kind of connection. A member consumes group policy
+	// through its controller/owner relationship, not through a mesh to every
+	// other member. A non-controller whose owner relationship was revoked must
+	// not see the group; the controller retains it for other valid members. A
+	// temporary outage retains the active agreement and therefore still shows it.
+	activePeers := map[string]bool{}
+	if h.BadgerStore != nil {
+		records, listErr := h.BadgerStore.ListCrossFed()
+		if listErr != nil {
+			fedWriteErr(w, http.StatusInternalServerError, "Failed to check federation relationships.")
+			return
+		}
+		now := time.Now().Unix()
+		for _, rec := range records {
+			activePeers[rec.RemoteChainID] = rec.Status == "active" && (rec.ExpiresAt == 0 || now < rec.ExpiresAt)
+		}
+	}
 	type domainView struct {
 		DomainTag    string `json:"domain_tag"`
 		OwnerChainID string `json:"owner_chain_id"`
@@ -1351,6 +1395,7 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 		GroupID           string                `json:"group_id"`
 		DisplayName       string                `json:"display_name,omitempty"`
 		Controller        string                `json:"controller_chain_id"`
+		ControllerName    string                `json:"controller_display_name,omitempty"`
 		Epoch             string                `json:"epoch"`
 		RosterRevision    int64                 `json:"roster_revision"`
 		RosterJournalHead string                `json:"roster_journal_head,omitempty"`
@@ -1360,24 +1405,62 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 		SharedDomains     []domainView          `json:"shared_domains"`
 	}
 	peerDelivery := make(map[string]store.SyncPeerDeliveryStatus)
+	peerNames, _ := ss.GetPeerNames(ctx)
+	if peerNames == nil {
+		peerNames = make(map[string]string)
+	}
+	if localName := strings.TrimSpace(h.Federation.NetworkName()); localName != "" {
+		peerNames[local] = localName
+	}
 	out := make([]groupView, 0, len(groups))
 	for i := range groups {
 		g := groups[i]
-		gv := groupView{
-			GroupID: g.GroupID, DisplayName: g.DisplayName,
-			Controller: g.ControllerChainID, Epoch: g.Epoch,
-			RosterRevision: g.RosterRevision, RosterJournalHead: g.RosterJournalHead,
-			IsController:  g.ControllerChainID == local,
-			Members:       []syncGroupMemberView{},
-			SharedDomains: []domainView{},
-		}
 		members, mErr := ss.ListSyncGroupMembers(ctx, g.GroupID)
 		if mErr != nil {
 			fedWriteErr(w, http.StatusInternalServerError, "Failed to read group members.")
 			return
 		}
+		// This node must still be an active participant. A controller's
+		// member_remove journal entry is deliberately retained locally for audit,
+		// but it must immediately remove the group from the evicted member's
+		// dashboard. Checking only the controller relationship leaves that member
+		// looking at a stale group forever, despite its own roster row being
+		// removed and all delivery consent already revoked.
+		localActive := false
+		for _, member := range members {
+			if member.MemberChainID == local && (member.MemberState == store.GroupMemberActive || member.MemberState == store.GroupMemberResyncing) {
+				localActive = true
+				break
+			}
+		}
+		if !localActive {
+			continue
+		}
+		if h.BadgerStore != nil && g.ControllerChainID != local && !activePeers[g.ControllerChainID] {
+			// A member needs its controller/owner link, not links to every other
+			// member. Requiring a mesh made a valid host-and-many-guests group vanish.
+			continue
+		}
+		gv := groupView{
+			GroupID: g.GroupID, DisplayName: g.DisplayName,
+			Controller: g.ControllerChainID, Epoch: g.Epoch,
+			ControllerName: peerNames[g.ControllerChainID],
+			RosterRevision: g.RosterRevision, RosterJournalHead: g.RosterJournalHead,
+			IsController:  g.ControllerChainID == local,
+			Members:       []syncGroupMemberView{},
+			SharedDomains: []domainView{},
+		}
 		for _, mem := range members {
+			// A removed/left member is retained in the local journal projection for
+			// audit and terminal delivery, not as a current group participant. Do
+			// not make the remaining people see an inflated member count or a stuck
+			// "setup in progress" card; omitting it also lets the owner issue the
+			// fresh signed invite required for a later rejoin.
+			if mem.MemberState == store.GroupMemberRemoved || mem.MemberState == store.GroupMemberLeft {
+				continue
+			}
 			member := syncGroupMemberProgress(g, mem, local)
+			member.DisplayName = peerNames[mem.MemberChainID]
 			consent, cErr := ss.ListPendingGroupMemberConsentDomains(ctx, g.GroupID, mem.MemberChainID)
 			if cErr != nil {
 				fedWriteErr(w, http.StatusInternalServerError, "Failed to read member consent domains.")
@@ -1425,7 +1508,9 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 		}
 		out = append(out, gv)
 	}
-	fedWriteJSON(w, http.StatusOK, map[string]any{"local_chain_id": local, "groups": out})
+	fedWriteJSON(w, http.StatusOK, map[string]any{
+		"local_chain_id": local, "local_network_name": peerNames[local], "groups": out,
+	})
 }
 
 // handleFedGroupDomainAdd authors an owner-unilateral domain_add (EmitDomainAdd):

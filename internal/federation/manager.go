@@ -259,11 +259,15 @@ type Manager struct {
 	// goroutine launches; nil when the drainer is disabled — nudgeSync is
 	// nil-safe. Wiring order matters: StartSyncDrainer runs before
 	// SetSyncNotifier in runServe, so the watcher never sees a half-built channel.
-	syncNudge     chan struct{}
-	syncStartOnce sync.Once
-	syncStopOnce  sync.Once
-	syncCancel    context.CancelFunc
-	syncWG        sync.WaitGroup
+	syncNudge chan struct{}
+	// syncJournalNudge wakes group-journal anti-entropy after a connection is
+	// restored or a person refreshes Groups. It is separate from syncNudge so
+	// ordinary memory commits do not cause full roster scans.
+	syncJournalNudge chan struct{}
+	syncStartOnce    sync.Once
+	syncStopOnce     sync.Once
+	syncCancel       context.CancelFunc
+	syncWG           sync.WaitGroup
 
 	// syncDigestFn is the anti-entropy seam (same pattern as syncPushFn):
 	// nil in production (m.SyncDigest), non-nil only in tests.

@@ -165,6 +165,21 @@ func (m *Manager) syncMetaFor(ctx context.Context, ss *store.SQLiteStore, id str
 // resend action). Nil-safe and non-blocking, like nudgeSync.
 func (m *Manager) NudgeSync() { m.nudgeSync() }
 
+// NudgeJournalReconcile asks the bounded group-journal anti-entropy worker to
+// run promptly. It is intentionally distinct from NudgeSync: normal memory
+// delivery must not trigger a roster scan, while restored trust and an explicit
+// Groups refresh should converge signed membership changes immediately.
+func (m *Manager) NudgeJournalReconcile() {
+	ch := m.syncJournalNudge
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
 // nudgeSync wakes the drainer without waiting for the ticker. Non-blocking
 // (buffered-1 channel: a pending nudge already covers this one) and nil-safe
 // (the drainer may be disabled — Postgres backend — or not started in tests).

@@ -462,12 +462,12 @@ func TestMemberInviteAcceptBootstrapConvergesWithoutRosterDiscoveryEscape(t *tes
 	}
 }
 
-// T2(b”): seedEnrollmentGroup (B2, hostConfirm seed) forms the host-controlled
-// 2-member roster: host is controller AND an active full-sync member, guest is
-// invited+activated. Idempotent — a repeat call for the same pair is a no-op.
+// Legacy enrollment imports still form a host-controlled 2-member roster so old
+// transcripts remain readable. Normal joins no longer call this helper.
 func TestSeedEnrollmentGroup(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	m.SetNetworkName("L33TDAWG SAGE")
 	attachBadger(t, m) // single-validator: validatorCount()==1 -> controller commits directly
 	guestPub, guestKey, _ := ed25519.GenerateKey(nil)
 	groupID := pairwiseGroupID("chain-local", "chain-guest", "epoch-1")
@@ -480,8 +480,12 @@ func TestSeedEnrollmentGroup(t *testing.T) {
 		t.Fatalf("seed enrollment group: %v", err)
 	}
 	g, _ := ms.GetSyncGroup(ctx, groupID)
-	if g == nil || g.ControllerChainID != "chain-local" {
+	if g == nil || g.ControllerChainID != "chain-local" || g.DisplayName != "L33TDAWG SAGE sharing group" {
 		t.Fatalf("group not seeded with local controller: %+v", g)
+	}
+	entries, _ := ms.ListSyncGroupLog(ctx, groupID, RosterSubchain, -1, 1)
+	if len(entries) != 1 || parseJournalPayload(entries[0].PayloadJSON)[pkDisplayName] != g.DisplayName {
+		t.Fatalf("group-create did not carry the signed display name: %+v", entries)
 	}
 	host, _ := ms.GetSyncGroupMember(ctx, groupID, "chain-local")
 	if host == nil || host.MemberState != store.GroupMemberActive || host.Role != store.GroupRoleFullSync {
@@ -499,6 +503,29 @@ func TestSeedEnrollmentGroup(t *testing.T) {
 	head2, _ := ms.GetSyncGroupSubchainHead(ctx, groupID, RosterSubchain)
 	if head1 == nil || head2 == nil || head1.Seq != head2.Seq {
 		t.Fatalf("re-seed must not append: %v -> %v", head1, head2)
+	}
+}
+
+func TestCreateSyncGroupStartsWithOnlyThisSAGE(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	attachBadger(t, m)
+
+	groupID, err := m.CreateSyncGroup(ctx, "Family research")
+	if err != nil {
+		t.Fatalf("create sync group: %v", err)
+	}
+	g, err := ms.GetSyncGroup(ctx, groupID)
+	if err != nil || g == nil || g.DisplayName != "Family research" || g.ControllerChainID != m.localChainID {
+		t.Fatalf("created group = %+v, err=%v", g, err)
+	}
+	members, err := ms.ListSyncGroupMembers(ctx, groupID)
+	if err != nil || len(members) != 1 || members[0].MemberChainID != m.localChainID || members[0].MemberState != store.GroupMemberActive {
+		t.Fatalf("new group members = %+v, err=%v", members, err)
+	}
+	entries, err := ms.ListSyncGroupLog(ctx, groupID, RosterSubchain, -1, 10)
+	if err != nil || len(entries) != 3 || entries[0].EntryType != "group_create" || entries[1].EntryType != "member_invite" || entries[2].EntryType != "member_activate" {
+		t.Fatalf("new group roster = %+v, err=%v", entries, err)
 	}
 }
 

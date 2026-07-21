@@ -31,11 +31,13 @@ package federation
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/store"
@@ -140,6 +142,54 @@ func (m *Manager) EmitGroupRename(ctx context.Context, groupID, name string) (st
 	payload := manifestPayload(g.RosterRevision+1, g.ManifestHash)
 	payload[pkDisplayName] = name
 	return m.EmitRosterControl(ctx, groupID, "manifest", payload)
+}
+
+// CreateSyncGroup creates an empty sharing workspace owned by this SAGE. A
+// trusted SAGE connection is deliberately NOT a group: the operator chooses
+// which connected SAGEs belong here afterwards through EmitMemberInvite.
+func (m *Manager) CreateSyncGroup(ctx context.Context, name string) (string, error) {
+	ss := m.syncStore()
+	if ss == nil {
+		return "", fmt.Errorf("group journal requires the SQLite store backend")
+	}
+	name = strings.TrimSpace(name)
+	if !validGroupDisplayName(name) {
+		return "", fmt.Errorf("group name must be 1..96 characters and cannot contain control characters")
+	}
+	entropy := make([]byte, 24)
+	if _, err := rand.Read(entropy); err != nil {
+		return "", fmt.Errorf("create group id: %w", err)
+	}
+	groupID := "grp-" + hex.EncodeToString(entropy)
+	epoch := "group-" + hex.EncodeToString(entropy[:12])
+	selfPub := hex.EncodeToString(m.agentPub)
+	if err := ss.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: groupID, ControllerChainID: m.localChainID,
+		ControllerAgentPubkey: selfPub, Epoch: epoch, DisplayName: name,
+	}); err != nil {
+		return "", err
+	}
+	if _, err := m.AppendGroupJournalEntry(ctx, groupID, RosterSubchain, "group_create",
+		m.localChainID, m.agentPub, m.agentKey, map[string]string{
+			pkEpoch: epoch, pkControllerChain: m.localChainID, pkControllerPubkey: selfPub, pkDisplayName: name,
+		}); err != nil {
+		return "", fmt.Errorf("create group journal: %w", err)
+	}
+	ownPin, err := m.ownPin()
+	if err != nil {
+		return "", err
+	}
+	invite := memberInvitePayload(m.localChainID, selfPub, store.GroupRoleFullSync, hex.EncodeToString(ownPin))
+	attachMemberInviteProof(groupID, invite, m.agentKey)
+	if _, err := m.AppendGroupJournalEntry(ctx, groupID, RosterSubchain, "member_invite",
+		m.localChainID, m.agentPub, m.agentKey, invite); err != nil {
+		return "", fmt.Errorf("add creator to group: %w", err)
+	}
+	if _, err := m.AppendGroupJournalEntry(ctx, groupID, RosterSubchain, "member_activate",
+		m.localChainID, m.agentPub, m.agentKey, memberChainPayload(m.localChainID)); err != nil {
+		return "", fmt.Errorf("activate group creator: %w", err)
+	}
+	return groupID, nil
 }
 
 // EmitRosterControl authors a CONTROLLER-AFFECTING roster entry (group_create,
@@ -456,11 +506,9 @@ func (m *Manager) admitOwnerDomainAdd(ctx context.Context, groupID string, e sto
 	return e, nil
 }
 
-// pairwiseGroupID derives the deterministic group id for the 2-of-2 enrollment
-// group seeded at a federation join (docs §8, I11): domain-separated SHA-256 over
-// the two chain ids in canonical (sorted) order plus the policy epoch, so the host
-// re-derives a stable id and a retried/second session for the same pair never
-// double-seeds (the GetSyncGroup existence guard in seedEnrollmentGroup then skips).
+// pairwiseGroupID derives the legacy deterministic group id used by pre-explicit-
+// group enrollment records. New federation joins never call it: a trusted SAGE
+// relationship and a sharing group are separate objects.
 func pairwiseGroupID(chainA, chainB, epoch string) string {
 	lo, hi := chainA, chainB
 	if lo > hi {
@@ -474,15 +522,18 @@ func pairwiseGroupID(chainA, chainB, epoch string) string {
 	return "grp-" + hex.EncodeToString(sum[:])
 }
 
-// seedEnrollmentGroup best-effort seeds the host-controlled 2-member sync group for
-// a freshly-activated federation pair at the 2-of-2 SAS trust boundary (docs §8,
-// join_routes hostConfirm). The host is BOTH the group controller and a full-sync
-// member (so it can own/share its own domains); the guest is invited + activated as
-// a full-sync member. No domains are shared until an explicit EmitDomainAdd, so an
-// empty enrollment group has no sync effect — it only establishes the roster the
-// domain-owner co-sign ceremony and anti-entropy build on. Idempotent: skips if the
-// group already exists. Returns the group id (guest-side discovery + the group
-// management REST surface are INT1). guestAgentPub is the guest node-operator key.
+// defaultSyncGroupDisplayName remains for importing legacy enrollment records.
+// Operator-created groups always provide their own explicit name.
+func (m *Manager) defaultSyncGroupDisplayName() string {
+	if name := sanitizeName(m.NetworkName()); name != "" {
+		return name + " sharing group"
+	}
+	return "SAGE sharing group"
+}
+
+// seedEnrollmentGroup is retained only for legacy enrollment transcript import
+// and regression coverage. Normal joins no longer invoke it: joining a SAGE is
+// not the same action as creating a sharing group.
 type enrollmentGrant struct {
 	Role         string
 	Selected     []string
@@ -503,6 +554,7 @@ func (m *Manager) seedEnrollmentGroup(ctx context.Context, guestChain string, gu
 		return "", fmt.Errorf("invalid enrollment roles host=%q guest=%q", hostGrant.Role, guestGrant.Role)
 	}
 	groupID := pairwiseGroupID(m.localChainID, guestChain, epoch)
+	displayName := m.defaultSyncGroupDisplayName()
 	selfPubHex := hex.EncodeToString(m.agentPub)
 	guestPubHex := hex.EncodeToString(guestAgentPub)
 	hostInvite := memberInvitePayload(m.localChainID, selfPubHex, hostGrant.Role, hostGrant.CAPin)
@@ -541,7 +593,7 @@ func (m *Manager) seedEnrollmentGroup(ctx context.Context, guestChain string, gu
 		etype   string
 		payload map[string]string
 	}{
-		{"group_create", map[string]string{pkEpoch: epoch, pkControllerChain: m.localChainID, pkControllerPubkey: selfPubHex}},
+		{"group_create", map[string]string{pkEpoch: epoch, pkControllerChain: m.localChainID, pkControllerPubkey: selfPubHex, pkDisplayName: displayName}},
 		{"member_invite", hostInvite},
 		{"member_activate", memberChainPayload(m.localChainID)},
 		{"member_invite", guestInvite},
@@ -571,7 +623,7 @@ func (m *Manager) seedEnrollmentGroup(ctx context.Context, guestChain string, gu
 		if g == nil {
 			if upErr := txStoreSQL.UpsertSyncGroup(ctx, store.SyncGroup{
 				GroupID: groupID, ControllerChainID: m.localChainID,
-				ControllerAgentPubkey: selfPubHex, Epoch: epoch,
+				ControllerAgentPubkey: selfPubHex, Epoch: epoch, DisplayName: displayName,
 			}); upErr != nil {
 				return upErr
 			}

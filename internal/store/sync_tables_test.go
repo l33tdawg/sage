@@ -178,12 +178,51 @@ func TestFederationConnectionEventSurvivesPurgeAndClearsOnlyOnFreshActivation(t 
 	}); setEventErr != nil {
 		t.Fatal(setEventErr)
 	}
+	if err := s.UpsertSyncGroup(ctx, SyncGroup{GroupID: "group-event", ControllerChainID: "chain-local", ControllerAgentPubkey: "local-key"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{GroupID: "group-event", MemberChainID: "chain-local", MemberAgentPubkey: "local-key", Role: GroupRoleFullSync, MemberState: GroupMemberActive}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{GroupID: "group-event", MemberChainID: binding.RemoteChainID, MemberAgentPubkey: binding.PeerAgentID, Role: GroupRoleEnrolledNoSync, MemberState: GroupMemberActive}); err != nil {
+		t.Fatal(err)
+	}
 	if purgeErr := s.PurgeSyncPeerState(ctx, binding.RemoteChainID); purgeErr != nil {
 		t.Fatal(purgeErr)
+	}
+	if groups, listErr := s.ListSyncGroups(ctx); listErr != nil || len(groups) != 0 {
+		t.Fatalf("revoked relationship left a visible sharing group: groups=%+v err=%v", groups, listErr)
+	}
+	if group, getErr := s.GetSyncGroup(ctx, "group-event"); getErr != nil || group != nil {
+		t.Fatalf("a retired pair group must not be returned for bootstrap: group=%+v err=%v", group, getErr)
 	}
 	event, err = s.GetFederationConnectionEvent(ctx, binding.RemoteChainID)
 	if err != nil || event == nil || event.Event != FederationConnectionRevokedLocally || event.CreatedAt == "" {
 		t.Fatalf("purge lost past-connection event=%+v err=%v", event, err)
+	}
+}
+
+func TestPurgeSyncPeerStateKeepsMultiMemberGroupForRemainingMembers(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	if err := s.UpsertSyncGroup(ctx, SyncGroup{GroupID: "group-team", ControllerChainID: "chain-local", ControllerAgentPubkey: "local-key"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, chainID := range []string{"chain-local", "chain-b", "chain-c"} {
+		if err := s.UpsertSyncGroupMember(ctx, SyncGroupMember{GroupID: "group-team", MemberChainID: chainID, MemberAgentPubkey: "agent-" + chainID, Role: GroupRoleEnrolledNoSync, MemberState: GroupMemberActive}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.PurgeSyncPeerState(ctx, "chain-b"); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := s.ListSyncGroups(ctx)
+	if err != nil || len(groups) != 1 || groups[0].GroupID != "group-team" {
+		t.Fatalf("revoking one member must preserve the group for remaining members: groups=%+v err=%v", groups, err)
+	}
+	group, err := s.GetSyncGroup(ctx, "group-team")
+	if err != nil || group == nil {
+		t.Fatalf("remaining group must still be available to the controller: group=%+v err=%v", group, err)
 	}
 }
 

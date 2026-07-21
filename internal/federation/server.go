@@ -459,6 +459,7 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	response := &StatusResponse{
 		ChainID:      m.localChainID,
+		NetworkName:  sanitizeName(m.NetworkName()),
 		Time:         time.Now().Unix(),
 		Capabilities: caps,
 		SharingGrant: &SharingGrant{

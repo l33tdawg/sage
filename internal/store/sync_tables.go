@@ -529,6 +529,19 @@ func (s *SQLiteStore) PurgeSyncPeerState(ctx context.Context, remoteChainID stri
 	defer originUnlock()
 	return s.RunInTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)
+		// A revoked agreement is a clean break, not a paused relationship. Retire
+		// only a legacy two-member group that exists solely for this pairing. A
+		// multi-member group belongs to its controller and remaining members; one
+		// guest leaving must not make it disappear for everyone else.
+		if _, err := tx.writeExecContext(ctx, `
+			INSERT OR IGNORE INTO sync_group_retired(group_id, retired_for_chain, reason)
+			SELECT m.group_id, ?, 'trusted relationship revoked'
+			FROM sync_group_member m
+			WHERE m.member_chain_id=?
+			  AND (SELECT COUNT(*) FROM sync_group_member all_members
+			       WHERE all_members.group_id=m.group_id) = 2`, remoteChainID, remoteChainID); err != nil {
+			return fmt.Errorf("retire sync groups for revoked peer: %w", err)
+		}
 		if _, err := tx.writeExecContext(ctx, `DELETE FROM sync_domains WHERE remote_chain_id=?`, remoteChainID); err != nil {
 			return fmt.Errorf("purge sync domains: %w", err)
 		}

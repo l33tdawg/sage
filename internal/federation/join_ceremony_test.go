@@ -257,15 +257,12 @@ func TestJoinCeremonyHappyPath(t *testing.T) {
 		t.Fatal("host seed_established not set")
 	}
 	hostGroups, err := host.mgr.syncStore().ListSyncGroups(ctx)
-	if err != nil || len(hostGroups) != 1 {
-		t.Fatalf("host enrollment group=%v err=%v", hostGroups, err)
+	if err != nil || len(hostGroups) != 0 {
+		t.Fatalf("a direct pairing must not create a host group: groups=%v err=%v", hostGroups, err)
 	}
 	guestGroups, err := guest.mgr.syncStore().ListSyncGroups(ctx)
-	if err != nil || len(guestGroups) != 1 {
-		t.Fatalf("guest enrollment group=%v err=%v", guestGroups, err)
-	}
-	if hostGroups[0].GroupID != guestGroups[0].GroupID || guestGroups[0].ControllerChainID != "host-aaaaaa" {
-		t.Fatalf("enrollment roster did not converge host=%+v guest=%+v", hostGroups[0], guestGroups[0])
+	if err != nil || len(guestGroups) != 0 {
+		t.Fatalf("a direct pairing must not create a guest group: groups=%v err=%v", guestGroups, err)
 	}
 	hostControl, err := host.mgr.syncStore().GetSyncControl(ctx, "guest-bbbbbb")
 	if err != nil || hostControl == nil || hostControl.Role != "host" || hostControl.BindingState != "active" || hostControl.Revision != 0 {
