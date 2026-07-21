@@ -39,9 +39,7 @@ func TestResetChainState_RefusesWhileInstanceLive(t *testing.T) {
 
 func TestMigrateOnUpgrade_FirstRun(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("SAGE_HOME")
-	os.Setenv("SAGE_HOME", tmpDir)
-	defer os.Setenv("SAGE_HOME", origHome)
+	t.Setenv("SAGE_HOME", tmpDir)
 
 	dataDir := filepath.Join(tmpDir, "data")
 	os.MkdirAll(dataDir, 0700)
@@ -74,9 +72,7 @@ func TestMigrateOnUpgrade_FirstRun(t *testing.T) {
 
 func TestMigrateOnUpgrade_SameVersion(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("SAGE_HOME")
-	os.Setenv("SAGE_HOME", tmpDir)
-	defer os.Setenv("SAGE_HOME", origHome)
+	t.Setenv("SAGE_HOME", tmpDir)
 
 	dataDir := filepath.Join(tmpDir, "data")
 	os.MkdirAll(dataDir, 0700)
@@ -105,9 +101,7 @@ func TestMigrateOnUpgrade_SameVersion(t *testing.T) {
 // that regression.
 func TestMigrateOnUpgrade_VersionChangedSameFork_PreservesState(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("SAGE_HOME")
-	os.Setenv("SAGE_HOME", tmpDir)
-	defer os.Setenv("SAGE_HOME", origHome)
+	t.Setenv("SAGE_HOME", tmpDir)
 
 	dataDir := filepath.Join(tmpDir, "data")
 	badgerDir := filepath.Join(dataDir, "badger")
@@ -167,9 +161,7 @@ func TestMigrateOnUpgrade_PreV75_LegacyInstall_RunsReset(t *testing.T) {
 		fromVersion := fromVersion
 		t.Run(fromVersion, func(t *testing.T) {
 			tmpDir := t.TempDir()
-			origHome := os.Getenv("SAGE_HOME")
-			os.Setenv("SAGE_HOME", tmpDir)
-			defer os.Setenv("SAGE_HOME", origHome)
+			t.Setenv("SAGE_HOME", tmpDir)
 
 			dataDir := filepath.Join(tmpDir, "data")
 			badgerDir := filepath.Join(dataDir, "badger")
@@ -249,9 +241,7 @@ func TestIsLegacyForkOneVersion(t *testing.T) {
 // This is the in-place upgrade path from v7.5.4 → v7.5.5.
 func TestMigrateOnUpgrade_LegacyInstall_AdoptsCurrentFork(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("SAGE_HOME")
-	os.Setenv("SAGE_HOME", tmpDir)
-	defer os.Setenv("SAGE_HOME", origHome)
+	t.Setenv("SAGE_HOME", tmpDir)
 
 	dataDir := filepath.Join(tmpDir, "data")
 	badgerDir := filepath.Join(dataDir, "badger")
@@ -286,9 +276,7 @@ func TestMigrateOnUpgrade_LegacyInstall_AdoptsCurrentFork(t *testing.T) {
 // chain state is incompatible by definition.
 func TestMigrateOnUpgrade_ForkBump_RunsReset(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("SAGE_HOME")
-	os.Setenv("SAGE_HOME", tmpDir)
-	defer os.Setenv("SAGE_HOME", origHome)
+	t.Setenv("SAGE_HOME", tmpDir)
 
 	dataDir := filepath.Join(tmpDir, "data")
 	badgerDir := filepath.Join(dataDir, "badger")
@@ -358,9 +346,7 @@ func TestMigrateOnUpgrade_ForkBump_RunsReset(t *testing.T) {
 // (incomplete) reset, leaving the operator with mixed-fork state.
 func TestMigrateOnUpgrade_ForkBump_StampsOnlyAfterReset(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("SAGE_HOME")
-	os.Setenv("SAGE_HOME", tmpDir)
-	defer os.Setenv("SAGE_HOME", origHome)
+	t.Setenv("SAGE_HOME", tmpDir)
 
 	dataDir := filepath.Join(tmpDir, "data")
 	os.MkdirAll(dataDir, 0700)
@@ -388,9 +374,7 @@ func TestMigrateOnUpgrade_ForkBump_StampsOnlyAfterReset(t *testing.T) {
 
 func TestMigrateOnUpgrade_DevVersion(t *testing.T) {
 	tmpDir := t.TempDir()
-	origHome := os.Getenv("SAGE_HOME")
-	os.Setenv("SAGE_HOME", tmpDir)
-	defer os.Setenv("SAGE_HOME", origHome)
+	t.Setenv("SAGE_HOME", tmpDir)
 
 	dataDir := filepath.Join(tmpDir, "data")
 	os.MkdirAll(dataDir, 0700)
