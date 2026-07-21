@@ -1255,6 +1255,13 @@ type syncGroupMemberView struct {
 	// distinguishable, since the dashboard treats undefined as "seed me" and an
 	// empty array as "the operator really has no selectors".
 	ConsentDomains []string `json:"consent_domains"`
+	// ActiveConsentDomains is the promoted subset -- the selectors whose domain is
+	// already inside a live shared root and is therefore actually being delivered.
+	// A selector stays pending until its owner shares that domain, so without this
+	// the dashboard cannot distinguish "syncing" from "waiting", and an operator
+	// who selected a domain before it was shared sees their selector listed while
+	// receiving nothing, with no explanation anywhere in the UI.
+	ActiveConsentDomains []string `json:"active_consent_domains"`
 }
 
 // syncGroupMemberProgress converts durable journal cursors into display state.
@@ -1372,6 +1379,15 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 				consent = []string{}
 			}
 			member.ConsentDomains = consent
+			active, aErr := ss.ListGroupMemberConsentDomains(ctx, g.GroupID, mem.MemberChainID)
+			if aErr != nil {
+				fedWriteErr(w, http.StatusInternalServerError, "Failed to read active member consent domains.")
+				return
+			}
+			if active == nil {
+				active = []string{}
+			}
+			member.ActiveConsentDomains = active
 			if mem.MemberChainID != local {
 				delivery, found := peerDelivery[mem.MemberChainID]
 				if !found {

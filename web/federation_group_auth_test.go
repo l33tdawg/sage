@@ -284,6 +284,14 @@ func TestFederationGroupListServesPendingConsentSelectors(t *testing.T) {
 			"set instead of the pending selector set, so the dashboard field renders blank "+
 			"and Apply role will destroy the member's selectors", local.ConsentDomains)
 	}
+	// "hr" is selected but NOT promoted -- no domain_add has shared it -- so the
+	// active set must be empty. The dashboard subtracts active from selectors to
+	// tell the operator which choices are still waiting on the domain owner;
+	// serving the same list for both would make an inert selector look live.
+	if len(local.ActiveConsentDomains) != 0 {
+		t.Fatalf("active_consent_domains = %v, want []; an unshared domain must not "+
+			"report as actively delivering", local.ActiveConsentDomains)
+	}
 }
 
 func TestSyncGroupMemberProgressFailsClosedForUnknownAndUnseenState(t *testing.T) {

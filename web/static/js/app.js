@@ -13052,6 +13052,12 @@ function SharingSyncGroupsPanel() {
             // `undefined` falls back.
             const localMember = (group.members || []).find(member => member.chain_id === localChain);
             const localConsent = (localMember && localMember.consent_domains) || [];
+            // A selector only becomes ACTIVE once its domain sits inside a live
+            // shared root, so a selector chosen before the owner shares that
+            // domain is silently inert. Surfacing the difference is the only way
+            // an operator can tell "syncing" from "waiting on the owner".
+            const localActive = (localMember && localMember.active_consent_domains) || [];
+            const pendingOnly = localConsent.filter(tag => !localActive.includes(tag));
             const selectedDomainsValue = draft.selectedDomains !== undefined
                 ? draft.selectedDomains
                 : localConsent.join(', ');
@@ -13091,6 +13097,7 @@ function SharingSyncGroupsPanel() {
                             <h4>This node’s synchronization role</h4>
                             <label>Role<select value=${draft.role || group.local_role || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { role: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
                             <label>Selective domains<input value=${selectedDomainsValue} onInput=${event => patchDraft(groupId, { selectedDomains: event.target.value })} placeholder="comma separated" /></label>
+                            ${pendingOnly.length > 0 && html`<p class="fed-consent-pending">Waiting on the domain owner: <strong>${pendingOnly.join(', ')}</strong>. These selectors are saved, but nothing is delivered for them until that domain is shared with this group.</p>`}
                             <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Apply role</button>
                         </form>
                         <form onSubmit=${async event => {
