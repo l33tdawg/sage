@@ -439,9 +439,13 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Enforce domain access policy from network_agents registry
+	// Enforce domain access policy from network_agents registry. This registry
+	// denial is as permanent as the consensus-layer one, so it carries the same
+	// problem type: an untyped 403 here is indistinguishable from the transient
+	// one a restarted node emits, and MCP clients burn a full re-registration
+	// and retry cycle against an ACL that will never yield.
 	if accessErr := checkDomainAccess(r.Context(), s.agentStore, s.badgerStore, agentID, req.DomainTag, "write"); accessErr != nil {
-		writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
+		writeProblemTyped(w, http.StatusForbidden, domainWriteDeniedProblemType, "Access denied", accessErr.Error())
 		return
 	}
 

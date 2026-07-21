@@ -1,4 +1,4 @@
-<!-- Core document reconciled through SAGE v11.11.1, including directional cross-chain peer RBAC and the quorum/state-sync/governance-gateway sections. -->
+<!-- Core document reconciled through SAGE v11.11.2, including directional cross-chain peer RBAC and the quorum/state-sync/governance-gateway sections. -->
 
 # RBAC, Organizations, and Federation
 

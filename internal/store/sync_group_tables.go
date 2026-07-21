@@ -455,6 +455,26 @@ func (s *SQLiteStore) SetSyncGroupRosterJournalHead(ctx context.Context, groupID
 	return nil
 }
 
+// SetSyncGroupDisplayName updates the controller-authored, replicated label for
+// a group without touching its immutable protocol ID or roster state.
+func (s *SQLiteStore) SetSyncGroupDisplayName(ctx context.Context, groupID, name string) error {
+	if groupID == "" {
+		return fmt.Errorf("group_id is required")
+	}
+	result, err := s.writeExecContext(ctx, `UPDATE sync_group
+		SET display_name=?, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		WHERE group_id=?`, name, groupID)
+	if err != nil {
+		return fmt.Errorf("set sync group display name: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("set sync group display name rows affected: %w", err)
+	} else if changed != 1 {
+		return fmt.Errorf("sync group %q not found", groupID)
+	}
+	return nil
+}
+
 // ---- sync_group_member ----
 
 // UpsertSyncGroupMember inserts or REPLACES a member as a FULL ROW: on conflict

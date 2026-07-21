@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -127,6 +129,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/domains", h.handleFedGroupDomainAdd)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/domains/remove", h.handleFedGroupDomainRemove)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/self-role", h.handleFedGroupSelfRole)
+	fr.Put("/v1/dashboard/federation/groups/{group_id}/name", h.handleFedGroupRename)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/roster", h.handleFedGroupRosterControl)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/members/invite", h.handleFedGroupMemberInvite)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/epoch-rotate", h.handleFedGroupEpochRotate)
@@ -748,7 +751,8 @@ func (h *DashboardHandler) handleFedSyncStatus(w http.ResponseWriter, r *http.Re
 // FedConnection is one cross_fed agreement for the Connections view.
 type FedConnection struct {
 	RemoteChainID  string   `json:"remote_chain_id"`
-	PeerName       string   `json:"peer_name,omitempty"` // friendly label the peer chose (cosmetic)
+	PeerName       string   `json:"peer_name,omitempty"`     // friendly label the peer chose (cosmetic)
+	PeerAgentID    string   `json:"peer_agent_id,omitempty"` // frozen JOIN operator key; group invite only
 	Endpoint       string   `json:"endpoint"`
 	MaxClearance   int      `json:"max_clearance"`
 	AllowedDomains []string `json:"allowed_domains"`
@@ -843,6 +847,9 @@ func (h *DashboardHandler) handleFedConnections(w http.ResponseWriter, _ *http.R
 				}
 			}
 			if ss := h.syncStore(); ss != nil {
+				if control, controlErr := ss.GetSyncControl(context.Background(), rec.RemoteChainID); controlErr == nil && control != nil {
+					conn.PeerAgentID = control.PeerAgentID
+				}
 				if event, eventErr := ss.GetFederationConnectionEvent(context.Background(), rec.RemoteChainID); eventErr == nil && event != nil {
 					conn.EndedBy = event.Event
 					conn.EndedMessage = event.Message
@@ -1163,6 +1170,7 @@ type groupManagementDriver interface {
 	EmitDomainAdd(ctx context.Context, groupID, domainTag string, maxClearance int) (store.SyncGroupLogEntry, error)
 	EmitDomainRemove(ctx context.Context, groupID, domainTag string) (store.SyncGroupLogEntry, error)
 	EmitSelfRoleChange(ctx context.Context, groupID, role string, selectedDomains []string) (store.SyncGroupLogEntry, error)
+	EmitGroupRename(ctx context.Context, groupID, name string) (store.SyncGroupLogEntry, error)
 	EmitRosterControl(ctx context.Context, groupID, entryType string, payload map[string]string) (store.SyncGroupLogEntry, error)
 	EmitMemberInvite(ctx context.Context, groupID, memberChain, memberPubkey, role string, selectedDomains, ownedDomains []string) (store.SyncGroupLogEntry, error)
 	EmitEpochRotate(ctx context.Context, groupID, newEpoch, incomingChain, incomingPubkey string) (store.SyncGroupLogEntry, error)
@@ -1510,6 +1518,36 @@ func (h *DashboardHandler) handleFedGroupSelfRole(w http.ResponseWriter, r *http
 	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
 	defer cancel()
 	entry, err := d.EmitSelfRoleChange(ctx, groupID, body.Role, body.SelectedDomains)
+	if err != nil {
+		fedWriteErr(w, http.StatusConflict, err.Error())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, groupEmitResult(entry))
+}
+
+// handleFedGroupRename publishes a controller-signed friendly label inside a
+// backward-compatible roster manifest extension. The group ID remains immutable
+// and auditable while v11.11.1 peers safely ignore the optional label field.
+func (h *DashboardHandler) handleFedGroupRename(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		fedWriteErr(w, http.StatusBadRequest, "Expected {\"name\": \"...\"}.")
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" || utf8.RuneCountInString(name) > 96 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		fedWriteErr(w, http.StatusBadRequest, "name must be 1..96 characters.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	entry, err := d.EmitGroupRename(ctx, chi.URLParam(r, "group_id"), name)
 	if err != nil {
 		fedWriteErr(w, http.StatusConflict, err.Error())
 		return

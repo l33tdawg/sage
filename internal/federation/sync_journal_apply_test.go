@@ -137,12 +137,16 @@ func TestJournalApplyManifestAntiRollback(t *testing.T) {
 	if g, _ := ms.GetSyncGroup(ctx, "g1"); g.RosterRevision != 7 {
 		t.Fatalf("stale manifest must NOT lower revision, got %d", g.RosterRevision)
 	}
-	fwd := mustEntry(t, "g1", RosterSubchain, 2, stale.EntryHash, "manifest", "chain-ctl", ctlPub, ctlKey, manifestPayload(9, "hash9"))
+	fwdPayload := manifestPayload(9, "hash9")
+	// An optional display name rides the established manifest entry so older
+	// peers validate the same entry while new peers fold the presentation label.
+	fwdPayload[pkDisplayName] = "Studio Sync"
+	fwd := mustEntry(t, "g1", RosterSubchain, 2, stale.EntryHash, "manifest", "chain-ctl", ctlPub, ctlKey, fwdPayload)
 	if n, err := ingestRoster(t, m, ms, "g1", RosterSubchain, fwd); err != nil || n != 1 {
 		t.Fatalf("forward manifest ingest: n=%d err=%v", n, err)
 	}
-	if g, _ := ms.GetSyncGroup(ctx, "g1"); g.RosterRevision != 9 || g.ManifestHash != "hash9" {
-		t.Fatalf("forward manifest must advance revision+hash, got rev=%d hash=%q", g.RosterRevision, g.ManifestHash)
+	if g, _ := ms.GetSyncGroup(ctx, "g1"); g.RosterRevision != 9 || g.ManifestHash != "hash9" || g.DisplayName != "Studio Sync" {
+		t.Fatalf("forward manifest must advance revision+hash+name, got rev=%d hash=%q name=%q", g.RosterRevision, g.ManifestHash, g.DisplayName)
 	}
 }
 

@@ -812,6 +812,130 @@ func TestSageReflect_DosOnly(t *testing.T) {
 	assert.EqualValues(t, 2, m["memories_stored"]) // summary + dos (no don'ts)
 }
 
+// mockSageAPIWithSubmit behaves like mockSageAPI but lets the test control the
+// /v1/memory/submit response, so write rejections can be exercised.
+func mockSageAPIWithSubmit(t *testing.T, submit http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"semantic": false, "provider": "hash", "dimension": 768, "ready": true,
+		})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1, 0.2, 0.3}})
+	})
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"memories": []map[string]any{}})
+	})
+	mux.HandleFunc("/v1/memory/submit", submit)
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// A domain the agent cannot write to must surface as a tool error. This used to
+// return status "reflected" with memories_stored=0 and a success message, so
+// every lesson reflected into an unwritable domain was silently discarded.
+func TestSageReflect_UnwritableDomainFailsLoudly(t *testing.T) {
+	var submits int
+	ts := mockSageAPIWithSubmit(t, func(w http.ResponseWriter, r *http.Request) {
+		submits++
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]any{
+			"type":   "https://sage.dev/errors/domain-write-denied",
+			"title":  "Access denied",
+			"status": http.StatusForbidden,
+			"detail": "agent does not have write access to domain 'sage-roadmap'",
+		})
+	})
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolReflect(context.Background(), map[string]any{
+		"task_summary": "Shipped the release audit",
+		"dos":          "Verify the domain grant before reflecting",
+		"donts":        "Don't trust a success message without checking memories_stored",
+		"domain":       "sage-roadmap",
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "sage-roadmap")
+	assert.Contains(t, err.Error(), "write access")
+	// A typed domain-write denial is permanent: each of the three components
+	// must fail on its first attempt rather than re-registering and retrying.
+	assert.Equal(t, 3, submits)
+}
+
+// A partial write must not report a clean reflection either.
+func TestSageReflect_PartialStoreReportsFailure(t *testing.T) {
+	var n int
+	ts := mockSageAPIWithSubmit(t, func(w http.ResponseWriter, r *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "application/json")
+		if n > 1 { // first component lands, the rest are rejected
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]any{"title": "Access denied", "detail": "nope"})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"memory_id": "mem-1", "status": "proposed"})
+	})
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolReflect(context.Background(), map[string]any{
+		"task_summary": "Shipped the release audit",
+		"dos":          "Verify the domain grant before reflecting",
+		"donts":        "Don't trust a success message without checking memories_stored",
+		"domain":       "sage-release",
+	})
+	require.NoError(t, err)
+
+	m := result.(map[string]any)
+	assert.Equal(t, "partially_stored", m["status"])
+	assert.EqualValues(t, 1, m["memories_stored"])
+	assert.EqualValues(t, 2, m["memories_failed"])
+	assert.NotContains(t, m["message"], "future self will thank you")
+}
+
+// Everything being a known duplicate is a legitimate no-op, not a failure.
+func TestSageReflect_AllDuplicatesIsNotAnError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"memories": []map[string]any{
+				{"content": "[Task Reflection] Shipped the release audit"},
+			},
+		})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("submit must not be called when every component is a duplicate")
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolReflect(context.Background(), map[string]any{
+		"task_summary": "Shipped the release audit",
+		"domain":       "sage-release",
+	})
+	require.NoError(t, err)
+
+	m := result.(map[string]any)
+	assert.Equal(t, "reflected", m["status"])
+	assert.EqualValues(t, 0, m["memories_stored"])
+	assert.EqualValues(t, 1, m["skipped_duplicates"])
+}
+
 func TestBootSafeguardExistsTrue(t *testing.T) {
 	// Mock API returns a memory with boot protocol content in meta domain
 	mux := http.NewServeMux()

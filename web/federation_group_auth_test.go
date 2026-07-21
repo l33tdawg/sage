@@ -64,6 +64,7 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/domains", `{"domain_tag":"hr"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/domains/remove", `{"domain_tag":"hr"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/self-role", `{"role":"full-sync"}`},
+		{http.MethodPut, "/v1/dashboard/federation/groups/g1/name", `{"name":"Studio"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/roster", `{"entry_type":"manifest","payload":{}}`},
 	}
 
@@ -80,6 +81,8 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 					h.handleFedGroupDomainRemove(rr, req)
 				case "/v1/dashboard/federation/groups/g1/self-role":
 					h.handleFedGroupSelfRole(rr, req)
+				case "/v1/dashboard/federation/groups/g1/name":
+					h.handleFedGroupRename(rr, req)
 				default:
 					h.handleFedGroupRosterControl(rr, req)
 				}

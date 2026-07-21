@@ -51,6 +51,14 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.11.2
+
+**Sharing & Sync becomes operable at a glance.** Group owners can give a group a friendly, signed name; choose one or more existing controlled domains instead of typing fragile tags; see each member's friendly name, live reachability, and catch-up state; and add an already-trusted SAGE through a guided invitation without copying a chain ID or public key. Group names ride the established signed roster manifest, so v11.11.1 peers safely ignore the optional label while continuing to synchronize during a rolling patch upgrade.
+
+**MCP reflection failures are now honest.** A completely unwritable reflection returns an error, partial writes report their lost components, and degraded embedding status is preserved. Permanent domain-write ACL denials are now typed so clients do not waste a registration-and-retry cycle on a refusal that cannot succeed.
+
+This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.2.
+
 ## What's New in v11.11.1
 
 **Release-pipeline fix for v11.11.0.** v11.11.0 was tagged but never published: the release workflow's native-shell evidence and publication jobs only execute for version 11.11 and above, so v11.11.0 was the first tag in the project's history to run them, and two latent defects surfaced in a path no pull request can exercise. The bundled daemon was staged after the Rust build that consumes it, and the publication gate expected an artifact-kind string the bundle verifier never records. Both are fixed and pinned by tests. No user received v11.11.0 on any channel.
@@ -557,7 +565,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.1`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.2`.
 
 ### Upgrading from an older version?
 

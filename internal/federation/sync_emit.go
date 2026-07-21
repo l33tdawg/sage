@@ -118,6 +118,30 @@ func (m *Manager) EmitSelfRoleChange(ctx context.Context, groupID, role string, 
 		m.localChainID, m.agentPub, m.agentKey, payload)
 }
 
+// EmitGroupRename publishes a controller-authored friendly label. The immutable
+// group ID remains the protocol identity; the label is replicated presentation
+// metadata for people operating the group.
+func (m *Manager) EmitGroupRename(ctx context.Context, groupID, name string) (store.SyncGroupLogEntry, error) {
+	ss := m.syncStore()
+	if ss == nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("group journal requires the SQLite store backend")
+	}
+	g, err := ss.GetSyncGroup(ctx, groupID)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	if g == nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("sync group %q not found", groupID)
+	}
+	// A rename is encoded as an optional signed field on the established manifest
+	// entry, not a new entry type. v11.11.1 peers already authenticate and apply
+	// manifests and safely ignore unknown payload fields, so a renamed group keeps
+	// synchronizing during a rolling patch upgrade.
+	payload := manifestPayload(g.RosterRevision+1, g.ManifestHash)
+	payload[pkDisplayName] = name
+	return m.EmitRosterControl(ctx, groupID, "manifest", payload)
+}
+
 // EmitRosterControl authors a CONTROLLER-AFFECTING roster entry (group_create,
 // member_invite/activate, member_remove(other), role_change(other), epoch_rotate,
 // manifest), gated by authorizeControllerAffecting. The caller supplies the built

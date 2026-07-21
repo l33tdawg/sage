@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -45,6 +46,7 @@ const (
 	pkControllerPubkey = "controller_pubkey"
 	pkRosterRevision   = "roster_revision"
 	pkManifestHash     = "manifest_hash"
+	pkDisplayName      = "display_name"
 	// A member_invite is a 2-of-2 statement: the controller authors the journal
 	// entry, while the invitee proves possession of the exact pinned operator key
 	// and accepts the exact role/CA/consent tuple.  Without this proof a controller
@@ -217,14 +219,14 @@ func decodeOwnedDomains(enc string) ([]string, error) {
 // ---- groupApplyState: the growing roster view + canonical resolver ----
 
 type groupApplyState struct {
-	groupID             string
-	controllerChain     string
-	controllerKey       ed25519.PublicKey
-	controllerEpoch     string
-	controllerByEpoch   map[string]controllerIdentity
-	memberKey           map[string]ed25519.PublicKey
-	memberState         map[string]string
-	domainOwner         map[string]string // active AND removed (owner is needed to verify a domain_remove)
+	groupID           string
+	controllerChain   string
+	controllerKey     ed25519.PublicKey
+	controllerEpoch   string
+	controllerByEpoch map[string]controllerIdentity
+	memberKey         map[string]ed25519.PublicKey
+	memberState       map[string]string
+	domainOwner       map[string]string // active AND removed (owner is needed to verify a domain_remove)
 	// domainAttested maps each shared domain tag the CURRENT controller re-attested
 	// at the most recent epoch_rotate to the sub-chain HEAD seq it vouched for
 	// (pkCarriedDomains). A domain_add carrying an OLD-epoch controller
@@ -697,8 +699,16 @@ func (gs *groupApplyState) apply(ctx context.Context, ss *store.SQLiteStore, e s
 		if rev <= gs.rosterRevisionFloor || rev > gs.rosterRevision+syncJournalMaxRevisionJump {
 			return nil
 		}
+		if name, present := p[pkDisplayName]; present && !validGroupDisplayName(strings.TrimSpace(name)) {
+			return nil
+		}
 		if err := ss.SetSyncGroupManifest(ctx, gs.groupID, rev, p[pkManifestHash]); err != nil {
 			return err
+		}
+		if name, present := p[pkDisplayName]; present {
+			if err := ss.SetSyncGroupDisplayName(ctx, gs.groupID, strings.TrimSpace(name)); err != nil {
+				return err
+			}
 		}
 		gs.rosterRevision = rev
 		gs.rosterRevisionFloor = rev
@@ -768,6 +778,21 @@ func validateAuthoredEntry(e store.SyncGroupLogEntry) error {
 		if _, err := strconv.ParseInt(p[pkRosterRevision], 10, 64); err != nil {
 			return fmt.Errorf("manifest: non-numeric roster_revision")
 		}
+		if name, present := p[pkDisplayName]; present && !validGroupDisplayName(strings.TrimSpace(name)) {
+			return fmt.Errorf("manifest: display_name must be 1..96 non-control characters")
+		}
 	}
 	return nil
+}
+
+func validGroupDisplayName(name string) bool {
+	if name == "" || utf8.RuneCountInString(name) > 96 {
+		return false
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }

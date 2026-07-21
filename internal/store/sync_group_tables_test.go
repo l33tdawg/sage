@@ -44,6 +44,16 @@ func TestSyncGroupRoundTrip(t *testing.T) {
 	if got.RosterRevisionFloor != 3 {
 		t.Fatalf("floor not advanced: %d", got.RosterRevisionFloor)
 	}
+	if err = s.SetSyncGroupDisplayName(ctx, "g1", "Studio Sync"); err != nil {
+		t.Fatalf("SetSyncGroupDisplayName: %v", err)
+	}
+	got, _ = s.GetSyncGroup(ctx, "g1")
+	if got.DisplayName != "Studio Sync" || got.GroupID != "g1" || got.RosterRevision != 3 {
+		t.Fatalf("group rename changed durable identity/state: %+v", got)
+	}
+	if err = s.SetSyncGroupDisplayName(ctx, "missing", "Nope"); err == nil {
+		t.Fatal("expected missing group display-name update to fail")
+	}
 
 	// Floor must never regress even if a stale roster_revision is written.
 	stale := g

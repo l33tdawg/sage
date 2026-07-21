@@ -289,7 +289,16 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
     assert.match(panel, /showConfirmation\('Remove '/);
     assert.match(panel, /showConfirmation\('Stop sharing/);
     assert.match(panel, /remote operator must cryptographically co-sign/);
-    assert.match(panel, /Invite or retry member bootstrap/);
+    assert.match(apiSource, /export function fedGroupRename\(groupId, name\)/);
+    assert.match(panel, /Group name/,
+        'controllers must be able to give the group a friendly replicated label');
+    assert.match(panel, /Share existing domains/,
+        'sharing must select existing controlled domains instead of accepting fragile free text');
+    assert.match(panel, /Add a member/);
+    assert.match(panel, /Select a trusted SAGE/,
+        'adding a member must choose an established trust connection, not copy a key by hand');
+    assert.match(panel, /online · syncing/,
+        'member reachability and catch-up state must be distinguishable');
     assert.match(panel, /const saved = await mutate[\s\S]*if \(saved\) patchDraft/,
         'failed mutations must preserve the operator draft for correction and retry');
     assert.match(appSource, /<\$\{SharingSyncGroupsPanel\} \/>/);

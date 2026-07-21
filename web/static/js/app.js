@@ -7,7 +7,7 @@ deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedGroups, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupMemberInvite, fedGroupMemberRemove, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
+fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedGroups, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
@@ -25,7 +25,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.11.1';
+const SAGE_VERSION = 'v11.11.2';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -12974,15 +12974,30 @@ function NetworkNameEditor() {
 function SharingSyncGroupsPanel() {
     const [groups, setGroups] = useState(null);
     const [localChain, setLocalChain] = useState('');
+    const [shareableDomains, setShareableDomains] = useState([]);
+    const [connections, setConnections] = useState([]);
+    const [reachability, setReachability] = useState({});
     const [error, setError] = useState('');
     const [busy, setBusy] = useState('');
     const [openGroup, setOpenGroup] = useState('');
     const [drafts, setDrafts] = useState({});
     const loadGroups = async () => {
         try {
-            const result = await fedGroups();
+            const [result, domainResult, connectionResult] = await Promise.all([
+                fedGroups(), fedShareableDomains(), fedConnections(),
+            ]);
             setGroups(Array.isArray(result.groups) ? result.groups : []);
             setLocalChain(result.local_chain_id || '');
+            setShareableDomains(Array.isArray(domainResult.domains) ? domainResult.domains.filter(domain => domain.can_share) : []);
+            const active = Array.isArray(connectionResult.connections)
+                ? connectionResult.connections.filter(connection => connection.status === 'active' && !connection.expired)
+                : [];
+            setConnections(active);
+            const statuses = await Promise.all(active.map(async connection => {
+                try { return [connection.remote_chain_id, await fedPeerStatus(connection.remote_chain_id)]; }
+                catch (e) { return [connection.remote_chain_id, { reachable: false }]; }
+            }));
+            setReachability(Object.fromEntries(statuses));
             setError('');
         } catch (e) { setError(String(e.message || e)); }
     };
@@ -13007,7 +13022,12 @@ function SharingSyncGroupsPanel() {
         setBusy('');
         return false;
     };
-    const domains = value => String(value || '').split(',').map(item => item.trim()).filter(Boolean);
+    const selected = event => Array.from(event.currentTarget.selectedOptions).map(option => option.value);
+    const connectionFor = chain => connections.find(connection => connection.remote_chain_id === chain);
+    const memberName = chain => {
+        const connection = connectionFor(chain);
+        return connection && (connection.peer_name || connection.remote_chain_id) || chain;
+    };
     const health = member => String(member.health || member.catch_up_state || member.state || 'unknown').replaceAll('_', ' ');
     const when = value => value ? new Date(value).toLocaleString() : 'No successful sync recorded';
 
@@ -13042,25 +13062,41 @@ function SharingSyncGroupsPanel() {
             const pendingOnly = localConsent.filter(tag => !localActive.includes(tag));
             const selectedDomainsValue = draft.selectedDomains !== undefined
                 ? draft.selectedDomains
-                : localConsent.join(', ');
+                : localConsent;
+            const currentRole = draft.role || group.local_role || 'enrolled-no-sync';
+            const existingMembers = new Set((group.members || []).map(member => member.chain_id));
+            const inviteCandidates = connections.filter(connection =>
+                !existingMembers.has(connection.remote_chain_id) && connection.peer_agent_id);
+            const liveMembers = (group.members || []).filter(member => {
+                if (member.chain_id === localChain) return true;
+                return reachability[member.chain_id] && reachability[member.chain_id].reachable;
+            }).length;
             return html`<article class="fed-group-card" key=${groupId}>
                 <button class="fed-group-summary" aria-expanded=${openGroup === groupId} aria-controls=${panelId} onClick=${() => setOpenGroup(openGroup === groupId ? '' : groupId)}>
-                    <span><strong>${group.display_name || groupId}</strong><small>${(group.members || []).length} members · ${(group.shared_domains || []).length} shared domains · local role ${group.local_role || 'unknown'}</small></span>
+                    <span><strong>${group.display_name || 'Unnamed sharing group'}</strong><small>${(group.members || []).length} members · ${liveMembers} online · ${(group.shared_domains || []).length} shared domains · ${group.is_controller ? 'you manage this group' : 'controller managed elsewhere'}</small></span>
                     <span aria-hidden="true">${openGroup === groupId ? '▾' : '▸'}</span>
                 </button>
                 ${openGroup === groupId && html`<div id=${panelId} class="fed-group-detail">
                     <dl class="fed-group-facts">
-                        <div><dt>Controller</dt><dd><code>${group.controller_chain_id}</code>${group.is_controller ? ' (this node)' : ''}</dd></div>
+                        <div><dt>Group ID</dt><dd><code>${groupId}</code></dd></div>
+                        <div><dt>Controller</dt><dd>${memberName(group.controller_chain_id)} <code>${group.controller_chain_id}</code>${group.is_controller ? ' (this node)' : ''}</dd></div>
                         <div><dt>Roster revision</dt><dd>${group.roster_revision ?? 'unknown'}</dd></div>
                         <div><dt>Journal head</dt><dd><code>${group.roster_journal_head || 'not reported'}</code></dd></div>
                         <div><dt>Epoch</dt><dd><code>${group.epoch}</code></dd></div>
                     </dl>
+                    ${group.is_controller && html`<form class="fed-group-rename" onSubmit=${async event => {
+                        event.preventDefault();
+                        const name = String(draft.name || '').trim();
+                        if (!name) return;
+                        if (!await showConfirmation('Rename this sharing group to “' + name + '”? The stable group ID stays unchanged.', { title: 'Rename sharing group?', confirmLabel: 'Rename group', tone: 'primary' })) return;
+                        mutate(groupId + ':rename', () => fedGroupRename(groupId, name), 'Group renamed');
+                    }}><label>Group name<input required maxlength="96" value=${draft.name !== undefined ? draft.name : (group.display_name || '')} placeholder="e.g. Family research sync" onInput=${event => patchDraft(groupId, { name: event.target.value })} /></label><button class="btn" type="submit" disabled=${busy !== ''}>Rename group</button><small class="muted">The name is shared with every member. The technical group ID remains unchanged.</small></form>`}
                     <h3>Members and catch-up</h3>
                     <div class="fed-group-table-wrap"><table class="fed-group-table">
                         <thead><tr><th scope="col">Member</th><th scope="col">Role</th><th scope="col">Health</th><th scope="col">Backlog</th><th scope="col">Last successful sync</th><th scope="col">Actions</th></tr></thead>
                         <tbody>${(group.members || []).map(member => html`<tr key=${member.chain_id}>
-                            <th scope="row"><code>${member.chain_id}</code>${member.chain_id === localChain && html`<span class="fed-group-local">this node</span>`}</th>
-                            <td>${member.role}</td><td><span class="fed-group-health">${health(member)}</span></td>
+                            <th scope="row"><strong>${memberName(member.chain_id)}</strong><br /><code>${member.chain_id}</code>${member.chain_id === localChain && html`<span class="fed-group-local">this node</span>`}</th>
+                            <td>${member.role.replaceAll('-', ' ')}</td><td><span class="fed-group-health">${member.chain_id === localChain ? health(member) : (!reachability[member.chain_id] || !reachability[member.chain_id].reachable ? 'offline' : (member.health === 'catching_up' ? 'online · syncing' : 'online · ' + health(member)))}</span></td>
                             <td>${member.peer_delivery ? member.peer_delivery.backlog : '—'}</td>
                             <td><time datetime=${member.peer_delivery && member.peer_delivery.last_delivered_at || ''}>${when(member.peer_delivery && member.peer_delivery.last_delivered_at)}</time></td>
                             <td>${group.is_controller && member.chain_id !== localChain && !['removed', 'left'].includes(member.state) && html`<button class="btn btn-danger" disabled=${busy !== ''} onClick=${async () => {
@@ -13072,25 +13108,25 @@ function SharingSyncGroupsPanel() {
                     <div class="fed-group-controls">
                         <form onSubmit=${async event => {
                             event.preventDefault();
-                            const role = draft.role || group.local_role || 'enrolled-no-sync';
+                            const role = currentRole;
                             if (!await showConfirmation('Change this node’s role in ' + (group.display_name || groupId) + ' to ' + role + '? Selective domains are an explicit receive-consent subset.', { title: 'Change synchronization role?', confirmLabel: 'Apply role', tone: 'primary' })) return;
-                            mutate(groupId + ':role', () => fedGroupSelfRole(groupId, role, domains(selectedDomainsValue)), 'Local synchronization role updated');
+                            mutate(groupId + ':role', () => fedGroupSelfRole(groupId, role, selectedDomainsValue), 'Local synchronization role updated');
                         }}>
                             <h4>This node’s synchronization role</h4>
-                            <label>Role<select value=${draft.role || group.local_role || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { role: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
-                            <label>Selective domains<input value=${selectedDomainsValue} onInput=${event => patchDraft(groupId, { selectedDomains: event.target.value })} placeholder="comma separated" /></label>
+                            <label>Role<select value=${currentRole} onChange=${event => patchDraft(groupId, { role: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
+                            ${currentRole === 'selective-sync' && html`<label>Domains this node receives<select multiple size="5" value=${selectedDomainsValue} onChange=${event => patchDraft(groupId, { selectedDomains: selected(event) })}>${shareableDomains.map(domain => html`<option value=${domain.domain} key=${domain.domain}>${domain.domain} · ${domain.memory_count || 0} memories</option>`)}</select><small class="muted">Choose existing domains. A selection becomes active when its owner shares it with this group.</small></label>`}
                             ${pendingOnly.length > 0 && html`<p class="fed-consent-pending">Waiting on the domain owner: <strong>${pendingOnly.join(', ')}</strong>. These selectors are saved, but nothing is delivered for them until that domain is shared with this group.</p>`}
                             <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Apply role</button>
                         </form>
                         <form onSubmit=${async event => {
                             event.preventDefault();
-                            const domain = String(draft.domain || '').trim();
-                            if (!domain || !await showConfirmation('Share domain “' + domain + '” with ' + (group.display_name || groupId) + '? Ownership is verified before authoring.', { title: 'Add shared domain?', confirmLabel: 'Share domain', tone: 'primary' })) return;
-                            const saved = await mutate(groupId + ':domain-add', () => fedGroupDomainAdd(groupId, domain, draft.clearance ?? 1), 'Shared domain added');
-                            if (saved) patchDraft(groupId, { domain: '' });
+                            const domainsToShare = draft.domainsToShare || [];
+                            if (!domainsToShare.length || !await showConfirmation('Share ' + domainsToShare.join(', ') + ' with ' + (group.display_name || groupId) + '? Only existing domains you control are available.', { title: 'Share selected domains?', confirmLabel: 'Share domains', tone: 'primary' })) return;
+                            const saved = await mutate(groupId + ':domain-add', () => Promise.all(domainsToShare.map(domain => fedGroupDomainAdd(groupId, domain, draft.clearance ?? 1))), 'Selected domains added');
+                            if (saved) patchDraft(groupId, { domainsToShare: [] });
                         }}>
-                            <h4>Add a domain this node owns</h4>
-                            <label>Domain<input required value=${draft.domain || ''} onInput=${event => patchDraft(groupId, { domain: event.target.value })} placeholder="project.alpha" /></label>
+                            <h4>Share existing domains</h4>
+                            <label>Domains<select multiple required size="5" value=${draft.domainsToShare || []} onChange=${event => patchDraft(groupId, { domainsToShare: selected(event) })}>${shareableDomains.map(domain => html`<option value=${domain.domain} key=${domain.domain}>${domain.domain} · ${domain.memory_count || 0} memories</option>`)}</select><small class="muted">Only domains already on this SAGE and controlled by you are shown. Create a domain from Domains first if you need a new one.</small></label>
                             <label>Maximum classification<select value=${draft.clearance ?? 1} onChange=${event => patchDraft(groupId, { clearance: event.target.value })}><option value="0">0 · Public</option><option value="1">1 · Internal</option><option value="2">2 · Confidential</option><option value="3">3 · Secret</option><option value="4">4 · Top secret</option></select></label>
                             <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Add shared domain</button>
                         </form>
@@ -13106,21 +13142,22 @@ function SharingSyncGroupsPanel() {
                     </li>`)}</ul>
                     ${group.is_controller && html`<form class="fed-group-invite" onSubmit=${async event => {
                         event.preventDefault();
-                        const chain = String(draft.inviteChain || '').trim();
-                        const pubkey = String(draft.invitePubkey || '').trim();
+                        const connection = connections.find(candidate => candidate.remote_chain_id === draft.inviteChain);
+                        if (!connection || !connection.peer_agent_id) return;
+                        const chain = connection.remote_chain_id;
+                        const pubkey = connection.peer_agent_id;
                         const role = draft.inviteRole || 'enrolled-no-sync';
                         if (!await showConfirmation('Invite or re-bootstrap ' + chain + ' in ' + (group.display_name || groupId) + ' as ' + role + '? The remote operator must cryptographically co-sign.', { title: 'Invite group member?', confirmLabel: 'Send invite', tone: 'primary' })) return;
-                        const saved = await mutate(groupId + ':invite', () => fedGroupMemberInvite(groupId, chain, pubkey, role, domains(draft.inviteSelected), domains(draft.inviteOwned)), 'Member invite accepted and bootstrap started');
-                        if (saved) patchDraft(groupId, { inviteChain: '', invitePubkey: '', inviteSelected: '', inviteOwned: '' });
+                        const saved = await mutate(groupId + ':invite', () => fedGroupMemberInvite(groupId, chain, pubkey, role, draft.inviteSelected || [], draft.inviteOwned || []), 'Invitation sent — the member will appear as pending until they accept');
+                        if (saved) patchDraft(groupId, { inviteChain: '', inviteSelected: [], inviteOwned: [] });
                     }}>
-                        <h3>Invite or retry member bootstrap</h3><p class="muted">The chain must already be trusted. The invite is a two-party signed ceremony.</p>
-                        <label>Member chain ID<input required value=${draft.inviteChain || ''} onInput=${event => patchDraft(groupId, { inviteChain: event.target.value })} /></label>
-                        <label>Member operator public key<input required pattern="[0-9a-fA-F]{64}" value=${draft.invitePubkey || ''} onInput=${event => patchDraft(groupId, { invitePubkey: event.target.value })} /></label>
+                        <h3>Add a member</h3><p class="muted">Choose a SAGE that is already trusted. Its verified operator identity is used automatically; the remote operator must still accept.</p>
+                        ${inviteCandidates.length > 0 ? html`<label>Trusted SAGE<select required value=${draft.inviteChain || ''} onChange=${event => patchDraft(groupId, { inviteChain: event.target.value })}><option value="" disabled>Select a trusted SAGE…</option>${inviteCandidates.map(connection => html`<option value=${connection.remote_chain_id} key=${connection.remote_chain_id}>${connection.peer_name || connection.remote_chain_id} · ${connection.remote_chain_id}</option>`)}</select></label>` : html`<p class="muted">Every trusted SAGE is already in this group, or no trusted SAGE is available. Pair a new SAGE above, then return here to add it.</p>`}
                         <label>Role<select value=${draft.inviteRole || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { inviteRole: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
-                        <label>Selective domains<input value=${draft.inviteSelected || ''} onInput=${event => patchDraft(groupId, { inviteSelected: event.target.value })} placeholder="comma separated" /></label>
-                        <label>Domains owned by invitee<input value=${draft.inviteOwned || ''} onInput=${event => patchDraft(groupId, { inviteOwned: event.target.value })} placeholder="comma separated" /></label>
-                        <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Invite or retry bootstrap</button>
+                        ${draft.inviteRole === 'selective-sync' && html`<label>Domains they may receive<select multiple size="4" value=${draft.inviteSelected || []} onChange=${event => patchDraft(groupId, { inviteSelected: selected(event) })}>${(group.shared_domains || []).map(domain => html`<option value=${domain.domain_tag} key=${domain.domain_tag}>${domain.domain_tag}</option>`)}</select></label>`}
+                        <button class="btn btn-primary" type="submit" disabled=${busy !== '' || !inviteCandidates.length}>Invite member</button>
                     </form>`}
+                    ${!group.is_controller && html`<p class="fed-consent-pending">Only <strong>${memberName(group.controller_chain_id)}</strong> controls membership for this group. Ask that node’s operator to use <em>Add a member</em>.</p>`}
                 </div>`}
             </article>`;
         })}

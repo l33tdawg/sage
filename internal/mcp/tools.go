@@ -1429,48 +1429,86 @@ func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, e
 
 	stored := 0
 	skipped := 0
+	attempted := 0
+	degraded := false
+	var storeErrs []string
 
-	// Store the task summary as an observation (skip if similar exists)
-	summaryContent := fmt.Sprintf("[Task Reflection] %s", taskSummary)
-	if !s.similarMemoryExists(ctx, summaryContent, domain) {
-		if _, err := s.storeMemory(ctx, summaryContent, domain, "observation", 0.85); err == nil {
-			stored++
+	// store attempts one reflection component, recording WHY it did not land.
+	// Every failure has to surface: a reflection that silently stored nothing —
+	// an unwritable domain being the common case — used to return "reflected"
+	// with memories_stored=0, so the agent believed the lesson was durable and
+	// only a caller that inspected the count ever noticed the loss.
+	store := func(content, memType string, confidence float64) {
+		if s.similarMemoryExists(ctx, content, domain) {
+			skipped++
+			return
 		}
-	} else {
-		skipped++
+		attempted++
+		storeDegraded, err := s.storeMemory(ctx, content, domain, memType, confidence)
+		if err != nil {
+			storeErrs = append(storeErrs, err.Error())
+			return
+		}
+		stored++
+		degraded = degraded || storeDegraded
 	}
 
-	// Store dos as a fact (high confidence — proven to work)
+	// Task summary as an observation, dos as a fact (high confidence — proven to
+	// work), don'ts as an observation (prevents repeating mistakes).
+	store(fmt.Sprintf("[Task Reflection] %s", taskSummary), "observation", 0.85)
 	if dos != "" {
-		doContent := fmt.Sprintf("[DO] %s", dos)
-		if !s.similarMemoryExists(ctx, doContent, domain) {
-			if _, err := s.storeMemory(ctx, doContent, domain, "fact", 0.90); err == nil {
-				stored++
-			}
-		} else {
-			skipped++
-		}
+		store(fmt.Sprintf("[DO] %s", dos), "fact", 0.90)
 	}
-
-	// Store don'ts as an observation (important — prevents repeating mistakes)
 	if donts != "" {
-		dontContent := fmt.Sprintf("[DON'T] %s", donts)
-		if !s.similarMemoryExists(ctx, dontContent, domain) {
-			if _, err := s.storeMemory(ctx, dontContent, domain, "observation", 0.90); err == nil {
-				stored++
-			}
-		} else {
-			skipped++
-		}
+		store(fmt.Sprintf("[DON'T] %s", donts), "observation", 0.90)
 	}
 
-	return map[string]any{
+	// Nothing survived out of everything we tried: the reflection is lost. Return
+	// a tool error so the caller cannot mistake it for a successful write.
+	if stored == 0 && attempted > 0 {
+		return nil, fmt.Errorf("reflection not stored in domain %q: %s",
+			domain, strings.Join(dedupeStrings(storeErrs), "; "))
+	}
+
+	result := map[string]any{
 		"status":             "reflected",
 		"memories_stored":    stored,
 		"skipped_duplicates": skipped,
 		"task":               taskSummary,
 		"message":            "Reflection stored. Your future self will thank you.",
-	}, nil
+	}
+	if len(storeErrs) > 0 {
+		// Some components landed and some did not — report the reflection as
+		// incomplete rather than clean, and name what was lost.
+		result["status"] = "partially_stored"
+		result["memories_failed"] = len(storeErrs)
+		result["store_errors"] = dedupeStrings(storeErrs)
+		result["message"] = fmt.Sprintf(
+			"Reflection only partially stored: %d of %d parts failed to commit. The rest of this lesson was lost.",
+			len(storeErrs), attempted)
+	}
+	if degraded {
+		// Committed WITHOUT a vector (embedder was down): surface it so the
+		// agent/user knows this reflection isn't semantically recallable yet.
+		result["semantic_degraded"] = true
+		result["degraded_reason"] = "embedder unavailable at store time — re-embed to backfill the vector"
+	}
+	return result, nil
+}
+
+// dedupeStrings collapses repeated messages while preserving order. The three
+// reflection components fail for the same reason far more often than not (one
+// unwritable domain), and repeating that reason verbatim three times buries it.
+func dedupeStrings(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // taskContentPrefix marks a memory as a task in its stored content.

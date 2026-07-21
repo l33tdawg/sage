@@ -902,6 +902,9 @@ export function fedGroupSelfRole(groupId, role, selectedDomains) {
         role, selected_domains: selectedDomains || [],
     });
 }
+export function fedGroupRename(groupId, name) {
+    return fedPut(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/name`, { name });
+}
 export function fedGroupMemberInvite(groupId, memberChain, memberPubkey, role, selectedDomains = [], ownedDomains = []) {
     return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/members/invite`, {
         member_chain: memberChain, member_pubkey: memberPubkey, role,
