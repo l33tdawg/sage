@@ -12,6 +12,7 @@ fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNet
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
 import { buildUpdateBanner } from './update-banner.js';
+import { computeReorderedColumn, applyColumnOrder } from './task-reorder.js';
 import { normalizeFederationJoinState } from './federation-flow.js';
 
 const { h, render, createContext } = preact;
@@ -2272,35 +2273,16 @@ function TasksPage({ sse }) {
 
     async function reorderTask(task, direction, visibleColumnTasks) {
 		if (reorderingColumn) return;
-        // Bounds and neighbours must come from the VISIBLE column, because that is
-        // what the up/down buttons are indexed against. Applying a filtered-space
-        // step of +/-1 to the unfiltered array made the move a silent no-op
-        // whenever a hidden card sat between two visible ones - which the default
-        // view hits routinely via the 7-day done retention, plus domain and agent
-        // filters.
-        const visible = Array.isArray(visibleColumnTasks) && visibleColumnTasks.length
-            ? visibleColumnTasks
-            : tasks.filter(t => t.task_status === task.task_status);
-        const visibleFrom = visible.findIndex(t => t.memory_id === task.memory_id);
-        const visibleTo = visibleFrom + direction;
-        if (visibleFrom < 0 || visibleTo < 0 || visibleTo >= visible.length) return;
-        const neighbourID = visible[visibleTo].memory_id;
-
-        // Swap the two visible cards within the FULL column ordering, leaving any
-        // hidden cards between them exactly where they are.
-        const columnTasks = tasks.filter(t => t.task_status === task.task_status);
-        const from = columnTasks.findIndex(t => t.memory_id === task.memory_id);
-        const to = columnTasks.findIndex(t => t.memory_id === neighbourID);
-        if (from < 0 || to < 0) return;
-        [columnTasks[from], columnTasks[to]] = [columnTasks[to], columnTasks[from]];
-        const orderedIDs = columnTasks.map(t => t.memory_id);
-        const rank = new Map(orderedIDs.map((id, index) => [id, index]));
+        // Index arithmetic lives in task-reorder.js so it can be unit-tested:
+        // bounds must come from the VISIBLE column (what the buttons are indexed
+        // against), and the optimistic update must rewrite only the target
+        // column's slots rather than sorting the whole array with a comparator
+        // that is non-transitive across columns.
+        const orderedIDs = computeReorderedColumn(tasks, visibleColumnTasks, task, direction);
+        if (!orderedIDs) return;
         const previousTasks = tasks;
 		setReorderingColumn(task.task_status);
-        setTasks(prev => [...prev].sort((a, b) => {
-            if (a.task_status !== task.task_status || b.task_status !== task.task_status) return 0;
-            return rank.get(a.memory_id) - rank.get(b.memory_id);
-        }));
+        setTasks(prev => applyColumnOrder(prev, task.task_status, orderedIDs));
         try {
             const res = await reorderTasks(task.task_status, orderedIDs);
             if (res && res.error) throw new Error(res.error);
@@ -13052,6 +13034,12 @@ function SharingSyncGroupsPanel() {
             // `undefined` falls back.
             const localMember = (group.members || []).find(member => member.chain_id === localChain);
             const localConsent = (localMember && localMember.consent_domains) || [];
+            // A selector only becomes ACTIVE once its domain sits inside a live
+            // shared root, so a selector chosen before the owner shares that
+            // domain is silently inert. Surfacing the difference is the only way
+            // an operator can tell "syncing" from "waiting on the owner".
+            const localActive = (localMember && localMember.active_consent_domains) || [];
+            const pendingOnly = localConsent.filter(tag => !localActive.includes(tag));
             const selectedDomainsValue = draft.selectedDomains !== undefined
                 ? draft.selectedDomains
                 : localConsent.join(', ');
@@ -13091,6 +13079,7 @@ function SharingSyncGroupsPanel() {
                             <h4>This node’s synchronization role</h4>
                             <label>Role<select value=${draft.role || group.local_role || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { role: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
                             <label>Selective domains<input value=${selectedDomainsValue} onInput=${event => patchDraft(groupId, { selectedDomains: event.target.value })} placeholder="comma separated" /></label>
+                            ${pendingOnly.length > 0 && html`<p class="fed-consent-pending">Waiting on the domain owner: <strong>${pendingOnly.join(', ')}</strong>. These selectors are saved, but nothing is delivered for them until that domain is shared with this group.</p>`}
                             <button class="btn btn-primary" type="submit" disabled=${busy !== ''}>Apply role</button>
                         </form>
                         <form onSubmit=${async event => {

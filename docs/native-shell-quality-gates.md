@@ -253,11 +253,26 @@ instrumentation that does not exist yet: the shell emits no paint, interactive,
 recovery-shown, or frame-timing signal, so they cannot be observed from outside
 the process at all. Building that instrumentation is the v11.14 hardening work.
 
-No harness measures any of these rows yet, including the RSS row that blocks
-from v11.11 — that instrumentation is still to be written. Until it exists this
-table is a set budget, not a measured one, and nothing here should be read as
-evidence that the ceilings have been met. Calibrating the ceilings against real
-numbers is a prerequisite for v11.14 making them blocking.
+macOS now measures the two rows that are observable without shell-side
+instrumentation. `native-shell-macos-perf-smoke.sh` launches the staged app
+against an isolated `SAGE_HOME`, waits for a renderable SSCP state, then samples
+every process running the exact shell executable — the daemon is identified
+separately and excluded from the budget, but recorded for context. Sampling
+starts only after the app is renderable, because these are settled-state budgets
+rather than startup peaks.
+
+**Incremental shell RSS is enforced from v11.11**; settled idle CPU is recorded
+only. The threshold logic lives in `native-shell-perf-evaluate.py` so its
+FAILING path is testable without a macOS runner: the suite drives it over the
+ceiling, exactly at it, with zero samples, and with two shell processes whose
+sum breaches it. A harness whose failure path has never executed is not
+evidence.
+
+The remaining seven rows are still unmeasured, and are blocked on
+instrumentation rather than hardware — the shell emits no paint, interactive,
+recovery-shown or frame-timing signal, so they cannot be observed from outside
+the process at all. Until that exists those rows are set budgets, not measured
+ones, and nothing here should be read as evidence that they have been met.
 
 From v11.14, three consecutive benchmark runs must pass. A regression of more
 than 10% against the last published release fails even when the absolute ceiling

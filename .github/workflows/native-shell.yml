@@ -21,6 +21,10 @@ on:
       - "scripts/native-shell-macos-runtime-smoke.test.sh"
       - "scripts/native-shell-macos-offline-smoke.sh"
       - "scripts/native-shell-macos-offline-smoke.test.sh"
+      - "scripts/native-shell-macos-perf-smoke.sh"
+      - "scripts/native-shell-macos-perf-smoke.test.sh"
+      - "scripts/native-shell-perf-evaluate.py"
+      - "scripts/native-shell-perf-evaluate.test.sh"
       - "scripts/native-shell-windows-runtime-smoke.ps1"
       - "scripts/native-shell-windows-runtime-smoke.test.sh"
       - "scripts/acceptance-endpoint-guard.sh"
@@ -46,6 +50,10 @@ on:
       - "scripts/native-shell-macos-runtime-smoke.test.sh"
       - "scripts/native-shell-macos-offline-smoke.sh"
       - "scripts/native-shell-macos-offline-smoke.test.sh"
+      - "scripts/native-shell-macos-perf-smoke.sh"
+      - "scripts/native-shell-macos-perf-smoke.test.sh"
+      - "scripts/native-shell-perf-evaluate.py"
+      - "scripts/native-shell-perf-evaluate.test.sh"
       - "scripts/native-shell-windows-runtime-smoke.ps1"
       - "scripts/native-shell-windows-runtime-smoke.test.sh"
       - "scripts/acceptance-endpoint-guard.sh"
@@ -198,6 +206,21 @@ jobs:
           path: ${{ runner.temp }}/sage-native-shell-macos-offline.*/diagnostics
           if-no-files-found: warn
           retention-days: 7
+      - name: Measure macOS shell performance budgets
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          scripts/native-shell-macos-perf-smoke.sh \
+            desktop/sage-shell/target/${{ matrix.rust-target }}/release/bundle \
+            "${NATIVE_SHELL_VERSION}"
+      - name: Upload macOS performance evidence
+        if: runner.os == 'macOS' && always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-shell-macOS-performance-${{ matrix.rust-target }}
+          path: ${{ runner.temp }}/sage-native-shell-macos-perf.*/diagnostics
+          if-no-files-found: warn
+          retention-days: 7
       - name: Run installed Windows package lifecycle smoke
         if: runner.os == 'Windows'
         shell: pwsh
@@ -253,6 +276,8 @@ jobs:
           scripts/native-shell-linux-runtime-smoke.test.sh
           scripts/native-shell-macos-runtime-smoke.test.sh
           scripts/native-shell-macos-offline-smoke.test.sh
+          scripts/native-shell-macos-perf-smoke.test.sh
+          scripts/native-shell-perf-evaluate.test.sh
           scripts/native-shell-windows-runtime-smoke.test.sh
           test -s docs/desktop-shell-decision.md
           test -s docs/native-app-daemon-contract.md

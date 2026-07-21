@@ -5239,3 +5239,14 @@ input[type="range"]::-moz-range-thumb {
     margin: 0 auto 14px;
     line-height: 1.5;
 }
+
+/* Selective-sync selectors that are saved but not yet delivering, because the
+   domain owner has not shared that domain with the group. Without this the
+   operator cannot distinguish a live selector from an inert one. */
+.fed-consent-pending {
+    margin: 4px 0 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--text-muted);
+}
+.fed-consent-pending strong { color: var(--text); }
