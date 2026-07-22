@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.11.5.
+Reconciled against internal/mcp for SAGE v11.11.6.
 
 # SAGE MCP Tools Reference
 

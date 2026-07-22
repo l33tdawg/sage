@@ -51,13 +51,13 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.11.5
+## What's New in v11.11.6
 
-**Federation removal now converges cleanly off-consensus.** When a group owner removes a SAGE, that member can retrieve only its own signed removal record, then immediately loses the group without losing an unrelated direct trusted connection. A restored pairing wakes roster reconciliation immediately, with a short anti-entropy safety net for transient outages. Remaining members keep their group, and CEREBRUM no longer counts an audit-only removed member as active.
+**Sharing groups now have an owner-controlled end.** Deleting a group stops its sharing immediately, removes every guest, and makes the group disappear from CEREBRUM without revoking the trusted SAGE connections underneath it. Offline guests receive their signed removal when they reconnect. Interrupted deletion remains visibly retryable and fail-closed, so it cannot silently leave group access active.
 
-**Direct revoke recovery is explicit.** A guest whose host permanently revokes trust sees a named reconnect action and plain next steps: the host creates a fresh code and approves the new pairing. Temporary reachability failures continue to say that pairing is preserved.
+**Connection history matches the trust model.** A revoked connection now says **Pair again** because restoring trust requires a fresh code and approval ceremony. Previous connections may be hidden from the local CEREBRUM list without deleting their server-side audit history, and a new pairing cannot inherit a stale local dismissal.
 
-This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.5.
+This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.6.
 
 ## What's New in v11.11.2
 
@@ -573,7 +573,7 @@ docker pull ghcr.io/l33tdawg/sage:latest
 docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.5`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.6`.
 
 ### Upgrading from an older version?
 

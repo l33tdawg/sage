@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.11.5. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.11.6. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -97,7 +97,7 @@ CometBFT without treating the consensus RPC as proof of application storage.
 
 ---
 
-## Related docs (reconciled through v11.11.5)
+## Related docs (reconciled through v11.11.6)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 
