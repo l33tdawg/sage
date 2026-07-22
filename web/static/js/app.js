@@ -7,7 +7,7 @@ deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedGroups, fedGroupCreate, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
+fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedGroups, fedGroupCreate, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedGroupDissolve, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
@@ -11875,14 +11875,14 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
     return html`<div class="fed-wizard" ref=${wizardRef}>
         <div class="fed-wizard-head">
             <button class="btn fed-back" disabled=${busy} onClick=${exitGuest}>← Back</button>
-            <span class="fed-wizard-title">${recoveryPeer ? `Reconnect with ${recoveryPeer}` : 'Join someone’s network'}</span>
+            <span class="fed-wizard-title">${recoveryPeer ? `Pair again with ${recoveryPeer}` : 'Join someone’s network'}</span>
         </div>
         ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
         ${err && html`<div class="fed-err" role="alert">${err}</div>`}
 
         ${step === 'scan' && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h2>${recoveryPeer ? `Reconnect with ${recoveryPeer}` : 'Scan their SAGE'}</h2>
+            <h2>${recoveryPeer ? `Pair again with ${recoveryPeer}` : 'Scan their SAGE'}</h2>
             ${recoveryPeer
                 ? html`<p class="fed-recovery-lead">Ask <strong>${recoveryPeer}</strong> to create a new connection code on their SAGE. Then scan it here, or paste the code they send you. They will need to approve the reconnection before anything can be shared.</p>`
                 : html`<p class="muted">Point your camera at the connection code your colleague is showing you.</p>`}
@@ -13035,10 +13035,30 @@ function SharingSyncGroupsPanel() {
         } catch (e) {
             const message = String(e.message || e);
             setError(message); showToast(message, 'error');
+            await loadGroups();
         }
         setBusy('');
         return false;
     };
+	const dissolveGroup = async groupId => {
+		setBusy(groupId + ':dissolve'); setError('');
+		try {
+			await fedGroupDissolve(groupId);
+			showToast('Sharing group deleted; trusted connections are unchanged', 'success');
+			await loadGroups();
+			requestAnimationFrame(() => document.getElementById('sharing-sync-title')?.focus());
+		} catch (e) {
+			await loadGroups();
+			const count = Number(e.data && e.data.removed_members || 0);
+			const message = e.data && e.data.status === 'dissolving'
+				? (count > 0
+					? `Closing paused after ${count} ${count === 1 ? 'member was' : 'members were'} updated. Group sharing is already stopped. Retry to finish.`
+					: 'Closing is still paused. Group sharing remains stopped. Retry to finish.')
+				: String(e.message || e);
+			setError(message); showToast(message, 'error');
+		}
+		setBusy('');
+	};
     const selected = event => Array.from(event.currentTarget.selectedOptions).map(option => option.value);
     const createGroup = async event => {
         event.preventDefault();
@@ -13084,7 +13104,7 @@ function SharingSyncGroupsPanel() {
 
     return html`<section class="fed-groups" aria-labelledby="sharing-sync-title">
         <div class="fed-groups-head"><div>
-            <h2 id="sharing-sync-title">Sharing groups</h2>
+			<h2 id="sharing-sync-title" tabindex="-1">Sharing groups</h2>
             <p class="muted">Groups are for a shared workspace with several SAGEs. For a direct 1:1 relationship, use the directional permissions on that trusted SAGE instead.</p>
         </div><div class="fed-groups-actions"><button class="btn btn-primary" onClick=${() => setCreating(!creating)} disabled=${busy !== ''}>${creating ? 'Cancel' : 'Create group'}</button><button class="btn" onClick=${loadGroups} disabled=${busy !== ''}>Refresh</button></div></div>
         ${error && html`<div class="fed-err" role="alert">Sharing & Sync: ${error}</div>`}
@@ -13126,6 +13146,7 @@ function SharingSyncGroupsPanel() {
             const inviteCandidates = connections.filter(connection =>
                 !existingMembers.has(connection.remote_chain_id) && connection.peer_agent_id);
             const remoteMembers = (group.members || []).filter(member => member.chain_id !== localChain);
+			const groupClosing = group.lifecycle_state === 'dissolving';
             const groupReady = remoteMembers.length >= 2 && remoteMembers.every(member => member.state === 'active');
             const activeRemoteMembers = remoteMembers.filter(member => {
                 const connection = connectionFor(member.chain_id);
@@ -13135,8 +13156,10 @@ function SharingSyncGroupsPanel() {
                 if (member.chain_id === localChain) return true;
                 return reachability[member.chain_id] && reachability[member.chain_id].reachable;
             }).length;
-            const groupConnected = remoteMembers.length === 0 || activeRemoteMembers.length > 0;
-            const groupConnectionSummary = !groupReady
+			const groupConnected = !groupClosing && (remoteMembers.length === 0 || activeRemoteMembers.length > 0);
+			const groupConnectionSummary = groupClosing
+				? 'closing — retry needed'
+				: !groupReady
                 ? 'setup in progress'
                 : (activeRemoteMembers.length === 0 ? 'connection needs attention' : `${liveMembers} reachable`);
             const canManageSharing = groupConnected && groupReady;
@@ -13155,8 +13178,9 @@ function SharingSyncGroupsPanel() {
                     <span aria-hidden="true">${openGroup === groupId ? '▾' : '▸'}</span>
                 </button>
                 ${openGroup === groupId && html`<div id=${panelId} class="fed-group-detail">
-                    ${!groupReady && html`<p class="fed-group-connection-warning"><strong>Group setup in progress.</strong> Invite at least two trusted SAGEs and wait for every invite to be accepted. Nothing is shared until setup is complete.</p>`}
-                    ${groupReady && !groupConnected && html`<p class="fed-group-connection-warning"><strong>The group owner connection needs attention.</strong> This saved group is not currently live for this SAGE. Retry the trusted connection to ${friendlyName(group.controller_chain_id, group.controller_display_name)}; sharing changes stay locked until that owner link is active again.</p>`}
+					${groupClosing && html`<p class="fed-group-connection-warning"><strong>This sharing group is closing.</strong> Group sharing is already stopped. Retry below to finish removing any members that still need their signed update; offline SAGEs will learn the change when they next connect.</p>`}
+                    ${!groupClosing && !groupReady && html`<p class="fed-group-connection-warning"><strong>Group setup in progress.</strong> Invite at least two trusted SAGEs and wait for every invite to be accepted. Nothing is shared until setup is complete.</p>`}
+                    ${!groupClosing && groupReady && !groupConnected && html`<p class="fed-group-connection-warning"><strong>The group owner connection needs attention.</strong> This saved group is not currently live for this SAGE. Retry the trusted connection to ${friendlyName(group.controller_chain_id, group.controller_display_name)}; sharing changes stay locked until that owner link is active again.</p>`}
                     ${group.is_controller && html`<form class="fed-group-rename" onSubmit=${async event => {
                         event.preventDefault();
                         const name = String(draft.name || '').trim();
@@ -13230,6 +13254,14 @@ function SharingSyncGroupsPanel() {
                         ${draft.inviteRole === 'selective-sync' && html`<label>Domains they may receive<select disabled=${!groupConnected} multiple size="4" value=${draft.inviteSelected || []} onChange=${event => patchDraft(groupId, { inviteSelected: selected(event) })}>${(group.shared_domains || []).map(domain => html`<option value=${domain.domain_tag} key=${domain.domain_tag}>${domain.domain_tag}</option>`)}</select></label>`}
                         <button class="btn btn-primary" type="submit" disabled=${busy !== '' || !groupConnected || !inviteCandidates.length}>Invite member</button>
                     </form>`}
+                    ${group.is_controller && html`<section class="fed-perm-danger">
+						<h3>${groupClosing ? 'Finish deleting sharing group' : 'Delete sharing group'}</h3>
+						<p>Remove every member and stop sharing through this group. This does not end any trusted connection. Offline SAGEs are updated when they next connect.</p>
+                        <button type="button" class="btn btn-danger" disabled=${busy !== ''} onClick=${async () => {
+							if (!groupClosing && !await showConfirmation('Delete ' + displayName + '? Every member is removed from this sharing group and sharing through it stops. This does not end their trusted connection to this SAGE. Each SAGE keeps copies it already has, and offline SAGEs are updated when they next connect.', { title: 'Delete sharing group?', confirmLabel: 'Delete group', tone: 'danger' })) return;
+							await dissolveGroup(groupId);
+						}}>${groupClosing ? 'Retry closing group' : 'Delete sharing group'}</button>
+                    </section>`}
                     ${!group.is_controller && html`<p class="fed-consent-pending"><strong>${friendlyName(group.controller_chain_id, group.controller_display_name)}</strong> owns this group. You are a member; ask its owner to use <em>Add a member</em>.</p>`}
                 </div>`}
             </article>`;
@@ -13246,6 +13278,12 @@ function FederationPage() {
     const [err, setErr] = useState('');
     const [remoteNotice, setRemoteNotice] = useState(null);
     const [connectionReachability, setConnectionReachability] = useState({});
+    const [hiddenPastConnections, setHiddenPastConnections] = useState(() => {
+        try {
+            const saved = JSON.parse(localStorage.getItem('sage-fed-hidden-past-connections') || '[]');
+            return Array.isArray(saved) ? saved.filter(value => typeof value === 'string') : [];
+        } catch (e) { return []; }
+    });
     const lastGoodConns = useRef(null);
     const lastRemoteRevokeKey = useRef('');
 
@@ -13253,6 +13291,18 @@ function FederationPage() {
         try {
             const r = await fedConnections();
             const next = Array.isArray(r.connections) ? r.connections : [];
+			// A fresh active pairing is a new trust generation. Clear every local
+			// history dismissal for that peer so a later expiry/revocation cannot be
+			// hidden by a key left over from an older connection that lacked ended_at.
+			const activeChains = new Set(next.filter(c => c.status === 'active' && !c.expired).map(c => c.remote_chain_id));
+			if (activeChains.size > 0) setHiddenPastConnections(current => {
+				const visible = current.filter(key => !Array.from(activeChains).some(chain => key.startsWith(chain + ':')));
+				if (visible.length !== current.length) {
+					try { localStorage.setItem('sage-fed-hidden-past-connections', JSON.stringify(visible)); } catch (e) {}
+					return visible;
+				}
+				return current;
+			});
             const previous = lastGoodConns.current;
             if (previous) {
                 const previouslyActive = new Set(previous.filter(c => c.status === 'active' && !c.expired).map(c => c.remote_chain_id));
@@ -13362,6 +13412,19 @@ function FederationPage() {
         setRecoveryPeer(connection && connection.peer_name ? connection.peer_name : 'the other SAGE');
         setMode('guest');
     };
+    const pastConnectionKey = connection => `${connection.remote_chain_id}:${connection.ended_at || connection.status || 'ended'}`;
+    const hidePastConnection = connection => {
+        const key = pastConnectionKey(connection);
+        setHiddenPastConnections(current => {
+            const next = current.includes(key) ? current : [...current, key];
+            try { localStorage.setItem('sage-fed-hidden-past-connections', JSON.stringify(next)); } catch (e) {}
+            return next;
+        });
+    };
+    const showHiddenPastConnections = () => {
+        try { localStorage.removeItem('sage-fed-hidden-past-connections'); } catch (e) {}
+        setHiddenPastConnections([]);
+    };
     const exitJoinWizard = () => {
         setRecoveryPeer('');
         setMode('landing');
@@ -13372,6 +13435,8 @@ function FederationPage() {
 
     const liveConns = (conns || []).filter(c => c.status === 'active' && !c.expired);
     const pastConns = (conns || []).filter(c => c.status !== 'active' || c.expired);
+    const visiblePastConns = pastConns.filter(c => !hiddenPastConnections.includes(pastConnectionKey(c)));
+    const hiddenPastCount = pastConns.length - visiblePastConns.length;
 
     return html`<div class="page fed-page">
         <div class="fed-landing">
@@ -13387,7 +13452,7 @@ function FederationPage() {
                     <p>${remoteNotice.ended_message || 'The other SAGE revoked the trusted link. Read and Copy access stopped immediately.'} To reconnect, ask them to create a new connection code, then scan or paste it here.</p>
                 </div>
                 <div class="fed-peer-revoke-actions">
-                    ${fedOn && html`<button class="btn btn-primary" onClick=${() => beginGuestRejoin(remoteNotice)}>Reconnect with ${remoteNotice.peer_name || 'this SAGE'}</button>`}
+                    ${fedOn && html`<button class="btn btn-primary" onClick=${() => beginGuestRejoin(remoteNotice)}>Pair again with ${remoteNotice.peer_name || 'this SAGE'}</button>`}
                     <button class="btn" aria-label="Dismiss connection-ended notice" onClick=${dismissRemoteNotice}>Dismiss</button>
                 </div>
             </div>`}
@@ -13443,17 +13508,22 @@ function FederationPage() {
                 </div>`; })}
                 ${pastConns.length > 0 && html`<div class="fed-past">
                     <button class="fed-past-toggle" onClick=${() => setShowPast(!showPast)} aria-expanded=${showPast} aria-controls="fed-past-connections">
-                        <span>${showPast ? '▾' : '▸'}</span> Past connections (${pastConns.length})
+                        <span>${showPast ? '▾' : '▸'}</span> Previous connections (${visiblePastConns.length})
                     </button>
                     ${showPast && html`<div class="fed-past-list" id="fed-past-connections">
-                        ${pastConns.map(c => html`<div class="fed-conn-row fed-conn-past" key=${c.remote_chain_id}>
+                        ${visiblePastConns.map(c => html`<div class="fed-conn-row fed-conn-past" key=${pastConnectionKey(c)}>
                             <span class="fed-conn-status off"></span>
                             <span class="fed-conn-name">${c.peer_name || 'Other SAGE'}</span>
-                            <span class="fed-conn-meta muted">${c.expired ? 'expired' : (c.ended_by === 'revoked_by_peer' ? 'revoked by peer' : 'revoked')} · audit history</span>
+                            <span class="fed-conn-meta muted">${c.expired ? 'expired' : (c.ended_by === 'revoked_by_peer' ? 'ended by the other SAGE' : 'ended')}</span>
                             ${c.ended_message && html`<span class="fed-past-reason muted">${c.ended_message}</span>`}
                             ${c.ended_at && html`<time class="fed-past-time muted" datetime=${c.ended_at}>${new Date(c.ended_at).toLocaleString()}</time>`}
-							${fedOn && html`<span class="fed-past-actions"><button class="btn" onClick=${() => beginGuestRejoin(c)}>Reconnect with ${c.peer_name || 'this SAGE'}</button></span>`}
+                            <span class="fed-past-actions">
+                                ${fedOn && html`<button class="btn" onClick=${() => beginGuestRejoin(c)}>Pair again…</button>`}
+                                <button class="btn" onClick=${() => hidePastConnection(c)}>Hide from this list</button>
+                            </span>
                         </div>`)}
+                        ${visiblePastConns.length > 0 && html`<p class="muted">Pairing again requires a new connection code and approval from both people.</p>`}
+                        ${hiddenPastCount > 0 && html`<button class="btn" onClick=${showHiddenPastConnections}>Show ${hiddenPastCount} hidden ${hiddenPastCount === 1 ? 'connection' : 'connections'}</button>`}
                     </div>`}
                 </div>`}
             </div>`}

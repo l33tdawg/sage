@@ -82,6 +82,97 @@ func TestMemberRemovalEnforcement(t *testing.T) {
 	assert.Equal(t, 1, anchors, "anchor fires exactly once per removal batch")
 }
 
+// TestDissolveSyncGroup proves the owner lifecycle action is strictly group
+// RBAC: every guest is terminally removed and the owner no longer lists the
+// group, while the independent trusted connection and direct-sync policy stay
+// intact for future direct sharing or another group.
+func TestDissolveSyncGroupPreservesPairwiseConnection(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	guestPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	guestPubHex := hex.EncodeToString(guestPub)
+	ownerPubHex := hex.EncodeToString(m.agentPub)
+
+	require.NoError(t, ms.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "g-dissolve", ControllerChainID: m.localChainID, ControllerAgentPubkey: ownerPubHex,
+	}))
+	seedActiveMember(t, ms, "g-dissolve", m.localChainID, store.GroupRoleFullSync, m.agentPub)
+	seedActiveMember(t, ms, "g-dissolve", "chain-guest", store.GroupRoleFullSync, guestPub)
+	// This represents the separate JOIN trust edge and direct-sharing policy.
+	// It is intentionally not owned by group removal.
+	bs := attachBadger(t, m)
+	require.NoError(t, bs.SetCrossFed("chain-guest", "", guestPub, 2, 0, []string{"hr"}, nil, "active"))
+	require.NoError(t, ms.PrepareSyncControl(ctx, store.SyncControl{
+		RemoteChainID: "chain-guest", Role: "host", ControllerChainID: m.localChainID,
+		ControllerAgentID: ownerPubHex, PeerAgentID: guestPubHex,
+		PolicyEpoch: "pairwise-epoch", RemoteCAPin: guestPubHex, PolicyVersion: 3,
+	}))
+	require.NoError(t, ms.ActivateSyncControl(ctx, "chain-guest", "pairwise-epoch"))
+	require.NoError(t, ms.SetSyncDomains(ctx, "chain-guest", []string{"hr"}))
+
+	anchors := 0
+	m.syncAnchorFn = func(_ context.Context, _, _, _ string) error { anchors++; return nil }
+	removed, err := m.DissolveSyncGroup(ctx, "g-dissolve")
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
+	assert.Equal(t, 1, anchors, "each signed terminal member removal remains anchored")
+
+	guest, err := ms.GetSyncGroupMember(ctx, "g-dissolve", "chain-guest")
+	require.NoError(t, err)
+	require.NotNil(t, guest)
+	assert.Equal(t, store.GroupMemberRemoved, guest.MemberState)
+	groups, err := ms.ListSyncGroups(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, groups, "the owner no longer sees a dissolved shared space")
+
+	_, _, _, _, _, _, status, err := bs.GetCrossFed("chain-guest")
+	require.NoError(t, err)
+	assert.Equal(t, "active", status, "dissolving a group must not revoke the trusted connection")
+	domains, err := ms.GetSyncDomains(ctx, "chain-guest")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"hr"}, domains, "direct sharing policy must survive group dissolution")
+	control, err := ms.GetSyncControl(ctx, "chain-guest")
+	require.NoError(t, err)
+	require.NotNil(t, control)
+	assert.Equal(t, "active", control.BindingState, "the pairwise JOIN binding must survive group dissolution")
+
+	removed, err = m.DissolveSyncGroup(ctx, "g-dissolve")
+	require.NoError(t, err)
+	assert.Zero(t, removed, "a retry after a lost success response must be idempotent")
+}
+
+func TestDissolveSyncGroupFailureStaysVisibleAndFailClosed(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	guestPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	require.NoError(t, ms.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "g-paused", ControllerChainID: m.localChainID,
+		ControllerAgentPubkey: hex.EncodeToString(m.agentPub),
+	}))
+	seedActiveMember(t, ms, "g-paused", m.localChainID, store.GroupRoleFullSync, m.agentPub)
+	seedActiveMember(t, ms, "g-paused", "chain-guest", store.GroupRoleFullSync, guestPub)
+	seedGroupDomain(t, ms, "g-paused", "hr", m.localChainID, 0)
+
+	// Two validators without a governance gate force the first signed removal to
+	// fail after the durable closing barrier has been installed.
+	bs := attachBadger(t, m)
+	require.NoError(t, bs.SaveValidators(map[string]int64{"validator-a": 1, "validator-b": 1}))
+	removed, err := m.DissolveSyncGroup(ctx, "g-paused")
+	require.Error(t, err)
+	assert.Zero(t, removed)
+	state, err := ms.SyncGroupLifecycleState(ctx, "g-paused")
+	require.NoError(t, err)
+	assert.Equal(t, store.GroupLifecycleDissolving, state)
+	groups, err := ms.ListSyncGroups(ctx)
+	require.NoError(t, err)
+	assert.Len(t, groups, 1, "a partial dissolution must stay visible for retry")
+	shared, err := ms.GroupSharedDomains(ctx, m.localChainID, "chain-guest")
+	require.NoError(t, err)
+	assert.Empty(t, shared, "group sharing must stop at lifecycle transition, before the first removal")
+}
+
 // TestMemberLeaveEnforcement proves the voluntary-leave path is symmetric: a
 // self-signed member_leave purges the leaver's group outbox and fires the anchor.
 func TestMemberLeaveEnforcement(t *testing.T) {

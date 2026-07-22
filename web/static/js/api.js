@@ -831,7 +831,12 @@ async function fedFetch(path, opts) {
     const text = await res.text();
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { error: text }; }
-    if (!res.ok) throw new Error(data.error || text || `HTTP ${res.status}`);
+    if (!res.ok) {
+        const error = new Error(data.error || text || `HTTP ${res.status}`);
+        error.status = res.status;
+        error.data = data;
+        throw error;
+    }
     return data;
 }
 function fedPost(path, body) {
@@ -916,6 +921,9 @@ export function fedGroupMemberRemove(groupId, memberChain) {
     return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/roster`, {
         entry_type: 'member_remove', payload: { member_chain: memberChain },
     });
+}
+export function fedGroupDissolve(groupId) {
+    return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/dissolve`);
 }
 
 // Host wizard.

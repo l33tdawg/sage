@@ -250,6 +250,63 @@ func TestSyncGroupMemberUpsertContract(t *testing.T) {
 	}
 }
 
+func TestSyncGroupDissolveLifecycleFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	require := func(err error, label string) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+	}
+	require(s.UpsertSyncGroup(ctx, SyncGroup{
+		GroupID: "g-close", ControllerChainID: "owner", ControllerAgentPubkey: "owner-key",
+	}), "group")
+	for _, chain := range []string{"owner", "guest"} {
+		require(s.UpsertSyncGroupMember(ctx, SyncGroupMember{
+			GroupID: "g-close", MemberChainID: chain, MemberAgentPubkey: chain + "-key",
+			Role: GroupRoleFullSync, MemberState: GroupMemberActive,
+		}), "member "+chain)
+	}
+	require(s.UpsertSyncGroupDomain(ctx, SyncGroupDomain{
+		GroupID: "g-close", DomainTag: "hr", OwnerChainID: "owner",
+	}), "domain")
+
+	before, err := s.GroupSharedDomains(ctx, "owner", "guest")
+	require(err, "shared before")
+	if len(before) != 1 || before[0] != "hr" {
+		t.Fatalf("shared before closing = %v, want [hr]", before)
+	}
+	state, err := s.BeginSyncGroupDissolve(ctx, "g-close", "owner")
+	require(err, "begin dissolve")
+	if state != GroupLifecycleDissolving {
+		t.Fatalf("lifecycle = %q, want dissolving", state)
+	}
+	if shared, err := s.GroupSharedDomains(ctx, "owner", "guest"); err != nil || len(shared) != 0 {
+		t.Fatalf("closing group still shares domains: %v %v", shared, err)
+	}
+	if targets, err := s.ListGroupFanoutTargets(ctx, "owner", "hr"); err != nil || len(targets) != 0 {
+		t.Fatalf("closing group still has fanout targets: %v %v", targets, err)
+	}
+	if err := s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
+		GroupID: "g-close", Subchain: "roster", Seq: 0, EntryHash: "manifest", EntryType: "manifest",
+	}); err == nil {
+		t.Fatal("non-terminal mutation was accepted after dissolve began")
+	}
+	require(s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
+		GroupID: "g-close", Subchain: "roster", Seq: 0, EntryHash: "remove", EntryType: "member_remove",
+	}), "terminal removal remains appendable")
+	require(s.CompleteSyncGroupDissolve(ctx, "g-close", "owner"), "complete dissolve")
+	state, err = s.SyncGroupLifecycleState(ctx, "g-close")
+	require(err, "terminal state")
+	if state != GroupLifecycleDissolved {
+		t.Fatalf("terminal lifecycle = %q, want dissolved", state)
+	}
+	if groups, err := s.ListSyncGroups(ctx); err != nil || len(groups) != 0 {
+		t.Fatalf("dissolved group remains visible: %v %v", groups, err)
+	}
+}
+
 // TestSyncTombstoneEnforcementCoexist verifies a local_suppress row is never
 // swallowed by a pre-existing advisory row for the same target (enforcement is
 // part of the PK), and IsLocallySuppressed still discriminates correctly.

@@ -6,12 +6,16 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -119,6 +123,35 @@ func seedGroup(t *testing.T, ms *store.SQLiteStore, groupID, controllerChain str
 		t.Fatalf("seed group: %v", err)
 	}
 	return pub, key
+}
+
+func TestMemberRemovalTerminalEntryReturnsNewestLifecycleRemoval(t *testing.T) {
+	ctx := context.Background()
+	_, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	for seq, item := range []struct {
+		entryType string
+		chain     string
+	}{
+		{entryType: "member_remove", chain: "chain-guest"},
+		{entryType: "member_invite", chain: "chain-guest"},
+		{entryType: "member_activate", chain: "chain-guest"},
+		{entryType: "member_remove", chain: "chain-other"},
+		{entryType: "member_remove", chain: "chain-guest"},
+	} {
+		payload, err := json.Marshal(memberChainPayload(item.chain))
+		require.NoError(t, err)
+		require.NoError(t, ms.AppendSyncGroupLog(ctx, store.SyncGroupLogEntry{
+			GroupID: "g-rejoin", Subchain: RosterSubchain, Seq: int64(seq),
+			EntryHash: fmt.Sprintf("hash-%d", seq), EntryType: item.entryType,
+			PayloadJSON: string(payload),
+		}))
+	}
+
+	entry, err := memberRemovalTerminalEntry(ctx, ms, "g-rejoin", "chain-guest")
+	require.NoError(t, err)
+	require.NotNil(t, entry)
+	assert.EqualValues(t, 4, entry.Seq,
+		"a re-invited guest must receive its newest removal, not the historical removal behind its cursor")
 }
 
 // bindPullJournalPeer gives PullGroupJournal the same exact, currently-active
@@ -656,6 +689,15 @@ func TestRemovedMemberGetsOnlyItsTerminalRosterRemoval(t *testing.T) {
 			t.Fatalf("append %s: %v", entry.EntryType, err)
 		}
 	}
+	if _, err := ms.BeginSyncGroupDissolve(ctx, "g1", "chain-ctl"); err != nil {
+		t.Fatalf("begin retired-owner fixture: %v", err)
+	}
+	if err := ms.CompleteSyncGroupDissolve(ctx, "g1", "chain-ctl"); err != nil {
+		t.Fatalf("retire owner fixture: %v", err)
+	}
+	if group, err := ms.GetSyncGroup(ctx, "g1"); err != nil || group != nil {
+		t.Fatalf("owner group must be retired before terminal serve: group=%+v err=%v", group, err)
+	}
 
 	rr, resp := journalAs(t, m, "chain-removed", SyncJournalRequest{GroupID: "g1", Subchain: RosterSubchain, AfterSeq: -1})
 	if rr.Code != http.StatusOK || resp == nil || !resp.TerminalOnly || len(resp.Entries) != 1 || resp.Entries[0].EntryType != "member_remove" || resp.Entries[0].Seq != 1 {
@@ -707,11 +749,14 @@ func TestPullTerminalRemovalSuffixConvergesWithoutOldDomainJournal(t *testing.T)
 	}
 }
 
-func TestPullTerminalRosterRemovalHidesGroupFromRemovedGuest(t *testing.T) {
+func TestInvitedGuestAutomaticallyPullsTerminalRemovalAndHidesGroup(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
 	ownerPub, ownerKey := seedGroup(t, ms, "g1", "chain-owner")
 	bindPullJournalPeer(t, m, ms, "g1", "chain-owner", ownerPub)
+	if err := ms.SetSyncGroupMemberState(ctx, "g1", m.localChainID, store.GroupMemberInvited, 0); err != nil {
+		t.Fatalf("leave guest in invited crash state: %v", err)
+	}
 
 	// The predecessor is deliberately absent locally. A removed guest still has
 	// to ingest the signed sparse removal and stop rendering the group.
@@ -723,9 +768,7 @@ func TestPullTerminalRosterRemovalHidesGroupFromRemovedGuest(t *testing.T) {
 		}
 		return &SyncJournalResponse{Version: JournalWireVersion, Entries: []JournalEntryWire{storeToWire(removal)}, NextCursor: 1, TerminalOnly: true}, nil
 	}
-	if n, err := m.PullGroupJournal(ctx, "chain-owner", "g1", RosterSubchain); err != nil || n != 1 {
-		t.Fatalf("pull terminal roster removal: n=%d err=%v", n, err)
-	}
+	m.reconcilePeerJournals(ctx, ms, "chain-owner")
 	local, err := ms.GetSyncGroupMember(ctx, "g1", m.localChainID)
 	if err != nil || local == nil || local.MemberState != store.GroupMemberRemoved {
 		t.Fatalf("local guest removal did not converge: member=%+v err=%v", local, err)

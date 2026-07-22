@@ -134,6 +134,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/roster", h.handleFedGroupRosterControl)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/members/invite", h.handleFedGroupMemberInvite)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/epoch-rotate", h.handleFedGroupEpochRotate)
+	fr.Post("/v1/dashboard/federation/groups/{group_id}/dissolve", h.handleFedGroupDissolve)
 }
 
 // --- LAN endpoint suggestion (fix the localhost-in-join-code footgun) -------
@@ -1175,6 +1176,7 @@ type groupManagementDriver interface {
 	EmitSelfRoleChange(ctx context.Context, groupID, role string, selectedDomains []string) (store.SyncGroupLogEntry, error)
 	EmitGroupRename(ctx context.Context, groupID, name string) (store.SyncGroupLogEntry, error)
 	CreateSyncGroup(ctx context.Context, name string) (string, error)
+	DissolveSyncGroup(ctx context.Context, groupID string) (int, error)
 	EmitRosterControl(ctx context.Context, groupID, entryType string, payload map[string]string) (store.SyncGroupLogEntry, error)
 	EmitMemberInvite(ctx context.Context, groupID, memberChain, memberPubkey, role string, selectedDomains, ownedDomains []string) (store.SyncGroupLogEntry, error)
 	EmitEpochRotate(ctx context.Context, groupID, newEpoch, incomingChain, incomingPubkey string) (store.SyncGroupLogEntry, error)
@@ -1258,6 +1260,37 @@ func (h *DashboardHandler) handleFedGroupCreate(w http.ResponseWriter, r *http.R
 		return
 	}
 	fedWriteJSON(w, http.StatusCreated, map[string]string{"group_id": groupID})
+}
+
+// handleFedGroupDissolve lets only the group owner end a shared space. The
+// federation layer emits signed terminal removals for all guests before locally
+// retiring the owner's card; it intentionally leaves each trusted connection
+// and its independent direct-sharing policy untouched.
+func (h *DashboardHandler) handleFedGroupDissolve(w http.ResponseWriter, r *http.Request) {
+	d, ok := h.groupDriver(w, r)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	groupID := chi.URLParam(r, "group_id")
+	removed, err := d.DissolveSyncGroup(ctx, groupID)
+	if err != nil {
+		body := map[string]any{
+			"error": err.Error(), "group_id": groupID,
+			"removed_members": removed,
+		}
+		if ss := h.syncStore(); ss != nil {
+			if state, stateErr := ss.SyncGroupLifecycleState(ctx, groupID); stateErr == nil && state == store.GroupLifecycleDissolving {
+				body["status"] = state
+			}
+		}
+		fedWriteJSON(w, http.StatusConflict, body)
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{
+		"group_id": groupID, "removed_members": removed, "status": "dissolved",
+	})
 }
 
 type syncGroupMemberView struct {
@@ -1399,6 +1432,7 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 		Epoch             string                `json:"epoch"`
 		RosterRevision    int64                 `json:"roster_revision"`
 		RosterJournalHead string                `json:"roster_journal_head,omitempty"`
+		LifecycleState    string                `json:"lifecycle_state,omitempty"`
 		IsController      bool                  `json:"is_controller"`
 		LocalRole         string                `json:"local_role,omitempty"`
 		Members           []syncGroupMemberView `json:"members"`
@@ -1449,6 +1483,11 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 			IsController:  g.ControllerChainID == local,
 			Members:       []syncGroupMemberView{},
 			SharedDomains: []domainView{},
+		}
+		gv.LifecycleState, err = ss.SyncGroupLifecycleState(ctx, g.GroupID)
+		if err != nil {
+			fedWriteErr(w, http.StatusInternalServerError, "Failed to read group lifecycle.")
+			return
 		}
 		for _, mem := range members {
 			// A removed/left member is retained in the local journal projection for

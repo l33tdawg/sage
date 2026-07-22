@@ -215,6 +215,18 @@ func (s *SQLiteStore) migrateSyncGroupTables(ctx context.Context) {
 		reason            TEXT NOT NULL,
 		retired_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	)`)
+	// A durable lifecycle barrier is separate from retirement. "dissolving"
+	// immediately disables group data flow and new mutations while the owner
+	// authors one signed terminal removal per member; "dissolved" makes retries
+	// idempotent after the presentation record is retired.
+	_, _ = s.writeExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS sync_group_lifecycle (
+		group_id       TEXT PRIMARY KEY,
+		state          TEXT NOT NULL CHECK (state IN ('dissolving','dissolved')),
+		owner_chain_id TEXT NOT NULL,
+		started_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		updated_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	)`)
 	_, _ = s.writeExecContext(ctx, `
 	CREATE TABLE IF NOT EXISTS sync_group_domain (
 		group_id         TEXT NOT NULL,
@@ -449,6 +461,118 @@ func (s *SQLiteStore) ListSyncGroups(ctx context.Context) ([]SyncGroup, error) {
 		out = append(out, *g)
 	}
 	return out, rows.Err()
+}
+
+// RetireSyncGroup hides a locally dissolved or departed group without deleting
+// its journal, roster, or audit evidence. Group retirement is deliberately a
+// local presentation/lifecycle marker: it has no authority to alter an
+// independent trusted connection or its pairwise sharing policy.
+func (s *SQLiteStore) RetireSyncGroup(ctx context.Context, groupID, retiredForChain, reason string) error {
+	if groupID == "" || retiredForChain == "" {
+		return fmt.Errorf("group_id and retired_for_chain are required")
+	}
+	_, err := s.writeExecContext(ctx, `
+		INSERT INTO sync_group_retired(group_id, retired_for_chain, reason)
+		VALUES (?, ?, ?)
+		ON CONFLICT(group_id) DO UPDATE SET
+			retired_for_chain=excluded.retired_for_chain,
+			reason=excluded.reason,
+			retired_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+		groupID, retiredForChain, reason)
+	if err != nil {
+		return fmt.Errorf("retire sync group: %w", err)
+	}
+	return nil
+}
+
+const (
+	GroupLifecycleDissolving = "dissolving"
+	GroupLifecycleDissolved  = "dissolved"
+)
+
+// SyncGroupLifecycleState returns the durable owner lifecycle state. An older
+// retirement row without a lifecycle row is treated as dissolved so retries of
+// an already-completed operation are still safe and idempotent.
+func (s *SQLiteStore) SyncGroupLifecycleState(ctx context.Context, groupID string) (string, error) {
+	if groupID == "" {
+		return "", fmt.Errorf("group_id is required")
+	}
+	var state string
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT state FROM sync_group_lifecycle WHERE group_id=?
+		UNION ALL
+		SELECT 'dissolved' FROM sync_group_retired
+		 WHERE group_id=? AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle WHERE group_id=?)
+		LIMIT 1`, groupID, groupID, groupID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get sync group lifecycle: %w", err)
+	}
+	return state, nil
+}
+
+// BeginSyncGroupDissolve installs the fail-closed lifecycle barrier. The caller
+// serializes this with group journal authors and holds the sync-policy write
+// lease, so no mutation or data-plane read can cross the transition.
+func (s *SQLiteStore) BeginSyncGroupDissolve(ctx context.Context, groupID, ownerChainID string) (string, error) {
+	if groupID == "" || ownerChainID == "" {
+		return "", fmt.Errorf("group_id and owner_chain_id are required")
+	}
+	if _, err := s.writeExecContext(ctx, `
+		INSERT INTO sync_group_lifecycle(group_id, state, owner_chain_id)
+		VALUES (?, 'dissolving', ?)
+		ON CONFLICT(group_id) DO NOTHING`, groupID, ownerChainID); err != nil {
+		return "", fmt.Errorf("begin sync group dissolve: %w", err)
+	}
+	var state, storedOwner string
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT state, owner_chain_id FROM sync_group_lifecycle WHERE group_id=?`, groupID).
+		Scan(&state, &storedOwner); err != nil {
+		return "", fmt.Errorf("read sync group dissolve: %w", err)
+	}
+	if storedOwner != ownerChainID {
+		return "", fmt.Errorf("sync group dissolve owner does not match")
+	}
+	return state, nil
+}
+
+// CompleteSyncGroupDissolve atomically retires the owner's active card and marks
+// the lifecycle terminal. Signed journals, roster rows, and pairwise connection
+// state are retained unchanged.
+func (s *SQLiteStore) CompleteSyncGroupDissolve(ctx context.Context, groupID, ownerChainID string) error {
+	if groupID == "" || ownerChainID == "" {
+		return fmt.Errorf("group_id and owner_chain_id are required")
+	}
+	return s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx, ok := txStore.(*SQLiteStore)
+		if !ok {
+			return fmt.Errorf("sync group dissolve requires the SQLite store backend")
+		}
+		result, err := tx.writeExecContext(ctx, `
+			UPDATE sync_group_lifecycle
+			   SET state='dissolved', updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			 WHERE group_id=? AND owner_chain_id=? AND state IN ('dissolving','dissolved')`,
+			groupID, ownerChainID)
+		if err != nil {
+			return fmt.Errorf("complete sync group lifecycle: %w", err)
+		}
+		if n, err := result.RowsAffected(); err != nil || n != 1 {
+			return fmt.Errorf("sync group dissolve was not started by this owner")
+		}
+		_, err = tx.writeExecContext(ctx, `
+			INSERT INTO sync_group_retired(group_id, retired_for_chain, reason)
+			VALUES (?, ?, 'dissolved by group owner')
+			ON CONFLICT(group_id) DO UPDATE SET
+				retired_for_chain=excluded.retired_for_chain,
+				reason=excluded.reason,
+				retired_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`, groupID, ownerChainID)
+		if err != nil {
+			return fmt.Errorf("retire dissolved sync group: %w", err)
+		}
+		return nil
+	})
 }
 
 // SetSyncGroupRosterJournalHead advances ONLY the roster head cache (a
@@ -1147,7 +1271,14 @@ func (s *SQLiteStore) AppendSyncGroupLog(ctx context.Context, e SyncGroupLogEntr
 	if e.GroupID == "" || e.Subchain == "" || e.EntryHash == "" || e.EntryType == "" {
 		return fmt.Errorf("group_id, subchain, entry_hash, and entry_type are required")
 	}
-	_, err := s.writeExecContext(ctx, `
+	state, err := s.SyncGroupLifecycleState(ctx, e.GroupID)
+	if err != nil {
+		return err
+	}
+	if state != "" && e.EntryType != "member_remove" {
+		return fmt.Errorf("sync group %s is %s; only terminal member removals are allowed", e.GroupID, state)
+	}
+	_, err = s.writeExecContext(ctx, `
 		INSERT INTO sync_group_log
 			(group_id, subchain, seq, prev_hash, entry_hash, entry_type, payload_json,
 			 author_chain_id, author_agent_pubkey, author_sig, controller_epoch,
@@ -1395,6 +1526,8 @@ func (s *SQLiteStore) ListGroupFanoutTargets(ctx context.Context, ownerChainID, 
 		  FROM sync_group_domain gd
 		  JOIN sync_group_member gm ON gm.group_id = gd.group_id
 		 WHERE gd.owner_chain_id = ? AND gd.removed_revision = 0
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=gd.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=gd.group_id)
 		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
 		   AND gm.member_state = 'active'
 		   AND gm.member_chain_id != gd.owner_chain_id
@@ -1425,7 +1558,11 @@ func (s *SQLiteStore) ListGroupFanoutTargets(ctx context.Context, ownerChainID, 
 // still enumerated and its fan-out outbox rows actually drain (the strand fix).
 func (s *SQLiteStore) ListActiveGroupMemberChains(ctx context.Context) ([]string, error) {
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT DISTINCT member_chain_id FROM sync_group_member WHERE member_state='active' ORDER BY member_chain_id`)
+		`SELECT DISTINCT gm.member_chain_id FROM sync_group_member gm
+		 WHERE gm.member_state='active'
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=gm.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=gm.group_id)
+		 ORDER BY gm.member_chain_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list active group member chains: %w", err)
 	}
@@ -1447,6 +1584,9 @@ func (s *SQLiteStore) ListActiveGroupMemberChains(ctx context.Context) ([]string
 func (s *SQLiteStore) GroupDomainsForMember(ctx context.Context, groupID, memberChainID string) ([]string, error) {
 	if groupID == "" || memberChainID == "" {
 		return nil, nil
+	}
+	if state, err := s.SyncGroupLifecycleState(ctx, groupID); err != nil || state != "" {
+		return nil, err
 	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT DISTINCT CASE
@@ -1489,6 +1629,9 @@ func (s *SQLiteStore) MemberSharesGroupDomain(ctx context.Context, groupID, memb
 	if groupID == "" || memberChainID == "" || domainTag == "" {
 		return false, nil
 	}
+	if state, err := s.SyncGroupLifecycleState(ctx, groupID); err != nil || state != "" {
+		return false, err
+	}
 	var n int
 	if err := s.conn.QueryRowContext(ctx, `
 		SELECT COUNT(*)
@@ -1516,6 +1659,9 @@ func (s *SQLiteStore) MemberSharesGroupDomain(ctx context.Context, groupID, memb
 func (s *SQLiteStore) MemberSharesGroupDomainForAgent(ctx context.Context, groupID, memberChainID, memberAgentID, domainTag string) (bool, error) {
 	if groupID == "" || memberChainID == "" || memberAgentID == "" || domainTag == "" {
 		return false, nil
+	}
+	if state, err := s.SyncGroupLifecycleState(ctx, groupID); err != nil || state != "" {
+		return false, err
 	}
 	var n int
 	if err := s.conn.QueryRowContext(ctx, `
@@ -1607,6 +1753,8 @@ func (s *SQLiteStore) ResolveGroupRelay(ctx context.Context, localChainID, relay
 		  JOIN sync_group_member receiver ON receiver.group_id = gd.group_id
 		       AND receiver.member_chain_id = ? AND receiver.member_state = 'active'
 		 WHERE gd.removed_revision = 0
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=gd.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=gd.group_id)
 		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
 		 ORDER BY gd.group_id`, relayerChainID, originChainID, localChainID, domainTag, domainTag)
 	if err != nil {
@@ -1672,6 +1820,8 @@ func (s *SQLiteStore) ListGroupRelayRoutesForAgents(ctx context.Context, localCh
 		  JOIN sync_group_member receiver ON receiver.group_id = gd.group_id
 		       AND receiver.member_chain_id = ? AND receiver.member_agent_pubkey = ? AND receiver.member_state = 'active'
 		 WHERE gd.removed_revision = 0
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=gd.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=gd.group_id)
 		   AND (gd.domain_tag = ? OR ? LIKE REPLACE(REPLACE(REPLACE(gd.domain_tag, '\', '\\'), '%', '\%'), '_', '\_') || '.%' ESCAPE '\')
 		   AND (relayer.role = 'full-sync' OR relayer.member_chain_id = gd.owner_chain_id
 		        OR (relayer.role = 'selective-sync' AND EXISTS (
@@ -1734,6 +1884,11 @@ func (s *SQLiteStore) GetGroupMemberAgentPubkey(ctx context.Context, groupID, me
 	if groupID == "" || memberChainID == "" {
 		return "", fmt.Errorf("group_id and member_chain_id are required")
 	}
+	if state, err := s.SyncGroupLifecycleState(ctx, groupID); err != nil {
+		return "", err
+	} else if state != "" {
+		return "", fmt.Errorf("group %s is not active", groupID)
+	}
 	var key string
 	err := s.conn.QueryRowContext(ctx, `
 		SELECT member_agent_pubkey FROM sync_group_member
@@ -1770,6 +1925,9 @@ func (s *SQLiteStore) GetGroupMemberAgentPubkey(ctx context.Context, groupID, me
 func (s *SQLiteStore) ListGroupServableOriginIDs(ctx context.Context, groupID, requesterChainID, responderChainID, domain, after string, limit int) ([]string, string, error) {
 	if groupID == "" || requesterChainID == "" || responderChainID == "" || domain == "" {
 		return nil, "", nil
+	}
+	if state, err := s.SyncGroupLifecycleState(ctx, groupID); err != nil || state != "" {
+		return nil, "", err
 	}
 	if limit <= 0 || limit > 2000 {
 		limit = 2000
@@ -1877,6 +2035,9 @@ func (s *SQLiteStore) ListGroupRelayCandidates(ctx context.Context, groupID, req
 	if groupID == "" || requesterChainID == "" || responderChainID == "" || domain == "" {
 		return nil, "", nil
 	}
+	if state, err := s.SyncGroupLifecycleState(ctx, groupID); err != nil || state != "" {
+		return nil, "", err
+	}
 	if limit <= 0 || limit > 2000 {
 		limit = 2000
 	}
@@ -1970,6 +2131,8 @@ func (s *SQLiteStore) GroupOwnedDomainsForPeer(ctx context.Context, ownerChainID
 		  JOIN sync_group_member peer ON peer.group_id = gd.group_id
 		       AND peer.member_chain_id = ? AND peer.member_state = 'active'
 		 WHERE gd.owner_chain_id = ? AND gd.removed_revision = 0
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=gd.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=gd.group_id)
 		 ORDER BY gd.group_id, gd.domain_tag`, peerChainID, ownerChainID)
 	if err != nil {
 		return nil, fmt.Errorf("group owned domains for peer: %w", err)
@@ -2025,6 +2188,8 @@ func (s *SQLiteStore) GroupOwnedDomainsForPeerAgents(ctx context.Context, ownerC
 		  JOIN sync_group_member peer ON peer.group_id = gd.group_id
 		       AND peer.member_chain_id = ? AND peer.member_agent_pubkey = ? AND peer.member_state = 'active'
 		 WHERE gd.owner_chain_id = ? AND gd.removed_revision = 0
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=gd.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=gd.group_id)
 		 ORDER BY gd.group_id, gd.domain_tag`, ownerChainID, ownerAgentID, peerChainID, peerAgentID, ownerChainID)
 	if err != nil {
 		return nil, fmt.Errorf("exact group owned domains for peer: %w", err)
@@ -2102,6 +2267,8 @@ func (s *SQLiteStore) groupSharedDomainRefs(ctx context.Context, chainA, chainB 
 		  JOIN sync_group_member mb ON mb.group_id=ma.group_id
 		 WHERE ma.member_chain_id=? AND mb.member_chain_id=?
 		   AND ma.member_state='active' AND mb.member_state='active'
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=ma.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=ma.group_id)
 		 ORDER BY ma.group_id`, chainA, chainB)
 	if err != nil {
 		return nil, fmt.Errorf("group shared domains with group: %w", err)
@@ -2129,6 +2296,8 @@ func (s *SQLiteStore) groupSharedDomainRefsForAgents(ctx context.Context, chainA
 		 WHERE ma.member_chain_id=? AND ma.member_agent_pubkey=?
 		   AND mb.member_chain_id=? AND mb.member_agent_pubkey=?
 		   AND ma.member_state='active' AND mb.member_state='active'
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=ma.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=ma.group_id)
 		 ORDER BY ma.group_id`, chainA, agentA, chainB, agentB)
 	if err != nil {
 		return nil, fmt.Errorf("exact group shared domains with group: %w", err)
@@ -2223,7 +2392,9 @@ func (s *SQLiteStore) SelfResyncingSharedWithPeer(ctx context.Context, localChai
 		  FROM sync_group_member self
 		  JOIN sync_group_member peer ON peer.group_id = self.group_id
 		 WHERE self.member_chain_id = ? AND self.member_state = 'resyncing'
-		   AND peer.member_chain_id = ? AND peer.member_state IN ('active','resyncing')`,
+		   AND peer.member_chain_id = ? AND peer.member_state IN ('active','resyncing')
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_lifecycle gl WHERE gl.group_id=self.group_id)
+		   AND NOT EXISTS (SELECT 1 FROM sync_group_retired gr WHERE gr.group_id=self.group_id)`,
 		localChainID, peerChainID).Scan(&n); err != nil {
 		return false, fmt.Errorf("self resyncing shared with peer: %w", err)
 	}

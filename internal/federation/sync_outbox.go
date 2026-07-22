@@ -1195,7 +1195,8 @@ func (m *Manager) reconcilePeerJournals(ctx context.Context, ss *store.SQLiteSto
 		}
 		local, lErr := ss.GetSyncGroupMember(ctx, group.GroupID, m.localChainID)
 		remote, rErr := ss.GetSyncGroupMember(ctx, group.GroupID, remoteChainID)
-		if lErr != nil || rErr != nil || !activeGroupMember(local) || !activeGroupMember(remote) {
+		localCanPullRoster := activeGroupMember(local) || (local != nil && local.MemberState == store.GroupMemberInvited)
+		if lErr != nil || rErr != nil || !localCanPullRoster || !activeGroupMember(remote) {
 			continue
 		}
 		if _, pullErr := m.PullGroupJournal(ctx, remoteChainID, group.GroupID, RosterSubchain); pullErr != nil {

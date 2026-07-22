@@ -217,6 +217,16 @@ func (m *Manager) journalSubchainServeScope(ctx context.Context, ss *store.SQLit
 		}
 		return journalServeDeny, nil
 	}
+	// Once the owner begins dissolving, active members may no longer discover or
+	// pull ordinary roster/domain metadata. Their sole remaining capability is the
+	// exact signed member_remove above after their projection transitions. This
+	// keeps the durable lifecycle barrier fail-closed without preventing an offline
+	// guest from learning its terminal removal later.
+	if state, stateErr := ss.SyncGroupLifecycleState(ctx, groupID); stateErr != nil {
+		return journalServeDeny, stateErr
+	} else if state != "" {
+		return journalServeDeny, nil
+	}
 	if member.MemberState != store.GroupMemberActive && member.MemberState != store.GroupMemberResyncing {
 		return journalServeDeny, nil
 	}
@@ -274,28 +284,31 @@ func (m *Manager) journalSubchainServeScope(ctx context.Context, ss *store.SQLit
 	return journalServeDeny, nil // not a group domain (active or removed)
 }
 
-// memberRemovalTerminalEntry finds the exact controller-signed roster removal
-// for memberChainID. A removed member is allowed to learn only this one terminal
-// record so it can converge its local projection; scanning is bounded just like a
-// normal journal pull and never returns unrelated roster history.
+// memberRemovalTerminalEntry finds the newest exact controller-signed roster
+// removal for memberChainID. Newest is load-bearing: after a removed member is
+// freshly invited and later removed again, returning its first historical
+// removal would sit behind the member's cursor and leave its current group card
+// stale forever. A removed member is allowed to learn only this one terminal
+// record, so the bounded scan never returns unrelated roster history.
 func memberRemovalTerminalEntry(ctx context.Context, ss *store.SQLiteStore, groupID, memberChainID string) (*store.SyncGroupLogEntry, error) {
 	var after int64 = -1
+	var latest *store.SyncGroupLogEntry
 	for page := 0; page < syncJournalMaxPages; page++ {
 		entries, err := ss.ListSyncGroupLog(ctx, groupID, RosterSubchain, after, SyncJournalMaxEntries)
 		if err != nil {
 			return nil, err
 		}
 		if len(entries) == 0 {
-			return nil, nil
+			return latest, nil
 		}
 		for i := range entries {
 			e := entries[i]
 			if e.EntryType == "member_remove" && parseJournalPayload(e.PayloadJSON)[pkMemberChain] == memberChainID {
-				return &e, nil
+				latest = &e
 			}
 		}
 		if len(entries) < SyncJournalMaxEntries {
-			return nil, nil
+			return latest, nil
 		}
 		after = entries[len(entries)-1].Seq
 	}
@@ -591,7 +604,7 @@ func (m *Manager) ingestTerminalJournalEntries(ctx context.Context, ss *store.SQ
 // and the policy WRITE lease are acquired: the current consensus agreement, the
 // exact active JOIN control, the remote member/operator key, and our own active
 // group identity.
-func (m *Manager) currentPullGroupPeerBound(ctx context.Context, ss *store.SQLiteStore, remoteChainID, groupID string) (bool, error) {
+func (m *Manager) currentPullGroupPeerBound(ctx context.Context, ss *store.SQLiteStore, remoteChainID, groupID string, allowInvitedTerminal bool) (bool, error) {
 	agreement, err := m.ActiveAgreement(remoteChainID)
 	if err != nil {
 		return false, nil
@@ -618,7 +631,8 @@ func (m *Manager) currentPullGroupPeerBound(ctx context.Context, ss *store.SQLit
 	if err != nil {
 		return false, err
 	}
-	if !activeGroupMember(local) || local.MemberAgentPubkey != hex.EncodeToString(m.agentPub) {
+	localEligible := activeGroupMember(local) || (allowInvitedTerminal && local != nil && local.MemberState == store.GroupMemberInvited)
+	if !localEligible || local.MemberAgentPubkey != hex.EncodeToString(m.agentPub) {
 		return false, nil
 	}
 	return true, nil
@@ -635,7 +649,8 @@ func (m *Manager) ingestPulledJournalPage(ctx context.Context, ss *store.SQLiteS
 	policyUnlock := ss.LockSyncPolicyWrite()
 	defer policyUnlock()
 
-	bound, err := m.currentPullGroupPeerBound(ctx, ss, remoteChainID, groupID)
+	bound, err := m.currentPullGroupPeerBound(ctx, ss, remoteChainID, groupID,
+		terminalOnly && subchain == RosterSubchain)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("revalidate journal peer: %w", err)
 	}

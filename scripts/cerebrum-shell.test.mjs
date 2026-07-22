@@ -260,15 +260,17 @@ test('federation keeps temporary pause separate from permanent revocation and ma
         'connection controls must identify the SAGE they affect');
     assert.match(page, /pairing preserved/);
     assert.match(panel, /Revoke trust permanently/);
-    assert.match(page, /Past connections \(\$\{pastConns\.length\}\)/);
+    assert.match(page, /Previous connections \(\$\{visiblePastConns\.length\}\)/);
     assert.match(page, /if \(!dismissed && lastRemoteRevokeKey\.current !== key\) setShowPast\(true\)/,
         'a newly received peer revocation must expose its audit record instead of hiding the recovery path');
-    assert.match(page, /Reconnect with \$\{remoteNotice\.peer_name \|\| 'this SAGE'\}/,
-        'the removal notice must offer the affected guest a direct recovery action');
+    assert.match(page, /Pair again with \$\{remoteNotice\.peer_name \|\| 'this SAGE'\}/,
+        'the removal notice must make clear that recovery is a new pairing');
     assert.match(page, /beginGuestRejoin\(remoteNotice\)/,
         'the recovery action must preserve the former host identity');
-    assert.match(page, /Reconnect with \$\{c\.peer_name \|\| 'this SAGE'\}/,
-        'the past connection row must use an unambiguous reconnect action');
+    assert.match(page, /Pair again…/,
+        'the past connection row must make clear that recovery is a new pairing');
+    assert.match(page, /Hide from this list/,
+        'past records must be removable from the everyday view without erasing security state');
     assert.doesNotMatch(page, /Host a new guest/,
         'a guest whose host revoked trust must not be offered the misleading inverse role as recovery');
     const guestWizard = appSource.slice(appSource.indexOf('function GuestJoinWizard('), appSource.indexOf('// HostJoinWizard'));
@@ -310,6 +312,8 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
     assert.match(panel, /showConfirmation\('Stop sharing/);
     assert.match(panel, /remote operator must cryptographically co-sign/);
     assert.match(apiSource, /export function fedGroupRename\(groupId, name\)/);
+    assert.match(apiSource, /export function fedGroupDissolve\(groupId\)/,
+        'owners need an explicit shared-space lifecycle action');
     assert.match(panel, /Group name/,
         'controllers must be able to give the group a friendly replicated label');
     assert.match(panel, /const groupName = group => String\(group\.display_name \|\| ''\)\.trim\(\) \|\| 'Sharing group';/,
@@ -318,6 +322,14 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
         'new and legacy groups must not render an unresolved-name placeholder');
     assert.match(panel, /class="fed-group-rename"/,
         'rename controls need their own structured panel rather than flowing into group facts');
+    assert.match(panel, /Delete sharing group/,
+        'an owner must be able to end a shared space, not merely remove people one by one');
+    assert.match(panel, /This does not end any trusted connection/,
+        'dissolving group RBAC must never be presented as revoking the pairwise connection');
+    assert.match(panel, /group\.lifecycle_state === 'dissolving'/,
+        'partial dissolution must remain visible and retryable instead of hiding live access behind a failed request');
+    assert.match(panel, /Group sharing is already stopped\. Retry to finish/,
+        'a partial failure must explain the fail-closed state in plain language');
     assert.match(panel, /connection needs attention/,
         'a missing trust link must not be misrepresented as the other SAGE being offline');
     assert.doesNotMatch(panel, /<code>\$\{groupId\}<\/code>/,

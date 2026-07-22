@@ -99,6 +99,7 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/self-role", `{"role":"full-sync"}`},
 		{http.MethodPut, "/v1/dashboard/federation/groups/g1/name", `{"name":"Studio"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/roster", `{"entry_type":"manifest","payload":{}}`},
+		{http.MethodPost, "/v1/dashboard/federation/groups/g1/dissolve", `{}`},
 	}
 
 	for _, tc := range paths {
@@ -120,6 +121,8 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 					h.handleFedGroupSelfRole(rr, req)
 				case "/v1/dashboard/federation/groups/g1/name":
 					h.handleFedGroupRename(rr, req)
+				case "/v1/dashboard/federation/groups/g1/dissolve":
+					h.handleFedGroupDissolve(rr, req)
 				default:
 					h.handleFedGroupRosterControl(rr, req)
 				}

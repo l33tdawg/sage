@@ -914,6 +914,15 @@ dashboard-agent auth (`web/federation_join.go:71-102`, `1021-1037`).
 | `GET /v1/dashboard/federation/connections/{chain_id}/sync` | Returns `publish_domains`, `subscribe_domains`, `remote_publish_domains`, `remote_subscribe_domains`, and revision state. |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/sync` | v3 accepts `publish_domains` and/or `subscribe_domains`; an omitted lane is preserved and an explicit empty lane is cleared. The UI uses `{"subscribe_domains":[...]}` for the receiver's independent “Save here” decision (`web/federation_join.go:414-527`). |
 
+Sharing groups are RBAC layered over existing trusted connections; membership
+changes never create, revoke, or rewrite the pairwise connection beneath them.
+
+| Route | Request / response |
+|---|---|
+| `GET /v1/dashboard/federation/groups` | Lists the local operator's active sharing groups, members, shared domains, delivery health, and `lifecycle_state`. A member removed by its owner and a fully dissolved owner group are omitted from the active list (`web/federation_join.go:1288-1515`). |
+| `POST /v1/dashboard/federation/groups` | Creates an owner-controlled sharing group from `{"name":"..."}`. Members are added separately from already trusted SAGE connections (`web/federation_join.go:1240-1263`). |
+| `POST /v1/dashboard/federation/groups/{group_id}/dissolve` | Owner-only, idempotent group deletion. It first persists a fail-closed `dissolving` barrier that stops group sharing and rejects new group mutations, then authors a signed terminal `member_remove` for each guest and retires the owner's active card. Partial failures remain visible/retryable as `dissolving`; offline guests can fetch their exact removal later. The endpoint does **not** modify `cross_fed`, `sync_control`, or direct `sync_domains`, so trusted connections and independent direct sharing remain intact (`internal/federation/sync_emit.go:202-292`, `internal/store/sync_group_tables.go:493-574`, `web/federation_join.go:1265-1287`). |
+
 `POST /v1/federation/cross/{chain_id}/write` is a reserved compatibility route,
 not an enabled peer capability. It requires the exact node operator, validates
 the chain id, and returns `501` before parsing a `RemoteWriteRequest` or calling

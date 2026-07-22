@@ -192,6 +192,116 @@ func (m *Manager) CreateSyncGroup(ctx context.Context, name string) (string, err
 	return groupID, nil
 }
 
+// DissolveSyncGroup is the owner-controlled end of a shared space. It emits a
+// signed member_remove for every other current member, so an offline guest can
+// still fetch the terminal revocation and remove the group from its own CEREBRUM.
+// Once every removal is durable, the owner locally retires the group card while
+// preserving the complete roster/journal audit trail. This never revokes the
+// pairwise trusted connection or its direct-sharing policy: a group is RBAC on
+// top of a connection, not the connection itself.
+func (m *Manager) DissolveSyncGroup(ctx context.Context, groupID string) (int, error) {
+	ss := m.syncStore()
+	if ss == nil {
+		return 0, fmt.Errorf("group journal requires the SQLite store backend")
+	}
+	state, err := ss.SyncGroupLifecycleState(ctx, groupID)
+	if err != nil {
+		return 0, err
+	}
+	if state == store.GroupLifecycleDissolved {
+		return 0, nil // lost-response/retry: the requested terminal state already holds
+	}
+	g, err := ss.GetSyncGroup(ctx, groupID)
+	if err != nil {
+		return 0, err
+	}
+	if g == nil {
+		return 0, fmt.Errorf("sync group %q not found", groupID)
+	}
+	if g.ControllerChainID != m.localChainID || g.ControllerAgentPubkey != hex.EncodeToString(m.agentPub) {
+		return 0, fmt.Errorf("only the group owner can dissolve %s", groupID)
+	}
+
+	// Install the durable fail-closed barrier while serialized with every journal
+	// mutation and every data-plane policy reader. An invite already committing
+	// finishes before this point and appears in the roster snapshot below; one
+	// that tries to append afterwards is rejected by AppendSyncGroupLog.
+	m.journalMu.Lock()
+	policyUnlock := ss.LockSyncPolicyWrite()
+	state, err = ss.SyncGroupLifecycleState(ctx, groupID)
+	if err == nil && state == "" {
+		current, getErr := ss.GetSyncGroup(ctx, groupID)
+		if getErr != nil {
+			err = getErr
+		} else if current == nil || current.ControllerChainID != m.localChainID || current.ControllerAgentPubkey != hex.EncodeToString(m.agentPub) {
+			err = fmt.Errorf("only the current group owner can dissolve %s", groupID)
+		} else {
+			state, err = ss.BeginSyncGroupDissolve(ctx, groupID, m.localChainID)
+		}
+	}
+	policyUnlock()
+	m.journalMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	if state == store.GroupLifecycleDissolved {
+		return 0, nil
+	}
+
+	members, err := ss.ListSyncGroupMembers(ctx, groupID)
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, member := range members {
+		if member.MemberChainID == m.localChainID {
+			continue
+		}
+		switch member.MemberState {
+		case store.GroupMemberActive, store.GroupMemberResyncing, store.GroupMemberInvited:
+			// A member_remove is a signed, terminal delivery event. It is safe for
+			// the member to be offline: the existing terminal journal route serves
+			// exactly this event after the access gate has changed.
+		default:
+			continue
+		}
+		if _, err := m.EmitRosterControl(ctx, groupID, "member_remove", memberChainPayload(member.MemberChainID)); err != nil {
+			return removed, fmt.Errorf("remove %s while dissolving group: %w", member.MemberChainID, err)
+		}
+		removed++
+	}
+
+	// Complete only when no non-owner entitlement remains. Keep the lifecycle
+	// barrier and card in "dissolving" on any error so a retry deterministically
+	// resumes, while group traffic remains stopped throughout.
+	m.journalMu.Lock()
+	policyUnlock = ss.LockSyncPolicyWrite()
+	members, err = ss.ListSyncGroupMembers(ctx, groupID)
+	if err == nil {
+		for _, member := range members {
+			if member.MemberChainID == m.localChainID {
+				continue
+			}
+			switch member.MemberState {
+			case store.GroupMemberActive, store.GroupMemberResyncing, store.GroupMemberInvited:
+				err = fmt.Errorf("group dissolution is incomplete; member %s still needs removal", member.MemberChainID)
+			}
+			if err != nil {
+				break
+			}
+		}
+	}
+	if err == nil {
+		err = ss.CompleteSyncGroupDissolve(ctx, groupID, m.localChainID)
+	}
+	policyUnlock()
+	m.journalMu.Unlock()
+	if err != nil {
+		return removed, err
+	}
+	return removed, nil
+}
+
 // EmitRosterControl authors a CONTROLLER-AFFECTING roster entry (group_create,
 // member_invite/activate, member_remove(other), role_change(other), epoch_rotate,
 // manifest), gated by authorizeControllerAffecting. The caller supplies the built
