@@ -57,6 +57,8 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 **Connection history matches the trust model.** A revoked connection now says **Pair again** because restoring trust requires a fresh code and approval ceremony. Previous connections may be hidden from the local CEREBRUM list without deleting their server-side audit history, and a new pairing cannot inherit a stale local dismissal.
 
+**The ABCI gRPC server includes the upstream security fix.** `grpc-go` is updated to 1.82.1, closing GHSA-hrxh-6v49-42gf: an xDS RBAC fail-open/panic path and an HTTP/2 rapid-reset denial-of-service bypass disclosed while this release was being prepared.
+
 This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.6.
 
 ## What's New in v11.11.2
