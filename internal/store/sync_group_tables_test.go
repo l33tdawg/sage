@@ -282,15 +282,18 @@ func TestSyncGroupDissolveLifecycleFailsClosed(t *testing.T) {
 	if state != GroupLifecycleDissolving {
 		t.Fatalf("lifecycle = %q, want dissolving", state)
 	}
-	if shared, err := s.GroupSharedDomains(ctx, "owner", "guest"); err != nil || len(shared) != 0 {
+	shared, err := s.GroupSharedDomains(ctx, "owner", "guest")
+	if err != nil || len(shared) != 0 {
 		t.Fatalf("closing group still shares domains: %v %v", shared, err)
 	}
-	if targets, err := s.ListGroupFanoutTargets(ctx, "owner", "hr"); err != nil || len(targets) != 0 {
+	targets, err := s.ListGroupFanoutTargets(ctx, "owner", "hr")
+	if err != nil || len(targets) != 0 {
 		t.Fatalf("closing group still has fanout targets: %v %v", targets, err)
 	}
-	if err := s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
+	appendErr := s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{
 		GroupID: "g-close", Subchain: "roster", Seq: 0, EntryHash: "manifest", EntryType: "manifest",
-	}); err == nil {
+	})
+	if appendErr == nil {
 		t.Fatal("non-terminal mutation was accepted after dissolve began")
 	}
 	require(s.AppendSyncGroupLog(ctx, SyncGroupLogEntry{

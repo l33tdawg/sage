@@ -558,7 +558,7 @@ func (s *SQLiteStore) CompleteSyncGroupDissolve(ctx context.Context, groupID, ow
 		if err != nil {
 			return fmt.Errorf("complete sync group lifecycle: %w", err)
 		}
-		if n, err := result.RowsAffected(); err != nil || n != 1 {
+		if n, rowsErr := result.RowsAffected(); rowsErr != nil || n != 1 {
 			return fmt.Errorf("sync group dissolve was not started by this owner")
 		}
 		_, err = tx.writeExecContext(ctx, `

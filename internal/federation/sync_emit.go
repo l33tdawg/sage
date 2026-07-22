@@ -265,8 +265,8 @@ func (m *Manager) DissolveSyncGroup(ctx context.Context, groupID string) (int, e
 		default:
 			continue
 		}
-		if _, err := m.EmitRosterControl(ctx, groupID, "member_remove", memberChainPayload(member.MemberChainID)); err != nil {
-			return removed, fmt.Errorf("remove %s while dissolving group: %w", member.MemberChainID, err)
+		if _, emitErr := m.EmitRosterControl(ctx, groupID, "member_remove", memberChainPayload(member.MemberChainID)); emitErr != nil {
+			return removed, fmt.Errorf("remove %s while dissolving group: %w", member.MemberChainID, emitErr)
 		}
 		removed++
 	}
