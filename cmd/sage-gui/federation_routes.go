@@ -184,7 +184,3 @@ func pruneExpiredFederationRoutes(cfg *FederationConfig, now time.Time) []string
 	}
 	return expired
 }
-
-func netConnResult(conn net.Conn, kind, target string, started time.Time) federation.PeerRouteDialResult {
-	return federation.PeerRouteDialResult{Conn: conn, Kind: kind, Target: target, Latency: time.Since(started)}
-}

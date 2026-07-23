@@ -87,9 +87,9 @@ func TestValidateNodeJoinBundle_Rejects(t *testing.T) {
 
 func TestResetProjectionReceiptsForJoinPreservesUserData(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "sage.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open SQLite: %v", err)
+	db, openErr := sql.Open("sqlite", dbPath)
+	if openErr != nil {
+		t.Fatalf("open SQLite: %v", openErr)
 	}
 	if _, err := db.Exec(`
 		CREATE TABLE memories (memory_id TEXT PRIMARY KEY, content TEXT NOT NULL);
@@ -111,9 +111,9 @@ func TestResetProjectionReceiptsForJoinPreservesUserData(t *testing.T) {
 		t.Fatalf("reset receipts: %v", err)
 	}
 
-	db, err = sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("reopen SQLite: %v", err)
+	db, openErr = sql.Open("sqlite", dbPath)
+	if openErr != nil {
+		t.Fatalf("reopen SQLite: %v", openErr)
 	}
 	defer func() { _ = db.Close() }()
 	var memories, receipts int

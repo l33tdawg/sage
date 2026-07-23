@@ -979,7 +979,8 @@ func (h *DashboardHandler) handleFedHostCreate(w http.ResponseWriter, r *http.Re
 	}
 	var res *federation.HostCreateResult
 	var err error
-	if body.Transport == "auto" {
+	switch body.Transport {
+	case "auto":
 		if driver, ok := h.Federation.(interface {
 			HostCreateAuto(string) (*federation.HostCreateResult, error)
 		}); ok {
@@ -987,7 +988,7 @@ func (h *DashboardHandler) handleFedHostCreate(w http.ResponseWriter, r *http.Re
 		} else {
 			res, err = h.Federation.HostCreate(body.Endpoint)
 		}
-	} else if body.Transport == "internet" {
+	case "internet":
 		if driver, ok := h.Federation.(interface {
 			HostCreateMode(string, bool) (*federation.HostCreateResult, error)
 		}); ok {
@@ -995,7 +996,7 @@ func (h *DashboardHandler) handleFedHostCreate(w http.ResponseWriter, r *http.Re
 		} else {
 			err = fmt.Errorf("internet join is unavailable")
 		}
-	} else {
+	default:
 		res, err = h.Federation.HostCreate(body.Endpoint)
 	}
 	if err != nil {

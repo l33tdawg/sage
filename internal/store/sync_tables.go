@@ -1576,7 +1576,7 @@ func (s *SQLiteStore) CountAdmittedSyncOriginsByDomain(ctx context.Context, remo
 	if err != nil {
 		return nil, fmt.Errorf("count admitted sync origins by domain: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make(map[string]int)
 	for rows.Next() {
 		var domain string
@@ -1602,7 +1602,7 @@ func (s *SQLiteStore) ListAdmittedSyncCopySources(ctx context.Context) ([]SyncCo
 	if err != nil {
 		return nil, fmt.Errorf("list admitted sync copy sources: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	out := make([]SyncCopySourceSummary, 0)
 	for rows.Next() {
 		var item SyncCopySourceSummary

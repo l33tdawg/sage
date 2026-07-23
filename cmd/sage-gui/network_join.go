@@ -309,7 +309,8 @@ func resetProjectionReceiptsForJoin(sqlitePath string) error {
 	defer func() { _ = db.Close() }()
 
 	var exists int
-	if err := db.QueryRow(`SELECT EXISTS(
+	ctx := context.Background()
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM sqlite_master
 		WHERE type = 'table' AND name = 'abci_projection_batches'
 	)`).Scan(&exists); err != nil {
@@ -318,7 +319,7 @@ func resetProjectionReceiptsForJoin(sqlitePath string) error {
 	if exists == 0 {
 		return nil
 	}
-	if _, err := db.Exec(`DELETE FROM abci_projection_batches`); err != nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM abci_projection_batches`); err != nil {
 		return fmt.Errorf("reset projection receipts for network join: %w", err)
 	}
 	return nil
