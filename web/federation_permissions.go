@@ -21,10 +21,20 @@ import (
 // dashboard needs enough information to explain why a domain is selectable,
 // but a peer must never receive local owner topology.
 type federationShareableDomain struct {
-	Domain      string `json:"domain"`
+	Domain      string                       `json:"domain"`
+	MemoryCount int                          `json:"memory_count"`
+	Authority   string                       `json:"authority"`
+	CanShare    bool                         `json:"can_share"`
+	CopySources []federationDomainCopySource `json:"copy_sources,omitempty"`
+}
+
+type federationDomainCopySource struct {
+	ChainID     string `json:"chain_id"`
 	MemoryCount int    `json:"memory_count"`
-	Authority   string `json:"authority"`
-	CanShare    bool   `json:"can_share"`
+}
+
+type syncCopySourceLister interface {
+	ListAdmittedSyncCopySources(context.Context) ([]store.SyncCopySourceSummary, error)
 }
 
 // handleFedShareableDomains returns the local operator's existing-domain
@@ -52,8 +62,9 @@ func (h *DashboardHandler) handleFedShareableDomains(w http.ResponseWriter, r *h
 
 func (h *DashboardHandler) federationShareableDomains(ctx context.Context) ([]federationShareableDomain, error) {
 	counts := map[string]int{}
+	copySources := map[string][]federationDomainCopySource{}
 	if h.store != nil {
-		stats, err := h.store.GetStats(ctx)
+		stats, err := h.cerebrumVisibleStats(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -64,6 +75,20 @@ func (h *DashboardHandler) federationShareableDomains(ctx context.Context) ([]fe
 				}
 			}
 		}
+		if lister, ok := h.store.(syncCopySourceLister); ok {
+			sources, sourceErr := lister.ListAdmittedSyncCopySources(ctx)
+			if sourceErr != nil {
+				return nil, sourceErr
+			}
+			for _, source := range sources {
+				if source.DomainTag == "" || source.OriginChainID == "" || source.MemoryCount <= 0 {
+					continue
+				}
+				copySources[source.DomainTag] = append(copySources[source.DomainTag], federationDomainCopySource{
+					ChainID: source.OriginChainID, MemoryCount: source.MemoryCount,
+				})
+			}
+		}
 	}
 
 	registered, err := h.BadgerStore.ListRegisteredDomains()
@@ -71,6 +96,9 @@ func (h *DashboardHandler) federationShareableDomains(ctx context.Context) ([]fe
 		return nil, err
 	}
 	for _, domain := range registered {
+		if isCerebrumInternalMemoryDomain(domain.DomainName) {
+			continue
+		}
 		if _, ok := counts[domain.DomainName]; !ok {
 			counts[domain.DomainName] = 0
 		}
@@ -85,6 +113,9 @@ func (h *DashboardHandler) federationShareableDomains(ctx context.Context) ([]fe
 	}
 	out := make([]federationShareableDomain, 0, len(counts))
 	for domain, count := range counts {
+		if isCerebrumInternalMemoryDomain(domain) {
+			continue
+		}
 		authority := "unavailable"
 		canShare := false
 		switch {
@@ -105,6 +136,7 @@ func (h *DashboardHandler) federationShareableDomains(ctx context.Context) ([]fe
 		}
 		out = append(out, federationShareableDomain{
 			Domain: domain, MemoryCount: count, Authority: authority, CanShare: canShare,
+			CopySources: copySources[domain],
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })

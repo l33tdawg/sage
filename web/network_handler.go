@@ -849,7 +849,7 @@ func (h *DashboardHandler) handleTriggerRedeploy(w http.ResponseWriter, r *http.
 func (h *DashboardHandler) handleUnregisteredAgents(agentStore store.AgentStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Get all agent IDs from memory data
-		stats, err := h.store.GetStats(r.Context())
+		stats, err := h.cerebrumVisibleStats(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to get stats: "+err.Error())
 			return

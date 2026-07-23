@@ -296,6 +296,15 @@ func (s *JoinStore) SetExpectedGuestWithP2P(id string, pin []byte, endpoint, pee
 	if len(pin) != 32 {
 		return fmt.Errorf("scanned guest pin must be 32 bytes")
 	}
+	// A legacy guest ignores the additive P2P fields and returns the original
+	// pin-only card. Downgrade the still-unapproved host transcript atomically
+	// so both peers sign the legacy enrollment rather than failing after the
+	// human verification step. Connectivity remains direct HTTPS for this
+	// ceremony; two upgraded peers exchange roaming routes after activation.
+	if peerID == "" && len(addrs) == 0 {
+		js.HostPeerID = ""
+		js.HostP2PAddrs = nil
+	}
 	js.ExpectedGuestPin = append([]byte(nil), pin...)
 	js.ExpectedGuestEnd = endpoint
 	js.ExpectedGuestPeer = peerID

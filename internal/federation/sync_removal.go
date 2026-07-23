@@ -31,12 +31,6 @@ import (
 	"github.com/l33tdawg/sage/internal/store"
 )
 
-// syncAuditDomainPrefix is the writable shared-domain prefix removal anchors land
-// in (docs §5.6). It lives UNDER the existing sage-* shared prefix, so no AppHash
-// / isSharedDomainStatic change is needed — the anchor is an ordinary
-// operator-signed MemorySubmit into an already-writable domain.
-const syncAuditDomainPrefix = "sage-syncaudit-"
-
 // enforceRemovalBatch is the POST-BATCH removal-enforcement hook. The caller
 // invokes it AFTER the journal append completes and m.journalMu is released,
 // passing the chains and domains that transitioned to removed/left in the
@@ -147,7 +141,7 @@ func (m *Manager) broadcastSubchainAnchor(_ context.Context, groupID, subchain, 
 		OriginChainID:   m.localChainID,
 		OriginMemoryID:  "syncanchor|" + groupID + "|" + subchain + "|" + head,
 		OriginCreatedAt: time.Now().UTC().Format(time.RFC3339),
-		Domain:          syncAuditDomainPrefix + groupID,
+		Domain:          store.SyncAuditDomainPrefix + groupID,
 		Classification:  0,
 		MemoryType:      "fact",
 		ConfidenceScore: 1,

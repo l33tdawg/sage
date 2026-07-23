@@ -98,6 +98,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	fr.Get("/v1/dashboard/federation/connections/{chain_id}/status", h.handleFedPeerStatus)
 
 	fr.Get("/v1/dashboard/federation/lan-endpoint", h.handleFedLanEndpoint)
+	fr.Get("/v1/dashboard/federation/join/routes", h.handleFedJoinRoutes)
 	fr.Get("/v1/dashboard/federation/readiness", h.handleFedReadiness)
 
 	// v11.6 host-controlled domain sync + status (operator-only surface, but the
@@ -126,6 +127,7 @@ func (h *DashboardHandler) registerFederationRoutes(r chi.Router) {
 	// locally authored; the emit self-check refuses an entry whose resolver-pinned
 	// key is not this node's, so a caller can never author for another owner.
 	fr.Get("/v1/dashboard/federation/groups", h.handleFedGroupList)
+	fr.Post("/v1/dashboard/federation/groups/refresh", h.handleFedGroupRefresh)
 	fr.Post("/v1/dashboard/federation/groups", h.handleFedGroupCreate)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/domains", h.handleFedGroupDomainAdd)
 	fr.Post("/v1/dashboard/federation/groups/{group_id}/domains/remove", h.handleFedGroupDomainRemove)
@@ -325,9 +327,9 @@ func (h *DashboardHandler) handleFedReadiness(w http.ResponseWriter, r *http.Req
 
 // --- Federation on/off (Settings surface) -----------------------------------
 
-// handleGetFederationSetting reports whether the inbound federation listener is
-// enabled. Off means the node can still reach OUT (recall, receipt delivery)
-// but won't accept inbound connections — no one can join or reach this node.
+// handleGetFederationSetting reports whether federation networking is enabled.
+// Off is a complete transport kill switch: inbound listeners and outbound
+// recall, receipts, sync, route refresh, and relay reservations stay stopped.
 func (h *DashboardHandler) handleGetFederationSetting(w http.ResponseWriter, _ *http.Request) {
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"enabled":      h.FederationEnabled,
@@ -336,7 +338,7 @@ func (h *DashboardHandler) handleGetFederationSetting(w http.ResponseWriter, _ *
 }
 
 // handleSetFederationSetting persists federation.enabled and restarts the node
-// so the inbound listener starts/stops. Mirrors network-mode's re-exec:
+// so every inbound and outbound federation worker starts/stops together.
 // non-destructive (chain + memories preserved), operator re-unlocks the vault
 // after restart. A no-op restart when the value is unchanged.
 func (h *DashboardHandler) handleSetFederationSetting(w http.ResponseWriter, r *http.Request) {
@@ -921,10 +923,44 @@ func (h *DashboardHandler) handleFedPeerStatus(w http.ResponseWriter, r *http.Re
 	chain := chi.URLParam(r, "chain_id")
 	st, err := h.Federation.PeerStatus(ctx, chain)
 	if err != nil {
-		fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "reachable": false, "error": err.Error()})
+		out := map[string]any{"remote_chain_id": chain, "reachable": false, "error": err.Error()}
+		var route federation.RouteDiagnostics
+		if diagnostics, ok := h.Federation.(interface {
+			RouteDiagnostics(string) federation.RouteDiagnostics
+		}); ok {
+			route = diagnostics.RouteDiagnostics(chain)
+			out["route"] = route
+		}
+		out["failure_state"] = federationDashboardFailureState(err, route)
+		fedWriteJSON(w, http.StatusOK, out)
 		return
 	}
-	fedWriteJSON(w, http.StatusOK, map[string]any{"remote_chain_id": chain, "reachable": true, "peer_time": st.Time, "network_name": st.NetworkName})
+	out := map[string]any{"remote_chain_id": chain, "reachable": true, "peer_time": st.Time, "network_name": st.NetworkName}
+	if diagnostics, ok := h.Federation.(interface {
+		RouteDiagnostics(string) federation.RouteDiagnostics
+	}); ok {
+		out["route"] = diagnostics.RouteDiagnostics(chain)
+	}
+	fedWriteJSON(w, http.StatusOK, out)
+}
+
+func (h *DashboardHandler) handleFedJoinRoutes(w http.ResponseWriter, _ *http.Request) {
+	if !h.fedReady(w) {
+		return
+	}
+	if status, ok := h.Federation.(interface {
+		LocalRouteStatus() map[string]any
+	}); ok {
+		fedWriteJSON(w, http.StatusOK, status.LocalRouteStatus())
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]any{
+		"state":             "degraded",
+		"selected":          map[string]any{"kind": "direct", "label": "Direct"},
+		"candidates":        []map[string]any{{"kind": "direct", "ready": true}},
+		"message":           "This SAGE supports direct legacy connections.",
+		"legacy_compatible": true,
+	})
 }
 
 // --- Host wizard ------------------------------------------------------------
@@ -943,7 +979,15 @@ func (h *DashboardHandler) handleFedHostCreate(w http.ResponseWriter, r *http.Re
 	}
 	var res *federation.HostCreateResult
 	var err error
-	if body.Transport == "internet" {
+	if body.Transport == "auto" {
+		if driver, ok := h.Federation.(interface {
+			HostCreateAuto(string) (*federation.HostCreateResult, error)
+		}); ok {
+			res, err = driver.HostCreateAuto(body.Endpoint)
+		} else {
+			res, err = h.Federation.HostCreate(body.Endpoint)
+		}
+	} else if body.Transport == "internet" {
 		if driver, ok := h.Federation.(interface {
 			HostCreateMode(string, bool) (*federation.HostCreateResult, error)
 		}); ok {
@@ -1180,6 +1224,10 @@ type groupManagementDriver interface {
 	EmitRosterControl(ctx context.Context, groupID, entryType string, payload map[string]string) (store.SyncGroupLogEntry, error)
 	EmitMemberInvite(ctx context.Context, groupID, memberChain, memberPubkey, role string, selectedDomains, ownedDomains []string) (store.SyncGroupLogEntry, error)
 	EmitEpochRotate(ctx context.Context, groupID, newEpoch, incomingChain, incomingPubkey string) (store.SyncGroupLogEntry, error)
+}
+
+type groupRefreshDriver interface {
+	NudgeJournalReconcileAndWait(ctx context.Context) error
 }
 
 func (h *DashboardHandler) isSyncGroupOperatorRequest(r *http.Request) bool {
@@ -1550,6 +1598,36 @@ func (h *DashboardHandler) handleFedGroupList(w http.ResponseWriter, r *http.Req
 	fedWriteJSON(w, http.StatusOK, map[string]any{
 		"local_chain_id": local, "local_network_name": peerNames[local], "groups": out,
 	})
+}
+
+// handleFedGroupRefresh waits for one prompted anti-entropy pass before the UI
+// reloads the local group projection. A plain list GET intentionally remains a
+// cheap SQLite read for polling; the explicit Refresh action is the operation
+// that may contact trusted peers.
+func (h *DashboardHandler) handleFedGroupRefresh(w http.ResponseWriter, r *http.Request) {
+	if !h.isFederationMutationOperatorRequest(r) {
+		fedWriteErr(w, http.StatusForbidden, "Refreshing sharing groups requires the local node operator.")
+		return
+	}
+	if !h.fedReady(w) {
+		return
+	}
+	d, ok := h.Federation.(groupRefreshDriver)
+	if !ok {
+		fedWriteErr(w, http.StatusNotImplemented, "Sharing-group refresh is unavailable on this node.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	defer cancel()
+	if err := d.NudgeJournalReconcileAndWait(ctx); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			fedWriteErr(w, http.StatusGatewayTimeout, "Refreshing sharing groups took too long. Check that the other SAGEs are online and try again.")
+			return
+		}
+		fedWriteErr(w, http.StatusBadGateway, "Sharing groups could not be refreshed. Try again.")
+		return
+	}
+	fedWriteJSON(w, http.StatusOK, map[string]string{"status": "refreshed"})
 }
 
 // handleFedGroupDomainAdd authors an owner-unilateral domain_add (EmitDomainAdd):

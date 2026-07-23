@@ -71,6 +71,12 @@ type EpochScore struct {
 type QueryOptions struct {
 	DomainTag string `json:"domain_tag,omitempty"`
 	Provider  string `json:"provider,omitempty"`
+	// ExcludeDomainPrefixes hides implementation-owned namespaces from
+	// presentation-layer queries without deleting or deprecating their records.
+	// It is intentionally opt-in: consensus, audit, backup, and ordinary REST/MCP
+	// recall retain the complete ledger unless their caller explicitly asks for
+	// a filtered view.
+	ExcludeDomainPrefixes []string `json:"-"`
 	// VectorProvider restricts cosine/distance candidates to the vector space
 	// that produced the query embedding. Empty preserves legacy/internal callers;
 	// live REST recall always sets it from the node's active embedder.
@@ -163,17 +169,21 @@ func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, 
 
 // ListOptions defines parameters for listing memories.
 type ListOptions struct {
-	DomainTag        string
-	Tag              string // filter by user-defined tag
-	Provider         string
-	Status           string
-	SubmittingAgent  string   // filter memories by agent_id (single)
-	SubmittingAgents []string // RBAC: restrict to these agent IDs
-	CreatedFrom      string   // ISO-8601 lower bound on created_at (inclusive); "" = no lower bound
-	CreatedTo        string   // ISO-8601 upper bound on created_at (inclusive); "" = no upper bound
-	Limit            int
-	Offset           int
-	Sort             string // "newest", "oldest", "confidence"
+	DomainTag string
+	// ExcludeDomainPrefixes is the list equivalent of QueryOptions'
+	// presentation-only namespace filter. Empty preserves the historical
+	// complete-ledger behavior.
+	ExcludeDomainPrefixes []string
+	Tag                   string // filter by user-defined tag
+	Provider              string
+	Status                string
+	SubmittingAgent       string   // filter memories by agent_id (single)
+	SubmittingAgents      []string // RBAC: restrict to these agent IDs
+	CreatedFrom           string   // ISO-8601 lower bound on created_at (inclusive); "" = no lower bound
+	CreatedTo             string   // ISO-8601 upper bound on created_at (inclusive); "" = no upper bound
+	Limit                 int
+	Offset                int
+	Sort                  string // "newest", "oldest", "confidence"
 }
 
 // StoreStats holds aggregate statistics.

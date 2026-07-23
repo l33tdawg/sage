@@ -1700,6 +1700,13 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		sqlStr += " AND f.domain_tag = ?"
 		args = append(args, opts.DomainTag)
 	}
+	for _, prefix := range opts.ExcludeDomainPrefixes {
+		if prefix == "" {
+			continue
+		}
+		sqlStr += " AND LOWER(m.domain_tag) NOT LIKE ?"
+		args = append(args, strings.ToLower(prefix)+"%")
+	}
 	if opts.Provider != "" && opts.DomainTag == "" {
 		sqlStr += " AND (m.provider = ? OR m.provider = '' OR m.memory_type = 'fact')"
 		args = append(args, opts.Provider)
@@ -2178,6 +2185,15 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 		countQuery += filter
 		args = append(args, opts.DomainTag)
 	}
+	for _, prefix := range opts.ExcludeDomainPrefixes {
+		if prefix == "" {
+			continue
+		}
+		filter := " AND LOWER(domain_tag) NOT LIKE ?"
+		query += filter
+		countQuery += filter
+		args = append(args, strings.ToLower(prefix)+"%")
+	}
 	if opts.Provider != "" {
 		filter := " AND (provider = ? OR provider = '' OR memory_type = 'fact')"
 		query += filter
@@ -2293,16 +2309,41 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 }
 
 func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
+	return s.getStats(ctx, nil)
+}
+
+// GetStatsExcludingDomainPrefixes is the presentation-safe aggregate variant.
+// The complete GetStats contract remains unchanged for audit/internal callers.
+func (s *SQLiteStore) GetStatsExcludingDomainPrefixes(ctx context.Context, prefixes []string) (*StoreStats, error) {
+	return s.getStats(ctx, prefixes)
+}
+
+func (s *SQLiteStore) getStats(ctx context.Context, excludedPrefixes []string) (*StoreStats, error) {
 	stats := &StoreStats{
 		ByDomain: make(map[string]int),
 		ByStatus: make(map[string]int),
 	}
+	excludedSQL := ""
+	excludedArgs := make([]any, 0, len(excludedPrefixes))
+	for _, prefix := range excludedPrefixes {
+		if prefix == "" {
+			continue
+		}
+		excludedSQL += " AND LOWER(domain_tag) NOT LIKE ?"
+		excludedArgs = append(excludedArgs, strings.ToLower(prefix)+"%")
+	}
 
-	if err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM memories WHERE status != 'deprecated'`).Scan(&stats.TotalMemories); err != nil {
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM memories WHERE status != 'deprecated'`+excludedSQL,
+		excludedArgs...,
+	).Scan(&stats.TotalMemories); err != nil {
 		return nil, fmt.Errorf("count total: %w", err)
 	}
 
-	rows, err := s.conn.QueryContext(ctx, `SELECT domain_tag, COUNT(*) FROM memories WHERE status != 'deprecated' GROUP BY domain_tag`)
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT domain_tag, COUNT(*) FROM memories WHERE status != 'deprecated'`+excludedSQL+` GROUP BY domain_tag`,
+		excludedArgs...,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("count by domain: %w", err)
 	}
@@ -2317,7 +2358,10 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 	}
 	_ = rows.Close()
 
-	rows, err = s.conn.QueryContext(ctx, `SELECT status, COUNT(*) FROM memories GROUP BY status`)
+	rows, err = s.conn.QueryContext(ctx,
+		`SELECT status, COUNT(*) FROM memories WHERE 1=1`+excludedSQL+` GROUP BY status`,
+		excludedArgs...,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("count by status: %w", err)
 	}
@@ -2334,7 +2378,10 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 
 	// Count by agent
 	stats.ByAgent = make(map[string]int)
-	rows, err = s.conn.QueryContext(ctx, `SELECT submitting_agent, COUNT(*) FROM memories GROUP BY submitting_agent`)
+	rows, err = s.conn.QueryContext(ctx,
+		`SELECT submitting_agent, COUNT(*) FROM memories WHERE 1=1`+excludedSQL+` GROUP BY submitting_agent`,
+		excludedArgs...,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("count by agent: %w", err)
 	}
@@ -2350,7 +2397,10 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 	_ = rows.Close()
 
 	var lastActivity *string
-	if scanErr := s.conn.QueryRowContext(ctx, `SELECT MAX(created_at) FROM memories`).Scan(&lastActivity); scanErr == nil {
+	if scanErr := s.conn.QueryRowContext(ctx,
+		`SELECT MAX(created_at) FROM memories WHERE 1=1`+excludedSQL,
+		excludedArgs...,
+	).Scan(&lastActivity); scanErr == nil {
 		stats.LastActivity = parseTimePtr(lastActivity)
 	}
 
@@ -2363,6 +2413,24 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (*StoreStats, error) {
 }
 
 func (s *SQLiteStore) GetTimeline(ctx context.Context, from, to time.Time, domain string, bucket string) ([]TimelineBucket, error) {
+	return s.getTimeline(ctx, from, to, domain, bucket, nil)
+}
+
+func (s *SQLiteStore) GetTimelineExcludingDomainPrefixes(
+	ctx context.Context,
+	from, to time.Time,
+	domain, bucket string,
+	prefixes []string,
+) ([]TimelineBucket, error) {
+	return s.getTimeline(ctx, from, to, domain, bucket, prefixes)
+}
+
+func (s *SQLiteStore) getTimeline(
+	ctx context.Context,
+	from, to time.Time,
+	domain, bucket string,
+	excludedPrefixes []string,
+) ([]TimelineBucket, error) {
 	// SQLite uses strftime for date truncation
 	var format string
 	switch bucket {
@@ -2383,6 +2451,13 @@ func (s *SQLiteStore) GetTimeline(ctx context.Context, from, to time.Time, domai
 	if domain != "" {
 		query += " AND domain_tag = ?"
 		args = append(args, domain)
+	}
+	for _, prefix := range excludedPrefixes {
+		if prefix == "" {
+			continue
+		}
+		query += " AND LOWER(domain_tag) NOT LIKE ?"
+		args = append(args, strings.ToLower(prefix)+"%")
 	}
 
 	query += " GROUP BY period ORDER BY period"

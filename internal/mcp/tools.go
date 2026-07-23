@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,7 +40,7 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_recall": {
 			Name:        "sage_recall",
-			Description: "Search memories by semantic similarity. Use this to find relevant past knowledge before answering questions.",
+			Description: "Search memories by semantic similarity. Searches this SAGE by default. When a domain is shared by another connected SAGE, set federated=true (or name exact federate_chains) to run an allowed live read through that connection. Use sage_federation first when you need to discover connected SAGEs or the remote domains they expose.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -47,10 +48,31 @@ func (s *Server) registerTools() map[string]Tool {
 					"domain":         map[string]any{"type": "string", "description": "Filter by domain tag"},
 					"top_k":          map[string]any{"type": "integer", "description": "Number of results to return", "default": 5},
 					"min_confidence": map[string]any{"type": "number", "description": "Minimum confidence threshold 0-1"},
+					"scope": map[string]any{
+						"type":        "string",
+						"enum":        []string{"local", "auto", "federated"},
+						"default":     "local",
+						"description": "local searches only this SAGE; auto/federated also query connected SAGEs that expose this exact domain, using caller-safe local delegation.",
+					},
+					"federated": map[string]any{"type": "boolean", "description": "Also query connected SAGEs that currently allow this signed caller to read the exact domain.", "default": false},
+					"federate_chains": map[string]any{
+						"type":        "array",
+						"items":       map[string]any{"type": "string"},
+						"description": "Optional exact remote chain IDs to query instead of every connected SAGE. Use sage_federation to discover them.",
+					},
 				},
 				"required": []string{"query"},
 			},
 			Handler: s.toolRecall,
+		},
+		"sage_federation": {
+			Name:        "sage_federation",
+			Description: "Discover the connected SAGEs, remote domains, agents, and copy status this caller is authorized to consume. Read-only and caller-filtered; pairing, sharing, subscriptions, and other mutations remain operator-only.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+			Handler: s.toolFederation,
 		},
 		"sage_forget": {
 			Name:        "sage_forget",
@@ -144,6 +166,7 @@ func (s *Server) registerTools() map[string]Tool {
 			Description: "Per-conversation-turn memory cycle. Call this EVERY turn. It does two things atomically: " +
 				"(1) Recalls consensus-committed memories relevant to the current topic (so you have context), and " +
 				"(2) Stores an observation about what just happened in this turn (so future-you has context). " +
+				"Exact-domain recall transparently checks currently authorized connected SAGEs and reports an actionable federation miss when none expose it. " +
 				"This builds episodic experience turn-by-turn, like human memory — not a context window dump. " +
 				"Domains are dynamic: create whatever domain fits the conversation (e.g. 'quantum-physics', 'go-debugging', 'user-project-x'). " +
 				"You decide what's relevant to recall based on the conversation context.",
@@ -576,6 +599,17 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 	}
 
 	domain := stringParam(params, "domain", "")
+	scope := stringParam(params, "scope", "local")
+	if scope != "local" && scope != "auto" && scope != "federated" {
+		return nil, fmt.Errorf("scope must be local, auto, or federated")
+	}
+	federationOptions := recallFederationOptions{
+		Federated: scope == "auto" || scope == "federated" || boolParam(params, "federated", false),
+		Chains:    stringSliceParam(params, "federate_chains"),
+	}
+	if federationOptions.requested() && domain == "" {
+		return nil, fmt.Errorf("domain is required for federated recall")
+	}
 
 	// Use user-configured defaults when caller doesn't specify
 	defaultTopK, defaultMinConf := s.getRecallDefaults(ctx)
@@ -594,7 +628,7 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 
 	if s.isSemanticMode(ctx) {
 		recallMode = "semantic_only"
-		if err := s.recallSemantic(ctx, query, domain, topK, minConf, &queryResp); err != nil {
+		if err := s.recallSemantic(ctx, query, domain, topK, minConf, federationOptions, &queryResp); err != nil {
 			return nil, err
 		}
 	} else if hybridRecallEnabled() {
@@ -607,9 +641,9 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 		recallMode = "hybrid"
 		degraded = true
 		degradedReason = nonSemanticRecallReason
-		if hybridErr := s.recallHybrid(ctx, query, domain, topK, minConf, &queryResp); hybridErr != nil {
+		if hybridErr := s.recallHybrid(ctx, query, domain, topK, minConf, federationOptions, &queryResp); hybridErr != nil {
 			fmt.Fprintf(os.Stderr, "SAGE MCP: hybrid recall failed (%v); falling back to FTS5 path\n", hybridErr)
-			fallbackMode, legacyErr := s.recallFTSWithFallback(ctx, query, domain, topK, minConf, &queryResp)
+			fallbackMode, legacyErr := s.recallFTSWithFallback(ctx, query, domain, topK, minConf, federationOptions, &queryResp)
 			if legacyErr != nil {
 				return nil, legacyErr
 			}
@@ -628,14 +662,14 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 		recallMode = "keyword_only"
 		degraded = true
 		degradedReason = nonSemanticRecallReason
-		searchReq, _ := json.Marshal(map[string]any{
+		searchReq, _ := json.Marshal(recallRequest{
 			"query":          query,
 			"domain_tag":     domain,
 			"provider":       s.provider,
 			"min_confidence": minConf,
 			"status_filter":  "committed",
 			"top_k":          topK,
-		})
+		}.withRecallFederation(federationOptions))
 		if searchErr := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, &queryResp); searchErr != nil {
 			// Belt-and-braces: if the node turned out to be vault-encrypted
 			// (e.g. older node where /v1/embed/info hasn't been patched, or
@@ -645,7 +679,7 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 			if strings.Contains(searchErr.Error(), vaultEncryptedSearchMarker) {
 				fmt.Fprintf(os.Stderr, "SAGE MCP: /v1/memory/search reports vault-encrypted; retrying with semantic path\n")
 				s.setSemanticMode(true)
-				if retryErr := s.recallSemantic(ctx, query, domain, topK, minConf, &queryResp); retryErr != nil {
+				if retryErr := s.recallSemantic(ctx, query, domain, topK, minConf, federationOptions, &queryResp); retryErr != nil {
 					return nil, retryErr
 				}
 				// Actually served semantically — not a degrade after all.
@@ -673,12 +707,24 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 			"type":                r.MemoryType,
 			"status":              r.Status,
 			"created_at":          r.CreatedAt,
+			"submitting_agent":    r.SubmittingAgent,
+			"content_hash":        r.ContentHash,
+			"classification":      r.Classification,
+			"source_kind":         r.SourceKind,
+			"foreign":             r.Foreign,
+			"trust":               r.Trust,
 		}
 		if r.Disputed {
 			entry["disputed"] = true
 		}
 		if r.SourceChainID != "" {
 			entry["source_chain_id"] = r.SourceChainID
+		}
+		if r.OriginMemoryID != "" {
+			entry["origin_memory_id"] = r.OriginMemoryID
+		}
+		if r.OriginAgentID != "" {
+			entry["origin_agent_id"] = r.OriginAgentID
 		}
 		memories = append(memories, entry)
 	}
@@ -691,6 +737,16 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 	}
 	if degradedReason != "" {
 		out["degraded_reason"] = degradedReason
+	}
+	if queryResp.Federation != nil {
+		out["federation"] = queryResp.Federation
+	} else if federationOptions.requested() {
+		out["federation"] = recallFederationInfo{
+			Queried: []string{},
+			Errors: map[string]string{
+				"*": "federated recall was requested but this SAGE did not report a federation result; its transport may be disabled or the node may need an update",
+			},
+		}
 	}
 	return out, nil
 }
@@ -709,17 +765,54 @@ const disputedContentPrefix = "[DISPUTED] "
 type recallResp struct {
 	Results []struct {
 		MemoryID           string  `json:"memory_id"`
+		SubmittingAgent    string  `json:"submitting_agent"`
 		Content            string  `json:"content"`
+		ContentHash        string  `json:"content_hash"`
 		DomainTag          string  `json:"domain_tag"`
 		ConfidenceScore    float64 `json:"confidence_score"`
 		CorroborationCount int     `json:"corroboration_count"`
+		Classification     int     `json:"classification"`
 		MemoryType         string  `json:"memory_type"`
 		Status             string  `json:"status"`
 		Disputed           bool    `json:"disputed,omitempty"`
 		CreatedAt          string  `json:"created_at"`
 		SourceChainID      string  `json:"source_chain_id,omitempty"`
+		SourceKind         string  `json:"source_kind,omitempty"`
+		OriginMemoryID     string  `json:"origin_memory_id,omitempty"`
+		OriginAgentID      string  `json:"origin_agent_id,omitempty"`
+		Foreign            bool    `json:"foreign,omitempty"`
+		Trust              string  `json:"trust,omitempty"`
 	} `json:"results"`
-	TotalCount int `json:"total_count"`
+	TotalCount int                   `json:"total_count"`
+	Federation *recallFederationInfo `json:"federation,omitempty"`
+}
+
+type recallFederationInfo struct {
+	Queried  []string          `json:"queried"`
+	Merged   int               `json:"merged"`
+	Errors   map[string]string `json:"errors,omitempty"`
+	Coverage []map[string]any  `json:"coverage,omitempty"`
+}
+
+type recallFederationOptions struct {
+	Federated bool
+	Chains    []string
+}
+
+func (o recallFederationOptions) requested() bool {
+	return o.Federated || len(o.Chains) > 0
+}
+
+type recallRequest map[string]any
+
+func (r recallRequest) withRecallFederation(options recallFederationOptions) recallRequest {
+	if options.Federated {
+		r["federated"] = true
+	}
+	if len(options.Chains) > 0 {
+		r["federate_chains"] = options.Chains
+	}
+	return r
 }
 
 // hybridRecallEnabled gates the hybrid recall path. Defaults to ON; set
@@ -737,7 +830,7 @@ func hybridRecallEnabled() bool {
 // recallHybrid embeds the query, then asks the node to fuse BM25 + vector
 // results via RRF in one round trip. The node handles ranking and access
 // control; this client just shapes the request and reads the response.
-func (s *Server) recallHybrid(ctx context.Context, query, domain string, topK int, minConf float64, out *recallResp) error {
+func (s *Server) recallHybrid(ctx context.Context, query, domain string, topK int, minConf float64, federationOptions recallFederationOptions, out *recallResp) error {
 	embedReq, _ := json.Marshal(map[string]string{"text": query})
 	var embedResp struct {
 		Embedding []float32 `json:"embedding"`
@@ -746,7 +839,7 @@ func (s *Server) recallHybrid(ctx context.Context, query, domain string, topK in
 		return fmt.Errorf("get embedding: %w", err)
 	}
 
-	hybridReq, _ := json.Marshal(map[string]any{
+	hybridReq, _ := json.Marshal(recallRequest{
 		"query":          query,
 		"embedding":      embedResp.Embedding,
 		"domain_tag":     domain,
@@ -754,7 +847,7 @@ func (s *Server) recallHybrid(ctx context.Context, query, domain string, topK in
 		"min_confidence": minConf,
 		"status_filter":  "committed",
 		"top_k":          topK,
-	})
+	}.withRecallFederation(federationOptions))
 	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/hybrid", hybridReq, out); err != nil {
 		return fmt.Errorf("hybrid recall: %w", err)
 	}
@@ -767,20 +860,20 @@ func (s *Server) recallHybrid(ctx context.Context, query, domain string, topK in
 // mode that actually served the request ("keyword_only", or "semantic_only"
 // when the vault-encrypted marker forced a semantic retry) so the caller can
 // report recall quality accurately instead of assuming keyword-only.
-func (s *Server) recallFTSWithFallback(ctx context.Context, query, domain string, topK int, minConf float64, out *recallResp) (string, error) {
-	searchReq, _ := json.Marshal(map[string]any{
+func (s *Server) recallFTSWithFallback(ctx context.Context, query, domain string, topK int, minConf float64, federationOptions recallFederationOptions, out *recallResp) (string, error) {
+	searchReq, _ := json.Marshal(recallRequest{
 		"query":          query,
 		"domain_tag":     domain,
 		"provider":       s.provider,
 		"min_confidence": minConf,
 		"status_filter":  "committed",
 		"top_k":          topK,
-	})
+	}.withRecallFederation(federationOptions))
 	if searchErr := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, out); searchErr != nil {
 		if strings.Contains(searchErr.Error(), vaultEncryptedSearchMarker) {
 			fmt.Fprintf(os.Stderr, "SAGE MCP: /v1/memory/search reports vault-encrypted; retrying with semantic path\n")
 			s.setSemanticMode(true)
-			if err := s.recallSemantic(ctx, query, domain, topK, minConf, out); err != nil {
+			if err := s.recallSemantic(ctx, query, domain, topK, minConf, federationOptions, out); err != nil {
 				return "", err
 			}
 			return "semantic_only", nil
@@ -793,7 +886,7 @@ func (s *Server) recallFTSWithFallback(ctx context.Context, query, domain string
 // recallSemantic runs the embedding + cosine-similarity recall path. Used by
 // the primary semantic branch in toolRecall and by the belt-and-braces retry
 // when the FTS5 path returns the vault-encrypted marker.
-func (s *Server) recallSemantic(ctx context.Context, query, domain string, topK int, minConf float64, out *recallResp) error {
+func (s *Server) recallSemantic(ctx context.Context, query, domain string, topK int, minConf float64, federationOptions recallFederationOptions, out *recallResp) error {
 	embedReq, _ := json.Marshal(map[string]string{"text": query})
 	var embedResp struct {
 		Embedding []float32 `json:"embedding"`
@@ -806,18 +899,35 @@ func (s *Server) recallSemantic(ctx context.Context, query, domain string, topK 
 		return fmt.Errorf("get embedding: %w", err)
 	}
 
-	queryReq, _ := json.Marshal(map[string]any{
+	queryReq, _ := json.Marshal(recallRequest{
+		"query":          query,
 		"embedding":      embedResp.Embedding,
 		"domain_tag":     domain,
 		"provider":       s.provider,
 		"min_confidence": minConf,
 		"status_filter":  "committed",
 		"top_k":          topK,
-	})
+	}.withRecallFederation(federationOptions))
 	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, out); err != nil {
 		return fmt.Errorf("query memories: %w", err)
 	}
 	return nil
+}
+
+func (s *Server) toolFederation(ctx context.Context, _ map[string]any) (any, error) {
+	var available struct {
+		Connections []map[string]any `json:"connections"`
+		Total       int              `json:"total"`
+		Message     string           `json:"message"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/federation/available", nil, &available); err != nil {
+		return nil, fmt.Errorf("discover available federation scopes: %w", err)
+	}
+	return map[string]any{
+		"connections": available.Connections,
+		"total":       available.Total,
+		"message":     available.Message,
+	}, nil
 }
 
 func (s *Server) toolForget(ctx context.Context, params map[string]any) (any, error) {
@@ -1033,18 +1143,7 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 	// Phase 1: Recall — get consensus-committed memories relevant to this topic.
 	// Uses semantic vector search (Ollama) or FTS5 text search (hash mode).
 	recallTopK, recallMinConf := s.getRecallDefaults(ctx)
-	var recallResp struct {
-		Results []struct {
-			MemoryID        string  `json:"memory_id"`
-			Content         string  `json:"content"`
-			DomainTag       string  `json:"domain_tag"`
-			ConfidenceScore float64 `json:"confidence_score"`
-			MemoryType      string  `json:"memory_type"`
-			Disputed        bool    `json:"disputed,omitempty"`
-			CreatedAt       string  `json:"created_at"`
-		} `json:"results"`
-		TotalCount int `json:"total_count"`
-	}
+	var turnRecall recallResp
 
 	// Tell the agent which recall path actually ran so a keyword-only fallback
 	// (non-semantic hash node or a dead embedder) isn't mistaken for full
@@ -1074,14 +1173,16 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 			s.invalidateSemanticMode()
 		} else {
 			queryReq, _ := json.Marshal(map[string]any{
+				"query":          topic,
 				"embedding":      embedResp.Embedding,
 				"domain_tag":     domain,
 				"provider":       s.provider,
 				"status_filter":  "committed",
 				"top_k":          recallTopK,
 				"min_confidence": recallMinConf,
+				"federated":      true,
 			})
-			if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, &recallResp); err != nil {
+			if err := s.doSignedJSON(ctx, "POST", "/v1/memory/query", queryReq, &turnRecall); err != nil {
 				result["recall_error"] = err.Error()
 				result["semantic_degraded"] = true
 				result["degraded_reason"] = "query_failed: " + err.Error()
@@ -1096,15 +1197,22 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 			"status_filter":  "committed",
 			"top_k":          recallTopK,
 			"min_confidence": recallMinConf,
+			"federated":      true,
 		})
-		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, &recallResp); err != nil {
+		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/search", searchReq, &turnRecall); err != nil {
 			result["recall_error"] = err.Error()
 		}
 	}
 
-	if _, hasErr := result["recall_error"]; !hasErr && len(recallResp.Results) > 0 {
-		memories := make([]map[string]any, 0, len(recallResp.Results))
-		for _, r := range recallResp.Results {
+	if turnRecall.Federation != nil {
+		result["federation"] = turnRecall.Federation
+		if len(turnRecall.Federation.Queried) == 0 && len(turnRecall.Federation.Errors) > 0 {
+			result["federation_notice"] = "No reachable connected SAGE currently exposes this exact domain to this agent. Use sage_federation to inspect authorized connections, or ask the remote owner to enable Read."
+		}
+	}
+	if _, hasErr := result["recall_error"]; !hasErr && len(turnRecall.Results) > 0 {
+		memories := make([]map[string]any, 0, len(turnRecall.Results))
+		for _, r := range turnRecall.Results {
 			// Fail closed if an older or misbehaving node ignores domain_tag.
 			// A turn belongs to exactly one project/domain; cross-domain memories
 			// can silently re-anchor an agent in the wrong repository.
@@ -1113,12 +1221,24 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 			}
 			content := r.Content
 			entry := map[string]any{
-				"memory_id":  r.MemoryID,
-				"content":    content,
-				"domain":     r.DomainTag,
-				"confidence": r.ConfidenceScore,
-				"type":       r.MemoryType,
-				"created_at": r.CreatedAt,
+				"memory_id":   r.MemoryID,
+				"content":     content,
+				"domain":      r.DomainTag,
+				"confidence":  r.ConfidenceScore,
+				"type":        r.MemoryType,
+				"created_at":  r.CreatedAt,
+				"source_kind": r.SourceKind,
+				"foreign":     r.Foreign,
+				"trust":       r.Trust,
+			}
+			if r.SourceChainID != "" {
+				entry["source_chain_id"] = r.SourceChainID
+			}
+			if r.OriginMemoryID != "" {
+				entry["origin_memory_id"] = r.OriginMemoryID
+			}
+			if r.OriginAgentID != "" {
+				entry["origin_agent_id"] = r.OriginAgentID
 			}
 			if r.Disputed {
 				entry["content"] = disputedContentPrefix + content
@@ -2107,6 +2227,43 @@ func stringParam(params map[string]any, key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+func boolParam(params map[string]any, key string, defaultVal bool) bool {
+	if v, ok := params[key].(bool); ok {
+		return v
+	}
+	return defaultVal
+}
+
+func stringSliceParam(params map[string]any, key string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	appendValue := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	switch values := params[key].(type) {
+	case []string:
+		for _, value := range values {
+			appendValue(value)
+		}
+	case []any:
+		for _, raw := range values {
+			if value, ok := raw.(string); ok {
+				appendValue(value)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func intParam(params map[string]any, key string, defaultVal int) int {

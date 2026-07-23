@@ -3,6 +3,7 @@ package federation
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"reflect"
 	"testing"
 
@@ -18,7 +19,12 @@ import (
 func TestSelectiveConsentFoldInEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
-	seedGroup(t, ms, "g1", "chain-ctl")
+	attachBadger(t, m)
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "g1", ControllerChainID: m.localChainID, ControllerAgentPubkey: hex.EncodeToString(m.agentPub),
+	}); err != nil {
+		t.Fatalf("seed group: %v", err)
+	}
 	// The local node is an active FULL-SYNC member (so a self role_change succeeds);
 	// chain-own owns the shared set, so the local member's entitlement comes purely
 	// from its role/consent, never from ownership.

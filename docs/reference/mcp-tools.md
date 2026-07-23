@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.11.6.
+Reconciled against internal/mcp for SAGE v11.12.0.
 
 # SAGE MCP Tools Reference
 
@@ -232,7 +232,7 @@ verified configurations).
 
 **Purpose:** Semantic search over committed memories.
 
-**Source:** `tools.go:40-54` (definition), `tools.go:495` (`toolRecall` handler)
+**Source:** `tools.go:41-61` (definition), `tools.go:588-729` (`toolRecall` handler)
 
 **Parameters:**
 
@@ -242,9 +242,15 @@ verified configurations).
 | `domain`         | string | no       | Filter by domain tag. Omit to search all domains. |
 | `top_k`          | int    | no       | Number of results. Default: from user's dashboard settings (fallback: 5). |
 | `min_confidence` | number | no       | Minimum confidence threshold 0–1. Default: from dashboard settings (fallback: 0). |
+| `scope` | string | no | `local` (default), `auto`, or `federated`. `auto`/`federated` run caller-authorized live reads for the exact `domain`. |
+| `federated` | bool | no | Compatibility alias for `scope=auto`. |
+| `federate_chains` | string[] | no | Restrict the live read to exact remote chain IDs returned by `sage_federation`. Supplying this also opts into federation. |
 
 **Returns:**
-- `memories`: array of `{memory_id, content, domain, confidence, type, status, created_at}`.
+- `memories`: includes author/hash/classification plus `source_kind`
+  (`local_native`, `federated_live`, or `federated_copy`). Foreign results
+  preserve `source_chain_id`, `origin_memory_id`, `origin_agent_id`,
+  `foreign:true`, and `trust:"external_untrusted"`.
 - `total_count`: total matching memories.
 - `recall_mode`: which path served the request — `semantic_only` | `hybrid` |
   `keyword_only`.
@@ -253,9 +259,20 @@ verified configurations).
   results are keyword-quality. When this is `true`, treat recall as lower-fidelity
   (fix the embedder / run the smart-memory setup).
 - `degraded_reason`: present only when degraded — a short explanation.
+- `federation`: when requested, `{queried, merged, coverage, errors?}`.
+  `coverage` names each peer's search mode, match/include counts, and the
+  keyword fallback available for embedding-provider mismatch. Missing transport
+  or an older node that ignores the opt-in is surfaced as an explicit `*` error
+  rather than looking like an authoritative empty domain.
 
 **Search path:** Same hybrid/semantic/FTS5 fallback chain as `sage_turn` recall
-phase. Committed memories are returned; an app-v17 two-phase-challenged memory
+phase. All three paths carry the same federation options
+(`tools.go`). An exact domain is required for an ordinary-agent federated call; this
+preserves concrete peer-RBAC policy and avoids an all-domain metadata probe.
+The local SAGE validates the caller's registered read subtree and clearance
+before delegating. Results from local and remote ranked lists are content/origin
+deduplicated, reciprocal-rank fused, and globally capped by `top_k`.
+Committed memories are returned; an app-v17 two-phase-challenged memory
 also remains recallable with `disputed: true`, a `[DISPUTED]` content prefix,
 and the shared query-time confidence haircut. The
 `recall_mode`/`semantic_degraded` fields surface silent keyword-only fallback so
@@ -266,6 +283,40 @@ a caller isn't misled into trusting a degraded recall.
 **When to call:** Use before destructive actions (`sage_recall 'critical lessons'`);
 when you need to look up specific past knowledge mid-conversation; in `bookend`
 mode as the primary in-session recall mechanism.
+
+---
+
+### sage_federation
+
+**Purpose:** Read-only discovery of connected SAGEs and the remote capabilities
+they currently expose to this SAGE.
+
+**Source:** `tools.go:62-70` (definition), `tools.go:884-1013` (handler)
+
+**Parameters:** none.
+
+**Returns:**
+- `connections`: active, reachable SAGEs whose authenticated remote grant
+  intersects this caller's local read subtrees; includes `remote_chain_id`,
+  `network_name`, capabilities, and normalized `remote_permissions`.
+- `shared_read_domains`: exact domains eligible for `sage_recall` with
+  `federated=true`.
+- `copy_offered_domains`: exact domains this node may independently subscribe
+  to retain.
+- `remote_agents`: authenticated peer-scoped agent contacts when the peer
+  advertises them.
+- `sync`: caller-filtered subscribed domains, saved-copy counts, and bounded
+  reconciliation health without endpoints, pins, secrets, or raw outbox rows.
+
+The REST broker probes active peers concurrently (bounded at eight and one
+shared timeout), then filters the authenticated disclosures for the signed
+caller. It does not change trust, permissions, subscriptions, or contacts;
+those routes remain exact-node-operator-only.
+
+**REST:** `GET /v1/federation/available`.
+
+**When to call:** Before asking an agent to use a domain that may live on
+another SAGE, or when choosing an exact `federate_chains` target.
 
 ---
 
@@ -872,12 +923,13 @@ registration name from `sage_register` is untouched.
 
 ## Summary
 
-**25 tools documented:**
+**26 tools documented:**
 
 | Category     | Tools |
 |--------------|-------|
 | Boot / lifecycle | `sage_inception`, `sage_red_pill`, `sage_turn`, `sage_reflect` |
 | Core memory  | `sage_remember`, `sage_recall`, `sage_forget`, `sage_reinstate`, `sage_corroborate`, `sage_link` |
+| Federation   | `sage_federation` |
 | Browse       | `sage_list`, `sage_timeline`, `sage_status` |
 | Tasks        | `sage_task`, `sage_backlog` |
 | Identity     | `sage_register`, `sage_rename` |

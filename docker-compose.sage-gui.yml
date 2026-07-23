@@ -7,7 +7,15 @@
 # Data persists across restarts in named volumes.
 #
 # Dashboard: http://localhost:8080
-# MCP:       Configure your agent to connect to http://localhost:8080
+# MCP stdio bridge:
+#   docker compose -f docker-compose.sage-gui.yml exec -T \
+#     -e SAGE_PROVIDER=claude-code \
+#     -e SAGE_PROJECT=my-project \
+#     -e SAGE_IDENTITY_PATH=/root/.sage/agents/claude-code-my-project/agent.key \
+#     sage /usr/local/bin/sage-gui mcp
+#
+# HTTP MCP is an authenticated alternative at /v1/mcp/sse or
+# /v1/mcp/streamable; mint its bearer with `sage-gui mcp-token create`.
 
 services:
   # ─────────────────────────────────────────────
@@ -45,6 +53,7 @@ services:
     ports:
       - "8080:8080"
     environment:
+      SAGE_HOME: "/root/.sage"
       REST_ADDR: "0.0.0.0:8080"
       OLLAMA_URL: "http://ollama:11434"
       SAGE_EMBEDDING_PROVIDER: "ollama"

@@ -628,6 +628,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Post("/v1/dashboard/settings/ledger/enable", h.handleEnableLedger)
 			r.Post("/v1/dashboard/settings/ledger/change-passphrase", h.handleChangePassphrase)
 			r.Post("/v1/dashboard/settings/ledger/recovery-key", h.handleGetRecoveryKey)
+			r.Post("/v1/dashboard/settings/ledger/recovery-key/confirm", h.handleConfirmRecoveryKeyBackup)
 			r.Post("/v1/dashboard/settings/ledger/disable", h.handleDisableLedger)
 
 			// Pre-validate endpoint — dry-run the per-node validation checks
@@ -1079,7 +1080,16 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// available instead of leaving a manual setup banner behind.
 	h.startPostUnlockRepairs()
 
-	// Create session
+	h.issueDashboardSession(w, r)
+
+	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// issueDashboardSession keeps cookie policy identical for ordinary login and
+// the successful enable-encryption transition. The latter turns auth on during
+// the request, so issuing the session in the same response prevents the browser
+// from being stranded between setup and recovery-key acknowledgement.
+func (h *DashboardHandler) issueDashboardSession(w http.ResponseWriter, r *http.Request) {
 	token := generateToken()
 	h.sessions.Store(token, time.Now().Add(sessionTTL))
 
@@ -1097,8 +1107,6 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteStrictMode,
 	})
-
-	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleLock invalidates the current session — like Cmd+L in 1Password.
@@ -1219,7 +1227,7 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
 
-	opts := store.ListOptions{
+	opts := cerebrumListOptions(store.ListOptions{
 		DomainTag:       q.Get("domain"),
 		Tag:             q.Get("tag"),
 		Provider:        q.Get("provider"),
@@ -1230,7 +1238,7 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		Limit:           limit,
 		Offset:          offset,
 		Sort:            q.Get("sort"),
-	}
+	})
 
 	// On-chain RBAC: if request comes from an MCP agent, enforce agent isolation.
 	if allowedAgents, seeAll := h.resolveAgentRBAC(r); !seeAll {
@@ -1265,7 +1273,7 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 	var records []*memory.MemoryRecord
 	var total int
 	if qStr := strings.TrimSpace(q.Get("q")); qStr != "" {
-		qopts := store.QueryOptions{
+		qopts := cerebrumQueryOptions(store.QueryOptions{
 			DomainTag:        opts.DomainTag,
 			Provider:         opts.Provider,
 			StatusFilter:     opts.Status,
@@ -1273,7 +1281,7 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 			SubmittingAgents: opts.SubmittingAgents,
 			CreatedFrom:      opts.CreatedFrom,
 			CreatedTo:        opts.CreatedTo,
-		}
+		})
 		if opts.Tag != "" {
 			qopts.Tags = []string{opts.Tag} // honor the tag filter on the FTS path too (the fallback already did)
 		}
@@ -1292,13 +1300,13 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 		if ferr == nil {
 			records, total = ftsRecs, len(ftsRecs)
 		} else {
-			pool, _, perr := h.store.ListMemories(r.Context(), store.ListOptions{
+			pool, _, perr := h.store.ListMemories(r.Context(), cerebrumListOptions(store.ListOptions{
 				DomainTag: opts.DomainTag, Tag: opts.Tag, Provider: opts.Provider,
 				Status: opts.Status, SubmittingAgent: opts.SubmittingAgent,
 				SubmittingAgents: opts.SubmittingAgents,
 				CreatedFrom:      opts.CreatedFrom, CreatedTo: opts.CreatedTo,
 				Limit: 1000, Sort: "newest",
-			})
+			}))
 			if perr != nil {
 				writeError(w, http.StatusInternalServerError, perr.Error())
 				return
@@ -1345,7 +1353,7 @@ func (h *DashboardHandler) handleListMemories(w http.ResponseWriter, r *http.Req
 	})
 }
 
-// handleExport streams ALL memories as JSONL (one JSON object per line).
+// handleExport streams active (non-deprecated) memories as JSONL (one JSON object per line).
 // This format can be re-imported via the import system for backup/restore.
 func (h *DashboardHandler) handleExport(w http.ResponseWriter, r *http.Request) {
 	// Export format: one MemoryRecord JSON per line (JSONL).
@@ -1365,11 +1373,12 @@ func (h *DashboardHandler) handleExport(w http.ResponseWriter, r *http.Request) 
 	exported := 0
 
 	for {
-		records, _, err := h.store.ListMemories(r.Context(), store.ListOptions{
+		records, _, err := h.store.ListMemories(r.Context(), cerebrumListOptions(store.ListOptions{
 			Limit:  pageSize,
 			Offset: offset,
 			Sort:   "oldest",
-		})
+			Status: "active",
+		}))
 		if err != nil {
 			if exported == 0 {
 				writeError(w, http.StatusInternalServerError, err.Error())
@@ -1405,6 +1414,15 @@ func (h *DashboardHandler) handleExport(w http.ResponseWriter, r *http.Request) 
 
 		offset += len(records)
 	}
+
+	// Keep an empty backup self-identifying. Without a manifest line, Import
+	// cannot distinguish an empty SAGE JSONL file from another empty format.
+	if exported == 0 {
+		_ = enc.Encode(map[string]any{
+			"record_type":         "sage_backup_manifest",
+			"sage_backup_version": 1,
+		})
+	}
 }
 
 // handleTimeline returns aggregated counts for the timeline bar.
@@ -1429,7 +1447,21 @@ func (h *DashboardHandler) handleTimeline(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	buckets, err := h.store.GetTimeline(r.Context(), from, to, domain, bucket)
+	if isCerebrumInternalMemoryDomain(domain) {
+		writeJSONResp(w, http.StatusOK, map[string]any{"buckets": []store.TimelineBucket{}})
+		return
+	}
+	var buckets []store.TimelineBucket
+	var err error
+	if provider, ok := h.store.(interface {
+		GetTimelineExcludingDomainPrefixes(context.Context, time.Time, time.Time, string, string, []string) ([]store.TimelineBucket, error)
+	}); ok {
+		buckets, err = provider.GetTimelineExcludingDomainPrefixes(
+			r.Context(), from, to, domain, bucket, cerebrumInternalDomainPrefixes,
+		)
+	} else {
+		buckets, err = h.store.GetTimeline(r.Context(), from, to, domain, bucket)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1577,11 +1609,11 @@ func (h *DashboardHandler) refreshGraphCache(parent context.Context, key, status
 // serialized JSON response. It is a pure function of its inputs, so it is safe
 // to call both on the request path and from the background refresh goroutine.
 func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, drillDomain string, limit int, seeAll bool, allowedAgents []string) ([]byte, error) {
-	opts := store.ListOptions{
+	opts := cerebrumListOptions(store.ListOptions{
 		Limit:  limit,
 		Sort:   "newest",
 		Status: statusParam,
-	}
+	})
 	// Default: exclude deprecated memories from graph view
 	if opts.Status == "" {
 		opts.Status = "committed"
@@ -1603,7 +1635,7 @@ func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, dr
 	var grandTotal int
 	var domainCounts map[string]int
 	if seeAll {
-		if stats, sErr := h.store.GetStats(ctx); sErr == nil && stats != nil {
+		if stats, sErr := h.cerebrumVisibleStats(ctx); sErr == nil && stats != nil {
 			grandTotal = stats.TotalMemories
 			domainCounts = stats.ByDomain
 		}
@@ -1717,6 +1749,11 @@ func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, dr
 		// non-SQLite stores simply omit it.
 		if dap, ok := h.store.(domainActivityProvider); ok {
 			if dl, dErr := dap.GetDomainLastActivity(ctx); dErr == nil {
+				for domain := range dl {
+					if isCerebrumInternalMemoryDomain(domain) {
+						delete(dl, domain)
+					}
+				}
 				resp["domain_last"] = dl
 			}
 		}
@@ -1763,7 +1800,7 @@ func (h *DashboardHandler) stratifiedSample(ctx context.Context, base store.List
 
 // handleStats returns aggregate statistics.
 func (h *DashboardHandler) handleStats(w http.ResponseWriter, r *http.Request) {
-	stats, err := h.store.GetStats(r.Context())
+	stats, err := h.cerebrumVisibleStats(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1782,6 +1819,9 @@ func (h *DashboardHandler) handleDeleteMemory(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "missing memory id")
 		return
 	}
+	if h.rejectInternalCerebrumMemory(w, r.Context(), id) {
+		return
+	}
 	if err := h.store.DeleteMemory(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1797,6 +1837,9 @@ func (h *DashboardHandler) handleUpdateMemory(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusBadRequest, "missing memory id")
 		return
 	}
+	if h.rejectInternalCerebrumMemory(w, r.Context(), id) {
+		return
+	}
 
 	var body struct {
 		Domain string   `json:"domain"`
@@ -1809,6 +1852,10 @@ func (h *DashboardHandler) handleUpdateMemory(w http.ResponseWriter, r *http.Req
 	}
 	if body.Domain == "" && body.Tags == nil {
 		writeError(w, http.StatusBadRequest, "domain or tags is required")
+		return
+	}
+	if isCerebrumInternalMemoryDomain(body.Domain) {
+		writeError(w, http.StatusBadRequest, "domain is reserved for internal federation state")
 		return
 	}
 	if body.Domain != "" {
@@ -1850,12 +1897,24 @@ func (h *DashboardHandler) handleBulkUpdateMemories(w http.ResponseWriter, r *ht
 		writeError(w, http.StatusBadRequest, "domain or add_tags is required")
 		return
 	}
+	if isCerebrumInternalMemoryDomain(body.Domain) {
+		writeError(w, http.StatusBadRequest, "domain is reserved for internal federation state")
+		return
+	}
 
 	ctx := r.Context()
 	updated := 0
 	var firstErr error
+	firstErrStatus := http.StatusInternalServerError
 
 	for _, id := range body.IDs {
+		if record, err := h.store.GetMemory(ctx, id); err == nil && record != nil && isCerebrumInternalMemoryDomain(record.DomainTag) {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("memory not found")
+				firstErrStatus = http.StatusNotFound
+			}
+			continue
+		}
 		if body.Domain != "" {
 			if err := h.store.UpdateDomainTag(ctx, id, body.Domain); err != nil {
 				if firstErr == nil {
@@ -1894,7 +1953,7 @@ func (h *DashboardHandler) handleBulkUpdateMemories(w http.ResponseWriter, r *ht
 	}
 
 	if firstErr != nil && updated == 0 {
-		writeError(w, http.StatusInternalServerError, firstErr.Error())
+		writeError(w, firstErrStatus, firstErr.Error())
 		return
 	}
 	writeJSONResp(w, http.StatusOK, map[string]any{
@@ -1920,6 +1979,9 @@ func (h *DashboardHandler) handleListTags(w http.ResponseWriter, r *http.Request
 // handleGetMemoryTags returns tags for a specific memory.
 func (h *DashboardHandler) handleGetMemoryTags(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if h.rejectInternalCerebrumMemory(w, r.Context(), id) {
+		return
+	}
 	tags, err := h.store.GetTags(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -1934,6 +1996,9 @@ func (h *DashboardHandler) handleGetMemoryTags(w http.ResponseWriter, r *http.Re
 // handleSetMemoryTags replaces all tags on a memory.
 func (h *DashboardHandler) handleSetMemoryTags(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if h.rejectInternalCerebrumMemory(w, r.Context(), id) {
+		return
+	}
 	var body struct {
 		Tags []string `json:"tags"`
 	}
@@ -2685,7 +2750,7 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 	health["embedder"] = embedderInfo
 
 	// Get memory stats
-	stats, err := h.store.GetStats(r.Context())
+	stats, err := h.cerebrumVisibleStats(r.Context())
 	if err == nil {
 		health["memories"] = stats
 	}

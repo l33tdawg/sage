@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.11.6 is the current release.** It is an off-consensus federation RBAC/UX patch: owners can delete sharing groups without revoking the trusted connections beneath them, offline guests converge on their signed removal, and previous connections present a fresh-pairing ceremony instead of a misleading reconnect action. The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. The native-shell productization bridge is retargeted to v11.11–v11.14; none of those planned releases is promised or dated.
+**Status (2026-07):** **v11.12.0 is the current release.** It completes the consumer onboarding/recovery slice, makes federation discoverable to ordinary authorized agents, unifies LAN and internet routing behind one automatic connection flow, and hardens owner-controlled federation groups without changing consensus. The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. The native-shell productization bridge remains targeted at v11.11–v11.14.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -12,7 +12,7 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 
 ### Onboarding and setup
 
-- **First-run onboarding wizard.** Fresh nodes get a three-step welcome (orientation, semantic memory, connect an AI tool). Closing it marks onboarding done; it is re-runnable any time from **Settings > Maintenance > Run setup**.
+- **First-run onboarding wizard.** Fresh nodes choose whether to start privately or join an existing SAGE network, then walk through smart search, connecting an AI tool, private-or-shared intent, and recovery protection. Closing it marks onboarding done; it is re-runnable any time from **Settings > Maintenance > Run setup**.
 - **Guided semantic-memory setup.** One flow turns on the bundled embedder (Ollama + `nomic-embed-text`): detect Ollama, pull the model, re-embed existing memories as a durable background job with a progress banner that survives reloads, then switch recall over. Includes recovery-key backup and honest handling of undecryptable memories (surfaced, not silently dropped).
 - **One-click managed reranker.** After a single consent click, SAGE downloads a pinned, sha256-checksum-verified llama.cpp engine build and the `bge-reranker-v2-m3` cross-encoder model, then runs and manages the sidecar process itself (loopback only, nothing leaves the machine). Recall results-per-query (k) is tunable 3-20. Bring-your-own TEI-compatible servers are still supported.
 - **Connect-an-AI-tool flows.** A single dashboard flow branches three ways: same-machine one-click config writing (ChatGPT desktop Codex mode, Claude Code, Codex CLI, Cursor, Windsurf, Claude Desktop), ChatGPT Work through an OpenAI plugin + Secure MCP Tunnel, remote MCP over LAN/VPN or an operator-managed HTTPS endpoint, and LAN node-join (another computer becomes a peer node sharing this node's memory).
@@ -200,7 +200,53 @@ fork or vendor the web view layer to get there sooner.
 
 ### v11.12 - consumer onboarding and recovery
 
-Make first run and recovery survivable by someone who has never used SAGE, natively and without a terminal. Guided create-or-join, connect-an-AI-tool, and choose-what-is-private-or-shared flows; recovery-key backup and restore; and honest, consistent dialogs for destructive or privacy-affecting actions that explain what happened, what remains safe, and the next step. Plain language and safe defaults throughout. The gate includes clean-machine onboarding and recovery usability tests with real nontechnical users — the same bar v12 sets, brought forward so it is proven early rather than at the end.
+Make first run and recovery survivable by someone who has never used SAGE,
+natively and without a terminal. v11.12 has four acceptance-owned tracks:
+
+- **One coherent first run.** Choose **Start my own SAGE** or **Join an existing
+  SAGE network**, set up semantic memory, and connect an AI tool. Standalone
+  setup is private by default, and the copy must distinguish a same-chain node
+  join from connecting separate SAGEs for file-sharing-style access.
+- **Private or shared, in plain language.** Let the owner choose people and
+  existing domains without exposing protocol identities. Trust, direct sharing,
+  and sharing-group membership remain separate; nothing is shared by default.
+- **Recovery that is actually proven.** Make recovery-key backup status and the
+  safe storage step visible, guide backup and restore, and prove both a forgotten
+  passphrase and a fresh-machine recovery without terminal commands.
+- **Honest dialogs and a real usability gate.** Every destructive or
+  privacy-affecting action says what changes, what remains safe, and what to do
+  next. Clean-machine onboarding and recovery tests with real nontechnical users
+  are release criteria, with keyboard, focus, and screen-reader basics exercised
+  in the same flows.
+
+The implemented browser slice now connects the whole decision path: the existing
+authenticated node-join ceremony is reachable directly from onboarding; a new
+standalone SAGE explicitly defaults to private; sharing routes into the existing
+federation and RBAC surface instead of inventing a second permission system; and
+a lived-in node is told to export a backup before replacing its network history.
+Onboarding also reuses the real encryption setup, persists an explicit recovery-
+key backup acknowledgement, and keeps warning until that acknowledgement exists.
+The portable plaintext memory backup is now labeled honestly, protected by the
+shared privacy dialog, and covered by an automated export → empty-node Preview →
+Confirm → content/hash verification. Single-memory forgetting, manual ledger cleanup,
+restart, and semantic-to-basic recall changes now use the shared explanatory dialog
+instead of click-twice controls. Every onboarding child now replaces, rather than
+stacks over, its parent dialog and shares keyboard focus/trap/restore behavior. A
+structured proxy exercise has now passed the federation, same-network join,
+forgotten-passphrase, keyboard/focus, and core onboarding paths; its evidence and
+limits are recorded in
+[`v11.12-clean-machine-acceptance.md`](v11.12-clean-machine-acceptance.md). Complete
+visible-only restore and cleanup runs now pass on the signed installed-copy build.
+For v11.12, the release owner accepts the structured proxy as the available usability
+evidence: independent nontechnical-user study remains a v12 criterion, the full
+spoken VoiceOver matrix remains in v11.14 accessibility hardening, and native-shell
+mapping remains part of the bridge to v12 rather than a browser-CEREBRUM blocker.
+The memory-only portable backup scope is also intentional for this release;
+federation, RBAC, credentials, settings, and chain history remain explicitly
+excluded, with any broader portable-node backup deferred to a separately designed
+release. The remaining RC artifact gate is a notarized and stapled v11.12
+clean-machine Finder/Launchpad open. Browser CEREBRUM remains supported throughout;
+the tracked native shell remains an internal alpha until v12 distribution.
 
 ### v11.13 - native lifecycle: install, updates, health, permissions
 

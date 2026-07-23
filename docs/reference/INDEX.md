@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.11.6. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.12.0. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -29,7 +29,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`concepts/voter-operations.md`](concepts/voter-operations.md) | How `proposed` memories become `committed` (the per-node auto-voter), how to *guarantee* auto-commit (`--require-voter` / `voter:` config), the stuck-memory alarm + triage, key safety, and the honest REST-vote caveat. |
 | [`concepts/content-validation-gate.md`](concepts/content-validation-gate.md) | The optional Layer-2 content-validation gate (`outcome_class`-keyed reject hook) and the deployment **arming seam** — both the stateless `contentvalidator.SetProvider` and the context-aware `SetProviderWithContext` (exposes the on-chain `RoleResolver` for signer-authority checks) — enabling it without patching the cmd entrypoints. |
 | [`federation-and-brain-api.md`](federation-and-brain-api.md) | The v11 HTTP surface: trust-only JOIN over direct HTTPS or libp2p relay/NAT traversal, independent per-peer Read/Copy grants over existing domains, receiver-controlled Copy subscriptions, authenticated domain-owner agent contacts, and the existing pipeline extended across federation through `/fed/v1/pipe/event`. Transport, peer policy, contacts, and pipeline work are off-consensus; tx-33/34 preserves agreement compatibility. The Write field/route remains reserved and fails closed. |
-| [`reranker-and-setup.md`](reranker-and-setup.md) | The v11 local-engine and setup surface: first-run onboarding, recall-tuning clamps, managed semantic memory setup (`/v1/dashboard/embeddings/*`, pinned Ollama runtime + readiness-gated model pull), the reranker config endpoint (`kind` field + verify-on-enable), the managed llama.cpp sidecar (`/v1/dashboard/reranker/setup/*`, pinned assets + sha256 + adopt-not-respawn), the TEI vs llama.cpp rerank dialects, and `embedding_provider` stamped at insert. All off-consensus. |
+| [`reranker-and-setup.md`](reranker-and-setup.md) | The v11 local-engine and setup surface: create-or-join/private-or-shared onboarding, Synaptic Ledger recovery acknowledgement, portable memory-backup boundaries, recall-tuning clamps, managed semantic memory setup (`/v1/dashboard/embeddings/*`, pinned Ollama runtime + readiness-gated model pull), the reranker config endpoint (`kind` field + verify-on-enable), the managed llama.cpp sidecar (`/v1/dashboard/reranker/setup/*`, pinned assets + sha256 + adopt-not-respawn), the TEI vs llama.cpp rerank dialects, and `embedding_provider` stamped at insert. Mostly off-consensus; imported memories re-enter the normal consensus lifecycle. |
 
 ---
 
@@ -47,6 +47,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | Make sure submitted memories actually get committed (not stuck at `proposed`) | [`concepts/voter-operations.md`](concepts/voter-operations.md) |
 | Pair two SAGE nodes, then change which existing domains they share without re-pairing | [`federation-and-brain-api.md`](federation-and-brain-api.md) — “Trust and directional peer RBAC” |
 | Send agent work to a visible owner on another federated SAGE | [`mcp-tools.md`](mcp-tools.md) — `sage_pipe`; [`federation-and-brain-api.md`](federation-and-brain-api.md) — `POST /fed/v1/pipe/event` |
+| Discover connected SAGEs and live-read a domain they share | [`mcp-tools.md`](mcp-tools.md) — `sage_federation`, then `sage_recall` with `federated=true` |
 | Distinguish internet federation, app-v20 quorum replication, and local-vs-network snapshot recovery | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) — “v11.9 quorum scopes are not cross-chain federation” |
 | Configure SAGE via environment variables | [`environment-variables.md`](environment-variables.md) |
 
@@ -97,7 +98,7 @@ CometBFT without treating the consensus RPC as proof of application storage.
 
 ---
 
-## Related docs (reconciled through v11.11.6)
+## Related docs (reconciled through v11.12.0)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

@@ -3,6 +3,7 @@ package web
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -1221,8 +1222,9 @@ func TestImport_SAGEBackup_ValidJSONL(t *testing.T) {
 	records, source, errors, err := parseJSONL(data)
 	require.NoError(t, err)
 	assert.Equal(t, "sage-backup", source)
-	assert.Len(t, records, 3)
-	assert.Empty(t, errors)
+	assert.Len(t, records, 2)
+	require.Len(t, errors, 1)
+	assert.Contains(t, errors[0], "skipped 1 forgotten memory")
 
 	// Verify metadata is preserved
 	assert.Equal(t, "First memory", records[0].Content)
@@ -1233,10 +1235,12 @@ func TestImport_SAGEBackup_ValidJSONL(t *testing.T) {
 	assert.NotEqual(t, "m1", records[0].MemoryID)
 	assert.NotEqual(t, "m2", records[1].MemoryID)
 
-	// Status should be reset to proposed for re-consensus
+	// Active records should be reset to proposed for re-consensus. A forgotten
+	// memory from an older backup must not become recallable under a new ID.
 	for _, rec := range records {
 		assert.Equal(t, "proposed", string(rec.Status))
 		assert.Nil(t, rec.CommittedAt)
+		assert.NotEqual(t, "Third memory", rec.Content)
 	}
 }
 
@@ -1251,6 +1255,28 @@ func TestImport_SAGEBackup_EmptyContent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sage-backup", source)
 	assert.Len(t, records, 1) // Empty content line skipped
+}
+
+func TestImport_SAGEBackup_DeprecatedOnlyStaysRecognized(t *testing.T) {
+	data := []byte(`{"memory_id":"forgotten","content":"Do not restore this","memory_type":"observation","domain_tag":"general","status":"deprecated"}`)
+
+	records, source, errors, err := parseJSONL(data)
+	require.NoError(t, err)
+	assert.Equal(t, "sage-backup", source)
+	assert.Empty(t, records)
+	require.Len(t, errors, 1)
+	assert.Contains(t, errors[0], "forgotten memory")
+	assert.NotContains(t, errors[0], "Claude Code")
+}
+
+func TestImport_SAGEBackup_EmptyManifestStaysRecognized(t *testing.T) {
+	data := []byte(`{"record_type":"sage_backup_manifest","sage_backup_version":1}`)
+
+	records, source, errors, err := parseJSONL(data)
+	require.NoError(t, err)
+	assert.Equal(t, "sage-backup", source)
+	assert.Empty(t, records)
+	assert.Empty(t, errors)
 }
 
 func TestImport_SAGEBackup_NotSAGEFormat(t *testing.T) {
@@ -1292,4 +1318,6 @@ func TestImport_SAGEBackup_RoundTrip(t *testing.T) {
 	// But IDs regenerated and status reset
 	assert.NotEqual(t, "orig-1", records[0].MemoryID)
 	assert.Equal(t, "proposed", string(records[0].Status))
+	expectedHash := sha256.Sum256([]byte(records[0].Content))
+	assert.Equal(t, expectedHash[:], records[0].ContentHash)
 }

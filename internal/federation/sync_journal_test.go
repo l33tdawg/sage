@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -715,8 +716,8 @@ func TestEnrollmentRoleDerivesFromCeremonyScope(t *testing.T) {
 func TestGroupPolicyMutationWaitsForInflightSyncLease(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
-	otherPub, _, _ := ed25519.GenerateKey(nil)
-	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-other", ControllerAgentPubkey: hex.EncodeToString(otherPub)}); err != nil {
+	attachBadger(t, m)
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: m.localChainID, ControllerAgentPubkey: hex.EncodeToString(m.agentPub)}); err != nil {
 		t.Fatal(err)
 	}
 	seedActiveMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, m.agentPub)
@@ -749,9 +750,10 @@ func TestGroupPolicyMutationWaitsForInflightSyncLease(t *testing.T) {
 func TestEmitSelfRoleChange(t *testing.T) {
 	ctx := context.Background()
 	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
-	// Group controlled by chain-ctl; chain-local is a member (not the controller),
-	// so a successful role_change here can ONLY be the self-authored path.
-	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: "chain-ctl", ControllerAgentPubkey: "00"}); err != nil {
+	attachBadger(t, m)
+	// A controller changing its own role still uses the self-authored path. Remote
+	// members exercise the controller-admitted path in the concurrency test below.
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{GroupID: "g1", ControllerChainID: m.localChainID, ControllerAgentPubkey: hex.EncodeToString(m.agentPub)}); err != nil {
 		t.Fatalf("seed group: %v", err)
 	}
 	seedActiveMember(t, ms, "g1", "chain-local", store.GroupRoleFullSync, m.agentPub)
@@ -773,13 +775,111 @@ func TestEmitSelfRoleChange(t *testing.T) {
 		t.Fatalf("consent subset not carried: %q", payload[pkSelectedDomains])
 	}
 
-	// A member cannot author ANOTHER member's role_change: chain-local (not the
-	// controller) authoring for chain-other fails the emit self-check.
+	// A non-controller member cannot author ANOTHER member's role_change.
 	yPub, _, _ := ed25519.GenerateKey(nil)
 	seedActiveMember(t, ms, "g1", "chain-other", store.GroupRoleFullSync, yPub)
-	if _, err := m.AppendGroupJournalEntry(ctx, "g1", RosterSubchain, "role_change", "chain-local", m.agentPub, m.agentKey,
+	attackerPub, attackerKey, _ := ed25519.GenerateKey(nil)
+	seedActiveMember(t, ms, "g1", "chain-attacker", store.GroupRoleFullSync, attackerPub)
+	if _, err := m.AppendGroupJournalEntry(ctx, "g1", RosterSubchain, "role_change", "chain-attacker", attackerPub, attackerKey,
 		roleChangePayload("chain-other", store.GroupRoleSelectiveSync)); err == nil {
 		t.Fatalf("a member must not author another member's role_change")
+	}
+}
+
+func TestControllerSerializesConcurrentSelfRoleChanges(t *testing.T) {
+	ctx := context.Background()
+	m, ms := newSyncTestManager(t, &scriptedComet{responses: []string{cometOK}})
+	if err := ms.UpsertSyncGroup(ctx, store.SyncGroup{
+		GroupID: "g-role-race", ControllerChainID: m.localChainID,
+		ControllerAgentPubkey: hex.EncodeToString(m.agentPub), Epoch: "epoch-role-race",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	type memberFixture struct {
+		chain string
+		pub   ed25519.PublicKey
+		key   ed25519.PrivateKey
+		peer  *peerIdentity
+	}
+	members := make([]memberFixture, 2)
+	for i, chain := range []string{"chain-guest-one", "chain-guest-two"} {
+		pub, key, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seedActiveMember(t, ms, "g-role-race", chain, store.GroupRoleEnrolledNoSync, pub)
+		peer := &peerIdentity{
+			ChainID: chain, AgentID: hex.EncodeToString(pub),
+			Agreement: &store.CrossFedRecord{RemoteChainID: chain, Status: "active"},
+		}
+		bindInboundGroupPeer(t, m, ms, peer, "host")
+		members[i] = memberFixture{chain: chain, pub: pub, key: key, peer: peer}
+	}
+
+	candidates := make([]store.SyncGroupLogEntry, len(members))
+	for i, member := range members {
+		candidates[i] = mustEntry(t, "g-role-race", RosterSubchain, 0, "", "role_change",
+			member.chain, member.pub, member.key, roleChangePayload(member.chain, store.GroupRoleFullSync))
+	}
+	type result struct {
+		index int
+		entry store.SyncGroupLogEntry
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan result, len(members))
+	var wg sync.WaitGroup
+	for i := range members {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			entry, err := m.admitSelfRoleChange(ctx, "g-role-race", candidates[index], members[index].peer)
+			results <- result{index: index, entry: entry, err: err}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	winner, loser := -1, -1
+	var first store.SyncGroupLogEntry
+	for got := range results {
+		if got.err == nil {
+			winner, first = got.index, got.entry
+			continue
+		}
+		if !errors.Is(got.err, errSelfRoleHeadChanged) {
+			t.Fatalf("concurrent admission %d failed unexpectedly: %v", got.index, got.err)
+		}
+		loser = got.index
+	}
+	if winner < 0 || loser < 0 || winner == loser {
+		t.Fatalf("concurrent admissions winner=%d loser=%d; want one of each", winner, loser)
+	}
+	if err := verifyControllerSignature(first, m.localChainID, m.agentPub); err != nil {
+		t.Fatalf("winning role change lacks controller admission: %v", err)
+	}
+	if held, err := ms.GetSyncGroupLogEntry(ctx, "g-role-race", RosterSubchain, 0); err != nil || held == nil || held.EntryHash != first.EntryHash {
+		t.Fatalf("controller persisted a competing branch: held=%+v err=%v", held, err)
+	}
+
+	retry := mustEntry(t, "g-role-race", RosterSubchain, 1, first.EntryHash, "role_change",
+		members[loser].chain, members[loser].pub, members[loser].key,
+		roleChangePayload(members[loser].chain, store.GroupRoleFullSync))
+	second, err := m.admitSelfRoleChange(ctx, "g-role-race", retry, members[loser].peer)
+	if err != nil {
+		t.Fatalf("losing member retry: %v", err)
+	}
+	if second.Seq != 1 || second.PrevHash != first.EntryHash {
+		t.Fatalf("retry did not extend winner: %+v", second)
+	}
+	for _, member := range members {
+		got, err := ms.GetSyncGroupMember(ctx, "g-role-race", member.chain)
+		if err != nil || got == nil || got.Role != store.GroupRoleFullSync {
+			t.Fatalf("member %s role did not converge: member=%+v err=%v", member.chain, got, err)
+		}
 	}
 }
 

@@ -94,7 +94,7 @@ func (m *Manager) startSyncDrainer(parent context.Context) {
 	// (runServe calls StartSyncDrainer, THEN SetSyncNotifier).
 	m.syncNudge = make(chan struct{}, 1)
 	nudge := m.syncNudge
-	m.syncJournalNudge = make(chan struct{}, 1)
+	m.syncJournalNudge = make(chan chan struct{}, 1)
 	journalNudge := m.syncJournalNudge
 
 	// A process can die after tx-34 commits but before node-local CA/seed/sync
@@ -142,8 +142,11 @@ func (m *Manager) startSyncDrainer(parent context.Context) {
 				return
 			case <-t.C:
 				m.syncReconcileAll(ctx, ss)
-			case <-journalNudge:
+			case done := <-journalNudge:
 				m.syncReconcileAll(ctx, ss)
+				if done != nil {
+					close(done)
+				}
 			}
 		}
 	}()

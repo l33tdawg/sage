@@ -2,7 +2,11 @@ package federation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -11,6 +15,10 @@ const (
 	// maxFanOutConcurrency bounds simultaneous outbound peer queries in one
 	// recall fan-out.
 	maxFanOutConcurrency = 8
+	// maxFanOutTargets bounds caller-controlled allocations and goroutines before
+	// any peer is resolved. The REST broker normally supplies only caller-safe
+	// targets, but the transport keeps its own defensive limit.
+	maxFanOutTargets = 64
 	// maxMergedPerPeer caps how many results a single peer may contribute to a
 	// merged recall response (defense against a peer ignoring our topK).
 	maxMergedPerPeer = maxFedTopK
@@ -52,7 +60,14 @@ func (m *Manager) FanOutRecall(ctx context.Context, targets []string, qr *QueryR
 			}
 			seen[t] = true
 			chains = append(chains, t)
+			if len(chains) == maxFanOutTargets {
+				break
+			}
 		}
+	}
+	sort.Strings(chains)
+	if len(chains) > maxFanOutTargets {
+		chains = chains[:maxFanOutTargets]
 	}
 	if len(chains) == 0 {
 		return nil
@@ -114,11 +129,41 @@ func (m *Manager) FanOutRecall(ctx context.Context, targets []string, qr *QueryR
 						res.SubmittingAgent = base + "@" + chain
 					}
 				}
-				outcome.Results = results
+				validated := results[:0]
+				for _, res := range results {
+					if validFederatedRecallResult(qr, res) {
+						validated = append(validated, res)
+						continue
+					}
+					m.logger.Warn().Str("peer", chain).Msg("discarded invalid federated recall result")
+				}
+				outcome.Results = validated
 			}
 			outcomes[i] = outcome
 		}(i, chain)
 	}
 	wg.Wait()
 	return outcomes
+}
+
+func validFederatedRecallResult(qr *QueryRequest, result *MemoryResult) bool {
+	if qr == nil || result == nil || qr.DomainTag == "" || result.MemoryID == "" {
+		return false
+	}
+	if result.Status != "committed" ||
+		!DomainAllowed([]string{qr.DomainTag}, result.DomainTag) ||
+		result.Classification < 0 || result.Classification > 4 ||
+		math.IsNaN(result.ConfidenceScore) || math.IsInf(result.ConfidenceScore, 0) ||
+		result.ConfidenceScore < 0 || result.ConfidenceScore > 1 {
+		return false
+	}
+	if len(result.ContentHash) != sha256.Size*2 {
+		return false
+	}
+	decoded, err := hex.DecodeString(result.ContentHash)
+	if err != nil || len(decoded) != sha256.Size {
+		return false
+	}
+	sum := sha256.Sum256([]byte(result.Content))
+	return strings.EqualFold(hex.EncodeToString(sum[:]), result.ContentHash)
 }

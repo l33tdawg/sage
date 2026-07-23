@@ -10,6 +10,9 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/l33tdawg/sage/internal/federation"
+	sagep2p "github.com/l33tdawg/sage/internal/p2p"
 )
 
 func TestPersistFederationPeerPreservesRawPathsAndRemoves(t *testing.T) {
@@ -34,6 +37,42 @@ func TestPersistFederationPeerPreservesRawPathsAndRemoves(t *testing.T) {
 	loaded, err = LoadConfig()
 	require.NoError(t, err)
 	assert.NotContains(t, loaded.Federation.P2PPeers, "remote-chain")
+}
+
+func TestPersistFederationRouteSnapshotRoundTripsVersionAndGeneration(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "config.yaml"), []byte("federation:\n  enabled: true\n  p2p_enabled: true\n"), 0o600))
+	priv, _, err := libcrypto.GenerateEd25519Key(rand.Reader)
+	require.NoError(t, err)
+	id, err := peer.IDFromPrivateKey(priv)
+	require.NoError(t, err)
+	target := "/ip4/203.0.113.10/tcp/4001/p2p/" + id.String()
+	snapshot := federation.RouteSnapshot{
+		PeerID: id.String(), Protocol: string(sagep2p.FederationProtocol),
+		Addrs: []string{target}, Revision: 17, IssuedAt: 100,
+		ExpiresAt: 200, Generation: "generation-hash",
+	}
+	require.NoError(t, persistFederationRouteSnapshot("remote-chain", snapshot))
+	loaded, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, []string{target}, loaded.Federation.P2PPeers["remote-chain"], "legacy mirror must remain")
+	got := loaded.Federation.P2PRoutes["remote-chain"]
+	assert.Equal(t, uint64(17), got.Revision)
+	assert.Equal(t, int64(100), got.IssuedAt)
+	assert.Equal(t, int64(200), got.ExpiresAt)
+	assert.Equal(t, "generation-hash", got.Generation)
+}
+
+func TestSelectFederationRouteAddressesKeepsMultipleRelayCandidates(t *testing.T) {
+	addrs := []string{
+		"/ip4/10.0.0.2/tcp/1/p2p/destination",
+		"/ip4/198.51.100.1/tcp/2/p2p/relay-one/p2p-circuit/p2p/destination",
+		"/ip4/198.51.100.2/tcp/3/p2p/relay-two/p2p-circuit/p2p/destination",
+	}
+	selected, err := selectFederationRouteAddresses(addrs)
+	require.NoError(t, err)
+	assert.Equal(t, addrs, selected)
 }
 
 func TestPersistStateSyncReceivingPreservesRawPaths(t *testing.T) {

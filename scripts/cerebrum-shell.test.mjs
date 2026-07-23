@@ -7,6 +7,7 @@ const apiSource = await readFile(new URL('../web/static/js/api.js', import.meta.
 const cssSource = await readFile(new URL('../web/static/css/sage.css', import.meta.url), 'utf8');
 const mriSource = await readFile(new URL('../web/static/js/mri-brain.js', import.meta.url), 'utf8');
 const mriPageSource = await readFile(new URL('../web/static/mri.html', import.meta.url), 'utf8');
+const federationRouteSource = await readFile(new URL('../web/static/js/federation-route-state.js', import.meta.url), 'utf8');
 const traySource = await readFile(new URL('../cmd/sage-tray/main.swift', import.meta.url), 'utf8');
 const { MRI_LAYOUT, mriBrainstemBias, mriDepthForAge, mriVerticalPosition } = await import('../web/static/js/mri-layout.js');
 
@@ -15,6 +16,233 @@ test('Access Controls is a first-class sidebar route', () => {
     assert.match(appSource, /navigate\('access'\)/);
     assert.match(appSource, /page === 'access'.*NetworkPage/s);
     assert.match(appSource, /accessMode \? 'access' : 'overview'/);
+});
+
+test('first-run onboarding offers a real create-or-join decision', () => {
+    const onboarding = appSource.slice(appSource.indexOf('function OnboardingWizard('), appSource.indexOf('// PipelineView'));
+    const guestJoin = appSource.slice(appSource.indexOf('function NetworkJoinGuestPanel('), appSource.indexOf('function RemoveConfirmModal('));
+
+    assert.match(onboarding, /Start my own SAGE/);
+    assert.match(onboarding, /Join an existing SAGE network/);
+    assert.match(onboarding, /setShowJoinNetwork\(true\)/,
+        'first-run join must open the existing authenticated join ceremony');
+    assert.match(onboarding, /return html`<\$\{NetworkJoinGuestPanel\}/,
+        'the join ceremony must replace the setup dialog instead of nesting two modal dialogs');
+    assert.match(onboarding, /if \(showEmbedSetup\)[\s\S]*return html`<\$\{EmbeddingsSetupModal\}/);
+    assert.match(onboarding, /if \(showRerankSetup\)[\s\S]*return html`<\$\{RerankerSetupModal\}/);
+    assert.match(onboarding, /if \(showConnect\)[\s\S]*return html`<\$\{ConnectToolModal\}/);
+    assert.match(onboarding, /if \(showChatGPT\)[\s\S]*return html`<\$\{ChatGPTTunnelWizard\}/,
+        'every setup child must replace onboarding so modal trees and tab order never stack');
+    assert.match(onboarding, /Nothing is shared unless you choose who can access it/,
+        'creating a SAGE must default to private in plain language');
+    assert.match(onboarding, /Joining here means this computer becomes part of the same SAGE network/,
+        'same-chain join must not be confused with file-sharing-style federation');
+    assert.match(onboarding, /useState\('private'\)/,
+        'the first-run sharing decision must fail closed to private');
+    assert.match(onboarding, /Keep this SAGE private/);
+    assert.match(onboarding, /Share with another SAGE/);
+    assert.match(onboarding, /Pairing alone shares nothing/,
+        'trust must remain visibly separate from access');
+    assert.match(onboarding, /Sharing works like a shared folder/,
+        'the RBAC choice should use a familiar file-sharing mental model');
+    assert.match(onboarding, /remove access later without deleting the trusted connection/,
+        'onboarding must preserve the trust-versus-sharing lifecycle boundary');
+    assert.match(onboarding, /role="group" aria-label="Choose whether to share with another SAGE"/);
+    assert.match(onboarding, /aria-pressed=\$\{privacyChoice === 'private'\}/);
+    assert.match(onboarding, /finish\(\); if \(onNavigate\) onNavigate\('federation'\)/,
+        'sharing setup must reuse Federation rather than create a second permission path');
+    assert.match(onboarding, /Keep private & continue/);
+    assert.match(onboarding, /fetchLedgerStatus\(\)/,
+        'onboarding recovery status must come from the node, not local browser state');
+    assert.match(onboarding, /return html`<\$\{SynapticLedgerModal\}/,
+        'recovery setup must reuse the real ledger flow with only one modal exposed');
+    assert.match(onboarding, /Encryption is on — back up the recovery key/);
+    assert.match(onboarding, /SAGE cannot recover your encrypted memories/);
+    assert.match(onboarding, /Anyone with it can reset the passphrase and unlock your memories/);
+    assert.match(onboarding, /Set up encryption & recovery/);
+    assert.match(onboarding, /Turn on <strong>smart search<\/strong>/,
+        'first-run copy must explain the benefit before implementation names');
+    assert.match(onboarding, /const titles = \['How do you want to start\?', 'Smart search'/,
+        'the first-run heading must use the same plain-language name');
+    assert.match(onboarding, /Smart search is <strong>on<\/strong> — your AI tools can find memories by meaning/,
+        'enabled smart search must not fall back to implementation jargon');
+    assert.doesNotMatch(onboarding, /Wire an AI tool to this node|agent identit/,
+        'first-run copy must not require node or agent-identity jargon');
+    assert.match(onboarding, /Finish setup/,
+        'choosing sharing must still leave an obvious way to finish without sharing now');
+    assert.match(onboarding, /role="dialog" aria-modal="true" aria-labelledby="onboarding-title"/);
+    assert.match(onboarding, /ref=\$\{dialogRef\} tabIndex="-1"/);
+    assert.match(onboarding, /aria-label="Close setup"/);
+    assert.match(guestJoin, /Your stored memories are kept/,
+        'the destructive-action warning must say what remains safe');
+    assert.match(guestJoin, /export a backup from <em>Settings → Maintenance<\/em> first/,
+        'a lived-in node must get a concrete safety step before replacing network history');
+    assert.match(guestJoin, /<label for="network-join-code">Pairing code from the host<\/label>/,
+        'the visible pairing-code label must name the text box for assistive technology');
+    assert.match(guestJoin, /<textarea id="network-join-code"/);
+    assert.match(cssSource, /\.onboarding-choice:focus-visible/,
+        'the choice buttons need an obvious keyboard focus indicator');
+    assert.match(cssSource, /@media \(max-width:\s*560px\)[\s\S]*\.onboarding-choices\s*\{\s*grid-template-columns:\s*1fr/,
+        'create-or-join choices must remain readable on a narrow window');
+});
+
+test('onboarding setup dialogs own and restore keyboard focus', () => {
+    const modalHook = appSource.slice(appSource.indexOf('function useModalDialog('), appSource.indexOf('// MriView'));
+    const ledger = appSource.slice(appSource.indexOf('function SynapticLedgerModal('), appSource.indexOf('function SoftwareUpdate('));
+    const embeddings = appSource.slice(appSource.indexOf('function EmbeddingsSetupModal('), appSource.indexOf('function RestartNodeButton('));
+    const reranker = appSource.slice(appSource.indexOf('function RerankerSetupModal('), appSource.indexOf('function FederationSettingRow('));
+    const chatGPT = appSource.slice(appSource.indexOf('function ChatGPTTunnelWizard('), appSource.indexOf('function ChatGPTCopyField('));
+    const connect = appSource.slice(appSource.indexOf('function ConnectToolModal('), appSource.indexOf('function NetworkJoinHostPanel('));
+    const join = appSource.slice(appSource.indexOf('function NetworkJoinGuestPanel('), appSource.indexOf('function RemoveConfirmModal('));
+
+    assert.match(modalHook, /requestAnimationFrame\(\(\) => dialog\.focus\(\)\)/,
+        'a modal must receive focus when it opens');
+    assert.match(modalHook, /event\.key !== 'Tab'/);
+    assert.match(modalHook, /event\.key === 'Escape'/);
+    assert.match(modalHook, /dialog\.contains\(document\.activeElement\)/,
+        'a setup modal must not steal keyboard events from an alertdialog above it');
+    assert.match(modalHook, /child\.inert = true/,
+        'non-modal app branches must leave the accessibility tree');
+    assert.match(modalHook, /while \(branch && branch !== app\)/);
+    assert.match(modalHook, /for \(const child of parent\.children\)/,
+        'nested modals must inert underlying controls in their own page branch too');
+    assert.match(modalHook, /origin && origin\.isConnected/,
+        'focus must return to a surviving opener when the modal closes');
+    for (const source of [ledger, embeddings, reranker, chatGPT, connect, join]) {
+        assert.match(source, /useModalDialog\(/);
+        assert.match(source, /role="dialog" aria-modal="true"/);
+        assert.match(source, /ref=\$\{dialogRef\} tabIndex="-1"/);
+    }
+    assert.match(join, /aria-labelledby="join-network-title"/);
+    assert.match(join, /aria-label="Close network join setup"/);
+});
+
+test('recovery-key backup confirmation is durable and explicit', () => {
+    const ledger = appSource.slice(appSource.indexOf('function SynapticLedger('), appSource.indexOf('function SynapticLedgerModal('));
+
+    assert.match(apiSource, /settings\/ledger\/recovery-key\/confirm/);
+    assert.match(apiSource, /export async function confirmRecoveryKeyBackup\(\)/);
+    assert.doesNotMatch(apiSource.match(/export async function confirmRecoveryKeyBackup\(\)[\s\S]*?\n\}/)?.[0] || '', /recovery_key|passphrase/,
+        'backup acknowledgement must never retransmit key material or a passphrase');
+    assert.match(ledger, /await confirmRecoveryKeyBackup\(\)/);
+    assert.match(ledger, /recovery_backup_confirmed: true/);
+    assert.match(ledger, /I've stored it safely/,
+        'starting a download alone must not falsely mark the key as stored');
+    assert.match(ledger, /Not now — return to Security/);
+    assert.match(ledger, /leaveRecoveryBackupForLater/,
+        'a failed acknowledgement must not trap the user on the recovery-key screen');
+    assert.match(ledger, /Backup confirmed/);
+    assert.match(ledger, /Backup needed/);
+    assert.match(ledger, /Back up recovery key/);
+    assert.match(ledger, /aria-label="Passphrase"/);
+    assert.match(ledger, /aria-label="Confirm passphrase"/,
+        'recovery fields need meaningful screen-reader names, not placeholder-only names');
+    assert.match(ledger, /<summary style="cursor:pointer;">Technical details<\/summary>/,
+        'crypto names and filesystem paths belong behind an optional disclosure');
+    assert.doesNotMatch(ledger, /<span class="label">Vault<\/span>/,
+        'the normal security view must not lead with an internal vault path');
+    assert.match(appSource, /aria-labelledby="ledger-setup-title"/);
+    assert.match(appSource, /aria-label="Close encryption and recovery setup"/);
+});
+
+test('recovery-key transition restores keyboard and screen-reader context', () => {
+    const ledger = appSource.slice(appSource.indexOf('function SynapticLedger()'), appSource.indexOf('function SynapticLedgerModal('));
+    assert.match(ledger, /const recoveryHeadingRef = useRef\(null\)/);
+    assert.match(ledger, /requestAnimationFrame\(\(\) => recoveryHeadingRef\.current\?\.focus\(\)\)/,
+        'focus must move when the focused enable/change button is replaced by the recovery screen');
+    assert.match(ledger, /<h3 ref=\$\{recoveryHeadingRef\} tabIndex="-1"/);
+    assert.match(ledger, /<div class="warning-banner" role="alert"/,
+        'the one-time recovery warning must be announced when it appears');
+});
+
+test('search and maintenance controls keep useful screen-reader names', () => {
+    const search = appSource.slice(appSource.indexOf('function SearchPage('), appSource.indexOf('// Combobox'));
+    const cleanup = appSource.slice(appSource.indexOf('function CleanupSettings('), appSource.indexOf('function UnreadableMemoriesPanel('));
+    const settings = appSource.slice(appSource.indexOf('function SettingsPage('), appSource.indexOf('function GuidePage('));
+
+    for (const label of [
+        'Filter memories by domain',
+        'Filter by memory lifecycle status',
+        'Filter memories by tag',
+        'Filter memories by agent',
+        'Filter by when the memory was created',
+        'Created on or after',
+        'Created on or before',
+        'Sort memories',
+    ]) {
+        assert.match(search, new RegExp(`aria-label="${label}"`));
+    }
+    assert.match(search, /aria-label=\$\{`Select memory from \$\{m\.domain_tag\} for bulk actions`\}/);
+    for (const label of [
+        'Enable automatic memory cleanup',
+        'Observation lifetime in days',
+        'Session context lifetime in days',
+        'Stale confidence threshold',
+        'Cleanup interval in hours',
+    ]) {
+        assert.match(cleanup, new RegExp(`aria-label="${label}"`));
+    }
+    assert.match(settings, /aria-label="Enable contextual tooltips"/);
+    assert.match(appSource, /aria-label="Open SAGE at login"/);
+});
+
+test('destructive memory actions use the consistent explanatory dialog', () => {
+    const detail = appSource.slice(appSource.indexOf('function MemoryDetail('), appSource.indexOf('function SearchPage('));
+    const cleanup = appSource.slice(appSource.indexOf('function CleanupSettings('), appSource.indexOf('function UnreadableMemoriesPanel('));
+    const restart = appSource.slice(appSource.indexOf('function RestartNodeButton('), appSource.indexOf('function RerankerSetupModal('));
+    const settings = appSource.slice(appSource.indexOf('function SettingsPage('), appSource.indexOf('function GuidePage('));
+
+    assert.match(detail, /await showConfirmation\(message/);
+    assert.match(detail, /stops appearing in normal recall and search, but remains in the on-chain audit history/);
+    assert.match(detail, /Other memories, domains, and trusted connections are unchanged/,
+        'forgetting one memory must say what remains safe');
+    assert.match(detail, /Could not forget memory/,
+        'a failed destructive action must keep an actionable error');
+    assert.doesNotMatch(detail, /Click again to confirm|Confirm Delete/,
+        'memory deletion must not use an undiscoverable click-twice interaction');
+
+    assert.match(cleanup, /Clean Synaptic Ledger\?/);
+    assert.match(cleanup, /Use Preview first if you want to see the exact count/,
+        'cleanup must provide a concrete next step before mutation');
+    assert.match(cleanup, /remain in the audit history/);
+    assert.match(cleanup, /Memories outside the current rules stay active/,
+        'cleanup must say what remains safe');
+    assert.doesNotMatch(cleanup, /Click again to confirm|confirmCleanup/,
+        'cleanup must use the shared accessible dialog instead of a five-second click-twice latch');
+    assert.match(restart, /await showConfirmation\(/);
+    assert.match(restart, /memories, settings, trusted connections, sharing groups, and access rules are not deleted/,
+        'restart must say what remains safe and that the encrypted ledger re-locks');
+    assert.doesNotMatch(restart, /Click again to confirm|arming|armRef/);
+    assert.match(settings, /Turn off semantic memory\?/);
+    assert.match(settings, /Your memories remain stored/,
+        'switching recall mode must explain that stored memories remain safe');
+    assert.doesNotMatch(settings, /Click again to switch|confirmHashEmbedding/);
+    assert.doesNotMatch(detail, /setConfirming/,
+        'the shared-dialog conversion must not leave a stale state setter that crashes memory detail');
+});
+
+test('memory export is honest about plaintext and fresh-machine scope', () => {
+    const settings = appSource.slice(appSource.indexOf('function SettingsPage('), appSource.indexOf('function GuidePage('));
+    const importPage = appSource.slice(appSource.indexOf('function ImportPage('), appSource.indexOf('function NetworkPage('));
+
+    assert.match(settings, /await showConfirmation\(/,
+        'privacy-affecting export must use the shared accessible dialog');
+    assert.match(settings, /Synaptic Ledger is encrypted on this computer, but the downloaded file will not be encrypted/,
+        'encrypted-at-rest users must be warned that export is plaintext');
+    assert.match(settings, /does not include trusted connections, sharing groups, access rules, AI-tool credentials, settings, or full chain history/,
+        'the export must not be described as a complete node backup');
+    assert.match(settings, /Download unencrypted backup/);
+    assert.match(settings, /Memories you chose to forget are not included/,
+        'backup copy must make the forgotten-memory boundary explicit');
+    assert.doesNotMatch(settings, /window\.open\('\/v1\/dashboard\/export'/,
+        'the old one-click export path must not bypass confirmation');
+    assert.match(settings, /You can import it on a new SAGE to recreate your memories/);
+    assert.match(importPage, /Trusted connections, sharing groups, access rules, credentials, settings, and chain history are not restored/,
+        'the restore surface must repeat the memory-only backup boundary');
+    assert.match(importPage, /Memories you chose to forget are not restored/,
+        'older backups must not silently resurrect forgotten memories');
+    assert.match(importPage, /setError\(res\.message \|\| res\.error\)/,
+        'import errors must show the friendly server explanation instead of a machine code');
 });
 
 test('governance wizard builds structured canonical quorum scopes', () => {
@@ -109,12 +337,12 @@ test('federation endpoint discovery uses the node listener as the signed source 
     assert.equal(validate('https://192.168.1.20:18444/path'), false);
     assert.equal(validate('https://192.168.1.20:18444?x=1'), false);
     const hostWizard = appSource.slice(appSource.indexOf('function HostJoinWizard('), appSource.indexOf('function fedCatalogMap('));
-    assert.match(hostWizard, /mode === 'lan' && !isFederationEndpointFormatValid\(endpoint\)/,
-        'host creation must reject a partially typed LAN address before calling the server');
-    assert.match(hostWizard, /!isFederationEndpointFormatValid\(endpoint\) \|\| isLoopbackEndpoint\(endpoint\)/,
-        'host auto-create must wait for a complete non-loopback endpoint');
-    assert.match(hostWizard, /disabled=\$\{busy \|\| !endpointReady \|\| endpointMissing \|\| endpointInvalid\}/,
-        'host manual create must stay disabled for a partial endpoint');
+    assert.match(hostWizard, /fedJoinRoutes\(\)/,
+        'the host must ask the node to prepare routes instead of guessing from the browser');
+    assert.match(hostWizard, /fedHostCreate\(endpoint, 'auto'\)/,
+        'one product intent must let the node choose Direct or Secure relay');
+    assert.match(hostWizard, /Advanced Direct address/,
+        'a manual endpoint remains recovery detail rather than a required topology choice');
     assert.match(guestWizard, /if \(confirmInFlight\.current\) return;[\s\S]*confirmInFlight\.current = true/,
         'same-tick final-confirm clicks must collapse into one dashboard request');
     assert.match(guestWizard, /catch \(e\) \{[\s\S]*confirmInFlight\.current = false;[\s\S]*fail\(e\);/,
@@ -143,7 +371,7 @@ test('federation ceremony presents one clear two-way scan flow without dropping 
         'the normal guest flow must open directly on the camera scan');
     assert.doesNotMatch(appSource, /function FedChannelGate/,
         'remote/fallback help must be progressive disclosure, not a three-choice preflight');
-    assert.match(guestWizard, /Connecting remotely or need to change the network address\?/);
+    assert.match(guestWizard, /Advanced: use a specific Direct address/);
     assert.match(appSource, /Why check a number after scanning\?/,
         'the remaining anti-relay fingerprint must explain why it exists');
     assert.match(guestWizard, /They confirm you[\s\S]*You confirm them/,
@@ -160,6 +388,46 @@ test('federation ceremony presents one clear two-way scan flow without dropping 
     assert.match(apiSource, /fedGuestAbort/);
     assert.match(guestWizard, /await fedGuestAbort\(scan\.session_id\)/,
         'a guest-side Stop must notify the waiting peer');
+});
+
+test('federation uses one automatic route flow and explains every actionable route state', () => {
+    const hostWizard = appSource.slice(appSource.indexOf('function HostJoinWizard('), appSource.indexOf('function fedCatalogMap('));
+
+    assert.match(apiSource, /fedJoinRoutes\(\).*\/v1\/dashboard\/federation\/join\/routes/);
+    assert.match(apiSource, /fedHostCreate\(endpoint, transport = 'auto'\)/);
+    assert.match(appSource, /from '\.\/federation-route-state\.js'/);
+    assert.match(hostWizard, /<h2>Connect another SAGE<\/h2>/);
+    assert.match(hostWizard, /checks Direct and Secure relay routes and chooses the best one automatically/);
+    assert.match(hostWizard, /phase: 'prepared'/);
+    assert.doesNotMatch(hostWizard, /Same Wi|local network<\/button>|Across the internet|setRouteMode/,
+        'operators must not choose topology that SAGE can negotiate itself');
+    assert.match(hostWizard, /legacy_compatible: true/);
+    assert.match(appSource, /Older SAGE versions remain compatible through the Direct route/);
+    assert.match(appSource, /normalized\.phase === 'prepared' \? 'Prepared' : 'Ready'/);
+
+    for (const [state, label] of [
+        ['locked', 'SAGE locked'],
+        ['offline', 'Offline'],
+        ['old_peer', 'Older SAGE'],
+        ['route_failure', 'Route failed'],
+        ['trust_failure', 'Trust check failed'],
+        ['security_blocked', 'Security blocked'],
+        ['disabled', 'Federation off'],
+    ]) {
+        assert.match(federationRouteSource, new RegExp(`state === '${state}'[\\s\\S]*label: '${label}'`),
+            `${state} must remain distinguishable instead of collapsing to unreachable`);
+    }
+    assert.match(federationRouteSource, /label: 'Direct'/);
+    assert.match(federationRouteSource, /label: 'Secure relay'/);
+    assert.match(federationRouteSource, /if \(value\.failure_state\)/);
+    assert.ok(
+        federationRouteSource.indexOf('if (value.failure_state)') < federationRouteSource.indexOf("if (value.route && typeof value.route === 'object')"),
+        'typed failures must win over historical route diagnostics',
+    );
+    assert.match(appSource, /federationConnectionAction/);
+    assert.match(cssSource, /\.fed-route-diagnostic\.danger/);
+    assert.match(cssSource, /@media \(max-width:\s*560px\)[\s\S]*\.fed-roles\s*\{\s*grid-template-columns:\s*1fr/,
+        'the one flow and its recovery entry points must remain readable on mobile');
 });
 
 test('federation separates trust from directional per-domain RBAC', () => {
@@ -181,6 +449,17 @@ test('federation separates trust from directional per-domain RBAC', () => {
         'a filter such as tii* must use prefix matching');
     assert.match(panel, /visibleRows\.forEach/,
         'bulk changes must apply only to the filtered rows');
+    assert.match(panel, /visibleSharedRows = visibleRows\.filter\(row => fedPermissionIsEnabled\(saved\[row\.domain\]\)\)/,
+        'already-shared rows must be grouped from the persisted permission snapshot');
+    assert.match(panel, /visibleUnsharedRows = visibleRows\.filter\(row => !fedPermissionIsEnabled\(saved\[row\.domain\]\)\)/,
+        'unshared rows must be kept in a separate group');
+    assert.ok(panel.indexOf('Already shared with') < panel.indexOf('Not shared'),
+        'already-shared domains must be rendered before unshared domains');
+    assert.match(panel, /visibleSharedRows\.map\(renderLocalPermissionRow\)/);
+    assert.match(panel, /visibleUnsharedRows\.map\(renderLocalPermissionRow\)/);
+    assert.match(cssSource, /\.fed-perm-rowgroup \+ \.fed-perm-rowgroup/);
+    assert.match(cssSource, /\.fed-perm-group-head\.shared > span/,
+        'the already-shared group must be visually distinct');
     assert.match(panel, /if \(field === 'write'\) return/,
         'the reserved Write control must not mutate the local policy');
     assert.match(panel, /field === 'copy'\) nextPermission\.read = true/,
@@ -194,6 +473,11 @@ test('federation separates trust from directional per-domain RBAC', () => {
         'serialized snapshots must fail closed even if stale UI state carries a Write bit');
     assert.match(remoteSection, /Copy offered/);
     assert.match(remoteSection, /Save here/);
+    assert.match(panel, /fedSyncStatus\(chain\)/,
+        'copy provenance must include the delivery state already exposed by the API');
+    assert.match(panel, /Memories saved here are local copies sourced from/);
+    assert.match(panel, /copies already retained on this SAGE remain until you explicitly delete those local memories/,
+        'revocation must never imply that retained copies are remotely erased');
     assert.match(remoteSection, /toggleSubscription\(domain, permission\.copy\)/,
         'the recipient independently opts into copies only after the source offers Copy');
     assert.match(apiSource, /subscribe_domains:\s*subscribeDomains/);
@@ -204,6 +488,19 @@ test('federation separates trust from directional per-domain RBAC', () => {
     assert.doesNotMatch(panel, /Add a topic|syncRole|Managed by the host|host-managed/);
     assert.match(appSource, /<\$\{FedPermissionsPanel\} conn=\$\{c\}/);
     assert.doesNotMatch(appSource, /FedSyncPanel/);
+});
+
+test('direct federation controls are symmetric after pairing', () => {
+    const panel = appSource.slice(appSource.indexOf('function FedPermissionsPanel('), appSource.indexOf('// FederationWarmup'));
+    assert.match(panel, /const showOutgoing = roleKnown/);
+    assert.match(panel, /\$\{roleKnown && html`<section class="fed-perm-section fed-agent-section">/,
+        'agent contact controls must not disappear merely because this SAGE scanned the first code');
+    assert.match(panel, /The setup role does not control ongoing access/);
+    assert.match(panel, /<h4>This SAGE → \$\{peerName\}<\/h4>/);
+    assert.match(panel, /<h4>\$\{peerName\} → this SAGE<\/h4>/);
+    assert.doesNotMatch(panel, /\$\{localIsHost && html`<section class="fed-perm-section fed-agent-section">/);
+    assert.doesNotMatch(panel, /Optionally share domains back to host|You are the guest/);
+    assert.match(panel, /memories already copied onto either SAGE survive until their local owner explicitly deletes them/);
 });
 
 test('federation agent contacts stay administrative and default-off', () => {
@@ -255,8 +552,8 @@ test('federation keeps temporary pause separate from permanent revocation and ma
     const page = appSource.slice(appSource.indexOf('function FederationPage('), appSource.indexOf('// PAGE_LABELS'));
     const panel = appSource.slice(appSource.indexOf('function FedPermissionsPanel('), appSource.indexOf('// FederationWarmup'));
     assert.match(apiSource, /connections\/\$\{encodeURIComponent\(chainId\)\}\/pause/);
-    assert.match(page, /Resume sharing/);
-    assert.match(page, /aria-label=\$\{!reachable \? `Retry connection to \$\{c\.peer_name/,
+    assert.match(appSource, /return paused \? 'Resume sharing' : 'Pause sharing'/);
+    assert.match(page, /aria-label=\$\{`\$\{actionLabel\} with \$\{c\.peer_name/,
         'connection controls must identify the SAGE they affect');
     assert.match(page, /pairing preserved/);
     assert.match(panel, /Revoke trust permanently/);
@@ -290,13 +587,22 @@ test('federation keeps temporary pause separate from permanent revocation and ma
     assert.match(page, /ended_at/);
     assert.match(page, /const reconnect = async \(conn\)/,
         'an intact but unreachable relationship must offer a retry path');
-    assert.match(page, /Join another SAGE as guest/);
-    assert.match(page, /Host a guest SAGE/);
+    assert.match(page, /Scan a connection code/);
+    assert.match(page, /Create a connection code/);
 });
 
 test('Sharing & Sync groups expose health and guarded operator controls', () => {
     const panel = appSource.slice(appSource.indexOf('function SharingSyncGroupsPanel('), appSource.indexOf('// FederationPage'));
     assert.match(apiSource, /export function fedGroups\(\)/);
+    assert.match(panel, /const namedConnections = active\.map\(connection =>/,
+        'group member choices must exclude revoked, expired, and superseded connection generations');
+    assert.match(apiSource, /export function fedGroupsRefresh\(\)/);
+    assert.match(panel, /await fedGroupsRefresh\(\);[\s\S]*await loadGroups\(\)/,
+        'Refresh must finish a prompted journal convergence pass before reloading the local group projection');
+    assert.match(panel, /Refreshing…/,
+        'the explicit peer refresh needs visible progress instead of looking like an ordinary local reload');
+    assert.match(panel, /aria-busy=\$\{busy === 'groups:refresh'\}/,
+        'assistive technology must receive the same refresh progress state');
     assert.match(apiSource, /export function fedGroupCreate\(name\)/,
         'a group must be explicitly created instead of being implied by a connection');
     assert.match(apiSource, /groups\/\$\{encodeURIComponent\(groupId\)\}\/domains/);
@@ -310,7 +616,10 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
     assert.match(panel, /<th scope="col">Health<\/th>/);
     assert.match(panel, /showConfirmation\('Remove '/);
     assert.match(panel, /showConfirmation\('Stop sharing/);
-    assert.match(panel, /remote operator must cryptographically co-sign/);
+    assert.match(panel, /SAGE verifies that connection automatically before adding it to this group/,
+        'adding an already-trusted SAGE must not imply a hidden manual acceptance step');
+    assert.doesNotMatch(panel, /remote operator must still accept|waiting for invited SAGEs to accept/,
+        'the synchronous trusted-connection ceremony must not be presented as a second person-facing step');
     assert.match(apiSource, /export function fedGroupRename\(groupId, name\)/);
     assert.match(apiSource, /export function fedGroupDissolve\(groupId\)/,
         'owners need an explicit shared-space lifecycle action');
@@ -326,6 +635,10 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
         'an owner must be able to end a shared space, not merely remove people one by one');
     assert.match(panel, /This does not end any trusted connection/,
         'dissolving group RBAC must never be presented as revoking the pairwise connection');
+    assert.match(panel, /Their direct trusted connection and direct sharing choices stay unchanged/,
+        'member removal must explicitly preserve the separate pairwise relationship');
+    assert.match(panel, /Direct trusted connections and direct sharing choices stay unchanged/,
+        'removing a group topic must explicitly preserve direct relationship choices');
     assert.match(panel, /group\.lifecycle_state === 'dissolving'/,
         'partial dissolution must remain visible and retryable instead of hiding live access behind a failed request');
     assert.match(panel, /Group sharing is already stopped\. Retry to finish/,
@@ -346,12 +659,25 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
         'group membership must be chosen from existing trusted SAGEs');
     assert.match(panel, /newGroupMembers\.length < 2/,
         'a 1:1 relationship must not be accidentally turned into a group');
+    const createGroup = panel.slice(panel.indexOf('const createGroup = async event => {'), panel.indexOf('const connectionFor'));
+    assert.match(createGroup, /const members = connections\.filter[\s\S]*if \(members\.length < 2\)[\s\S]*selected trusted connections is no longer active[\s\S]*fedGroupCreate\(name\)/,
+        'a connection revoked after selection must be rejected before an undersized group is created');
+    assert.match(createGroup, /for \(const connection of members\) \{[\s\S]*await fedGroupMemberInvite/,
+        'multi-member setup must serialize signed invite ceremonies so each uses the latest roster revision');
+    assert.match(createGroup, /for \(let attempt = 0; attempt < 3; attempt\+\+\)[\s\S]*setTimeout\(resolve, 300 \* \(attempt \+ 1\)\)/,
+        'one-click group creation must absorb brief idempotent bootstrap races instead of requiring a manual retry');
+    assert.doesNotMatch(createGroup, /Promise\.allSettled/,
+        'parallel group invites race against the same signed roster head');
+    assert.match(createGroup, /outcome = \{ status: 'rejected', reason \}/,
+        'a failed invite must not prevent later selected SAGEs from being attempted');
+    assert.match(createGroup, /await loadGroups\(\);[\s\S]*if \(finalError\) setError\(finalError\)/,
+        'a final partial-setup error must survive the local projection reload');
     assert.match(appSource, /direct 1:1 relationship/,
         'the direct relationship and group models must be visibly separate');
-    assert.match(appSource, /Guests do not share back by default/,
-        'guest-to-host sharing must be an explicit opt-in rather than an implied symmetric grant');
-    assert.match(appSource, /You are the guest/,
-        'guest connections must clearly explain their consumption-only default');
+    assert.match(appSource, /The setup role does not control ongoing access/,
+        'the ceremony role must not hide ordinary directional controls after trust is established');
+    assert.match(appSource, /each SAGE can independently share domains/,
+        'symmetric control means independent explicit grants, never an implied bilateral grant');
     assert.match(panel, /Select a trusted SAGE/,
         'adding a member must choose an established trust connection, not copy a key by hand');
     assert.match(panel, /online · syncing/,
@@ -479,6 +805,24 @@ test('MRI uses one dense shared memory sample limit', () => {
     assert.match(mriPageSource, /String\(DEFAULT_MRI_NODE_LIMIT\)/);
     const mriView = appSource.slice(appSource.indexOf('function MriView('), appSource.indexOf('// Global tooltips state'));
     assert.doesNotMatch(mriView, /limit=500/);
+});
+
+test('MRI distinguishes domains stored here from domains shared by other SAGE nodes', () => {
+    const mriView = appSource.slice(appSource.indexOf('function BrainDomainInventory('), appSource.indexOf('// Global tooltips state'));
+    assert.match(appSource, /import \{ buildBrainDomainInventory \} from '\.\/domain-inventory\.js'/);
+    assert.match(mriView, /Local domains/);
+    assert.match(mriView, /Stored on this SAGE, including copies retained here\./);
+    assert.match(mriView, /includes copies from \$\{copyLabel\}/);
+    assert.match(mriView, /Shared domains/);
+    assert.match(mriView, /Available from other SAGE nodes\./);
+    assert.match(mriView, /from \$\{sourceLabel\}/);
+    assert.match(mriView, /Copy offered/);
+    assert.match(mriView, /Saved here/);
+    assert.match(mriView, /Last known/);
+    assert.match(mriView, /Manage sharing →/);
+    assert.match(mriView, /aria-label="Local and shared domains"/);
+    assert.match(cssSource, /\.brain-domain-inventory/);
+    assert.match(cssSource, /@media \(max-width:\s*760px\)[\s\S]*\.brain-domain-inventory/);
 });
 
 test('MRI spreads long-lived memory histories through the brain volume', () => {

@@ -3,17 +3,24 @@ import { SSEClient } from './sse.js';
 import { fetchStats, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchScopes, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
 rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, reorderTasks, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
-deprecateUnreadable, getRecoveryKey, recoverOrphansPreview, recoverOrphans,
+deprecateUnreadable, getRecoveryKey, confirmRecoveryKeyBackup, recoverOrphansPreview, recoverOrphans,
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedGroups, fedGroupCreate, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedGroupDissolve, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
+fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedGroups, fedGroupsRefresh, fedGroupCreate, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedGroupDissolve, fedJoinRoutes, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
 import { buildUpdateBanner } from './update-banner.js';
 import { computeReorderedColumn, applyColumnOrder } from './task-reorder.js';
 import { normalizeFederationJoinState } from './federation-flow.js';
+import { buildBrainDomainInventory } from './domain-inventory.js';
+import {
+    classifyFederationFailure,
+    federationConnectionRoute,
+    federationRoutePresentation,
+    normalizeFederationRoutePlan,
+} from './federation-route-state.js';
 
 const { h, render, createContext } = preact;
 const { useState, useEffect, useRef, useLayoutEffect, useCallback, useContext } = preactHooks;
@@ -25,7 +32,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.11.6';
+const SAGE_VERSION = 'v11.12.0';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -172,17 +179,277 @@ function ConfirmationDialogHost() {
     `;
 }
 
+// Accessible modal behavior shared by the setup flows. `active` lets a parent
+// component temporarily return a child modal without keeping stale listeners or
+// focus ownership. The dialog branch, not the whole app, stays interactive.
+function useModalDialog(onRequestClose, active = true) {
+    const dialogRef = useRef(null);
+    const closeRef = useRef(onRequestClose);
+    closeRef.current = onRequestClose;
+
+    useEffect(() => {
+        const dialog = dialogRef.current;
+        if (!active || !dialog) return undefined;
+
+        const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const overlay = dialog.parentElement;
+        const app = document.getElementById('app');
+        const inerted = [];
+        if (app && overlay) {
+            // The overlay may be nested inside Settings/Onboarding rather than
+            // portalled directly under #app. Inert every sibling along the full
+            // ancestor path so controls in that same page branch are hidden too,
+            // while no ancestor containing the modal itself becomes inert.
+            let branch = overlay;
+            while (branch && branch !== app) {
+                const parent = branch.parentElement;
+                if (!parent) break;
+                for (const child of parent.children) {
+                    if (child === branch) continue;
+                    inerted.push([child, child.inert]);
+                    child.inert = true;
+                }
+                branch = parent;
+            }
+        }
+
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        const focusable = () => Array.from(dialog.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        ));
+        const frame = requestAnimationFrame(() => dialog.focus());
+        const onKeyDown = event => {
+            // A higher-priority alertdialog may be open above this setup modal.
+            // Only the dialog that currently owns focus handles Escape/Tab.
+            if (!dialog.contains(document.activeElement)) return;
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                event.stopPropagation();
+                if (closeRef.current) closeRef.current();
+                return;
+            }
+            if (event.key !== 'Tab') return;
+            const nodes = focusable();
+            if (!nodes.length) {
+                event.preventDefault();
+                dialog.focus();
+                return;
+            }
+            const first = nodes[0];
+            const last = nodes[nodes.length - 1];
+            if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+                event.preventDefault();
+                last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first.focus();
+            }
+        };
+        document.addEventListener('keydown', onKeyDown, true);
+        return () => {
+            cancelAnimationFrame(frame);
+            document.removeEventListener('keydown', onKeyDown, true);
+            document.body.style.overflow = previousOverflow;
+            inerted.forEach(([child, wasInert]) => { child.inert = wasInert; });
+            if (origin && origin.isConnected) origin.focus();
+        };
+    }, [active]);
+
+    return dialogRef;
+}
+
+function BrainDomainInventory({ onInventory }) {
+    const [inventory, setInventory] = useState(null);
+    const [loadingRemote, setLoadingRemote] = useState(false);
+    const [federationError, setFederationError] = useState('');
+    const [collapsed, setCollapsed] = useState(() => {
+        try { return localStorage.getItem('sage-brain-domains-collapsed') === 'true'; } catch { return false; }
+    });
+
+    useEffect(() => {
+        let alive = true;
+        let timer = null;
+        let inFlight = false;
+        const load = async () => {
+            if (inFlight || document.hidden) return;
+            inFlight = true;
+            const [statsResult, catalogueResult, connectionsResult] = await Promise.allSettled([
+                fetchStats(),
+                fedShareableDomains(),
+                fedConnections(),
+            ]);
+            if (!alive) return;
+
+            const stats = statsResult.status === 'fulfilled' ? statsResult.value : null;
+            const localCatalogue = catalogueResult.status === 'fulfilled' ? catalogueResult.value : null;
+            const connectionsPayload = connectionsResult.status === 'fulfilled' ? connectionsResult.value : null;
+            const connections = connectionsPayload && Array.isArray(connectionsPayload.connections)
+                ? connectionsPayload.connections
+                : [];
+            const active = connections.filter(connection =>
+                connection && connection.status === 'active' && connection.expired !== true
+            );
+            const localInventory = buildBrainDomainInventory({
+                stats, localCatalogue, connections, peerStates: {},
+            });
+            setInventory(localInventory);
+            if (onInventory) onInventory(localInventory);
+            setFederationError(connectionsResult.status === 'rejected'
+                ? 'Federation domain status is unavailable.'
+                : '');
+            setLoadingRemote(active.length > 0);
+
+            const entries = await Promise.all(active.map(async connection => {
+                const chainID = connection.remote_chain_id;
+                const [permissionsResult, syncResult] = await Promise.allSettled([
+                    fedPermissionsGet(chainID),
+                    fedSyncGet(chainID),
+                ]);
+                const errors = [];
+                if (permissionsResult.status === 'rejected') {
+                    errors.push(permissionsResult.reason && permissionsResult.reason.message || 'permissions unavailable');
+                }
+                if (syncResult.status === 'rejected') {
+                    errors.push(syncResult.reason && syncResult.reason.message || 'copy state unavailable');
+                }
+                return [chainID, {
+                    permissions: permissionsResult.status === 'fulfilled' ? permissionsResult.value : null,
+                    sync: syncResult.status === 'fulfilled' ? syncResult.value : null,
+                    error: errors.join('; '),
+                }];
+            }));
+            if (!alive) return;
+            const peerStates = Object.fromEntries(entries);
+            const complete = buildBrainDomainInventory({
+                stats, localCatalogue, connections, peerStates,
+            });
+            setInventory(complete);
+            if (onInventory) onInventory(complete);
+            setLoadingRemote(false);
+            inFlight = false;
+        };
+        load();
+        timer = setInterval(load, 30000);
+        const onVisibility = () => { if (!document.hidden) load(); };
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+            alive = false;
+            clearInterval(timer);
+            document.removeEventListener('visibilitychange', onVisibility);
+        };
+    }, []);
+
+    const toggle = () => {
+        const next = !collapsed;
+        setCollapsed(next);
+        try { localStorage.setItem('sage-brain-domains-collapsed', String(next)); } catch {}
+    };
+    if (!inventory) {
+        return html`<aside class="brain-domain-inventory loading" aria-label="Domain sources">
+            <span class="brain-domain-loading">Loading domain sources…</span>
+        </aside>`;
+    }
+
+    const localPreview = inventory.localDomains.slice(0, 10);
+    const sharedPreview = inventory.sharedDomains.slice(0, 10);
+    return html`<aside class="brain-domain-inventory ${collapsed ? 'collapsed' : ''}" aria-label="Local and shared domains">
+        <div class="brain-domain-head">
+            <div>
+                <strong>Domain sources</strong>
+                <span>${inventory.localDomains.length} local · ${inventory.sharedDomains.length} shared</span>
+            </div>
+            <button type="button" onClick=${toggle}
+                aria-expanded=${!collapsed}
+                aria-label=${collapsed ? 'Show domain sources' : 'Hide domain sources'}>
+                ${collapsed ? 'Show' : 'Hide'}
+            </button>
+        </div>
+        ${!collapsed && html`<div class="brain-domain-body">
+            <section aria-labelledby="brain-local-domains">
+                <div class="brain-domain-section-head">
+                    <div>
+                        <h3 id="brain-local-domains">Local domains</h3>
+                        <p>Stored on this SAGE, including copies retained here.</p>
+                    </div>
+                    <span>${inventory.localDomains.length}</span>
+                </div>
+                ${localPreview.length ? html`<div class="brain-domain-list">
+                    ${localPreview.map(domain => {
+                        const copyNames = domain.copySources.map(source => source.peerName);
+                        const copyLabel = copyNames.slice(0, 2).join(', ')
+                            + (copyNames.length > 2 ? ` +${copyNames.length - 2}` : '');
+                        return html`<div class="brain-domain-row local" key=${domain.domain}>
+                            <span class="brain-domain-dot" style=${`background:${getDomainColor(domain.domain)}`}></span>
+                            <div class="brain-domain-identity">
+                                <strong title=${domain.domain}>${domain.domain}</strong>
+                                ${copyNames.length > 0 && html`<span title=${copyNames.join(', ')}>includes copies from ${copyLabel}</span>`}
+                            </div>
+                            <span class="brain-domain-count">${domain.memoryCount.toLocaleString()}</span>
+                        </div>`;
+                    })}
+                    ${inventory.localDomains.length > localPreview.length && html`
+                        <div class="brain-domain-more">+${inventory.localDomains.length - localPreview.length} more local domains</div>`}
+                </div>` : html`<p class="brain-domain-empty">No memories are stored locally yet.</p>`}
+            </section>
+
+            <section aria-labelledby="brain-shared-domains">
+                <div class="brain-domain-section-head">
+                    <div>
+                        <h3 id="brain-shared-domains">Shared domains</h3>
+                        <p>Available from other SAGE nodes.</p>
+                    </div>
+                    <span>${inventory.sharedDomains.length}</span>
+                </div>
+                ${sharedPreview.length ? html`<div class="brain-domain-list">
+                    ${sharedPreview.map(domain => {
+                        const sourceNames = domain.sources.map(source => source.peerName);
+                        const sourceLabel = sourceNames.slice(0, 2).join(', ') +
+                            (sourceNames.length > 2 ? ` +${sourceNames.length - 2}` : '');
+                        return html`<div class="brain-domain-row shared ${domain.paused ? 'paused' : ''}" key=${domain.domain}>
+                            <span class="brain-domain-external" aria-hidden="true">↗</span>
+                            <div class="brain-domain-identity">
+                                <strong title=${domain.domain}>${domain.domain}</strong>
+                                <span title=${sourceNames.join(', ')}>from ${sourceLabel}</span>
+                            </div>
+                            <div class="brain-domain-badges">
+                                ${domain.lastKnown
+                                    ? html`<span class="brain-domain-badge stale">Last known</span>`
+                                    : domain.paused
+                                        ? html`<span class="brain-domain-badge paused">Paused</span>`
+                                        : html`<span class="brain-domain-badge read">Read</span>`}
+                                ${domain.copy && html`<span class="brain-domain-badge copy">${domain.savedHere ? 'Saved here' : 'Copy offered'}</span>`}
+                            </div>
+                        </div>`;
+                    })}
+                    ${inventory.sharedDomains.length > sharedPreview.length && html`
+                        <div class="brain-domain-more">+${inventory.sharedDomains.length - sharedPreview.length} more shared domains</div>`}
+                </div>` : html`<p class="brain-domain-empty">
+                    ${loadingRemote
+                        ? 'Checking connected SAGE nodes…'
+                        : inventory.activePeerCount
+                            ? 'No readable domains are currently shared with this SAGE.'
+                            : 'Connect another SAGE to receive shared domains.'}
+                </p>`}
+                ${inventory.unavailablePeers.length > 0 && !loadingRemote && html`
+                    <p class="brain-domain-unavailable">
+                        Could not verify ${inventory.unavailablePeers.map(peer => peer.peerName).join(', ')}.
+                    </p>`}
+                ${federationError && html`<p class="brain-domain-unavailable">${federationError}</p>`}
+                <button class="brain-domain-manage" type="button" onClick=${() => { window.location.hash = '#/federation'; }}>
+                    Manage sharing →
+                </button>
+            </section>
+        </div>`}
+    </aside>`;
+}
+
 // MriView — the 3D MRI memory-brain, rendered natively (the dashboard's
 // X-Frame-Options/CSP forbid iframing, so we mount the shared renderer
 // directly). Reads /v1/dashboard/memory/graph.
 function MriView({ sse }) {
     const ref = useRef(null);
-    const [mriEmpty, setMriEmpty] = useState(false);
-    useEffect(() => {
-        let alive = true;
-        fetchStats().then(s => { if (alive) setMriEmpty((s.total_memories || 0) === 0); }).catch(() => {});
-        return () => { alive = false; };
-    }, [sse]);
+    const [inventory, setInventory] = useState(null);
     useEffect(() => {
         if (!ref.current) return;
         const cleanup = mountMriBrain(ref.current, {
@@ -191,14 +458,19 @@ function MriView({ sse }) {
         });
         return cleanup;
     }, [sse]);
+    const noLocalMemories = inventory && inventory.localMemoryTotal === 0;
+    const hasSharedDomains = inventory && inventory.sharedDomains.length > 0;
     return html`<div class="mri-wrap">
         <div class="mri-stage" ref=${ref}></div>
-        ${mriEmpty && html`<div class="brain-empty-overlay">
+        <${BrainDomainInventory} onInventory=${setInventory} />
+        ${noLocalMemories && html`<div class="brain-empty-overlay">
             <${EmptyState} icon="brain"
-                headline="Your brain is empty"
-                hint="No memories to visualize yet. Import an existing export or connect an agent over MCP, and the MRI will render them in 3D."
-                actionLabel="Import memories"
-                onAction=${() => { window.location.hash = '#/import'; }} />
+                headline=${hasSharedDomains ? 'No memories stored locally' : 'Your brain is empty'}
+                hint=${hasSharedDomains
+                    ? `${inventory.sharedDomains.length} shared ${inventory.sharedDomains.length === 1 ? 'domain is' : 'domains are'} available from other SAGE nodes. They remain remote unless you enable Copy.`
+                    : 'No memories to visualize yet. Import an existing export or connect an agent over MCP, and the MRI will render them in 3D.'}
+                actionLabel=${hasSharedDomains ? 'View federation' : 'Import memories'}
+                onAction=${() => { window.location.hash = hasSharedDomains ? '#/federation' : '#/import'; }} />
         </div>`}
     </div>`;
 }
@@ -1882,7 +2154,6 @@ function TagEditor({ memoryId }) {
 }
 
 function MemoryDetail({ memory, onClose, onDelete, onNavigate, onUpdate, inline }) {
-    const [confirming, setConfirming] = useState(false);
     const [agentInfo, setAgentInfo] = useState(null);
     const [visible, setVisible] = useState(false);
     const [lastMemory, setLastMemory] = useState(null);
@@ -1899,7 +2170,6 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate, onUpdate, inline 
 
     // Keep last memory data for closing animation
     useEffect(() => {
-        setConfirming(false); // never carry an armed delete across to a different memory
         setEditingDomain(false);
         setDomainOverride(null); // drop any per-memory domain edit when a different memory opens
         if (memory) {
@@ -1937,10 +2207,22 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate, onUpdate, inline 
     if (!displayMemory) return null;
 
     async function handleDelete() {
-        if (!confirming) { setConfirming(true); return; }
-        await deleteMemory(m.id);
-        if (onDelete) onDelete(m.id);
-        onClose();
+        const durable = (m.memory_type || m.memoryType) === 'fact';
+        const message = durable
+            ? 'Forget this durable fact? It stops appearing in normal recall and search, but remains in the on-chain audit history. Other memories, domains, and trusted connections are unchanged.'
+            : 'Forget this memory? It stops appearing in normal recall and search, but remains in the on-chain audit history. Other memories, domains, and trusted connections are unchanged.';
+        if (!await showConfirmation(message, {
+            title: durable ? 'Forget durable fact?' : 'Forget memory?',
+            confirmLabel: durable ? 'Forget fact' : 'Forget memory',
+            tone: 'danger',
+        })) return;
+        try {
+            await deleteMemory(m.id);
+            if (onDelete) onDelete(m.id);
+            onClose();
+        } catch (e) {
+            showToast(`Could not forget memory: ${e.message || e}`, 'error');
+        }
     }
 
     async function saveDomain() {
@@ -2058,10 +2340,7 @@ function MemoryDetail({ memory, onClose, onDelete, onNavigate, onUpdate, inline 
                 </div>
 
                 <div class="detail-section" style="margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border);">
-                    <button class="btn btn-danger" onClick=${handleDelete}>
-                        ${confirming ? 'Confirm Delete' : 'Forget Memory'}
-                    </button>
-                    ${confirming && html`<span style="font-size: 12px; color: var(--danger); margin-left: 12px;">Click again to confirm</span>`}
+                    <button class="btn btn-danger" onClick=${handleDelete}>Forget memory…</button>
                 </div>
     `;
 
@@ -2994,24 +3273,24 @@ function SearchPage() {
             <div class="search-filters">
                 <${HelpTip} text="Full-text search across your whole memory base by content or domain - relevance-ranked when the full-text index is available, keyword-matched otherwise. Domain, tag, and agent filters narrow the set." />
                 <${PageHelp} section="search" label="Search & Import guide" />
-                <select class="filter-select" value=${domainFilter} onChange=${handleDomainFilter}>
+                <select class="filter-select" aria-label="Filter memories by domain" value=${domainFilter} onChange=${handleDomainFilter}>
                     <option value="">All domains</option>
                     ${domains.map(d => html`<option value=${d}>${d}</option>`)}
                 </select>
-                <select class="filter-select" value=${statusFilter} onChange=${handleStatusFilter} title="Filter by memory lifecycle status">
+                <select class="filter-select" aria-label="Filter by memory lifecycle status" value=${statusFilter} onChange=${handleStatusFilter} title="Filter by memory lifecycle status">
                     <option value="active">All (active)</option>
                     <option value="committed">Committed</option>
                     <option value="proposed">Proposed</option>
                     <option value="deprecated">Deprecated (audit)</option>
                 </select>
                 ${allTags.length > 0 && html`
-                    <select class="filter-select" value=${tagFilter} onChange=${handleTagFilter}>
+                    <select class="filter-select" aria-label="Filter memories by tag" value=${tagFilter} onChange=${handleTagFilter}>
                         <option value="">All tags</option>
                         ${allTags.map(t => html`<option value=${t.tag}>${t.tag} (${t.count})</option>`)}
                     </select>
                 `}
                 ${agents.length > 0 && html`
-                    <select class="filter-select" value=${agentFilter} onChange=${handleAgentFilter}>
+                    <select class="filter-select" aria-label="Filter memories by agent" value=${agentFilter} onChange=${handleAgentFilter}>
                         <option value="">All agents</option>
                         ${agents.map(a => html`<option value=${a.agent_id}>${a.name} (${a.agent_id.slice(0, 8)}...)</option>`)}
                     </select>
@@ -3022,7 +3301,7 @@ function SearchPage() {
                         Transfer domain ownership
                     </button>
                 `}
-                <select class="filter-select" value=${datePreset} onChange=${handleDatePreset} title="Filter by when the memory was created">
+                <select class="filter-select" aria-label="Filter by when the memory was created" value=${datePreset} onChange=${handleDatePreset} title="Filter by when the memory was created">
                     <option value="">Any time</option>
                     <option value="1h">Last hour</option>
                     <option value="24h">Last 24 hours</option>
@@ -3031,13 +3310,13 @@ function SearchPage() {
                     <option value="custom">Custom range...</option>
                 </select>
                 ${datePreset === 'custom' && html`
-                    <input type="date" class="filter-select" style="min-width:140px;" value=${customFrom} title="From date"
+                    <input type="date" class="filter-select" aria-label="Created on or after" style="min-width:140px;" value=${customFrom} title="From date"
                         onChange=${e => { setCustomFrom(e.target.value); applyCustomRange(e.target.value, customTo); }} />
                     <span style="align-self:center;color:var(--text-muted);font-size:12px;">to</span>
-                    <input type="date" class="filter-select" style="min-width:140px;" value=${customTo} title="To date"
+                    <input type="date" class="filter-select" aria-label="Created on or before" style="min-width:140px;" value=${customTo} title="To date"
                         onChange=${e => { setCustomTo(e.target.value); applyCustomRange(customFrom, e.target.value); }} />
                 `}
-                <select class="filter-select" value=${sortOrder} onChange=${handleSort} title="Sort order (applies when not text-searching)">
+                <select class="filter-select" aria-label="Sort memories" value=${sortOrder} onChange=${handleSort} title="Sort order (applies when not text-searching)">
                     <option value="newest">Newest first</option>
                     <option value="oldest">Oldest first</option>
                     <option value="confidence">Highest confidence</option>
@@ -3076,7 +3355,7 @@ function SearchPage() {
                 ${results.map(m => { const mid = m.memory_id; const isSel = selected.has(mid); const isOpen = expandedId === mid; return html`
                     <div class="memory-card ${isOpen ? 'expanded' : ''}" style=${isSel ? 'outline:2px solid var(--primary);outline-offset:-1px;' : ''} onClick=${() => setExpandedId(isOpen ? null : mid)}>
                         <div class="memory-card-header">
-                            <input type="checkbox" style="cursor:pointer;width:15px;height:15px;flex:none;" checked=${isSel} onClick=${e => toggleSelect(mid, e)} title="Select for bulk actions" />
+                            <input type="checkbox" style="cursor:pointer;width:15px;height:15px;flex:none;" checked=${isSel} onClick=${e => toggleSelect(mid, e)} title="Select for bulk actions" aria-label=${`Select memory from ${m.domain_tag} for bulk actions`} />
                             <span class="domain-badge" style="background: ${getDomainColor(m.domain_tag)}20; color: ${getDomainColor(m.domain_tag)};">
                                 ${m.domain_tag}
                             </span>
@@ -3221,6 +3500,7 @@ function SynapticLedger() {
     const [recoveryKey, setRecoveryKey] = useState(null);
     const [keyIsBackup, setKeyIsBackup] = useState(false); // true when shown via the "back up" flow (not freshly generated)
     const [backupPass, setBackupPass] = useState('');
+    const recoveryHeadingRef = useRef(null);
 
     const loadStatus = useCallback(async () => {
         try {
@@ -3234,6 +3514,15 @@ function SynapticLedger() {
     }, []);
 
     useEffect(() => { loadStatus(); }, []);
+
+    // Enabling encryption replaces the focused submit button with the recovery
+    // screen. Move focus to its heading so keyboard and screen-reader users do
+    // not fall out of the active dialog when that button disappears.
+    useEffect(() => {
+        if (!recoveryKey) return undefined;
+        const frame = requestAnimationFrame(() => recoveryHeadingRef.current?.focus());
+        return () => cancelAnimationFrame(frame);
+    }, [recoveryKey]);
 
     const downloadRecoveryKey = (key) => {
         const date = new Date().toISOString().slice(0, 10);
@@ -3313,6 +3602,31 @@ function SynapticLedger() {
         setBusy(false);
     };
 
+    const handleConfirmRecoveryBackup = async (lockAfter = false) => {
+        setError(null); setBusy(true);
+        try {
+            await confirmRecoveryKeyBackup();
+            setStatus(current => ({ ...(current || {}), recovery_backup_confirmed: true }));
+            setRecoveryKey(null);
+            setKeyIsBackup(false);
+            if (lockAfter && window.__sageLock) {
+                window.__sageLock();
+            } else {
+                setView('status');
+            }
+        } catch (e) {
+            setError(e.message || String(e));
+        }
+        setBusy(false);
+    };
+
+    const leaveRecoveryBackupForLater = () => {
+        setRecoveryKey(null);
+        setKeyIsBackup(false);
+        setError(null);
+        setView('status');
+    };
+
     const handleDisable = async () => {
         setError(null);
         setBusy(true);
@@ -3332,21 +3646,22 @@ function SynapticLedger() {
     if (recoveryKey) {
         return html`
             <div>
-                <h3 style="color:var(--accent);margin-bottom:12px;">
+                <h3 ref=${recoveryHeadingRef} tabIndex="-1" style="color:var(--accent);margin-bottom:12px;">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
                         <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                     </svg>
                     ${keyIsBackup ? 'Your Recovery Key' : 'Recovery Key Generated'}
                 </h3>
-                <div class="warning-banner" style="margin-bottom:16px;">
+                <div class="warning-banner" role="alert" style="margin-bottom:16px;">
                     ${keyIsBackup
                         ? '⚠ Store this somewhere safe and offline (a password manager is ideal). Anyone with this key can decrypt your memories. If you lose your passphrase AND this key, your encrypted memories are unrecoverable.'
                         : '⚠ Save this recovery key NOW. It will not be shown again. If you lose your passphrase and this key, your encrypted memories are unrecoverable.'}
                 </div>
+                ${error && html`<div class="import-error" role="alert" style="margin-bottom:12px;">${error}</div>`}
                 <div style="background:var(--bg-deep);border:1px solid var(--border-light);border-radius:var(--radius);padding:12px;font-family:monospace;font-size:11px;word-break:break-all;color:var(--text-dim);margin-bottom:16px;max-height:100px;overflow-y:auto;">
                     ${recoveryKey}
                 </div>
-                <div style="display:flex;gap:8px;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
                     <button class="btn btn-primary" onClick=${() => downloadRecoveryKey(recoveryKey)}>
                         Download Recovery Key
                     </button>
@@ -3354,16 +3669,9 @@ function SynapticLedger() {
                         navigator.clipboard.writeText(recoveryKey);
                     }}>Copy to Clipboard</button>
                     ${keyIsBackup
-                        ? html`<button class="btn" onClick=${() => { setRecoveryKey(null); setKeyIsBackup(false); setView('status'); }}>Done</button>`
-                        : html`<button class="btn" onClick=${() => {
-                            setRecoveryKey(null);
-                            // After first-time encryption enable, send to lock screen
-                            if (window.__sageLock) {
-                                window.__sageLock();
-                            } else {
-                                setView('status');
-                            }
-                        }}>I've saved it — Lock Now</button>`}
+                        ? html`<button class="btn" disabled=${busy} onClick=${() => handleConfirmRecoveryBackup(false)}>${busy ? 'Saving status…' : "I've stored it safely"}</button>`
+                        : html`<button class="btn" disabled=${busy} onClick=${() => handleConfirmRecoveryBackup(true)}>${busy ? 'Saving status…' : "I've stored it safely — Lock now"}</button>`}
+                    <button class="btn" disabled=${busy} onClick=${leaveRecoveryBackupForLater}>Not now — return to Security</button>
                 </div>
             </div>
         `;
@@ -3379,20 +3687,20 @@ function SynapticLedger() {
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
                         <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                     </svg>
-                    Enable Synaptic Ledger
+                    Turn on memory protection
                 </h3>
                 <p style="font-size:13px;color:var(--text-dim);margin:12px 0;line-height:1.6;">
-                    All new memories will be encrypted at rest with AES-256-GCM. You'll need this passphrase to unlock your brain on startup. A recovery key will be generated — save it somewhere safe.
+                    SAGE will protect new memories stored on this computer. You'll use this passphrase to unlock them after SAGE starts. SAGE will also create a recovery key — save it somewhere safe.
                 </p>
                 ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
                 <div class="wizard-field">
                     <label>Passphrase</label>
-                    <input class="wizard-input" type="password" placeholder="Minimum 8 characters"
+                    <input class="wizard-input" type="password" aria-label="Passphrase" placeholder="Minimum 8 characters"
                         value=${passphrase} onInput=${e => setPassphrase(e.target.value)} />
                 </div>
                 <div class="wizard-field">
                     <label>Confirm Passphrase</label>
-                    <input class="wizard-input" type="password" placeholder="Type it again"
+                    <input class="wizard-input" type="password" aria-label="Confirm passphrase" placeholder="Type it again"
                         value=${confirmPassphrase} onInput=${e => setConfirmPassphrase(e.target.value)}
                         onKeyDown=${e => { if (e.key === 'Enter') handleEnable(); }} />
                 </div>
@@ -3417,17 +3725,17 @@ function SynapticLedger() {
                     Change Passphrase
                 </h3>
                 <p style="font-size:13px;color:var(--text-dim);margin:12px 0;line-height:1.6;">
-                    Your existing memories stay readable — the underlying encryption key doesn't change, only the passphrase that protects it. A new recovery key will be generated.
+                    Your existing memories stay readable — the underlying encryption key doesn't change, only the passphrase that protects it. SAGE will show the same recovery key again so you can save another copy.
                 </p>
                 ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
                 <div class="wizard-field">
                     <label>Current Passphrase</label>
-                    <input class="wizard-input" type="password" placeholder="Your current passphrase"
+                    <input class="wizard-input" type="password" aria-label="Current passphrase" placeholder="Your current passphrase"
                         value=${oldPassphrase} onInput=${e => setOldPassphrase(e.target.value)} />
                 </div>
                 <div class="wizard-field">
                     <label>New Passphrase</label>
-                    <input class="wizard-input" type="password" placeholder="Minimum 8 characters"
+                    <input class="wizard-input" type="password" aria-label="New passphrase" placeholder="Minimum 8 characters"
                         value=${newPassphrase} onInput=${e => setNewPassphrase(e.target.value)}
                         onKeyDown=${e => { if (e.key === 'Enter') handleChangePassphrase(); }} />
                 </div>
@@ -3457,7 +3765,7 @@ function SynapticLedger() {
                 ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
                 <div class="wizard-field">
                     <label>Passphrase</label>
-                    <input class="wizard-input" type="password" placeholder="Your vault passphrase"
+                    <input class="wizard-input" type="password" aria-label="Passphrase" placeholder="Your passphrase"
                         value=${backupPass} onInput=${e => setBackupPass(e.target.value)}
                         onKeyDown=${e => { if (e.key === 'Enter') handleBackupRecoveryKey(); }} />
                 </div>
@@ -3487,7 +3795,7 @@ function SynapticLedger() {
                 ${error && html`<div class="import-error" style="margin-bottom:12px;">${error}</div>`}
                 <div class="wizard-field">
                     <label>Passphrase</label>
-                    <input class="wizard-input" type="password" placeholder="Confirm your passphrase"
+                    <input class="wizard-input" type="password" aria-label="Passphrase" placeholder="Confirm your passphrase"
                         value=${passphrase} onInput=${e => setPassphrase(e.target.value)}
                         onKeyDown=${e => { if (e.key === 'Enter') handleDisable(); }} />
                 </div>
@@ -3508,7 +3816,7 @@ function SynapticLedger() {
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:6px">
                     <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
                 </svg>
-                Synaptic Ledger <${HelpTip} text="Encrypts all memories at rest with AES-256-GCM. You'll need to enter your passphrase each session. If you lose it, use your recovery key to reset it." />
+                Memory protection <${HelpTip} text="Protects memories stored on this computer. You'll need to enter your passphrase after SAGE starts. If you lose it, use your recovery key to reset it." />
             </h3>
             ${enabled ? html`
                 <div style="margin:12px 0;">
@@ -3516,27 +3824,24 @@ function SynapticLedger() {
                         <span class="label">Status</span>
                         <span class="value" style="color:var(--accent);">Encrypted</span>
                     </div>
-                    <div class="settings-row">
-                        <span class="label">Algorithm</span>
-                        <span class="value">${status.algorithm}</span>
-                    </div>
-                    <div class="settings-row">
-                        <span class="label">Key Derivation</span>
-                        <span class="value">${status.kdf}</span>
-                    </div>
-                    <div class="settings-row">
-                        <span class="label">Vault</span>
-                        <span class="value" style="font-family:monospace;font-size:12px;">${status.vault_path}</span>
-                    </div>
+                    <details style="margin-top:8px;color:var(--text-muted);font-size:12px;">
+                        <summary style="cursor:pointer;">Technical details</summary>
+                        <div class="settings-row"><span class="label">Encryption</span><span class="value">${status.algorithm}</span></div>
+                        <div class="settings-row"><span class="label">Key protection</span><span class="value">${status.kdf}</span></div>
+                        <div class="settings-row"><span class="label">Protected key file</span><span class="value" style="font-family:monospace;font-size:12px;">${status.vault_path}</span></div>
+                    </details>
                 </div>
                 <div class="settings-row">
                     <span class="label">Recovery Key</span>
-                    <button class="btn" style="padding:4px 12px;font-size:12px;" onClick=${() => { setView('backup'); setError(null); }}>Back up →</button>
+                    <span class="value" style="color:${status.recovery_backup_confirmed ? 'var(--accent)' : 'var(--warning)'};">${status.recovery_backup_confirmed ? 'Backup confirmed' : 'Backup needed'}</span>
                 </div>
                 <p style="font-size:11px;color:var(--text-muted);margin:2px 0 10px;line-height:1.5;">
-                    Your recovery key resets your passphrase if you forget it. It's shown only once at setup — back it up here anytime (passphrase required).
+                    ${status.recovery_backup_confirmed
+                        ? 'SAGE remembers that you confirmed storing the recovery key. You can make another backup anytime.'
+                        : 'Your recovery key resets your passphrase if you forget it. Back it up now; SAGE cannot recover it for you.'}
                 </p>
-                <div style="display:flex;gap:8px;">
+                <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                    <button class="btn ${status.recovery_backup_confirmed ? '' : 'btn-primary'}" onClick=${() => { setView('backup'); setError(null); }}>${status.recovery_backup_confirmed ? 'Make another backup' : 'Back up recovery key'}</button>
                     <button class="btn" onClick=${() => setView('change')}>Change Passphrase</button>
                     <button class="btn btn-danger" onClick=${() => setView('disable')}>Disable</button>
                 </div>
@@ -3547,11 +3852,31 @@ function SynapticLedger() {
                         <span class="value" style="color:var(--text-muted);">Not encrypted</span>
                     </div>
                     <p style="font-size:12px;color:var(--text-muted);margin:8px 0;line-height:1.5;">
-                        Enable the Synaptic Ledger to encrypt all memories at rest with AES-256-GCM. If your device is lost or compromised, your memories stay private.
+                        Turn on memory protection so memories stored on this computer cannot be read without your passphrase.
                     </p>
                 </div>
-                <button class="btn btn-primary" onClick=${() => setView('enable')}>Enable Encryption</button>
+                <button class="btn btn-primary" onClick=${() => setView('enable')}>Turn on protection</button>
             `}
+        </div>
+    `;
+}
+
+function SynapticLedgerModal({ onClose }) {
+    const dialogRef = useModalDialog(onClose);
+    return html`
+        <div class="wizard-overlay">
+            <div class="wizard-modal" ref=${dialogRef} tabIndex="-1" style="max-width:620px;" role="dialog" aria-modal="true" aria-labelledby="ledger-setup-title">
+                <div class="wizard-header">
+                    <h2 id="ledger-setup-title">Protect and recover your memories</h2>
+                    <button class="detail-close" onClick=${onClose} aria-label="Close encryption and recovery setup">×</button>
+                </div>
+                <div class="wizard-body">
+                    <${SynapticLedger} />
+                </div>
+                <div class="wizard-footer" style="justify-content:flex-end;">
+                    <button class="btn" onClick=${onClose}>Return to setup</button>
+                </div>
+            </div>
         </div>
     `;
 }
@@ -3966,7 +4291,7 @@ function AutostartToggle() {
             <span class="label">Open at Login</span>
             <span class="value" style="display:flex;align-items:center;gap:8px;">
                 <label class="toggle-switch" onClick=${(e) => e.stopPropagation()}>
-                    <input type="checkbox" checked=${autostart.enabled}
+                    <input type="checkbox" aria-label="Open SAGE at login" checked=${autostart.enabled}
                         disabled=${loading}
                         onChange=${handleToggle} />
                     <span class="toggle-slider"></span>
@@ -4105,7 +4430,7 @@ function RecallSettings() {
                 </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px;min-width:180px">
-                <input type="range" min="3" max="20" value=${topK}
+                <input type="range" aria-label="Results per query" min="3" max="20" value=${topK}
                     onInput=${e => setTopK(parseInt(e.target.value))}
                     style="flex:1;accent-color:var(--accent)" />
                 <span class="value" style="min-width:24px;text-align:center;font-weight:600">${topK}</span>
@@ -4121,7 +4446,7 @@ function RecallSettings() {
                 </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px;min-width:180px">
-                <input type="range" min="50" max="100" value=${minConfidence}
+                <input type="range" aria-label="Minimum confidence" min="50" max="100" value=${minConfidence}
                     onInput=${e => setMinConfidence(parseInt(e.target.value))}
                     style="flex:1;accent-color:var(--accent)" />
                 <span class="value" style="min-width:36px;text-align:center;font-weight:600">${minConfidence}%</span>
@@ -4181,14 +4506,15 @@ function CleanupSettings() {
         setCleanupRunning(false);
     };
 
-    const [confirmCleanup, setConfirmCleanup] = useState(false);
     const handleCleanup = async () => {
-        if (!confirmCleanup) {
-            setConfirmCleanup(true);
-            setTimeout(() => setConfirmCleanup(false), 5000);
-            return;
-        }
-        setConfirmCleanup(false);
+        const previewCount = cleanupResult && cleanupResult.dry_run ? Number(cleanupResult.deprecated || 0) : null;
+        const previewNote = previewCount === null
+            ? 'Use Preview first if you want to see the exact count before continuing. '
+            : `Your latest preview found ${previewCount} ${previewCount === 1 ? 'memory' : 'memories'} to clean. `;
+        if (!await showConfirmation(
+            `${previewNote}Run cleanup using the current rules? Matching memories stop appearing in normal recall but remain in the audit history. Memories outside the current rules stay active.`,
+            { title: 'Clean Synaptic Ledger?', confirmLabel: 'Run cleanup', tone: 'danger' }
+        )) return;
         setCleanupRunning(true);
         setCleanupResult(null);
         try {
@@ -4237,7 +4563,7 @@ function CleanupSettings() {
                     </div>
                 </div>
                 <label class="toggle-switch">
-                    <input type="checkbox" checked=${config.enabled}
+                    <input type="checkbox" aria-label="Enable automatic memory cleanup" checked=${config.enabled}
                         onChange=${(e) => {
                             const newVal = e.target.checked;
                             updateField('enabled', newVal);
@@ -4249,9 +4575,8 @@ function CleanupSettings() {
 
             <!-- Quick actions — always visible -->
             <div style="display:flex;gap:8px;padding:12px 0;flex-wrap:wrap;align-items:center">
-                <button class="btn ${confirmCleanup ? '' : 'btn-danger'}" onClick=${handleCleanup} disabled=${cleanupRunning}
-                    style="font-size:12px;${confirmCleanup ? 'background:var(--danger);color:#fff;animation:pulse 1s infinite' : ''}">
-                    ${cleanupRunning ? 'Cleaning...' : confirmCleanup ? 'Click again to confirm' : 'Clean Synaptic Ledger'}
+                <button class="btn btn-danger" onClick=${handleCleanup} disabled=${cleanupRunning} style="font-size:12px;">
+                    ${cleanupRunning ? 'Cleaning...' : 'Clean Synaptic Ledger…'}
                 </button>
                 <button class="btn" onClick=${handleDryRun} disabled=${cleanupRunning} style="font-size:12px">
                     ${cleanupRunning ? 'Running...' : 'Preview'}
@@ -4292,7 +4617,7 @@ function CleanupSettings() {
                         </div>
                     </div>
                     <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" min="1" max="90" value=${config.observation_ttl_days}
+                        <input type="range" aria-label="Observation lifetime in days" min="1" max="90" value=${config.observation_ttl_days}
                             onInput=${(e) => updateField('observation_ttl_days', parseInt(e.target.value))}
                             style="width:120px" />
                         <span class="value" style="min-width:50px;text-align:right">${config.observation_ttl_days}d</span>
@@ -4316,7 +4641,7 @@ function CleanupSettings() {
                         </div>
                     </div>
                     <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" min="1" max="30" value=${config.session_ttl_days}
+                        <input type="range" aria-label="Session context lifetime in days" min="1" max="30" value=${config.session_ttl_days}
                             onInput=${(e) => updateField('session_ttl_days', parseInt(e.target.value))}
                             style="width:120px" />
                         <span class="value" style="min-width:50px;text-align:right">${config.session_ttl_days}d</span>
@@ -4341,7 +4666,7 @@ function CleanupSettings() {
                         </div>
                     </div>
                     <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" min="1" max="50" value=${Math.round(config.stale_threshold * 100)}
+                        <input type="range" aria-label="Stale confidence threshold" min="1" max="50" value=${Math.round(config.stale_threshold * 100)}
                             onInput=${(e) => updateField('stale_threshold', parseInt(e.target.value) / 100)}
                             style="width:120px" />
                         <span class="value" style="min-width:50px;text-align:right">${(config.stale_threshold * 100).toFixed(0)}%</span>
@@ -4364,7 +4689,7 @@ function CleanupSettings() {
                         </div>
                     </div>
                     <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" min="1" max="168" value=${config.cleanup_interval_hours}
+                        <input type="range" aria-label="Cleanup interval in hours" min="1" max="168" value=${config.cleanup_interval_hours}
                             onInput=${(e) => updateField('cleanup_interval_hours', parseInt(e.target.value))}
                             style="width:120px" />
                         <span class="value" style="min-width:50px;text-align:right">${config.cleanup_interval_hours}h</span>
@@ -4533,6 +4858,8 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     // progress in every tab), so it must never trap the user here; the 'done'
     // step stays closable while the node restarts (review HIGHs).
     const busy = autoRunning || pulling || (enabling && step !== 'done');
+    const requestClose = () => { if (busy) return false; onClose(); };
+    const dialogRef = useModalDialog(requestClose);
     const refreshStatus = () => { embeddingsStatus().then(setStatus).catch(() => {}); };
 
     useEffect(() => {
@@ -4884,11 +5211,11 @@ function EmbeddingsSetupModal({ onClose, onDone }) {
     };
 
     return html`
-        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget && !busy) onClose(); }}>
-            <div class="wizard-modal" style="max-width:560px;max-height:85vh;display:flex;flex-direction:column;">
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) requestClose(); }}>
+            <div class="wizard-modal" ref=${dialogRef} tabIndex="-1" role="dialog" aria-modal="true" aria-labelledby="embedding-setup-title" style="max-width:560px;max-height:85vh;display:flex;flex-direction:column;">
                 <div class="wizard-header">
-                    <h2>Turn on smart memory</h2>
-                    <button class="detail-close" onClick=${() => { if (!busy) onClose(); }} disabled=${busy} title=${busy ? 'Please wait — a task is running' : 'Close'}>×</button>
+                    <h2 id="embedding-setup-title">Turn on smart memory</h2>
+                    <button class="detail-close" onClick=${requestClose} disabled=${busy} title=${busy ? 'Please wait — a task is running' : 'Close'} aria-label="Close smart memory setup">×</button>
                 </div>
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
                     ${loading && html`<p style="color:var(--text-dim);text-align:center;padding:24px;">Checking…</p>`}
@@ -5073,7 +5400,7 @@ function RerankerControl() {
                 <span class="value" style="display:flex;align-items:center;gap:8px;">
                     <span style="color:${cfg.enabled ? 'var(--accent)' : 'var(--text-muted)'};font-size:12px;">${cfg.enabled ? 'On' : 'Off'}</span>
                     <label class="toggle-switch" onClick=${(e) => e.stopPropagation()}>
-                        <input type="checkbox" checked=${cfg.enabled} disabled=${busy}
+                        <input type="checkbox" aria-label="Enable reranker" checked=${cfg.enabled} disabled=${busy}
                             onChange=${(e) => (managed && !e.target.checked) ? doStopManaged() : save(e.target.checked)} />
                         <span class="toggle-slider"></span>
                     </label>
@@ -5115,22 +5442,17 @@ function RerankerControl() {
     `;
 }
 
-// RestartNodeButton - a confirm-armed node restart. The handler already exists
+// RestartNodeButton - the handler already exists
 // (POST /v1/dashboard/settings/update/restart); restarting re-locks the vault.
 function RestartNodeButton() {
-    const [arming, setArming] = useState(false);
     const [busy, setBusy] = useState(false);
 	const [restartError, setRestartError] = useState('');
-    const armRef = useRef(null);
-    useEffect(() => () => { if (armRef.current) clearTimeout(armRef.current); }, []);
     const doRestart = async () => {
-        if (!arming) {
-            setArming(true);
-            armRef.current = setTimeout(() => setArming(false), 4000);
-            return;
-        }
-        if (armRef.current) clearTimeout(armRef.current);
-		setArming(false); setBusy(true); setRestartError('');
+		if (!await showConfirmation(
+			'Restart SAGE now? The node will be briefly unavailable and an encrypted Synaptic Ledger will lock again. Your memories, settings, trusted connections, sharing groups, and access rules are not deleted. Unlock SAGE again after it returns.',
+			{ title: 'Restart SAGE?', confirmLabel: 'Restart SAGE' }
+		)) return;
+		setBusy(true); setRestartError('');
 		try {
 			const result = await restartAndWaitForNewBoot();
 			if (result.ok) {
@@ -5147,12 +5469,11 @@ function RestartNodeButton() {
         <div class="settings-row">
             <span class="label">Restart node</span>
             <span class="value">
-                <button class="btn" disabled=${busy} style=${arming ? 'border-color:var(--warning);color:var(--warning);' : ''} onClick=${doRestart}>
-                    ${busy ? 'Restarting...' : (arming ? 'Click again to confirm' : 'Restart')}
+                <button class="btn" disabled=${busy} onClick=${doRestart}>
+                    ${busy ? 'Restarting...' : 'Restart…'}
                 </button>
             </span>
         </div>
-        ${arming ? html`<div style="font-size:11px;color:var(--warning);margin-top:4px;">Restarting re-locks the vault - you will need to unlock again. The node is briefly offline.</div>` : ''}
 		${restartError ? html`<div style="font-size:11px;color:var(--danger);margin-top:4px;">${restartError}</div>` : ''}
     `;
 }
@@ -5172,6 +5493,8 @@ function RerankerSetupModal({ onClose, onDone }) {
     const [copied, setCopied] = useState(false);
     const runningRef = useRef(false);
     const busy = phase === 'running';
+    const requestClose = () => { if (busy) return false; onClose(); };
+    const dialogRef = useModalDialog(requestClose);
 
     const refresh = async () => {
         try { const s = await rerankerSetupStatus(); setSt(s); return s; }
@@ -5297,11 +5620,11 @@ function RerankerSetupModal({ onClose, onDone }) {
     };
 
     return html`
-        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget && !busy) onClose(); }}>
-            <div class="wizard-modal" style="max-width:540px;">
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) requestClose(); }}>
+            <div class="wizard-modal" ref=${dialogRef} tabIndex="-1" role="dialog" aria-modal="true" aria-labelledby="reranker-setup-title" style="max-width:540px;">
                 <div class="wizard-header">
-                    <h2>Set up the reranker</h2>
-                    <button class="detail-close" onClick=${() => { if (!busy) onClose(); }} disabled=${busy} title=${busy ? 'Please wait - setup is running' : 'Close'}>\u00D7</button>
+                    <h2 id="reranker-setup-title">Set up the reranker</h2>
+                    <button class="detail-close" onClick=${requestClose} disabled=${busy} title=${busy ? 'Please wait - setup is running' : 'Close'} aria-label="Close reranker setup">\u00D7</button>
                 </div>
                 <div class="wizard-body" style="padding:20px;line-height:1.55;">
                     ${phase === 'check' && html`<p style="color:var(--text-dim);text-align:center;padding:20px;">Checking what's already in place\u2026</p>`}
@@ -5446,7 +5769,6 @@ function SettingsPage({ onRunSetup, requestedTab }) {
     const [embStatus, setEmbStatus] = useState(null);            // GET /embeddings/status (need_reembed etc)
     const [embeddingSwitching, setEmbeddingSwitching] = useState(false);
     const [embeddingSwitchMsg, setEmbeddingSwitchMsg] = useState('');
-    const [confirmHashEmbedding, setConfirmHashEmbedding] = useState(false);
     const refreshEmb = useCallback(() => { embeddingsStatus().then(setEmbStatus).catch(() => {}); }, []);
     useEffect(() => { refreshEmb(); }, [refreshEmb]);
     const [updateAvailable, setUpdateAvailable] = useState(false);
@@ -5517,6 +5839,22 @@ function SettingsPage({ onRunSetup, requestedTab }) {
     const ver = health?.version || 'dev';
     const encrypted = health?.encrypted || false;
     const chain = health?.chain || null;
+    const handleMemoryExport = async () => {
+        const encryptionNote = encrypted
+            ? 'Your Synaptic Ledger is encrypted on this computer, but the downloaded file will not be encrypted. '
+            : '';
+        const confirmed = await showConfirmation(
+            `${encryptionNote}The file contains a readable copy of your active memories. Memories you chose to forget are not included. It can recreate memories on a new SAGE, but it does not include trusted connections, sharing groups, access rules, AI-tool credentials, settings, or full chain history. Store it somewhere private.`,
+            { title: 'Download memory backup?', confirmLabel: 'Download unencrypted backup' }
+        );
+        if (!confirmed) return;
+        const link = document.createElement('a');
+        link.href = '/v1/dashboard/export';
+        link.rel = 'noopener';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    };
     // Embedder status. v6.8.8+ servers return a structured `embedder` block;
     // older servers only set the `ollama` string. Derive a normalized view
     // so the row below this can render any provider without branching twice.
@@ -5527,12 +5865,10 @@ function SettingsPage({ onRunSetup, requestedTab }) {
             setShowEmbedSetup(true); // migrates every row before activating Ollama
             return;
         }
-        if (!confirmHashEmbedding) {
-            setConfirmHashEmbedding(true);
-            setEmbeddingSwitchMsg('Hash mode turns off meaning-based recall. The reranker remains a separate setting below. Click Hash embeddings again to confirm.');
-            return;
-        }
-        setConfirmHashEmbedding(false);
+        if (!await showConfirmation(
+            'Switch to basic hash recall? Meaning-based recall turns off and SAGE restarts. Your memories remain stored, the reranker remains a separate setting, and you can turn semantic memory back on later.',
+            { title: 'Turn off semantic memory?', confirmLabel: 'Use basic recall' }
+        )) return;
         setEmbeddingSwitching(true); setEmbeddingSwitchMsg('Switching to hash embeddings and restarting...');
         try {
             const result = await selectEmbeddingProvider('hash');
@@ -5801,7 +6137,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                             <span class="label">${statusDot(embedderStatus.online)} Smart memory embeddings</span>
                             <span class="value" role="group" aria-label="Embedding provider" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
                                 <button class="btn ${embedderStatus.provider === 'ollama' ? 'btn-primary' : ''}" aria-pressed=${embedderStatus.provider === 'ollama'} disabled=${embeddingSwitching} onClick=${() => chooseEmbeddingProvider('ollama')}>Ollama <span style="opacity:.75;">(preferred)</span></button>
-                                <button class="btn ${embedderStatus.provider === 'hash' ? 'btn-primary' : ''}" aria-pressed=${embedderStatus.provider === 'hash'} style=${confirmHashEmbedding ? 'border-color:var(--warning);color:var(--warning);' : ''} disabled=${embeddingSwitching} onClick=${() => chooseEmbeddingProvider('hash')}>${confirmHashEmbedding ? 'Click again to switch' : 'Hash embeddings'}</button>
+                                <button class="btn ${embedderStatus.provider === 'hash' ? 'btn-primary' : ''}" aria-pressed=${embedderStatus.provider === 'hash'} disabled=${embeddingSwitching} onClick=${() => chooseEmbeddingProvider('hash')}>Hash embeddings</button>
                             </span>
                         </div>
                         <div style="font-size:11px;color:var(--text-muted);margin:-4px 0 14px;">${embedderStatus.provider === 'ollama'
@@ -5850,16 +6186,16 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                         ${html`<${CleanupSettings} />`}
                     </div>
                     <div class="settings-section" style="margin-top:16px">
-                        <h3>Export & Backup</h3>
+                        <h3>Memory backup</h3>
                         <p style="color:var(--text-muted);font-size:0.85rem;margin-bottom:16px;">
-                            Download a full backup of your memories in JSONL format. This file can be re-imported on a new machine via the Import page to restore your brain.
+                            Download an unencrypted JSONL copy of your active memories. Memories you chose to forget are not included. You can import it on a new SAGE to recreate your memories.
                         </p>
                         <div class="settings-row">
-                            <span class="label">Export all memories (JSONL - re-importable)</span>
-                            <button class="btn" onClick=${() => { window.open('/v1/dashboard/export', '_blank'); }}>Download Backup</button>
+                            <span class="label">Memory content and memory metadata (JSONL)</span>
+                            <button class="btn" onClick=${handleMemoryExport}>Download memory backup…</button>
                         </div>
                         <p style="color:var(--text-muted);font-size:0.85rem;margin-top:12px;">
-                            To restore, go to the <strong>Import</strong> page (sidebar) and upload your <code>.jsonl</code> backup file. All domains, types, and metadata are preserved.
+                            This is not a complete node backup: trusted connections, sharing groups, access rules, AI-tool credentials, settings, and chain history are not included. To restore memories, open <strong>Import</strong> and upload the <code>.jsonl</code> file.
                         </p>
                     </div>
                     <div class="settings-section" style="margin-top:16px">
@@ -5879,7 +6215,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                             <span class="label">Contextual Tooltips</span>
                             <span class="value" style="display:flex;align-items:center;gap:8px;">
                                 <label class="toggle-switch" onClick=${(e) => e.stopPropagation()}>
-                                    <input type="checkbox" checked=${window.__sageTooltips?.enabled}
+                                    <input type="checkbox" aria-label="Enable contextual tooltips" checked=${window.__sageTooltips?.enabled}
                                         onChange=${() => window.__sageTooltips?.toggle()} />
                                     <span class="toggle-slider"></span>
                                 </label>
@@ -5998,7 +6334,7 @@ function ImportPage({ sse }) {
             if (res.error === 'unstructured_document') {
                 setSuggestion(res.suggestion || res.message);
             } else if (res.error) {
-                setError(res.error);
+                setError(res.message || res.error);
             } else {
                 setPreview(res);
             }
@@ -6119,7 +6455,7 @@ function ImportPage({ sse }) {
                         </svg>
                     </div>
                     <h3>SAGE Backup</h3>
-                    <p><strong>Restore from backup.</strong> Upload a <strong>.jsonl</strong> export from Settings > Export. All domains, types, and metadata are preserved.</p>
+                    <p><strong>Recreate memories on this SAGE.</strong> Upload a <strong>.jsonl</strong> memory backup from Settings → Maintenance. Content, domain, type, and selected metadata are imported as new memory records. Memories you chose to forget are not restored. Trusted connections, sharing groups, access rules, credentials, settings, and chain history are not restored.</p>
                     <span class="provider-file-type">.jsonl</span>
                 </div>
             </div>
@@ -6868,7 +7204,7 @@ function HelpOverlay({ onClose, initialSection }) {
                     </div>
                     <div class="guide-detail-item">
                         <div class="guide-detail-label">Keep it up to date</div>
-                        <div class="guide-detail-desc">Check for and install updates, restart, make a backup of everything, or run the friendly welcome setup again - all from here.</div>
+                        <div class="guide-detail-desc">Check for and install updates, restart, export a portable copy of your memories, or run the friendly welcome setup again - all from here.</div>
                     </div>
                 </div>
             `,
@@ -7187,10 +7523,10 @@ function DomainAccessMatrix({ domains, domainAccess, onChange, onAddDomain, disa
                             ${isCustom ? html`<span style="font-size:10px;color:var(--text-muted);margin-left:6px;">new</span>` : ''}
                         </div>
                         <div class="domain-matrix-toggle" onClick=${e => e.stopPropagation()}>
-                            <label class="toggle-switch"><input type="checkbox" checked=${a.read} onChange=${() => toggle(domain, 'read')} /><span class="toggle-slider"></span></label>
+                            <label class="toggle-switch"><input type="checkbox" aria-label=${`Allow read access to ${domain}`} checked=${a.read} onChange=${() => toggle(domain, 'read')} /><span class="toggle-slider"></span></label>
                         </div>
                         <div class="domain-matrix-toggle" onClick=${e => e.stopPropagation()}>
-                            <label class="toggle-switch"><input type="checkbox" checked=${a.write} onChange=${() => toggle(domain, 'write')} /><span class="toggle-slider"></span></label>
+                            <label class="toggle-switch"><input type="checkbox" aria-label=${`Allow write access to ${domain}`} checked=${a.write} onChange=${() => toggle(domain, 'write')} /><span class="toggle-slider"></span></label>
                         </div>
                     </div>`;
                 })}
@@ -8921,13 +9257,14 @@ ${runCommand}`;
     const installed = !!status?.binary_found;
     const running = !!status?.running;
     const canSetup = cleanTunnelId && apiKey.trim() && !busy && !running && (installed || status?.install_supported);
+    const dialogRef = useModalDialog(onClose);
 
     return html`
         <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
-            <div class="wizard-modal" style="max-width:720px;max-height:85vh;display:flex;flex-direction:column;">
+            <div class="wizard-modal" ref=${dialogRef} tabIndex="-1" role="dialog" aria-modal="true" aria-labelledby="chatgpt-tunnel-title" style="max-width:720px;max-height:85vh;display:flex;flex-direction:column;">
                 <div class="wizard-header">
-					<h2>Connect ChatGPT Work</h2>
-                    <button class="detail-close" onClick=${onClose}>×</button>
+					<h2 id="chatgpt-tunnel-title">Connect ChatGPT Work</h2>
+                    <button class="detail-close" onClick=${onClose} aria-label="Close ChatGPT connection setup">×</button>
                 </div>
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
                     <div style="display:flex;align-items:flex-start;gap:12px;background:var(--success-tint);border:1px solid rgba(16,185,129,0.28);border-radius:8px;padding:14px;margin-bottom:16px;">
@@ -9835,13 +10172,14 @@ function ConnectToolModal({ onClose, agents, onOpenChatGPT }) {
     const badgeStyle = (action) => action === 'created'
         ? 'background:var(--accent-dim);color:var(--accent);'
         : 'background:var(--primary-dim);color:var(--primary);';
+    const dialogRef = useModalDialog(onClose);
 
     return html`
         <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) onClose(); }}>
-            <div class="wizard-modal" style="max-width:640px;max-height:85vh;display:flex;flex-direction:column;">
+            <div class="wizard-modal" ref=${dialogRef} tabIndex="-1" role="dialog" aria-modal="true" aria-labelledby="connect-tool-title" style="max-width:640px;max-height:85vh;display:flex;flex-direction:column;">
                 <div class="wizard-header">
-                    <h2>Connect an AI tool</h2>
-                    <button class="detail-close" onClick=${onClose}>×</button>
+                    <h2 id="connect-tool-title">Connect an AI tool</h2>
+                    <button class="detail-close" onClick=${onClose} aria-label="Close AI tool setup">×</button>
                 </div>
                 <div class="wizard-body" style="overflow-y:auto;flex:1;padding:20px;line-height:1.55;">
                     ${view === 'branch' && html`
@@ -10114,6 +10452,8 @@ function NetworkJoinGuestPanel({ onClose }) {
     const [err, setErr] = useState(null);
     const [restarting, setRestarting] = useState(false);
     const pollRef = useRef(null);
+    const closeJoin = () => { joinGuestCancel().catch(() => {}); onClose(); };
+    const dialogRef = useModalDialog(closeJoin);
 
     useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
@@ -10146,20 +10486,22 @@ function NetworkJoinGuestPanel({ onClose }) {
     const st = status && status.state;
 
     return html`
-        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) { joinGuestCancel().catch(() => {}); onClose(); } }}>
-            <div class="wizard-modal" style="max-width:560px;">
+        <div class="wizard-overlay" onClick=${e => { if (e.target === e.currentTarget) closeJoin(); }}>
+            <div class="wizard-modal" ref=${dialogRef} tabIndex="-1" role="dialog" aria-modal="true" aria-labelledby="join-network-title" style="max-width:560px;">
                 <div class="wizard-header">
-                    <h2>Join a SAGE network</h2>
-                    <button class="detail-close" onClick=${() => { joinGuestCancel().catch(() => {}); onClose(); }}>×</button>
+                    <h2 id="join-network-title">Join a SAGE network</h2>
+                    <button class="detail-close" onClick=${closeJoin} aria-label="Close network join setup">×</button>
                 </div>
                 <div class="wizard-body" style="padding:20px;line-height:1.55;">
                     ${!sas && html`
                         <p style="color:var(--text-dim);">This makes <strong>this computer</strong> part of another SAGE network — it keeps its own node but shares that network's memory.
                             On the host, open <em>Connect an AI tool → another computer on my network</em> to get a pairing code, then paste it here.</p>
-                        <div class="warning-banner" style="margin-bottom:12px;">Heads up: joining resets this node's local chain state and restarts it. Your stored memories are kept.</div>
+                        <div class="warning-banner" style="margin-bottom:12px;">
+                            <strong>Before you continue:</strong> joining replaces this computer's current network history and restarts SAGE. Your stored memories are kept. If this SAGE has been used before, export a backup from <em>Settings → Maintenance</em> first.
+                        </div>
                         <div class="wizard-field">
-                            <label>Pairing code from the host</label>
-                            <textarea class="wizard-input" style="min-height:70px;font-family:monospace;font-size:11px;" value=${token} onInput=${e => setToken(e.target.value)} placeholder="paste the code shown on the other computer"></textarea>
+                            <label for="network-join-code">Pairing code from the host</label>
+                            <textarea id="network-join-code" class="wizard-input" style="min-height:70px;font-family:monospace;font-size:11px;" value=${token} onInput=${e => setToken(e.target.value)} placeholder="Paste the code shown on the other computer"></textarea>
                         </div>
                         <button class="btn btn-primary" onClick=${onJoin} disabled=${starting || !token.trim()}>
                             ${starting ? 'Connecting…' : 'Join'}
@@ -10261,57 +10603,94 @@ function RemoveConfirmModal({ agent, onConfirm, onCancel }) {
 // ============================================================================
 
 // OnboardingWizard - shown once on a fresh node (empty brain + onboarding not
-// yet marked done) and re-runnable from Settings > Maintenance. Three short
+// yet marked done) and re-runnable from Settings > Maintenance. Short guided
 // steps that reuse the REAL setup surfaces (EmbeddingsSetupModal for semantic
 // memory, ConnectToolModal for wiring an AI tool) instead of duplicating them.
 // Closing it at ANY point marks onboarding done so it never nags; the Settings
 // entry is the way back in.
 function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
-    const [step, setStep] = useState(0); // 0 welcome | 1 memory | 2 connect | 3 done
+    const [step, setStep] = useState(0); // 0 create-or-join | 1 memory | 2 connect | 3 privacy | 4 recovery | 5 done
     const [emb, setEmb] = useState(null);
+    const [ledgerStatus, setLedgerStatus] = useState(null);
     const [agents, setAgents] = useState([]);
     const [showEmbedSetup, setShowEmbedSetup] = useState(false);
     const [showRerankSetup, setShowRerankSetup] = useState(false);
     const [rerankOn, setRerankOn] = useState(false);
     const [showConnect, setShowConnect] = useState(false);
     const [showChatGPT, setShowChatGPT] = useState(false);
+    const [showJoinNetwork, setShowJoinNetwork] = useState(false);
+    const [showLedgerSetup, setShowLedgerSetup] = useState(false);
+    const [privacyChoice, setPrivacyChoice] = useState('private');
 
     const refreshEmb = () => embeddingsStatus().then(setEmb).catch(() => setEmb(null));
     const refreshAgents = () => fetchAgents().then(d => setAgents(d.agents || [])).catch(() => {});
     const refreshRerank = () => fetchReranker().then(c => setRerankOn(!!c.enabled)).catch(() => {}); // any enabled reranker counts, incl. BYO TEI
-    useEffect(() => { refreshEmb(); refreshAgents(); refreshRerank(); }, []);
+    const refreshLedger = () => fetchLedgerStatus().then(setLedgerStatus).catch(() => setLedgerStatus({ unavailable: true }));
+    useEffect(() => { refreshEmb(); refreshAgents(); refreshRerank(); refreshLedger(); }, []);
 
     const finish = () => { saveOnboarding(true).catch(() => {}); onClose(); };
 
     const semantic = !!(emb && emb.is_semantic);
     const ollamaUp = !!(emb && emb.ollama_running);
-    const titles = ['Welcome to SAGE', 'Semantic memory', 'Connect an AI tool', "You're set"];
+    const titles = ['How do you want to start?', 'Smart search', 'Connect an AI tool', 'Private or shared?', 'Protect and recover', "You're set"];
+    const childOpen = showEmbedSetup || showRerankSetup || showConnect || showChatGPT || showJoinNetwork || showLedgerSetup;
+    const dialogRef = useModalDialog(finish, !childOpen);
+
+    // Keep exactly one modal in the accessibility tree and tab order. Each
+    // child reuses the real setup surface and returns here when it closes.
+    if (showEmbedSetup) {
+        return html`<${EmbeddingsSetupModal} onClose=${() => { setShowEmbedSetup(false); refreshEmb(); }} onDone=${refreshEmb} />`;
+    }
+    if (showRerankSetup) {
+        return html`<${RerankerSetupModal} onClose=${() => { setShowRerankSetup(false); refreshRerank(); }} onDone=${refreshRerank} />`;
+    }
+    if (showConnect) {
+        return html`<${ConnectToolModal} agents=${agents}
+            onOpenChatGPT=${() => { setShowConnect(false); setShowChatGPT(true); }}
+            onClose=${() => { setShowConnect(false); refreshAgents(); }} />`;
+    }
+    if (showChatGPT) {
+        return html`<${ChatGPTTunnelWizard} onClose=${() => setShowChatGPT(false)} />`;
+    }
+    if (showJoinNetwork) {
+        return html`<${NetworkJoinGuestPanel} onClose=${() => setShowJoinNetwork(false)} />`;
+    }
+    if (showLedgerSetup) {
+        return html`<${SynapticLedgerModal} onClose=${() => { setShowLedgerSetup(false); refreshLedger(); }} />`;
+    }
 
     return html`
         <div class="wizard-overlay">
-            <div class="wizard-modal" style="max-width:560px;">
+            <div class="wizard-modal" ref=${dialogRef} tabIndex="-1" style="max-width:560px;" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
                 <div class="wizard-header">
-                    <h2>${titles[step]}</h2>
-                    <button class="detail-close" onClick=${finish} title="Close - you can rerun this from Settings > Maintenance">×</button>
+                    <h2 id="onboarding-title">${titles[step]}</h2>
+                    <button class="detail-close" onClick=${finish} title="Close - you can rerun this from Settings > Maintenance" aria-label="Close setup">×</button>
                 </div>
                 <div class="wizard-body" style="padding:20px;line-height:1.55;">
                     ${step === 0 && html`
-                        <p style="margin-top:0;">Your node is running - this dashboard (CEREBRUM) is where you watch and curate everything your AI tools remember.</p>
-                        <p>Two quick steps take you from empty brain to working memory:</p>
-                        <ol style="margin:0 0 4px;padding-left:20px;color:var(--text-dim);">
-                            <li><strong>Semantic memory</strong> - recall by meaning, not just keywords.</li>
-                            <li><strong>Connect an AI tool</strong> - Claude Code, Codex, Cursor, ChatGPT and friends.</li>
-                        </ol>
-                        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;">
-                            <button class="btn" onClick=${finish}>Skip for now</button>
-                            <button class="btn btn-primary" onClick=${() => setStep(1)}>Let's go</button>
+                        <p style="margin-top:0;color:var(--text-dim);">This computer can keep its own private SAGE, or join a SAGE network that already exists.</p>
+                        <div class="onboarding-choices">
+                            <button class="connect-card onboarding-choice" onClick=${() => setStep(1)}>
+                                <span class="connect-card-icon" aria-hidden="true">🧠</span>
+                                <span class="onboarding-choice-title">Start my own SAGE</span>
+                                <span class="onboarding-choice-copy">Set up private memory on this computer. Nothing is shared unless you choose who can access it.</span>
+                            </button>
+                            <button class="connect-card onboarding-choice" onClick=${() => setShowJoinNetwork(true)}>
+                                <span class="connect-card-icon" aria-hidden="true">🔗</span>
+                                <span class="onboarding-choice-title">Join an existing SAGE network</span>
+                                <span class="onboarding-choice-copy">Use a pairing code from someone you trust. This computer becomes part of their SAGE network.</span>
+                            </button>
+                        </div>
+                        <div class="onboarding-safety-note">You can connect separate SAGEs for file-sharing-style access later. Joining here means this computer becomes part of the same SAGE network.</div>
+                        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px;">
+                            <button class="btn" onClick=${finish}>Decide later</button>
                         </div>
                     `}
                     ${step === 1 && html`
                         ${semantic ? html`
                             <div style="display:flex;align-items:center;gap:10px;background:var(--success-tint);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
                                 <span style="color:var(--accent);font-size:18px;">✓</span>
-                                <div style="font-size:13px;">Semantic memory is <strong>on</strong> - your agents recall by meaning (Ollama + nomic-embed-text).</div>
+                                <div style="font-size:13px;">Smart search is <strong>on</strong> — your AI tools can find memories by meaning.</div>
                             </div>
                             ${rerankOn ? html`
                                 <div style="display:flex;align-items:center;gap:10px;margin-top:10px;background:var(--success-tint);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
@@ -10325,11 +10704,11 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                                 </div>
                             `}
                         ` : html`
-                            <p style="margin-top:0;">Out of the box SAGE recalls by <strong>keywords</strong>. Turning on the semantic embedder (a free local model via Ollama) lets your agents find memories by <strong>meaning</strong> - the single biggest recall upgrade.</p>
+                            <p style="margin-top:0;">SAGE can find exact words now. Turn on <strong>smart search</strong> to also find memories with the same <strong>meaning</strong>. It runs privately on this computer, and SAGE handles the one-time setup.</p>
                             ${ollamaUp
-                                ? html`<p style="color:var(--accent);font-size:13px;">Ollama is already running on this machine - setup takes about a minute.</p>`
-                                : html`<p style="color:var(--text-dim);font-size:13px;">SAGE downloads and verifies the local Ollama runtime, starts it, pulls the model, and continues only after readiness checks pass. You can skip for now and turn it on any time from Settings.</p>`}
-                            <button class="btn btn-primary" onClick=${() => setShowEmbedSetup(true)}>Set up semantic memory</button>
+                                ? html`<p style="color:var(--accent);font-size:13px;">The private search helper is already available — setup takes about a minute.</p>`
+                                : html`<p style="color:var(--text-dim);font-size:13px;">SAGE downloads and checks everything it needs. You can skip for now and turn it on any time from Settings.</p>`}
+                            <button class="btn btn-primary" onClick=${() => setShowEmbedSetup(true)}>Turn on smart search</button>
                         `}
                         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
                             <button class="btn" onClick=${() => setStep(0)}>Back</button>
@@ -10339,8 +10718,7 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                         </div>
                     `}
                     ${step === 2 && html`
-                        <p style="margin-top:0;">Wire an AI tool to this node and it gets persistent memory: it reloads what it knows when it boots, and remembers what it learns as it works.</p>
-                        ${agents.length > 0 && html`<p style="color:var(--accent);font-size:13px;">✓ ${agents.length} agent identit${agents.length === 1 ? 'y' : 'ies'} registered on this node.</p>`}
+                        <p style="margin-top:0;">Connect ChatGPT, Claude, Codex, Cursor, or another AI tool so it can recall what it knows and remember what it learns while you work.</p>
                         <button class="btn btn-primary" onClick=${() => setShowConnect(true)}>Connect an AI tool</button>
                         <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
                             <button class="btn" onClick=${() => setStep(1)}>Back</button>
@@ -10348,26 +10726,79 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                         </div>
                     `}
                     ${step === 3 && html`
+                        <p style="margin-top:0;color:var(--text-dim);">SAGE starts private. Connecting an AI tool on this computer does not share your memories with another SAGE.</p>
+                        <div class="onboarding-choices onboarding-privacy-choices" role="group" aria-label="Choose whether to share with another SAGE">
+                            <button class="connect-card onboarding-choice ${privacyChoice === 'private' ? 'selected' : ''}"
+                                aria-pressed=${privacyChoice === 'private'} onClick=${() => setPrivacyChoice('private')}>
+                                <span class="connect-card-icon" aria-hidden="true">🔒</span>
+                                <span class="onboarding-choice-title">Keep this SAGE private</span>
+                                <span class="onboarding-choice-copy">No other SAGE can see anything. You can set up sharing later without redoing this setup.</span>
+                                <span class="onboarding-choice-status">${privacyChoice === 'private' ? 'Selected · nothing will be shared' : 'Choose private'}</span>
+                            </button>
+                            <button class="connect-card onboarding-choice ${privacyChoice === 'share' ? 'selected' : ''}"
+                                aria-pressed=${privacyChoice === 'share'} onClick=${() => setPrivacyChoice('share')}>
+                                <span class="connect-card-icon" aria-hidden="true">🤝</span>
+                                <span class="onboarding-choice-title">Share with another SAGE</span>
+                                <span class="onboarding-choice-copy">First pair with someone you trust, then choose the existing topics they can access. Pairing alone shares nothing.</span>
+                                <span class="onboarding-choice-status">${privacyChoice === 'share' ? 'Selected · you choose people and topics next' : 'Choose sharing'}</span>
+                            </button>
+                        </div>
+                        <div class="onboarding-safety-note">Sharing works like a shared folder: the owner chooses who gets access and what they can use. You can remove access later without deleting the trusted connection.</div>
+                        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
+                            <button class="btn" onClick=${() => setStep(2)}>Back</button>
+                            <button class="btn btn-primary" onClick=${() => setStep(4)}>${privacyChoice === 'share' ? 'Continue' : 'Keep private & continue'}</button>
+                        </div>
+                    `}
+                    ${step === 4 && html`
+                        <p style="margin-top:0;color:var(--text-dim);">Encryption protects memories stored on this computer. A recovery key is the only way to reset a forgotten passphrase.</p>
+                        ${ledgerStatus === null && html`<div class="onboarding-recovery-state muted" role="status">Checking encryption and recovery…</div>`}
+                        ${ledgerStatus && ledgerStatus.unavailable && html`<div class="import-error" role="alert">SAGE could not check recovery status. You can continue and return to Settings → Security later.</div>`}
+                        ${ledgerStatus && !ledgerStatus.unavailable && ledgerStatus.enabled && html`
+                            <div class="onboarding-recovery-state ${ledgerStatus.recovery_backup_confirmed ? 'ready' : 'attention'}">
+                                <div class="onboarding-recovery-icon" aria-hidden="true">${ledgerStatus.recovery_backup_confirmed ? '✓' : '!'}</div>
+                                <div>
+                                    <strong>${ledgerStatus.recovery_backup_confirmed ? 'Encryption is on and backup is confirmed' : 'Encryption is on — back up the recovery key'}</strong>
+                                    <p>${ledgerStatus.recovery_backup_confirmed ? 'SAGE remembers that you confirmed storing the key safely. You can make another copy now.' : 'If you forget the passphrase before saving this key, SAGE cannot recover your encrypted memories.'}</p>
+                                </div>
+                            </div>
+                            <button class="btn ${ledgerStatus.recovery_backup_confirmed ? '' : 'btn-primary'}" onClick=${() => setShowLedgerSetup(true)}>${ledgerStatus.recovery_backup_confirmed ? 'Review recovery backup' : 'Back up recovery key'}</button>
+                        `}
+                        ${ledgerStatus && !ledgerStatus.unavailable && !ledgerStatus.enabled && html`
+                            <div class="onboarding-recovery-state">
+                                <div class="onboarding-recovery-icon" aria-hidden="true">🔓</div>
+                                <div>
+                                    <strong>Memories are not encrypted on disk</strong>
+                                    <p>Encryption is optional. If you turn it on, SAGE creates a recovery key and guides you to store it safely.</p>
+                                </div>
+                            </div>
+                            <button class="btn btn-primary" onClick=${() => setShowLedgerSetup(true)}>Set up encryption & recovery</button>
+                        `}
+                        <div class="onboarding-safety-note"><strong>Keep the recovery key private.</strong> Anyone with it can reset the passphrase and unlock your memories. Store it in a password manager or another safe offline place.</div>
+                        <div style="display:flex;gap:8px;justify-content:space-between;margin-top:20px;">
+                            <button class="btn" onClick=${() => setStep(3)}>Back</button>
+                            <button class="btn btn-primary" onClick=${() => setStep(5)}>${ledgerStatus && ledgerStatus.enabled && !ledgerStatus.recovery_backup_confirmed ? 'Continue for now' : 'Continue'}</button>
+                        </div>
+                    `}
+                    ${step === 5 && html`
                         <p style="margin-top:0;">That's the essentials. Two things worth knowing about:</p>
                         <ul style="padding-left:20px;color:var(--text-dim);">
                             <li><strong>Import</strong> - bring your existing ChatGPT / Claude / Gemini conversations into the brain.</li>
-                            <li><strong>The guide</strong> - how memories, consensus, agents and federation fit together.</li>
+                            <li><strong>The guide</strong> - how SAGE remembers, shares, and keeps your information safe.</li>
                         </ul>
                         <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px;flex-wrap:wrap;">
                             <button class="btn" onClick=${() => { finish(); if (onNavigate) onNavigate('import'); }}>Import conversations</button>
                             <button class="btn" onClick=${() => { finish(); if (onOpenGuide) onOpenGuide('getting-started'); }}>Open the guide</button>
-                            <button class="btn btn-primary" onClick=${finish}>Finish</button>
+                            ${privacyChoice === 'share'
+                                ? html`
+                                    <button class="btn" onClick=${finish}>Finish setup</button>
+                                    <button class="btn btn-primary" onClick=${() => { finish(); if (onNavigate) onNavigate('federation'); }}>Set up sharing</button>
+                                `
+                                : html`<button class="btn btn-primary" onClick=${finish}>Finish</button>`}
                         </div>
                     `}
                 </div>
             </div>
         </div>
-        ${showEmbedSetup && html`<${EmbeddingsSetupModal} onClose=${() => { setShowEmbedSetup(false); refreshEmb(); }} onDone=${refreshEmb} />`}
-        ${showRerankSetup && html`<${RerankerSetupModal} onClose=${() => { setShowRerankSetup(false); refreshRerank(); }} onDone=${refreshRerank} />`}
-        ${showConnect && html`<${ConnectToolModal} agents=${agents}
-            onOpenChatGPT=${() => { setShowConnect(false); setShowChatGPT(true); }}
-            onClose=${() => { setShowConnect(false); refreshAgents(); }} />`}
-        ${showChatGPT && html`<${ChatGPTTunnelWizard} onClose=${() => setShowChatGPT(false)} />`}
     `;
 }
 
@@ -11704,6 +12135,28 @@ function isFederationEndpointFormatValid(ep) {
     }
 }
 
+function FedRouteDiagnostic({ plan, compact = false }) {
+    const normalized = normalizeFederationRoutePlan(plan);
+    const presentation = federationRoutePresentation(normalized);
+    const candidateLabel = candidate => candidate.kind === 'relay' ? 'Secure relay' : 'Direct';
+    return html`<div class="fed-route-diagnostic ${presentation.tone} ${compact ? 'compact' : ''}" role="status" aria-live="polite">
+        <div class="fed-route-summary">
+            <span class="fed-route-dot"></span>
+            <strong>${presentation.label}</strong>
+            ${normalized.latencyMs != null && normalized.latencyMs >= 0 && html`<span>${Math.round(normalized.latencyMs)} ms</span>`}
+        </div>
+        <p>${presentation.detail}</p>
+        ${!compact && normalized.candidates.length > 0 && html`<ul class="fed-route-candidates">
+            ${normalized.candidates.map(candidate => html`<li class=${candidate.ready ? 'ready' : 'unavailable'} key=${candidate.kind + candidate.endpoint}>
+                <span>${candidateLabel(candidate)}</span>
+                <strong>${candidate.ready ? (normalized.phase === 'prepared' ? 'Prepared' : 'Ready') : 'Unavailable'}</strong>
+                ${candidate.reason && html`<small>${candidate.reason}</small>`}
+            </li>`)}
+        </ul>`}
+        ${!compact && normalized.legacyCompatible && html`<p class="fed-route-legacy">Older SAGE versions remain compatible through the Direct route. Automatic roaming needs current versions on both machines.</p>`}
+    </div>`;
+}
+
 // useLanEndpoint - resolves the endpoint the wizard should advertise from the
 // node's effective federation listener. JOIN attestations freeze this exact
 // value, so the browser must never guess a port. setEndpoint remains available
@@ -11767,6 +12220,8 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
     const [scan, setScan] = useState(null);       // {session_id, host_chain, host_endpoint, host_pin, return_uri}
     const [codes, setCodes] = useState(null);      // {code_g, code_h, confirm_step}
     const [hostScope, setHostScope] = useState(null);
+    const [routePlan, setRoutePlan] = useState(null);
+    const [routeFailure, setRouteFailure] = useState('');
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
     const [pollNote, setPollNote] = useState('');
@@ -11780,7 +12235,11 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
         });
     }, [step]);
 
-    const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
+    const fail = (e, fallback = 'route_failure') => {
+        setRouteFailure(classifyFederationFailure(e, fallback));
+        setErr(String(e.message || e));
+        setBusy(false);
+    };
 
     const doScan = async (uri, source = 'camera') => {
         if (!!String(endpoint || '').trim() && !isFederationEndpointFormatValid(endpoint)) {
@@ -11790,9 +12249,23 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
         setBusy(true); setErr('');
         try {
             if (source !== 'camera') setTier4(true);
-            const r = await fedGuestScan(uri, endpoint); setScan(r); setStep('return');
+            const r = await fedGuestScan(uri, endpoint);
+            setScan(r);
+            const route = normalizeFederationRoutePlan(
+                r && r.route
+                    ? r.route
+                    : {
+                        phase: 'prepared',
+                        state: 'ready',
+                        message: 'The first secure exchange succeeded. SAGE will keep choosing the best route automatically.',
+                    },
+            );
+            setRoutePlan(route);
+            setRouteFailure('');
+            if (route.state === 'relay') setTier4(true);
+            setStep('return');
         }
-        catch (e) { fail(e); }
+        catch (e) { fail(e, 'route_failure'); }
         setBusy(false);
     };
     const doRequest = async () => {
@@ -11852,6 +12325,7 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
                 const s = await fedGuestStatus(scan.session_id);
                 if (!live) return;
                 misses = 0; setPollNote('');
+                if (s && s.route) setRoutePlan(normalizeFederationRoutePlan(s.route, endpoint));
                 if (s.aborted || s.state === 'aborted') { setEndedReason('They stopped the connection before it completed.'); setStep('ended'); return; }
                 if (s.expired || s.state === 'expired') { setEndedReason('The connection code expired before both computers finished.'); setStep('ended'); return; }
                 if (s.active) { setStep('done'); return; }
@@ -11859,8 +12333,10 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
             } catch (e) {
                 if (!live) return;
                 misses += 1;
-                if (misses >= 4) setPollNote(`Can't check their side (${e && e.message ? e.message : 'no response'}). Make sure the other computer is on and you're both on the same network.`);
-                if (misses >= 15) { setEndedReason('We could not reach the other computer for about 30 seconds. Your connection has not been approved; check the network and try again.'); setStep('interrupted'); }
+                const state = classifyFederationFailure(e, 'offline');
+                setRouteFailure(state);
+                if (misses >= 4) setPollNote(`${federationRoutePresentation({ state, last_error: e && e.message }).label}: ${e && e.message ? e.message : 'no response'}. SAGE will keep trying prepared Direct and Secure relay routes.`);
+                if (misses >= 15) { setEndedReason('SAGE could not reach the other computer for about 30 seconds over either prepared route. Your connection has not been approved.'); setStep('interrupted'); }
             }
         };
         const id = setInterval(tick, 2000); tick();
@@ -11879,6 +12355,7 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
         </div>
         ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
         ${err && html`<div class="fed-err" role="alert">${err}</div>`}
+        ${routeFailure && html`<${FedRouteDiagnostic} plan=${{ state: routeFailure, last_error: err }} compact=${true} />`}
 
         ${step === 'scan' && html`<div class="fed-step">
             <${FedGreenRail} />
@@ -11888,11 +12365,11 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
                 : html`<p class="muted">Point your camera at the connection code your colleague is showing you.</p>`}
             ${tier4 && html`<div class="fed-tier4-note">Connecting remotely or using a pasted image? The short number check later protects against a code being swapped or relayed.</div>`}
             ${!endpointReady && html`<div class="muted">Finding this computer’s network address…</div>`}
-            ${endpointMissing && html`<div class="fed-tier4-note" role="status">No local-network address was detected. You can still scan an Internet connection code. For a same-network connection, enter this computer’s reachable address below.</div>`}
+            ${endpointMissing && html`<div class="fed-tier4-note" role="status">No Direct address was detected. You can still scan a code that contains a Secure relay route.</div>`}
             ${endpointInvalid && html`<div class="fed-err" role="alert">Enter the full <code>https://host:port</code> address with no path or query before scanning.</div>`}
             <${FedScanInput} onValue=${doScan} busy=${busy || !endpointReady || endpointInvalid} />
             <details class="fed-advanced" open=${endpointFailed || endpointMissing || endpointInvalid || isLoopbackEndpoint(endpoint) || lanCandidates.length > 1}>
-                <summary onClick=${() => setTier4(true)}>Connecting remotely or need to change the network address?</summary>
+                <summary onClick=${() => setTier4(true)}>Advanced: use a specific Direct address</summary>
                 <div class="fed-field">
                     <label for="fed-guest-endpoint">This computer’s reachable address</label>
                     <input id="fed-guest-endpoint" class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)}
@@ -11906,7 +12383,8 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
         ${step === 'return' && scan && html`<div class="fed-step">
             <${FedGreenRail} />
             <h3>Now let them scan you</h3>
-            <p class="muted">Connecting to <strong>${scan.host_name || 'the other SAGE'}</strong>. Hold this up to their camera, or send it for them to paste.</p>
+            <p class="muted">Connecting to <strong>${scan.host_name || 'the other SAGE'}</strong>. SAGE automatically chose the best prepared route. Hold this up to their camera, or send it for them to paste.</p>
+            ${routePlan && html`<${FedRouteDiagnostic} plan=${routePlan} compact=${true} />`}
             <${FedQr} text=${scan.return_uri} caption="Their SAGE scans this to check it's really you." />
             <div class="fed-step-actions">
                 <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : "They've scanned me — continue"}</button>
@@ -11970,9 +12448,10 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
 // HostJoinWizard - "Let someone join". Maps to host H1-H7.
 function HostJoinWizard({ onExit }) {
     const wizardRef = useRef(null);
-    const [step, setStep] = useState('route');
-    const [routeMode, setRouteMode] = useState('');
+    const [step, setStep] = useState('prepare');
     const [endpoint, setEndpoint, lanCandidates, endpointReady] = useLanEndpoint();
+    const [routePlan, setRoutePlan] = useState(null);
+    const [routeFailure, setRouteFailure] = useState('');
     const [session, setSession] = useState(null);   // {session_id, otpauth_uri, host_pin}
     const [view, setView] = useState(null);          // host status view
     const [tier4, setTier4] = useState(false);
@@ -11984,7 +12463,11 @@ function HostJoinWizard({ onExit }) {
     const trustOnlyGrant = { max_clearance: 4, allowed_domains: [], mode: 'exchange', direction: 'both' };
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
-    const fail = (e) => { setErr(String(e.message || e)); setBusy(false); };
+    const fail = (e, fallback = 'route_failure') => {
+        setRouteFailure(classifyFederationFailure(e, fallback));
+        setErr(String(e.message || e));
+        setBusy(false);
+    };
 
     useEffect(() => {
         requestAnimationFrame(() => {
@@ -11993,35 +12476,71 @@ function HostJoinWizard({ onExit }) {
         });
     }, [step]);
 
-    const doCreate = async (mode = routeMode || 'lan') => {
-        if (mode === 'lan' && !isFederationEndpointFormatValid(endpoint)) {
-            setErr('Enter a complete reachable address such as https://192.168.1.10:18444 before creating a code.');
-            return;
-        }
+    useEffect(() => {
+        if (step !== 'prepare' || !endpointReady) return;
+        let live = true;
+        setRouteFailure('');
+        fedJoinRoutes()
+            .then(response => {
+                if (!live) return;
+                setRoutePlan(normalizeFederationRoutePlan({ ...response, phase: 'prepared' }));
+            })
+            .catch(error => {
+                if (!live) return;
+                // Mixed app/backend upgrades may briefly lack the preflight
+                // endpoint. Keep the proven direct ceremony available when the
+                // listener supplied a valid address, and label it honestly.
+                if ((error.status === 404 || error.status === 501) && isFederationEndpointFormatValid(endpoint)) {
+                    setRoutePlan(normalizeFederationRoutePlan({
+                        phase: 'prepared',
+                        state: 'degraded',
+                        candidates: [{ kind: 'direct', ready: true, endpoint }],
+                        message: 'Automatic route preparation is unavailable on this SAGE build. A compatible Direct candidate is prepared.',
+                        legacy_compatible: true,
+                    }));
+                    return;
+                }
+                setRouteFailure(classifyFederationFailure(error));
+                setRoutePlan(normalizeFederationRoutePlan({
+                    state: classifyFederationFailure(error),
+                    message: String(error.message || error),
+                }));
+            });
+        return () => { live = false; };
+    }, [step, endpointReady, endpoint]);
+
+    const doCreate = async () => {
         setBusy(true); setErr('');
-        try { const r = await fedHostCreate(endpoint, mode); setSession(r); setRouteMode(mode); setTier4(mode === 'internet'); setStep('showqr'); }
+        try {
+            const r = await fedHostCreate(endpoint, 'auto');
+            setSession(r);
+            const effective = normalizeFederationRoutePlan({
+                ...(r && r.route ? r.route : routePlan || {}),
+                phase: 'prepared',
+                state: r && r.route && r.route.state
+                    ? r.route.state
+                    : routePlan && routePlan.state || 'ready',
+                message: r && r.route && r.route.message
+                    ? r.route.message
+                    : 'Connection routes are prepared. SAGE will test them and choose automatically when the other SAGE connects.',
+                legacy_compatible: r && Object.prototype.hasOwnProperty.call(r, 'legacy_compatible')
+                    ? r.legacy_compatible
+                    : true,
+            });
+            setRoutePlan(effective);
+            setRouteFailure('');
+            setTier4(effective.state === 'relay');
+            setStep('showqr');
+        }
         catch (e) { fail(e); }
         setBusy(false);
     };
-
-    // Show the code straight away: as soon as the node resolves a real network
-    // address (not a useless localhost one), mint the session and jump to the QR
-    // so the common case is zero clicks. If only a loopback address is known we
-    // stay on the address screen so the operator can correct it first.
-    const autoTried = useRef(false);
-    useEffect(() => {
-        if (autoTried.current || step !== 'create' || session || busy || !endpointReady) return;
-        if (!isFederationEndpointFormatValid(endpoint) || isLoopbackEndpoint(endpoint)) return;
-        autoTried.current = true;
-        doCreate();
-    }, [endpoint, endpointReady, step, session, busy]);
 
     // "Wrong address?" from the QR screen: burn the auto-minted session and go
     // back to the address form (re-minting is intentional — the code embeds it).
     const editAddress = async () => {
         try { if (session) await fedHostAbort(session.session_id); } catch (e) {}
-        autoTried.current = true; // don't immediately re-auto-create; let them edit
-        setSession(null); setView(null); setStep('create');
+        setSession(null); setView(null); setStep('prepare');
     };
     const doScanReturn = async (uri, source = 'camera') => {
         setBusy(true); setErr('');
@@ -12064,6 +12583,10 @@ function HostJoinWizard({ onExit }) {
                 if (!live) return;
                 misses = 0;
                 setView(v);
+                if (v && v.route) {
+                    setRoutePlan(normalizeFederationRoutePlan(v.route));
+                    setRouteFailure('');
+                }
                 const state = normalizeFederationJoinState(v.state);
                 if (state === 'aborted') { setEndedReason('They stopped the connection before it completed.'); setStep('ended'); return; }
                 if (state === 'expired') { setEndedReason('The connection code expired before both computers finished.'); setStep('ended'); return; }
@@ -12072,6 +12595,7 @@ function HostJoinWizard({ onExit }) {
             } catch (e) {
                 if (!live) return;
                 misses += 1;
+                setRouteFailure(classifyFederationFailure(e, 'offline'));
                 if (misses >= 15) {
                     interruptedFrom.current = step;
                     setEndedReason('We could not reach the local federation service for about 30 seconds. The connection has not silently advanced.');
@@ -12087,38 +12611,37 @@ function HostJoinWizard({ onExit }) {
         : (['compare', 'readback'].includes(step) ? 'check' : 'scan');
     const endpointMissing = endpointReady && !String(endpoint || '').trim();
     const endpointInvalid = endpointReady && !!String(endpoint || '').trim() && !isFederationEndpointFormatValid(endpoint);
+    const preparedRelay = routePlan && routePlan.candidates.some(candidate => candidate.kind === 'relay' && candidate.ready);
+    const routeBlocked = routePlan && ['offline', 'disabled', 'locked', 'security_blocked', 'trust_failure', 'route_failure'].includes(routePlan.state);
+    const routeReadyForCreate = !!routePlan && !routeBlocked && (preparedRelay || isFederationEndpointFormatValid(endpoint));
 
     return html`<div class="fed-wizard ${step === 'showqr' ? 'fed-wizard-wide' : ''}" ref=${wizardRef}>
         <div class="fed-wizard-head">
-            <button class="btn fed-back" disabled=${busy} onClick=${step === 'route' ? onExit : abort}>← ${step === 'route' ? 'Back' : 'Cancel'}</button>
-            <span class="fed-wizard-title">Let someone join</span>
+            <button class="btn fed-back" disabled=${busy} onClick=${step === 'prepare' ? onExit : abort}>← ${step === 'prepare' ? 'Back' : 'Cancel'}</button>
+            <span class="fed-wizard-title">Connect another SAGE</span>
         </div>
         ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
         ${err && html`<div class="fed-err" role="alert">${err}</div>`}
+        ${routeFailure && html`<${FedRouteDiagnostic} plan=${{ state: routeFailure, last_error: err }} compact=${true} />`}
 
-        ${step === 'route' && html`<div class="fed-step">
-            <h2>How are the two computers connected?</h2>
+        ${step === 'prepare' && html`<div class="fed-step">
+            <h2>Connect another SAGE</h2>
             <${FedGreenRail} />
-            <div class="fed-gate-choices">
-                <button class="btn btn-primary" onClick=${() => { setRouteMode('lan'); setStep('create'); }}>Same Wi‑Fi or local network</button>
-                <button class="btn" disabled=${busy} onClick=${() => { setRouteMode('internet'); doCreate('internet'); }}>${busy ? 'Checking relay…' : 'Across the internet'}</button>
-            </div>
-            <p class="muted">Either way, SAGE saves secure roaming routes when available, so a laptop can move from home Wi‑Fi to another network and reconnect without pairing again.</p>
-        </div>`}
-
-        ${step === 'create' && html`<div class="fed-step">
-            <h2>Let someone join your network</h2>
-            <${FedGreenRail} />
-            ${!endpointReady && html`<div class="muted">Finding this computer’s network address…</div>`}
-            ${endpointMissing && html`<div class="fed-err" role="alert">We couldn’t read this node’s federation address. Enter the reachable address below before creating a code.</div>`}
-            ${endpointInvalid && html`<div class="fed-err" role="alert">Enter the full <code>https://host:port</code> address with no path or query before creating a code.</div>`}
-            <div class="fed-field">
-                <label for="fed-host-endpoint">Your network address (how they'll reach you)</label>
-                <input id="fed-host-endpoint" class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:PORT" />
-                ${isLoopbackEndpoint(endpoint) && html`<div class="fed-warn">This advertised address points back to this computer, so another SAGE cannot reach it. Same-computer testing still works. For another computer, set <code>federation.listen_addr</code> to a reachable or wildcard address, restart SAGE, then choose the detected reachable address above or use Internet setup.</div>`}
-            </div>
-            <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
-            <button class="btn btn-primary" disabled=${busy || !endpointReady || endpointMissing || endpointInvalid} onClick=${() => doCreate('lan')}>${busy ? 'Working…' : 'Show my connection code'}</button>
+            <p class="muted">SAGE checks Direct and Secure relay routes and chooses the best one automatically. The encrypted trust ceremony is the same nearby or across the internet.</p>
+            ${!endpointReady || !routePlan
+                ? html`<div class="fed-route-loading"><span class="fed-spinner"></span> Preparing secure routes…</div>`
+                : html`<${FedRouteDiagnostic} plan=${routePlan} />`}
+            <details class="fed-advanced" open=${endpointMissing || endpointInvalid || isLoopbackEndpoint(endpoint)}>
+                <summary>Advanced Direct address</summary>
+                ${endpointMissing && html`<div class="fed-warn">No Direct address was detected. Secure relay may still work when it is ready.</div>`}
+                ${endpointInvalid && html`<div class="fed-err" role="alert">Enter the full <code>https://host:port</code> address with no path or query.</div>`}
+                <div class="fed-field">
+                    <label for="fed-host-endpoint">This SAGE’s Direct address</label>
+                    <input id="fed-host-endpoint" class="fed-share-input" value=${endpoint} onInput=${e => setEndpoint(e.target.value)} placeholder="https://192.168.1.10:PORT" />
+                </div>
+                <${FedEndpointPicker} candidates=${lanCandidates} endpoint=${endpoint} onPick=${setEndpoint} />
+            </details>
+            <button class="btn btn-primary" disabled=${busy || !endpointReady || !routeReadyForCreate} onClick=${doCreate}>${busy ? 'Preparing connection…' : 'Show connection code'}</button>
         </div>`}
 
         ${step === 'showqr' && session && html`<div class="fed-step fed-exchange-step">
@@ -12132,7 +12655,8 @@ function HostJoinWizard({ onExit }) {
                         <div><h3>They scan this SAGE</h3><p class="muted">Show this code to your colleague.</p></div>
                     </div>
                     <${FedQr} size=${200} text=${session.otpauth_uri} caption="Their camera scans this first." />
-                    ${routeMode === 'lan' && html`<button class="fed-linkbtn" onClick=${editAddress}>Wrong network address?</button>`}
+                    ${routePlan && html`<${FedRouteDiagnostic} plan=${routePlan} compact=${true} />`}
+                    ${routePlan && routePlan.candidates.some(candidate => candidate.kind === 'direct' && candidate.ready) && html`<button class="fed-linkbtn" onClick=${editAddress}>Advanced: change Direct address</button>`}
                 </section>
                 <section class="fed-exchange-card fed-exchange-card-active">
                     <div class="fed-exchange-card-head">
@@ -12244,6 +12768,10 @@ function fedPermissionMapsEqual(a, b) {
     return JSON.stringify(fedPermissionSnapshot(a)) === JSON.stringify(fedPermissionSnapshot(b));
 }
 
+function fedPermissionIsEnabled(permission) {
+    return !!(permission && (permission.read || permission.copy));
+}
+
 function normalizeFedDomainList(items) {
     return Array.from(new Set((Array.isArray(items) ? items : [])
         .map(value => String(value || '').trim())
@@ -12279,7 +12807,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const peerName = conn.peer_name || 'Other SAGE';
     const localIsHost = conn.local_role === 'host';
     const roleKnown = conn.local_role === 'host' || conn.local_role === 'guest';
-    const relationshipRole = localIsHost ? 'This SAGE is the relationship host' : (conn.local_role === 'guest' ? `${peerName} is the relationship host` : 'This direct relationship needs its role restored');
+    const relationshipRole = localIsHost ? 'This SAGE created the original connection code' : (conn.local_role === 'guest' ? `${peerName} created the original connection code` : 'This older direct relationship needs its role restored');
     const [catalog, setCatalog] = useState(null);
     const [saved, setSaved] = useState(null);
     const [draft, setDraft] = useState(null);
@@ -12297,6 +12825,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const [subscribeSaved, setSubscribeSaved] = useState([]);
     const [subscribeDraft, setSubscribeDraft] = useState([]);
     const [syncKnown, setSyncKnown] = useState(false);
+    const [syncStatus, setSyncStatus] = useState(null);
     const [filter, setFilter] = useState('');
     const [busy, setBusy] = useState(false);
     const [syncBusy, setSyncBusy] = useState(false);
@@ -12305,7 +12834,6 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const [refreshing, setRefreshing] = useState(false);
     const [err, setErr] = useState('');
     const [reloadToken, setReloadToken] = useState(0);
-    const [showGuestShareBack, setShowGuestShareBack] = useState(false);
 
     useEffect(() => {
         let live = true;
@@ -12313,10 +12841,11 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         setSyncErr('');
         setSyncSaveErr('');
         const load = async () => {
-            const [catalogResult, permissionsResult, syncResult, pipeContactsResult] = await Promise.allSettled([
+            const [catalogResult, permissionsResult, syncResult, syncStatusResult, pipeContactsResult] = await Promise.allSettled([
                 fedShareableDomains(),
                 fedPermissionsGet(chain),
                 fedSyncGet(chain),
+                fedSyncStatus(chain),
 				fedPipeContactsGet(chain),
             ]);
             if (!live) return;
@@ -12345,6 +12874,8 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 setSubscribeSaved([]); setSubscribeDraft([]); setSyncKnown(false);
                 setSyncErr(`Couldn't load copy choices: ${syncResult.reason && syncResult.reason.message ? syncResult.reason.message : syncResult.reason}`);
             }
+            if (syncStatusResult.status === 'fulfilled') setSyncStatus(syncStatusResult.value || {});
+            else setSyncStatus(null);
 			if (pipeContactsResult.status === 'fulfilled') {
 				const result = pipeContactsResult.value || {};
 				setLocalPipeContacts(normalizeFedPipeContactGrant(result.local_contacts));
@@ -12418,6 +12949,11 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         return { domain, meta, canShare: !!meta && meta.can_share !== false };
     });
     const visibleRows = localRows.filter(row => fedDomainMatchesFilter(row.domain, filter));
+    // Group by the persisted snapshot rather than the draft so a row does not
+    // jump away while someone is checking or clearing its controls. The row
+    // moves after Save confirms the new sharing state.
+    const visibleSharedRows = visibleRows.filter(row => fedPermissionIsEnabled(saved[row.domain]));
+    const visibleUnsharedRows = visibleRows.filter(row => !fedPermissionIsEnabled(saved[row.domain]));
     // Keep stale subscriptions visible so the receiver can always turn them
     // off even after the source withdraws its Copy grant.
     const remoteRows = Array.from(new Set([
@@ -12591,10 +13127,11 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const refresh = async () => {
         setRefreshing(true); setSyncErr(''); setSyncSaveErr('');
         try {
-			const [catalogResponse, permissionResponse, syncResponse, pipeContactsResponse] = await Promise.all([
+			const [catalogResponse, permissionResponse, syncResponse, syncStatusResponse, pipeContactsResponse] = await Promise.all([
                 fedShareableDomains(),
                 fedPermissionsGet(chain),
                 fedSyncGet(chain),
+                fedSyncStatus(chain),
 				fedPipeContactsGet(chain),
             ]);
             setCatalog(fedCatalogMap(catalogResponse));
@@ -12606,6 +13143,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 const domains = normalizeFedDomainList(syncResponse && syncResponse.subscribe_domains);
                 setSubscribeSaved(domains); setSubscribeDraft(domains); setSyncKnown(true);
             }
+            setSyncStatus(syncStatusResponse || {});
             // A manual refresh may adopt server-side local changes only when it
             // cannot discard edits made in this panel.
             if (!dirty) {
@@ -12622,17 +13160,46 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     };
     const localAgentContacts = localPipeContacts && Array.isArray(localPipeContacts.contacts) ? localPipeContacts.contacts : [];
 	const remoteAgentContacts = remotePipeContacts && Array.isArray(remotePipeContacts.contacts) ? remotePipeContacts.contacts : [];
-	const showOutgoing = localIsHost || showGuestShareBack;
+	const showOutgoing = roleKnown;
+    const outboxCounts = syncStatus && syncStatus.outbox_counts && typeof syncStatus.outbox_counts === 'object'
+        ? syncStatus.outbox_counts
+        : {};
+    const syncPending = Number(outboxCounts.pending || 0);
+    const syncFailed = Number(outboxCounts.failed || 0) + Number(outboxCounts.rejected || 0);
+    const renderLocalPermissionRow = row => {
+        const permission = draft[row.domain] || { read: false, write: false, copy: false };
+        const count = row.meta && Number.isFinite(Number(row.meta.memory_count)) ? Number(row.meta.memory_count) : null;
+        const authority = row.meta && row.meta.authority != null ? String(row.meta.authority) : '';
+        return html`<div class="fed-perm-grid fed-perm-row" role="row" key=${row.domain}>
+            <div class="fed-perm-domain" role="rowheader">
+                <strong>${row.domain}</strong>
+                <span class="fed-perm-domain-meta muted">
+                    ${count != null ? `${count} ${count === 1 ? 'memory' : 'memories'}` : ''}
+                    ${authority ? html`<span title="Sharing authority">${authority}</span>` : ''}
+                    ${!row.meta ? html`<span class="fed-perm-tag stale">removed locally — revoke only</span>` : ''}
+                    ${row.meta && !row.canShare ? html`<span class="fed-perm-tag blocked">not shareable</span>` : ''}
+                </span>
+            </div>
+            ${['read', 'write', 'copy'].map(field => html`<label class="fed-perm-cell" role="cell" key=${field}>
+                <input type="checkbox"
+                    aria-label="Allow ${peerName} to ${field} ${row.domain}"
+                    checked=${!!permission[field]}
+                    disabled=${field === 'write' || (!row.canShare && !permission[field])}
+                    title=${field === 'write' ? 'Write requires a consensus-bound federation ingress capability' : ''}
+                    onChange=${() => togglePermission(row, field)} />
+            </label>`)}
+        </div>`;
+    };
 
     return html`<div class="fed-permissions-panel">
         <div class="fed-permissions-intro">
-            <strong>${relationshipRole}.</strong> This is a direct 1:1 relationship, not a group. ${localIsHost ? `As host, you decide which of this SAGE’s domains ${peerName} can consume.` : (conn.local_role === 'guest' ? `As guest, this SAGE consumes only the domains ${peerName} explicitly shares.` : 'This older pairing has no trustworthy host/guest role, so outbound sharing is locked until its relationship role is restored.')}
+            <strong>${relationshipRole}.</strong> This is a direct 1:1 relationship, not a group. ${roleKnown ? `The setup role does not control ongoing access: each SAGE can independently share domains, save offered copies, and expose selected agent contacts.` : 'This older pairing has no trustworthy role binding, so outbound sharing stays locked until it is paired again.'}
         </div>
         ${conn.sharing_paused && html`<div class="fed-perm-pause-note">
             <strong>Sharing from this SAGE is paused.</strong> The saved domain choices below are preserved and take effect again when you resume.
         </div>`}
 
-		${localIsHost && html`<section class="fed-perm-section fed-agent-section">
+		${roleKnown && html`<section class="fed-perm-section fed-agent-section">
 			<div class="fed-perm-section-head">
 				<div>
 					<h4>Agent work requests</h4>
@@ -12695,8 +13262,8 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         ${showOutgoing ? html`<section class="fed-perm-section">
             <div class="fed-perm-section-head">
                 <div>
-                    <h4>${localIsHost ? `Host sharing: this SAGE → ${peerName}` : `Optional: share this SAGE → host ${peerName}`}</h4>
-                    <p>${localIsHost ? `${peerName} is the guest. Choose which domains they can consume; they receive nothing unless you enable it here.` : `Guests do not share back by default. Enable a domain here only if you intentionally want the host to consume something from this SAGE.`} Read allows live lookup; Copy offers synchronized local copies that the receiver independently chooses to keep.</p>
+                    <h4>This SAGE → ${peerName}</h4>
+                    <p>Choose which local domains ${peerName} can consume; they receive nothing unless you enable it here. Read allows live lookup. Copy offers synchronized local copies that the receiver independently chooses to keep.</p>
                 </div>
             </div>
             <div class="fed-perm-toolbar">
@@ -12717,30 +13284,18 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 <span role="columnheader">Existing domain</span><span role="columnheader">Read</span><span role="columnheader">Write (not yet)</span><span role="columnheader">Copy offer</span>
             </div>
             ${visibleRows.length === 0 && html`<div class="fed-perm-empty muted">${localRows.length ? 'No existing domains match this filter.' : 'This SAGE has no domains available to share yet.'}</div>`}
-            ${visibleRows.map(row => {
-                const permission = draft[row.domain] || { read: false, write: false, copy: false };
-                const count = row.meta && Number.isFinite(Number(row.meta.memory_count)) ? Number(row.meta.memory_count) : null;
-                const authority = row.meta && row.meta.authority != null ? String(row.meta.authority) : '';
-                return html`<div class="fed-perm-grid fed-perm-row" role="row" key=${row.domain}>
-                    <div class="fed-perm-domain" role="rowheader">
-                        <strong>${row.domain}</strong>
-                        <span class="fed-perm-domain-meta muted">
-                            ${count != null ? `${count} ${count === 1 ? 'memory' : 'memories'}` : ''}
-                            ${authority ? html`<span title="Sharing authority">${authority}</span>` : ''}
-                            ${!row.meta ? html`<span class="fed-perm-tag stale">removed locally — revoke only</span>` : ''}
-                            ${row.meta && !row.canShare ? html`<span class="fed-perm-tag blocked">not shareable</span>` : ''}
-                        </span>
-                    </div>
-                    ${['read', 'write', 'copy'].map(field => html`<label class="fed-perm-cell" role="cell" key=${field}>
-                        <input type="checkbox"
-                            aria-label="Allow ${peerName} to ${field} ${row.domain}"
-                            checked=${!!permission[field]}
-                            disabled=${field === 'write' || (!row.canShare && !permission[field])}
-                            title=${field === 'write' ? 'Write requires a consensus-bound federation ingress capability' : ''}
-                            onChange=${() => togglePermission(row, field)} />
-                    </label>`)}
-                </div>`;
-            })}
+            ${visibleSharedRows.length > 0 && html`<div class="fed-perm-rowgroup" role="rowgroup" aria-label=${`Already shared with ${peerName}`}>
+                <div class="fed-perm-grid fed-perm-group-head shared" role="row">
+                    <span role="columnheader" aria-colspan="4"><strong>Already shared with ${peerName}</strong><span>${visibleSharedRows.length} ${visibleSharedRows.length === 1 ? 'domain' : 'domains'}</span></span>
+                </div>
+                ${visibleSharedRows.map(renderLocalPermissionRow)}
+            </div>`}
+            ${visibleUnsharedRows.length > 0 && html`<div class="fed-perm-rowgroup" role="rowgroup" aria-label="Not shared">
+                <div class="fed-perm-grid fed-perm-group-head" role="row">
+                    <span role="columnheader" aria-colspan="4"><strong>Not shared</strong><span>${visibleUnsharedRows.length} ${visibleUnsharedRows.length === 1 ? 'domain' : 'domains'}</span></span>
+                </div>
+                ${visibleUnsharedRows.map(renderLocalPermissionRow)}
+            </div>`}
             </div>
             ${err && html`<div class="fed-err fed-perm-error" role="alert">${err}</div>`}
             <div class="fed-perm-actions">
@@ -12748,25 +13303,32 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 <span class="muted">${dirty ? 'Unsaved permission changes' : (alignmentPending ? 'Copy delivery needs retry' : 'Saved')}</span>
             </div>
         </section>` : html`<section class="fed-perm-section fed-guest-share-back">
-            <h4>You are the guest</h4>
-            <p class="muted">This SAGE is only consuming what ${peerName} shares. It is not sharing anything back.</p>
-            <button class="btn" onClick=${() => setShowGuestShareBack(true)}>Optionally share domains back to host…</button>
+            <h4>Sharing controls unavailable for this older pairing</h4>
+            <p class="muted">Pair again to restore the signed relationship role before sharing domains from this SAGE.</p>
         </section>`}
 
         <section class="fed-perm-section fed-perm-remote">
             <div class="fed-perm-section-head">
                 <div>
-                    <h4>${localIsHost ? `Guest ${peerName} → this SAGE (optional)` : `Host ${peerName} → this SAGE`}</h4>
-                    <p>${localIsHost ? `Guests do not share back by default. If ${peerName} deliberately opts in, their domains appear here.` : `${peerName} is the host and controls what this SAGE can consume. When Copy is offered, choose whether to keep a synchronized local copy here.`}</p>
+                    <h4>${peerName} → this SAGE</h4>
+                    <p>${peerName} independently controls what this SAGE may consume. When Copy is offered, choose whether to retain synchronized local memories here.</p>
                 </div>
                 <button class="btn" disabled=${refreshing} onClick=${refresh}>${refreshing ? 'Refreshing…' : 'Refresh'}</button>
             </div>
             ${syncErr && html`<div class="fed-err fed-perm-error" role="alert">${syncErr}</div>`}
+            <div class="fed-copy-provenance">
+                <strong>Copy provenance</strong>
+                <p>Memories saved here are local copies sourced from <strong>${peerName}</strong>. Turning off Save here or revoking trust stops future synchronization; copies already retained on this SAGE remain until you explicitly delete those local memories.</p>
+                ${syncStatus && syncStatus.peer_unsupported && html`<span class="fed-perm-tag stale">Older peer · live Copy status unavailable</span>`}
+                ${syncPending > 0 && html`<span class="fed-perm-tag pending">${syncPending} ${syncPending === 1 ? 'copy' : 'copies'} waiting to send</span>`}
+                ${syncFailed > 0 && html`<span class="fed-perm-tag blocked">${syncFailed} ${syncFailed === 1 ? 'copy needs' : 'copies need'} attention</span>`}
+                ${syncStatus && syncStatus.last_reconcile && html`<span class="muted">Last checked ${new Date(syncStatus.last_reconcile).toLocaleString()}</span>`}
+            </div>
             ${remotePaused && html`<div class="fed-perm-pause-note">
                 <strong>${peerName} paused sharing.</strong> Effective Read and Copy access is off now. Their saved choices stay private on their SAGE and can resume when they turn sharing back on.
             </div>`}
             ${!remoteKnown && html`<div class="fed-perm-empty muted">Their SAGE has not reported its permission set yet.</div>`}
-            ${remoteKnown && !remotePaused && remoteRows.length === 0 && html`<div class="fed-perm-empty muted">${localIsHost ? `${peerName} is not sharing anything back to this SAGE.` : `${peerName} is not sharing any domains with this SAGE.`}</div>`}
+            ${remoteKnown && !remotePaused && remoteRows.length === 0 && html`<div class="fed-perm-empty muted">${peerName} is not sharing any domains with this SAGE.</div>`}
             ${remoteRows.length > 0 && html`<div>
                 <div class="fed-perm-table" role="table" aria-label=${`Domains ${peerName} shares with this computer`}>
                 <div class="fed-perm-grid fed-perm-grid-copy-choice fed-perm-grid-head" role="row">
@@ -12802,7 +13364,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         <section class="fed-perm-danger">
             <div>
                 <strong>Revoke trust permanently</strong>
-                <p>This ends the trusted pairing, notifies the peer when reachable, and requires the JOIN ceremony again if you reconnect. Use Pause sharing on the connection row for a temporary stop.</p>
+                <p>This ends the trusted pairing, notifies the peer when reachable, and requires the JOIN ceremony again if you reconnect. It stops future Read and Copy traffic, but memories already copied onto either SAGE survive until their local owner explicitly deletes them. Use Pause sharing on the connection row for a temporary stop.</p>
             </div>
             <button class="btn btn-danger" disabled=${revokeBusy} onClick=${onRevoke}>${revokeBusy ? 'Revoking…' : 'Revoke trust…'}</button>
         </section>
@@ -12993,6 +13555,19 @@ function SharingSyncGroupsPanel() {
     const [creating, setCreating] = useState(false);
     const [newGroupName, setNewGroupName] = useState('');
     const [newGroupMembers, setNewGroupMembers] = useState([]);
+    const refreshGroups = async () => {
+        setBusy('groups:refresh'); setError('');
+        try {
+            await fedGroupsRefresh();
+            await loadGroups();
+            showToast('Checked for sharing group updates', 'success');
+        } catch (e) {
+            const message = String(e.message || e);
+            await loadGroups();
+            setError(message); showToast(message, 'error');
+        }
+        setBusy('');
+    };
     const loadGroups = async () => {
         try {
             const [result, domainResult, connectionResult] = await Promise.all([
@@ -13010,7 +13585,7 @@ function SharingSyncGroupsPanel() {
             }));
             const statusByChain = Object.fromEntries(statuses);
             setReachability(statusByChain);
-            const namedConnections = allConnections.map(connection => ({
+            const namedConnections = active.map(connection => ({
                 ...connection,
                 peer_name: statusByChain[connection.remote_chain_id]?.network_name || connection.peer_name,
             }));
@@ -13064,30 +13639,56 @@ function SharingSyncGroupsPanel() {
         event.preventDefault();
         const name = newGroupName.trim();
         if (!name || newGroupMembers.length < 2) return;
+        const members = connections.filter(connection => newGroupMembers.includes(connection.remote_chain_id));
+        if (members.length < 2) {
+            const message = 'One of the selected trusted connections is no longer active. Choose at least two active SAGEs and try again.';
+            setError(message); showToast(message, 'error');
+            return;
+        }
         setBusy('group:create'); setError('');
         let groupId = '';
+        let finalError = '';
         try {
             const result = await fedGroupCreate(name);
             groupId = result.group_id;
-            const members = connections.filter(connection => newGroupMembers.includes(connection.remote_chain_id));
-            const invitations = await Promise.allSettled(members.map(connection =>
-                fedGroupMemberInvite(result.group_id, connection.remote_chain_id, connection.peer_agent_id, 'enrolled-no-sync')
-            ));
+            // Each accepted invite advances the signed roster head. Sending several
+            // invites at once makes them race on the same revision, so later appends
+            // can fail even though every selected SAGE is online. Keep attempting all
+            // selected members, but serialize the ceremonies against the latest head.
+            const invitations = [];
+            for (const connection of members) {
+                let outcome = null;
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    try {
+                        await fedGroupMemberInvite(result.group_id, connection.remote_chain_id, connection.peer_agent_id, 'enrolled-no-sync');
+                        outcome = { status: 'fulfilled' };
+                        break;
+                    } catch (reason) {
+                        outcome = { status: 'rejected', reason };
+                        // The backend treats an already-active member as an
+                        // idempotent bootstrap retry. Absorb brief route/bootstrap
+                        // races here instead of making the person retry by hand.
+                        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)));
+                    }
+                }
+                invitations.push(outcome);
+            }
             const failed = invitations.filter(invitation => invitation.status === 'rejected');
             if (failed.length > 0) {
                 const sent = invitations.length - failed.length;
-                setError(`Group setup is incomplete: invitations reached ${sent} of ${invitations.length} SAGEs. Open the setup below to retry the remaining invitations. Nothing is shared until every selected SAGE has accepted.`);
+                finalError = `Group setup is incomplete: SAGE added ${sent} of ${invitations.length} selected SAGEs. Open the group below to add the remaining SAGEs. Nothing is shared until setup is complete.`;
                 showToast('Group setup needs attention — no domains are shared', 'warning');
             } else {
-                showToast('Group created; waiting for invited SAGEs to accept', 'success');
+                showToast('Sharing group created — no topics are shared yet', 'success');
             }
         } catch (e) {
-            const message = String(e.message || e);
-            setError(message); showToast(message, 'error');
+            finalError = String(e.message || e);
+            showToast(finalError, 'error');
         }
         setNewGroupName(''); setNewGroupMembers([]); setCreating(false);
         if (groupId) setOpenGroup(groupId);
         await loadGroups();
+        if (finalError) setError(finalError);
         setBusy('');
     };
     const connectionFor = chain => connections.find(connection => connection.remote_chain_id === chain);
@@ -13106,12 +13707,12 @@ function SharingSyncGroupsPanel() {
         <div class="fed-groups-head"><div>
 			<h2 id="sharing-sync-title" tabindex="-1">Sharing groups</h2>
             <p class="muted">Groups are for a shared workspace with several SAGEs. For a direct 1:1 relationship, use the directional permissions on that trusted SAGE instead.</p>
-        </div><div class="fed-groups-actions"><button class="btn btn-primary" onClick=${() => setCreating(!creating)} disabled=${busy !== ''}>${creating ? 'Cancel' : 'Create group'}</button><button class="btn" onClick=${loadGroups} disabled=${busy !== ''}>Refresh</button></div></div>
+        </div><div class="fed-groups-actions"><button class="btn btn-primary" onClick=${() => setCreating(!creating)} disabled=${busy !== ''}>${creating ? 'Cancel' : 'Create group'}</button><button class="btn" onClick=${refreshGroups} disabled=${busy !== ''} aria-busy=${busy === 'groups:refresh'}>${busy === 'groups:refresh' ? 'Refreshing…' : 'Refresh'}</button></div></div>
         ${error && html`<div class="fed-err" role="alert">Sharing & Sync: ${error}</div>`}
         ${creating && html`<form class="fed-group-create" onSubmit=${createGroup}>
-            <div><h3>Create a sharing group</h3><p class="muted">Choose at least two trusted SAGEs to join this SAGE. This starts a setup: nothing is shared until each invite is accepted. For one other SAGE, use the direct relationship above instead.</p></div>
+            <div><h3>Create a sharing group</h3><p class="muted">Choose at least two trusted SAGEs. SAGE verifies their existing connections and adds them in this one setup. Nothing is shared until you choose a topic. For one other SAGE, use the direct relationship above instead.</p></div>
             <label>Group name<input required maxlength="96" value=${newGroupName} placeholder="e.g. Family research" onInput=${event => setNewGroupName(event.target.value)} autofocus /></label>
-            <label>Add trusted SAGEs<select multiple size="4" value=${newGroupMembers} onChange=${event => setNewGroupMembers(selected(event))}>${connections.filter(connection => connection.peer_agent_id).map(connection => html`<option key=${connection.remote_chain_id} value=${connection.remote_chain_id}>${connection.peer_name || 'Other SAGE'}</option>`)}</select><small class="muted">Choose two or more. Each selected SAGE must accept; no domains are shared during setup.</small></label>
+            <label>Add trusted SAGEs<select multiple size="4" value=${newGroupMembers} onChange=${event => setNewGroupMembers(selected(event))}>${connections.filter(connection => connection.peer_agent_id).map(connection => html`<option key=${connection.remote_chain_id} value=${connection.remote_chain_id}>${connection.peer_name || 'Other SAGE'}</option>`)}</select><small class="muted">Choose two or more. Their trusted connections are verified automatically; no topics are shared during setup.</small></label>
             <div><button class="btn btn-primary" type="submit" disabled=${busy !== '' || newGroupMembers.length < 2}>${busy === 'group:create' ? 'Creating…' : 'Create group'}</button><button class="btn" type="button" disabled=${busy !== ''} onClick=${() => setCreating(false)}>Cancel</button></div>
         </form>`}
         ${groups === null && !error && html`<div class="muted" role="status">Loading Sharing & Sync groups…</div>`}
@@ -13179,7 +13780,7 @@ function SharingSyncGroupsPanel() {
                 </button>
                 ${openGroup === groupId && html`<div id=${panelId} class="fed-group-detail">
 					${groupClosing && html`<p class="fed-group-connection-warning"><strong>This sharing group is closing.</strong> Group sharing is already stopped. Retry below to finish removing any members that still need their signed update; offline SAGEs will learn the change when they next connect.</p>`}
-                    ${!groupClosing && !groupReady && html`<p class="fed-group-connection-warning"><strong>Group setup in progress.</strong> Invite at least two trusted SAGEs and wait for every invite to be accepted. Nothing is shared until setup is complete.</p>`}
+                    ${!groupClosing && !groupReady && html`<p class="fed-group-connection-warning"><strong>Group setup in progress.</strong> Add at least two trusted SAGEs. SAGE verifies each existing connection automatically, and nothing is shared until setup is complete.</p>`}
                     ${!groupClosing && groupReady && !groupConnected && html`<p class="fed-group-connection-warning"><strong>The group owner connection needs attention.</strong> This saved group is not currently live for this SAGE. Retry the trusted connection to ${friendlyName(group.controller_chain_id, group.controller_display_name)}; sharing changes stay locked until that owner link is active again.</p>`}
                     ${group.is_controller && html`<form class="fed-group-rename" onSubmit=${async event => {
                         event.preventDefault();
@@ -13197,8 +13798,8 @@ function SharingSyncGroupsPanel() {
                             <td>${member.peer_delivery ? member.peer_delivery.backlog : '—'}</td>
                             <td><time datetime=${member.peer_delivery && member.peer_delivery.last_delivered_at || ''}>${when(member.peer_delivery && member.peer_delivery.last_delivered_at)}</time></td>
                             <td>${group.is_controller && member.chain_id !== localChain && !['removed', 'left'].includes(member.state) && html`<button class="btn btn-danger" disabled=${busy !== '' || !groupConnected} onClick=${async () => {
-                                if (!await showConfirmation('Remove ' + memberName(member) + ' from ' + displayName + '? Group delivery and consent are revoked; rejoining requires a fresh signed invite.', { title: 'Remove group member?', confirmLabel: 'Remove member', tone: 'danger' })) return;
-                                mutate(groupId + ':remove:' + member.chain_id, () => fedGroupMemberRemove(groupId, member.chain_id), 'Member removed and group access revoked');
+                                if (!await showConfirmation('Remove ' + memberName(member) + ' from ' + displayName + '? Group delivery and consent stop, and rejoining requires a new group invitation. Their direct trusted connection and direct sharing choices stay unchanged.', { title: 'Remove group member?', confirmLabel: 'Remove member', tone: 'danger' })) return;
+                                mutate(groupId + ':remove:' + member.chain_id, () => fedGroupMemberRemove(groupId, member.chain_id), 'Member removed; trusted connection unchanged');
                             }}>Remove</button>`}</td>
                         </tr>`)}</tbody>
                     </table></div>
@@ -13233,7 +13834,7 @@ function SharingSyncGroupsPanel() {
                     <ul class="fed-group-domains">${(group.shared_domains || []).map(domain => html`<li key=${domain.domain_tag}>
                         <span><strong>${domain.domain_tag}</strong><small>owner ${friendlyName(domain.owner_chain_id)} · max classification ${domain.max_clearance}</small></span>
                         ${domain.owner_chain_id === localChain && html`<button class="btn btn-danger" disabled=${busy !== '' || !canManageSharing} onClick=${async () => {
-                            if (!await showConfirmation('Stop sharing “' + domain.domain_tag + '” through ' + (group.display_name || groupId) + '? Local data is preserved and group delivery stops.', { title: 'Remove shared domain?', confirmLabel: 'Stop sharing', tone: 'danger' })) return;
+                            if (!await showConfirmation('Stop sharing “' + domain.domain_tag + '” through ' + (group.display_name || groupId) + '? Local data is preserved and group delivery stops. Direct trusted connections and direct sharing choices stay unchanged.', { title: 'Remove shared domain?', confirmLabel: 'Stop sharing', tone: 'danger' })) return;
                             mutate(groupId + ':domain-remove:' + domain.domain_tag, () => fedGroupDomainRemove(groupId, domain.domain_tag), 'Shared domain removed');
                         }}>Stop sharing</button>`}
                     </li>`)}</ul>
@@ -13244,15 +13845,15 @@ function SharingSyncGroupsPanel() {
                         const chain = connection.remote_chain_id;
                         const pubkey = connection.peer_agent_id;
                         const role = draft.inviteRole || 'enrolled-no-sync';
-                        if (!await showConfirmation('Invite or re-bootstrap ' + friendlyName(chain, connection.peer_name) + ' in ' + displayName + ' as ' + role + '? The remote operator must cryptographically co-sign.', { title: 'Invite group member?', confirmLabel: 'Send invite', tone: 'primary' })) return;
-                        const saved = await mutate(groupId + ':invite', () => fedGroupMemberInvite(groupId, chain, pubkey, role, draft.inviteSelected || [], draft.inviteOwned || []), 'Invitation sent — the member will appear as pending until they accept');
+                        if (!await showConfirmation('Add ' + friendlyName(chain, connection.peer_name) + ' to ' + displayName + '? SAGE will verify the existing trusted connection before adding them.', { title: 'Add group member?', confirmLabel: 'Add member', tone: 'primary' })) return;
+                        const saved = await mutate(groupId + ':invite', () => fedGroupMemberInvite(groupId, chain, pubkey, role, draft.inviteSelected || [], draft.inviteOwned || []), 'Member added');
                         if (saved) patchDraft(groupId, { inviteChain: '', inviteSelected: [], inviteOwned: [] });
                     }}>
-                        <h3>Add a member</h3><p class="muted">Choose a SAGE that is already trusted. Its verified operator identity is used automatically; the remote operator must still accept.</p>
+                        <h3>Add a member</h3><p class="muted">Choose a SAGE that is already trusted. SAGE verifies that connection automatically before adding it to this group.</p>
                         ${inviteCandidates.length > 0 ? html`<label>Trusted SAGE<select disabled=${!groupConnected} required value=${draft.inviteChain || ''} onChange=${event => patchDraft(groupId, { inviteChain: event.target.value })}><option value="" disabled>Select a trusted SAGE…</option>${inviteCandidates.map(connection => html`<option value=${connection.remote_chain_id} key=${connection.remote_chain_id}>${connection.peer_name || 'Other SAGE'}</option>`)}</select></label>` : html`<p class="muted">Every trusted SAGE is already in this group, or no trusted SAGE is available. Pair a new SAGE above, then return here to add it.</p>`}
                         <label>Role<select disabled=${!groupConnected} value=${draft.inviteRole || 'enrolled-no-sync'} onChange=${event => patchDraft(groupId, { inviteRole: event.target.value })}><option value="full-sync">Full sync</option><option value="selective-sync">Selective sync</option><option value="enrolled-no-sync">Enrolled, no sync</option></select></label>
                         ${draft.inviteRole === 'selective-sync' && html`<label>Domains they may receive<select disabled=${!groupConnected} multiple size="4" value=${draft.inviteSelected || []} onChange=${event => patchDraft(groupId, { inviteSelected: selected(event) })}>${(group.shared_domains || []).map(domain => html`<option value=${domain.domain_tag} key=${domain.domain_tag}>${domain.domain_tag}</option>`)}</select></label>`}
-                        <button class="btn btn-primary" type="submit" disabled=${busy !== '' || !groupConnected || !inviteCandidates.length}>Invite member</button>
+                        <button class="btn btn-primary" type="submit" disabled=${busy !== '' || !groupConnected || !inviteCandidates.length}>Add member</button>
                     </form>`}
                     ${group.is_controller && html`<section class="fed-perm-danger">
 						<h3>${groupClosing ? 'Finish deleting sharing group' : 'Delete sharing group'}</h3>
@@ -13267,6 +13868,15 @@ function SharingSyncGroupsPanel() {
             </article>`;
         })}
     </section>`;
+}
+
+function federationConnectionAction(route, paused) {
+    if (['direct', 'p2p_direct', 'relay', 'degraded', 'old_peer'].includes(route.state)) {
+        return paused ? 'Resume sharing' : 'Pause sharing';
+    }
+    if (route.state === 'locked') return 'Retry after unlock';
+    if (route.state === 'security_blocked' || route.state === 'trust_failure') return 'Review trust';
+    return 'Retry connection';
 }
 
 // FederationPage - the 8th sidebar section landing: role fork + connections list.
@@ -13326,7 +13936,13 @@ function FederationPage() {
             const active = next.filter(connection => connection.status === 'active' && !connection.expired);
             const probes = await Promise.all(active.map(async connection => {
                 try { return [connection.remote_chain_id, await fedPeerStatus(connection.remote_chain_id)]; }
-                catch (e) { return [connection.remote_chain_id, { reachable: false }]; }
+                catch (e) {
+                    return [connection.remote_chain_id, {
+                        reachable: false,
+                        failure_state: classifyFederationFailure(e, 'offline'),
+                        error: String(e.message || e),
+                    }];
+                }
             }));
             setConnectionReachability(Object.fromEntries(probes));
             setConns(next); setLocalChain(r.local_chain_id || ''); setErr('');
@@ -13372,7 +13988,7 @@ function FederationPage() {
         const chain = conn.remote_chain_id;
         const peerName = conn.peer_name || 'Other SAGE';
         if (!await showConfirmation(
-            `Permanently revoke trust with ${peerName}? This stops access, notifies the peer when reachable, and requires the JOIN ceremony again if you reconnect. Use Pause sharing instead for a temporary stop.`,
+            `Permanently revoke trust with ${peerName}? This stops future Read, Copy synchronization, and agent work requests, notifies the peer when reachable, and requires the JOIN ceremony again if you reconnect. Memories already copied onto either SAGE remain there until that SAGE's owner explicitly deletes them. Use Pause sharing instead for a temporary stop.`,
             { title: 'Revoke trust permanently?', confirmLabel: 'Revoke trust', tone: 'danger' }
         )) return;
         setBusyChain(chain);
@@ -13394,12 +14010,19 @@ function FederationPage() {
             const status = await fedPeerStatus(chain);
             setConnectionReachability(current => ({ ...current, [chain]: status }));
             if (status.reachable) {
-                showToast(`Reached ${peerName}; the trusted pairing is active`, 'success');
+                const route = federationConnectionRoute(status);
+                const view = federationRoutePresentation(route);
+                showToast(`Reached ${peerName} via ${view.label}; the trusted pairing is active`, 'success');
                 await load();
             } else {
-                showToast(`Couldn't reach ${peerName} yet. Your trusted pairing is still intact; make sure the other SAGE is running and reachable, then try again.`, 'warning');
+                const route = federationConnectionRoute(status);
+                const view = federationRoutePresentation(route);
+                showToast(`${view.label}: ${view.detail}`, view.tone === 'danger' ? 'error' : 'warning', 9000);
             }
-        } catch (e) { showToast(String(e.message || e), 'error'); }
+        } catch (e) {
+            const view = federationRoutePresentation({ state: classifyFederationFailure(e), last_error: String(e.message || e) });
+            showToast(`${view.label}: ${view.detail}`, view.tone === 'danger' ? 'error' : 'warning', 9000);
+        }
         setBusyChain('');
     };
     const dismissRemoteNotice = () => {
@@ -13449,7 +14072,7 @@ function FederationPage() {
             ${remoteNotice && html`<div class="fed-peer-revoke-notice" role="status">
                 <div>
                     <strong>${remoteNotice.peer_name || 'Other SAGE'} ended this connection</strong>
-                    <p>${remoteNotice.ended_message || 'The other SAGE revoked the trusted link. Read and Copy access stopped immediately.'} To reconnect, ask them to create a new connection code, then scan or paste it here.</p>
+                    <p>${remoteNotice.ended_message || 'The other SAGE revoked the trusted link. Live Read and future Copy synchronization stopped immediately.'} Memories already saved on either SAGE remain local until their owner explicitly deletes them. To reconnect, ask them to create a new connection code, then scan or paste it here.</p>
                 </div>
                 <div class="fed-peer-revoke-actions">
                     ${fedOn && html`<button class="btn btn-primary" onClick=${() => beginGuestRejoin(remoteNotice)}>Pair again with ${remoteNotice.peer_name || 'this SAGE'}</button>`}
@@ -13461,13 +14084,13 @@ function FederationPage() {
             ${fedOn && !warming && html`<div class="fed-roles">
                 <button class="fed-role-card" onClick=${() => setMode('guest')}>
                     <div class="fed-role-glyph">${icons.federation}</div>
-                    <div class="fed-role-title">Join another SAGE as guest</div>
-                    <div class="fed-role-desc">They are the host and choose what this SAGE can consume.</div>
+                    <div class="fed-role-title">Scan a connection code</div>
+                    <div class="fed-role-desc">Use the code shown by the other SAGE. Both sides manage their own sharing after trust is established.</div>
                 </button>
                 <button class="fed-role-card" onClick=${() => setMode('host')}>
                     <div class="fed-role-glyph">${icons.federation}</div>
-                    <div class="fed-role-title">Host a guest SAGE</div>
-                    <div class="fed-role-desc">You choose which domains the guest can consume.</div>
+                    <div class="fed-role-title">Create a connection code</div>
+                    <div class="fed-role-desc">SAGE automatically chooses Direct or Secure relay. Pairing alone shares no domains.</div>
                 </button>
             </div>`}
             ${(fedOn || (conns && conns.length > 0)) && html`<div class="fed-conns">
@@ -13484,23 +14107,27 @@ function FederationPage() {
                         onAction=${fedOn ? (() => setMode('guest')) : null} />
                 `}
                 ${liveConns.map(c => {
-                    const reachable = connectionReachability[c.remote_chain_id]?.reachable !== false;
-                    const role = c.local_role === 'host' ? 'you are host' : (c.local_role === 'guest' ? 'you are guest' : 'direct relationship');
+                    const status = connectionReachability[c.remote_chain_id];
+                    const route = federationConnectionRoute(status);
+                    const routeView = federationRoutePresentation(route);
+                    const routeUsable = ['direct', 'p2p_direct', 'relay', 'degraded', 'old_peer'].includes(route.state);
+                    const actionLabel = federationConnectionAction(route, c.sharing_paused);
+                    const role = c.local_role === 'host' ? 'connection code created here' : (c.local_role === 'guest' ? 'connection code scanned here' : 'older direct relationship');
                     return html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
                     <div class="fed-conn-row">
                         <button class="fed-conn-main fed-conn-expand" aria-expanded=${openChain === c.remote_chain_id}
                             aria-controls=${`fed-connection-${c.remote_chain_id}`}
                             onClick=${() => setOpenChain(openChain === c.remote_chain_id ? '' : c.remote_chain_id)}>
-                            <span class="fed-conn-status ${reachable ? (c.sharing_paused ? 'paused' : 'on') : 'off'}"></span>
+                            <span class="fed-conn-status ${routeUsable ? (c.sharing_paused ? 'paused' : 'on') : (routeView.tone === 'danger' ? 'blocked' : 'off')}"></span>
                             <span class="fed-conn-name">${c.peer_name || 'Other SAGE'}</span>
                             <span class="fed-conn-role">${role}</span>
-                            <span class="fed-conn-meta muted">${!reachable ? 'can’t reach this SAGE · pairing preserved' : (c.sharing_paused ? 'sharing paused · pairing preserved' : 'connected · manage sharing')}</span>
+                            <span class="fed-conn-meta muted">${c.sharing_paused && routeUsable ? 'sharing paused · pairing preserved' : `${routeView.label} · ${routeView.detail}`}</span>
                             <span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>
                         </button>
-                        <button class="btn fed-conn-off ${!reachable || c.sharing_paused ? 'btn-primary' : ''}"
+                        <button class="btn fed-conn-off ${!routeUsable || c.sharing_paused ? 'btn-primary' : ''}"
                             disabled=${busyChain === c.remote_chain_id}
-                            aria-label=${!reachable ? `Retry connection to ${c.peer_name || 'Other SAGE'}` : `${c.sharing_paused ? 'Resume' : 'Pause'} sharing with ${c.peer_name || 'Other SAGE'}`}
-                            onClick=${() => !reachable ? reconnect(c) : pause(c, !c.sharing_paused)}>${busyChain === c.remote_chain_id ? 'Working…' : (!reachable ? 'Retry connection' : (c.sharing_paused ? 'Resume sharing' : 'Pause sharing'))}</button>
+                            aria-label=${`${actionLabel} with ${c.peer_name || 'Other SAGE'}`}
+                            onClick=${() => !routeUsable ? reconnect(c) : pause(c, !c.sharing_paused)}>${busyChain === c.remote_chain_id ? 'Working…' : actionLabel}</button>
                     </div>
                     ${openChain === c.remote_chain_id && html`<div id=${`fed-connection-${c.remote_chain_id}`}>
                         <${FedPermissionsPanel} conn=${c} revokeBusy=${busyChain === c.remote_chain_id} onRevoke=${() => revoke(c)} />

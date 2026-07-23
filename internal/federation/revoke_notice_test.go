@@ -110,6 +110,30 @@ func TestPermanentRevokeNotifiesExactPeerAndExplainsBothPastRows(t *testing.T) {
 	hostServer := startCeremonyTLSServer(t, host)
 	guestServer := startCeremonyTLSServer(t, guest)
 	completeTwoServerCeremony(t, host, guest, hostServer.URL, guestServer.URL)
+	ctx := context.Background()
+	hostOperatorID := hex.EncodeToString(host.mgr.agentPub)
+	if err := host.mgr.badger.RegisterAgent(hostOperatorID, "Host operator", "member", "", "test", "", 1); err != nil {
+		t.Fatalf("register host operator: %v", err)
+	}
+	if err := host.mgr.badger.RegisterDomain("shared-project", hostOperatorID, "", 1); err != nil {
+		t.Fatalf("register shared domain: %v", err)
+	}
+
+	// Model the exact visible setup exercised by CEREBRUM before revocation:
+	// the host grants Read/Copy and offers a synchronized copy, while the guest
+	// independently chooses Save here. These are separate durable choices and a
+	// fresh trust generation must restore neither of them.
+	if _, err := host.mgr.ReplacePeerRBACPolicy(ctx, "guest-revok2", []store.PeerRBACDomainPermission{{
+		Domain: "shared-project", Read: true, Copy: true,
+	}}); err != nil {
+		t.Fatalf("seed host Read/Copy policy: %v", err)
+	}
+	if _, err := host.mgr.SetDirectionalSyncPolicy(ctx, "guest-revok2", []string{"shared-project"}, nil); err != nil {
+		t.Fatalf("seed host Copy offer: %v", err)
+	}
+	if _, err := guest.mgr.SetDirectionalSyncPolicy(ctx, "host-revoke1", nil, []string{"shared-project"}); err != nil {
+		t.Fatalf("seed guest Save here subscription: %v", err)
+	}
 
 	// A delayed or forged notice from another ceremony generation is rejected
 	// before either chain state or presentation metadata changes.
@@ -155,4 +179,25 @@ func TestPermanentRevokeNotifiesExactPeerAndExplainsBothPastRows(t *testing.T) {
 	}
 	assertEvent(host, "guest-revok2", store.FederationConnectionRevokedLocally)
 	assertEvent(guest, "host-revoke1", store.FederationConnectionRevokedByPeer)
+
+	completeTwoServerCeremony(t, host, guest, hostServer.URL, guestServer.URL)
+	assertFreshDenyAll := func(node *ceremonyNode, chain string) {
+		t.Helper()
+		policy, policyErr := node.mgr.GetPeerRBACPolicy(ctx, chain)
+		if policyErr != nil || policy == nil || len(policy.Domains) != 0 || policy.Paused {
+			t.Fatalf("fresh peer policy chain=%s policy=%+v err=%v, want active deny-all", chain, policy, policyErr)
+		}
+		ss := node.mgr.syncStore()
+		for _, direction := range []string{
+			store.SyncDirectionLocalPublish, store.SyncDirectionLocalSubscribe,
+			store.SyncDirectionRemotePublish, store.SyncDirectionRemoteSubscribe,
+		} {
+			domains, domainsErr := ss.GetDirectionalSyncDomains(ctx, chain, direction)
+			if domainsErr != nil || len(domains) != 0 {
+				t.Fatalf("fresh directional policy chain=%s direction=%s domains=%v err=%v, want empty", chain, direction, domains, domainsErr)
+			}
+		}
+	}
+	assertFreshDenyAll(host, "guest-revok2")
+	assertFreshDenyAll(guest, "host-revoke1")
 }

@@ -1,8 +1,9 @@
 package federation
 
-// Authenticated cross-node ceremonies for the two journal operations that
-// require distinct signers:
+// Authenticated cross-node ceremonies for journal operations that require
+// distinct signers or one controller-serialized roster head:
 //   - domain_add: owner authors, current controller admits/countersigns;
+//   - self role_change: member authors, current controller serializes/countersigns;
 //   - epoch_rotate: outgoing controller authors, incoming controller countersigns.
 // Every route is mounted behind peerAuth. Responses carry the fully signed entry
 // so both participants persist byte-identical journal material.
@@ -14,11 +15,17 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
 
-var errGroupPeerNoLongerBound = errors.New("federation peer is no longer the active frozen operator")
+var (
+	errGroupPeerNoLongerBound = errors.New("federation peer is no longer the active frozen operator")
+	errSelfRoleHeadChanged    = errors.New("self role change is not based on the current roster head")
+)
+
+const maxSelfRoleAdmissionAttempts = 8
 
 type domainAddHeadRequest struct {
 	GroupID   string `json:"group_id"`
@@ -26,6 +33,15 @@ type domainAddHeadRequest struct {
 }
 
 type domainAddHeadResponse struct {
+	Seq      int64  `json:"seq"`
+	PrevHash string `json:"prev_hash"`
+}
+
+type selfRoleHeadRequest struct {
+	GroupID string `json:"group_id"`
+}
+
+type selfRoleHeadResponse struct {
 	Seq      int64  `json:"seq"`
 	PrevHash string `json:"prev_hash"`
 }
@@ -283,6 +299,135 @@ func (m *Manager) handleDomainAddAdmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, &signedGroupEntryResponse{Entry: entry})
+}
+
+// handleSelfRoleHead lets an exact active member obtain only the next roster
+// position from its controller. The member signs its own role/consent assertion;
+// the controller never gains authority to invent that consent.
+func (m *Manager) handleSelfRoleHead(w http.ResponseWriter, r *http.Request) {
+	peer, ok := authenticatedPeer(r)
+	if !ok {
+		httpError(w, http.StatusUnauthorized, "authenticated peer identity missing")
+		return
+	}
+	var req selfRoleHeadRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil || req.GroupID == "" {
+		httpError(w, http.StatusBadRequest, "group_id is required")
+		return
+	}
+	ss := m.syncStore()
+	if ss == nil {
+		httpError(w, http.StatusNotImplemented, "group journal unavailable")
+		return
+	}
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
+	if bound, err := m.inboundGroupPeerBound(r.Context(), ss, peer); err != nil || !bound {
+		httpError(w, http.StatusNotFound, "role admission unavailable")
+		return
+	}
+	gs, err := loadGroupApplyState(r.Context(), ss, req.GroupID)
+	if err != nil || gs.controllerChain != m.localChainID || !gs.controllerKey.Equal(m.agentPub) ||
+		!gs.memberActive(peer.ChainID) || gs.memberKey[peer.ChainID] == nil ||
+		hex.EncodeToString(gs.memberKey[peer.ChainID]) != peer.AgentID {
+		httpError(w, http.StatusNotFound, "role admission unavailable")
+		return
+	}
+	head, err := ss.GetSyncGroupSubchainHead(r.Context(), req.GroupID, RosterSubchain)
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "could not read roster journal head")
+		return
+	}
+	resp := selfRoleHeadResponse{Seq: 0}
+	if head != nil {
+		resp.Seq, resp.PrevHash = head.Seq+1, head.EntryHash
+	}
+	writeJSON(w, http.StatusOK, &resp)
+}
+
+func (m *Manager) handleSelfRoleAdmit(w http.ResponseWriter, r *http.Request) {
+	peer, ok := authenticatedPeer(r)
+	if !ok {
+		httpError(w, http.StatusUnauthorized, "authenticated peer identity missing")
+		return
+	}
+	var req signedGroupEntryRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil || req.GroupID == "" {
+		httpError(w, http.StatusBadRequest, "invalid signed self role change")
+		return
+	}
+	if req.Entry.AuthorChainID != peer.ChainID || req.Entry.AuthorAgentPubkey != peer.AgentID {
+		httpError(w, http.StatusForbidden, "entry author does not match authenticated member")
+		return
+	}
+	entry, err := m.admitSelfRoleChange(r.Context(), req.GroupID, req.Entry, peer)
+	if err != nil {
+		switch {
+		case errors.Is(err, errGroupPeerNoLongerBound):
+			httpError(w, http.StatusNotFound, "role admission unavailable")
+		case errors.Is(err, errSelfRoleHeadChanged):
+			httpError(w, http.StatusConflict, errSelfRoleHeadChanged.Error())
+		default:
+			httpError(w, http.StatusConflict, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, &signedGroupEntryResponse{Entry: entry})
+}
+
+func (m *Manager) emitRemoteSelfRoleChange(ctx context.Context, gs *groupApplyState, groupID string, payload map[string]string) (store.SyncGroupLogEntry, error) {
+	agreement, err := m.ActiveAgreement(gs.controllerChain)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	for attempt := 0; attempt < maxSelfRoleAdmissionAttempts; attempt++ {
+		body, status, callErr := m.doPeerRequest(ctx, agreement, http.MethodPost, "/fed/v1/sync/group/self-role/head", &selfRoleHeadRequest{GroupID: groupID})
+		if callErr != nil {
+			return store.SyncGroupLogEntry{}, callErr
+		}
+		if status != http.StatusOK {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("controller %s refused role head (%d): %s", gs.controllerChain, status, truncate(body, 200))
+		}
+		var head selfRoleHeadResponse
+		if json.Unmarshal(body, &head) != nil || head.Seq < 0 {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("controller returned an invalid roster head")
+		}
+		candidate, buildErr := buildJournalEntry(groupID, RosterSubchain, head.Seq, head.PrevHash, "role_change",
+			m.localChainID, m.agentPub, m.agentKey, payload)
+		if buildErr != nil {
+			return store.SyncGroupLogEntry{}, buildErr
+		}
+		body, status, callErr = m.doPeerRequest(ctx, agreement, http.MethodPost, "/fed/v1/sync/group/self-role/admit",
+			&signedGroupEntryRequest{GroupID: groupID, Entry: candidate})
+		if callErr != nil {
+			return store.SyncGroupLogEntry{}, callErr
+		}
+		if status == http.StatusConflict && strings.Contains(string(body), errSelfRoleHeadChanged.Error()) {
+			continue
+		}
+		if status != http.StatusOK {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("controller %s refused role admission (%d): %s", gs.controllerChain, status, truncate(body, 200))
+		}
+		var admitted signedGroupEntryResponse
+		if json.Unmarshal(body, &admitted) != nil || admitted.Entry.EntryHash != candidate.EntryHash ||
+			admitted.Entry.AuthorSig != candidate.AuthorSig || admitted.Entry.ControllerEpoch != gs.controllerEpoch ||
+			verifyControllerSignature(admitted.Entry, gs.controllerChain, gs.controllerKey) != nil {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("controller returned a mismatched role entry")
+		}
+		// Another member may have won the roster position immediately before this
+		// one. Pull from our current local head so we ingest that predecessor and the
+		// admitted entry together; appending only the returned tip would be out of
+		// order on the losing member even though the controller serialized correctly.
+		if _, pullErr := m.PullGroupJournal(ctx, gs.controllerChain, groupID, RosterSubchain); pullErr != nil {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("catch up controller-approved role entry: %w", pullErr)
+		}
+		held, heldErr := m.syncStore().GetSyncGroupLogEntry(ctx, groupID, RosterSubchain, admitted.Entry.Seq)
+		if heldErr != nil || held == nil || held.EntryHash != admitted.Entry.EntryHash {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("controller-approved role entry was not present after roster catch-up")
+		}
+		return admitted.Entry, nil
+	}
+	return store.SyncGroupLogEntry{}, fmt.Errorf("controller roster kept changing; retry the role update")
 }
 
 func (m *Manager) emitRemoteOwnerDomainAdd(ctx context.Context, controllerChain, groupID, domainTag string, maxClearance int) (store.SyncGroupLogEntry, error) {

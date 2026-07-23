@@ -57,6 +57,7 @@ type peerIdentity struct {
 // behind peerAuth — there is no unauthenticated surface on this listener.
 func (m *Manager) Router() http.Handler {
 	r := chi.NewRouter()
+	r.Use(m.transportEnabledMiddleware)
 	r.Group(func(r chi.Router) {
 		r.Use(m.peerAuth)
 		r.Get("/fed/v1/status", m.handleStatus)
@@ -70,6 +71,8 @@ func (m *Manager) Router() http.Handler {
 		r.Post("/fed/v1/sync/journal", m.handleSyncJournal) // v11.8 group journal exchange
 		r.Post("/fed/v1/sync/group/domain-add/head", m.handleDomainAddHead)
 		r.Post("/fed/v1/sync/group/domain-add/admit", m.handleDomainAddAdmit)
+		r.Post("/fed/v1/sync/group/self-role/head", m.handleSelfRoleHead)
+		r.Post("/fed/v1/sync/group/self-role/admit", m.handleSelfRoleAdmit)
 		r.Post("/fed/v1/sync/group/epoch-rotate/cosign", m.handleEpochRotateCosign)
 		r.Post("/fed/v1/sync/group/subchains", m.handleGroupSubchains)
 		r.Post("/fed/v1/sync/group/member-invite/accept", m.handleMemberInviteAccept)
@@ -81,6 +84,16 @@ func (m *Manager) Router() http.Handler {
 	// (no active agreement exists yet during a join).
 	m.mountJoinRoutes(r)
 	return r
+}
+
+func (m *Manager) transportEnabledMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !m.transportIsEnabled() {
+			httpError(w, http.StatusServiceUnavailable, "federation transport is disabled")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // peerAuth authenticates a federation request end-to-end:

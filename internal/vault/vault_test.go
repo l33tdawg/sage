@@ -164,6 +164,27 @@ func TestRecoveryKey(t *testing.T) {
 	assert.Equal(t, "secret memory", decrypted)
 }
 
+func TestVerifyRecoveryKeyRejectsAnotherVaultKey(t *testing.T) {
+	dir := t.TempDir()
+	firstPath := filepath.Join(dir, "first.key")
+	secondPath := filepath.Join(dir, "second.key")
+	require.NoError(t, Init(firstPath, "first-pass"))
+	require.NoError(t, Init(secondPath, "second-pass"))
+
+	first, err := Open(firstPath, "first-pass")
+	require.NoError(t, err)
+	firstKey, err := first.RecoveryKey()
+	require.NoError(t, err)
+	second, err := Open(secondPath, "second-pass")
+	require.NoError(t, err)
+	secondKey, err := second.RecoveryKey()
+	require.NoError(t, err)
+
+	assert.NoError(t, VerifyRecoveryKey(firstPath, firstKey))
+	assert.ErrorIs(t, VerifyRecoveryKey(firstPath, secondKey), ErrWrongRecoveryKey)
+	assert.ErrorIs(t, VerifyRecoveryKey(firstPath, "not-base64"), ErrWrongRecoveryKey)
+}
+
 func TestRecoveryKeyNilVault(t *testing.T) {
 	var v *Vault
 	_, err := v.RecoveryKey()

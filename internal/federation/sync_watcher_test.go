@@ -52,6 +52,41 @@ func TestSyncWatcherEnqueuesAndNudges(t *testing.T) {
 	assert.Equal(t, 1, counts[store.SyncStatePending])
 }
 
+func TestNudgeJournalReconcileAndWaitWaitsForPromptedPass(t *testing.T) {
+	m, _, _ := newDrainTestManager(t)
+	m.syncJournalNudge = make(chan chan struct{}, 1)
+	passStarted := make(chan struct{})
+	finishPass := make(chan struct{})
+	go func() {
+		done := <-m.syncJournalNudge
+		close(passStarted)
+		<-finishPass
+		close(done)
+	}()
+
+	returned := make(chan error, 1)
+	go func() {
+		returned <- m.NudgeJournalReconcileAndWait(context.Background())
+	}()
+	select {
+	case <-passStarted:
+	case <-time.After(time.Second):
+		t.Fatal("prompted reconcile was not queued")
+	}
+	select {
+	case err := <-returned:
+		t.Fatalf("refresh returned before the prompted pass finished: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(finishPass)
+	select {
+	case err := <-returned:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("refresh did not return after the prompted pass finished")
+	}
+}
+
 func TestSyncWatcherWaitsForAdmissionProvenance(t *testing.T) {
 	ctx := context.Background()
 	m, ms, bs := newDrainTestManager(t)

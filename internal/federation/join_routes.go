@@ -549,14 +549,14 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	hooks := m.joinP2PHooks()
 	routePrepared := false
 	if len(ctx.GuestP2PAddrs) > 0 {
-		if hooks.Persist == nil {
+		if hooks.Persist == nil && hooks.PersistSnapshot == nil {
 			ctx.RollbackGuestCA()
 			if ss := m.syncStore(); ss != nil {
 				_ = ss.DeleteSyncControl(context.Background(), ctx.GuestChain)
 			}
 			return "", "", fmt.Errorf("internet peer route persistence is unavailable")
 		}
-		if persistErr := hooks.Persist(ctx.GuestChain, ctx.GuestP2PAddrs); persistErr != nil {
+		if persistErr := m.persistBootstrapRoute(ctx.GuestChain, ctx.GuestPeerID, epoch, ctx.GuestP2PAddrs); persistErr != nil {
 			ctx.RollbackGuestCA()
 			if ss := m.syncStore(); ss != nil {
 				_ = ss.DeleteSyncControl(context.Background(), ctx.GuestChain)
@@ -677,10 +677,33 @@ func (m *Manager) HostCreate(hostEndpoint string) (*HostCreateResult, error) {
 	return m.HostCreateMode(hostEndpoint, false)
 }
 
+// HostCreateAuto is the single product intent. When a relay-backed bundle is
+// ready it creates one code carrying direct HTTPS, P2P-direct and relay
+// candidates. If relay preparation is unavailable but a direct endpoint is
+// usable, it emits the legacy LAN-shaped code so older peers still connect.
+func (m *Manager) HostCreateAuto(hostEndpoint string) (*HostCreateResult, error) {
+	hooks := m.joinP2PHooks()
+	if hooks.LocalBundle != nil {
+		if bundle, err := hooks.LocalBundle(); err == nil {
+			bundle = m.prepareLocalRouteBundle(bundle)
+			if validateP2PBundle(bundle) == nil {
+				return m.HostCreateMode(hostEndpoint, true)
+			}
+		}
+	}
+	if hostEndpoint == "" {
+		return nil, fmt.Errorf("no direct or secure relay route is ready yet")
+	}
+	return m.HostCreate(hostEndpoint)
+}
+
 // HostCreateMode requires a ready relay bundle for explicit internet setup.
 // Normal LAN setup keeps its legacy QR byte shape; two v11.6 peers exchange
 // roaming routes over authenticated mTLS only after the agreement is active.
 func (m *Manager) HostCreateMode(hostEndpoint string, requireP2P bool) (*HostCreateResult, error) {
+	if !m.transportIsEnabled() {
+		return nil, fmt.Errorf("federation transport is disabled")
+	}
 	if requireP2P && hostEndpoint == "" {
 		hostEndpoint = joinP2POnlyEndpoint
 	}
@@ -705,6 +728,7 @@ func (m *Manager) HostCreateMode(hostEndpoint string, requireP2P bool) (*HostCre
 	hooks := m.joinP2PHooks()
 	if requireP2P && hooks.LocalBundle != nil {
 		if bundle, bundleErr := hooks.LocalBundle(); bundleErr == nil && bundle.PeerID != "" && len(bundle.Addrs) > 0 {
+			bundle = m.prepareLocalRouteBundle(bundle)
 			if setErr := m.joins.SetHostP2P(js.ID, bundle.PeerID, bundle.Addrs); setErr != nil {
 				return nil, setErr
 			}
@@ -1088,6 +1112,9 @@ type GuestScanResult struct {
 // CA over the join listener, asserts its SPKI equals the scanned pin (refuse on
 // mismatch), and caches a draft. It returns the guest's own return QR string.
 func (m *Manager) GuestScan(ctx context.Context, uri, guestEndpoint string) (*GuestScanResult, error) {
+	if !m.transportIsEnabled() {
+		return nil, fmt.Errorf("federation transport is disabled")
+	}
 	enr, err := totp.ParseEnrollment(uri, false) // seed REQUIRED for a host enrollment
 	if err != nil {
 		return nil, err
@@ -1440,13 +1467,13 @@ func (m *Manager) GuestConfirm(ctx context.Context, sessionID, guestEndpoint str
 
 			routePrepared := false
 			if len(d.hostP2PAddrs) > 0 {
-				if hooks.Persist == nil {
+				if hooks.Persist == nil && hooks.PersistSnapshot == nil {
 					if ss := m.syncStore(); ss != nil {
 						_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
 					}
 					return "", fmt.Errorf("internet peer route persistence is unavailable")
 				}
-				if persistErr := hooks.Persist(d.hostChain, d.hostP2PAddrs); persistErr != nil {
+				if persistErr := m.persistBootstrapRoute(d.hostChain, d.hostPeerID, epoch, d.hostP2PAddrs); persistErr != nil {
 					if ss := m.syncStore(); ss != nil {
 						_ = ss.DeleteSyncControl(context.Background(), d.hostChain)
 					}
@@ -1974,18 +2001,36 @@ func joinHTTPTransport(tlsCfg *tls.Config) *http.Transport {
 
 func joinP2PHTTPTransport(tlsCfg *tls.Config, dial func(context.Context, string) (net.Conn, error), targets []string) *http.Transport {
 	exact := append([]string(nil), targets...)
+	authenticate := authenticatePeerRoute(tlsCfg)
 	return &http.Transport{
 		TLSClientConfig: tlsCfg,
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var errs []error
+		DialTLSContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			attempts := make([]routeDialAttempt, 0, len(exact))
 			for _, target := range exact {
-				conn, err := dial(ctx, target)
-				if err == nil {
-					return conn, nil
+				target := target
+				delay := time.Duration(0)
+				if routeKindForTarget(target) == RouteKindRelay {
+					delay = routeCandidateDelay
 				}
-				errs = append(errs, err)
+				attempts = append(attempts, routeDialAttempt{
+					delay: delay,
+					dial: func(attemptCtx context.Context) (PeerRouteDialResult, error) {
+						candidateCtx, cancel := context.WithTimeout(attemptCtx, 2*time.Second)
+						defer cancel()
+						start := time.Now()
+						conn, err := dial(candidateCtx, target)
+						return authenticate(candidateCtx, PeerRouteDialResult{
+							Conn: conn, Kind: routeKindForTarget(target),
+							Target: target, Latency: time.Since(start),
+						}, err)
+					},
+				})
 			}
-			return nil, fmt.Errorf("join p2p targets unreachable: %w", errors.Join(errs...))
+			winner, err := raceRouteDials(ctx, attempts)
+			if err != nil {
+				return nil, fmt.Errorf("join p2p targets unreachable: %w", err)
+			}
+			return winner.Conn, nil
 		},
 	}
 }

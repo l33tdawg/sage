@@ -140,6 +140,40 @@ func TestClonePeerPermissionsSanitizesStaleWriteAndCanonicalizesCopy(t *testing.
 	}}, permissions)
 }
 
+func TestShareableDomainCatalogueKeepsCopiedFromAfterConnectionRemoval(t *testing.T) {
+	ctx := context.Background()
+	ss, err := store.NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "copy-source.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ss.Close() })
+	bs, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bs.CloseBadger() })
+
+	operatorID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	require.NoError(t, bs.RegisterAgent(operatorID, "operator", "admin", "", "test", "", 4))
+	require.NoError(t, bs.RegisterDomain("sage-autoresearch-benchmark", operatorID, "", 1))
+	require.NoError(t, ss.RecordSyncOrigin(ctx, store.SyncOrigin{
+		OriginChainID:  "chain-a",
+		OriginMemoryID: "origin-1",
+		LocalMemoryID:  "local-copy-1",
+		DomainTag:      "sage-autoresearch-benchmark",
+		Outcome:        "admitted",
+	}))
+	// No cross_fed agreement is installed: this exercises the post-revoke
+	// catalogue, where durable copy provenance must outlive the connection.
+	h := NewDashboardHandler(ss, "test")
+	h.BadgerStore = bs
+	h.NodeOperatorAgentID = operatorID
+
+	domains, err := h.federationShareableDomains(ctx)
+	require.NoError(t, err)
+	require.Len(t, domains, 1)
+	require.Equal(t, "sage-autoresearch-benchmark", domains[0].Domain)
+	require.Equal(t, []federationDomainCopySource{{
+		ChainID: "chain-a", MemoryCount: 1,
+	}}, domains[0].CopySources)
+}
+
 func TestFederationPermissionSavePreflightsAndReportsCopyAlignment(t *testing.T) {
 	setup := func(t *testing.T, driver FederationJoinDriver) (*DashboardHandler, *store.SQLiteStore, *store.BadgerStore) {
 		t.Helper()

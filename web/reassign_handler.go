@@ -56,6 +56,9 @@ func (h *DashboardHandler) handleAgentDomains(agentStore store.AgentStore) http.
 		}
 		out := make([]domainInfo, 0, len(domains))
 		for _, d := range domains {
+			if isCerebrumInternalMemoryDomain(d) {
+				continue
+			}
 			isOwner := false
 			if h.BadgerStore != nil {
 				if owner, oErr := h.BadgerStore.GetDomainOwner(d); oErr == nil && owner == id {
@@ -485,6 +488,10 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 		req.Domain = strings.TrimSpace(req.Domain)
 		if req.TargetAgentID == "" || req.Domain == "" {
 			writeError(w, http.StatusBadRequest, "target_agent_id and domain are required")
+			return
+		}
+		if isCerebrumInternalMemoryDomain(req.Domain) {
+			writeError(w, http.StatusNotFound, "domain not found")
 			return
 		}
 		if req.SourceAgentID == req.TargetAgentID {

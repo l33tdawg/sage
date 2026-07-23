@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -15,15 +17,63 @@ import (
 
 	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/store"
 )
 
 // fakeFederation implements FederationService with canned outcomes so the
 // merge path is testable without TLS or a peer chain.
 type fakeFederation struct {
-	outcomes    []federation.PeerRecallOutcome
-	calls       int
-	lastReq     *federation.QueryRequest
-	agreementMu sync.Mutex
+	outcomes      []federation.PeerRecallOutcome
+	calls         int
+	lastReq       *federation.QueryRequest
+	peerStatus    *federation.StatusResponse
+	peerStatusErr error
+	agreementMu   sync.Mutex
+}
+
+type parallelStatusFederation struct {
+	*fakeFederation
+	statuses map[string]*federation.StatusResponse
+	delay    time.Duration
+	mu       sync.Mutex
+	current  int
+	max      int
+}
+
+type provenanceMemoryStore struct {
+	*mockMemoryStore
+	origin *store.SyncOrigin
+}
+
+func (s *provenanceMemoryStore) GetSyncOriginByLocalMemoryID(_ context.Context, localID string) (*store.SyncOrigin, error) {
+	if s.origin != nil && s.origin.LocalMemoryID == localID {
+		return s.origin, nil
+	}
+	return nil, errors.New("not a synced copy")
+}
+
+func (f *parallelStatusFederation) PeerStatus(ctx context.Context, chainID string) (*federation.StatusResponse, error) {
+	f.mu.Lock()
+	f.current++
+	if f.current > f.max {
+		f.max = f.current
+	}
+	f.mu.Unlock()
+	defer func() {
+		f.mu.Lock()
+		f.current--
+		f.mu.Unlock()
+	}()
+	select {
+	case <-time.After(f.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	status := f.statuses[chainID]
+	if status == nil {
+		return nil, errors.New("unreachable")
+	}
+	return status, nil
 }
 
 func (f *fakeFederation) LockAgreementMutation() func() {
@@ -44,6 +94,9 @@ func (f *fakeFederation) StageRemoteCA(string, []byte) ([]byte, func() error, fu
 	return nil, nil, nil, errors.New("na")
 }
 func (f *fakeFederation) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
+	if f.peerStatus != nil || f.peerStatusErr != nil {
+		return f.peerStatus, f.peerStatusErr
+	}
 	return nil, errors.New("na")
 }
 func (f *fakeFederation) LocalChainID() string { return "chain-local" }
@@ -169,9 +222,279 @@ func TestFederatedRecallDeniedForNonOperator(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
 	assert.Equal(t, 0, fed.calls, "non-operator must not trigger a fan-out")
 	require.NotNil(t, resp.Federation)
-	assert.Contains(t, resp.Federation.Errors["*"], "operator")
+	assert.Contains(t, resp.Federation.Errors["*"], "not authorized")
 	// Only the local result survives — no remote leak.
 	assert.Equal(t, 1, resp.TotalCount)
+}
+
+func TestFederatedRecallOrdinaryAgentUsesSubtreeDelegationAndGlobalTopK(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("local-%d", i)
+		memStore.memories[id] = &memory.MemoryRecord{
+			MemoryID: id, SubmittingAgent: "local-agent", Content: "benchmark local",
+			ContentHash: []byte{byte(i + 1)}, MemoryType: memory.TypeFact,
+			DomainTag: "sage-autoresearch.benchmark", ConfidenceScore: 0.9 - float64(i)*0.1,
+			Status: memory.StatusCommitted, CreatedAt: time.Now(),
+		}
+	}
+	fed := &fakeFederation{
+		peerStatus: &federation.StatusResponse{
+			ChainID: "chain-a",
+			PeerRBACGrant: &federation.PeerRBACGrant{Domains: []federation.PeerRBACDomainGrant{{
+				Domain: "sage-autoresearch", Read: true,
+			}}},
+		},
+		outcomes: []federation.PeerRecallOutcome{{
+			ChainID: "chain-a",
+			Results: []*federation.MemoryResult{
+				{MemoryID: "remote-1", SubmittingAgent: "author-a", Content: "benchmark remote one", DomainTag: "sage-autoresearch.benchmark", ConfidenceScore: .95, Classification: 1, Status: "committed", SourceChainID: "chain-a"},
+				{MemoryID: "remote-2", SubmittingAgent: "author-a", Content: "benchmark remote two", DomainTag: "sage-autoresearch.benchmark", ConfidenceScore: .85, Classification: 1, Status: "committed", SourceChainID: "chain-a"},
+			},
+		}},
+	}
+	srv.SetFederation(fed)
+	require.NoError(t, badger.SetCrossFed("chain-a", "https://redacted.invalid", []byte("pin"), 2, 0, []string{"*"}, nil, "active"))
+
+	body, _ := json.Marshal(HybridSearchMemoryRequest{
+		Query: "benchmark", Embedding: []float32{.1, .2}, DomainTag: "sage-autoresearch.benchmark",
+		Federated: true, TopK: 2,
+	})
+	req, callerID := signedRequest(t, http.MethodPost, "/v1/memory/hybrid", body)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+	require.NoError(t, badger.SetAgentPermission(callerID, 1,
+		`[{"domain":"sage-autoresearch","read":true}]`, "*", "", ""))
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var resp QueryMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.Equal(t, 1, fed.calls, "ordinary authorized caller should delegate")
+	require.Len(t, resp.Results, 2, "top_k must cap the globally merged result set")
+	require.NotNil(t, resp.Federation)
+	assert.GreaterOrEqual(t, resp.Federation.Merged, 1)
+	require.Len(t, resp.Federation.Coverage, 1)
+	assert.Equal(t, "hybrid", resp.Federation.Coverage[0].SearchMode)
+	assert.Contains(t, resp.Federation.Coverage[0].Fallback, "embedding-provider")
+	var remote *MemoryResult
+	for _, result := range resp.Results {
+		if result.SourceKind == "federated_live" {
+			remote = result
+		}
+	}
+	require.NotNil(t, remote)
+	assert.True(t, remote.Foreign)
+	assert.Equal(t, "external_untrusted", remote.Trust)
+	assert.Equal(t, "author-a", remote.OriginAgentID)
+}
+
+func TestFederatedSemanticRecallCarriesTextFallback(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	fed := &fakeFederation{}
+	srv.SetFederation(fed)
+	body, _ := json.Marshal(QueryMemoryRequest{
+		Query: "benchmark exact words", Embedding: []float32{.1, .2},
+		DomainTag: "sage-autoresearch-benchmark", Federated: true,
+	})
+	req, callerID := signedRequest(t, http.MethodPost, "/v1/memory/query", body)
+	srv.SetNodeOperatorID(callerID)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NotNil(t, fed.lastReq)
+	assert.Equal(t, federation.ModeHybrid, fed.lastReq.Mode)
+	assert.Equal(t, "benchmark exact words", fed.lastReq.Query)
+}
+
+func TestFederatedRecallDeduplicatesLocalAndLiveByContentHash(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+	memStore.memories["local-copy-shape"] = &memory.MemoryRecord{
+		MemoryID: "local-copy-shape", SubmittingAgent: "local-agent", Content: "same immutable fact",
+		ContentHash: []byte{1}, MemoryType: memory.TypeFact, DomainTag: "shared",
+		ConfidenceScore: .8, Status: memory.StatusCommitted, CreatedAt: time.Now(),
+	}
+	fed := &fakeFederation{outcomes: []federation.PeerRecallOutcome{{
+		ChainID: "chain-a",
+		Results: []*federation.MemoryResult{
+			{MemoryID: "origin-1", Content: "same immutable fact", ContentHash: "01", DomainTag: "shared", ConfidenceScore: .9, Status: "committed", SourceChainID: "chain-a"},
+			{MemoryID: "origin-2", Content: "different fact", ContentHash: "02", DomainTag: "shared", ConfidenceScore: .7, Status: "committed", SourceChainID: "chain-a"},
+		},
+	}}}
+	srv.SetFederation(fed)
+	body, _ := json.Marshal(SearchMemoryRequest{Query: "fact", DomainTag: "shared", Federated: true, TopK: 10})
+	req, callerID := signedRequest(t, http.MethodPost, "/v1/memory/search", body)
+	srv.SetNodeOperatorID(callerID)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var resp QueryMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.Len(t, resp.Results, 2, "same content hash from local/live sources must be one fused result")
+	assert.Equal(t, "local_native", resp.Results[0].SourceKind, "prefer the locally committed representative")
+}
+
+func TestRecallSurfacesStoredCopyOriginalProvenance(t *testing.T) {
+	srv, memStore, _ := newTestServer(t, "")
+	memStore.memories["local-copy"] = &memory.MemoryRecord{
+		MemoryID: "local-copy", SubmittingAgent: "local-receiver", Content: "retained foreign fact",
+		ContentHash: []byte{9}, MemoryType: memory.TypeObservation, DomainTag: "shared",
+		ConfidenceScore: .9, Status: memory.StatusCommitted, CreatedAt: time.Now(),
+	}
+	srv.store = &provenanceMemoryStore{mockMemoryStore: memStore, origin: &store.SyncOrigin{
+		OriginChainID: "chain-a", OriginMemoryID: "origin-9", OriginAgentPubkey: "agent-a",
+		LocalMemoryID: "local-copy", ContentHash: "feed09", Classification: 2, MemoryType: "fact",
+	}}
+	body, _ := json.Marshal(SearchMemoryRequest{Query: "foreign fact", DomainTag: "shared", TopK: 5})
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/search", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var response QueryMemoryResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	require.Len(t, response.Results, 1)
+	got := response.Results[0]
+	assert.Equal(t, "federated_copy", got.SourceKind)
+	assert.Equal(t, "chain-a", got.SourceChainID)
+	assert.Equal(t, "origin-9", got.OriginMemoryID)
+	assert.Equal(t, "agent-a", got.OriginAgentID)
+	assert.Equal(t, "feed09", got.ContentHash)
+	assert.Equal(t, 2, got.Classification)
+	assert.Equal(t, "fact", got.MemoryType)
+	assert.Equal(t, "external_untrusted", got.Trust)
+}
+
+func TestCrossFedStatusExposesAuthenticatedRemoteDiscovery(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	fed := &fakeFederation{peerStatus: &federation.StatusResponse{
+		ChainID:      "chain-dkan-tii",
+		NetworkName:  "DKAN-TII",
+		Time:         time.Now().Unix(),
+		Capabilities: []string{federation.CapabilitySync, federation.CapabilityFederatedPipeline},
+		PeerRBACGrant: &federation.PeerRBACGrant{
+			PolicyVersion: 3,
+			Domains: []federation.PeerRBACDomainGrant{{
+				Domain: "sage-autoresearch-benchmark",
+				Read:   true,
+			}},
+		},
+		PipeContacts: &federation.PipeContactGrant{
+			Contacts: []federation.PipeContact{{AgentID: "agent-b"}},
+		},
+	}}
+	srv.SetFederation(fed)
+
+	req, agentID := signedRequest(t, http.MethodGet, "/v1/federation/cross/chain-dkan-tii/status", nil)
+	srv.SetNodeOperatorID(agentID)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	assert.Equal(t, true, response["reachable"])
+	assert.Equal(t, "DKAN-TII", response["network_name"])
+	assert.NotNil(t, response["peer_rbac_grant"])
+	assert.NotNil(t, response["pipe_contacts"])
+}
+
+func TestFederationAvailableIsCallerFilteredSubtreeAndParallel(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	for _, chain := range []string{"chain-a", "chain-b"} {
+		require.NoError(t, badger.SetCrossFed(chain, "https://redacted.invalid", []byte(chain), 2, 0, []string{"*"}, nil, "active"))
+	}
+	status := func(name string) *federation.StatusResponse {
+		return &federation.StatusResponse{
+			ChainID: name, NetworkName: name,
+			PeerRBACGrant: &federation.PeerRBACGrant{Domains: []federation.PeerRBACDomainGrant{
+				{Domain: "sage-autoresearch", Read: true, Copy: true},
+				{Domain: "finance.secret", Read: true},
+			}},
+		}
+	}
+	fed := &parallelStatusFederation{
+		fakeFederation: &fakeFederation{},
+		statuses: map[string]*federation.StatusResponse{
+			"chain-a": status("A"),
+			"chain-b": status("B"),
+		},
+		delay: 100 * time.Millisecond,
+	}
+	srv.SetFederation(fed)
+
+	req, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available", nil)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+	require.NoError(t, badger.SetAgentPermission(callerID, 1,
+		`[{"domain":"sage-autoresearch.benchmark","read":true}]`, "*", "", ""))
+	start := time.Now()
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	elapsed := time.Since(start)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var response struct {
+		Connections []availableFederationConnection `json:"connections"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	require.Len(t, response.Connections, 2)
+	for _, connection := range response.Connections {
+		assert.Equal(t, []string{"sage-autoresearch.benchmark"}, connection.SharedReadDomains)
+		assert.Equal(t, []string{"sage-autoresearch.benchmark"}, connection.CopyOfferedDomains)
+	}
+	assert.GreaterOrEqual(t, fed.max, 2, "peer status probes should overlap")
+	assert.Less(t, elapsed, 190*time.Millisecond, "discovery should be one bounded parallel window")
+}
+
+func TestFederationCallerACLMatchesLocalDomainPolicy(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	_, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available", nil)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 2))
+
+	require.NoError(t, badger.SetAgentPermission(callerID, 2, `[]`, "*", "", ""))
+	allowed, _ := srv.federationCallerCanRead(context.Background(), callerID, "sage-autoresearch-benchmark")
+	assert.True(t, allowed, "empty JSON policy means unrestricted just like local checkDomainAccess")
+	assert.Equal(t, []string{"sage-autoresearch-benchmark"},
+		srv.federationVisibleRemoteScopes(context.Background(), callerID, "sage-autoresearch-benchmark"))
+
+	require.NoError(t, badger.SetAgentPermission(callerID, 2,
+		`[{"domain":"finance","read":true}]`, "*", "", ""))
+	require.NoError(t, badger.SetAccessGrant("sage-autoresearch-benchmark", callerID, 1, 0, "owner"))
+	allowed, _ = srv.federationCallerCanRead(context.Background(), callerID, "sage-autoresearch-benchmark")
+	assert.False(t, allowed, "a direct grant must not bypass an explicit local DomainAccess deny")
+	assert.Error(t, checkDomainAccess(context.Background(), nil, badger, callerID, "sage-autoresearch-benchmark", "read"))
+
+	require.NoError(t, badger.SetAgentPermission(callerID, 2, `{broken`, "*", "", ""))
+	allowed, _ = srv.federationCallerCanRead(context.Background(), callerID, "finance")
+	assert.False(t, allowed, "malformed registered policy must fail closed")
+	assert.Error(t, checkDomainAccess(context.Background(), nil, badger, callerID, "finance", "read"))
+}
+
+func TestFederationAvailableMetadataIsNarrowedToCallerSubtree(t *testing.T) {
+	contacts := []federation.PipeContact{{
+		AgentID: "owner", ContactID: "operator-token", Accepting: true,
+		Domains: []federation.PipeContactDomain{{
+			Domain: "sage-autoresearch", OwningDomain: "sage", OwnerHeight: 42,
+		}},
+	}}
+	got := filterAvailablePipeContacts(contacts, []string{"sage-autoresearch.benchmark"})
+	require.Len(t, got, 1)
+	assert.Empty(t, got[0].ContactID)
+	require.Len(t, got[0].Domains, 1)
+	assert.Equal(t, "sage-autoresearch.benchmark", got[0].Domains[0].Domain)
+	assert.Empty(t, got[0].Domains[0].OwningDomain)
+	assert.Zero(t, got[0].Domains[0].OwnerHeight)
 }
 
 func TestRecallWithoutOptInSkipsFederation(t *testing.T) {

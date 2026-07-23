@@ -17,6 +17,10 @@ const windowsInstaller = readFileSync(
   'utf8',
 );
 const rootDockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
+const dockerComposeGuide = readFileSync(
+  new URL('../docker-compose.sage-gui.yml', import.meta.url),
+  'utf8',
+);
 const bundleVerifier = readFileSync(
   new URL('../scripts/verify-native-shell-bundle.sh', import.meta.url),
   'utf8',
@@ -322,6 +326,26 @@ test('desktop release metadata strips the tag prefix without renaming versioned 
   assert.match(windowsInstaller, /OutFile "SAGE-\$\{ASSET_VERSION\}-Windows-Setup\.exe"/);
   assert.match(rootDockerfile, /^ARG VERSION=dev$/m);
   assert.doesNotMatch(rootDockerfile, /^ARG VERSION=4\.5\.7$/m);
+});
+
+test('Docker guidance keeps stdio MCP in the running SAGE container', () => {
+  assert.match(rootDockerfile, /^ENV SAGE_HOME=\/root\/\.sage$/m);
+  assert.match(rootDockerfile, /docker exec -i .*sage \/usr\/local\/bin\/sage-gui mcp/s);
+  assert.doesNotMatch(
+    rootDockerfile,
+    /docker run -i ghcr\.io\/l33tdawg\/sage:latest mcp/,
+  );
+
+  assert.match(dockerComposeGuide, /sage_data:\/root\/\.sage/);
+  assert.match(dockerComposeGuide, /SAGE_HOME: "\/root\/\.sage"/);
+  assert.match(
+    dockerComposeGuide,
+    /docker compose .* exec -T .*sage \/usr\/local\/bin\/sage-gui mcp/s,
+  );
+  assert.doesNotMatch(
+    dockerComposeGuide,
+    /Configure your agent to connect to http:\/\/localhost:8080/,
+  );
 });
 
 test('the fresh real-Comet fixture cannot skip historical app forks', () => {

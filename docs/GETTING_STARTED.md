@@ -91,11 +91,14 @@ Open the dashboard in your browser to see the Brain Visualization: the **MRI** b
 
 ## First run: the onboarding wizard
 
-The first time you open a fresh node's dashboard (empty brain, setup not yet done), SAGE greets you with a short **onboarding wizard**. It is three steps, and it walks you straight from an empty brain to working memory:
+The first time you open a fresh node's dashboard (empty brain, setup not yet done), SAGE greets you with a short **onboarding wizard**. It walks you from an empty brain to a private, recoverable setup:
 
-1. **Welcome** - a one-screen orientation to CEREBRUM, the dashboard where you watch and curate everything your AI tools remember.
-2. **Semantic memory** - turn on recall-by-meaning (the guided embedder setup, below). Optional, but it is the single biggest recall upgrade, so the wizard recommends it.
-3. **Connect an AI tool** - wire up Claude Code, Codex, Cursor, ChatGPT, or another client so it gets persistent memory.
+1. **Choose how to start** - create a private SAGE on this computer, or join an existing SAGE network with a pairing code.
+2. **Smart search** - optionally turn on recall by meaning. It runs privately on this computer, and SAGE handles setup.
+3. **Connect an AI tool** - connect Claude Code, Codex, Cursor, ChatGPT, or another client so it gets persistent memory.
+4. **Choose private or shared** - private is the default; pairing alone shares nothing, and you choose people and topics separately.
+5. **Protect and recover** - turn on encryption and save the recovery key needed if you forget the passphrase.
+6. **Finish** - import existing conversations, open the guide, or continue into sharing setup.
 
 Closing the wizard at any point marks onboarding done, so it never nags you again. You can **re-run it any time** from **Settings > Maintenance > Run setup** - handy if you skipped a step or want to connect another tool later. The wizard reuses the real setup screens (it does not duplicate them), so whatever you do inside it is the same thing you would do from Settings.
 

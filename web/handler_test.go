@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -209,6 +210,143 @@ func TestHandleStats(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, float64(2), resp["total_memories"])
+}
+
+func TestCerebrumHidesFederationAuditMemories(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+
+	insertTestMemory(t, s, "user-memory", "general")
+	insertTestMemory(t, s, "sync-anchor", "SAGE-SYNCAUDIT-GRP-ABC")
+
+	t.Run("list", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/memory/list?limit=50", nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		var resp struct {
+			Memories []*memory.MemoryRecord `json:"memories"`
+			Total    int                    `json:"total"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Equal(t, 1, resp.Total)
+		require.Len(t, resp.Memories, 1)
+		assert.Equal(t, "user-memory", resp.Memories[0].MemoryID)
+	})
+
+	t.Run("search", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/memory/list?q=content&limit=50", nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		var resp struct {
+			Memories []*memory.MemoryRecord `json:"memories"`
+			Total    int                    `json:"total"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Equal(t, 1, resp.Total)
+		require.Len(t, resp.Memories, 1)
+		assert.Equal(t, "user-memory", resp.Memories[0].MemoryID)
+	})
+
+	t.Run("stats", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/stats", nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		var resp store.StoreStats
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		assert.Equal(t, 1, resp.TotalMemories)
+		assert.Equal(t, map[string]int{"general": 1}, resp.ByDomain)
+		assert.Equal(t, 1, resp.ByStatus[string(memory.StatusProposed)])
+		assert.Equal(t, 1, resp.ByAgent["agent1"])
+	})
+
+	t.Run("graph", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/memory/graph?status=proposed&limit=50", nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		var resp struct {
+			Nodes        []graphNode    `json:"nodes"`
+			Total        int            `json:"total"`
+			DomainCounts map[string]int `json:"domain_counts"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		require.Len(t, resp.Nodes, 1)
+		assert.Equal(t, "user-memory", resp.Nodes[0].ID)
+		assert.Equal(t, 1, resp.Total)
+		assert.Equal(t, map[string]int{"general": 1}, resp.DomainCounts)
+	})
+
+	t.Run("timeline", func(t *testing.T) {
+		from := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+		to := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+		path := "/v1/dashboard/memory/timeline?bucket=hour&from=" + from + "&to=" + to
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		var resp struct {
+			Buckets []store.TimelineBucket `json:"buckets"`
+		}
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+		total := 0
+		for _, bucket := range resp.Buckets {
+			total += bucket.Count
+		}
+		assert.Equal(t, 1, total)
+	})
+
+	t.Run("portable export", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/export", nil)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		assert.Contains(t, w.Body.String(), `"memory_id":"user-memory"`)
+		assert.NotContains(t, strings.ToLower(w.Body.String()), "sage-syncaudit-")
+		assert.NotContains(t, w.Body.String(), `"memory_id":"sync-anchor"`)
+	})
+}
+
+func TestCerebrumCannotMutateFederationAuditMemory(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+	insertTestMemory(t, s, "sync-anchor", "sage-syncaudit-grp-abc")
+	insertTestMemory(t, s, "user-memory", "general")
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/v1/dashboard/memory/sync-anchor", nil)
+	markLocalCEREBRUM(deleteReq)
+	deleteW := httptest.NewRecorder()
+	r.ServeHTTP(deleteW, deleteReq)
+	require.Equal(t, http.StatusNotFound, deleteW.Code, deleteW.Body.String())
+
+	body := bytes.NewBufferString(`{"domain":"general"}`)
+	updateReq := httptest.NewRequest(http.MethodPatch, "/v1/dashboard/memory/sync-anchor", body)
+	updateReq.Header.Set("Content-Type", "application/json")
+	updateW := httptest.NewRecorder()
+	r.ServeHTTP(updateW, updateReq)
+	require.Equal(t, http.StatusNotFound, updateW.Code, updateW.Body.String())
+
+	reservedBody := bytes.NewBufferString(`{"domain":"SAGE-SYNCAUDIT-GRP-FAKE"}`)
+	reservedReq := httptest.NewRequest(http.MethodPatch, "/v1/dashboard/memory/user-memory", reservedBody)
+	reservedReq.Header.Set("Content-Type", "application/json")
+	reservedW := httptest.NewRecorder()
+	r.ServeHTTP(reservedW, reservedReq)
+	require.Equal(t, http.StatusBadRequest, reservedW.Code, reservedW.Body.String())
+
+	record, err := s.GetMemory(context.Background(), "sync-anchor")
+	require.NoError(t, err)
+	assert.Equal(t, "sage-syncaudit-grp-abc", record.DomainTag)
+	assert.Equal(t, memory.StatusProposed, record.Status)
+	userRecord, err := s.GetMemory(context.Background(), "user-memory")
+	require.NoError(t, err)
+	assert.Equal(t, "general", userRecord.DomainTag)
 }
 
 func TestTaskAssignmentCrossProviderAppearsInBacklogAndInbox(t *testing.T) {
@@ -863,6 +1001,27 @@ func TestHandleExport_AllMemories(t *testing.T) {
 	}
 }
 
+func TestHandleExport_ExcludesDeprecatedMemories(t *testing.T) {
+	h, s := newTestHandler(t)
+	r := testRouter(h)
+
+	insertTestMemory(t, s, "kept", "test-domain")
+	insertTestMemory(t, s, "forgotten", "test-domain")
+	require.NoError(t, s.UpdateStatus(context.Background(), "forgotten", memory.StatusDeprecated, time.Now().UTC()))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/export", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	lines := bytes.Split(bytes.TrimSpace(w.Body.Bytes()), []byte("\n"))
+	require.Len(t, lines, 1)
+	var rec memory.MemoryRecord
+	require.NoError(t, json.Unmarshal(lines[0], &rec))
+	assert.Equal(t, "kept", rec.MemoryID)
+	assert.NotContains(t, w.Body.String(), "content-forgotten")
+}
+
 func TestHandleExport_PaginatesAcrossPages(t *testing.T) {
 	h, s := newTestHandler(t)
 	r := testRouter(h)
@@ -903,8 +1062,93 @@ func TestHandleExport_EmptyDB(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Header().Get("Content-Type"), "application/x-ndjson")
-	// Body should be empty (no records)
-	assert.Empty(t, bytes.TrimSpace(w.Body.Bytes()))
+	// The body carries a format marker so Import can truthfully identify an
+	// empty SAGE backup instead of misclassifying it as another JSONL format.
+	var manifest map[string]any
+	require.NoError(t, json.Unmarshal(bytes.TrimSpace(w.Body.Bytes()), &manifest))
+	assert.Equal(t, "sage_backup_manifest", manifest["record_type"])
+	assert.Equal(t, float64(1), manifest["sage_backup_version"])
+}
+
+func TestMemoryBackup_FreshHandlerRoundTrip(t *testing.T) {
+	sourceHandler, sourceStore := newTestHandler(t)
+	insertTestMemory(t, sourceStore, "portable-1", "project-alpha")
+	insertTestMemory(t, sourceStore, "portable-2", "project-beta")
+	insertTestMemory(t, sourceStore, "forgotten", "private-history")
+	require.NoError(t, sourceStore.UpdateStatus(context.Background(), "forgotten", memory.StatusDeprecated, time.Now().UTC()))
+
+	exportReq := httptest.NewRequest(http.MethodGet, "/v1/dashboard/export", nil)
+	exportW := httptest.NewRecorder()
+	testRouter(sourceHandler).ServeHTTP(exportW, exportReq)
+	require.Equal(t, http.StatusOK, exportW.Code)
+
+	// A second handler/store represents a newly installed SAGE. Exercise the
+	// same preview + explicit confirmation routes used by CEREBRUM rather than
+	// calling the parser or store directly.
+	freshHandler, freshStore := newTestHandler(t)
+	freshRouter := testRouter(freshHandler)
+	var upload bytes.Buffer
+	writer := multipart.NewWriter(&upload)
+	part, err := writer.CreateFormFile("file", "sage-memory-backup.jsonl")
+	require.NoError(t, err)
+	_, err = part.Write(exportW.Body.Bytes())
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	previewReq := httptest.NewRequest(http.MethodPost, "/v1/dashboard/import/preview", &upload)
+	previewReq.Header.Set("Content-Type", writer.FormDataContentType())
+	previewW := httptest.NewRecorder()
+	freshRouter.ServeHTTP(previewW, previewReq)
+	require.Equal(t, http.StatusOK, previewW.Code, previewW.Body.String())
+	var preview map[string]any
+	require.NoError(t, json.Unmarshal(previewW.Body.Bytes(), &preview))
+	require.Equal(t, "sage-backup", preview["source"])
+	require.Equal(t, float64(2), preview["total"])
+	importID, ok := preview["import_id"].(string)
+	require.True(t, ok)
+	require.NotEmpty(t, importID)
+
+	confirmBody, err := json.Marshal(map[string]string{"import_id": importID})
+	require.NoError(t, err)
+	confirmReq := httptest.NewRequest(http.MethodPost, "/v1/dashboard/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq.Header.Set("Content-Type", "application/json")
+	confirmW := httptest.NewRecorder()
+	freshRouter.ServeHTTP(confirmW, confirmReq)
+	require.Equal(t, http.StatusOK, confirmW.Code, confirmW.Body.String())
+
+	restored, total, err := freshStore.ListMemories(context.Background(), store.ListOptions{Limit: 10, Sort: "oldest"})
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.Len(t, restored, 2)
+	assert.Equal(t, "project-alpha", restored[0].DomainTag)
+	assert.Equal(t, "content-portable-1", restored[0].Content)
+	assert.NotEqual(t, "portable-1", restored[0].MemoryID)
+	expectedHash := sha256.Sum256([]byte(restored[0].Content))
+	assert.Equal(t, expectedHash[:], restored[0].ContentHash)
+}
+
+func TestMemoryBackup_DeprecatedOnlyPreviewExplainsNothingWillRestore(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+
+	var upload bytes.Buffer
+	writer := multipart.NewWriter(&upload)
+	part, err := writer.CreateFormFile("file", "old-sage-backup.jsonl")
+	require.NoError(t, err)
+	_, err = part.Write([]byte(`{"memory_id":"forgotten","content":"Do not restore this","memory_type":"observation","domain_tag":"general","status":"deprecated"}`))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/import/preview", &upload)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnprocessableEntity, w.Code)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	assert.Equal(t, "no_restorable_memories", response["error"])
+	assert.Contains(t, response["message"], "Memories you chose to forget will stay forgotten")
 }
 
 func TestHandleAuthMiddleware_DynamicEncryption(t *testing.T) {

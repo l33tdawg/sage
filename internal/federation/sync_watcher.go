@@ -14,6 +14,7 @@ package federation
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -175,8 +176,32 @@ func (m *Manager) NudgeJournalReconcile() {
 		return
 	}
 	select {
-	case ch <- struct{}{}:
+	case ch <- nil:
 	default:
+	}
+}
+
+// NudgeJournalReconcileAndWait asks the anti-entropy worker to run and waits
+// until that prompted pass finishes. Unlike the background nudge above, an
+// explicit operator refresh must not race its immediate SQLite reload and show
+// the same stale group projection. The caller supplies the bound on waiting;
+// cancellation never stops or corrupts a worker pass already in progress.
+func (m *Manager) NudgeJournalReconcileAndWait(ctx context.Context) error {
+	ch := m.syncJournalNudge
+	if ch == nil {
+		return fmt.Errorf("group journal refresh is not running")
+	}
+	done := make(chan struct{})
+	select {
+	case ch <- done:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

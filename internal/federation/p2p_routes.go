@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	ma "github.com/multiformats/go-multiaddr"
@@ -77,7 +78,7 @@ func (m *Manager) currentP2PRouteBinding(ctx context.Context, remoteChainID stri
 }
 
 func validateP2PBundle(bundle JoinP2PBundle) error {
-	if bundle.Protocol != "/sage/fed/1.0.0" || len(bundle.Addrs) == 0 || len(bundle.Addrs) > 4 {
+	if bundle.Protocol != "/sage/fed/1.0.0" || len(bundle.Addrs) == 0 || len(bundle.Addrs) > 8 {
 		return fmt.Errorf("invalid p2p route bundle")
 	}
 	declared, err := peer.Decode(bundle.PeerID)
@@ -102,13 +103,13 @@ func validateP2PBundle(bundle JoinP2PBundle) error {
 	if !hasCircuit {
 		return fmt.Errorf("p2p route bundle has no relay fallback")
 	}
-	return nil
+	return validateRouteSnapshotTimes(bundle, time.Now())
 }
 
 func (m *Manager) handleP2PRoutes(w http.ResponseWriter, r *http.Request) {
 	identity := peerFromCtx(r.Context())
 	hooks := m.joinP2PHooks()
-	if identity == nil || hooks.Persist == nil || hooks.LocalBundle == nil {
+	if identity == nil || (hooks.Persist == nil && hooks.PersistSnapshot == nil) || hooks.LocalBundle == nil {
 		httpError(w, http.StatusNotImplemented, "p2p route exchange unavailable")
 		return
 	}
@@ -135,6 +136,9 @@ func (m *Manager) handleP2PRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	local, err := hooks.LocalBundle()
+	if err == nil {
+		local = m.prepareLocalRouteBundle(local)
+	}
 	if err != nil || validateP2PBundle(local) != nil {
 		httpError(w, http.StatusServiceUnavailable, "local relay route is not ready")
 		return
@@ -153,7 +157,7 @@ func (m *Manager) handleP2PRoutes(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusForbidden, "p2p route binding changed before persistence")
 		return
 	}
-	if err := hooks.Persist(identity.ChainID, remote.Addrs); err != nil {
+	if err := m.persistRouteSnapshot(identity.ChainID, currentBinding, remote); err != nil {
 		unlock()
 		httpError(w, http.StatusInternalServerError, "could not persist peer route")
 		return
@@ -166,6 +170,9 @@ func (m *Manager) handleP2PRoutes(w http.ResponseWriter, r *http.Request) {
 // over the already-authenticated direct mTLS channel. Older peers simply return
 // 404 and retain fully compatible LAN-only behavior.
 func (m *Manager) ExchangeP2PRoutes(ctx context.Context, remoteChainID string, local JoinP2PBundle) error {
+	if local.Revision == 0 {
+		local = m.prepareLocalRouteBundle(local)
+	}
 	if err := validateP2PBundle(local); err != nil {
 		return err
 	}
@@ -199,7 +206,7 @@ func (m *Manager) ExchangeP2PRoutes(ctx context.Context, remoteChainID string, l
 		return validationErr
 	}
 	hooks := m.joinP2PHooks()
-	if hooks.Persist == nil {
+	if hooks.Persist == nil && hooks.PersistSnapshot == nil {
 		return fmt.Errorf("p2p route persistence unavailable")
 	}
 	unlock = ss.LockSyncPolicyRead()
@@ -212,7 +219,7 @@ func (m *Manager) ExchangeP2PRoutes(ctx context.Context, remoteChainID string, l
 		unlock()
 		return fmt.Errorf("p2p route binding changed before persistence")
 	}
-	err = hooks.Persist(remoteChainID, remote.Addrs)
+	err = m.persistRouteSnapshot(remoteChainID, currentBinding, remote)
 	unlock()
 	return err
 }

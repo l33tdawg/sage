@@ -1507,6 +1507,16 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 		args = append(args, opts.DomainTag)
 		argIdx++
 	}
+	for _, prefix := range opts.ExcludeDomainPrefixes {
+		if prefix == "" {
+			continue
+		}
+		filter := fmt.Sprintf(" AND LOWER(domain_tag) NOT LIKE $%d", argIdx)
+		query += filter
+		countQuery += filter
+		args = append(args, strings.ToLower(prefix)+"%")
+		argIdx++
+	}
 	if opts.Provider != "" {
 		filter := fmt.Sprintf(" AND (provider = $%d OR provider = '' OR memory_type = 'fact')", argIdx)
 		query += filter
@@ -1514,7 +1524,13 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 		args = append(args, opts.Provider)
 		argIdx++
 	}
-	if opts.Status != "" {
+	switch {
+	case opts.Status == "active":
+		// Match SQLite's shared ListMemories contract: "active" means every
+		// lifecycle state except deprecated/audit-only.
+		query += " AND status != 'deprecated'"
+		countQuery += " AND status != 'deprecated'"
+	case opts.Status != "":
 		filter := fmt.Sprintf(" AND status = $%d", argIdx)
 		query += filter
 		countQuery += filter
@@ -1592,16 +1608,41 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 
 // GetStats returns aggregate statistics about stored memories.
 func (s *PostgresStore) GetStats(ctx context.Context) (*StoreStats, error) {
+	return s.getStats(ctx, nil)
+}
+
+// GetStatsExcludingDomainPrefixes is the presentation-safe aggregate variant.
+// The complete GetStats contract remains unchanged for audit/internal callers.
+func (s *PostgresStore) GetStatsExcludingDomainPrefixes(ctx context.Context, prefixes []string) (*StoreStats, error) {
+	return s.getStats(ctx, prefixes)
+}
+
+func (s *PostgresStore) getStats(ctx context.Context, excludedPrefixes []string) (*StoreStats, error) {
 	stats := &StoreStats{
 		ByDomain: make(map[string]int),
 		ByStatus: make(map[string]int),
 	}
+	excludedSQL := ""
+	excludedArgs := make([]any, 0, len(excludedPrefixes))
+	for _, prefix := range excludedPrefixes {
+		if prefix == "" {
+			continue
+		}
+		excludedArgs = append(excludedArgs, strings.ToLower(prefix)+"%")
+		excludedSQL += fmt.Sprintf(" AND LOWER(domain_tag) NOT LIKE $%d", len(excludedArgs))
+	}
 
-	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM memories`).Scan(&stats.TotalMemories); err != nil {
+	if err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM memories WHERE 1=1`+excludedSQL,
+		excludedArgs...,
+	).Scan(&stats.TotalMemories); err != nil {
 		return nil, fmt.Errorf("count total: %w", err)
 	}
 
-	rows, err := s.db.Query(ctx, `SELECT domain_tag, COUNT(*) FROM memories GROUP BY domain_tag`)
+	rows, err := s.db.Query(ctx,
+		`SELECT domain_tag, COUNT(*) FROM memories WHERE 1=1`+excludedSQL+` GROUP BY domain_tag`,
+		excludedArgs...,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("count by domain: %w", err)
 	}
@@ -1616,7 +1657,10 @@ func (s *PostgresStore) GetStats(ctx context.Context) (*StoreStats, error) {
 	}
 	rows.Close()
 
-	rows, err = s.db.Query(ctx, `SELECT status, COUNT(*) FROM memories GROUP BY status`)
+	rows, err = s.db.Query(ctx,
+		`SELECT status, COUNT(*) FROM memories WHERE 1=1`+excludedSQL+` GROUP BY status`,
+		excludedArgs...,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("count by status: %w", err)
 	}
@@ -1631,7 +1675,10 @@ func (s *PostgresStore) GetStats(ctx context.Context) (*StoreStats, error) {
 	}
 	rows.Close()
 
-	row := s.db.QueryRow(ctx, `SELECT MAX(created_at) FROM memories`)
+	row := s.db.QueryRow(ctx,
+		`SELECT MAX(created_at) FROM memories WHERE 1=1`+excludedSQL,
+		excludedArgs...,
+	)
 	var lastActivity *time.Time
 	if scanErr := row.Scan(&lastActivity); scanErr == nil {
 		stats.LastActivity = lastActivity
@@ -1642,6 +1689,24 @@ func (s *PostgresStore) GetStats(ctx context.Context) (*StoreStats, error) {
 
 // GetTimeline returns memory counts aggregated by time periods.
 func (s *PostgresStore) GetTimeline(ctx context.Context, from, to time.Time, domain string, bucket string) ([]TimelineBucket, error) {
+	return s.getTimeline(ctx, from, to, domain, bucket, nil)
+}
+
+func (s *PostgresStore) GetTimelineExcludingDomainPrefixes(
+	ctx context.Context,
+	from, to time.Time,
+	domain, bucket string,
+	prefixes []string,
+) ([]TimelineBucket, error) {
+	return s.getTimeline(ctx, from, to, domain, bucket, prefixes)
+}
+
+func (s *PostgresStore) getTimeline(
+	ctx context.Context,
+	from, to time.Time,
+	domain, bucket string,
+	excludedPrefixes []string,
+) ([]TimelineBucket, error) {
 	trunc := "day"
 	switch bucket {
 	case "hour":
@@ -1660,6 +1725,15 @@ func (s *PostgresStore) GetTimeline(ctx context.Context, from, to time.Time, dom
 	if domain != "" {
 		query += fmt.Sprintf(" AND domain_tag = $%d", argIdx)
 		args = append(args, domain)
+		argIdx++
+	}
+	for _, prefix := range excludedPrefixes {
+		if prefix == "" {
+			continue
+		}
+		query += fmt.Sprintf(" AND LOWER(domain_tag) NOT LIKE $%d", argIdx)
+		args = append(args, strings.ToLower(prefix)+"%")
+		argIdx++
 	}
 
 	query += ` GROUP BY period ORDER BY period`

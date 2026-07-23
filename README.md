@@ -45,21 +45,27 @@ Full deployment guide (multi-agent networks, RBAC, federation, monitoring): **[A
 | Control Board | Federation | Recall Engine |
 |:---:|:---:|:---:|
 | ![CEREBRUM overview dashboard](docs/screen-overview.png) | ![Federation join dashboard](docs/screen-network.png) | ![Recall engine settings](docs/screen-config.png) |
-| Chain health, quorum, agents, federation, and embeddings | Trust-only LAN or internet JOIN, followed by independent Read/Copy choices on each SAGE | Smart-memory setup, managed reranker install, and recall-depth tuning |
+| Chain health, quorum, agents, federation, and embeddings | One trust-only JOIN that prepares Direct and Secure relay automatically, followed by independent Read/Copy choices on each SAGE | Smart-memory setup, managed reranker install, and recall-depth tuning |
 
 The dashboard also includes agent management, domain permissions, key rotation, import/export, software updates, and encryption controls.
 
 ---
 
-## What's New in v11.11.6
+## What's New in v11.12.0
 
-**Sharing groups now have an owner-controlled end.** Deleting a group stops its sharing immediately, removes every guest, and makes the group disappear from CEREBRUM without revoking the trusted SAGE connections underneath it. Offline guests receive their signed removal when they reconnect. Interrupted deletion remains visibly retryable and fail-closed, so it cannot silently leave group access active.
+**This release makes first run, sharing, recovery, and day-to-day federation understandable without technical knowledge.** CEREBRUM now presents one create-or-join decision, keeps a new SAGE private by default, explains that pairing alone shares nothing, and routes sharing into the same owner-controlled RBAC surface used everywhere else.
 
-**Connection history matches the trust model.** A revoked connection now says **Pair again** because restoring trust requires a fresh code and approval ceremony. Previous connections may be hidden from the local CEREBRUM list without deleting their server-side audit history, and a new pairing cannot inherit a stale local dismissal.
+- **File-sharing-style groups with Active Directory semantics.** Owners choose already-trusted SAGEs and existing domains, guests control only their own receive role, and group deletion removes the group everywhere without deleting the trusted connections underneath it. Concurrent guest role changes are serialized by the owner, and **Refresh** waits for signed journal reconciliation before showing the result.
+- **Federation visible to ordinary agents.** The read-only `sage_federation` MCP tool lets an authorized agent inspect the SAGE connections and Read/Copy scopes visible to its own subtree. An exact-domain `sage_recall` can opt into authorized peers with `scope:auto`, merges peer results under one global limit, preserves provenance, and falls back safely when peers use different embedding providers.
+- **One automatic connection path.** Users no longer choose LAN versus internet. SAGE prepares direct and secure-relay candidates behind one **Connect** action, labels them as prepared until a real exchange selects one, prefers a working direct route, falls back without replaying a request, refreshes stale routes, and keeps route, trust, lock, compatibility, offline, degraded, and security failures distinct.
+- **Clear local-versus-shared visibility.** Already-shared domains stay in a separate first section of the permissions list. The main Brain identifies local, remote, saved-here, and copied-from sources—even after a connection is revoked—while internal federation/RBAC audit records stay out of user memory views and sharing controls.
+- **Recovery that is visible and honest.** Recovery-key backup acknowledgement survives reloads; a wrong recovery key is rejected before the vault is touched; successful recovery establishes the ordinary dashboard session; portable JSONL backups restore through Preview and Confirm; forgotten memories are excluded and cannot be resurrected from older backups.
+- **Safe same-network join.** Join codes bind the exact SAGE executable as well as the version, and adopting the host chain clears only old chain-projection receipts while preserving the guest's local memories.
+- **Accessible, consistent controls.** Destructive and privacy-affecting actions use explanatory dialogs that say what changes and what remains safe. Search filters, cleanup and preference switches, recall controls, and per-domain access switches expose useful screen-reader names.
 
-**The ABCI gRPC server includes the upstream security fix.** `grpc-go` is updated to 1.82.1, closing GHSA-hrxh-6v49-42gf: an xDS RBAC fail-open/panic path and an HTTP/2 rapid-reset denial-of-service bypass disclosed while this release was being prepared.
+The structured v11.12 proxy acceptance exercised first run, same-network join, three-node federation, group creation/removal, concurrent roles, restore, forgetting, cleanup, keyboard focus, and recovery on disposable nodes. The protected release workflow supplies the remaining signed/notarized clean-install artifact check.
 
-This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.11.6.
+This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.12.0.
 
 ## What's New in v11.11.2
 
@@ -290,7 +296,7 @@ SDK 11.6.1.
 
 **SAGE federation can now travel with you, and selected memories can become a shared, durable two-node brain without turning the relay into a trusted server.** v11.6.0 is an off-consensus connectivity, replication-control, and UX release: it changes no consensus rule, AppHash, transaction type, key encoding, or fork. `app-v17` remains shipped-dormant until governed activation, and existing chains replay byte-identically.
 
-- **Pair across the internet without port-forwarding.** The guided host flow now offers Same LAN or Internet. Internet JOIN carries a bounded libp2p route bundle through the human-verified ceremony and uses NAT traversal with Circuit Relay v2 fallback. Federation mTLS, the pinned CA, active treaty, and signed requests remain the trust boundary; the relay sees encrypted bytes and connection metadata, never plaintext memories or federation keys.
+- **Pair across the internet without port-forwarding.** Current CEREBRUM prepares direct and secure-relay candidates behind one connection flow; v11.6 introduced the bounded libp2p route bundle, NAT traversal, and Circuit Relay v2 fallback that make that possible. Federation mTLS, the pinned CA, active treaty, and signed requests remain the trust boundary; the relay sees encrypted bytes and connection metadata, never plaintext memories or federation keys.
 - **LAN relationships roam without re-pairing.** A legacy-shaped LAN QR stays compatible with older guests. Once two v11.6 nodes finish signing, they exchange relay/direct routes over the authenticated agreement, persist them atomically, and can move LAN → internet → LAN without changing federation identity.
 - **Memory sync is host-controlled and off by default.** After signing, the host can leave copying off or choose concrete domains permitted by both treaty scopes and local domain ownership. The selected set is the complete bidirectional replication allowlist; the guest can view it or disconnect, but cannot widen it. Existing pre-v11.6 links retain their legacy bilateral behavior until they re-pair.
 - **Offline catch-up keeps domain boundaries intact.** The existing durable outbox and anti-entropy engine now propagate versioned host policy before data, preserve user tags, retry across restarts and outages, and catch a returning peer up. Memories outside selected domains never enter the sync outbox.
@@ -572,10 +578,47 @@ Or grab a binary: [macOS DMG](https://github.com/l33tdawg/sage/releases/latest) 
 
 ```bash
 docker pull ghcr.io/l33tdawg/sage:latest
-docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
+docker run -d --name sage \
+  -p 8080:8080 \
+  -v ~/.sage:/root/.sage \
+  ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.11.6`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.12.0`.
+
+The SAGE server stays in that container. To give a local MCP client a stdio
+bridge, start a second process **inside the same running container**:
+
+```bash
+docker exec -i \
+  -e SAGE_PROVIDER=claude-code \
+  -e SAGE_PROJECT=my-project \
+  -e SAGE_IDENTITY_PATH=/root/.sage/agents/claude-code-my-project/agent.key \
+  sage /usr/local/bin/sage-gui mcp
+```
+
+For the shipped Compose stack, use the service name rather than a generated
+container name:
+
+```bash
+docker compose -f docker-compose.sage-gui.yml exec -T \
+  -e SAGE_PROVIDER=claude-code \
+  -e SAGE_PROJECT=my-project \
+  -e SAGE_IDENTITY_PATH=/root/.sage/agents/claude-code-my-project/agent.key \
+  sage /usr/local/bin/sage-gui mcp
+```
+
+If an MCP client launches this through a wrapper, point its stdio configuration
+at the wrapper's absolute path. Pass `SAGE_PROVIDER`, `SAGE_PROJECT`, and
+`SAGE_IDENTITY_PATH` through `docker exec -e`/`docker compose exec -e`; setting
+them only on the host-side Docker command does not place them in the container.
+Keep the whole SAGE data root mounted at `/root/.sage`, including agent keys and
+the ledger. Do not start a separate `docker run ... mcp` container: its
+`localhost:8080` is isolated from the running SAGE server.
+
+HTTP MCP is also available at `/v1/mcp/sse` and `/v1/mcp/streamable`, but both
+require a bearer token or OAuth. Bare `http://localhost:8080` is the REST base,
+not an unauthenticated MCP endpoint.
 
 ### Upgrading from an older version?
 

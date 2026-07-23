@@ -1,6 +1,10 @@
 # SAGE — Persistent consensus-validated memory for AI agents
-# Server mode:  docker run -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
-# MCP stdio:    docker run -i ghcr.io/l33tdawg/sage:latest mcp
+# Server:
+#   docker run -d --name sage -p 8080:8080 -v ~/.sage:/root/.sage ghcr.io/l33tdawg/sage:latest
+# MCP stdio bridge (run inside that same server container):
+#   docker exec -i -e SAGE_PROVIDER=claude-code -e SAGE_PROJECT=my-project \
+#     -e SAGE_IDENTITY_PATH=/root/.sage/agents/claude-code-my-project/agent.key \
+#     sage /usr/local/bin/sage-gui mcp
 FROM golang:1.25-alpine AS builder
 
 WORKDIR /src
@@ -20,6 +24,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /sage-gui /usr/local/bin/sage-gui
 
+ENV SAGE_HOME=/root/.sage
 ENV REST_ADDR=0.0.0.0:8080
 EXPOSE 8080
 

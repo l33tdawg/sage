@@ -231,6 +231,121 @@ func TestSageRecall_MissingQuery(t *testing.T) {
 	assert.Contains(t, err.Error(), "query is required")
 }
 
+func TestSageRecall_FederatedOptionsReachNodeAndSurfaceProvenance(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"semantic": true, "provider": "ollama", "ready": true})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1, 0.2}})
+	})
+	mux.HandleFunc("/v1/memory/query", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, true, body["federated"])
+		assert.Equal(t, "benchmark", body["query"], "semantic recall must preserve text for remote provider fallback")
+		assert.Equal(t, "sage-autoresearch-benchmark", body["domain_tag"])
+		assert.Equal(t, []any{"chain-dkan-tii"}, body["federate_chains"])
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"results": []map[string]any{{
+				"memory_id":        "remote-benchmark-1",
+				"content":          "remote benchmark result",
+				"domain_tag":       "sage-autoresearch-benchmark",
+				"confidence_score": 0.93,
+				"memory_type":      "fact",
+				"status":           "committed",
+				"source_chain_id":  "chain-dkan-tii",
+				"source_kind":      "federated_live",
+				"submitting_agent": "agent-a",
+				"content_hash":     "abc123",
+				"classification":   1,
+				"foreign":          true,
+				"trust":            "external_untrusted",
+			}},
+			"total_count": 1,
+			"federation": map[string]any{
+				"queried": []string{"chain-dkan-tii"},
+				"merged":  1,
+			},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolRecall(context.Background(), map[string]any{
+		"query":           "benchmark",
+		"domain":          "sage-autoresearch-benchmark",
+		"scope":           "auto",
+		"federate_chains": []any{"chain-dkan-tii"},
+		"min_confidence":  0.7,
+	})
+	require.NoError(t, err)
+	out := result.(map[string]any)
+	memories := out["memories"].([]map[string]any)
+	require.Len(t, memories, 1)
+	assert.Equal(t, "chain-dkan-tii", memories[0]["source_chain_id"])
+	assert.Equal(t, "federated_live", memories[0]["source_kind"])
+	assert.Equal(t, "agent-a", memories[0]["submitting_agent"])
+	assert.Equal(t, "abc123", memories[0]["content_hash"])
+	assert.Equal(t, 1, memories[0]["classification"])
+	assert.Equal(t, true, memories[0]["foreign"])
+	assert.Equal(t, "external_untrusted", memories[0]["trust"])
+	federationInfo := out["federation"].(*recallFederationInfo)
+	assert.Equal(t, []string{"chain-dkan-tii"}, federationInfo.Queried)
+	assert.Equal(t, 1, federationInfo.Merged)
+}
+
+func TestSageRecall_FederatedRequiresExactDomain(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer("http://localhost:9999", priv)
+	_, err := s.toolRecall(context.Background(), map[string]any{
+		"query":     "benchmark",
+		"federated": true,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "domain is required for federated recall")
+}
+
+func TestSageFederationDiscoversRemoteDomainsAndAgents(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{
+				{
+					"remote_chain_id":      "chain-dkan-tii",
+					"reachable":            true,
+					"network_name":         "DKAN-TII",
+					"capabilities":         []string{"sync", "federated-pipeline"},
+					"shared_read_domains":  []string{"sage-autoresearch-benchmark", "sage-autoresearch-paper"},
+					"copy_offered_domains": []string{"sage-autoresearch-paper"},
+					"remote_agents":        []map[string]any{{"agent_id": "agent-b", "display_name": "Benchmark agent"}},
+					"sync":                 map[string]any{"saved_copies": 3},
+				},
+			},
+			"total":   1,
+			"message": "caller-safe",
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolFederation(context.Background(), nil)
+	require.NoError(t, err)
+	out := result.(map[string]any)
+	connections := out["connections"].([]map[string]any)
+	require.Len(t, connections, 1)
+	assert.Equal(t, "chain-dkan-tii", connections[0]["remote_chain_id"])
+	assert.Equal(t, "DKAN-TII", connections[0]["network_name"])
+	assert.ElementsMatch(t, []any{"sage-autoresearch-benchmark", "sage-autoresearch-paper"}, connections[0]["shared_read_domains"])
+	assert.ElementsMatch(t, []any{"sage-autoresearch-paper"}, connections[0]["copy_offered_domains"])
+	assert.NotNil(t, connections[0]["remote_agents"])
+	assert.Equal(t, float64(3), connections[0]["sync"].(map[string]any)["saved_copies"])
+}
+
 func TestSageForget(t *testing.T) {
 	ts := mockSageAPI(t)
 	defer ts.Close()

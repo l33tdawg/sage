@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type groupListTestDriver struct {
@@ -27,8 +30,33 @@ type peerStatusTestDriver struct {
 	FederationJoinDriver
 }
 
+type peerFailureStatusTestDriver struct {
+	FederationJoinDriver
+	err   error
+	route federation.RouteDiagnostics
+}
+
+type groupRefreshTestDriver struct {
+	groupListTestDriver
+	refreshCalls int
+	refreshErr   error
+}
+
+func (d *groupRefreshTestDriver) NudgeJournalReconcileAndWait(context.Context) error {
+	d.refreshCalls++
+	return d.refreshErr
+}
+
 func (peerStatusTestDriver) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
 	return &federation.StatusResponse{NetworkName: "DKAN-TII", Time: 123}, nil
+}
+
+func (d peerFailureStatusTestDriver) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
+	return nil, d.err
+}
+
+func (d peerFailureStatusTestDriver) RouteDiagnostics(string) federation.RouteDiagnostics {
+	return d.route
 }
 
 func TestFederationPeerStatusReturnsFriendlyNetworkName(t *testing.T) {
@@ -50,6 +78,31 @@ func TestFederationPeerStatusReturnsFriendlyNetworkName(t *testing.T) {
 	if !got.Reachable || got.NetworkName != "DKAN-TII" {
 		t.Fatalf("status must retain the authenticated friendly name: %+v", got)
 	}
+}
+
+func TestFederationPeerStatusTypesFailureAheadOfHistoricalRoute(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Federation = peerFailureStatusTestDriver{
+		err:   errors.New("active federation agreement was revoked"),
+		route: federation.RouteDiagnostics{State: federation.RouteKindDirect, ActiveKind: federation.RouteKindDirect},
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/federation/connections/chain-remote/status", nil)
+	rr := httptest.NewRecorder()
+	h.handleFedPeerStatus(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var got struct {
+		Reachable    bool                        `json:"reachable"`
+		FailureState string                      `json:"failure_state"`
+		Error        string                      `json:"error"`
+		Route        federation.RouteDiagnostics `json:"route"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+	assert.False(t, got.Reachable)
+	assert.Equal(t, "trust_failure", got.FailureState)
+	assert.Contains(t, got.Error, "revoked")
+	assert.Equal(t, federation.RouteKindDirect, got.Route.ActiveKind,
+		"historical diagnostics remain available but must not override the typed failure")
 }
 
 func TestFederationGroupRouteAcceptsOnlyOperatorEd25519Signature(t *testing.T) {
@@ -93,6 +146,7 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 		method, path, body string
 	}{
 		{http.MethodGet, "/v1/dashboard/federation/groups", ""},
+		{http.MethodPost, "/v1/dashboard/federation/groups/refresh", ""},
 		{http.MethodPost, "/v1/dashboard/federation/groups", `{"name":"Studio"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/domains", `{"domain_tag":"hr"}`},
 		{http.MethodPost, "/v1/dashboard/federation/groups/g1/domains/remove", `{"domain_tag":"hr"}`},
@@ -113,6 +167,8 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 					} else {
 						h.handleFedGroupList(rr, req)
 					}
+				case "/v1/dashboard/federation/groups/refresh":
+					h.handleFedGroupRefresh(rr, req)
 				case "/v1/dashboard/federation/groups/g1/domains":
 					h.handleFedGroupDomainAdd(rr, req)
 				case "/v1/dashboard/federation/groups/g1/domains/remove":
@@ -164,6 +220,33 @@ func TestFederationGroupSurfaceRequiresVerifiedNodeOperator(t *testing.T) {
 				t.Fatalf("operator did not cross auth boundary: status=%d", got)
 			}
 		})
+	}
+}
+
+func TestFederationGroupRefreshWaitsForPromptedReconcile(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.NodeOperatorAgentID = strings.Repeat("a", 64)
+	driver := &groupRefreshTestDriver{groupListTestDriver: groupListTestDriver{localChainID: "chain-local"}}
+	h.Federation = driver
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/federation/groups/refresh", nil)
+	req = req.WithContext(context.WithValue(req.Context(), verifiedDashboardAgentKey{}, h.NodeOperatorAgentID))
+	rr := httptest.NewRecorder()
+	h.handleFedGroupRefresh(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("refresh status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if driver.refreshCalls != 1 {
+		t.Fatalf("refresh calls=%d want 1", driver.refreshCalls)
+	}
+
+	driver.refreshErr = context.DeadlineExceeded
+	req = httptest.NewRequest(http.MethodPost, "/v1/dashboard/federation/groups/refresh", nil)
+	req = req.WithContext(context.WithValue(req.Context(), verifiedDashboardAgentKey{}, h.NodeOperatorAgentID))
+	rr = httptest.NewRecorder()
+	h.handleFedGroupRefresh(rr, req)
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Fatalf("timed-out refresh status=%d want %d body=%s", rr.Code, http.StatusGatewayTimeout, rr.Body.String())
 	}
 }
 

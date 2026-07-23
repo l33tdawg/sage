@@ -3,10 +3,14 @@ package rest
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"slices"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -429,11 +433,440 @@ func (s *Server) handleCrossFedPeerStatus(w http.ResponseWriter, r *http.Request
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"remote_chain_id": remoteChainID,
 		"reachable":       true,
 		"peer_time":       status.Time,
+	}
+	if status.NetworkName != "" {
+		response["network_name"] = status.NetworkName
+	}
+	if len(status.Capabilities) > 0 {
+		response["capabilities"] = status.Capabilities
+	}
+	// These are the remote SAGE's authenticated, directional disclosures to
+	// this node. Exposing them on the already operator-only status route gives
+	// MCP clients the same read-only discovery CEREBRUM uses without granting
+	// any new capability or leaking the local node's outbound policy.
+	if status.PeerRBACGrant != nil {
+		response["peer_rbac_grant"] = status.PeerRBACGrant
+	}
+	if status.SharingGrant != nil {
+		response["sharing_grant"] = status.SharingGrant
+	}
+	if status.PipeContacts != nil {
+		response["pipe_contacts"] = status.PipeContacts
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+type availableFederationPermission struct {
+	Domain string `json:"domain"`
+	Read   bool   `json:"read"`
+	Copy   bool   `json:"copy"`
+}
+
+type availableFederationSync struct {
+	SubscribedDomains []string       `json:"subscribed_domains"`
+	SavedCopies       int            `json:"saved_copies"`
+	SavedByDomain     map[string]int `json:"saved_by_domain,omitempty"`
+	LastReconcile     string         `json:"last_reconcile,omitempty"`
+	PeerUnsupported   bool           `json:"peer_unsupported,omitempty"`
+}
+
+type availableFederationConnection struct {
+	RemoteChainID      string                          `json:"remote_chain_id"`
+	NetworkName        string                          `json:"network_name,omitempty"`
+	Reachable          bool                            `json:"reachable"`
+	Capabilities       []string                        `json:"capabilities,omitempty"`
+	SharingPaused      bool                            `json:"sharing_paused,omitempty"`
+	RemotePermissions  []availableFederationPermission `json:"remote_permissions"`
+	SharedReadDomains  []string                        `json:"shared_read_domains"`
+	CopyOfferedDomains []string                        `json:"copy_offered_domains"`
+	RemoteAgents       []federation.PipeContact        `json:"remote_agents,omitempty"`
+	Sync               *availableFederationSync        `json:"sync,omitempty"`
+}
+
+const maxAgentFederationTargets = 64
+
+func statusAllowsFederatedRead(status *federation.StatusResponse, domain string) bool {
+	if status == nil || domain == "" {
+		return false
+	}
+	if status.PeerRBACGrant != nil {
+		if status.PeerRBACGrant.Paused {
+			return false
+		}
+		for _, grant := range status.PeerRBACGrant.Domains {
+			if (grant.Read || grant.Copy) && federation.DomainAllowed([]string{grant.Domain}, domain) {
+				return true
+			}
+		}
+		return false
+	}
+	return status.SharingGrant != nil &&
+		federation.DomainAllowed(status.SharingGrant.AllowedDomains, domain)
+}
+
+// federationRecallTargets converts an agent request into the finite set of
+// currently authenticated peers that actually expose the requested domain.
+// Failures and non-sharing peers are deliberately omitted so ordinary recall
+// cannot enumerate hidden federation topology through queried/error fields.
+func (s *Server) federationRecallTargets(ctx context.Context, requested []string, domain string) []string {
+	if s.federation == nil || s.badgerStore == nil || domain == "" {
+		return nil
+	}
+	records, err := s.badgerStore.ListCrossFed()
+	if err != nil {
+		return nil
+	}
+	active := make(map[string]struct{}, len(records))
+	now := time.Now().Unix()
+	for _, record := range records {
+		if record.Status == "active" && (record.ExpiresAt == 0 || now < record.ExpiresAt) {
+			active[record.RemoteChainID] = struct{}{}
+		}
+	}
+	wildcard := len(requested) == 0 || (len(requested) == 1 && requested[0] == "*")
+	candidates := make([]string, 0, len(active))
+	if wildcard {
+		for chain := range active {
+			candidates = append(candidates, chain)
+		}
+	} else {
+		seen := make(map[string]struct{})
+		for _, raw := range requested {
+			chain := strings.TrimSpace(raw)
+			if chain == "" {
+				continue
+			}
+			if _, ok := active[chain]; !ok {
+				continue
+			}
+			if _, ok := seen[chain]; ok {
+				continue
+			}
+			seen[chain] = struct{}{}
+			candidates = append(candidates, chain)
+		}
+	}
+	sort.Strings(candidates)
+	if len(candidates) > maxAgentFederationTargets {
+		candidates = candidates[:maxAgentFederationTargets]
+	}
+
+	type probe struct {
+		chain  string
+		status *federation.StatusResponse
+	}
+	probes := make([]probe, len(candidates))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, chain := range candidates {
+		wg.Add(1)
+		go func(index int, chainID string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			status, statusErr := s.federation.PeerStatus(ctx, chainID)
+			if statusErr == nil {
+				probes[index] = probe{chain: chainID, status: status}
+			}
+		}(i, chain)
+	}
+	wg.Wait()
+	out := make([]string, 0, len(probes))
+	for _, peer := range probes {
+		if statusAllowsFederatedRead(peer.status, domain) {
+			out = append(out, peer.chain)
+		}
+	}
+	return out
+}
+
+// handleFederationAvailable is the ordinary-agent control-plane view. It
+// returns only active peers and only the intersection between the peer's
+// authenticated outbound grant and the local caller's readable subtrees. It
+// never returns endpoints, CA pins, agreement generations, TOTP material, or
+// mutation controls.
+func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Request) {
+	if s.federation == nil || s.badgerStore == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"connections": []availableFederationConnection{},
+			"total":       0,
+			"message":     "No federation transport is available on this SAGE.",
+		})
+		return
+	}
+	callerID := middleware.ContextAgentID(r.Context())
+	if callerID == "" {
+		writeProblem(w, http.StatusForbidden, "Access denied", "A registered agent identity is required for federation discovery.")
+		return
+	}
+	records, err := s.badgerStore.ListCrossFed()
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to discover federation connections.")
+		return
+	}
+	now := time.Now().Unix()
+	active := make([]string, 0, len(records))
+	for _, record := range records {
+		if record.Status == "active" && (record.ExpiresAt == 0 || now < record.ExpiresAt) {
+			active = append(active, record.RemoteChainID)
+		}
+	}
+	sort.Strings(active)
+
+	type peerResult struct {
+		chain  string
+		status *federation.StatusResponse
+		err    error
+	}
+	results := make([]peerResult, len(active))
+	ctx, cancel := context.WithTimeout(r.Context(), fedRecallTimeout())
+	defer cancel()
+	const maxConcurrentDiscovery = 8
+	sem := make(chan struct{}, maxConcurrentDiscovery)
+	var wg sync.WaitGroup
+	for i, chainID := range active {
+		wg.Add(1)
+		go func(index int, chain string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[index] = peerResult{chain: chain, err: ctx.Err()}
+				return
+			}
+			status, statusErr := s.federation.PeerStatus(ctx, chain)
+			results[index] = peerResult{chain: chain, status: status, err: statusErr}
+		}(i, chainID)
+	}
+	wg.Wait()
+
+	connections := make([]availableFederationConnection, 0, len(results))
+	for _, peer := range results {
+		// An unavailable peer has no current authenticated grant to filter.
+		// Omit it for ordinary callers instead of leaking raw topology.
+		if peer.err != nil || peer.status == nil {
+			continue
+		}
+		connection := availableFederationConnection{
+			RemoteChainID: peer.chain,
+			NetworkName:   peer.status.NetworkName,
+			Reachable:     true,
+			Capabilities:  append([]string(nil), peer.status.Capabilities...),
+		}
+		permissions := make([]availableFederationPermission, 0)
+		if peer.status.PeerRBACGrant != nil {
+			connection.SharingPaused = peer.status.PeerRBACGrant.Paused
+			for _, grant := range peer.status.PeerRBACGrant.Domains {
+				for _, visible := range s.federationVisibleRemoteScopes(r.Context(), callerID, grant.Domain) {
+					read := !connection.SharingPaused && (grant.Read || grant.Copy)
+					copyAllowed := !connection.SharingPaused && grant.Copy
+					if !read && !copyAllowed {
+						continue
+					}
+					permissions = append(permissions, availableFederationPermission{Domain: visible, Read: read, Copy: copyAllowed})
+				}
+			}
+		} else if peer.status.SharingGrant != nil {
+			for _, remoteScope := range peer.status.SharingGrant.AllowedDomains {
+				for _, visible := range s.federationVisibleRemoteScopes(r.Context(), callerID, remoteScope) {
+					permissions = append(permissions, availableFederationPermission{Domain: visible, Read: true})
+				}
+			}
+		}
+		permissions = normalizeAvailablePermissions(permissions)
+		if len(permissions) == 0 {
+			continue
+		}
+		connection.RemotePermissions = permissions
+		for _, permission := range permissions {
+			if permission.Read {
+				connection.SharedReadDomains = append(connection.SharedReadDomains, permission.Domain)
+			}
+			if permission.Copy {
+				connection.CopyOfferedDomains = append(connection.CopyOfferedDomains, permission.Domain)
+			}
+		}
+		if peer.status.PipeContacts != nil && !peer.status.PipeContacts.Paused {
+			connection.RemoteAgents = filterAvailablePipeContacts(peer.status.PipeContacts.Contacts, connection.SharedReadDomains)
+		}
+		connection.Sync = s.availableFederationSync(r.Context(), peer.chain, connection.SharedReadDomains)
+		connections = append(connections, connection)
+	}
+	sort.Slice(connections, func(i, j int) bool {
+		if connections[i].NetworkName != connections[j].NetworkName {
+			return connections[i].NetworkName < connections[j].NetworkName
+		}
+		return connections[i].RemoteChainID < connections[j].RemoteChainID
 	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"connections": connections,
+		"total":       len(connections),
+		"message":     "Use sage_recall with scope=auto and one of these exact domains. Federation mutations remain operator-only.",
+	})
+}
+
+func normalizeAvailablePermissions(in []availableFederationPermission) []availableFederationPermission {
+	merged := make(map[string]availableFederationPermission)
+	for _, permission := range in {
+		current := merged[permission.Domain]
+		current.Domain = permission.Domain
+		current.Read = current.Read || permission.Read
+		current.Copy = current.Copy || permission.Copy
+		merged[permission.Domain] = current
+	}
+	out := make([]availableFederationPermission, 0, len(merged))
+	for _, permission := range merged {
+		out = append(out, permission)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Domain < out[j].Domain })
+	return out
+}
+
+func (s *Server) federationVisibleRemoteScopes(ctx context.Context, callerID, remoteScope string) []string {
+	if remoteScope == "" {
+		return nil
+	}
+	if s.nodeOperatorID != "" && callerID == s.nodeOperatorID {
+		return []string{remoteScope}
+	}
+	var role, domainAccess string
+	if s.badgerStore != nil {
+		if agent, err := s.badgerStore.GetRegisteredAgent(callerID); err == nil && agent != nil {
+			role, domainAccess = agent.Role, agent.DomainAccess
+		}
+	}
+	if role == "" && s.agentStore != nil {
+		if agent, err := s.agentStore.GetAgent(ctx, callerID); err == nil && agent != nil {
+			role, domainAccess = agent.Role, agent.DomainAccess
+		}
+	}
+	if role == "" {
+		return nil
+	}
+	if role == "admin" || domainAccess == "" {
+		return []string{remoteScope}
+	}
+	var access []struct {
+		Domain string `json:"domain"`
+		Read   bool   `json:"read"`
+	}
+	if json.Unmarshal([]byte(domainAccess), &access) != nil {
+		return nil
+	}
+	if len(access) == 0 {
+		return []string{remoteScope}
+	}
+	visible := make([]string, 0, len(access))
+	for _, local := range access {
+		if !local.Read || local.Domain == "" {
+			continue
+		}
+		switch {
+		case federation.DomainAllowed([]string{local.Domain}, remoteScope):
+			visible = append(visible, remoteScope)
+		case federation.DomainAllowed([]string{remoteScope}, local.Domain):
+			visible = append(visible, local.Domain)
+		}
+	}
+	sort.Strings(visible)
+	return slices.Compact(visible)
+}
+
+func filterAvailablePipeContacts(contacts []federation.PipeContact, allowed []string) []federation.PipeContact {
+	out := make([]federation.PipeContact, 0)
+	for _, contact := range contacts {
+		filtered := contact
+		// ContactID is an authorization-bound mutation token for the operator
+		// surface, not ordinary-agent discovery metadata.
+		filtered.ContactID = ""
+		filtered.Domains = nil
+		for _, domain := range contact.Domains {
+			for _, scope := range allowed {
+				switch {
+				case federation.DomainAllowed([]string{scope}, domain.Domain):
+					filtered.Domains = append(filtered.Domains, domain)
+				case federation.DomainAllowed([]string{domain.Domain}, scope):
+					// The contact was advertised for a broader parent than this
+					// caller may read. Return only the authorized intersection;
+					// ancestor ownership generation is outside that subtree.
+					narrowed := domain
+					narrowed.Domain = scope
+					narrowed.OwningDomain = ""
+					narrowed.OwnerHeight = 0
+					filtered.Domains = append(filtered.Domains, narrowed)
+				default:
+					continue
+				}
+				if len(filtered.Domains) > 0 {
+					break
+				}
+			}
+		}
+		if len(filtered.Domains) > 0 {
+			out = append(out, filtered)
+		}
+	}
+	return out
+}
+
+func (s *Server) availableFederationSync(ctx context.Context, remoteChainID string, allowed []string) *availableFederationSync {
+	ss := s.syncStore()
+	if ss == nil {
+		return nil
+	}
+	var subscribed []string
+	if control, err := ss.GetSyncControl(ctx, remoteChainID); err == nil && isActiveFrozenV3SyncControl(control) {
+		subscribed, _ = ss.GetDirectionalSyncDomains(ctx, remoteChainID, store.SyncDirectionLocalSubscribe)
+	} else {
+		subscribed, _ = ss.GetSyncDomains(ctx, remoteChainID)
+	}
+	filtered := make([]string, 0, len(subscribed))
+	for _, domain := range subscribed {
+		for _, scope := range allowed {
+			switch {
+			case federation.DomainAllowed([]string{scope}, domain):
+				filtered = append(filtered, domain)
+			case federation.DomainAllowed([]string{domain}, scope):
+				filtered = append(filtered, scope)
+			default:
+				continue
+			}
+			if len(filtered) > 0 {
+				break
+			}
+		}
+	}
+	sort.Strings(filtered)
+	counts, _ := ss.CountAdmittedSyncOriginsByDomain(ctx, remoteChainID)
+	visibleCounts := make(map[string]int)
+	total := 0
+	for domain, count := range counts {
+		if federation.DomainAllowed(allowed, domain) {
+			visibleCounts[domain] = count
+			total += count
+		}
+	}
+	summary := &availableFederationSync{
+		SubscribedDomains: slices.Compact(filtered),
+		SavedCopies:       total,
+		SavedByDomain:     visibleCounts,
+	}
+	if s.federation != nil {
+		if reconcile, ok := s.federation.SyncReconcileInfo(remoteChainID); ok {
+			summary.LastReconcile = reconcile.LastReconcile.UTC().Format(time.RFC3339)
+			summary.PeerUnsupported = reconcile.PeerUnsupported
+		}
+	}
+	return summary
 }
 
 // ---- cross-chain domain sync -------------------------------------------------

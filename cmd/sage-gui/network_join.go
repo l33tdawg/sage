@@ -20,9 +20,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -53,6 +56,10 @@ type NodeJoinBundle struct {
 	// same build or its replayed AppHash can diverge from the host's, stalling
 	// consensus — so applyNodeJoinBundle refuses a mismatch unless forced.
 	AppVersion string `json:"app_version,omitempty"`
+	// BinarySHA256 closes the development-build hole where two incompatible
+	// executables both report version "dev". Consensus replay requires the
+	// exact same executable, not merely the same human-readable release label.
+	BinarySHA256 string `json:"binary_sha256,omitempty"`
 }
 
 // nodeIDHostRe matches a CometBFT persistent-peer string: 40-hex node id, '@',
@@ -92,13 +99,52 @@ func buildNodeJoinBundle(lanIP string) (NodeJoinBundle, error) {
 
 	port := hostP2PPort()
 	hostPeer := fmt.Sprintf("%s@%s", nodeKey.ID(), net.JoinHostPort(lanIP, port))
+	binarySHA256, err := runningBinarySHA256()
+	if err != nil {
+		return NodeJoinBundle{}, fmt.Errorf("fingerprint SAGE executable: %w", err)
+	}
 
 	return NodeJoinBundle{
-		ChainID:    gen.ChainID,
-		GenesisB64: base64.StdEncoding.EncodeToString(genBytes),
-		HostPeer:   hostPeer,
-		AppVersion: version,
+		ChainID:      gen.ChainID,
+		GenesisB64:   base64.StdEncoding.EncodeToString(genBytes),
+		HostPeer:     hostPeer,
+		AppVersion:   version,
+		BinarySHA256: binarySHA256,
 	}, nil
+}
+
+func runningBinarySHA256() (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	f, err := os.Open(executable) //nolint:gosec // fingerprints the running executable itself
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func validateNodeJoinCompatibility(b NodeJoinBundle) error {
+	if b.AppVersion != "" && b.AppVersion != version {
+		return fmt.Errorf("host runs SAGE %s but this machine runs %s — install the same version before joining", b.AppVersion, version)
+	}
+	if b.BinarySHA256 == "" {
+		return nil // Backward compatibility with bundles created before v11.12.
+	}
+	localSHA256, err := runningBinarySHA256()
+	if err != nil {
+		return fmt.Errorf("fingerprint this SAGE executable: %w", err)
+	}
+	if !strings.EqualFold(b.BinarySHA256, localSHA256) {
+		return fmt.Errorf("the host and this computer have different SAGE builds — install the same SAGE app on both computers before joining")
+	}
+	return nil
 }
 
 // hostP2PPort returns the port the host's CometBFT P2P listener uses, derived
@@ -166,8 +212,10 @@ func applyNodeJoinBundle(b NodeJoinBundle, force bool) error {
 	// App-version guard BEFORE any destructive step: a guest running a
 	// different ABCI build can replay the host's blocks to a divergent AppHash
 	// and stall consensus. Refuse a mismatch unless explicitly forced.
-	if !force && b.AppVersion != "" && b.AppVersion != version {
-		return fmt.Errorf("host runs SAGE %s but this machine runs %s — install the same version before joining (or re-run with --force if you are sure)", b.AppVersion, version)
+	if !force {
+		if compatibilityErr := validateNodeJoinCompatibility(b); compatibilityErr != nil {
+			return fmt.Errorf("%w (or re-run with --force if you are sure)", compatibilityErr)
+		}
 	}
 
 	// Refuse to wipe chain state out from under a running node — that risks
@@ -217,6 +265,16 @@ func doWipeAndAdopt(b NodeJoinBundle, genesisBytes []byte) error {
 		return wipeErr
 	}
 
+	// The off-chain database deliberately survives a same-network join so local
+	// memories are not discarded. Its exactly-once projection receipts cannot:
+	// they identify blocks by (height, AppHash) from the OLD chain. Keeping them
+	// makes the first replay of the host chain fail closed as a fork whenever a
+	// height was already projected locally. Clear only those receipts; the host
+	// chain will replay its canonical projection while user data remains intact.
+	if resetErr := resetProjectionReceiptsForJoin(filepath.Join(home, "data", "sage.db")); resetErr != nil {
+		return resetErr
+	}
+
 	// Point config at the host: quorum mode (p2p peers + 0.0.0.0 binds), the
 	// host as our sole persistent peer, and the adopted chain_id.
 	cfg, err := LoadConfig()
@@ -228,6 +286,40 @@ func doWipeAndAdopt(b NodeJoinBundle, genesisBytes []byte) error {
 	cfg.ChainID = b.ChainID
 	if err := SaveConfig(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
+	}
+	return nil
+}
+
+// resetProjectionReceiptsForJoin removes chain-specific exactly-once markers
+// from a closed SQLite projection before the adopted chain replays. The table
+// may not exist on a brand-new node or an older database, both of which are
+// already clean for this purpose.
+func resetProjectionReceiptsForJoin(sqlitePath string) error {
+	if _, err := os.Stat(sqlitePath); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect SQLite projection before network join: %w", err)
+	}
+
+	db, err := sql.Open("sqlite", sqlitePath+"?_pragma=busy_timeout(15000)")
+	if err != nil {
+		return fmt.Errorf("open SQLite projection for network join: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var exists int
+	if err := db.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM sqlite_master
+		WHERE type = 'table' AND name = 'abci_projection_batches'
+	)`).Scan(&exists); err != nil {
+		return fmt.Errorf("inspect projection receipts before network join: %w", err)
+	}
+	if exists == 0 {
+		return nil
+	}
+	if _, err := db.Exec(`DELETE FROM abci_projection_batches`); err != nil {
+		return fmt.Errorf("reset projection receipts for network join: %w", err)
 	}
 	return nil
 }
@@ -284,8 +376,8 @@ func WritePendingJoin(bundleJSON []byte) error {
 	// Version-check at STAGE time so the dashboard surfaces a clear error DURING
 	// the ceremony instead of silently no-op'ing on the next restart (the
 	// startup apply also discards a mismatch, but the user would see nothing).
-	if b.AppVersion != "" && b.AppVersion != version {
-		return fmt.Errorf("the host runs SAGE %s but this computer runs %s — install the same version, then join", b.AppVersion, version)
+	if compatibilityErr := validateNodeJoinCompatibility(b); compatibilityErr != nil {
+		return compatibilityErr
 	}
 	return os.WriteFile(pendingJoinPath(), bundleJSON, 0600)
 }
@@ -326,9 +418,9 @@ func applyPendingJoinAtStartup(logger zerolog.Logger) (bool, error) {
 		_ = os.Remove(path)
 		return false, nil
 	}
-	if b.AppVersion != "" && b.AppVersion != version {
-		logger.Warn().Str("host_version", b.AppVersion).Str("this_version", version).
-			Msg("pending network-join version mismatch — discarding to avoid an AppHash split")
+	if compatibilityErr := validateNodeJoinCompatibility(b); compatibilityErr != nil {
+		logger.Warn().Err(compatibilityErr).Str("host_version", b.AppVersion).Str("this_version", version).
+			Msg("pending network-join build mismatch — discarding to avoid an AppHash split")
 		_ = os.Remove(path)
 		return false, nil
 	}

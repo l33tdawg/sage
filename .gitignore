@@ -126,6 +126,7 @@ docs/*
 !docs/desktop-shell-decision.md
 !docs/native-app-daemon-contract.md
 !docs/native-shell-quality-gates.md
+!docs/v11.12-clean-machine-acceptance.md
 # Agent-facing code reference (public)
 !docs/reference/
 # Architecture diagram (rendered PNG embedded in ARCHITECTURE.md; .mmd source kept local/untracked)

@@ -1,8 +1,8 @@
-<!-- Verified against SAGE v11.11.6 code (2026-07-22). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.12.0 code (2026-07-23). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
-v11 adds two independent HTTP surfaces. v11.6 can carry the same mTLS HTTP protocol over direct HTTPS or libp2p, including NAT traversal and Circuit Relay v2 fallback. The dashboard JOIN wizard offers Same LAN and Internet setup: Internet enrollment carries bounded libp2p routes in the QR, while two v11.6 nodes paired on a LAN exchange and persist roaming routes over their authenticated agreement after signing. Older peers remain compatible with the legacy LAN enrollment. The relay is outside the trust boundary and sees only encrypted traffic.
+v11 adds two independent HTTP surfaces. v11.6 can carry the same mTLS HTTP protocol over direct HTTPS or libp2p, including NAT traversal and Circuit Relay v2 fallback. The dashboard JOIN wizard now exposes one topology-free flow: it prepares every usable Direct and Secure relay candidate and sends `transport:"auto"`. Preparation is not a reachability claim; the selected route is reported only after an authenticated exchange actually uses it. Current peers exchange and persist roaming routes over their authenticated agreement after signing, while older peers remain compatible through Direct. The relay is outside the trust boundary and sees only encrypted traffic.
 
 1. **Cross-network federation** - a directional read/copy exchange between two independent SAGE chains, plus a guided TOTP JOIN ceremony that establishes node trust. Mutable per-domain peer RBAC is separate from that ceremony. Write is reserved in the versioned wire shape but unavailable in v11.9/v11.10. The existing agent pipeline can also carry explicitly accepted agent-to-agent work over that trust edge; it remains off-consensus and is not remote memory Write. This spans three listeners: a dedicated peer-facing mTLS listener (`/fed/v1/*`), the node operator's REST control surface (`/v1/federation/*`), and a cookie-authed dashboard proxy (`/v1/dashboard/federation/*`).
 2. **The brain as a tool** - the memory "train of thought" endpoint (`GET /v1/dashboard/memory/{id}/related`) that powers the MRI click-to-explore board.
@@ -304,11 +304,31 @@ timeout does not silently recreate a shorter HTTP deadline
 | `POST /fed/v1/join/abort` | `handleJoinAbort` (`join_routes.go`) | A bound guest propagates Stop to the host. The exact bound client-cert SPKI is required; active connections must use permanent revoke instead. |
 | `POST /fed/v1/join/confirm` | `handleJoinConfirm` (`join_routes.go`) | Guest -> host approval #2. Verifies the guest's signatures over the frozen attestation E, then the host broadcasts its tx-33, commits the staged CA + seed, and marks ACTIVE. An identical confirm from the same bound certificate replays the stored activation result after a lost HTTP response without a second broadcast; changed certificates/signatures still fail. |
 
-Internet enrollment adds `x_sage_transport=p2p`, protocol, peer ID, and up to four complete peer multiaddrs to the otherwise compatible TOTP URI. Parsing is all-or-nothing: the peer ID must match every terminal `/p2p/<id>`, at least one route must contain `/p2p-circuit`, and malformed or partial P2P metadata is rejected. P2P route and peer identity digests are included in the frozen attestation E, so route substitution makes the signed confirmation fail. The spoken codes separately bind the seed, CA pins, session nonces, and step. Temporary pre-agreement stream admission is bounded by session and peer and becomes a durable allowlist entry only after the agreement commits. When authoritative LAN discovery is empty, Internet setup uses a reserved loopback transcript endpoint while every ceremony call travels over the attested P2P routes. Established-peer dialing recognizes that exact value as P2P-only and never attempts it as a direct TCP fallback; a missing route is classified as offline so exact-address work may remain queued without sending bytes (`internal/federation/join_routes.go`; `internal/federation/client.go`).
+An automatic enrollment with a prepared relay bundle adds
+`x_sage_transport=p2p`, protocol, peer ID, and up to four complete peer
+multiaddrs to the otherwise compatible TOTP URI. Parsing is all-or-nothing: the
+peer ID must match every terminal `/p2p/<id>`, at least one route must contain
+`/p2p-circuit`, and malformed or partial P2P metadata is rejected. P2P route and
+peer identity digests are included in the frozen attestation E, so route
+substitution makes the signed confirmation fail. The spoken codes separately
+bind the seed, CA pins, session nonces, and step. Temporary pre-agreement stream
+admission is bounded by session and peer and becomes a durable allowlist entry
+only after the agreement commits. When no authoritative Direct address exists,
+automatic setup uses a reserved transcript endpoint while every ceremony call
+travels over the attested P2P candidates. Established-peer dialing recognizes
+that exact value as P2P-only and never attempts it as a direct TCP fallback; a
+missing route is classified as offline so exact-address work may remain queued
+without sending bytes (`internal/federation/join_routes.go`;
+`internal/federation/client.go`).
 
 ### `POST /fed/v1/p2p/routes` (established peers)
 
-Authenticated v11.6 peers use this endpoint after a LAN ceremony to exchange `JoinP2PBundle{peer_id, protocol, addrs}`. Both bundles receive the same strict validation as Internet enrollment and are persisted atomically with the runtime allowlist. Older peers return 404 and remain LAN-only; the agreement itself stays valid. Revocation removes the stored route and inbound admission.
+Authenticated v11.6 peers use this endpoint after a compatible Direct ceremony
+to exchange `JoinP2PBundle{peer_id, protocol, addrs}`. Both bundles receive the
+same strict validation as automatic enrollment and are persisted atomically
+with the runtime allowlist. Older peers return 404 and remain Direct-only; the
+agreement itself stays valid. Revocation removes the stored route and inbound
+admission.
 
 ### `POST /fed/v1/connection/revoke-notice` (established peers)
 
@@ -362,9 +382,12 @@ grace so an authenticated identical confirmation can recover a lost response.
 
 ---
 
-## 2. Operator REST - `/v1/federation/*` (Ed25519-authed)
+## 2. Federation REST - `/v1/federation/*` (Ed25519-authed)
 
-The node operator's control surface. These routes sit inside the standard `/v1/` group behind `middleware.Ed25519AuthMiddleware` (`api/rest/server.go:393-423`) - the same signed-request auth as the rest of `/v1/*` (see `rest-api.md`). Trust, policy, and outbound peer actions additionally require the **exact node operator** identity (`requireNodeOperator`, `federation_handler.go:24-35`; fail-closed when no operator is configured). Errors use RFC 7807 `application/problem+json`.
+These routes sit inside the standard signed `/v1/` group. Trust, policy, and
+outbound peer mutations require the **exact node operator** identity
+(`requireNodeOperator`). The one ordinary-agent route,
+`GET /v1/federation/available`, is read-only and caller-filtered.
 
 ### Cross_fed agreement builder (tx-33 / tx-34)
 
@@ -374,6 +397,7 @@ The node operator's control surface. These routes sit inside the standard `/v1/`
 | `GET /v1/federation/cross` | `handleCrossFedList` (`federation_handler.go:266-297`) | Exact node operator | List on-chain agreements (reads chain state directly; works without the transport wired). |
 | `POST /v1/federation/cross/{chain_id}/revoke` | `handleCrossFedRevoke` (`federation_handler.go:229-318`) | Exact node operator + on-chain authz | Best-effort notify the exact active peer, then broadcast local tx-34 and purge the connection generation. |
 | `GET /v1/federation/cross/{chain_id}/status` | `handleCrossFedPeerStatus` (`federation_handler.go:299-333`) | Exact node operator | Live reachability preflight against the peer's `/fed/v1/status`. |
+| `GET /v1/federation/available` | `handleFederationAvailable` | Registered Ed25519 caller | Concurrently probe active peers and return only the remote read/copy subtrees, contacts, and saved-copy summary intersecting this caller's local ACL. Never returns endpoints, CA pins, agreement generations, secrets, or mutation controls. |
 | `POST /v1/federation/cross/{chain_id}/write` | `handleCrossFedWrite` (`api/rest/federation_write_handler.go:11-25`) | Ed25519 + exact node operator | Reserved compatibility surface. After operator and chain-id validation it returns `501` before parsing an inner credential or dialing a peer. |
 | `GET/PUT /v1/federation/cross/{chain_id}/sync` | `handleSyncDomainsGet/Set` (`api/rest/federation_handler.go:342-576`, `656-746`) | Ed25519 + exact node operator | Read or replace local v3 Publish/Subscribe lanes; true legacy links retain their `domains` contract. |
 
@@ -395,7 +419,36 @@ completed narrowing from leaving an old broad response in flight
 
 `GET /v1/federation/cross` returns `{agreements: []CrossFedListEntry, total}` where each entry (`federation_handler.go:253-264`) carries `remote_chain_id`, `endpoint`, `spki_pin`, `max_clearance`, `allowed_domains`, `allowed_depts`, `expires_at`, `status`, `expired`.
 
-`GET …/status` returns `{remote_chain_id, reachable, peer_time}` on success or `{remote_chain_id, reachable:false, error}` with `502` when unreachable - `reachable` stays a bool across both branches by design.
+`GET …/status` returns `{remote_chain_id, reachable, peer_time}` on success and
+adds the authenticated peer's `network_name`, `capabilities`,
+`peer_rbac_grant` (or legacy `sharing_grant`), and `pipe_contacts` when
+advertised. These additions give operator MCP clients read-only discovery of
+the same directional remote disclosure CEREBRUM consumes; the route remains
+exact-node-operator-only and never returns or mutates this node's outbound
+policy (`api/rest/federation_handler.go:405-456`). The error response remains
+`{remote_chain_id, reachable:false, error}` with `502`; `reachable` stays a bool
+across both branches by design.
+
+`GET /v1/federation/available` is the agent-facing broker used by
+`sage_federation`. Status probes run concurrently with a maximum of eight and a
+single four-second request window. An unavailable peer is omitted for ordinary
+callers because no current authenticated grant exists to filter. Read scopes
+use the same dotted-subtree semantics as memory ACLs; a local parent grant
+covers a remote child, while a remote parent is narrowed to an explicitly
+allowed local child. Copy status exposes only authorized subscribed domains,
+saved-copy counts, and reconcile health.
+
+Federated recall remains an exact-domain opt-in at the REST layer. Operators
+and admins may delegate broadly; an ordinary registered caller must hold local
+read access to the requested subtree, and every remote record is filtered by
+the caller's clearance in addition to the chain treaty ceiling. Semantic calls
+carry their original query text and use remote hybrid search, so a peer whose
+embedding provider differs can still contribute via its keyword arm. Local and
+peer rankings are origin/content deduplicated, reciprocal-rank fused, and
+globally capped by `top_k`. Live results are marked `federated_live`; retained
+sync copies resolve `sync_origin` and are marked `federated_copy`. Both preserve
+origin chain/agent/hash/classification and carry
+`trust:"external_untrusted"`.
 
 The notifying revoke response adds `peer_notified` and, when the live notice
 failed, `notification_warning`; local revocation still succeeds. A peer that
@@ -457,7 +510,7 @@ Every route 501s when the transport is not wired (`fedReady`,
 
 | Method + path | Handler | Purpose |
 |---|---|---|
-| `GET /v1/dashboard/federation/shareable-domains` | `handleFedShareableDomains` (`web/federation_permissions.go:30-111`) | List existing registered/observed local domains and whether this operator may share them; never creates a domain. |
+| `GET /v1/dashboard/federation/shareable-domains` | `handleFedShareableDomains` (`web/federation_permissions.go`) | List existing registered/observed local domains and whether this operator may share them; never creates a domain. A row may include durable `copy_sources:[{chain_id,memory_count}]` from admitted local copies, without peer endpoints, keys, content, or policy metadata. |
 | `GET /v1/dashboard/federation/connections` | `handleFedConnections` (`web/federation_join.go:748-800`) | List agreements with `sharing_paused` and durable end-event context for past rows. |
 | `GET /v1/dashboard/federation/connections/{chain_id}/permissions` | `handleFedPermissionsGet` (`web/federation_permissions.go:161-227`) | Return editable `local_permissions`, `local_paused`, and the authenticated peer's read-only permissions/pause state. |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/permissions` | `handleFedPermissionsPut` (`web/federation_permissions.go:254-402`) | Replace this node's complete existing-domain Read/Copy snapshot for the frozen peer. A true `write` field is rejected. |
@@ -467,7 +520,9 @@ Every route 501s when the transport is not wired (`fedReady`,
 | `PUT /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsPut` (`web/federation_pipe_contacts.go:66-107`) | Toggle one exact local owner's default-off inbound work acceptance using its current contact ID. |
 | `POST /v1/dashboard/federation/connections/{chain_id}/revoke` | `handleFedRevoke` (`web/federation_join.go`) | Commit local tx-34, best-effort notify the peer with the retained exact old credentials, purge locally, and return notification status. |
 | `GET /v1/dashboard/federation/connections/{chain_id}/status` | `handleFedPeerStatus` (`web/federation_join.go:778`) | Peer reachability preflight |
-| `POST /v1/dashboard/federation/join/host/create` | `handleFedHostCreate` (`web/federation_join.go:795`) | Host H1; body includes `transport` (`lan` or `internet`) |
+| `POST /v1/dashboard/federation/groups/refresh` | `handleFedGroupRefresh` (`web/federation_join.go`) | Prompt one bounded group-journal anti-entropy pass and wait for it to finish before CEREBRUM reloads the local group projection. Ordinary group-list polling remains a local SQLite read. |
+| `GET /v1/dashboard/federation/join/routes` | `handleFedJoinRoutes` (`web/federation_join.go`) | Return locally prepared Direct/Secure relay candidates. `ready` means prepared locally, not proven reachable and not currently selected. |
+| `POST /v1/dashboard/federation/join/host/create` | `handleFedHostCreate` (`web/federation_join.go`) | Host H1; current CEREBRUM sends `transport:"auto"`. `lan` and `internet` remain compatibility inputs for older clients. |
 | `POST /v1/dashboard/federation/join/host/scan-return` | `handleFedHostScanReturn` (`web/federation_join.go:827`) | Host scans guest return QR |
 | `GET /v1/dashboard/federation/join/host/{session_id}` | `handleFedHostStatus` (`web/federation_join.go:846`) | Host wizard poll |
 | `POST /v1/dashboard/federation/join/host/{session_id}/approve` | `handleFedHostApprove` (`web/federation_join.go:858`) | Host approval #1 |
@@ -478,9 +533,18 @@ Every route 501s when the transport is not wired (`fedReady`,
 | `POST /v1/dashboard/federation/join/guest/{session_id}/abort` | `handleFedGuestAbort` (`web/federation_join.go`) | Propagate a guest-side Stop and zeroize the local draft |
 | `POST /v1/dashboard/federation/join/guest/confirm` | `handleFedGuestConfirm` (`web/federation_join.go:963`) | Guest approval #2 |
 
-(JOIN handlers live in `web/federation_join.go`.) Except for the dashboard-only
-host `transport` choice and its fixed trust-only compatibility scope, the join
+(JOIN handlers live in `web/federation_join.go`.) The dashboard owns automatic
+route intent and the fixed trust-only compatibility scope; the remaining join
 request/response bodies mirror the operator REST bodies of §2.
+
+The dashboard connection-status response is HTTP `200` for both successful and
+failed probes so a row does not disappear during recovery. A failure includes
+`reachable:false`, `error`, and a typed `failure_state` (`locked`, `offline`,
+`old_peer`, `route_failure`, `trust_failure`, `security_blocked`, or
+`disabled`). It may also retain historical `route` diagnostics, but CEREBRUM
+must render `failure_state` first; a previous Direct/Relay success cannot
+override a current trust or reachability failure
+(`web/federation_route_status.go`; `web/static/js/federation-route-state.js`).
 
 CEREBRUM treats this as an admin-management surface: active connection rows
 open their Read/Copy details and expose the everyday Pause/Resume action;
@@ -495,6 +559,18 @@ this SAGE” and “scan their SAGE back” side by side; it stacks into the pag
 real vertical scroll container on narrow/short viewports and bounds the camera
 preview so it cannot be cut off (`web/static/js/app.js:11928-11950`;
 `web/static/css/sage.css:4597-4604`, `4726-4753`, `4870-4892`).
+
+The main MRI view also renders a **Domain sources** panel. `Local domains` means
+the memory is stored on this SAGE (including a federated copy retained here);
+`Shared domains` means an active peer currently advertises Read/Copy access.
+Each shared row names its source SAGE and distinguishes live Read, Copy offered,
+Copy saved here, paused access, and a last-known persisted Copy route while the
+peer cannot be reached. A local copied domain retains its `copied from` origin
+after Pause or Revoke; stopping a connection never rewrites a foreign copy as
+native. Remote-only domains remain catalogue rows rather than
+fake MRI nodes, because the graph still represents this node's stored brain
+(`web/static/js/domain-inventory.js`; `web/static/js/app.js`,
+`BrainDomainInventory`).
 
 The same expanded detail contains **Agent work requests**, not a chat composer.
 For local surfaced owners, the operator independently enables inbound work from
@@ -639,6 +715,17 @@ retain their historical tx-33 treaty gates. All paths then enforce
 ledger, cross-domain duplicate protection, vault-locked retry behavior, and
 ordinary locally signed submission
 (`internal/federation/sync_server.go:169-226`, `516-533`).
+
+Group member/domain removals also commit an audit-only subchain-head anchor as
+an ordinary fact in the reserved `sage-syncaudit-<group_id>` namespace. This is
+consensus evidence for anti-truncation, not user knowledge: it remains in the
+ledger and portable backups, while CEREBRUM excludes the reserved namespace
+from memory search/list, headline counts, graph/timeline, related-memory,
+ownership, unregistered-agent, and federation share-policy surfaces and rejects
+direct dashboard edits to those records. Both the periodic and commit-tail
+outbox candidate paths reject the namespace, so an audit anchor cannot itself
+replicate as shared content (`internal/federation/sync_removal.go`;
+`internal/store/sync_tables.go`; `web/internal_memory_visibility.go`).
 
 For relays, `sync_origin` also stores the exact verified origin operator key.
 Digest enumeration and sender routing require that key and its signature to

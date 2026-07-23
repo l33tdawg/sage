@@ -36,6 +36,10 @@ var ErrLocked = errors.New("vault is locked — passphrase required")
 // ErrWrongPassphrase is returned when the passphrase doesn't match.
 var ErrWrongPassphrase = errors.New("wrong passphrase")
 
+// ErrWrongRecoveryKey is returned when a syntactically valid or invalid
+// recovery key does not identify the data key already bound to this vault.
+var ErrWrongRecoveryKey = errors.New("recovery key does not match this vault")
+
 // keyFile is the on-disk format for the encrypted vault key.
 type keyFile struct {
 	Salt         []byte `json:"salt"`          // Argon2id salt
@@ -274,6 +278,31 @@ func (v *Vault) RecoveryKey() (string, error) {
 		return "", ErrLocked
 	}
 	return base64.StdEncoding.EncodeToString(v.dataKey), nil
+}
+
+// VerifyRecoveryKey proves that a supplied recovery key belongs to the current
+// on-disk vault without changing the file. Recovery must call this before
+// InitFromRecoveryKey: that initializer can legitimately create a key file from
+// any 32-byte data key and therefore cannot by itself distinguish a typo or a
+// key copied from another SAGE.
+func VerifyRecoveryKey(keyFilePath, recoveryKeyB64 string) error {
+	dataKey, err := base64.StdEncoding.DecodeString(recoveryKeyB64)
+	if err != nil || len(dataKey) != argonKeyLen {
+		return ErrWrongRecoveryKey
+	}
+	data, err := os.ReadFile(keyFilePath)
+	if err != nil {
+		return fmt.Errorf("read key file: %w", err)
+	}
+	var kf keyFile
+	if err := json.Unmarshal(data, &kf); err != nil {
+		return fmt.Errorf("parse key file: %w", err)
+	}
+	verifyHash := sha256.Sum256(dataKey)
+	if !equalBytes(verifyHash[:], kf.VerifyHash) {
+		return ErrWrongRecoveryKey
+	}
+	return nil
 }
 
 // FromDataKey builds an IN-MEMORY vault directly from a base64 recovery key (the

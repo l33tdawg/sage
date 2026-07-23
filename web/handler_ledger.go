@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strings"
@@ -9,15 +10,26 @@ import (
 	"github.com/l33tdawg/sage/internal/vault"
 )
 
+const recoveryBackupConfirmedPreference = "ledger_recovery_backup_confirmed"
+
 // VaultStore is implemented by stores that support encryption.
 type VaultStore interface {
 	SetVault(v *vault.Vault)
 }
 
 // handleGetLedgerStatus returns the current Synaptic Ledger (encryption vault) status.
-func (h *DashboardHandler) handleGetLedgerStatus(w http.ResponseWriter, _ *http.Request) {
+func (h *DashboardHandler) handleGetLedgerStatus(w http.ResponseWriter, r *http.Request) {
+	backupConfirmed := false
+	if h.prefStore != nil {
+		if value, err := h.prefStore.GetPreference(r.Context(), recoveryBackupConfirmedPreference); err == nil {
+			backupConfirmed = value == "1"
+		}
+	}
 	if !h.Encrypted.Load() && !vault.Exists(h.VaultKeyPath) {
-		writeJSONResp(w, http.StatusOK, map[string]any{"enabled": false})
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"enabled":                   false,
+			"recovery_backup_confirmed": backupConfirmed,
+		})
 		return
 	}
 
@@ -28,10 +40,11 @@ func (h *DashboardHandler) handleGetLedgerStatus(w http.ResponseWriter, _ *http.
 	}
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"enabled":    h.Encrypted.Load(),
-		"algorithm":  "AES-256-GCM",
-		"kdf":        "Argon2id",
-		"vault_path": displayPath,
+		"enabled":                   h.Encrypted.Load(),
+		"algorithm":                 "AES-256-GCM",
+		"kdf":                       "Argon2id",
+		"vault_path":                displayPath,
+		"recovery_backup_confirmed": backupConfirmed,
 	})
 }
 
@@ -66,6 +79,16 @@ func (h *DashboardHandler) handleEnableLedger(w http.ResponseWriter, r *http.Req
 	// all previously encrypted memories.
 	reusing := vault.Exists(h.VaultKeyPath)
 	if !reusing {
+		// Clear a possibly stale acknowledgement before creating a new data key.
+		// Failing closed here matters: if the preference write were ignored and
+		// vault creation continued, onboarding could falsely describe a brand-new
+		// recovery key as already stored safely.
+		if h.prefStore != nil {
+			if err := h.prefStore.SetPreference(r.Context(), recoveryBackupConfirmedPreference, "0"); err != nil {
+				writeError(w, http.StatusInternalServerError, "could not reset recovery backup status")
+				return
+			}
+		}
 		if err := vault.Init(h.VaultKeyPath, body.Passphrase); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to initialise vault: "+err.Error())
 			return
@@ -97,6 +120,11 @@ func (h *DashboardHandler) handleEnableLedger(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+
+	// Authentication becomes active above. Establish the dashboard session in
+	// this same response so the operator can confirm recovery-key storage and
+	// continue setup without a surprise login ceremony.
+	h.issueDashboardSession(w, r)
 
 	// Recovery key: the raw data key, base64-encoded.
 	// This can re-initialize the vault with a new passphrase if the original is lost.
@@ -200,6 +228,29 @@ func (h *DashboardHandler) handleGetRecoveryKey(w http.ResponseWriter, r *http.R
 	writeJSONResp(w, http.StatusOK, map[string]any{"recovery_key": key})
 }
 
+// handleConfirmRecoveryKeyBackup records the operator's explicit acknowledgement
+// that the current recovery key was stored safely. It never validates or changes
+// key material; the flag exists solely so onboarding can keep an honest, durable
+// "backup still needed" reminder across reloads.
+func (h *DashboardHandler) handleConfirmRecoveryKeyBackup(w http.ResponseWriter, r *http.Request) {
+	if !h.Encrypted.Load() {
+		writeError(w, http.StatusBadRequest, "encryption is not enabled")
+		return
+	}
+	if h.prefStore == nil {
+		writeError(w, http.StatusNotImplemented, "preferences not supported on this node")
+		return
+	}
+	if err := h.prefStore.SetPreference(r.Context(), recoveryBackupConfirmedPreference, "1"); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not save recovery backup status")
+		return
+	}
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"ok":                        true,
+		"recovery_backup_confirmed": true,
+	})
+}
+
 // handleRecoverLedger resets the vault passphrase using the recovery key.
 // This is the escape hatch when a user loses their passphrase but has the recovery key.
 func (h *DashboardHandler) handleRecoverLedger(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +278,19 @@ func (h *DashboardHandler) handleRecoverLedger(w http.ResponseWriter, r *http.Re
 	}
 	if len(body.NewPassphrase) < 8 {
 		writeError(w, http.StatusBadRequest, "passphrase must be at least 8 characters")
+		return
+	}
+
+	// A recovery-key initializer accepts any 32-byte key because it is also used
+	// to create vault files. Prove this key belongs to the existing vault before
+	// making a backup or touching vault.key; otherwise a key from another SAGE
+	// could silently replace the only key that decrypts these memories.
+	if err := vault.VerifyRecoveryKey(h.VaultKeyPath, body.RecoveryKey); err != nil {
+		if errors.Is(err, vault.ErrWrongRecoveryKey) {
+			writeError(w, http.StatusUnauthorized, "recovery key does not match this vault")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not verify recovery key")
 		return
 	}
 
@@ -258,6 +322,11 @@ func (h *DashboardHandler) handleRecoverLedger(w http.ResponseWriter, r *http.Re
 	}
 	h.VaultLocked.Store(false)
 	h.startPostUnlockRepairs()
+	// Recovery is an unauthenticated route because the recovery key is the
+	// credential. Once it succeeds, establish the ordinary dashboard session in
+	// the same response so the operator lands back in their brain instead of an
+	// unlocked-but-unauthenticated empty shell.
+	h.issueDashboardSession(w, r)
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"ok":      true,

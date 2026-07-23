@@ -9,7 +9,7 @@
   },
   "scripts": {
     "check:js": "node scripts/check-static-js.mjs",
-    "test": "npm run check:js && node --test scripts/cerebrum-shell.test.mjs scripts/federation-flow.test.mjs scripts/filter-codeql-sarif.test.mjs scripts/release-workflow.test.mjs scripts/restart-proof.test.mjs scripts/task-reorder.test.mjs scripts/update-banner.test.mjs scripts/version-alignment.test.mjs"
+    "test": "npm run check:js && node --test scripts/cerebrum-shell.test.mjs scripts/domain-inventory.test.mjs scripts/federation-flow.test.mjs scripts/federation-route-state.test.mjs scripts/filter-codeql-sarif.test.mjs scripts/release-workflow.test.mjs scripts/restart-proof.test.mjs scripts/task-reorder.test.mjs scripts/update-banner.test.mjs scripts/version-alignment.test.mjs"
   },
   "repository": {
     "type": "git",

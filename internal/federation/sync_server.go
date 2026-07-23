@@ -563,6 +563,9 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 			OriginAgentPubkey: originAgentPubkey,
 			LocalMemoryID:     localID,
 			DomainTag:         item.Domain,
+			ContentHash:       item.ContentHash,
+			Classification:    item.Classification,
+			MemoryType:        item.MemoryType,
 			Outcome:           store.SyncOutcomeAdmitted,
 			// Persist the origin's signature so THIS node can later relay the copy
 			// authentically (v11.8 mesh, docs §9.2): a relayer re-serves this sig

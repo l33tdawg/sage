@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
+	"github.com/l33tdawg/sage/internal/totp"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -286,6 +288,51 @@ func TestLANHostCreateRemainsLegacyWithP2PHooks(t *testing.T) {
 	if create.Transport != "" || strings.Contains(create.OTPAuthURI, "x_sage_transport") {
 		t.Fatalf("normal LAN QR is not backward-compatible: transport=%q uri=%s", create.Transport, create.OTPAuthURI)
 	}
+}
+
+func TestHostCreateAutoUsesPreparedRelayBundle(t *testing.T) {
+	host := newCeremonyNode(t, "host-auto1")
+	bundle := testRouteBundle(t, "203.0.113.80")
+	host.mgr.SetJoinP2PHooks(JoinP2PHooks{
+		LocalBundle: func() (JoinP2PBundle, error) { return bundle, nil },
+	})
+	create, err := host.mgr.HostCreateAuto("https://192.168.1.20:8444")
+	require.NoError(t, err)
+	assert.Equal(t, "p2p", create.Transport)
+	assert.Contains(t, create.OTPAuthURI, "x_sage_transport=p2p")
+}
+
+func TestHostCreateAutoFallsBackToLegacyDirectForOldPeers(t *testing.T) {
+	host := newCeremonyNode(t, "host-auto2")
+	host.mgr.SetJoinP2PHooks(JoinP2PHooks{
+		LocalBundle: func() (JoinP2PBundle, error) {
+			return JoinP2PBundle{}, errors.New("relay still preparing")
+		},
+	})
+	create, err := host.mgr.HostCreateAuto("https://192.168.1.20:8444")
+	require.NoError(t, err)
+	assert.Empty(t, create.Transport)
+	assert.NotContains(t, create.OTPAuthURI, "x_sage_transport")
+}
+
+func TestAutoHostDowngradesTranscriptForLegacyGuestReturn(t *testing.T) {
+	host := newCeremonyNode(t, "host-auto3")
+	bundle := testRouteBundle(t, "203.0.113.81")
+	host.mgr.SetJoinP2PHooks(JoinP2PHooks{
+		LocalBundle: func() (JoinP2PBundle, error) { return bundle, nil },
+	})
+	create, err := host.mgr.HostCreateAuto("https://192.168.1.20:8444")
+	require.NoError(t, err)
+	require.Equal(t, "p2p", create.Transport)
+	legacyReturn := totp.ProvisioningURI(nil, "legacy-guest", "SAGE", bytes.Repeat([]byte{0x42}, 32),
+		"https://192.168.1.21:8444", sidForQR(create.SessionID), "guest")
+	require.NoError(t, host.mgr.HostScanReturn(create.SessionID, legacyReturn))
+	session, ok := host.mgr.JoinStore().Get(create.SessionID, time.Now())
+	require.True(t, ok)
+	assert.Empty(t, session.HostPeerID)
+	assert.Empty(t, session.HostP2PAddrs)
+	assert.Empty(t, session.ExpectedGuestPeer)
+	assert.Empty(t, session.ExpectedGuestP2P)
 }
 
 func TestValidateJoinEndpointRequiresExplicitCompletePort(t *testing.T) {

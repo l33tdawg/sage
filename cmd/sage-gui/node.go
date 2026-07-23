@@ -1249,6 +1249,7 @@ func runServe(startupProof string) (rerr error) {
 		logger.Warn().Msg("no chain_id in genesis/config — federation transport disabled")
 	} else {
 		fedMgr = federation.NewManager(federation.Config{
+			Disabled:         !cfg.Federation.Enabled,
 			LocalChainID:     cfg.ChainID,
 			NetworkName:      sanitizeNetworkName(cfg.NetworkName),
 			CertsDir:         certsDir,
@@ -1282,30 +1283,36 @@ func runServe(startupProof string) (rerr error) {
 		if restoredSeeds > 0 {
 			logger.Info().Int("agreements", restoredSeeds).Msg("federation: restored peer seeds into cache after boot")
 		}
-		// v11.5 domain-sync drainer + commit-tail watcher are OUTBOUND-only (this
-		// node pushes to a peer's /fed/v1/sync/push); they do NOT need this node's
-		// inbound mTLS listener. Wire them here, gated only on the manager
-		// existing — NOT on cfg.Federation.Enabled — so that turning the inbound
-		// listener OFF (Settings toggle) does not silently stop replicating to
-		// established peers, matching how recall/receipt delivery already survive
-		// the toggle ("off = outbound-only"). No-op on non-SQLite backends.
+		// Federation Off is a complete network kill switch: no listener, recall,
+		// receipts, sync drainer, route refresh, or relay reservations.
 		// SetSyncNotifier MUST follow StartSyncDrainer (it nudges the channel the
 		// drainer creates).
-		fedMgr.StartSyncDrainer(ctx)
-		defer fedMgr.StopSyncDrainer()
-		app.SetSyncNotifier(fedMgr.SyncWatcher())
+		if cfg.Federation.Enabled {
+			fedMgr.StartSyncDrainer(ctx)
+			defer fedMgr.StopSyncDrainer()
+			app.SetSyncNotifier(fedMgr.SyncWatcher())
+		}
 	}
 
-	// Optional v11.6 connectivity substrate. It starts independently of the
-	// TCP federation listener because federation.enabled=false means
-	// outbound-only: established peers may still be dialed over libp2p, while
-	// AcceptInbound=false installs no federation stream handler. The SAGE trust
-	// boundary remains the mTLS+pin layer inside each stream.
+	// Optional v11.6 connectivity substrate. It starts only while federation is
+	// enabled; Off must not leave outbound relay reservations or peer dials live.
 	var fedP2P *sagep2p.Transport
 	var fedP2PRoutesMu sync.RWMutex
-	if cfg.Federation.P2PEnabled && fedMgr != nil && (cfg.Federation.Enabled || len(cfg.Federation.P2PPeers) > 0) {
+	if cfg.Federation.Enabled && cfg.Federation.P2PEnabled && fedMgr != nil {
+		for _, remoteChainID := range pruneExpiredFederationRoutes(&cfg.Federation, time.Now()) {
+			if err := persistFederationPeer(remoteChainID, nil); err != nil {
+				logger.Warn().Err(err).Str("chain_id", remoteChainID).Msg("could not prune expired federation route from config")
+			} else {
+				logger.Info().Str("chain_id", remoteChainID).Msg("pruned expired federation route")
+			}
+		}
 		allowedPeerAddrs := make([]string, 0)
-		for _, targets := range cfg.Federation.P2PPeers {
+		for remoteChainID := range cfg.Federation.P2PPeers {
+			targets, routeErr := configuredFederationRouteTargets(cfg.Federation, remoteChainID, time.Now())
+			if routeErr != nil {
+				logger.Warn().Err(routeErr).Str("chain_id", remoteChainID).Msg("ignoring invalid federation route")
+				continue
+			}
 			allowedPeerAddrs = append(allowedPeerAddrs, targets...)
 		}
 		p2pTransport, p2pErr := sagep2p.New(ctx, sagep2p.Config{
@@ -1322,53 +1329,21 @@ func runServe(startupProof string) (rerr error) {
 			logger.Warn().Err(p2pErr).Msg("federation p2p transport unavailable; direct HTTPS remains active")
 		} else {
 			fedP2P = p2pTransport
-			fedMgr.SetPeerDialFunc(func(dialCtx context.Context, remoteChainID string) (net.Conn, bool, error) {
+			fedMgr.SetPeerRouteDialFunc(func(dialCtx context.Context, remoteChainID string, authenticate federation.PeerRouteAuthenticator) (federation.PeerRouteDialResult, bool, error) {
 				fedP2PRoutesMu.RLock()
-				targets := append([]string(nil), cfg.Federation.P2PPeers[remoteChainID]...)
+				targets, routeErr := configuredFederationRouteTargets(cfg.Federation, remoteChainID, time.Now())
 				fedP2PRoutesMu.RUnlock()
-				if len(targets) == 0 {
-					return nil, false, nil
+				if routeErr != nil {
+					return federation.PeerRouteDialResult{}, true, routeErr
 				}
-				var dialErrors []error
-				for _, target := range targets {
-					if target == "" {
-						continue
-					}
-					conn, dialErr := p2pTransport.DialContext(dialCtx, target)
-					if dialErr == nil {
-						return conn, true, nil
-					}
-					dialErrors = append(dialErrors, dialErr)
-				}
-				if len(dialErrors) == 0 {
-					return nil, true, errors.New("no non-empty p2p target configured")
-				}
-				return nil, true, errors.Join(dialErrors...)
+				return dialFederationP2PRoutes(dialCtx, p2pTransport, targets, authenticate)
 			})
 			fedMgr.SetJoinP2PHooks(federation.JoinP2PHooks{
 				LocalBundle: func() (federation.JoinP2PBundle, error) {
 					if !cfg.Federation.Enabled {
 						return federation.JoinP2PBundle{}, errors.New("enable federation before creating an internet connection")
 					}
-					all := p2pTransport.Addrs()
-					selected := make([]string, 0, 4)
-					circuit := ""
-					for _, addr := range all {
-						if strings.Contains(addr, "/p2p-circuit/") {
-							if circuit == "" {
-								circuit = addr
-							}
-							continue
-						}
-						if len(selected) < 3 {
-							selected = append(selected, addr)
-						}
-					}
-					if circuit == "" {
-						return federation.JoinP2PBundle{}, errors.New("relay reservation is not ready")
-					}
-					selected = append(selected, circuit)
-					return federation.JoinP2PBundle{PeerID: p2pTransport.Host().ID().String(), Protocol: string(sagep2p.FederationProtocol), Addrs: selected}, nil
+					return localFederationRouteBundle(p2pTransport)
 				},
 				DialTarget: p2pTransport.DialContext,
 				Begin:      p2pTransport.BeginJoin,
@@ -1395,6 +1370,46 @@ func runServe(startupProof string) (rerr error) {
 					cfg.Federation.P2PPeers[remoteChainID] = append([]string(nil), targets...)
 					return nil
 				},
+				PersistSnapshot: func(remoteChainID string, snapshot federation.RouteSnapshot) error {
+					fedP2PRoutesMu.Lock()
+					defer fedP2PRoutesMu.Unlock()
+					previous := append([]string(nil), cfg.Federation.P2PPeers[remoteChainID]...)
+					if err := persistFederationRouteSnapshot(remoteChainID, snapshot); err != nil {
+						return err
+					}
+					p2pTransport.RemoveAllowedPeer(previous)
+					if err := p2pTransport.AddAllowedPeer(snapshot.Addrs); err != nil {
+						if prior, ok := cfg.Federation.P2PRoutes[remoteChainID]; ok {
+							_ = persistFederationRouteSnapshot(remoteChainID, configuredRouteSnapshot(prior))
+						} else {
+							_ = persistFederationPeer(remoteChainID, previous)
+						}
+						if len(previous) > 0 {
+							_ = p2pTransport.AddAllowedPeer(previous)
+						}
+						return err
+					}
+					if cfg.Federation.P2PPeers == nil {
+						cfg.Federation.P2PPeers = make(map[string][]string)
+					}
+					if cfg.Federation.P2PRoutes == nil {
+						cfg.Federation.P2PRoutes = make(map[string]FederationRouteSnapshot)
+					}
+					cfg.Federation.P2PPeers[remoteChainID] = append([]string(nil), snapshot.Addrs...)
+					cfg.Federation.P2PRoutes[remoteChainID] = FederationRouteSnapshot{
+						PeerID: snapshot.PeerID, Protocol: snapshot.Protocol,
+						Addrs:    append([]string(nil), snapshot.Addrs...),
+						Revision: snapshot.Revision, IssuedAt: snapshot.IssuedAt,
+						ExpiresAt: snapshot.ExpiresAt, Generation: snapshot.Generation,
+					}
+					return nil
+				},
+				LoadSnapshot: func(remoteChainID string) (federation.RouteSnapshot, bool) {
+					fedP2PRoutesMu.RLock()
+					defer fedP2PRoutesMu.RUnlock()
+					raw, ok := cfg.Federation.P2PRoutes[remoteChainID]
+					return configuredRouteSnapshot(raw), ok
+				},
 				Remove: func(remoteChainID string) error {
 					fedP2PRoutesMu.Lock()
 					defer fedP2PRoutesMu.Unlock()
@@ -1404,9 +1419,12 @@ func runServe(startupProof string) (rerr error) {
 					}
 					p2pTransport.RemoveAllowedPeer(targets)
 					delete(cfg.Federation.P2PPeers, remoteChainID)
+					delete(cfg.Federation.P2PRoutes, remoteChainID)
 					return nil
 				},
 			})
+			fedMgr.StartRouteRefresher(ctx)
+			defer fedMgr.StopRouteRefresher()
 			logger.Info().
 				Str("peer_id", fedP2P.Host().ID().String()).
 				Int("addresses", len(fedP2P.Addrs())).
@@ -1524,8 +1542,8 @@ func runServe(startupProof string) (rerr error) {
 			// Periodic reaper for expired join sessions / guest drafts / rate-limit
 			// map (seed hygiene + staged-CA rollback + unbounded-growth guard).
 			trackDone(fedMgr.StartMaintenance(ctx))
-			// (Domain-sync drainer + commit-tail watcher are wired above in the
-			// fedMgr block — outbound-only, not gated on the inbound listener.)
+			// Domain-sync drainer + commit-tail watcher are wired above and share
+			// the same complete federation.enabled lifecycle as this listener.
 			if fedListener != nil {
 				startListener(func() {
 					logger.Info().Str("addr", fedAddr).Str("chain_id", cfg.ChainID).Msg("federation mTLS listener starting")

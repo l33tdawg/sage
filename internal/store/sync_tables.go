@@ -112,6 +112,9 @@ type SyncOrigin struct {
 	OriginAgentPubkey string
 	LocalMemoryID     string
 	DomainTag         string
+	ContentHash       string
+	Classification    int
+	MemoryType        string
 	Outcome           string
 	// OriginSig is the ORIGIN agent's ed25519 signature persisted at admission
 	// (v11.8 mesh relay, docs §9.2). Nil for pre-v11.8 pairwise rows / rejections;
@@ -119,6 +122,15 @@ type SyncOrigin struct {
 	// against the origin's roster key, never the relayer's.
 	OriginSig []byte
 	CreatedAt time.Time
+}
+
+// SyncCopySourceSummary is the durable, content-free provenance catalogue for
+// retained copies. It intentionally survives peer revoke with only the origin
+// chain, local domain, and count.
+type SyncCopySourceSummary struct {
+	DomainTag     string `json:"domain"`
+	OriginChainID string `json:"chain_id"`
+	MemoryCount   int    `json:"memory_count"`
 }
 
 // SyncOriginPending is a durable pre-broadcast quarantine. Its local ID is
@@ -230,6 +242,9 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		origin_agent_pubkey TEXT NOT NULL DEFAULT '',
 		local_memory_id   TEXT NOT NULL DEFAULT '',
 		domain_tag        TEXT NOT NULL DEFAULT '',
+		content_hash      TEXT NOT NULL DEFAULT '',
+		classification    INTEGER NOT NULL DEFAULT 0,
+		memory_type       TEXT NOT NULL DEFAULT '',
 		outcome           TEXT NOT NULL
 		                  CHECK (outcome IN ('admitted','rejected_dup_cross_domain','rejected_clearance','rejected_not_consented','rejected_domain_scope')),
 		created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -321,6 +336,39 @@ func (s *SQLiteStore) migrateSyncTables(ctx context.Context) {
 		`SELECT COUNT(*) FROM pragma_table_info('sync_origin') WHERE name='origin_agent_pubkey'`).Scan(&hasOriginAgent); err == nil && hasOriginAgent == 0 {
 		_, _ = s.writeExecContext(ctx, `ALTER TABLE sync_origin ADD COLUMN origin_agent_pubkey TEXT NOT NULL DEFAULT ''`)
 	}
+	for _, col := range []struct {
+		name string
+		ddl  string
+	}{
+		{"content_hash", `ALTER TABLE sync_origin ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''`},
+		{"classification", `ALTER TABLE sync_origin ADD COLUMN classification INTEGER NOT NULL DEFAULT 0`},
+		{"memory_type", `ALTER TABLE sync_origin ADD COLUMN memory_type TEXT NOT NULL DEFAULT ''`},
+	} {
+		var found int
+		if err := s.conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM pragma_table_info('sync_origin') WHERE name=?`, col.name).Scan(&found); err == nil && found == 0 {
+			_, _ = s.writeExecContext(ctx, col.ddl)
+		}
+	}
+	// Existing admitted rows predate the immutable metadata columns above.
+	// Backfill from the locally committed copy instead of accepting the column
+	// defaults (notably classification=0, which would relabel confidential
+	// retained copies as PUBLIC in recall provenance).
+	_, _ = s.writeExecContext(ctx, `
+		UPDATE sync_origin
+		   SET content_hash = COALESCE((
+		           SELECT lower(hex(m.content_hash)) FROM memories m
+		            WHERE m.memory_id = sync_origin.local_memory_id
+		       ), content_hash),
+		       classification = COALESCE((
+		           SELECT m.classification FROM memories m
+		            WHERE m.memory_id = sync_origin.local_memory_id
+		       ), classification),
+		       memory_type = COALESCE((
+		           SELECT m.memory_type FROM memories m
+		            WHERE m.memory_id = sync_origin.local_memory_id
+		       ), memory_type)
+		 WHERE outcome = 'admitted' AND local_memory_id != ''`)
 	var hasOriginChain int
 	if err := s.conn.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM pragma_table_info('sync_outbox') WHERE name='origin_chain_id'`).Scan(&hasOriginChain); err == nil && hasOriginChain == 0 {
@@ -1456,9 +1504,11 @@ func (s *SQLiteStore) RecordSyncOrigin(ctx context.Context, o SyncOrigin) error 
 	}
 	_, err := s.writeExecContext(ctx, `
 		INSERT OR IGNORE INTO sync_origin
-			(origin_chain_id, origin_memory_id, origin_created_at, origin_agent_pubkey, local_memory_id, domain_tag, outcome, origin_sig)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		o.OriginChainID, o.OriginMemoryID, o.OriginCreatedAt, o.OriginAgentPubkey, o.LocalMemoryID, o.DomainTag, o.Outcome, sig)
+			(origin_chain_id, origin_memory_id, origin_created_at, origin_agent_pubkey, local_memory_id, domain_tag,
+			 content_hash, classification, memory_type, outcome, origin_sig)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		o.OriginChainID, o.OriginMemoryID, o.OriginCreatedAt, o.OriginAgentPubkey, o.LocalMemoryID, o.DomainTag,
+		o.ContentHash, o.Classification, o.MemoryType, o.Outcome, sig)
 	if err != nil {
 		return fmt.Errorf("record sync origin: %w", err)
 	}
@@ -1469,13 +1519,15 @@ func (s *SQLiteStore) RecordSyncOrigin(ctx context.Context, o SyncOrigin) error 
 // or sql.ErrNoRows if this pair has never been decided.
 func (s *SQLiteStore) GetSyncOrigin(ctx context.Context, originChainID, originMemoryID string) (*SyncOrigin, error) {
 	row := s.conn.QueryRowContext(ctx, `
-		SELECT origin_chain_id, origin_memory_id, origin_created_at, origin_agent_pubkey, local_memory_id, domain_tag, outcome, origin_sig, created_at
+		SELECT origin_chain_id, origin_memory_id, origin_created_at, origin_agent_pubkey, local_memory_id, domain_tag,
+		       content_hash, classification, memory_type, outcome, origin_sig, created_at
 		  FROM sync_origin
 		 WHERE origin_chain_id = ? AND origin_memory_id = ?`, originChainID, originMemoryID)
 	var o SyncOrigin
 	var createdAt string
 	if err := row.Scan(&o.OriginChainID, &o.OriginMemoryID, &o.OriginCreatedAt, &o.OriginAgentPubkey,
-		&o.LocalMemoryID, &o.DomainTag, &o.Outcome, &o.OriginSig, &createdAt); err != nil {
+		&o.LocalMemoryID, &o.DomainTag, &o.ContentHash, &o.Classification, &o.MemoryType,
+		&o.Outcome, &o.OriginSig, &createdAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, sql.ErrNoRows
 		}
@@ -1483,6 +1535,83 @@ func (s *SQLiteStore) GetSyncOrigin(ctx context.Context, originChainID, originMe
 	}
 	o.CreatedAt = parseTime(createdAt)
 	return &o, nil
+}
+
+// GetSyncOriginByLocalMemoryID resolves the immutable foreign provenance for a
+// locally committed synced copy. It is intentionally keyed by the local ID
+// used by recall so callers never have to know the origin pair in advance.
+func (s *SQLiteStore) GetSyncOriginByLocalMemoryID(ctx context.Context, localMemoryID string) (*SyncOrigin, error) {
+	if localMemoryID == "" {
+		return nil, sql.ErrNoRows
+	}
+	row := s.conn.QueryRowContext(ctx, `
+		SELECT origin_chain_id, origin_memory_id, origin_created_at, origin_agent_pubkey, local_memory_id, domain_tag,
+		       content_hash, classification, memory_type, outcome, origin_sig, created_at
+		  FROM sync_origin
+		 WHERE local_memory_id = ? AND outcome = 'admitted'
+		 LIMIT 1`, localMemoryID)
+	var o SyncOrigin
+	var createdAt string
+	if err := row.Scan(&o.OriginChainID, &o.OriginMemoryID, &o.OriginCreatedAt, &o.OriginAgentPubkey,
+		&o.LocalMemoryID, &o.DomainTag, &o.ContentHash, &o.Classification, &o.MemoryType,
+		&o.Outcome, &o.OriginSig, &createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, sql.ErrNoRows
+		}
+		return nil, fmt.Errorf("get sync origin by local memory id: %w", err)
+	}
+	o.CreatedAt = parseTime(createdAt)
+	return &o, nil
+}
+
+// CountAdmittedSyncOriginsByDomain returns exact-domain counts for copies whose
+// original source is remoteChainID. Callers apply subtree authorization before
+// exposing this operational summary.
+func (s *SQLiteStore) CountAdmittedSyncOriginsByDomain(ctx context.Context, remoteChainID string) (map[string]int, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT domain_tag, COUNT(*)
+		  FROM sync_origin
+		 WHERE origin_chain_id = ? AND outcome = 'admitted' AND local_memory_id != ''
+		 GROUP BY domain_tag`, remoteChainID)
+	if err != nil {
+		return nil, fmt.Errorf("count admitted sync origins by domain: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]int)
+	for rows.Next() {
+		var domain string
+		var count int
+		if err := rows.Scan(&domain, &count); err != nil {
+			return nil, fmt.Errorf("scan admitted sync origin count: %w", err)
+		}
+		out[domain] = count
+	}
+	return out, rows.Err()
+}
+
+// ListAdmittedSyncCopySources groups durable admitted-copy provenance for the
+// local domain catalogue. No peer endpoint, key, agent, content, or policy
+// metadata is exposed, and revoked peers remain attributable.
+func (s *SQLiteStore) ListAdmittedSyncCopySources(ctx context.Context) ([]SyncCopySourceSummary, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT domain_tag, origin_chain_id, COUNT(*)
+		  FROM sync_origin
+		 WHERE outcome = 'admitted' AND local_memory_id != ''
+		 GROUP BY domain_tag, origin_chain_id
+		 ORDER BY domain_tag, origin_chain_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list admitted sync copy sources: %w", err)
+	}
+	defer rows.Close()
+	out := make([]SyncCopySourceSummary, 0)
+	for rows.Next() {
+		var item SyncCopySourceSummary
+		if err := rows.Scan(&item.DomainTag, &item.OriginChainID, &item.MemoryCount); err != nil {
+			return nil, fmt.Errorf("scan admitted sync copy source: %w", err)
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 // RelayOrigin is the stored provenance a relayer re-serves verbatim for a local
@@ -1620,6 +1749,11 @@ type SyncCandidate struct {
 	Classification int
 }
 
+// SyncAuditDomainPrefix is reserved for federation protocol anchors. These
+// records remain in the local ledger for audit/backup but must never become
+// user-selected federation content or enter another peer's sync outbox.
+const SyncAuditDomainPrefix = "sage-syncaudit-"
+
 // ListSyncCandidates returns committed memories inside the consented domain
 // subtrees that have no outbox row for the peer AND are not themselves synced
 // copies (loop prevention folded into SQL: any memory with a sync_origin
@@ -1652,10 +1786,11 @@ func (s *SQLiteStore) ListSyncCandidates(ctx context.Context, remoteChainID stri
 	if clause == "" {
 		return nil, nil
 	}
-	args = append(args, remoteChainID, limit)
+	args = append(args, SyncAuditDomainPrefix+"%", remoteChainID, limit)
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT m.memory_id, m.domain_tag, m.classification FROM memories m
 		 WHERE m.status = 'committed' AND (`+clause+`)
+		   AND LOWER(m.domain_tag) NOT LIKE ?
 		   AND NOT EXISTS (SELECT 1 FROM sync_outbox o
 		                    WHERE o.remote_chain_id = ? AND o.memory_id = m.memory_id)
 		   AND NOT EXISTS (SELECT 1 FROM sync_origin so
@@ -1685,7 +1820,8 @@ func (s *SQLiteStore) ListSyncCandidates(ctx context.Context, remoteChainID stri
 func (s *SQLiteStore) GetSyncCandidateByID(ctx context.Context, memoryID string) (*SyncCandidate, error) {
 	row := s.conn.QueryRowContext(ctx, `
 		SELECT memory_id, COALESCE(domain_tag, ''), classification FROM memories
-		 WHERE memory_id = ? AND status = 'committed'`, memoryID)
+		 WHERE memory_id = ? AND status = 'committed'
+		   AND LOWER(domain_tag) NOT LIKE ?`, memoryID, SyncAuditDomainPrefix+"%")
 	var c SyncCandidate
 	if err := row.Scan(&c.MemoryID, &c.DomainTag, &c.Classification); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -150,6 +151,9 @@ func (l *syncPolicyDeliveryLease) clearCancel(cancel context.CancelFunc) {
 
 // Config wires a Manager into the node.
 type Config struct {
+	// Disabled gates all federation networking, inbound and outbound. The zero
+	// value preserves enabled behavior for embedded users and existing tests.
+	Disabled bool
 	// LocalChainID is this network's globally-unique chain id (v11 Phase 0),
 	// read off-consensus from genesis/config — the receiver side of every
 	// chain-qualified signature and the self-federation guard.
@@ -199,6 +203,22 @@ type Manager struct {
 	// direct TCP/HTTPS dial path byte-for-byte. Set once during node boot.
 	peerDialMu sync.RWMutex
 	peerDialFn PeerDialFunc
+	// peerRouteDialFn is the route-aware successor. The legacy seam remains for
+	// old embedders/tests and is adapted when this hook is absent.
+	peerRouteDialMu sync.RWMutex
+	peerRouteDialFn PeerRouteDialFunc
+
+	transportDisabled    atomic.Bool
+	routeMu              sync.RWMutex
+	routeStatus          map[string]RouteDiagnostics
+	localRouteRevision   uint64
+	routeRefreshMu       sync.Mutex
+	routeRefreshActive   map[string]bool
+	routeRefreshLast     map[string]time.Time
+	routeRefreshFn       func(context.Context, string, JoinP2PBundle) error
+	routeRefresherMu     sync.Mutex
+	routeRefresherCancel context.CancelFunc
+	routeRefresherDone   chan struct{}
 
 	joinP2PMu sync.RWMutex
 	joinP2P   JoinP2PHooks
@@ -261,9 +281,12 @@ type Manager struct {
 	// SetSyncNotifier in runServe, so the watcher never sees a half-built channel.
 	syncNudge chan struct{}
 	// syncJournalNudge wakes group-journal anti-entropy after a connection is
-	// restored or a person refreshes Groups. It is separate from syncNudge so
-	// ordinary memory commits do not cause full roster scans.
-	syncJournalNudge chan struct{}
+	// restored or a person refreshes Groups. A nil acknowledgement is a
+	// best-effort background nudge; a non-nil acknowledgement lets the explicit
+	// Groups refresh wait for the prompted pass before it reloads SQLite.
+	// It is separate from syncNudge so ordinary memory commits do not cause full
+	// roster scans.
+	syncJournalNudge chan chan struct{}
 	syncStartOnce    sync.Once
 	syncStopOnce     sync.Once
 	syncCancel       context.CancelFunc
@@ -435,21 +458,26 @@ type PeerDialFunc func(ctx context.Context, remoteChainID string) (conn net.Conn
 // Addrs contain both direct and relay-circuit targets so one enrollment can
 // roam LAN -> internet -> LAN without changing federation trust.
 type JoinP2PBundle struct {
-	PeerID   string   `json:"peer_id"`
-	Protocol string   `json:"protocol"`
-	Addrs    []string `json:"addrs"`
+	PeerID    string   `json:"peer_id"`
+	Protocol  string   `json:"protocol"`
+	Addrs     []string `json:"addrs"`
+	Revision  uint64   `json:"revision,omitempty"`
+	IssuedAt  int64    `json:"issued_at,omitempty"`
+	ExpiresAt int64    `json:"expires_at,omitempty"`
 }
 
 // JoinP2PHooks keep federation independent of libp2p while giving the JOIN
 // ceremony narrowly-scoped bootstrap, admission and crash-safe route seams.
 type JoinP2PHooks struct {
-	LocalBundle func() (JoinP2PBundle, error)
-	DialTarget  func(context.Context, string) (net.Conn, error)
-	Begin       func(sessionID string, expiresAt time.Time)
-	BindPeer    func(sessionID string, targets []string, expiresAt time.Time) error
-	End         func(sessionID string)
-	Persist     func(remoteChainID string, targets []string) error
-	Remove      func(remoteChainID string) error
+	LocalBundle     func() (JoinP2PBundle, error)
+	DialTarget      func(context.Context, string) (net.Conn, error)
+	Begin           func(sessionID string, expiresAt time.Time)
+	BindPeer        func(sessionID string, targets []string, expiresAt time.Time) error
+	End             func(sessionID string)
+	Persist         func(remoteChainID string, targets []string) error
+	PersistSnapshot func(remoteChainID string, snapshot RouteSnapshot) error
+	LoadSnapshot    func(remoteChainID string) (RouteSnapshot, bool)
+	Remove          func(remoteChainID string) error
 }
 
 func (m *Manager) SetJoinP2PHooks(h JoinP2PHooks) {
@@ -509,23 +537,27 @@ func (m *Manager) JoinStore() *JoinStore { return m.joins }
 func NewManager(cfg Config) *Manager {
 	pub, _ := cfg.AgentKey.Public().(ed25519.PublicKey)
 	m := &Manager{
-		localChainID:     cfg.LocalChainID,
-		networkName:      cfg.NetworkName,
-		certsDir:         cfg.CertsDir,
-		cometRPC:         cfg.CometRPC,
-		agentKey:         cfg.AgentKey,
-		agentPub:         pub,
-		badger:           cfg.Badger,
-		memStore:         cfg.MemStore,
-		postV20ForNextTx: cfg.PostV20ForNextTx,
-		logger:           cfg.Logger.With().Str("component", "federation").Logger(),
-		seenSigs:         make(map[string]map[string]int64),
-		caCache:          make(map[string]*x509.Certificate),
-		broadcastSem:     make(chan struct{}, maxConcurrentReceiptBroadcasts),
-		seedCache:        make(map[string][][]byte),
-		joins:            NewJoinStore(),
-		guestDrafts:      make(map[string]*guestDraft),
+		localChainID:       cfg.LocalChainID,
+		networkName:        cfg.NetworkName,
+		certsDir:           cfg.CertsDir,
+		cometRPC:           cfg.CometRPC,
+		agentKey:           cfg.AgentKey,
+		agentPub:           pub,
+		badger:             cfg.Badger,
+		memStore:           cfg.MemStore,
+		postV20ForNextTx:   cfg.PostV20ForNextTx,
+		logger:             cfg.Logger.With().Str("component", "federation").Logger(),
+		seenSigs:           make(map[string]map[string]int64),
+		caCache:            make(map[string]*x509.Certificate),
+		broadcastSem:       make(chan struct{}, maxConcurrentReceiptBroadcasts),
+		seedCache:          make(map[string][][]byte),
+		joins:              NewJoinStore(),
+		guestDrafts:        make(map[string]*guestDraft),
+		routeStatus:        make(map[string]RouteDiagnostics),
+		routeRefreshActive: make(map[string]bool),
+		routeRefreshLast:   make(map[string]time.Time),
 	}
+	m.transportDisabled.Store(cfg.Disabled)
 	// Production governance proof is read from the durable consensus state. Tests
 	// may replace the seam, but production never defaults to a permissive stub.
 	m.controllerGovGate = m.passedControllerGovernance

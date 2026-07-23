@@ -37,7 +37,12 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/reference/python-sdk.md', `Version:** ${version}`],
     ['docs/reference/rest-api.md', `Reconciled through SAGE v${version}`],
     ['docs/reference/concepts/rbac-orgs-federation.md', `reconciled through SAGE v${version}`],
-    ['docs/ROADMAP.md', `v${version} is the current release`],
+    [
+      'docs/ROADMAP.md',
+      version.includes('-')
+        ? `v${version} is the current release candidate`
+        : `v${version} is the current release`,
+    ],
   ];
   for (const [path, marker] of exact) {
     assert.ok(read(path).includes(marker), `${path} is missing current version marker: ${marker}`);

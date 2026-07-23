@@ -96,17 +96,24 @@ func (m *Manager) EmitDomainRemove(ctx context.Context, groupID, domainTag strin
 		m.localChainID, m.agentPub, m.agentKey, domainRemovePayload(domainTag))
 }
 
-// EmitSelfRoleChange authors an owner-unilateral role_change for the local member's
-// OWN role (docs §8), optionally carrying the selective-sync consent subset. The
-// resolve() self-role_change branch (author == payload member AND active) accepts
-// it without controller involvement; the emit self-check refuses it if the local
-// node is not an active member. selectedDomains is recorded only for the
-// selective-sync role (it is the subset of the ALREADY-SHARED set the member
-// consents to receive); it never widens WRITE.
+// EmitSelfRoleChange authors a role_change for the local member's OWN role,
+// optionally carrying the selective-sync consent subset. The member remains the
+// author of that consent assertion, but a remote controller allocates and
+// countersigns the exact next roster position. Without that serialization two
+// members can legitimately sign different entries at the same sequence and fork
+// the append-only roster. selectedDomains is receive consent for the already-
+// shared set and never widens WRITE.
 func (m *Manager) EmitSelfRoleChange(ctx context.Context, groupID, role string, selectedDomains []string) (store.SyncGroupLogEntry, error) {
 	ss := m.syncStore()
 	if ss == nil {
 		return store.SyncGroupLogEntry{}, fmt.Errorf("group journal requires the SQLite store backend")
+	}
+	gs, err := loadGroupApplyState(ctx, ss, groupID)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	if !gs.memberActive(m.localChainID) || gs.memberKey[m.localChainID] == nil || !gs.memberKey[m.localChainID].Equal(m.agentPub) {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("local node is not an active member of group %s", groupID)
 	}
 	payload := roleChangePayload(m.localChainID, role)
 	if role == store.GroupRoleSelectiveSync && len(selectedDomains) > 0 {
@@ -116,8 +123,101 @@ func (m *Manager) EmitSelfRoleChange(ctx context.Context, groupID, role string, 
 		}
 		payload[pkSelectedDomains] = enc
 	}
+	if gs.controllerChain != m.localChainID {
+		return m.emitRemoteSelfRoleChange(ctx, gs, groupID, payload)
+	}
+	if !gs.controllerKey.Equal(m.agentPub) {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("local chain does not hold the active controller key for group %s", groupID)
+	}
 	return m.AppendGroupJournalEntry(ctx, groupID, RosterSubchain, "role_change",
 		m.localChainID, m.agentPub, m.agentKey, payload)
+}
+
+// admitSelfRoleChange is the controller half of a member-authored role change.
+// It serializes exact-head validation, frozen-peer revalidation, controller
+// countersigning, append, and projection under the journal/policy write locks.
+func (m *Manager) admitSelfRoleChange(ctx context.Context, groupID string, e store.SyncGroupLogEntry, requiredPeer *peerIdentity) (store.SyncGroupLogEntry, error) {
+	ss := m.syncStore()
+	if ss == nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("group journal requires the SQLite store backend")
+	}
+	if e.GroupID == "" {
+		e.GroupID = groupID
+	}
+	if e.GroupID != groupID || e.Subchain != RosterSubchain || e.EntryType != "role_change" {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("invalid pre-signed self role change")
+	}
+	if err := validateAuthoredEntry(e); err != nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("invalid pre-signed self role change: %w", err)
+	}
+
+	m.journalMu.Lock()
+	defer m.journalMu.Unlock()
+	policyUnlock := ss.LockSyncPolicyWrite()
+	defer policyUnlock()
+
+	if requiredPeer != nil {
+		if requiredPeer.ChainID != e.AuthorChainID || requiredPeer.AgentID != e.AuthorAgentPubkey {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("role admission peer does not match the signed member")
+		}
+		bound, bindErr := m.currentInboundGroupPeerBound(ctx, ss, requiredPeer)
+		if bindErr != nil {
+			return store.SyncGroupLogEntry{}, fmt.Errorf("revalidate role admission peer: %w", bindErr)
+		}
+		if !bound {
+			return store.SyncGroupLogEntry{}, errGroupPeerNoLongerBound
+		}
+	}
+
+	gs, err := loadGroupApplyState(ctx, ss, groupID)
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	if gs.controllerChain != m.localChainID || !gs.controllerKey.Equal(m.agentPub) {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("only the active group controller may admit a self role change")
+	}
+	payload := parseJournalPayload(e.PayloadJSON)
+	memberKey := gs.memberKey[e.AuthorChainID]
+	if payload[pkMemberChain] != e.AuthorChainID || !gs.memberActive(e.AuthorChainID) || memberKey == nil ||
+		e.AuthorAgentPubkey != hex.EncodeToString(memberKey) || verifyJournalEntry(e, memberKey) != nil {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("pre-signed self role change does not verify for the active member")
+	}
+	if held, getErr := ss.GetSyncGroupLogEntry(ctx, groupID, RosterSubchain, e.Seq); getErr != nil {
+		return store.SyncGroupLogEntry{}, getErr
+	} else if held != nil {
+		if held.EntryHash == e.EntryHash && held.AuthorSig == e.AuthorSig {
+			return *held, nil
+		}
+		return store.SyncGroupLogEntry{}, errSelfRoleHeadChanged
+	}
+	head, err := ss.GetSyncGroupSubchainHead(ctx, groupID, RosterSubchain)
+	wantSeq, wantPrev := int64(0), ""
+	if err == nil && head != nil {
+		wantSeq, wantPrev = head.Seq+1, head.EntryHash
+	}
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	if e.Seq != wantSeq || e.PrevHash != wantPrev {
+		return store.SyncGroupLogEntry{}, errSelfRoleHeadChanged
+	}
+	attachControllerSignature(&e, gs.controllerEpoch, m.localChainID, m.agentPub, m.agentKey)
+	var evicted, removed []string
+	err = ss.RunInTx(ctx, func(txStore store.OffchainStore) error {
+		txSS, ok := txStore.(*store.SQLiteStore)
+		if !ok {
+			return fmt.Errorf("group journal requires the SQLite store backend")
+		}
+		_, evicted, removed, err = m.ingestJournalEntriesInTxLocked(ctx, txSS, groupID, RosterSubchain, []store.SyncGroupLogEntry{e})
+		return err
+	})
+	if err != nil {
+		return store.SyncGroupLogEntry{}, err
+	}
+	if len(evicted) != 0 || len(removed) != 0 {
+		return store.SyncGroupLogEntry{}, fmt.Errorf("role_change produced an invalid removal side effect")
+	}
+	return e, nil
 }
 
 // EmitGroupRename publishes a controller-authored friendly label. The immutable

@@ -23,6 +23,85 @@ func newSyncTestStore(t *testing.T) *SQLiteStore {
 	return s
 }
 
+func TestSyncOriginLookupByLocalMemoryPreservesRecallProvenance(t *testing.T) {
+	s := newSyncTestStore(t)
+	ctx := context.Background()
+	want := SyncOrigin{
+		OriginChainID:     "chain-a",
+		OriginMemoryID:    "origin-memory",
+		OriginCreatedAt:   "2026-07-23T00:00:00Z",
+		OriginAgentPubkey: "origin-agent",
+		LocalMemoryID:     "local-copy",
+		DomainTag:         "sage-autoresearch-benchmark",
+		ContentHash:       "abcdef",
+		Classification:    2,
+		MemoryType:        "fact",
+		Outcome:           SyncOutcomeAdmitted,
+	}
+	if err := s.RecordSyncOrigin(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetSyncOriginByLocalMemoryID(ctx, "local-copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.OriginChainID != want.OriginChainID || got.OriginMemoryID != want.OriginMemoryID ||
+		got.OriginAgentPubkey != want.OriginAgentPubkey || got.ContentHash != want.ContentHash ||
+		got.Classification != want.Classification || got.MemoryType != want.MemoryType {
+		t.Fatalf("provenance mismatch: got %+v want %+v", got, want)
+	}
+	counts, err := s.CountAdmittedSyncOriginsByDomain(ctx, want.OriginChainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[want.DomainTag] != 1 {
+		t.Fatalf("saved-copy count = %v", counts)
+	}
+}
+
+func TestSyncOriginMetadataBackfillAndDurableCopySourceSummary(t *testing.T) {
+	s := newSyncTestStore(t)
+	ctx := context.Background()
+	content := "legacy confidential retained copy"
+	hash := sha256.Sum256([]byte(content))
+	if err := s.InsertMemory(ctx, &memory.MemoryRecord{
+		MemoryID: "legacy-local-copy", SubmittingAgent: "local-operator",
+		Content: content, ContentHash: hash[:], MemoryType: memory.TypeFact,
+		DomainTag:       "sage-autoresearch-benchmark",
+		ConfidenceScore: .9, Status: memory.StatusCommitted, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateMemoryClassification(ctx, "legacy-local-copy", ClearanceLevel(3)); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a pre-metadata sync_origin row after additive columns acquired
+	// their defaults during upgrade.
+	if err := s.RecordSyncOrigin(ctx, SyncOrigin{
+		OriginChainID: "retired-chain", OriginMemoryID: "legacy-origin",
+		LocalMemoryID: "legacy-local-copy", DomainTag: "sage-autoresearch-benchmark",
+		Outcome: SyncOutcomeAdmitted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.migrateSyncTables(ctx)
+	got, err := s.GetSyncOriginByLocalMemoryID(ctx, "legacy-local-copy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Classification != 3 || got.ContentHash != hex.EncodeToString(hash[:]) || got.MemoryType != "fact" {
+		t.Fatalf("legacy metadata not backfilled from local copy: %+v", got)
+	}
+	sources, err := s.ListAdmittedSyncCopySources(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || sources[0].OriginChainID != "retired-chain" ||
+		sources[0].DomainTag != "sage-autoresearch-benchmark" || sources[0].MemoryCount != 1 {
+		t.Fatalf("unexpected durable copy source summary: %+v", sources)
+	}
+}
+
 func TestSyncDomainsRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	s := newSyncTestStore(t)

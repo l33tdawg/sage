@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -69,10 +71,42 @@ func isPeerOfflineDialError(err error) bool {
 		errors.Is(err, syscall.EHOSTUNREACH)
 }
 
+func authenticatePeerRoute(tlsCfg *tls.Config) PeerRouteAuthenticator {
+	return func(ctx context.Context, result PeerRouteDialResult, dialErr error) (PeerRouteDialResult, error) {
+		if dialErr != nil {
+			closeRouteResult(result)
+			result.Conn = nil
+			return result, dialErr
+		}
+		if result.Conn == nil {
+			return result, errors.New("route returned no connection")
+		}
+		if result.Authenticated || tlsCfg == nil {
+			result.Authenticated = true
+			return result, nil
+		}
+		raw := result.Conn
+		conn := tls.Client(raw, tlsCfg.Clone())
+		if err := conn.HandshakeContext(ctx); err != nil {
+			_ = raw.Close()
+			result.Conn = nil
+			return result, err
+		}
+		result.Conn = conn
+		result.Authenticated = true
+		return result, nil
+	}
+}
+
 // doPeerRequest performs one signed mTLS request against an agreement's
 // endpoint. Fail-closed by construction: no agreement, bad endpoint scheme,
 // missing/pin-mismatched CA, or TLS failure all error before any bytes leave.
 func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRecord, method, path string, payload any) ([]byte, int, error) {
+	if !m.transportIsEnabled() {
+		err := errors.New("federation transport is disabled")
+		m.recordRouteFailure(agreement.RemoteChainID, err, false)
+		return nil, 0, err
+	}
 	endpoint, err := url.Parse(strings.TrimRight(agreement.Endpoint, "/"))
 	if err != nil {
 		return nil, 0, fmt.Errorf("agreement %s: invalid endpoint: %w", agreement.RemoteChainID, err)
@@ -127,38 +161,69 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 	req.Header.Set(HeaderSignature, hex.EncodeToString(sig))
 
 	transport := &http.Transport{TLSClientConfig: tlsCfg}
+	authenticate := authenticatePeerRoute(tlsCfg)
 	p2pOnly := agreement.Endpoint == joinP2POnlyEndpoint
-	if peerDial := m.peerDialFunc(); peerDial != nil {
-		directDialer := &net.Dialer{}
-		transport.DialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
-			conn, handled, dialErr := peerDial(dialCtx, agreement.RemoteChainID)
-			if handled {
-				if dialErr != nil {
-					if p2pOnly {
-						return nil, fmt.Errorf("%w: peer %s p2p route unavailable: %v", ErrPeerOffline, agreement.RemoteChainID, dialErr)
-					}
-					// Connectivity failure may fall back to the agreement's direct
-					// HTTPS endpoint. The same pinned-CA TLS config is applied below;
-					// TLS/authentication failures after a successful p2p dial do not
-					// downgrade or retry another transport.
-					m.logger.Warn().Err(dialErr).Str("chain_id", agreement.RemoteChainID).Msg("p2p dial failed; falling back to direct federation HTTPS")
-					return directDialer.DialContext(dialCtx, network, address)
-				}
-				if conn == nil {
-					if p2pOnly {
-						return nil, fmt.Errorf("%w: peer %s p2p dial returned no connection", ErrPeerOffline, agreement.RemoteChainID)
-					}
-					return nil, fmt.Errorf("peer %s p2p dial returned no connection", agreement.RemoteChainID)
-				}
-				return conn, nil
+	var selectedMu sync.Mutex
+	selected := PeerRouteDialResult{Kind: RouteKindDirect, Target: endpoint.Host}
+	routeDial := m.peerRouteDialFunc()
+	if routeDial == nil {
+		if legacyDial := m.peerDialFunc(); legacyDial != nil {
+			routeDial = func(dialCtx context.Context, chain string, _ PeerRouteAuthenticator) (PeerRouteDialResult, bool, error) {
+				start := time.Now()
+				conn, handled, dialErr := legacyDial(dialCtx, chain)
+				return PeerRouteDialResult{Conn: conn, Kind: RouteKindP2PDirect, Latency: time.Since(start)}, handled, dialErr
 			}
-			if p2pOnly {
-				return nil, fmt.Errorf("%w: peer %s has no configured p2p route", ErrPeerOffline, agreement.RemoteChainID)
-			}
-			return directDialer.DialContext(dialCtx, network, address)
 		}
-	} else if p2pOnly {
-		transport.DialContext = func(context.Context, string, string) (net.Conn, error) {
+	}
+	if routeDial != nil || !p2pOnly {
+		directDialer := &net.Dialer{}
+		transport.DialTLSContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+			attempts := make([]routeDialAttempt, 0, 2)
+			if !p2pOnly {
+				attempts = append(attempts, routeDialAttempt{
+					dial: func(attemptCtx context.Context) (PeerRouteDialResult, error) {
+						start := time.Now()
+						conn, dialErr := directDialer.DialContext(attemptCtx, network, address)
+						return authenticate(attemptCtx, PeerRouteDialResult{
+							Conn: conn, Kind: RouteKindDirect, Target: address,
+							Latency: time.Since(start),
+						}, dialErr)
+					},
+				})
+			}
+			if routeDial != nil {
+				delay := routeCandidateDelay
+				if p2pOnly {
+					delay = 0
+				}
+				attempts = append(attempts, routeDialAttempt{
+					delay: delay,
+					dial: func(attemptCtx context.Context) (PeerRouteDialResult, error) {
+						result, handled, dialErr := routeDial(attemptCtx, agreement.RemoteChainID, authenticate)
+						if !handled {
+							return PeerRouteDialResult{}, errors.New("peer has no configured p2p route")
+						}
+						if !result.Authenticated {
+							return authenticate(attemptCtx, result, dialErr)
+						}
+						return result, dialErr
+					},
+				})
+			}
+			winner, dialErr := raceRouteDials(dialCtx, attempts)
+			if dialErr != nil {
+				if isSecurityTransportError(dialErr) {
+					return nil, fmt.Errorf("peer %s route authentication failed: %w", agreement.RemoteChainID, dialErr)
+				}
+				return nil, fmt.Errorf("%w: peer %s routes unavailable: %v", ErrPeerOffline, agreement.RemoteChainID, dialErr)
+			}
+			selectedMu.Lock()
+			selected = winner
+			selectedMu.Unlock()
+			return winner.Conn, nil
+		}
+	} else {
+		transport.DialTLSContext = func(context.Context, string, string) (net.Conn, error) {
 			return nil, fmt.Errorf("%w: peer %s has no p2p dialer", ErrPeerOffline, agreement.RemoteChainID)
 		}
 	}
@@ -170,10 +235,22 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	if err != nil {
+		securityFailure := isSecurityTransportError(err)
+		m.recordRouteFailure(agreement.RemoteChainID, err, securityFailure)
+		if !securityFailure && path != "/fed/v1/p2p/routes" {
+			m.triggerRouteRefresh(agreement.RemoteChainID)
+		}
 		if isPeerOfflineDialError(err) {
 			return nil, 0, fmt.Errorf("%w: peer %s: %v", ErrPeerOffline, agreement.RemoteChainID, err)
 		}
 		return nil, 0, fmt.Errorf("peer %s unreachable: %w", agreement.RemoteChainID, err)
+	}
+	selectedMu.Lock()
+	chosen := selected
+	selectedMu.Unlock()
+	m.recordRouteSuccess(agreement.RemoteChainID, chosen)
+	if chosen.Kind == RouteKindDirect && routeDial != nil && path != "/fed/v1/p2p/routes" {
+		m.maybeTriggerRouteRefresh(agreement.RemoteChainID)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxFedResponseBytes))
@@ -181,6 +258,25 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 		return nil, resp.StatusCode, fmt.Errorf("read peer response: %w", err)
 	}
 	return respBody, resp.StatusCode, nil
+}
+
+func isSecurityTransportError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalidCert x509.CertificateInvalidError
+	var recordHeader tls.RecordHeaderError
+	if errors.As(err, &unknownAuthority) || errors.As(err, &hostname) ||
+		errors.As(err, &invalidCert) || errors.As(err, &recordHeader) {
+		return true
+	}
+	// crypto/tls wraps several alert types in private concrete errors. They are
+	// distinguishable from dial errors by the stable operation/error text.
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "tls:") || strings.Contains(text, "x509:") ||
+		strings.Contains(text, "certificate") || strings.Contains(text, "spki")
 }
 
 // QueryPeer runs one scoped recall against a remote chain.

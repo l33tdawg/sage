@@ -189,7 +189,7 @@ func TestPeerStatusOverP2PStreamKeepsFederationMTLS(t *testing.T) {
 	}
 }
 
-func TestPeerStatusFallsBackToDirectHTTPSOnP2PDialFailure(t *testing.T) {
+func TestPeerStatusPrefersReachableDirectHTTPSWithoutWaitingForP2P(t *testing.T) {
 	a := newTestChain(t, "fallback-a")
 	b := newTestChain(t, "fallback-b")
 	federate(t, b, a, "https://unused.invalid", []string{"*"}, 4, 0)
@@ -205,8 +205,8 @@ func TestPeerStatusFallsBackToDirectHTTPSOnP2PDialFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PeerStatus direct fallback: %v", err)
 	}
-	if !attempted {
-		t.Fatal("p2p dial seam was not attempted")
+	if attempted {
+		t.Fatal("reachable direct HTTPS should win before the delayed p2p candidate")
 	}
 	if status.ChainID != b.chainID {
 		t.Fatalf("PeerStatus chain = %q, want %q", status.ChainID, b.chainID)
@@ -463,6 +463,41 @@ func TestQueryDomainScopeDenied(t *testing.T) {
 	// Unscoped query under a scoped treaty is also refused.
 	if _, err := a.mgr.QueryPeer(ctx, b.chainID, &QueryRequest{Mode: ModeText, Query: "sealed"}); err == nil {
 		t.Fatal("unscoped query served under scoped treaty")
+	}
+}
+
+func TestHybridQueryFallsBackToTextAcrossEmbeddingProviders(t *testing.T) {
+	a := newTestChain(t, "provider-a")
+	b := newTestChain(t, "provider-b")
+	content := "cross provider keyword fallback sentinel"
+	hash := sha256.Sum256([]byte(content))
+	if err := b.mem.InsertMemory(context.Background(), &memory.MemoryRecord{
+		MemoryID: "provider-mismatch", SubmittingAgent: hex.EncodeToString(b.agentPub),
+		Content: content, ContentHash: hash[:], Embedding: []float32{1, 0},
+		EmbeddingProvider: "embedder-b", MemoryType: memory.TypeFact,
+		DomainTag: "shared.providers", ConfidenceScore: .9,
+		Status: memory.StatusCommitted, CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.badger.SetMemoryClassification("provider-mismatch", 0); err != nil {
+		t.Fatal(err)
+	}
+	listener := startListener(t, b)
+	federate(t, b, a, "https://unused.invalid", []string{"shared"}, 2, 0)
+	federate(t, a, b, listener.URL, []string{"shared"}, 2, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	response, err := a.mgr.QueryPeer(ctx, b.chainID, &QueryRequest{
+		Mode: ModeHybrid, Query: "keyword fallback sentinel",
+		Embedding: []float32{0, 1}, EmbeddingProvider: "embedder-a",
+		DomainTag: "shared.providers", TopK: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 || response.Results[0].MemoryID != "provider-mismatch" {
+		t.Fatalf("provider-mismatch fallback result = %+v", response.Results)
 	}
 }
 

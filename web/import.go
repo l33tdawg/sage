@@ -105,6 +105,14 @@ func (h *DashboardHandler) handleImportPreview(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if source == "sage-backup" && len(records) == 0 {
+		writeJSONResp(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":   "no_restorable_memories",
+			"message": "This SAGE backup has no active memories to restore. Memories you chose to forget will stay forgotten.",
+			"details": parseErrors,
+		})
+		return
+	}
 
 	// Check for unstructured data
 	if (source == "markdown" || source == "plaintext") && isUnstructuredDocument(records) {
@@ -184,6 +192,14 @@ func (h *DashboardHandler) handleImportUpload(w http.ResponseWriter, r *http.Req
 	records, source, parseErrors, err := parseImportFile(w, r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if source == "sage-backup" && len(records) == 0 {
+		writeJSONResp(w, http.StatusUnprocessableEntity, map[string]any{
+			"error":   "no_restorable_memories",
+			"message": "This SAGE backup has no active memories to restore. Memories you chose to forget will stay forgotten.",
+			"details": parseErrors,
+		})
 		return
 	}
 
@@ -1027,6 +1043,7 @@ func tryParseSAGEBackup(data []byte) ([]*memory.MemoryRecord, string, []string, 
 	// Peek at first non-empty line to detect format.
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
+	recognized := false
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -1036,6 +1053,13 @@ func tryParseSAGEBackup(data []byte) ([]*memory.MemoryRecord, string, []string, 
 		if json.Unmarshal([]byte(line), &obj) != nil {
 			return nil, "", nil, false
 		}
+		if obj["record_type"] == "sage_backup_manifest" {
+			if _, hasVersion := obj["sage_backup_version"]; !hasVersion {
+				return nil, "", nil, false
+			}
+			recognized = true
+			break
+		}
 		// SAGE backup lines have memory_id and domain_tag
 		if _, hasMemoryID := obj["memory_id"]; !hasMemoryID {
 			return nil, "", nil, false
@@ -1043,7 +1067,11 @@ func tryParseSAGEBackup(data []byte) ([]*memory.MemoryRecord, string, []string, 
 		if _, hasDomain := obj["domain_tag"]; !hasDomain {
 			return nil, "", nil, false
 		}
+		recognized = true
 		break
+	}
+	if !recognized {
+		return nil, "", nil, false
 	}
 
 	// Parse all lines as MemoryRecords.
@@ -1053,6 +1081,7 @@ func tryParseSAGEBackup(data []byte) ([]*memory.MemoryRecord, string, []string, 
 	var records []*memory.MemoryRecord
 	var errors []string
 	lineNum := 0
+	deprecatedSkipped := 0
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -1069,9 +1098,21 @@ func tryParseSAGEBackup(data []byte) ([]*memory.MemoryRecord, string, []string, 
 		if rec.Content == "" {
 			continue
 		}
+		// Forgetting a memory makes it audit-only. Older SAGE backups included
+		// those rows, so skip them here instead of silently making forgotten
+		// content recallable again under a new ID.
+		if rec.Status == memory.StatusDeprecated {
+			deprecatedSkipped++
+			continue
+		}
 
 		// Generate new ID for import to avoid collisions with existing memories.
 		rec.MemoryID = generateMemoryID()
+		// The portable export intentionally does not trust or require the source
+		// node's stored hash. Bind the restored record to the content that was
+		// actually parsed before it re-enters consensus on this SAGE.
+		contentHash := sha256.Sum256([]byte(rec.Content))
+		rec.ContentHash = contentHash[:]
 		// Reset status — imported memories go through consensus again.
 		rec.Status = memory.StatusProposed
 		rec.CommittedAt = nil
@@ -1080,8 +1121,12 @@ func tryParseSAGEBackup(data []byte) ([]*memory.MemoryRecord, string, []string, 
 		records = append(records, &rec)
 	}
 
-	if len(records) == 0 {
-		return nil, "", errors, false
+	if deprecatedSkipped > 0 {
+		label := "memories"
+		if deprecatedSkipped == 1 {
+			label = "memory"
+		}
+		errors = append(errors, fmt.Sprintf("skipped %d forgotten %s; forgotten memories stay forgotten", deprecatedSkipped, label))
 	}
 
 	return records, "sage-backup", errors, true

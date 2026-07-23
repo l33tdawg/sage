@@ -1,4 +1,4 @@
-<!-- Verified against code at SAGE v11.4.11. Cite file:line when behavior is non-obvious. -->
+<!-- Verified against code during SAGE v11.12 development. Cite file:line when behavior is non-obvious. -->
 
 # SAGE Local Engines and First-Run Setup Reference (v11)
 
@@ -13,11 +13,13 @@ onboarding is a per-node UI flag, recall tuning is a per-node preference, and th
 touches chain state. Normal memory submission (which does reach consensus) is
 documented in [`rest-api.md`](rest-api.md) and [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md).
 
-All endpoints below live on the **dashboard listener** and use the dashboard's
-cookie/session auth (`authMiddleware`), not the Ed25519 signed-request scheme the
-`/v1/*` public API uses. The managed semantic-memory, managed-reranker, and
-managed-ChatGPT-tunnel **setup** endpoints additionally sit behind a strict
-same-origin gate (see below).
+All endpoints below live on the **dashboard listener** and normally use the
+dashboard's cookie/session auth (`authMiddleware`), not the Ed25519 signed-request
+scheme the `/v1/*` public API uses. The forgotten-passphrase recovery exception is
+called out explicitly below; the immediate post-encryption acknowledgement remains
+session-authenticated because enable issues that session. The managed semantic-
+memory, managed-reranker, and managed-ChatGPT-tunnel **setup** endpoints additionally
+sit behind a strict same-origin gate (see below).
 
 ---
 
@@ -51,6 +53,73 @@ Marks onboarding done (any close of the wizard) or un-done. Idempotent
 Persists `onboarding_done` as `"1"` / `"0"` (`web/onboarding_handler.go:42-48`).
 Returns HTTP 501 when the node has no preference store
 (`web/onboarding_handler.go:38-40`).
+
+### Browser wizard flow
+
+`OnboardingWizard` in `web/static/js/app.js` is a router over existing setup
+surfaces, not a second implementation of their security logic:
+
+1. choose **Start my own SAGE** or **Join an existing SAGE network**;
+2. configure semantic memory;
+3. connect an AI tool;
+4. keep the SAGE private (the default) or continue to the existing Federation
+   page for file-sharing-style trust and RBAC;
+5. inspect real encryption/recovery status and open `SynapticLedger` when setup or
+   backup is needed.
+
+Same-chain node join and cross-chain federation are deliberately described as
+different operations. Choosing sharing does not grant anything inside the wizard;
+it routes to the existing federation permission surface, where pairing alone still
+shares nothing. The join and ledger setup surfaces replace the onboarding dialog
+while open so two modal dialogs are never exposed simultaneously. The same exclusive
+return applies to semantic-memory, reranker, AI-tool, and ChatGPT setup. All of these
+dialogs use the shared `useModalDialog` focus owner: focus enters the dialog, Tab and
+Escape stay with the active modal, non-modal app branches become inert, and focus is
+restored to a surviving opener or the returning onboarding dialog.
+
+### Synaptic Ledger recovery and backup acknowledgement
+
+`GET /v1/dashboard/settings/ledger` returns encryption status plus
+`recovery_backup_confirmed`. The latter is an advisory preference only: a newly
+generated vault resets it to `false`, and it becomes `true` only after the operator
+explicitly confirms safe storage. Downloading or copying the key does not silently
+mark it as backed up (`web/handler_ledger.go`, `SynapticLedger` in
+`web/static/js/app.js`).
+
+`POST /v1/dashboard/settings/ledger/recovery-key/confirm` stores that acknowledgement
+without receiving a passphrase or recovery key. A successful enable-encryption
+response establishes the dashboard session in the same response that turns auth on,
+so confirmation remains behind ordinary cookie/session authentication without an
+extra login ceremony. The state is never used for authorization or cryptographic
+decisions (`web/handler.go`, `web/handler_ledger.go`).
+
+`POST /v1/dashboard/settings/ledger/recover` remains the unauthenticated forgotten-
+passphrase escape hatch because possession of the recovery key is the credential.
+Before changing anything, SAGE verifies that the submitted key matches the current
+vault's stored verification hash. A correctly formatted key from another SAGE is
+rejected without creating a backup or rewriting the vault. The matching recovery
+key resets access to the existing vault; it is not a portable copy of the node or
+its memories (`internal/vault/vault.go`, `web/handler_ledger.go`).
+
+### Portable memory backup and fresh-node import
+
+`GET /v1/dashboard/export` streams active (non-deprecated) memories as JSONL.
+Deprecated memories are audit-only and are deliberately excluded; import also skips
+deprecated rows found in older backup files so a routine restore cannot make
+forgotten content recallable again. An export with no active memories contains only
+a versioned format marker, allowing Import to explain truthfully that there is
+nothing to restore instead of guessing another JSONL format. The export is readable
+plaintext even when the source Synaptic Ledger is encrypted, so CEREBRUM always shows the shared privacy
+confirmation before downloading and labels the file unencrypted. The file recreates
+memory content, domains, types, and selected memory metadata through Import's Preview
+→ Confirm flow. Imported records receive new IDs, re-enter consensus as proposed
+records, and bind a freshly computed SHA-256 content hash to the bytes actually
+imported (`web/handler.go`, `web/import.go`).
+
+This is intentionally described as a **memory backup**, not a complete node backup.
+It does not contain trusted connections, synchronization groups, RBAC grants, AI-tool
+credentials, node preferences, or full chain history. Those boundaries are rendered
+in both Settings → Maintenance and the Import page.
 
 ---
 

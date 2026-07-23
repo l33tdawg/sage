@@ -23,8 +23,8 @@ You grant what **they** may Read or Copy from **you**; they grant what **you** m
 
 ## Before you start
 
-- Both people need federation switched on. For **Same LAN**, the wizard reads the node's actual federation listener address and port (usually **8444**) for the ceremony, then securely exchanges roaming routes after signing when both nodes support v11.6. An explicit listener host is honored exactly; a wildcard bind lets the wizard offer detected LAN addresses. Port `0` is invalid because an ephemeral port cannot be truthfully advertised. For **Internet**, the host's enrollment code carries its signed-session libp2p routes and the ceremony uses those routes from the start.
-- Internet connectivity depends on at least one configured relay being reachable. SAGE ships with the project relay route and operators may add or replace relay multiaddrs. A relay outage can delay a relay-only connection, but does not weaken authentication or expose memory content.
+- Both people need federation switched on. There is no LAN-versus-internet choice: SAGE prepares every usable direct and secure-relay candidate, then selects a working route during the encrypted exchange. The wizard reads the actual federation listener address and port (usually **8444**) for the Direct candidate. An explicit listener host is honored exactly; a wildcard bind lets the wizard offer detected addresses. Port `0` is invalid because an ephemeral port cannot be truthfully advertised.
+- Internet reachability depends on at least one configured relay being ready when no direct route works. SAGE ships with the project relay route and operators may add or replace relay multiaddrs. A relay outage can delay a relay-only connection, but does not weaken authentication or expose memory content.
 - You will each need a camera, or a shared screen, or at least a phone call you placed to a number you trust. The connection is safest when you are in the same room or on a video call you started.
 - You do not choose domains during JOIN. After both codes match, open the connection and choose from domains that already exist on your own SAGE. Leaving every box clear is a healthy connected state that shares nothing.
 
@@ -109,9 +109,9 @@ That is it. You will see "You're connected", a two-of-two meter filled in, and a
 
 Pick **Let someone join mine**.
 
-### 1. Choose how the computers connect
+### 1. Let SAGE prepare the connection
 
-Pick **Same LAN** when both computers are on the same local network, or **Internet** when they need the signed libp2p route carried in the enrollment code. For Same LAN, SAGE fills the address from the listener the node actually started and requires a complete reachable address before it creates a code. Internet setup needs a ready relay reservation but does not invent or expose a LAN address when none is authoritative; the attested P2P routes carry the ceremony. Usually you can show the connection code immediately; use the advanced address control only when a multi-homed LAN machine requires a different reachable address.
+SAGE prepares Direct and Secure relay candidates automatically and labels them as **Prepared**; that does not mean either route is already in use. The actual route is selected only when the other SAGE connects. Usually you can show the connection code immediately. Open **Advanced Direct address** only when a multi-homed machine needs a different reachable listener address. If no valid Direct address exists, a prepared secure relay can still carry the ceremony.
 
 ### 2. Show your code, then scan theirs back
 

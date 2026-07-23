@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -57,13 +59,17 @@ type SubmitMemoryResponse struct {
 
 // QueryMemoryRequest is the JSON body for POST /v1/memory/query.
 type QueryMemoryRequest struct {
-	Embedding     []float32 `json:"embedding"`
-	DomainTag     string    `json:"domain_tag,omitempty"`
-	Provider      string    `json:"provider,omitempty"`
-	MinConfidence float64   `json:"min_confidence,omitempty"`
-	StatusFilter  string    `json:"status_filter,omitempty"`
-	TopK          int       `json:"top_k,omitempty"`
-	Cursor        string    `json:"cursor,omitempty"`
+	Embedding []float32 `json:"embedding"`
+	// Query is optional for local vector search, but lets federated semantic
+	// recall ask peers for hybrid vector+text coverage. The text arm is the
+	// deterministic fallback when two SAGEs use different embedding spaces.
+	Query         string  `json:"query,omitempty"`
+	DomainTag     string  `json:"domain_tag,omitempty"`
+	Provider      string  `json:"provider,omitempty"`
+	MinConfidence float64 `json:"min_confidence,omitempty"`
+	StatusFilter  string  `json:"status_filter,omitempty"`
+	TopK          int     `json:"top_k,omitempty"`
+	Cursor        string  `json:"cursor,omitempty"`
 	// Tags, when non-empty, restricts results to memories tagged with ANY
 	// of the listed values (OR semantics) on both supported SQL backends.
 	Tags []string `json:"tags,omitempty"`
@@ -89,9 +95,21 @@ type QueryMemoryResponse struct {
 
 // FederationInfo discloses the outcome of a federated recall fan-out.
 type FederationInfo struct {
-	Queried []string          `json:"queried"`
-	Merged  int               `json:"merged"`
-	Errors  map[string]string `json:"errors,omitempty"`
+	Queried  []string             `json:"queried"`
+	Merged   int                  `json:"merged"`
+	Errors   map[string]string    `json:"errors,omitempty"`
+	Coverage []FederationCoverage `json:"coverage,omitempty"`
+}
+
+// FederationCoverage makes partial/fallback search explicit instead of
+// allowing an empty peer contribution to look authoritative.
+type FederationCoverage struct {
+	ChainID    string `json:"chain_id"`
+	Status     string `json:"status"`
+	SearchMode string `json:"search_mode"`
+	Matched    int    `json:"matched,omitempty"`
+	Included   int    `json:"included,omitempty"`
+	Fallback   string `json:"fallback,omitempty"`
 }
 
 // FilterInfo surfaces server-side filters that hid data from the caller.
@@ -149,10 +167,16 @@ type MemoryResult struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	CommittedAt *time.Time `json:"committed_at,omitempty"`
 	// SourceChainID is v11 federation provenance: empty for local memories,
-	// the origin chain id for results merged in from a cross_fed peer (whose
-	// SubmittingAgent is then chain-qualified as pubkey@chain_id). Remote
-	// results live only in this response — they are never stored locally.
-	SourceChainID string `json:"source_chain_id,omitempty"`
+	// the origin chain for both borrowed live results and retained synced
+	// copies. SourceKind distinguishes those two cases.
+	SourceChainID  string `json:"source_chain_id,omitempty"`
+	SourceKind     string `json:"source_kind,omitempty"` // local_native | federated_live | federated_copy
+	OriginMemoryID string `json:"origin_memory_id,omitempty"`
+	OriginAgentID  string `json:"origin_agent_id,omitempty"`
+	Foreign        bool   `json:"foreign,omitempty"`
+	// Foreign federation content is authenticated and policy-filtered, but it
+	// remains external input to the consuming agent.
+	Trust string `json:"trust,omitempty"`
 }
 
 // MemoryDetailResponse is a memory record with votes and corroborations.
@@ -230,9 +254,12 @@ func checkDomainAccess(ctx context.Context, agentStore store.AgentStore, badgerS
 					Read   bool   `json:"read"`
 					Write  bool   `json:"write"`
 				}
-				if err := json.Unmarshal([]byte(onChainAgent.DomainAccess), &access); err == nil && len(access) > 0 {
+				if err := json.Unmarshal([]byte(onChainAgent.DomainAccess), &access); err != nil {
+					return fmt.Errorf("agent domain access policy is invalid")
+				}
+				if len(access) > 0 {
 					for _, a := range access {
-						if a.Domain == domain {
+						if federation.DomainAllowed([]string{a.Domain}, domain) {
 							if action == "read" && a.Read {
 								return nil
 							}
@@ -279,7 +306,7 @@ func checkDomainAccess(ctx context.Context, agentStore store.AgentStore, badgerS
 		Write  bool   `json:"write"`
 	}
 	if err := json.Unmarshal([]byte(agent.DomainAccess), &access); err != nil {
-		return nil // Malformed JSON — allow (safe default for existing data)
+		return fmt.Errorf("agent domain access policy is invalid")
 	}
 
 	if len(access) == 0 {
@@ -287,7 +314,7 @@ func checkDomainAccess(ctx context.Context, agentStore store.AgentStore, badgerS
 	}
 
 	for _, a := range access {
-		if a.Domain == domain {
+		if federation.DomainAllowed([]string{a.Domain}, domain) {
 			if action == "read" && a.Read {
 				return nil
 			}
@@ -928,8 +955,13 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
 
+	federatedMode := federation.ModeSemantic
+	if req.Query != "" {
+		federatedMode = federation.ModeHybrid
+	}
 	s.mergeFederatedRecall(r, &resp, req.Federated, req.FederateChains, &federation.QueryRequest{
-		Mode:              federation.ModeSemantic,
+		Mode:              federatedMode,
+		Query:             req.Query,
 		Embedding:         req.Embedding,
 		EmbeddingProvider: s.activeEmbeddingProvider(),
 		DomainTag:         req.DomainTag,
@@ -980,8 +1012,8 @@ func fedRecallTimeout() time.Duration {
 	return defaultFedRecallTimeout
 }
 
-// mergeFederatedRecall appends read-only results from cross_fed peers to a
-// recall response (v11 Mode-1 exchange). Opt-in per request; no-op when the
+// mergeFederatedRecall fuses read-only results from cross_fed peers with the
+// local recall ranking (v11 Mode-1 exchange). Opt-in per request; no-op when the
 // federation transport isn't wired or the request didn't ask. Remote results
 // arrive already filtered by the SERVING peer's treaty enforcement (its
 // AllowedDomains + MaxClearance + committed-only) and are merged into the
@@ -989,40 +1021,102 @@ func fedRecallTimeout() time.Duration {
 // Peer failures are disclosed in resp.Federation.Errors, never silently
 // dropped (fail-closed plus disclosure, same philosophy as FilterInfo).
 //
-// AUTHORIZATION: federated recall is an OPERATOR capability — the opt-in is
-// gated to the node operator (the identity that establishes agreements). The
-// per-agreement MaxClearance is a chain↔chain ceiling, NOT the requesting
-// local agent's personal clearance, so letting an arbitrary local agent invoke
-// it on a multi-tenant node would be a clearance side-channel (a low-clearance
-// agent reading a peer's higher-clearance corpus). Per-local-agent clearance
-// mapping of remote results is the richer future model (plan §9.8 clearance_map);
-// until then the operator gate is the conservative, escalation-free default.
+// AUTHORIZATION: operators/admins retain broad read authority; ordinary
+// registered agents may delegate only an exact domain covered by their local
+// read subtree. Remote records are then filtered again against that caller's
+// clearance, independently of the chain-to-chain treaty ceiling.
 func (s *Server) mergeFederatedRecall(r *http.Request, resp *QueryMemoryResponse, federated bool, chains []string, fedReq *federation.QueryRequest) {
+	s.enrichStoredCopyProvenance(r.Context(), resp.Results)
 	if s.federation == nil || (!federated && len(chains) == 0) {
 		return
 	}
 	callerID := middleware.ContextAgentID(r.Context())
-	if s.nodeOperatorID == "" || callerID != s.nodeOperatorID {
-		// Not permitted for this caller — disclose rather than silently return
-		// local-only, so the client can tell federation was declined vs unwired.
+	allowed, callerClearance := s.federationCallerCanRead(r.Context(), callerID, fedReq.DomainTag)
+	if !allowed {
 		resp.Federation = &FederationInfo{
 			Queried: []string{},
-			Errors:  map[string]string{"*": "federated recall is restricted to the node operator"},
+			Errors:  map[string]string{"*": "caller is not authorized to read this federated domain"},
 		}
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), fedRecallTimeout())
 	defer cancel()
 
-	outcomes := s.federation.FanOutRecall(ctx, chains, fedReq)
+	targets := chains
+	if s.nodeOperatorID == "" || callerID != s.nodeOperatorID {
+		targets = s.federationRecallTargets(ctx, chains, fedReq.DomainTag)
+		if len(targets) == 0 {
+			resp.Federation = &FederationInfo{
+				Queried: []string{},
+				Errors:  map[string]string{"*": "no reachable authorized federation peer currently exposes this domain"},
+			}
+			return
+		}
+	}
+	outcomes := s.federation.FanOutRecall(ctx, targets, fedReq)
 	if len(outcomes) == 0 {
 		resp.Federation = &FederationInfo{Queried: []string{}}
 		return
 	}
-	info := &FederationInfo{}
+	info := &FederationInfo{Coverage: make([]FederationCoverage, 0, len(outcomes))}
+	type rankedResult struct {
+		result *MemoryResult
+		score  float64
+		order  int
+	}
+	const federationRRFK = 60
+	ranked := make([]rankedResult, 0, len(resp.Results)+16)
+	rankedIndex := make(map[string]int)
+	rankIdentity := func(result *MemoryResult) string {
+		if result.ContentHash != "" {
+			return "hash:" + strings.ToLower(result.ContentHash)
+		}
+		if result.SourceChainID != "" && result.OriginMemoryID != "" {
+			return "origin:" + result.SourceChainID + ":" + result.OriginMemoryID
+		}
+		return "memory:" + result.SourceChainID + ":" + result.MemoryID
+	}
+	preference := func(result *MemoryResult) int {
+		switch result.SourceKind {
+		case "local_native":
+			return 3
+		case "federated_copy":
+			return 2
+		default:
+			return 1
+		}
+	}
+	addRanked := func(result *MemoryResult, score float64, order int) {
+		key := rankIdentity(result)
+		if index, exists := rankedIndex[key]; exists {
+			ranked[index].score += score
+			if preference(result) > preference(ranked[index].result) ||
+				(preference(result) == preference(ranked[index].result) &&
+					result.ConfidenceScore > ranked[index].result.ConfidenceScore) {
+				ranked[index].result = result
+			}
+			return
+		}
+		rankedIndex[key] = len(ranked)
+		ranked = append(ranked, rankedResult{result: result, score: score, order: order})
+	}
+	for i, local := range resp.Results {
+		addRanked(local, 1.0/float64(federationRRFK+i+1), i)
+	}
+	nextOrder := len(ranked)
 	for _, outcome := range outcomes {
 		info.Queried = append(info.Queried, outcome.ChainID)
+		coverage := FederationCoverage{
+			ChainID:    outcome.ChainID,
+			Status:     "ok",
+			SearchMode: fedReq.Mode,
+		}
+		if fedReq.Mode == federation.ModeHybrid {
+			coverage.Fallback = "keyword arm covers embedding-provider mismatch"
+		}
 		if outcome.Err != nil {
+			coverage.Status = "error"
+			info.Coverage = append(info.Coverage, coverage)
 			if info.Errors == nil {
 				info.Errors = make(map[string]string)
 			}
@@ -1030,7 +1124,7 @@ func (s *Server) mergeFederatedRecall(r *http.Request, resp *QueryMemoryResponse
 			s.logger.Warn().Err(outcome.Err).Str("peer", outcome.ChainID).Msg("federated recall peer failed")
 			continue
 		}
-		for _, fr := range outcome.Results {
+		for peerRank, fr := range outcome.Results {
 			// Enforce the caller's decayed floor on peer results too: fr.ConfidenceScore
 			// is already the serving peer's decayed value, so this keeps the
 			// min_confidence contract ("every returned result satisfies confidence_score
@@ -1039,8 +1133,13 @@ func (s *Server) mergeFederatedRecall(r *http.Request, resp *QueryMemoryResponse
 			if fedReq.MinConfidence > 0 && fr.ConfidenceScore < fedReq.MinConfidence {
 				continue
 			}
-			info.Merged++
-			resp.Results = append(resp.Results, &MemoryResult{
+			// The remote SAGE enforces the chain-to-chain ceiling; this local
+			// gate additionally enforces the invoking agent's own clearance.
+			if fr.Classification > callerClearance {
+				continue
+			}
+			coverage.Matched++
+			addRanked(&MemoryResult{
 				MemoryID:           fr.MemoryID,
 				SubmittingAgent:    fr.SubmittingAgent,
 				Content:            fr.Content,
@@ -1054,11 +1153,168 @@ func (s *Server) mergeFederatedRecall(r *http.Request, resp *QueryMemoryResponse
 				CreatedAt:          fr.CreatedAt,
 				CommittedAt:        fr.CommittedAt,
 				SourceChainID:      fr.SourceChainID,
-			})
+				SourceKind:         "federated_live",
+				OriginMemoryID:     fr.MemoryID,
+				OriginAgentID:      fr.SubmittingAgent,
+				Foreign:            true,
+				Trust:              "external_untrusted",
+			}, 1.0/float64(federationRRFK+peerRank+1), nextOrder)
+			nextOrder++
 		}
+		info.Coverage = append(info.Coverage, coverage)
+	}
+
+	// Reciprocal-rank fuse every local/peer list, then apply one global cap.
+	// This avoids source-order append bias and guarantees top_k is a response
+	// bound rather than a per-peer multiplier.
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		if ranked[i].result.ConfidenceScore != ranked[j].result.ConfidenceScore {
+			return ranked[i].result.ConfidenceScore > ranked[j].result.ConfidenceScore
+		}
+		return ranked[i].order < ranked[j].order
+	})
+	limit := fedReq.TopK
+	if limit <= 0 {
+		limit = 10
+	}
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	resp.Results = make([]*MemoryResult, 0, len(ranked))
+	includedByChain := make(map[string]int)
+	for _, rr := range ranked {
+		resp.Results = append(resp.Results, rr.result)
+		if rr.result.SourceKind == "federated_live" {
+			info.Merged++
+			includedByChain[rr.result.SourceChainID]++
+		}
+	}
+	for i := range info.Coverage {
+		info.Coverage[i].Included = includedByChain[info.Coverage[i].ChainID]
 	}
 	resp.TotalCount = len(resp.Results)
 	resp.Federation = info
+}
+
+// federationCallerCanRead applies the local caller's federation delegation
+// policy. Unlike the historical operator-only gate it lets ordinary registered
+// agents use the same domain subtree semantics as normal SAGE access grants,
+// while unknown identities fail closed.
+func (s *Server) federationCallerCanRead(ctx context.Context, callerID, domain string) (bool, int) {
+	if callerID == "" {
+		return false, 0
+	}
+	if s.nodeOperatorID != "" && callerID == s.nodeOperatorID {
+		return true, 4
+	}
+	if domain == "" {
+		return false, 0
+	}
+	if s.badgerStore != nil {
+		agent, err := s.badgerStore.GetRegisteredAgent(callerID)
+		if err == nil && agent != nil {
+			if agent.Role == "admin" {
+				return true, 4
+			}
+			if agent.DomainAccess == "" {
+				return true, int(agent.Clearance)
+			}
+			var access []struct {
+				Domain string `json:"domain"`
+				Read   bool   `json:"read"`
+			}
+			if err := json.Unmarshal([]byte(agent.DomainAccess), &access); err != nil {
+				return false, int(agent.Clearance)
+			}
+			if len(access) == 0 {
+				return true, int(agent.Clearance)
+			}
+			{
+				for _, entry := range access {
+					if entry.Read && federation.DomainAllowed([]string{entry.Domain}, domain) {
+						return true, int(agent.Clearance)
+					}
+				}
+			}
+			return false, int(agent.Clearance)
+		}
+	}
+	if s.agentStore != nil {
+		agent, err := s.agentStore.GetAgent(ctx, callerID)
+		if err != nil || agent == nil {
+			return false, 0
+		}
+		if agent.Role == "admin" {
+			return true, 4
+		}
+		if agent.DomainAccess == "" {
+			return true, agent.Clearance
+		}
+		var access []struct {
+			Domain string `json:"domain"`
+			Read   bool   `json:"read"`
+		}
+		if json.Unmarshal([]byte(agent.DomainAccess), &access) != nil {
+			return false, agent.Clearance
+		}
+		if len(access) == 0 {
+			return true, agent.Clearance
+		}
+		for _, entry := range access {
+			if entry.Read && federation.DomainAllowed([]string{entry.Domain}, domain) {
+				return true, agent.Clearance
+			}
+		}
+	}
+	return false, 0
+}
+
+type syncOriginLookup interface {
+	GetSyncOriginByLocalMemoryID(context.Context, string) (*store.SyncOrigin, error)
+}
+
+func (s *Server) enrichStoredCopyProvenance(ctx context.Context, results []*MemoryResult) {
+	lookup, ok := s.store.(syncOriginLookup)
+	if !ok {
+		for _, result := range results {
+			if result.SourceKind == "" {
+				result.SourceKind = "local_native"
+			}
+		}
+		return
+	}
+	for _, result := range results {
+		origin, err := lookup.GetSyncOriginByLocalMemoryID(ctx, result.MemoryID)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil && origin == nil) {
+			result.SourceKind = "local_native"
+			continue
+		}
+		if err != nil {
+			// Provenance is a trust boundary. A database/migration failure must
+			// never silently launder a retained foreign copy into local-native
+			// content. Over-taint the result until the ledger is readable.
+			result.SourceKind = "federated_copy"
+			result.Foreign = true
+			result.Trust = "external_untrusted"
+			continue
+		}
+		result.SourceChainID = origin.OriginChainID
+		result.SourceKind = "federated_copy"
+		result.OriginMemoryID = origin.OriginMemoryID
+		result.OriginAgentID = origin.OriginAgentPubkey
+		result.Foreign = true
+		result.Trust = "external_untrusted"
+		if origin.ContentHash != "" {
+			result.ContentHash = origin.ContentHash
+		}
+		result.Classification = origin.Classification
+		if origin.MemoryType != "" {
+			result.MemoryType = origin.MemoryType
+		}
+	}
 }
 
 // SearchMemoryRequest is the JSON body for POST /v1/memory/search.

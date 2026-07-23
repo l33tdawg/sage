@@ -796,6 +796,16 @@ export async function getRecoveryKey(passphrase) {
     return res.json();
 }
 
+// Records only the operator's acknowledgement that the current recovery key
+// was stored safely. No recovery key or passphrase is sent on this request.
+export async function confirmRecoveryKeyBackup() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/settings/ledger/recovery-key/confirm`, {
+        method: 'POST',
+    });
+    if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `HTTP ${res.status}`); }
+    return res.json();
+}
+
 // ─── LAN node-join ceremony (Phase 5b-3, Flow 3) ───
 // Host side: add another computer to your SAGE network as a non-validator peer.
 async function njFetch(path, opts) {
@@ -894,6 +904,7 @@ export function fedPeerStatus(chainId) { return fedFetch(`/v1/dashboard/federati
 // operator-only and SQLite-only; the UI surfaces 403/501 instead of silently
 // pretending group management is available.
 export function fedGroups() { return fedFetch('/v1/dashboard/federation/groups'); }
+export function fedGroupsRefresh() { return fedPost('/v1/dashboard/federation/groups/refresh'); }
 export function fedGroupCreate(name) { return fedPost('/v1/dashboard/federation/groups', { name }); }
 export function fedGroupDomainAdd(groupId, domainTag, maxClearance) {
     return fedPost(`/v1/dashboard/federation/groups/${encodeURIComponent(groupId)}/domains`, {
@@ -927,7 +938,11 @@ export function fedGroupDissolve(groupId) {
 }
 
 // Host wizard.
-export function fedHostCreate(endpoint, transport = 'lan') { return fedPost('/v1/dashboard/federation/join/host/create', { endpoint, transport }); }
+// Route preparation is advisory and carries no peer identity or secret. The
+// node chooses the best currently usable path; CEREBRUM never asks the operator
+// to understand LAN versus relay topology.
+export function fedJoinRoutes() { return fedFetch('/v1/dashboard/federation/join/routes'); }
+export function fedHostCreate(endpoint, transport = 'auto') { return fedPost('/v1/dashboard/federation/join/host/create', { endpoint, transport }); }
 export function fedHostScanReturn(sessionId, returnUri) { return fedPost('/v1/dashboard/federation/join/host/scan-return', { session_id: sessionId, return_uri: returnUri }); }
 export function fedHostStatus(sessionId) { return fedFetch(`/v1/dashboard/federation/join/host/${encodeURIComponent(sessionId)}`); }
 export function fedHostApprove(sessionId, grant) { return fedPost(`/v1/dashboard/federation/join/host/${encodeURIComponent(sessionId)}/approve`, grant); }

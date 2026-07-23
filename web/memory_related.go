@@ -109,7 +109,7 @@ func (h *DashboardHandler) handleMemoryRelated(w http.ResponseWriter, r *http.Re
 	}
 	ctx := r.Context()
 	x, err := h.store.GetMemory(ctx, id)
-	if err != nil || x == nil {
+	if err != nil || x == nil || isCerebrumInternalMemoryDomain(x.DomainTag) {
 		writeError(w, http.StatusNotFound, "memory not found")
 		return
 	}
@@ -138,7 +138,7 @@ func (h *DashboardHandler) handleMemoryRelated(w http.ResponseWriter, r *http.Re
 	}
 	pool := make(map[string]*acc)
 	bump := func(rec *memory.MemoryRecord, add float64, relation string) {
-		if rec == nil || rec.MemoryID == id {
+		if rec == nil || rec.MemoryID == id || isCerebrumInternalMemoryDomain(rec.DomainTag) {
 			return
 		}
 		if !seeAll && !allowed[rec.SubmittingAgent] {
@@ -180,7 +180,7 @@ func (h *DashboardHandler) handleMemoryRelated(w http.ResponseWriter, r *http.Re
 	ftsOK := len(xWords) > 0
 	if ftsOK {
 		for _, word := range relatedContentWords(x.Content) {
-			hits, sErr := h.store.SearchByText(ctx, word, store.QueryOptions{TopK: relatedPerTerm})
+			hits, sErr := h.store.SearchByText(ctx, word, cerebrumQueryOptions(store.QueryOptions{TopK: relatedPerTerm}))
 			if sErr != nil {
 				ftsOK = false // encrypted vault / FTS off - switch to in-process overlap
 				break
@@ -205,22 +205,22 @@ func (h *DashboardHandler) handleMemoryRelated(w http.ResponseWriter, r *http.Re
 				}
 			}
 		}
-		sameLobe, _, _ := h.store.ListMemories(ctx, store.ListOptions{
+		sameLobe, _, _ := h.store.ListMemories(ctx, cerebrumListOptions(store.ListOptions{
 			DomainTag: x.DomainTag, Sort: "newest", Limit: 250, Status: "committed",
-		})
+		}))
 		scoreOverlap(sameLobe)
-		recent, _, _ := h.store.ListMemories(ctx, store.ListOptions{
+		recent, _, _ := h.store.ListMemories(ctx, cerebrumListOptions(store.ListOptions{
 			Sort: "newest", Limit: 250, Status: "committed",
-		})
+		}))
 		scoreOverlap(recent)
 	}
 
 	// 4. Same-lobe filler (low weight), so the panel is never empty even for a
 	// tag-less, parent-less memory whose content shares no vocabulary.
 	if len(pool) < k {
-		recs, _, _ := h.store.ListMemories(ctx, store.ListOptions{
+		recs, _, _ := h.store.ListMemories(ctx, cerebrumListOptions(store.ListOptions{
 			DomainTag: x.DomainTag, Sort: "confidence", Limit: k, Status: "committed",
-		})
+		}))
 		for _, rec := range recs {
 			bump(rec, 0.25, "same-lobe")
 		}

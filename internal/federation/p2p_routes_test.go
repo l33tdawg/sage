@@ -83,7 +83,12 @@ func TestAuthenticatedRouteExchangePersistsRemoteAndReturnsLocal(t *testing.T) {
 	assert.Equal(t, remote.Addrs, persisted)
 	var got JoinP2PBundle
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
-	assert.Equal(t, local, got)
+	assert.Equal(t, local.PeerID, got.PeerID)
+	assert.Equal(t, local.Protocol, got.Protocol)
+	assert.Equal(t, local.Addrs, got.Addrs)
+	assert.NotZero(t, got.Revision)
+	assert.NotZero(t, got.IssuedAt)
+	assert.Greater(t, got.ExpiresAt, got.IssuedAt)
 }
 
 func TestRouteExchangeRejectsAuthenticatedChainWithWrongOperator(t *testing.T) {

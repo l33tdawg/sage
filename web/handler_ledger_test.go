@@ -3,15 +3,29 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/l33tdawg/sage/internal/vault"
 )
+
+type setFailingPreferences struct {
+	PreferencesStore
+	err error
+}
+
+func (s *setFailingPreferences) SetPreference(context.Context, string, string) error {
+	return s.err
+}
 
 // loginAfterEnable calls the login endpoint and returns the session cookie.
 func loginAfterEnable(t *testing.T, r http.Handler, passphrase string) *http.Cookie {
@@ -43,9 +57,10 @@ func TestHandleGetLedgerStatus_Disabled(t *testing.T) {
 }
 
 func TestHandleEnableLedger(t *testing.T) {
-	h, _ := newTestHandler(t)
+	h, s := newTestHandler(t)
 	r := testRouter(h)
 	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+	require.NoError(t, s.SetPreference(context.Background(), recoveryBackupConfirmedPreference, "1"))
 
 	body, _ := json.Marshal(map[string]string{"passphrase": "test-pass-123"})
 	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
@@ -60,6 +75,95 @@ func TestHandleEnableLedger(t *testing.T) {
 	assert.Equal(t, true, resp["ok"])
 	assert.NotEmpty(t, resp["recovery_key"])
 	assert.True(t, h.Encrypted.Load())
+	var cookie *http.Cookie
+	for _, candidate := range w.Result().Cookies() {
+		if candidate.Name == sessionCookieName {
+			cookie = candidate
+			break
+		}
+	}
+	require.NotNil(t, cookie, "enabling encryption should authenticate the current dashboard session")
+
+	// A newly generated recovery key must start as not-yet-backed-up even if a
+	// stale preference survived from an older vault.
+	statusReq := httptest.NewRequest("GET", "/v1/dashboard/settings/ledger", nil)
+	statusReq.AddCookie(cookie)
+	statusW := httptest.NewRecorder()
+	r.ServeHTTP(statusW, statusReq)
+	require.Equal(t, http.StatusOK, statusW.Code)
+	var statusResp map[string]any
+	require.NoError(t, json.Unmarshal(statusW.Body.Bytes(), &statusResp))
+	assert.Equal(t, false, statusResp["recovery_backup_confirmed"])
+
+	// The authenticated acknowledgement persists across later status reads.
+	confirmReq := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/recovery-key/confirm", nil)
+	confirmReq.AddCookie(cookie)
+	confirmW := httptest.NewRecorder()
+	r.ServeHTTP(confirmW, confirmReq)
+	require.Equal(t, http.StatusOK, confirmW.Code)
+
+	statusReq = httptest.NewRequest("GET", "/v1/dashboard/settings/ledger", nil)
+	statusReq.AddCookie(cookie)
+	statusW = httptest.NewRecorder()
+	r.ServeHTTP(statusW, statusReq)
+	require.Equal(t, http.StatusOK, statusW.Code)
+	require.NoError(t, json.Unmarshal(statusW.Body.Bytes(), &statusResp))
+	assert.Equal(t, true, statusResp["recovery_backup_confirmed"])
+}
+
+func TestHandleEnableLedgerFailsClosedWhenBackupStatusCannotReset(t *testing.T) {
+	h, s := newTestHandler(t)
+	h.prefStore = &setFailingPreferences{PreferencesStore: s, err: errors.New("preference write failed")}
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+	r := testRouter(h)
+
+	body, err := json.Marshal(map[string]string{"passphrase": "test-pass-123"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.False(t, h.Encrypted.Load())
+	assert.NoFileExists(t, h.VaultKeyPath, "a new vault must not be created with a stale backup-confirmed flag")
+}
+
+func TestHandleConfirmRecoveryKeyBackupRequiresEncryption(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/recovery-key/confirm", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestHandleConfirmRecoveryKeyBackupRejectsCrossSiteBrowser(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/recovery-key/confirm", nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestHandleConfirmRecoveryKeyBackupRejectsRemoteCallerWithoutSession(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.Encrypted.Store(true)
+	r := testRouter(h)
+
+	req := httptest.NewRequest("POST", "/v1/dashboard/settings/ledger/recovery-key/confirm", nil)
+	req.RemoteAddr = "192.168.1.9:1234"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func TestVaultLoginTriggersScopedProjectionRecovery(t *testing.T) {
@@ -338,6 +442,10 @@ func TestHandleRecoverLedger(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, true, resp["ok"])
 	assert.False(t, h.VaultLocked.Load(), "vault should be unlocked after recovery")
+	cookies := w.Result().Cookies()
+	require.Len(t, cookies, 1, "successful recovery must establish a dashboard session")
+	assert.Equal(t, sessionCookieName, cookies[0].Name)
+	assert.NotEmpty(t, cookies[0].Value)
 }
 
 func TestHandleRecoverLedger_BadKey(t *testing.T) {
@@ -364,6 +472,41 @@ func TestHandleRecoverLedger_BadKey(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestHandleRecoverLedger_WrongSameLengthKeyLeavesVaultUntouched(t *testing.T) {
+	h, _ := newTestHandler(t)
+	r := testRouter(h)
+	h.VaultKeyPath = filepath.Join(t.TempDir(), "vault.key")
+
+	body, err := json.Marshal(map[string]string{"passphrase": "original-pass"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/ledger/enable", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	original, err := os.ReadFile(h.VaultKeyPath)
+	require.NoError(t, err)
+
+	wrongKey := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
+	body, err = json.Marshal(map[string]string{
+		"recovery_key":   wrongKey,
+		"new_passphrase": "new-pass-456",
+	})
+	require.NoError(t, err)
+	req = httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/ledger/recover", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	after, err := os.ReadFile(h.VaultKeyPath)
+	require.NoError(t, err)
+	assert.Equal(t, original, after, "a wrong recovery key must never rewrite vault.key")
+	assert.NoFileExists(t, h.VaultKeyPath+".bak", "verification must happen before backup or mutation")
+	_, err = vault.Open(h.VaultKeyPath, "original-pass")
+	assert.NoError(t, err, "the original passphrase must still unlock the untouched vault")
 }
 
 func TestHandleEnableLedger_ReusesExistingKey(t *testing.T) {

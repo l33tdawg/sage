@@ -77,6 +77,50 @@ func TestPostgresUpdateStatus(t *testing.T) {
 	assert.NotNil(t, got.CommittedAt)
 }
 
+func TestPostgresListMemoriesActiveExcludesDeprecated(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+	domain := "active-filter-" + uuid.NewString()
+
+	insert := func(content string, status memory.MemoryStatus) string {
+		t.Helper()
+		id := uuid.NewString()
+		record := &memory.MemoryRecord{
+			MemoryID:        id,
+			SubmittingAgent: "agent-test",
+			Content:         content,
+			ContentHash:     memory.ComputeContentHash(content),
+			MemoryType:      memory.TypeObservation,
+			DomainTag:       domain,
+			ConfidenceScore: 0.8,
+			Status:          status,
+			CreatedAt:       time.Now(),
+		}
+		require.NoError(t, store.InsertMemory(ctx, record))
+		return id
+	}
+
+	proposedID := insert("active proposed", memory.StatusProposed)
+	committedID := insert("active committed", memory.StatusCommitted)
+	insert("audit only", memory.StatusDeprecated)
+
+	records, total, err := store.ListMemories(ctx, ListOptions{
+		DomainTag: domain,
+		Status:    "active",
+		Limit:     10,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.Len(t, records, 2)
+	ids := map[string]bool{}
+	for _, record := range records {
+		ids[record.MemoryID] = true
+		assert.NotEqual(t, memory.StatusDeprecated, record.Status)
+	}
+	assert.True(t, ids[proposedID])
+	assert.True(t, ids[committedID])
+}
+
 func TestPostgresTaskBoardAllStatuses(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()

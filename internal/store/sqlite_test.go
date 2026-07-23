@@ -471,6 +471,55 @@ func TestGetTimeline(t *testing.T) {
 	assert.Equal(t, 3, total)
 }
 
+func TestPresentationDomainExclusions(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	visible := testMemory("visible", "agent1", "shared searchable content", "general")
+	visible.CreatedAt = now
+	require.NoError(t, s.InsertMemory(ctx, visible))
+	internal := testMemory("internal", "agent1", "shared searchable content", "SAGE-SYNCAUDIT-GRP-ABC")
+	internal.CreatedAt = now
+	require.NoError(t, s.InsertMemory(ctx, internal))
+
+	prefixes := []string{"sage-syncaudit-"}
+
+	records, total, err := s.ListMemories(ctx, ListOptions{
+		Limit:                 10,
+		ExcludeDomainPrefixes: prefixes,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, records, 1)
+	assert.Equal(t, "visible", records[0].MemoryID)
+
+	results, err := s.SearchByText(ctx, "searchable", QueryOptions{
+		TopK:                  10,
+		ExcludeDomainPrefixes: prefixes,
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "visible", results[0].MemoryID)
+
+	stats, err := s.GetStatsExcludingDomainPrefixes(ctx, prefixes)
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.TotalMemories)
+	assert.Equal(t, map[string]int{"general": 1}, stats.ByDomain)
+	assert.Equal(t, 1, stats.ByStatus[string(memory.StatusProposed)])
+	assert.Equal(t, 1, stats.ByAgent["agent1"])
+
+	buckets, err := s.GetTimelineExcludingDomainPrefixes(
+		ctx, now.Add(-time.Hour), now.Add(time.Hour), "", "hour", prefixes,
+	)
+	require.NoError(t, err)
+	timelineTotal := 0
+	for _, bucket := range buckets {
+		timelineTotal += bucket.Count
+	}
+	assert.Equal(t, 1, timelineTotal)
+}
+
 func TestDeleteMemory(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

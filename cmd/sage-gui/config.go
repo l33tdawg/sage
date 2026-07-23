@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/l33tdawg/sage/internal/federation"
 	sagep2p "github.com/l33tdawg/sage/internal/p2p"
 	"gopkg.in/yaml.v3"
 )
@@ -84,12 +85,11 @@ type Config struct {
 	DisableAutoUpgrade bool `yaml:"disable_auto_upgrade,omitempty"`
 }
 
-// FederationConfig controls the v11 cross-network federation LISTENER (the
-// dedicated mTLS port serving other SAGE chains). The OUTBOUND side (federated
-// recall, receipt delivery) needs no listener and is always available once
-// cross_fed agreements exist — this only gates the inbound surface.
+// FederationConfig controls all v11 cross-network federation networking.
+// Enabled=false is a complete kill switch: no inbound listener, outbound
+// recall/receipts/sync, route refresh, or relay reservation is started.
 type FederationConfig struct {
-	Enabled bool `yaml:"enabled"` // start the mTLS federation listener
+	Enabled bool `yaml:"enabled"`
 	// ListenAddr is the federation listener address (default 0.0.0.0:8444).
 	// Unlike the local API this REQUIRES a verified client certificate pinned
 	// to an active cross_fed agreement, so exposing it is the point.
@@ -109,10 +109,24 @@ type FederationConfig struct {
 	// libp2p multiaddrs. The libp2p peer ID is connectivity identity only; the
 	// existing on-chain CA SPKI pin remains the federation trust identity.
 	P2PPeers map[string][]string `yaml:"p2p_peers,omitempty"`
+	// P2PRoutes is the versioned successor to P2PPeers. P2PPeers remains
+	// mirrored for rolling upgrades; new nodes use this generation-bound
+	// snapshot to reject stale route refresh responses after restart.
+	P2PRoutes map[string]FederationRouteSnapshot `yaml:"p2p_routes,omitempty"`
 	// P2PForcePrivate makes AutoRelay reserve a relay path even on networks
 	// where automatic reachability detection would take time. Intended for
 	// known-NAT test/deployment profiles, not enabled by default.
 	P2PForcePrivate bool `yaml:"p2p_force_private,omitempty"`
+}
+
+type FederationRouteSnapshot struct {
+	PeerID     string   `yaml:"peer_id"`
+	Protocol   string   `yaml:"protocol"`
+	Addrs      []string `yaml:"addrs"`
+	Revision   uint64   `yaml:"revision"`
+	IssuedAt   int64    `yaml:"issued_at"`
+	ExpiresAt  int64    `yaml:"expires_at"`
+	Generation string   `yaml:"generation"`
 }
 
 // VoterConfig controls the per-node memory auto-voter — the goroutine that
@@ -630,11 +644,15 @@ func persistNetworkName(name string) error {
 // route. All targets must name one peer ID. Nil removes the route on revoke or
 // a failed staged activation. Raw config round-tripping preserves user paths.
 func persistFederationPeer(chainID string, targets []string) error {
+	return persistFederationRouteSnapshot(chainID, federation.RouteSnapshot{Addrs: targets})
+}
+
+func persistFederationRouteSnapshot(chainID string, snapshot federation.RouteSnapshot) error {
 	if chainID == "" {
 		return fmt.Errorf("remote chain id is required")
 	}
 	var peerID string
-	for _, target := range targets {
+	for _, target := range snapshot.Addrs {
 		id, err := sagep2p.PeerIDFromTarget(target)
 		if err != nil {
 			return err
@@ -643,6 +661,12 @@ func persistFederationPeer(chainID string, targets []string) error {
 			return fmt.Errorf("peer routes name different peer ids")
 		}
 		peerID = id.String()
+	}
+	if snapshot.PeerID == "" {
+		snapshot.PeerID = peerID
+	}
+	if snapshot.Protocol == "" && len(snapshot.Addrs) > 0 {
+		snapshot.Protocol = string(sagep2p.FederationProtocol)
 	}
 	configPersistMu.Lock()
 	defer configPersistMu.Unlock()
@@ -664,10 +688,20 @@ func persistFederationPeer(chainID string, targets []string) error {
 	if raw.Federation.P2PPeers == nil {
 		raw.Federation.P2PPeers = make(map[string][]string)
 	}
-	if len(targets) == 0 {
+	if raw.Federation.P2PRoutes == nil {
+		raw.Federation.P2PRoutes = make(map[string]FederationRouteSnapshot)
+	}
+	if len(snapshot.Addrs) == 0 {
 		delete(raw.Federation.P2PPeers, chainID)
+		delete(raw.Federation.P2PRoutes, chainID)
 	} else {
-		raw.Federation.P2PPeers[chainID] = append([]string(nil), targets...)
+		raw.Federation.P2PPeers[chainID] = append([]string(nil), snapshot.Addrs...)
+		raw.Federation.P2PRoutes[chainID] = FederationRouteSnapshot{
+			PeerID: snapshot.PeerID, Protocol: snapshot.Protocol,
+			Addrs:    append([]string(nil), snapshot.Addrs...),
+			Revision: snapshot.Revision, IssuedAt: snapshot.IssuedAt,
+			ExpiresAt: snapshot.ExpiresAt, Generation: snapshot.Generation,
+		}
 	}
 	out, err := yaml.Marshal(&raw)
 	if err != nil {

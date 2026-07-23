@@ -62,6 +62,7 @@ func TestListSyncCandidatesSubtreeAndExclusions(t *testing.T) {
 	seedCommitted(t, ms, "m-eng", "eng", "eng fact")         // outside consent
 	seedCommitted(t, ms, "m-queued", "hr", "queued fact")    // already queued
 	seedCommitted(t, ms, "m-copy", "hr", "synced copy fact") // a copy: never re-forward
+	seedCommitted(t, ms, "m-audit", "SAGE-SYNCAUDIT-GRP-ABC", "protocol anchor")
 	_, err := ms.EnqueueSyncOutbox(ctx, "chain-b", "m-queued")
 	require.NoError(t, err)
 	require.NoError(t, ms.RecordSyncOrigin(ctx, store.SyncOrigin{
@@ -80,6 +81,13 @@ func TestListSyncCandidatesSubtreeAndExclusions(t *testing.T) {
 	assert.False(t, ids["m-eng"], "outside consented subtree")
 	assert.False(t, ids["m-queued"], "already in outbox")
 	assert.False(t, ids["m-copy"], "synced copies are never re-forwarded")
+
+	auditCandidates, err := ms.ListSyncCandidates(ctx, "chain-b", []string{"SAGE-SYNCAUDIT-GRP-ABC"}, 100)
+	require.NoError(t, err)
+	assert.Empty(t, auditCandidates, "protocol audit anchors never enter an outbound sync lane")
+	auditCandidate, err := ms.GetSyncCandidateByID(ctx, "m-audit")
+	require.NoError(t, err)
+	assert.Nil(t, auditCandidate, "commit-tail lookup must enforce the same reservation as restart scans")
 }
 
 func TestSyncDrainEndToEnd(t *testing.T) {
