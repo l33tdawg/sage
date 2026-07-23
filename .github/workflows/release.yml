@@ -292,6 +292,25 @@ jobs:
         run: |
           go test ./internal/shellcontrol -count=1
           go test ./cmd/sage-gui -run 'Test(LocalAgentKeyResolver|ShellStartupProof)' -count=1
+      # v11.12.0 was immutably tagged with the staging helper's compatibility
+      # allow-list still ending at v11.11.x. A workflow_dispatch recovery checks
+      # out that exact tag, so repair only this stale release-helper guard in
+      # the ephemeral checkout; product source and the tagged commit stay
+      # untouched. New tags contain the corrected helper from main.
+      - name: Repair v11.12.0 native staging helper for immutable-tag recovery
+        if: github.event_name == 'workflow_dispatch' && env.RELEASE_TAG == 'v11.12.0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          helper=scripts/stage-native-shell-daemon.sh
+          grep -Fq "SEMVER_PATTERN='^11\\.(10|11)\\." "${helper}"
+          sed \
+            -e 's/(10|11)/(10|11|12)/g' \
+            -e 's/v11\.10\.x or v11\.11\.x/v11.10.x, v11.11.x, or v11.12.x/g' \
+            "${helper}" > "${helper}.recovered"
+          mv "${helper}.recovered" "${helper}"
+          chmod +x "${helper}"
+          grep -Fq "SEMVER_PATTERN='^11\\.(10|11|12)\\." "${helper}"
       # MUST precede the Rust build: tauri's build script resolves the
       # bundle.resources glob "binaries/*" at compile time, so cargo test/clippy
       # fail with "glob pattern binaries/* path not found" if the daemon has not

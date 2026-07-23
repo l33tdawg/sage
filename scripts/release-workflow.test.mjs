@@ -25,6 +25,10 @@ const bundleVerifier = readFileSync(
   new URL('../scripts/verify-native-shell-bundle.sh', import.meta.url),
   'utf8',
 );
+const daemonStager = readFileSync(
+  new URL('../scripts/stage-native-shell-daemon.sh', import.meta.url),
+  'utf8',
+);
 const v119Chaos = readFileSync(
   new URL('../deploy/scripts/run-v11.9-chaos.sh', import.meta.url),
   'utf8',
@@ -136,6 +140,15 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   // docs/native-shell-quality-gates.md being revisited.
   assert.doesNotMatch(evidence, /id: linux-x64/);
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
+  assert.match(
+    daemonStager,
+    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\)\\\./,
+    'the tagged daemon stager must accept the current v11.12 release series',
+  );
+  assert.match(evidence, /Repair v11\.12\.0 native staging helper for immutable-tag recovery/);
+  assert.match(evidence, /github\.event_name == 'workflow_dispatch'.*RELEASE_TAG == 'v11\.12\.0'/);
+  assert.match(evidence, /grep -Fq "SEMVER_PATTERN='\^11\\\\\.\(10\|11\)\\\\\."/);
+  assert.match(evidence, /grep -Fq "SEMVER_PATTERN='\^11\\\\\.\(10\|11\|12\)\\\\\."/);
   // The daemon MUST be staged before the Rust build. tauri's build script
   // resolves the bundle.resources glob "binaries/*" at compile time, so cargo
   // test/clippy die with "glob pattern binaries/* path not found" if staging has

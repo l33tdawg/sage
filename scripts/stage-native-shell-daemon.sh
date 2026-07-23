@@ -40,9 +40,9 @@ BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 OUTPUT_DIR=${REPO_ROOT}/desktop/sage-shell/binaries
 
 VERSION_CORE=${VERSION#v}
-SEMVER_PATTERN='^11\.(10|11)\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+SEMVER_PATTERN='^11\.(10|11|12)\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 if [[ ! "${VERSION_CORE}" =~ ${SEMVER_PATTERN} ]]; then
-  echo "SAGE_DAEMON_VERSION must be an SSCP-compatible v11.10.x or v11.11.x semver, got: ${VERSION}" >&2
+  echo "SAGE_DAEMON_VERSION must be an SSCP-compatible v11.10.x, v11.11.x, or v11.12.x semver, got: ${VERSION}" >&2
   exit 2
 fi
 if [ "${OUTPUT_DIR}" != "${REPO_ROOT}/desktop/sage-shell/binaries" ]; then
