@@ -109,7 +109,9 @@ func TestMCPOrdinaryAgentFederatedRecallTwoNodesEndToEnd(t *testing.T) {
 	require.NoError(t, nodeA.badger.SetMemoryClassification("benchmark-a", 1))
 
 	health := metrics.NewHealthChecker()
-	bREST := rest.NewServer("", nodeB.sqlite, nodeB.sqlite, nodeB.badger, health, zerolog.Nop(), embedding.NewClient("", ""))
+	// Keep the end-to-end federation gate hermetic: the MCP recall path probes
+	// /v1/embed and must not depend on a developer or CI runner having Ollama.
+	bREST := rest.NewServer("", nodeB.sqlite, nodeB.sqlite, nodeB.badger, health, zerolog.Nop(), embedding.NewHashProvider(768))
 	bREST.SetFederation(nodeB.manager)
 	bREST.SetNodeOperatorID(hex.EncodeToString(nodeB.pub))
 	bHTTP := httptest.NewServer(bREST.Router())
