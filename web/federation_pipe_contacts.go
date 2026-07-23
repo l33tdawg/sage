@@ -46,11 +46,13 @@ func (h *DashboardHandler) handleFedPipeContactsGet(w http.ResponseWriter, r *ht
 	}
 	remote := (*federation.PipeContactGrant)(nil)
 	remoteKnown := false
-	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
-	defer cancel()
-	if status, statusErr := h.Federation.PeerStatus(ctx, chain); statusErr == nil && status != nil && status.PipeContacts != nil {
-		remote = status.PipeContacts
-		remoteKnown = true
+	if r.URL.Query().Get("live") != "0" {
+		ctx, cancel := context.WithTimeout(r.Context(), fedStatusTimeout)
+		defer cancel()
+		if status, statusErr := h.Federation.PeerStatus(ctx, chain); statusErr == nil && status != nil && status.PipeContacts != nil {
+			remote = status.PipeContacts
+			remoteKnown = true
+		}
 	}
 	fedWriteJSON(w, http.StatusOK, map[string]any{
 		"remote_chain_id": chain,

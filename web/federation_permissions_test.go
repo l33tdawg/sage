@@ -20,6 +20,7 @@ type pauseContractDriver struct {
 	policy       *store.PeerRBACPolicy
 	calls        []bool
 	replaceCalls int
+	statusCalls  int
 	publish      []string
 	subscribe    []string
 	syncErr      error
@@ -80,6 +81,7 @@ func (d *pauseContractDriver) SetPeerRBACPaused(_ context.Context, _ string, pau
 	return d.GetPeerRBACPolicy(context.Background(), d.policy.RemoteChainID)
 }
 func (d *pauseContractDriver) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
+	d.statusCalls++
 	return &federation.StatusResponse{PeerRBACGrant: &federation.PeerRBACGrant{
 		PolicyVersion: federation.SyncPolicyVersionPeerRBAC, Paused: true,
 		Domains: []federation.PeerRBACDomainGrant{},
@@ -341,6 +343,23 @@ func TestFederationPauseEndpointPreservesPolicyAndReportsBothDirections(t *testi
 	require.NoError(t, json.NewDecoder(permissionsRR.Body).Decode(&permissionsBody))
 	require.True(t, permissionsBody.LocalPaused)
 	require.True(t, permissionsBody.RemotePaused)
+	require.Equal(t, 1, driver.statusCalls)
+
+	localOnlyReq := withFederationChain(httptest.NewRequest(http.MethodGet,
+		"http://localhost/v1/dashboard/federation/connections/chain-peer/permissions?live=0", nil), "chain-peer")
+	localOnlyReq.RemoteAddr = "127.0.0.1:4242"
+	localOnlyReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	localOnlyRR := httptest.NewRecorder()
+	h.handleFedPermissionsGet(localOnlyRR, localOnlyReq)
+	require.Equal(t, http.StatusOK, localOnlyRR.Code, localOnlyRR.Body.String())
+	require.Equal(t, 1, driver.statusCalls, "local-only dashboard paint must not dial the peer")
+	var localOnlyBody struct {
+		LocalPaused bool `json:"local_paused"`
+		RemoteKnown bool `json:"remote_known"`
+	}
+	require.NoError(t, json.NewDecoder(localOnlyRR.Body).Decode(&localOnlyBody))
+	require.True(t, localOnlyBody.LocalPaused)
+	require.False(t, localOnlyBody.RemoteKnown)
 
 	resumeReq := withFederationChain(httptest.NewRequest(http.MethodPut,
 		"http://localhost/v1/dashboard/federation/connections/chain-peer/pause",

@@ -581,6 +581,14 @@ test('federation keeps temporary pause separate from permanent revocation and ma
     assert.match(page, /lastGoodConns/);
     assert.doesNotMatch(page, /setConns\(\[\]\)/,
         'one failed poll must not unmount live rows and unsaved permission drafts');
+    assert.match(page, /setConns\(next\); setLocalChain[\s\S]*const probes = await Promise\.all/,
+        'trusted relationships must paint from local state before background peer probes finish');
+    assert.match(page, /route: connection\.route,[\s\S]*cached: !!connection\.route/,
+        'the first paint must reuse manager route diagnostics when available');
+    assert.match(panel, /fedPermissionsGet\(chain, false\)/,
+        'opening a connection must load local permissions without waiting for the peer');
+    assert.match(panel, /fedPipeContactsGet\(chain, false\)/,
+        'opening a connection must load local agent controls without waiting for the peer');
     assert.match(page, /ended this connection/);
     assert.match(page, /sage-fed-revoke-dismissed/,
         'peer revocation must have a persistent, dismissible explanation outside collapsed history');
@@ -594,8 +602,10 @@ test('federation keeps temporary pause separate from permanent revocation and ma
 test('Sharing & Sync groups expose health and guarded operator controls', () => {
     const panel = appSource.slice(appSource.indexOf('function SharingSyncGroupsPanel('), appSource.indexOf('// FederationPage'));
     assert.match(apiSource, /export function fedGroups\(\)/);
-    assert.match(panel, /const namedConnections = active\.map\(connection =>/,
-        'group member choices must exclude revoked, expired, and superseded connection generations');
+    assert.match(panel, /function SharingSyncGroupsPanel\(\{ connections = \[\], reachability = \{\} \}\)/,
+        'groups must reuse the parent connection cache instead of issuing duplicate peer probes');
+    assert.doesNotMatch(panel, /fedPeerStatus\(/,
+        'group rendering must not add another synchronous reachability probe per peer');
     assert.match(apiSource, /export function fedGroupsRefresh\(\)/);
     assert.match(panel, /await fedGroupsRefresh\(\);[\s\S]*await loadGroups\(\)/,
         'Refresh must finish a prompted journal convergence pass before reloading the local group projection');
@@ -684,7 +694,7 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
         'member reachability and catch-up state must be distinguishable');
     assert.match(panel, /const saved = await mutate[\s\S]*if \(saved\) patchDraft/,
         'failed mutations must preserve the operator draft for correction and retry');
-    assert.match(appSource, /<\$\{SharingSyncGroupsPanel\} \/>/);
+    assert.match(appSource, /<\$\{SharingSyncGroupsPanel\} connections=\$\{liveConns\} reachability=\$\{connectionReachability\} \/>/);
 });
 
 test('federation ceremony controls expose accessible dialog, focus, and table semantics', () => {
@@ -821,8 +831,31 @@ test('MRI distinguishes domains stored here from domains shared by other SAGE no
     assert.match(mriView, /Last known/);
     assert.match(mriView, /Manage sharing →/);
     assert.match(mriView, /aria-label="Local and shared domains"/);
+    assert.match(mriView, /Filter local domains…/);
+    assert.match(mriView, /How to read/);
+    assert.match(mriView, /Show whole brain/);
+    assert.match(mriView, /onSelectDomain\(active \? '' : domain\.domain\)/,
+        'the consolidated source list must retain the old domain drill-down');
+    assert.match(mriView, /showDomainLegend: false/,
+        'CEREBRUM must not render a redundant right-hand domain legend');
+    assert.match(mriSource, /const showDomainLegend = opts\.showDomainLegend !== false/);
+    assert.match(mriSource, /sage:mri-domain-select/);
     assert.match(cssSource, /\.brain-domain-inventory/);
     assert.match(cssSource, /@media \(max-width:\s*760px\)[\s\S]*\.brain-domain-inventory/);
+});
+
+test('MRI domain-source panel can be moved, resized, persisted, and reset', () => {
+    const inventoryView = appSource.slice(
+        appSource.indexOf('function BrainDomainInventory('),
+        appSource.indexOf('// MriView'),
+    );
+    assert.match(inventoryView, /sage-brain-domain-panel-layout/);
+    assert.match(inventoryView, /ResizeObserver/);
+    assert.match(inventoryView, /data-domain-drag-handle/);
+    assert.match(inventoryView, /pointermove/);
+    assert.match(inventoryView, /sage:domain-panel-reset/);
+    assert.match(cssSource, /\.brain-domain-inventory[\s\S]*resize:\s*both/);
+    assert.match(cssSource, /\.brain-domain-inventory\.dragging/);
 });
 
 test('MRI spreads long-lived memory histories through the brain volume', () => {

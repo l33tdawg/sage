@@ -278,6 +278,7 @@ export function mountMriBrain(container, opts = {}) {
   injectStyleOnce();
   const fetchUrl = opts.fetchUrl || `/v1/dashboard/memory/graph?status=all&limit=${DEFAULT_MRI_NODE_LIMIT}`;
   const showScan = opts.showScan !== false;
+  const showDomainLegend = opts.showDomainLegend !== false;
 
   const root = document.createElement('div');
   root.className = 'mrib';
@@ -285,7 +286,7 @@ export function mountMriBrain(container, opts = {}) {
     <div class="mrib-graph"></div>
     <div class="boot">◉ ACQUIRING HIPPOCAMPAL FIELD…</div>
     ${showScan ? '<div class="panel scan"><b>CEREBRUM · MRI</b><div class="s">◉ SCANNING</div></div>' : ''}
-    <div class="panel legend">
+    ${showDomainLegend ? `<div class="panel legend">
       <div class="lg-head"><h4>Domain tags</h4><span class="lg-toggle"></span></div>
       <div class="lg-detail">
         <div class="cls">A complementary-learning-systems view: SAGE is the <b>hippocampus</b>
@@ -302,7 +303,7 @@ export function mountMriBrain(container, opts = {}) {
       </div>
       <div class="seg">Lobes — domains</div><div class="lobes"></div>
       <div class="lg-detail"><div class="seg">Connectome — typed links</div><div class="linktypes"></div></div>
-    </div>
+    </div>` : ''}
     <div class="panel hud">
       <div><div class="n nn">0</div><div class="l">memories</div></div>
       <div><div class="n ne">0</div><div class="l">synapses</div></div>
@@ -528,7 +529,9 @@ export function mountMriBrain(container, opts = {}) {
     const all = (Object.keys(dc).length ? Object.keys(dc) : [...new Set(d.nodes.map(n=>n.domain))])
       .sort((a,b) => String(dl[b]||'').localeCompare(String(dl[a]||'')) || a.localeCompare(b));
     const doms = all.slice(0, MAX_LOBES);
-    const lobes = $('.lobes'); lobes.innerHTML = '';
+    const lobes = $('.lobes');
+    if (!lobes) return;
+    lobes.innerHTML = '';
     if (currentDomain) {
       const back = document.createElement('div');
       back.className = 'row'; back.style.cursor = 'pointer';
@@ -565,6 +568,21 @@ export function mountMriBrain(container, opts = {}) {
       buildLobes(d);
     });
   }
+
+  // The CEREBRUM home page owns the consolidated domain-source panel. It can
+  // drive this renderer without duplicating a second domain legend inside the
+  // canvas. An empty domain restores the whole-brain view.
+  const onExternalDomainSelect = event => {
+    const next = String(event && event.detail && event.detail.domain || '');
+    if (currentDomain === (next || null)) return;
+    currentDomain = next || null;
+    if (Graph) {
+      load();
+      if (!currentDomain) zoomOut();
+    }
+  };
+  container.addEventListener('sage:mri-domain-select', onExternalDomainSelect);
+  subs.push(() => container.removeEventListener('sage:mri-domain-select', onExternalDomainSelect));
 
   // --- Click-to-explore: a memory's "train of thought" ----------------------
   // Clicking a node fetches its top related memories, blooms them as a labelled
@@ -920,7 +938,8 @@ export function mountMriBrain(container, opts = {}) {
     } catch(e){ /* hull optional */ }
 
     buildLobes(data);
-    const lt=$('.linktypes'); Object.values(LINK_TYPES).filter(t=>t.typed).forEach(t=>lt.insertAdjacentHTML('beforeend',
+    const lt=$('.linktypes');
+    if (lt) Object.values(LINK_TYPES).filter(t=>t.typed).forEach(t=>lt.insertAdjacentHTML('beforeend',
       `<div class="row"><span class="bar" style="background:${t.color}"></span><div class="t"><span>${t.label}</span></div></div>`));
     refreshCounts(data);
 
@@ -931,8 +950,8 @@ export function mountMriBrain(container, opts = {}) {
     controls = Graph.controls();
     if (controls) { controls.autoRotate = scanning; controls.autoRotateSpeed = 0.45; }
 
-    // Centre the brain in the VISIBLE area. The legend panel (right, 270px) and the
-    // left nav rail make the canvas-centred scene look shoved to the right + low. A
+    // Centre the brain in the VISIBLE area. A standalone renderer may include the
+    // right legend, while CEREBRUM uses its consolidated left domain-source panel. A
     // camera view-offset shifts the projection left/up WITHOUT rotating, so the brain
     // sits centred and autoRotate still spins around it (no orbit-centre drift).
     function centerView(){

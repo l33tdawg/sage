@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.12.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.12.1. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -909,7 +909,7 @@ dashboard-agent auth (`web/federation_join.go:71-102`, `1021-1037`).
 | Route | Request / response |
 |---|---|
 | `GET /v1/dashboard/federation/shareable-domains` | Returns `{"domains":[{"domain","memory_count","authority","can_share"}]}` from registered plus observed local domains. It never creates a domain (`web/federation_permissions.go:30-111`). |
-| `GET /v1/dashboard/federation/connections/{chain_id}/permissions` | Returns `local_permissions`, `local_legacy`, authenticated read-only `remote_permissions`, `remote_known`, and `remote_legacy` (`web/federation_permissions.go:161-220`). |
+| `GET /v1/dashboard/federation/connections/{chain_id}/permissions` | Returns `local_permissions`, `local_legacy`, authenticated read-only `remote_permissions`, `remote_known`, and `remote_legacy`. With `?live=0`, it returns durable local state without probing the peer and therefore reports `remote_known:false` (`web/federation_permissions.go:200-287`). |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/permissions` | Full replacement body: `{"permissions":[{"domain":"tii.work","read":true,"copy":false}]}`. Omitted domains are revoked; `[]` is explicit deny-all. Copy implies Read. Every enabled domain must already exist and be controlled by this operator. A `write:true` member is rejected with `400` because no consensus-bound federation ingress capability exists (`web/federation_permissions.go:223-258`, `279-305`). |
 | `GET /v1/dashboard/federation/connections/{chain_id}/sync` | Returns `publish_domains`, `subscribe_domains`, `remote_publish_domains`, `remote_subscribe_domains`, and revision state. |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/sync` | v3 accepts `publish_domains` and/or `subscribe_domains`; an omitted lane is preserved and an explicit empty lane is cleared. The UI uses `{"subscribe_domains":[...]}` for the receiver's independent “Save here” decision (`web/federation_join.go:414-527`). |

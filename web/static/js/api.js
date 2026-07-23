@@ -877,10 +877,16 @@ export function fedSettingSet(enabled) { return fedPost('/v1/dashboard/settings/
 // Directional, per-connection RBAC. Trust is established by the join ceremony;
 // these grants can then change independently on either node.
 export function fedShareableDomains() { return fedFetch('/v1/dashboard/federation/shareable-domains'); }
-export function fedPermissionsGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`); }
+export function fedPermissionsGet(chainId, live = true) {
+    const suffix = live ? '' : '?live=0';
+    return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions${suffix}`);
+}
 export function fedPermissionsSet(chainId, permissions) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`, { permissions }); }
 export function fedPause(chainId, paused) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pause`, { paused }); }
-export function fedPipeContactsGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pipe-contacts`); }
+export function fedPipeContactsGet(chainId, live = true) {
+    const suffix = live ? '' : '?live=0';
+    return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pipe-contacts${suffix}`);
+}
 export function fedPipeContactSet(chainId, agentId, contactId, accepting) {
     return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pipe-contacts`, {
         agent_id: agentId, contact_id: contactId, accepting: !!accepting,

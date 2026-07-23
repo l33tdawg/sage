@@ -5396,10 +5396,13 @@ input[type="range"]::-moz-range-thumb {
     left: 16px;
     z-index: 7;
     width: min(350px, calc(100% - 32px));
+    min-width: 270px;
+    min-height: 180px;
     max-height: calc(100% - 96px);
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    resize: both;
     border: 1px solid rgba(78, 116, 169, 0.45);
     border-radius: 12px;
     background: rgba(8, 15, 27, 0.90);
@@ -5408,16 +5411,27 @@ input[type="range"]::-moz-range-thumb {
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
 }
+.brain-domain-inventory.dragging {
+    cursor: grabbing;
+    user-select: none;
+}
 .brain-domain-inventory.loading {
     width: auto;
+    min-width: 0;
+    min-height: 0;
     padding: 10px 14px;
+    resize: none;
 }
 .brain-domain-loading {
     color: #7f93b5;
     font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     letter-spacing: 0.6px;
 }
-.brain-domain-inventory.collapsed { width: 250px; }
+.brain-domain-inventory.collapsed {
+    min-height: 0;
+    height: auto !important;
+    resize: horizontal;
+}
 .brain-domain-head {
     display: flex;
     align-items: center;
@@ -5425,9 +5439,12 @@ input[type="range"]::-moz-range-thumb {
     gap: 12px;
     padding: 11px 13px;
     border-bottom: 1px solid rgba(64, 91, 130, 0.42);
+    cursor: grab;
+    touch-action: none;
 }
+.brain-domain-inventory.dragging .brain-domain-head { cursor: grabbing; }
 .brain-domain-inventory.collapsed .brain-domain-head { border-bottom: 0; }
-.brain-domain-head > div { min-width: 0; }
+.brain-domain-head > div:first-child { min-width: 0; }
 .brain-domain-head strong {
     display: block;
     color: #eaf4ff;
@@ -5440,8 +5457,15 @@ input[type="range"]::-moz-range-thumb {
     color: #7f93b5;
     font-size: 10px;
 }
+.brain-domain-head-actions {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 5px;
+}
 .brain-domain-head button,
-.brain-domain-manage {
+.brain-domain-manage,
+.brain-domain-tools button {
     border: 1px solid #263b5e;
     border-radius: 7px;
     background: rgba(14, 27, 48, 0.72);
@@ -5453,7 +5477,9 @@ input[type="range"]::-moz-range-thumb {
 .brain-domain-head button:hover,
 .brain-domain-head button:focus-visible,
 .brain-domain-manage:hover,
-.brain-domain-manage:focus-visible {
+.brain-domain-manage:focus-visible,
+.brain-domain-tools button:hover,
+.brain-domain-tools button:focus-visible {
     border-color: #58d7ff;
     outline: none;
 }
@@ -5468,6 +5494,21 @@ input[type="range"]::-moz-range-thumb {
     margin-top: 12px;
     border-top: 1px solid rgba(64, 91, 130, 0.38);
 }
+.brain-domain-guide {
+    color: #8196b7;
+    font-size: 10px;
+    line-height: 1.4;
+}
+.brain-domain-guide p { margin: 0; }
+.brain-domain-guide p + .brain-domain-guide-grid,
+.brain-domain-guide-grid + p { margin-top: 8px; }
+.brain-domain-guide-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px 10px;
+}
+.brain-domain-guide-grid span { min-width: 0; }
+.brain-domain-guide-grid b { color: #dceaff; font-weight: 600; }
 .brain-domain-section-head {
     display: flex;
     align-items: flex-start;
@@ -5498,6 +5539,27 @@ input[type="range"]::-moz-range-thumb {
     text-align: center;
 }
 .brain-domain-list { display: grid; gap: 4px; }
+.brain-domain-tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+.brain-domain-tools input {
+    min-width: 0;
+    flex: 1;
+    border: 1px solid #263b5e;
+    border-radius: 7px;
+    background: rgba(5, 12, 23, 0.72);
+    color: #dceaff;
+    font: 10px/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    padding: 6px 8px;
+}
+.brain-domain-tools input::placeholder { color: #617695; }
+.brain-domain-tools input:focus {
+    border-color: #58d7ff;
+    outline: none;
+}
 .brain-domain-row {
     min-width: 0;
     display: flex;
@@ -5507,6 +5569,24 @@ input[type="range"]::-moz-range-thumb {
     border: 1px solid transparent;
     border-radius: 8px;
     background: rgba(14, 27, 48, 0.42);
+}
+.brain-domain-row.local {
+    width: 100%;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.brain-domain-row.local:hover,
+.brain-domain-row.local:focus-visible {
+    border-color: rgba(57, 208, 255, 0.38);
+    background: rgba(24, 48, 80, 0.62);
+    outline: none;
+}
+.brain-domain-row.local.selected {
+    border-color: rgba(57, 208, 255, 0.68);
+    background: rgba(57, 208, 255, 0.13);
+    box-shadow: inset 2px 0 #39d0ff;
 }
 .brain-domain-row.shared {
     align-items: flex-start;
@@ -5586,7 +5666,6 @@ input[type="range"]::-moz-range-thumb {
 }
 :root[data-theme="light"] .brain-domain-head { border-color: #dbe3ec; }
 :root[data-theme="light"] .brain-domain-head strong,
-:root[data-theme="light"] .brain-domain-row.local > strong,
 :root[data-theme="light"] .brain-domain-identity strong { color: #1e293b; }
 :root[data-theme="light"] .brain-domain-head span,
 :root[data-theme="light"] .brain-domain-section-head p,
@@ -5597,7 +5676,18 @@ input[type="range"]::-moz-range-thumb {
 :root[data-theme="light"] .brain-domain-body section + section { border-color: #dbe3ec; }
 :root[data-theme="light"] .brain-domain-row { background: rgba(234, 240, 247, 0.75); }
 :root[data-theme="light"] .brain-domain-head button,
-:root[data-theme="light"] .brain-domain-manage { background: #f1f5f9; color: #0e7490; border-color: #cbd5e1; }
+:root[data-theme="light"] .brain-domain-manage,
+:root[data-theme="light"] .brain-domain-tools button { background: #f1f5f9; color: #0e7490; border-color: #cbd5e1; }
+:root[data-theme="light"] .brain-domain-tools input {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    color: #1e293b;
+}
+:root[data-theme="light"] .brain-domain-guide { color: #64748b; }
+:root[data-theme="light"] .brain-domain-guide-grid b { color: #1e293b; }
+:root[data-theme="light"] .brain-domain-row.local:hover,
+:root[data-theme="light"] .brain-domain-row.local:focus-visible { background: #e2e8f0; }
+:root[data-theme="light"] .brain-domain-row.local.selected { background: rgba(14, 116, 144, 0.12); }
 
 @media (max-width: 760px) {
     .brain-domain-inventory {
@@ -5605,8 +5695,10 @@ input[type="range"]::-moz-range-thumb {
         left: 10px;
         width: calc(100% - 20px);
         max-height: 42%;
+        min-width: 240px;
     }
-    .brain-domain-inventory.collapsed { width: min(250px, calc(100% - 20px)); }
+    .brain-domain-guide-grid { grid-template-columns: 1fr; }
+    .brain-domain-head-actions button:first-child { display: none; }
 }
 
 /* Tasks board first-run empty state (v11 UX uplift) */

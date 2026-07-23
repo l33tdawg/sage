@@ -254,18 +254,22 @@ func (h *DashboardHandler) handleFedPermissionsGet(w http.ResponseWriter, r *htt
 	remote := []store.PeerRBACDomainPermission{}
 	remoteKnown := false
 	remoteLegacy := false
-	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
-	defer cancel()
-	status, statusErr := h.Federation.PeerStatus(ctx, chain)
-	if statusErr == nil && status != nil {
-		switch {
-		case status.PeerRBACGrant != nil:
-			remote = peerRBACGrantPermissions(status.PeerRBACGrant.Domains)
-			remoteKnown = true
-		case status.SharingGrant != nil:
-			remote = legacyDomainPermissions(status.SharingGrant.AllowedDomains)
-			remoteKnown = true
-			remoteLegacy = true
+	var status *federation.StatusResponse
+	var statusErr error
+	if r.URL.Query().Get("live") != "0" {
+		ctx, cancel := context.WithTimeout(r.Context(), fedStatusTimeout)
+		defer cancel()
+		status, statusErr = h.Federation.PeerStatus(ctx, chain)
+		if statusErr == nil && status != nil {
+			switch {
+			case status.PeerRBACGrant != nil:
+				remote = peerRBACGrantPermissions(status.PeerRBACGrant.Domains)
+				remoteKnown = true
+			case status.SharingGrant != nil:
+				remote = legacyDomainPermissions(status.SharingGrant.AllowedDomains)
+				remoteKnown = true
+				remoteLegacy = true
+			}
 		}
 	}
 

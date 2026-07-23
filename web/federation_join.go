@@ -54,7 +54,8 @@ type FederationJoinDriver interface {
 func (h *DashboardHandler) SetFederation(f FederationJoinDriver) { h.Federation = f }
 
 const (
-	fedCallTimeout = 25 * time.Second
+	fedCallTimeout   = 25 * time.Second
+	fedStatusTimeout = 6 * time.Second
 )
 
 func fedWriteJSON(w http.ResponseWriter, status int, v any) {
@@ -754,19 +755,20 @@ func (h *DashboardHandler) handleFedSyncStatus(w http.ResponseWriter, r *http.Re
 
 // FedConnection is one cross_fed agreement for the Connections view.
 type FedConnection struct {
-	RemoteChainID  string   `json:"remote_chain_id"`
-	PeerName       string   `json:"peer_name,omitempty"`     // friendly label the peer chose (cosmetic)
-	PeerAgentID    string   `json:"peer_agent_id,omitempty"` // frozen JOIN operator key; group invite only
-	LocalRole      string   `json:"local_role,omitempty"`    // host or guest in the original JOIN ceremony
-	Endpoint       string   `json:"endpoint"`
-	MaxClearance   int      `json:"max_clearance"`
-	AllowedDomains []string `json:"allowed_domains"`
-	Status         string   `json:"status"`
-	Expired        bool     `json:"expired"`
-	SharingPaused  bool     `json:"sharing_paused"`
-	EndedBy        string   `json:"ended_by,omitempty"`
-	EndedMessage   string   `json:"ended_message,omitempty"`
-	EndedAt        string   `json:"ended_at,omitempty"`
+	RemoteChainID  string                       `json:"remote_chain_id"`
+	PeerName       string                       `json:"peer_name,omitempty"`     // friendly label the peer chose (cosmetic)
+	PeerAgentID    string                       `json:"peer_agent_id,omitempty"` // frozen JOIN operator key; group invite only
+	LocalRole      string                       `json:"local_role,omitempty"`    // host or guest in the original JOIN ceremony
+	Endpoint       string                       `json:"endpoint"`
+	MaxClearance   int                          `json:"max_clearance"`
+	AllowedDomains []string                     `json:"allowed_domains"`
+	Status         string                       `json:"status"`
+	Expired        bool                         `json:"expired"`
+	SharingPaused  bool                         `json:"sharing_paused"`
+	EndedBy        string                       `json:"ended_by,omitempty"`
+	EndedMessage   string                       `json:"ended_message,omitempty"`
+	EndedAt        string                       `json:"ended_at,omitempty"`
+	Route          *federation.RouteDiagnostics `json:"route,omitempty"`
 }
 
 // handleGetNetworkName returns the local network's friendly label + the raw
@@ -850,6 +852,12 @@ func (h *DashboardHandler) handleFedConnections(w http.ResponseWriter, _ *http.R
 						conn.SharingPaused = policy.Paused
 					}
 				}
+				if diagnostics, ok := h.Federation.(interface {
+					RouteDiagnostics(string) federation.RouteDiagnostics
+				}); ok {
+					route := diagnostics.RouteDiagnostics(rec.RemoteChainID)
+					conn.Route = &route
+				}
 			}
 			if ss := h.syncStore(); ss != nil {
 				if control, controlErr := ss.GetSyncControl(context.Background(), rec.RemoteChainID); controlErr == nil && control != nil {
@@ -918,7 +926,7 @@ func (h *DashboardHandler) handleFedPeerStatus(w http.ResponseWriter, r *http.Re
 	if !h.fedReady(w) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), fedCallTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), fedStatusTimeout)
 	defer cancel()
 	chain := chi.URLParam(r, "chain_id")
 	st, err := h.Federation.PeerStatus(ctx, chain)

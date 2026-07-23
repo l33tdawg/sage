@@ -51,6 +51,17 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.12.1
+
+**Federation now stays useful while another SAGE is slow or offline.** Trusted relationships and their last-known route state render immediately from local state, initial permission and agent-contact controls no longer wait on a remote round trip, repeated status probes are shared instead of multiplied across panels, and the bounded live-status check fails promptly without hiding saved controls behind a long “Loading…” state.
+
+- **One domain surface in the Brain.** The duplicate right-side Domain tags rail is consolidated into the Local/Shared Domain sources panel. Local domains can filter the MRI directly, the panel includes domain search and the compact reading guide, and remote-only domains remain visibly separate from memories actually stored on this SAGE.
+- **A workspace that stays where you put it.** Domain sources can be moved and resized, saves its geometry across reloads, clamps itself back into the visible canvas, and includes a one-click Reset.
+- **Cached first paint, authenticated refresh.** CEREBRUM reuses manager route diagnostics and persisted local permission state immediately, then performs one authenticated peer refresh in the background. Manual Refresh still requests fresh remote RBAC and agent-contact state.
+- **Native preview version alignment.** The alpha shell now accepts its version-matched v11.12 daemon instead of rejecting the daemon bundled by the v11.12 release pipeline.
+
+This release changes no SAGE consensus rule, AppHash input, transaction type, key encoding, fork target, or application version. App-v20 and the v11.9 rollout boundary are unchanged; existing chains upgrade in place. SDK 11.12.1.
+
 ## What's New in v11.12.0
 
 **This release makes first run, sharing, recovery, and day-to-day federation understandable without technical knowledge.** CEREBRUM now presents one create-or-join decision, keeps a new SAGE private by default, explains that pairing alone shares nothing, and routes sharing into the same owner-controlled RBAC surface used everywhere else.
@@ -584,7 +595,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.12.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.12.1`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:

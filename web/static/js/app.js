@@ -32,7 +32,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.12.0';
+const SAGE_VERSION = 'v11.12.1';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -259,13 +259,18 @@ function useModalDialog(onRequestClose, active = true) {
     return dialogRef;
 }
 
-function BrainDomainInventory({ onInventory }) {
+function BrainDomainInventory({ onInventory, selectedDomain, onSelectDomain }) {
     const [inventory, setInventory] = useState(null);
     const [loadingRemote, setLoadingRemote] = useState(false);
     const [federationError, setFederationError] = useState('');
+    const [domainFilter, setDomainFilter] = useState('');
+    const [showGuide, setShowGuide] = useState(() => {
+        try { return localStorage.getItem('sage-brain-domain-guide') === 'true'; } catch { return false; }
+    });
     const [collapsed, setCollapsed] = useState(() => {
         try { return localStorage.getItem('sage-brain-domains-collapsed') === 'true'; } catch { return false; }
     });
+    const panelRef = useRef(null);
 
     useEffect(() => {
         let alive = true;
@@ -340,32 +345,170 @@ function BrainDomainInventory({ onInventory }) {
         };
     }, []);
 
+    useEffect(() => {
+        if (!inventory || !panelRef.current) return;
+        const panel = panelRef.current;
+        const stage = panel.parentElement;
+        const storageKey = 'sage-brain-domain-panel-layout';
+        let dragging = false;
+        let startX = 0;
+        let startY = 0;
+        let startLeft = 0;
+        let startTop = 0;
+        let resizeFrame = 0;
+
+        const clamp = () => {
+            if (!stage || !panel.isConnected) return;
+            const stageWidth = stage.clientWidth;
+            const stageHeight = stage.clientHeight;
+            const maxWidth = Math.max(270, stageWidth - 20);
+            const maxHeight = Math.max(180, stageHeight - 20);
+            if (panel.offsetWidth > maxWidth) panel.style.width = `${maxWidth}px`;
+            if (panel.offsetHeight > maxHeight) panel.style.height = `${maxHeight}px`;
+            const left = Math.max(80 - panel.offsetWidth, Math.min(stageWidth - 80, panel.offsetLeft));
+            const top = Math.max(0, Math.min(stageHeight - 48, panel.offsetTop));
+            panel.style.left = `${left}px`;
+            panel.style.top = `${top}px`;
+        };
+        const save = () => {
+            if (!panel.isConnected) return;
+            try {
+                localStorage.setItem(storageKey, JSON.stringify({
+                    left: panel.offsetLeft,
+                    top: panel.offsetTop,
+                    width: panel.offsetWidth,
+                    height: panel.offsetHeight,
+                }));
+            } catch {}
+        };
+        const restore = () => {
+            try {
+                const saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+                if (!saved || typeof saved !== 'object') return;
+                if (Number.isFinite(saved.left)) panel.style.left = `${saved.left}px`;
+                if (Number.isFinite(saved.top)) panel.style.top = `${saved.top}px`;
+                if (Number.isFinite(saved.width)) panel.style.width = `${saved.width}px`;
+                if (Number.isFinite(saved.height)) panel.style.height = `${saved.height}px`;
+            } catch {}
+            clamp();
+        };
+        const onMove = event => {
+            if (!dragging) return;
+            panel.style.left = `${startLeft + event.clientX - startX}px`;
+            panel.style.top = `${startTop + event.clientY - startY}px`;
+            clamp();
+            event.preventDefault();
+        };
+        const onUp = () => {
+            if (!dragging) return;
+            dragging = false;
+            panel.classList.remove('dragging');
+            document.removeEventListener('pointermove', onMove);
+            document.removeEventListener('pointerup', onUp);
+            save();
+        };
+        const onDown = event => {
+            if (!event.target.closest('[data-domain-drag-handle]') ||
+                event.target.closest('button, input, a')) return;
+            dragging = true;
+            startX = event.clientX;
+            startY = event.clientY;
+            startLeft = panel.offsetLeft;
+            startTop = panel.offsetTop;
+            panel.classList.add('dragging');
+            document.addEventListener('pointermove', onMove);
+            document.addEventListener('pointerup', onUp);
+            event.preventDefault();
+        };
+        const onResize = () => {
+            cancelAnimationFrame(resizeFrame);
+            resizeFrame = requestAnimationFrame(() => {
+                clamp();
+                save();
+            });
+        };
+        const reset = () => {
+            try { localStorage.removeItem(storageKey); } catch {}
+            panel.style.left = '';
+            panel.style.top = '';
+            panel.style.width = '';
+            panel.style.height = '';
+            clamp();
+        };
+
+        restore();
+        panel.addEventListener('pointerdown', onDown);
+        panel.addEventListener('sage:domain-panel-reset', reset);
+        window.addEventListener('resize', clamp);
+        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(onResize) : null;
+        if (observer) observer.observe(panel);
+        return () => {
+            dragging = false;
+            cancelAnimationFrame(resizeFrame);
+            document.removeEventListener('pointermove', onMove);
+            document.removeEventListener('pointerup', onUp);
+            panel.removeEventListener('pointerdown', onDown);
+            panel.removeEventListener('sage:domain-panel-reset', reset);
+            window.removeEventListener('resize', clamp);
+            if (observer) observer.disconnect();
+        };
+    }, [!!inventory]);
+
     const toggle = () => {
         const next = !collapsed;
         setCollapsed(next);
         try { localStorage.setItem('sage-brain-domains-collapsed', String(next)); } catch {}
     };
+    const toggleGuide = () => {
+        const next = !showGuide;
+        setShowGuide(next);
+        try { localStorage.setItem('sage-brain-domain-guide', String(next)); } catch {}
+    };
+    const resetLayout = () => {
+        if (panelRef.current) panelRef.current.dispatchEvent(new CustomEvent('sage:domain-panel-reset'));
+    };
     if (!inventory) {
-        return html`<aside class="brain-domain-inventory loading" aria-label="Domain sources">
+        return html`<aside ref=${panelRef} class="brain-domain-inventory loading" aria-label="Domain sources">
             <span class="brain-domain-loading">Loading domain sources…</span>
         </aside>`;
     }
 
-    const localPreview = inventory.localDomains.slice(0, 10);
+    const normalizedFilter = domainFilter.trim().toLowerCase();
+    const localMatches = normalizedFilter
+        ? inventory.localDomains.filter(domain => domain.domain.toLowerCase().includes(normalizedFilter))
+        : inventory.localDomains;
+    const localPreview = localMatches.slice(0, 30);
     const sharedPreview = inventory.sharedDomains.slice(0, 10);
-    return html`<aside class="brain-domain-inventory ${collapsed ? 'collapsed' : ''}" aria-label="Local and shared domains">
-        <div class="brain-domain-head">
+    return html`<aside ref=${panelRef} class="brain-domain-inventory ${collapsed ? 'collapsed' : ''}" aria-label="Local and shared domains">
+        <div class="brain-domain-head" data-domain-drag-handle>
             <div>
                 <strong>Domain sources</strong>
                 <span>${inventory.localDomains.length} local · ${inventory.sharedDomains.length} shared</span>
             </div>
-            <button type="button" onClick=${toggle}
-                aria-expanded=${!collapsed}
-                aria-label=${collapsed ? 'Show domain sources' : 'Hide domain sources'}>
-                ${collapsed ? 'Show' : 'Hide'}
-            </button>
+            <div class="brain-domain-head-actions">
+                ${!collapsed && html`<button type="button" onClick=${toggleGuide}
+                    aria-expanded=${showGuide}>${showGuide ? 'Less' : 'How to read'}</button>`}
+                <button type="button" onClick=${resetLayout} title="Reset panel position and size">Reset</button>
+                <button type="button" onClick=${toggle}
+                    aria-expanded=${!collapsed}
+                    aria-label=${collapsed ? 'Show domain sources' : 'Hide domain sources'}>
+                    ${collapsed ? 'Show' : 'Hide'}
+                </button>
+            </div>
         </div>
         ${!collapsed && html`<div class="brain-domain-body">
+            ${showGuide && html`<section class="brain-domain-guide" aria-label="How to read the memory brain">
+                <p>SAGE captures episodic memories; corroboration and decay shape what consolidates.</p>
+                <div class="brain-domain-guide-grid">
+                    <span><b>◍ Size + glow</b> corroboration</span>
+                    <span><b>◌ Fade</b> confidence decay</span>
+                    <span><b>⊘ Grey</b> challenged or pruned</span>
+                    <span><b>⊙ Depth</b> age; oldest near the core</span>
+                    <span><b>✦ Halo</b> a fresh idea</span>
+                    <span><b>◈ Angle</b> domain</span>
+                </div>
+                <p>Click a local domain below to isolate its lobe. Click a memory to follow its train of thought.</p>
+            </section>`}
             <section aria-labelledby="brain-local-domains">
                 <div class="brain-domain-section-head">
                     <div>
@@ -374,23 +517,39 @@ function BrainDomainInventory({ onInventory }) {
                     </div>
                     <span>${inventory.localDomains.length}</span>
                 </div>
+                <div class="brain-domain-tools">
+                    <input type="search" value=${domainFilter}
+                        onInput=${event => setDomainFilter(event.currentTarget.value)}
+                        placeholder="Filter local domains…"
+                        aria-label="Filter local domains" />
+                    ${selectedDomain && html`<button type="button" onClick=${() => onSelectDomain && onSelectDomain('')}>
+                        Show whole brain
+                    </button>`}
+                </div>
                 ${localPreview.length ? html`<div class="brain-domain-list">
                     ${localPreview.map(domain => {
                         const copyNames = domain.copySources.map(source => source.peerName);
                         const copyLabel = copyNames.slice(0, 2).join(', ')
                             + (copyNames.length > 2 ? ` +${copyNames.length - 2}` : '');
-                        return html`<div class="brain-domain-row local" key=${domain.domain}>
+                        const active = selectedDomain === domain.domain;
+                        return html`<button type="button"
+                            class="brain-domain-row local ${active ? 'selected' : ''}"
+                            key=${domain.domain}
+                            aria-pressed=${active}
+                            onClick=${() => onSelectDomain && onSelectDomain(active ? '' : domain.domain)}>
                             <span class="brain-domain-dot" style=${`background:${getDomainColor(domain.domain)}`}></span>
                             <div class="brain-domain-identity">
                                 <strong title=${domain.domain}>${domain.domain}</strong>
                                 ${copyNames.length > 0 && html`<span title=${copyNames.join(', ')}>includes copies from ${copyLabel}</span>`}
                             </div>
                             <span class="brain-domain-count">${domain.memoryCount.toLocaleString()}</span>
-                        </div>`;
+                        </button>`;
                     })}
-                    ${inventory.localDomains.length > localPreview.length && html`
-                        <div class="brain-domain-more">+${inventory.localDomains.length - localPreview.length} more local domains</div>`}
-                </div>` : html`<p class="brain-domain-empty">No memories are stored locally yet.</p>`}
+                    ${localMatches.length > localPreview.length && html`
+                        <div class="brain-domain-more">Showing 30 of ${localMatches.length}; filter to find another domain.</div>`}
+                </div>` : html`<p class="brain-domain-empty">
+                    ${normalizedFilter ? 'No local domains match this filter.' : 'No memories are stored locally yet.'}
+                </p>`}
             </section>
 
             <section aria-labelledby="brain-shared-domains">
@@ -450,19 +609,31 @@ function BrainDomainInventory({ onInventory }) {
 function MriView({ sse }) {
     const ref = useRef(null);
     const [inventory, setInventory] = useState(null);
+    const [selectedDomain, setSelectedDomain] = useState('');
     useEffect(() => {
         if (!ref.current) return;
         const cleanup = mountMriBrain(ref.current, {
             showScan: false,
+            showDomainLegend: false,
             sse,
         });
         return cleanup;
     }, [sse]);
+    const selectDomain = domain => {
+        const next = String(domain || '');
+        setSelectedDomain(next);
+        if (ref.current) {
+            ref.current.dispatchEvent(new CustomEvent('sage:mri-domain-select', {
+                detail: { domain: next },
+            }));
+        }
+    };
     const noLocalMemories = inventory && inventory.localMemoryTotal === 0;
     const hasSharedDomains = inventory && inventory.sharedDomains.length > 0;
     return html`<div class="mri-wrap">
         <div class="mri-stage" ref=${ref}></div>
-        <${BrainDomainInventory} onInventory=${setInventory} />
+        <${BrainDomainInventory} onInventory=${setInventory}
+            selectedDomain=${selectedDomain} onSelectDomain=${selectDomain} />
         ${noLocalMemories && html`<div class="brain-empty-overlay">
             <${EmptyState} icon="brain"
                 headline=${hasSharedDomains ? 'No memories stored locally' : 'Your brain is empty'}
@@ -12802,7 +12973,7 @@ function normalizeFedPipeContactGrant(value) {
 
 // FedPermissionsPanel keeps identity/trust separate from ongoing authorization.
 // Each node edits only its own grants and observes the peer's grants read-only.
-function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
+function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
     const chain = conn.remote_chain_id;
     const peerName = conn.peer_name || 'Other SAGE';
     const localIsHost = conn.local_role === 'host';
@@ -12843,10 +13014,10 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         const load = async () => {
             const [catalogResult, permissionsResult, syncResult, syncStatusResult, pipeContactsResult] = await Promise.allSettled([
                 fedShareableDomains(),
-                fedPermissionsGet(chain),
+                fedPermissionsGet(chain, false),
                 fedSyncGet(chain),
                 fedSyncStatus(chain),
-				fedPipeContactsGet(chain),
+				fedPipeContactsGet(chain, false),
             ]);
             if (!live) return;
             const errors = [];
@@ -12856,9 +13027,11 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                 const p = permissionsResult.value || {};
                 const local = normalizeFedPermissionList(p.local_permissions);
                 setSaved(local); setDraft(local);
-                setRemote(normalizeFedPermissionList(p.remote_permissions));
-                setRemoteKnown(p.remote_known === true);
-                setRemotePaused(p.remote_paused === true);
+                if (p.remote_known === true) {
+                    setRemote(normalizeFedPermissionList(p.remote_permissions));
+                    setRemoteKnown(true);
+                    setRemotePaused(p.remote_paused === true);
+                }
                 setAlignmentPending(p.copy_alignment_pending === true);
             } else {
                 // PUT replaces the entire local snapshot. If GET failed, an
@@ -12880,8 +13053,10 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
 				const result = pipeContactsResult.value || {};
 				setLocalPipeContacts(normalizeFedPipeContactGrant(result.local_contacts));
 				setLocalPipeContactsKnown(true);
-				setRemotePipeContacts(result.remote_contacts ? normalizeFedPipeContactGrant(result.remote_contacts) : null);
-				setRemotePipeKnown(result.remote_known === true);
+				if (result.remote_known === true) {
+					setRemotePipeContacts(result.remote_contacts ? normalizeFedPipeContactGrant(result.remote_contacts) : normalizeFedPipeContactGrant(null));
+					setRemotePipeKnown(true);
+				}
 				setPipeContactErr('');
 			} else {
 				setLocalPipeContacts(normalizeFedPipeContactGrant(null));
@@ -12895,32 +13070,60 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
         return () => { live = false; };
     }, [chain, reloadToken]);
 
+    // The parent runs the one live reachability probe for this connection.
+    // Consume that authenticated response here so opening the panel never
+    // starts duplicate 25-second peer calls merely to reveal local controls.
+    useEffect(() => {
+        if (!connectionStatus || connectionStatus.reachable !== true) return;
+        if (connectionStatus.peer_rbac_grant) {
+            setRemote(normalizeFedPermissionList(connectionStatus.peer_rbac_grant.domains));
+            setRemoteKnown(true);
+            setRemotePaused(connectionStatus.peer_rbac_grant.paused === true);
+        } else if (connectionStatus.sharing_grant) {
+            setRemote(normalizeFedPermissionList(
+                (connectionStatus.sharing_grant.allowed_domains || []).map(domain => ({ domain, read: true }))
+            ));
+            setRemoteKnown(true);
+            setRemotePaused(false);
+        }
+        if (connectionStatus.pipe_contacts) {
+            setRemotePipeContacts(normalizeFedPipeContactGrant(connectionStatus.pipe_contacts));
+            setRemotePipeKnown(true);
+            setPipeContactErr('');
+        }
+    }, [connectionStatus]);
+
     // Keep new local domains and the peer's latest grants visible while this
-    // panel is open. Never overwrite an unsaved local draft during polling.
+    // panel is open. These are local-only reads; the parent owns the single
+    // background peer probe. Never overwrite an unsaved local draft.
     useEffect(() => {
         let live = true;
         let timer = null;
         const poll = async () => {
             const [catalogResult, permissionsResult, pipeContactsResult] = await Promise.allSettled([
                 fedShareableDomains(),
-                fedPermissionsGet(chain),
-				fedPipeContactsGet(chain),
+                fedPermissionsGet(chain, false),
+				fedPipeContactsGet(chain, false),
             ]);
             if (!live) return;
             if (catalogResult.status === 'fulfilled') setCatalog(fedCatalogMap(catalogResult.value));
             if (permissionsResult.status === 'fulfilled') {
                 const p = permissionsResult.value || {};
-                setRemote(normalizeFedPermissionList(p.remote_permissions));
-                setRemoteKnown(p.remote_known === true);
-                setRemotePaused(p.remote_paused === true);
+                if (p.remote_known === true) {
+                    setRemote(normalizeFedPermissionList(p.remote_permissions));
+                    setRemoteKnown(true);
+                    setRemotePaused(p.remote_paused === true);
+                }
                 setAlignmentPending(p.copy_alignment_pending === true);
             }
 			if (pipeContactsResult.status === 'fulfilled') {
 				const result = pipeContactsResult.value || {};
 				setLocalPipeContacts(normalizeFedPipeContactGrant(result.local_contacts));
 				setLocalPipeContactsKnown(true);
-				setRemotePipeContacts(result.remote_contacts ? normalizeFedPipeContactGrant(result.remote_contacts) : null);
-				setRemotePipeKnown(result.remote_known === true);
+				if (result.remote_known === true) {
+					setRemotePipeContacts(result.remote_contacts ? normalizeFedPipeContactGrant(result.remote_contacts) : normalizeFedPipeContactGrant(null));
+					setRemotePipeKnown(true);
+				}
 				setPipeContactErr('');
 			}
             if (live) timer = setTimeout(poll, 8000);
@@ -13041,7 +13244,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
                     contacts: current.contacts.map(contact => ({ ...contact, accepting: false })),
                 } : current);
                 try {
-                    const latestContacts = await fedPipeContactsGet(chain);
+                    const latestContacts = await fedPipeContactsGet(chain, false);
                     setLocalPipeContacts(normalizeFedPipeContactGrant(latestContacts && latestContacts.local_contacts));
 					setLocalPipeContactsKnown(true);
                     setRemotePipeContacts(latestContacts && latestContacts.remote_contacts ? normalizeFedPipeContactGrant(latestContacts.remote_contacts) : null);
@@ -13099,7 +13302,7 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
 		} catch (e) {
 			setPipeContactErr(String(e.message || e));
 			try {
-				const latest = await fedPipeContactsGet(chain);
+				const latest = await fedPipeContactsGet(chain, false);
 				setLocalPipeContacts(normalizeFedPipeContactGrant(latest && latest.local_contacts));
 				setLocalPipeContactsKnown(true);
 				setRemotePipeContacts(latest && latest.remote_contacts ? normalizeFedPipeContactGrant(latest.remote_contacts) : null);
@@ -13127,17 +13330,15 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
     const refresh = async () => {
         setRefreshing(true); setSyncErr(''); setSyncSaveErr('');
         try {
-			const [catalogResponse, permissionResponse, syncResponse, syncStatusResponse, pipeContactsResponse] = await Promise.all([
+			const [catalogResponse, permissionResponse, syncResponse, syncStatusResponse, pipeContactsResponse, peerStatusResponse] = await Promise.all([
                 fedShareableDomains(),
-                fedPermissionsGet(chain),
+                fedPermissionsGet(chain, false),
                 fedSyncGet(chain),
                 fedSyncStatus(chain),
-				fedPipeContactsGet(chain),
+				fedPipeContactsGet(chain, false),
+                fedPeerStatus(chain),
             ]);
             setCatalog(fedCatalogMap(catalogResponse));
-            setRemote(normalizeFedPermissionList(permissionResponse.remote_permissions));
-            setRemoteKnown(permissionResponse.remote_known === true);
-            setRemotePaused(permissionResponse.remote_paused === true);
             setAlignmentPending(permissionResponse.copy_alignment_pending === true);
             if (!subscribeDirty) {
                 const domains = normalizeFedDomainList(syncResponse && syncResponse.subscribe_domains);
@@ -13152,9 +13353,24 @@ function FedPermissionsPanel({ conn, onRevoke, revokeBusy }) {
             }
 			setLocalPipeContacts(normalizeFedPipeContactGrant(pipeContactsResponse && pipeContactsResponse.local_contacts));
 			setLocalPipeContactsKnown(true);
-			setRemotePipeContacts(pipeContactsResponse && pipeContactsResponse.remote_contacts ? normalizeFedPipeContactGrant(pipeContactsResponse.remote_contacts) : null);
-			setRemotePipeKnown(pipeContactsResponse && pipeContactsResponse.remote_known === true);
 			setPipeContactErr('');
+            if (peerStatusResponse && peerStatusResponse.reachable === true) {
+                if (peerStatusResponse.peer_rbac_grant) {
+                    setRemote(normalizeFedPermissionList(peerStatusResponse.peer_rbac_grant.domains));
+                    setRemoteKnown(true);
+                    setRemotePaused(peerStatusResponse.peer_rbac_grant.paused === true);
+                } else if (peerStatusResponse.sharing_grant) {
+                    setRemote(normalizeFedPermissionList(
+                        (peerStatusResponse.sharing_grant.allowed_domains || []).map(domain => ({ domain, read: true }))
+                    ));
+                    setRemoteKnown(true);
+                    setRemotePaused(false);
+                }
+                if (peerStatusResponse.pipe_contacts) {
+                    setRemotePipeContacts(normalizeFedPipeContactGrant(peerStatusResponse.pipe_contacts));
+                    setRemotePipeKnown(true);
+                }
+            }
         } catch (e) { setSyncErr(String(e.message || e)); }
         setRefreshing(false);
     };
@@ -13542,12 +13758,10 @@ function NetworkNameEditor() {
     </div>`;
 }
 
-function SharingSyncGroupsPanel() {
+function SharingSyncGroupsPanel({ connections = [], reachability = {} }) {
     const [groups, setGroups] = useState(null);
     const [localChain, setLocalChain] = useState('');
     const [shareableDomains, setShareableDomains] = useState([]);
-    const [connections, setConnections] = useState([]);
-    const [reachability, setReachability] = useState({});
     const [error, setError] = useState('');
     const [busy, setBusy] = useState('');
     const [openGroup, setOpenGroup] = useState('');
@@ -13570,26 +13784,13 @@ function SharingSyncGroupsPanel() {
     };
     const loadGroups = async () => {
         try {
-            const [result, domainResult, connectionResult] = await Promise.all([
-                fedGroups(), fedShareableDomains(), fedConnections(),
+            const [result, domainResult] = await Promise.all([
+                fedGroups(), fedShareableDomains(),
             ]);
             const nextGroups = Array.isArray(result.groups) ? result.groups : [];
             setGroups(nextGroups);
             setLocalChain(result.local_chain_id || '');
             setShareableDomains(Array.isArray(domainResult.domains) ? domainResult.domains.filter(domain => domain.can_share) : []);
-            const allConnections = Array.isArray(connectionResult.connections) ? connectionResult.connections : [];
-            const active = allConnections.filter(connection => connection.status === 'active' && !connection.expired);
-            const statuses = await Promise.all(active.map(async connection => {
-                try { return [connection.remote_chain_id, await fedPeerStatus(connection.remote_chain_id)]; }
-                catch (e) { return [connection.remote_chain_id, { reachable: false }]; }
-            }));
-            const statusByChain = Object.fromEntries(statuses);
-            setReachability(statusByChain);
-            const namedConnections = active.map(connection => ({
-                ...connection,
-                peer_name: statusByChain[connection.remote_chain_id]?.network_name || connection.peer_name,
-            }));
-            setConnections(namedConnections);
             setError('');
         } catch (e) { setError(String(e.message || e)); }
     };
@@ -13896,8 +14097,11 @@ function FederationPage() {
     });
     const lastGoodConns = useRef(null);
     const lastRemoteRevokeKey = useRef('');
+    const loadInFlight = useRef(false);
 
     const load = async () => {
+        if (loadInFlight.current) return;
+        loadInFlight.current = true;
         try {
             const r = await fedConnections();
             const next = Array.isArray(r.connections) ? r.connections : [];
@@ -13934,6 +14138,24 @@ function FederationPage() {
             }
             lastGoodConns.current = next;
             const active = next.filter(connection => connection.status === 'active' && !connection.expired);
+            // Trusted relationships, saved permissions, and the manager's
+            // last-known route diagnostics are all local facts. Paint them
+            // before probing an offline peer so this section never sits blank
+            // for the network timeout.
+            setConns(next); setLocalChain(r.local_chain_id || ''); setErr('');
+            setConnectionReachability(current => {
+                const seeded = { ...current };
+                active.forEach(connection => {
+                    if (!seeded[connection.remote_chain_id]) {
+                        seeded[connection.remote_chain_id] = {
+                            route: connection.route,
+                            cached: !!connection.route,
+                            checking: true,
+                        };
+                    }
+                });
+                return seeded;
+            });
             const probes = await Promise.all(active.map(async connection => {
                 try { return [connection.remote_chain_id, await fedPeerStatus(connection.remote_chain_id)]; }
                 catch (e) {
@@ -13944,8 +14166,12 @@ function FederationPage() {
                     }];
                 }
             }));
-            setConnectionReachability(Object.fromEntries(probes));
-            setConns(next); setLocalChain(r.local_chain_id || ''); setErr('');
+            const statuses = Object.fromEntries(probes);
+            setConnectionReachability(current => ({ ...current, ...statuses }));
+            setConns(current => (current || next).map(connection => ({
+                ...connection,
+                peer_name: statuses[connection.remote_chain_id]?.network_name || connection.peer_name,
+            })));
         }
         catch (e) {
             // Keep the last good rows (and any open permission draft) mounted
@@ -13953,6 +14179,7 @@ function FederationPage() {
             // list would falsely imply every connection disappeared.
             setErr(String(e.message || e));
         }
+        finally { loadInFlight.current = false; }
     };
     useEffect(() => {
         if (mode !== 'landing') return undefined;
@@ -14111,7 +14338,12 @@ function FederationPage() {
                     const route = federationConnectionRoute(status);
                     const routeView = federationRoutePresentation(route);
                     const routeUsable = ['direct', 'p2p_direct', 'relay', 'degraded', 'old_peer'].includes(route.state);
-                    const actionLabel = federationConnectionAction(route, c.sharing_paused);
+                    const actionLabel = status && status.checking
+                        ? 'Checking…'
+                        : federationConnectionAction(route, c.sharing_paused);
+                    const routeDetail = status && status.checking && status.cached
+                        ? `Last check: ${routeView.label} · checking again in the background`
+                        : `${routeView.label} · ${routeView.detail}`;
                     const role = c.local_role === 'host' ? 'connection code created here' : (c.local_role === 'guest' ? 'connection code scanned here' : 'older direct relationship');
                     return html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
                     <div class="fed-conn-row">
@@ -14121,16 +14353,16 @@ function FederationPage() {
                             <span class="fed-conn-status ${routeUsable ? (c.sharing_paused ? 'paused' : 'on') : (routeView.tone === 'danger' ? 'blocked' : 'off')}"></span>
                             <span class="fed-conn-name">${c.peer_name || 'Other SAGE'}</span>
                             <span class="fed-conn-role">${role}</span>
-                            <span class="fed-conn-meta muted">${c.sharing_paused && routeUsable ? 'sharing paused · pairing preserved' : `${routeView.label} · ${routeView.detail}`}</span>
+                            <span class="fed-conn-meta muted">${c.sharing_paused && routeUsable ? 'sharing paused · pairing preserved' : routeDetail}</span>
                             <span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>
                         </button>
                         <button class="btn fed-conn-off ${!routeUsable || c.sharing_paused ? 'btn-primary' : ''}"
-                            disabled=${busyChain === c.remote_chain_id}
+                            disabled=${busyChain === c.remote_chain_id || (status && status.checking)}
                             aria-label=${`${actionLabel} with ${c.peer_name || 'Other SAGE'}`}
                             onClick=${() => !routeUsable ? reconnect(c) : pause(c, !c.sharing_paused)}>${busyChain === c.remote_chain_id ? 'Working…' : actionLabel}</button>
                     </div>
                     ${openChain === c.remote_chain_id && html`<div id=${`fed-connection-${c.remote_chain_id}`}>
-                        <${FedPermissionsPanel} conn=${c} revokeBusy=${busyChain === c.remote_chain_id} onRevoke=${() => revoke(c)} />
+                        <${FedPermissionsPanel} conn=${c} connectionStatus=${status} revokeBusy=${busyChain === c.remote_chain_id} onRevoke=${() => revoke(c)} />
                     </div>`}
                 </div>`; })}
                 ${pastConns.length > 0 && html`<div class="fed-past">
@@ -14154,7 +14386,7 @@ function FederationPage() {
                     </div>`}
                 </div>`}
             </div>`}
-            ${fedOn && html`<${SharingSyncGroupsPanel} />`}
+            ${fedOn && html`<${SharingSyncGroupsPanel} connections=${liveConns} reachability=${connectionReachability} />`}
         </div>
     </div>`;
 }

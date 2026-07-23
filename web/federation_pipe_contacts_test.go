@@ -18,10 +18,11 @@ import (
 
 type pipeContactContractDriver struct {
 	FederationJoinDriver
-	local    *federation.PipeContactGrant
-	remote   *federation.PipeContactGrant
-	setErr   error
-	setCalls int
+	local       *federation.PipeContactGrant
+	remote      *federation.PipeContactGrant
+	setErr      error
+	setCalls    int
+	statusCalls int
 }
 
 func (d *pipeContactContractDriver) LocalPipeContacts(context.Context, string) (*federation.PipeContactGrant, error) {
@@ -42,6 +43,7 @@ func (d *pipeContactContractDriver) SetPipeContactAcceptance(_ context.Context, 
 }
 
 func (d *pipeContactContractDriver) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
+	d.statusCalls++
 	return &federation.StatusResponse{PipeContacts: d.remote}, nil
 }
 
@@ -85,6 +87,23 @@ func TestFederatedPipeContactDashboardReadAndMutation(t *testing.T) {
 	require.False(t, getBody.Local.Contacts[0].Accepting)
 	require.True(t, getBody.RemoteKnown)
 	require.True(t, getBody.Remote.Contacts[0].Accepting)
+	require.Equal(t, 1, driver.statusCalls)
+
+	localOnlyReq := withFederationChain(httptest.NewRequest(http.MethodGet,
+		"http://localhost/v1/dashboard/federation/connections/chain-peer/pipe-contacts?live=0", nil), "chain-peer")
+	localOnlyReq.RemoteAddr = "127.0.0.1:4242"
+	localOnlyReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	localOnlyRR := httptest.NewRecorder()
+	h.handleFedPipeContactsGet(localOnlyRR, localOnlyReq)
+	require.Equal(t, http.StatusOK, localOnlyRR.Code, localOnlyRR.Body.String())
+	require.Equal(t, 1, driver.statusCalls, "local-only dashboard paint must not dial the peer")
+	var localOnlyBody struct {
+		Local       *federation.PipeContactGrant `json:"local_contacts"`
+		RemoteKnown bool                         `json:"remote_known"`
+	}
+	require.NoError(t, json.NewDecoder(localOnlyRR.Body).Decode(&localOnlyBody))
+	require.NotNil(t, localOnlyBody.Local)
+	require.False(t, localOnlyBody.RemoteKnown)
 
 	putReq := withFederationChain(httptest.NewRequest(http.MethodPut,
 		"http://localhost/v1/dashboard/federation/connections/chain-peer/pipe-contacts",
