@@ -45,7 +45,7 @@ No tokens. No gas fees. No cryptocurrency. Just consensus-validated knowledge.
 | Layer | Technology |
 |-------|-----------|
 | Consensus | CometBFT v0.38.23 (ABCI 2.0, raw -- not Cosmos SDK) |
-| State Machine | Go 1.22+ ABCI application |
+| State Machine | Go 1.25.7+ ABCI application |
 | On-chain State | BadgerDB v4.5.0 (content hash, status, classification, votes, grants, appHash) |
 | Off-chain Storage | SQLite (personal / single-binary) or PostgreSQL 16 + pgvector / HNSW (cluster) -- write-behind projection |
 | Tx Format | Protobuf (deterministic serialization) |
@@ -69,7 +69,7 @@ No tokens. No gas fees. No cryptocurrency. Just consensus-validated knowledge.
 |------------|---------|-------|
 | Docker | 20.10+ | Required for the containerized network |
 | Docker Compose | v2+ | Uses `docker compose` (v2 syntax, not `docker-compose`) |
-| Go | 1.22+ | Only needed for local builds and running tests |
+| Go | 1.25.7+ | Only needed for local builds and running tests |
 | Python | 3.10+ | Only needed for the SDK and experiments |
 | make | any | Build automation |
 | curl | any | Used by `make status` and health checks |
@@ -1263,7 +1263,7 @@ sage/
 ├── papers/                           # Research papers (PDFs, CC BY 4.0)
 ├── .github/workflows/ci.yml          # CI: lint, test, build, docker, sdk-test
 ├── Makefile                          # Build/test/deploy targets
-├── go.mod                            # Go 1.22, CometBFT v0.38.23 (library)
+├── go.mod                            # Go 1.25.7, CometBFT v0.38.23 (library)
 └── .golangci.yml                     # Linter configuration
 ```
 

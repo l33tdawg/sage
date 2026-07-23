@@ -14,7 +14,7 @@ And because SAGE uses real consensus infrastructure (not just a JSON file), your
 
 ## Quick Install
 
-### From Source (Go 1.24+)
+### From Source (Go 1.25.7+)
 
 ```bash
 git clone https://github.com/l33tdawg/sage.git
