@@ -76,11 +76,11 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_find_agent": {
 			Name:        "sage_find_agent",
-			Description: "Find a contactable agent by name before sending work. Searches active local registrations first; only when no local match exists, searches caller-authorized federated contacts that are active and accepting work. Returns exact values ready for sage_pipe.to. This is not a global directory.",
+			Description: "Find a contactable agent by name before sending work. Searches active local registrations first; only when no local match exists, searches caller-authorized federated contacts that are active and accepting work. Names are exact with ASCII case-insensitivity (non-ASCII names use registered casing). Returns exact values ready for sage_pipe.to. This is not a global directory.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":  map[string]any{"type": "string", "description": "Agent display name, registered name, or local provider name to find. Matching is case-insensitive and supports partial names."},
+					"name":  map[string]any{"type": "string", "description": "Exact agent display name, registered name, or provider name to find. ASCII matching is case-insensitive; non-ASCII names use registered casing."},
 					"limit": map[string]any{"type": "integer", "description": "Maximum matches to return (default: 10, max: 20).", "default": 10, "minimum": 1, "maximum": 20},
 				},
 				"required": []string{"name"},
@@ -621,6 +621,11 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 		Federated: scope == "auto" || scope == "federated" || boolParam(params, "federated", false),
 		Chains:    stringSliceParam(params, "federate_chains"),
 	}
+	if federationOptions.requested() {
+		if err := s.requireBoundFederatedCaller(ctx); err != nil {
+			return nil, err
+		}
+	}
 	if federationOptions.requested() && domain == "" {
 		return nil, fmt.Errorf("domain is required for federated recall")
 	}
@@ -929,6 +934,9 @@ func (s *Server) recallSemantic(ctx context.Context, query, domain string, topK 
 }
 
 func (s *Server) toolFederation(ctx context.Context, _ map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
 	var available struct {
 		Connections []map[string]any `json:"connections"`
 		Total       int              `json:"total"`
@@ -969,17 +977,23 @@ type findAgentFederatedDomain struct {
 }
 
 type findAgentFederatedConnection struct {
-	RemoteChainID string                      `json:"remote_chain_id"`
-	NetworkName   string                      `json:"network_name"`
-	RemoteAgents  []findAgentFederatedContact `json:"remote_agents"`
+	RemoteChainID         string                      `json:"remote_chain_id"`
+	NetworkName           string                      `json:"network_name"`
+	RemoteAgents          []findAgentFederatedContact `json:"remote_agents"`
+	RemoteAgentsTruncated bool                        `json:"remote_agents_truncated"`
 }
 
 const (
-	federatedAgentCacheTTL             = time.Minute
-	maxFederatedAgentCacheCallers      = 128
-	maxFederatedAgentCacheChains       = 64
-	maxFederatedAgentCacheContacts     = 256
-	maxFederatedAgentCacheDomains      = 512
+	federatedAgentCacheTTL        = time.Minute
+	maxFederatedAgentCacheCallers = 128
+	maxFederatedAgentCacheChains  = 64
+	// Discovery fetches only a named, remote-bounded result set. Cache one
+	// caller-visible domain basis per result so local revoke reauthorization is
+	// cheap without making a large remote roster or contact-domain cross-product
+	// an availability boundary.
+	maxFederatedAgentCacheContacts     = 20
+	maxFederatedAgentCacheDomains      = 1
+	maxFederatedAgentAuthorizeDomains  = 512
 	maxFederatedAgentCacheLabelBytes   = 256
 	maxFederatedAgentCacheAddressBytes = 256
 )
@@ -1006,20 +1020,29 @@ func cloneFindAgentFederatedConnections(in []findAgentFederatedConnection) []fin
 // contact response. The original response is never retained after the call.
 func boundedFederatedAgentConnections(in []findAgentFederatedConnection) []findAgentFederatedConnection {
 	out := make([]findAgentFederatedConnection, 0, min(len(in), maxFederatedAgentCacheChains))
-	contacts, domains := 0, 0
+	contacts := 0
+	truncated := false
 	for _, connection := range in {
-		if len(out) >= maxFederatedAgentCacheChains ||
-			len(connection.RemoteChainID) == 0 || len(connection.RemoteChainID) > maxFederatedAgentCacheLabelBytes ||
+		if len(out) >= maxFederatedAgentCacheChains {
+			if len(connection.RemoteAgents) > 0 {
+				truncated = true
+			}
+			continue
+		}
+		if len(connection.RemoteChainID) == 0 || len(connection.RemoteChainID) > maxFederatedAgentCacheLabelBytes ||
 			len(connection.NetworkName) > maxFederatedAgentCacheLabelBytes {
 			continue
 		}
 		bounded := findAgentFederatedConnection{
-			RemoteChainID: connection.RemoteChainID,
-			NetworkName:   connection.NetworkName,
-			RemoteAgents:  make([]findAgentFederatedContact, 0),
+			RemoteChainID:         connection.RemoteChainID,
+			NetworkName:           connection.NetworkName,
+			RemoteAgents:          make([]findAgentFederatedContact, 0),
+			RemoteAgentsTruncated: connection.RemoteAgentsTruncated,
 		}
 		for _, contact := range connection.RemoteAgents {
 			if contacts >= maxFederatedAgentCacheContacts {
+				truncated = true
+				bounded.RemoteAgentsTruncated = true
 				break
 			}
 			if !contact.Available || !contact.Accepting ||
@@ -1034,15 +1057,14 @@ func boundedFederatedAgentConnections(in []findAgentFederatedConnection) []findA
 			boundedContact := contact
 			boundedContact.Domains = nil
 			for _, domain := range contact.Domains {
-				if domains >= maxFederatedAgentCacheDomains {
-					break
-				}
 				domain.Domain = strings.TrimSpace(domain.Domain)
 				if domain.Domain == "" || len(domain.Domain) > maxFederatedAgentCacheLabelBytes {
 					continue
 				}
 				boundedContact.Domains = append(boundedContact.Domains, domain)
-				domains++
+				if len(boundedContact.Domains) >= maxFederatedAgentCacheDomains {
+					break
+				}
 			}
 			if len(boundedContact.Domains) == 0 {
 				continue
@@ -1054,6 +1076,9 @@ func boundedFederatedAgentConnections(in []findAgentFederatedConnection) []findA
 			out = append(out, bounded)
 		}
 	}
+	if truncated && len(out) > 0 {
+		out[len(out)-1].RemoteAgentsTruncated = true
+	}
 	return out
 }
 
@@ -1062,37 +1087,50 @@ func boundedFederatedAgentConnections(in []findAgentFederatedConnection) []findA
 // policy is refreshed on TTL expiry and again by the live outbox resolver, but
 // a local RBAC revoke takes effect on the very next lookup.
 func (s *Server) reauthorizeCachedFederatedAgentConnections(ctx context.Context, connections []findAgentFederatedConnection) ([]findAgentFederatedConnection, error) {
-	domainSet := make(map[string]struct{})
+	type cachedContactScope struct {
+		RemoteChainID string `json:"remote_chain_id"`
+		Domain        string `json:"domain"`
+	}
+	scopeSet := make(map[string]cachedContactScope)
 	for _, connection := range connections {
 		for _, contact := range connection.RemoteAgents {
 			for _, domain := range contact.Domains {
-				if domain.Domain != "" {
-					domainSet[domain.Domain] = struct{}{}
+				if connection.RemoteChainID != "" && domain.Domain != "" {
+					scope := cachedContactScope{RemoteChainID: connection.RemoteChainID, Domain: domain.Domain}
+					scopeSet[scope.RemoteChainID+"\x00"+scope.Domain] = scope
 				}
 			}
 		}
 	}
-	if len(domainSet) == 0 {
+	if len(scopeSet) == 0 {
 		return nil, nil
 	}
-	domains := make([]string, 0, len(domainSet))
-	for domain := range domainSet {
-		domains = append(domains, domain)
+	scopes := make([]cachedContactScope, 0, len(scopeSet))
+	for _, scope := range scopeSet {
+		scopes = append(scopes, scope)
 	}
-	sort.Strings(domains)
-	body, err := json.Marshal(map[string]any{"domains": domains})
-	if err != nil {
-		return nil, fmt.Errorf("encode cached federation authorization request: %w", err)
-	}
-	var response struct {
-		AllowedDomains []string `json:"allowed_domains"`
-	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/federation/contacts/authorize", body, &response); err != nil {
-		return nil, fmt.Errorf("reauthorize cached federated contacts: %w", err)
-	}
-	allowed := make(map[string]struct{}, len(response.AllowedDomains))
-	for _, domain := range response.AllowedDomains {
-		allowed[domain] = struct{}{}
+	sort.Slice(scopes, func(i, j int) bool {
+		if scopes[i].RemoteChainID == scopes[j].RemoteChainID {
+			return scopes[i].Domain < scopes[j].Domain
+		}
+		return scopes[i].RemoteChainID < scopes[j].RemoteChainID
+	})
+	allowed := make(map[string]struct{}, len(scopes))
+	for start := 0; start < len(scopes); start += maxFederatedAgentAuthorizeDomains {
+		end := min(start+maxFederatedAgentAuthorizeDomains, len(scopes))
+		body, err := json.Marshal(map[string]any{"contacts": scopes[start:end]})
+		if err != nil {
+			return nil, fmt.Errorf("encode cached federation authorization request: %w", err)
+		}
+		var response struct {
+			AllowedContacts []cachedContactScope `json:"allowed_contacts"`
+		}
+		if err := s.doSignedJSON(ctx, "POST", "/v1/federation/contacts/authorize", body, &response); err != nil {
+			return nil, fmt.Errorf("reauthorize cached federated contacts: %w", err)
+		}
+		for _, scope := range response.AllowedContacts {
+			allowed[scope.RemoteChainID+"\x00"+scope.Domain] = struct{}{}
+		}
 	}
 	filtered := make([]findAgentFederatedConnection, 0, len(connections))
 	for _, connection := range connections {
@@ -1100,7 +1138,7 @@ func (s *Server) reauthorizeCachedFederatedAgentConnections(ctx context.Context,
 		visible.RemoteAgents = nil
 		for _, contact := range connection.RemoteAgents {
 			for _, domain := range contact.Domains {
-				if _, ok := allowed[domain.Domain]; ok {
+				if _, ok := allowed[connection.RemoteChainID+"\x00"+domain.Domain]; ok {
 					visible.RemoteAgents = append(visible.RemoteAgents, contact)
 					break
 				}
@@ -1117,23 +1155,27 @@ func (s *Server) reauthorizeCachedFederatedAgentConnections(ctx context.Context,
 // signed caller. The federation available view is caller-filtered, so sharing
 // this projection between MCP bearer identities would disclose contacts outside
 // their authorized domain intersection.
-func (s *Server) cachedFederatedAgentConnections(ctx context.Context) ([]findAgentFederatedConnection, bool) {
-	callerID := s.effectiveAgentID(ctx)
+func (s *Server) federatedAgentCacheKey(ctx context.Context, query string) string {
+	return s.effectiveAgentID(ctx) + "\x00" + strings.ToLower(strings.TrimSpace(query))
+}
+
+func (s *Server) cachedFederatedAgentConnections(ctx context.Context, query string) ([]findAgentFederatedConnection, bool) {
+	cacheKey := s.federatedAgentCacheKey(ctx, query)
 	now := time.Now()
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
-	entry, ok := s.federatedAgentCache[callerID]
+	entry, ok := s.federatedAgentCache[cacheKey]
 	if !ok || now.Sub(entry.fetchedAt) >= federatedAgentCacheTTL {
 		if ok {
-			delete(s.federatedAgentCache, callerID)
+			delete(s.federatedAgentCache, cacheKey)
 		}
 		return nil, false
 	}
 	return cloneFindAgentFederatedConnections(entry.connections), true
 }
 
-func (s *Server) cacheFederatedAgentConnections(ctx context.Context, connections []findAgentFederatedConnection) {
-	callerID := s.effectiveAgentID(ctx)
+func (s *Server) cacheFederatedAgentConnections(ctx context.Context, query string, connections []findAgentFederatedConnection) {
+	cacheKey := s.federatedAgentCacheKey(ctx, query)
 	now := time.Now()
 	connections = boundedFederatedAgentConnections(connections)
 	s.stateMu.Lock()
@@ -1143,7 +1185,7 @@ func (s *Server) cacheFederatedAgentConnections(ctx context.Context, connections
 			delete(s.federatedAgentCache, id)
 		}
 	}
-	if _, exists := s.federatedAgentCache[callerID]; !exists && len(s.federatedAgentCache) >= maxFederatedAgentCacheCallers {
+	if _, exists := s.federatedAgentCache[cacheKey]; !exists && len(s.federatedAgentCache) >= maxFederatedAgentCacheCallers {
 		var oldestID string
 		var oldestAt time.Time
 		for id, entry := range s.federatedAgentCache {
@@ -1153,7 +1195,7 @@ func (s *Server) cacheFederatedAgentConnections(ctx context.Context, connections
 		}
 		delete(s.federatedAgentCache, oldestID)
 	}
-	s.federatedAgentCache[callerID] = federatedAgentCacheEntry{
+	s.federatedAgentCache[cacheKey] = federatedAgentCacheEntry{
 		connections: cloneFindAgentFederatedConnections(connections),
 		fetchedAt:   now,
 	}
@@ -1166,13 +1208,10 @@ func matchesAgentName(query string, candidates ...string) (exact bool, partial b
 			continue
 		}
 		if strings.EqualFold(candidate, query) {
-			return true, true
-		}
-		if strings.Contains(strings.ToLower(candidate), strings.ToLower(query)) {
-			partial = true
+			return true, false
 		}
 	}
-	return false, partial
+	return false, false
 }
 
 // toolFindAgent provides an explicit, safe recipient-discovery path for
@@ -1180,6 +1219,9 @@ func matchesAgentName(query string, candidates ...string) (exact bool, partial b
 // consulted after a local miss, and the existing caller-filtered available view
 // limits results to remote agents the caller may already see and contact.
 func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
 	query := strings.TrimSpace(stringParam(params, "name", ""))
 	if query == "" {
 		return nil, fmt.Errorf("'name' is required")
@@ -1195,8 +1237,9 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 	var localResponse struct {
 		Agents []findAgentLocalResult `json:"agents"`
 	}
-	if err := s.doSignedJSON(ctx, "GET", "/v1/agents", nil, &localResponse); err != nil {
-		return nil, fmt.Errorf("list local agents: %w", err)
+	path := "/v1/agents/lookup?name=" + url.QueryEscape(query) + "&limit=20"
+	if err := s.doSignedJSON(ctx, "GET", path, nil, &localResponse); err != nil {
+		return nil, fmt.Errorf("find local agents: %w", err)
 	}
 
 	localExact := make([]findAgentLocalResult, 0)
@@ -1244,7 +1287,7 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 		}, nil
 	}
 
-	connections, cacheHit := s.cachedFederatedAgentConnections(ctx)
+	connections, cacheHit := s.cachedFederatedAgentConnections(ctx, query)
 	if cacheHit {
 		var err error
 		connections, err = s.reauthorizeCachedFederatedAgentConnections(ctx, connections)
@@ -1255,11 +1298,12 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 		var federationResponse struct {
 			Connections []findAgentFederatedConnection `json:"connections"`
 		}
-		if err := s.doSignedJSON(ctx, "GET", "/v1/federation/available", nil, &federationResponse); err != nil {
+		path := "/v1/federation/available?agent_name=" + url.QueryEscape(query) + "&agent_limit=20"
+		if err := s.doSignedJSON(ctx, "GET", path, nil, &federationResponse); err != nil {
 			return nil, fmt.Errorf("discover federated agents after local miss: %w", err)
 		}
 		connections = boundedFederatedAgentConnections(federationResponse.Connections)
-		s.cacheFederatedAgentConnections(ctx, connections)
+		s.cacheFederatedAgentConnections(ctx, query, connections)
 	}
 
 	type federatedMatch struct {
@@ -1315,12 +1359,16 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 			"accepting":       true,
 		})
 	}
+	remoteTruncated := false
+	for _, connection := range connections {
+		remoteTruncated = remoteTruncated || connection.RemoteAgentsTruncated
+	}
 	return map[string]any{
 		"matches":         matches,
 		"total":           len(federatedMatches),
 		"searched":        []string{"local", "federated"},
 		"federated_cache": map[bool]string{true: "hit", false: "miss"}[cacheHit],
-		"truncated":       len(federatedMatches) > len(matches),
+		"truncated":       remoteTruncated || len(federatedMatches) > len(matches),
 		"message":         "No local agent matched. Federated results are limited to active, opted-in contacts you are authorized to use; pass a match's to value directly to sage_pipe. sage_pipe always re-checks the live recipient before sending.",
 	}, nil
 }
@@ -2690,6 +2738,9 @@ func floatParam(params map[string]any, key string, defaultVal float64) float64 {
 // --- Pipeline Tool Handlers ---
 
 func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
 	to := stringParam(params, "to", "")
 	if to == "" {
 		return nil, fmt.Errorf("'to' is required (local provider/name/agent_id or federated #node/agent or agent_id@chain)")
@@ -2900,6 +2951,9 @@ func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, err
 }
 
 func (s *Server) toolPipeResult(ctx context.Context, params map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
 	pipeID := stringParam(params, "pipe_id", "")
 	if pipeID == "" {
 		return nil, fmt.Errorf("'pipe_id' is required")

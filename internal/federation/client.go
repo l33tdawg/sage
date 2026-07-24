@@ -46,11 +46,19 @@ func receiptDeliveryTimeout() time.Duration {
 
 const maxFedResponseBytes = 16 << 20
 
+// A v11.13.0 peer ignores the compact-status preference and can legally send
+// its older full v1 contact snapshot. Allow that compatibility retry one at a
+// time so an eight-peer named discovery fan-out never multiplies the legacy
+// 16 MiB response allowance.
+const maxConcurrentLegacyPipeStatusFallbacks = 1
+
 // ErrPeerOffline marks only ordinary dial/name-resolution failures for which
 // an exact, previously authenticated routing snapshot may be used to enqueue
 // work locally. TLS, certificate, HTTP, identity, and decode failures never
 // wrap this sentinel and therefore never permit cached authorization fallback.
 var ErrPeerOffline = errors.New("federation peer is offline")
+
+var errPeerResponseLimit = errors.New("peer response exceeds size limit")
 
 func isPeerOfflineDialError(err error) bool {
 	if err == nil {
@@ -102,6 +110,10 @@ func authenticatePeerRoute(tlsCfg *tls.Config) PeerRouteAuthenticator {
 // endpoint. Fail-closed by construction: no agreement, bad endpoint scheme,
 // missing/pin-mismatched CA, or TLS failure all error before any bytes leave.
 func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRecord, method, path string, payload any) ([]byte, int, error) {
+	return m.doPeerRequestWithHeaders(ctx, agreement, method, path, payload, nil)
+}
+
+func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store.CrossFedRecord, method, path string, payload any, headers http.Header) ([]byte, int, error) {
 	if !m.transportIsEnabled() {
 		err := errors.New("federation transport is disabled")
 		m.recordRouteFailure(agreement.RemoteChainID, err, false)
@@ -159,6 +171,11 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 	req.Header.Set(HeaderTimestamp, strconv.FormatInt(ts, 10))
 	req.Header.Set(HeaderNonce, hex.EncodeToString(nonce))
 	req.Header.Set(HeaderSignature, hex.EncodeToString(sig))
+	for key, values := range headers {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
+	}
 
 	transport := &http.Transport{TLSClientConfig: tlsCfg}
 	authenticate := authenticatePeerRoute(tlsCfg)
@@ -253,11 +270,42 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 		m.maybeTriggerRouteRefresh(agreement.RemoteChainID)
 	}
 	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxFedResponseBytes))
+	responseLimit := peerResponseLimit(path, headers)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, responseLimit+1))
 	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("read peer response: %w", err)
 	}
+	if int64(len(respBody)) > responseLimit {
+		return nil, resp.StatusCode, fmt.Errorf("%w: %d-byte limit", errPeerResponseLimit, responseLimit)
+	}
 	return respBody, resp.StatusCode, nil
+}
+
+// peerResponseLimit keeps named recipient discovery bounded even if a remote
+// peer is buggy or malicious and ignores its compact-status preference or its
+// own targeted-response contract.
+func peerResponseLimit(path string, headers http.Header) int64 {
+	if path == "/fed/v1/pipe/contacts/lookup" {
+		return int64(maxPipeContactLookupBytes)
+	}
+	if path == "/fed/v1/status" && clientRequestsCapability(headers, CapabilityFederatedPipelineContactLookup) {
+		// A compact status has no contact roster. The peer policy/capability
+		// envelope is far smaller than this, while the limit bounds all eight
+		// named-discovery workers even if a remote peer ignores the preference.
+		return int64(maxPipeContactStatusBytes)
+	}
+	return int64(maxFedResponseBytes)
+}
+
+func clientRequestsCapability(headers http.Header, capability string) bool {
+	for _, value := range headers.Values(HeaderClientCapabilities) {
+		for _, advertised := range strings.Split(value, ",") {
+			if strings.TrimSpace(advertised) == capability {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isSecurityTransportError(err error) bool {
@@ -352,14 +400,59 @@ func (m *Manager) PeerStatus(ctx context.Context, remoteChainID string) (*Status
 	return out, nil
 }
 
+// PeerStatusForPipeLookup is the compact counterpart for named recipient
+// discovery. It deliberately skips legacy contact-cache refresh: targeted
+// contacts are live-only and no compact status can prove an offline route is
+// still current.
+func (m *Manager) PeerStatusForPipeLookup(ctx context.Context, remoteChainID string) (*StatusResponse, error) {
+	agreement, err := m.ActiveAgreement(remoteChainID)
+	if err != nil {
+		return nil, err
+	}
+	out, err := m.fetchPeerStatusForPipeLookup(ctx, agreement)
+	if err != nil {
+		return nil, err
+	}
+	m.rememberPeerName(remoteChainID, out.NetworkName)
+	return out, nil
+}
+
 // fetchPeerStatus performs only the authenticated network exchange. Cache
 // callers supply their request-time agreement/control binding separately so a
 // delayed response can never be relabeled with post-response policy state.
 func (m *Manager) fetchPeerStatus(ctx context.Context, agreement *store.CrossFedRecord) (*StatusResponse, error) {
+	return m.fetchPeerStatusWithHeaders(ctx, agreement, nil)
+}
+
+// fetchPeerStatusForPipeLookup asks a v11.13.1 peer to advertise capability
+// and policy without constructing its legacy contact snapshot. Old peers
+// ignore the advisory header and return the v1-compatible snapshot instead.
+func (m *Manager) fetchPeerStatusForPipeLookup(ctx context.Context, agreement *store.CrossFedRecord) (*StatusResponse, error) {
+	compact, err := m.fetchPeerStatusWithHeaders(ctx, agreement, http.Header{
+		HeaderClientCapabilities: {CapabilityFederatedPipelineContactLookup},
+	})
+	if !errors.Is(err, errPeerResponseLimit) {
+		return compact, err
+	}
+	// v11.13.0 did not understand the compact-status preference. Its legacy
+	// status body remains compatible up to the historic 16 MiB transport cap,
+	// but must be fetched serially and filtered immediately by the caller.
+	if sem := m.legacyPipeStatusFallbackSem; sem != nil {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return m.fetchPeerStatus(ctx, agreement)
+}
+
+func (m *Manager) fetchPeerStatusWithHeaders(ctx context.Context, agreement *store.CrossFedRecord, headers http.Header) (*StatusResponse, error) {
 	if agreement == nil {
 		return nil, fmt.Errorf("peer status agreement is unavailable")
 	}
-	body, status, err := m.doPeerRequest(ctx, agreement, http.MethodGet, "/fed/v1/status", nil)
+	body, status, err := m.doPeerRequestWithHeaders(ctx, agreement, http.MethodGet, "/fed/v1/status", nil, headers)
 	if err != nil {
 		return nil, err
 	}

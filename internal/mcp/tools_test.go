@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -353,7 +354,7 @@ func TestSageFederationDiscoversRemoteDomainsAndAgents(t *testing.T) {
 func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
 	var federationRequested bool
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/agents/lookup", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"agents": []map[string]any{
 				{"agent_id": "local-innovium", "name": "Innovium", "registered_name": "claude-code/innovium", "provider": "claude-code", "status": "active"},
@@ -386,7 +387,7 @@ func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
 
 func TestSageFindAgentFallsBackToContactableFederatedMatches(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/agents/lookup", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []any{}})
 	})
 	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
@@ -427,7 +428,7 @@ func TestSageFindAgentFallsBackToContactableFederatedMatches(t *testing.T) {
 func TestSageFindAgentCachesFederatedContactsPerCaller(t *testing.T) {
 	federationCalls, authorizationCalls := 0, 0
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/agents/lookup", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []any{}})
 	})
 	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
@@ -436,26 +437,28 @@ func TestSageFindAgentCachesFederatedContactsPerCaller(t *testing.T) {
 			"connections": []map[string]any{{
 				"remote_chain_id": "chain-innovium",
 				"remote_agents": []map[string]any{{
-					"agent_id": "remote-live", "display_name": "Innovium Research", "address": "remote-live@chain-innovium", "available": true, "accepting": true, "domains": []map[string]any{{"domain": "research"}},
+					"agent_id": "remote-live", "display_name": "Innovium Research", "registered_name": "innovium", "address": "remote-live@chain-innovium", "available": true, "accepting": true, "domains": []map[string]any{{"domain": "research"}},
 				}},
 			}},
 		})
 	})
 	mux.HandleFunc("/v1/federation/contacts/authorize", func(w http.ResponseWriter, _ *http.Request) {
 		authorizationCalls++
-		_ = json.NewEncoder(w).Encode(map[string]any{"allowed_domains": []string{"research"}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed_contacts": []map[string]string{{"remote_chain_id": "chain-innovium", "domain": "research"}}})
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
 	_, priv, _ := ed25519.GenerateKey(nil)
 	s := NewServer(ts.URL, priv)
-	callerA := authmw.WithAgentID(context.Background(), "caller-a")
+	callerAPub, callerAPriv, _ := ed25519.GenerateKey(nil)
+	callerAID := hex.EncodeToString(callerAPub)
+	callerA := authmw.WithMCPSigner(authmw.WithAgentID(context.Background(), callerAID), callerAPriv)
 	first, err := s.toolFindAgent(callerA, map[string]any{"name": "innovium"})
 	require.NoError(t, err)
 	assert.Equal(t, "miss", first.(map[string]any)["federated_cache"])
 
-	second, err := s.toolFindAgent(callerA, map[string]any{"name": "research"})
+	second, err := s.toolFindAgent(callerA, map[string]any{"name": "innovium"})
 	require.NoError(t, err)
 	assert.Equal(t, "hit", second.(map[string]any)["federated_cache"])
 	assert.Equal(t, 1, federationCalls, "the second lookup should reuse the caller-scoped federated projection")
@@ -464,16 +467,19 @@ func TestSageFindAgentCachesFederatedContactsPerCaller(t *testing.T) {
 	require.Len(t, matches, 1)
 	assert.Equal(t, "remote-live@chain-innovium", matches[0]["to"])
 
-	callerB := authmw.WithAgentID(context.Background(), "caller-b")
+	callerBPub, callerBPriv, _ := ed25519.GenerateKey(nil)
+	callerBID := hex.EncodeToString(callerBPub)
+	callerB := authmw.WithMCPSigner(authmw.WithAgentID(context.Background(), callerBID), callerBPriv)
 	third, err := s.toolFindAgent(callerB, map[string]any{"name": "innovium"})
 	require.NoError(t, err)
 	assert.Equal(t, "miss", third.(map[string]any)["federated_cache"])
 	assert.Equal(t, 2, federationCalls, "a different agent identity must not reuse caller A's discovery cache")
 
 	s.stateMu.Lock()
-	entry := s.federatedAgentCache["caller-b"]
+	cacheKey := s.federatedAgentCacheKey(callerB, "innovium")
+	entry := s.federatedAgentCache[cacheKey]
 	entry.fetchedAt = time.Now().Add(-federatedAgentCacheTTL)
-	s.federatedAgentCache["caller-b"] = entry
+	s.federatedAgentCache[cacheKey] = entry
 	s.stateMu.Unlock()
 	fourth, err := s.toolFindAgent(callerB, map[string]any{"name": "innovium"})
 	require.NoError(t, err)
@@ -503,8 +509,8 @@ func TestFederatedAgentCacheBoundsProjection(t *testing.T) {
 		}
 		connections[i] = connection
 	}
-	s.cacheFederatedAgentConnections(context.Background(), connections)
-	cached, hit := s.cachedFederatedAgentConnections(context.Background())
+	s.cacheFederatedAgentConnections(context.Background(), "worker", connections)
+	cached, hit := s.cachedFederatedAgentConnections(context.Background(), "worker")
 	require.True(t, hit)
 	assert.LessOrEqual(t, len(cached), maxFederatedAgentCacheChains)
 	contacts := 0
@@ -512,13 +518,77 @@ func TestFederatedAgentCacheBoundsProjection(t *testing.T) {
 		contacts += len(connection.RemoteAgents)
 	}
 	assert.LessOrEqual(t, contacts, maxFederatedAgentCacheContacts)
+	require.True(t, cached[len(cached)-1].RemoteAgentsTruncated, "dropping later caller-visible contacts must remain observable to the MCP result")
+}
+
+func TestSageFindAgentRequestsTargetedFederatedContacts(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agents/lookup", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []any{}})
+	})
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "innovium", r.URL.Query().Get("agent_name"))
+		assert.Equal(t, "20", r.URL.Query().Get("agent_limit"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"connections": []map[string]any{{
+			"remote_chain_id": "chain-innovium", "remote_agents": []map[string]any{{
+				"agent_id": "remote-256", "display_name": "worker-256", "registered_name": "innovium", "provider": "claude-code",
+				"address": "remote-256@chain-innovium", "available": true, "accepting": true,
+				"domains": []map[string]any{{"domain": "research"}},
+			}},
+		}}})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolFindAgent(context.Background(), map[string]any{"name": "innovium"})
+	require.NoError(t, err)
+	matches := result.(map[string]any)["matches"].([]map[string]any)
+	require.Len(t, matches, 1)
+	assert.Equal(t, "remote-256@chain-innovium", matches[0]["to"])
+}
+
+func TestFederatedAgentCacheReauthorizationBatchesLargeDomainSets(t *testing.T) {
+	authorizationCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/federation/contacts/authorize", func(w http.ResponseWriter, r *http.Request) {
+		authorizationCalls++
+		var request struct {
+			Contacts []struct {
+				RemoteChainID string `json:"remote_chain_id"`
+				Domain        string `json:"domain"`
+			} `json:"contacts"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		assert.LessOrEqual(t, len(request.Contacts), maxFederatedAgentAuthorizeDomains)
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed_contacts": request.Contacts})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	contacts := make([]findAgentFederatedContact, 0, maxFederatedAgentAuthorizeDomains+1)
+	for i := 0; i <= maxFederatedAgentAuthorizeDomains; i++ {
+		contacts = append(contacts, findAgentFederatedContact{
+			AgentID: fmt.Sprintf("agent-%d", i), Address: fmt.Sprintf("agent-%d@chain-innovium", i),
+			Available: true, Accepting: true, Domains: []findAgentFederatedDomain{{Domain: fmt.Sprintf("research-%d", i)}},
+		})
+	}
+	filtered, err := s.reauthorizeCachedFederatedAgentConnections(context.Background(), []findAgentFederatedConnection{{
+		RemoteChainID: "chain-innovium", RemoteAgents: contacts,
+	}})
+	require.NoError(t, err)
+	require.Len(t, filtered, 1)
+	require.Len(t, filtered[0].RemoteAgents, len(contacts))
+	assert.Equal(t, 2, authorizationCalls)
 }
 
 func TestSageFindAgentCachedContactsHonorLocalReauthorization(t *testing.T) {
 	federationCalls, authorizationCalls := 0, 0
 	allowCachedContact := true
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/agents/lookup", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []any{}})
 	})
 	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
@@ -532,11 +602,11 @@ func TestSageFindAgentCachedContactsHonorLocalReauthorization(t *testing.T) {
 	})
 	mux.HandleFunc("/v1/federation/contacts/authorize", func(w http.ResponseWriter, _ *http.Request) {
 		authorizationCalls++
-		allowed := []string{}
+		allowed := []map[string]string{}
 		if allowCachedContact {
-			allowed = []string{"research"}
+			allowed = []map[string]string{{"remote_chain_id": "chain-innovium", "domain": "research"}}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"allowed_domains": allowed})
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed_contacts": allowed})
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -554,6 +624,32 @@ func TestSageFindAgentCachedContactsHonorLocalReauthorization(t *testing.T) {
 	assert.Zero(t, out["total"])
 	assert.Equal(t, 1, federationCalls, "revocation must not trigger a remote discovery probe")
 	assert.Equal(t, 1, authorizationCalls)
+}
+
+func TestKeylessBearerCannotUseOperatorSignedFederatedTools(t *testing.T) {
+	_, operatorKey, _ := ed25519.GenerateKey(nil)
+	s := NewServer("http://127.0.0.1:1", operatorKey)
+	middleware := authmw.MCPBearerAuthMiddleware(func(context.Context, string) (string, ed25519.PrivateKey, error) {
+		return "restricted-agent", nil, nil // legacy keyless bearer
+	})
+	h := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, findErr := s.toolFindAgent(r.Context(), map[string]any{"name": "innovium"})
+		_, pipeErr := s.toolPipe(r.Context(), map[string]any{"to": "agent", "payload": "work"})
+		_, federationErr := s.toolFederation(r.Context(), nil)
+		_, recallErr := s.toolRecall(r.Context(), map[string]any{"query": "research", "domain": "research", "scope": "federated"})
+		_, resultErr := s.toolPipeResult(r.Context(), map[string]any{"pipe_id": "pipe", "result": "done"})
+		assert.ErrorContains(t, findErr, "legacy bearer tokens")
+		assert.ErrorContains(t, pipeErr, "legacy bearer tokens")
+		assert.ErrorContains(t, federationErr, "legacy bearer tokens")
+		assert.ErrorContains(t, recallErr, "legacy bearer tokens")
+		assert.ErrorContains(t, resultErr, "legacy bearer tokens")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp", nil)
+	req.Header.Set("Authorization", "Bearer legacy-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestSageForget(t *testing.T) {

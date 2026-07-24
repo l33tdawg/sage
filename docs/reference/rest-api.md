@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.13.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.13.1. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -464,6 +464,19 @@ Returns 503 if not configured on this node.
 ### `GET /v1/agents`
 
 List all registered agents. **No auth required.**
+
+**Response** (HTTP 200): `{"agents": [...AgentEntry], "total": N}`
+
+---
+
+### `GET /v1/agents/lookup`
+
+Signed, bounded exact-name lookup for MCP recipient discovery. `name` is required
+(1–512 bytes) and matches display name, registered name, or provider with
+ASCII case-insensitivity (non-ASCII names use registered casing); `limit`
+defaults to 20 and is 1–20. It returns the same
+sanitized agent fields as the public roster, but uses an index-backed metadata
+projection rather than enumerating the roster or deriving memory counts.
 
 **Response** (HTTP 200): `{"agents": [...AgentEntry], "total": N}`
 
@@ -1338,21 +1351,21 @@ the exact returned destination (`api/rest/pipe_handler.go:47-126`,
 ```
 
 Local targets retain their existing provider/name/ID behavior. Federated
-resolution is limited to the finite authenticated contact snapshots disclosed
+resolution is limited to the finite authenticated contact projection disclosed
 by active peers. A qualified handle never falls through to a similarly named
 local target. Unknown, stale, paused, unavailable, non-accepting, ambiguous, or
 temporarily incomplete resolution fails explicitly. An exact `agent@chain`
-address may resolve while that one peer is genuinely offline from the last
-authenticated contact snapshot, but only when its encrypted cache still
-matches the complete active JOIN, CA, operator, policy-epoch, and policy
-revision binding. Friendly handles and bare labels always require a live,
-complete peer scan. TLS/certificate/authentication, HTTP, identity, malformed
-response, and binding failures never use the cache
+address may resolve while that one peer is genuinely offline from a previous
+encrypted legacy-status snapshot, but only when its cache still matches the
+complete active JOIN, CA, operator, policy-epoch, and policy-revision binding.
+Targeted lookup results are live-only. Friendly handles and bare labels always
+require a live, complete peer scan. TLS/certificate/authentication, HTTP,
+identity, malformed response, and binding failures never use the cache
 (`internal/federation/client.go:47-67,154-160`;
 `internal/federation/pipe_targets.go:87-167,169-295`;
 `internal/store/federated_pipe_contacts.go:49-195`).
 
-The cached result is only a local queue-routing hint. Immediately before every
+Any legacy cached result is only a local queue-routing hint. Immediately before every
 delivery attempt, the durable outbox performs a fresh authenticated live
 resolution and requires the exact policy epoch, agreement, contact ID, contact
 revision, agent, and chain to match. No intent or payload leaves this SAGE from
@@ -1366,17 +1379,18 @@ the address was resolved earlier (`api/rest/pipe_handler.go`).
 
 ### `POST /v1/federation/contacts/authorize`
 
-Local-only reauthorization for a set of domains from an already caller-filtered
-federated-contact projection. This route does not discover agents, reveal peer
-topology, or make a peer request; it exists so the MCP's brief in-memory
-recipient cache honors a local RBAC change immediately.
+Local-only reauthorization for chain/domain contact scopes from an already
+caller-filtered federated-contact projection. This route does not discover
+agents or make a peer request; it exists so the MCP's brief in-memory recipient
+cache honors a local RBAC or agreement-state change immediately.
 
-**Request:** `{"domains":["example.scope"]}` (at most 512 unique, non-empty
-domains; each is at most 256 bytes).
+**Request:** `{"contacts":[{"remote_chain_id":"chain-a","domain":"example.scope"}]}`
+(at most 512 unique chain/domain pairs; each domain is at most 256 bytes).
 
-**Response** (HTTP 200): `{"allowed_domains":["example.scope"]}` — only the
-input domains that the signed caller may currently read. An unregistered caller
-receives 403; malformed or oversize input receives 400.
+**Response** (HTTP 200): `{"allowed_contacts":[{"remote_chain_id":"chain-a","domain":"example.scope"}]}`
+— only the input scopes whose agreement is active/unexpired and whose domain the
+signed caller may currently read. An unregistered caller receives 403;
+malformed or oversize input receives 400.
 
 ### `POST /v1/pipe/send`
 
@@ -1408,9 +1422,9 @@ local policy (`api/rest/pipe_handler.go`).
 `{"pipe_id":"pipe-<uuid>","status":"pending","expires_at":"...","destination_chain_id":"<remote chain or empty>"}`.
 For a remote send, `pending` means durably queued for delivery; it does not claim
 that the peer or agent has already received the work. Consequently, an exact
-address resolved from the bounded offline cache can be accepted locally while
-the peer is down; delivery waits for that peer to return and pass the fresh live
-authorization preflight above.
+address resolved from a bounded legacy-status offline cache can be accepted
+locally while the peer is down. Delivery waits for that peer to return and pass
+the fresh live authorization preflight above.
 
 **Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:513-515`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:4083` payload, `:4086` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:527-529`) to 413.
 

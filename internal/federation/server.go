@@ -11,7 +11,9 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,10 +27,14 @@ import (
 // (mTLS handshake gates strangers), but a peer is still another failure
 // domain — bound everything.
 const (
-	maxFedBodyBytes  = 4 << 20 // embeddings are ~30KB; 4MB is generous headroom
-	maxFedTopK       = 50
-	defaultFedTopK   = 10
-	maxTimestampSkew = 5 * time.Minute
+	maxFedBodyBytes = 4 << 20 // embeddings are ~30KB; 4MB is generous headroom
+	// Contact lookup accepts only one 512-byte selector and a small limit. Keep
+	// its authenticated-but-untrusted body well below the general memory route
+	// budget so a paired peer cannot turn directory discovery into a read DoS.
+	maxPipeContactLookupRequestBytes = 2 << 10
+	maxFedTopK                       = 50
+	defaultFedTopK                   = 10
+	maxTimestampSkew                 = 5 * time.Minute
 	// maxReplayEntriesPerChain bounds each PEER CHAIN's replay shard. Total
 	// listener memory is bounded by (active peer chains × this) — and one
 	// peer's flood is confined to its own shard.
@@ -66,6 +72,7 @@ func (m *Manager) Router() http.Handler {
 		r.Post("/fed/v1/receipt", m.handleReceipt)
 		r.Post("/fed/v1/connection/revoke-notice", m.handleRevokeNotice)
 		r.Post("/fed/v1/pipe/event", m.handlePipeEvent)
+		r.Post("/fed/v1/pipe/contacts/lookup", m.handlePipeContactLookup)
 		r.Post("/fed/v1/sync/push", m.handleSyncPush)       // v11.5 domain sync
 		r.Post("/fed/v1/sync/digest", m.handleSyncDigest)   // v11.5 anti-entropy
 		r.Post("/fed/v1/sync/journal", m.handleSyncJournal) // v11.8 group journal exchange
@@ -182,7 +189,11 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		r.Body = http.MaxBytesReader(w, r.Body, maxFedBodyBytes)
+		bodyLimit := int64(maxFedBodyBytes)
+		if r.Method == http.MethodPost && r.URL.Path == "/fed/v1/pipe/contacts/lookup" {
+			bodyLimit = maxPipeContactLookupRequestBytes
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			httpError(w, http.StatusRequestEntityTooLarge, "request body too large")
@@ -441,6 +452,7 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if m.syncStore() != nil {
 		caps = append(caps, CapabilitySync)
 		caps = append(caps, CapabilityFederatedPipeline)
+		caps = append(caps, CapabilityFederatedPipelineContactLookup)
 	}
 	policy, err := m.getPeerRBACPolicyForAgreement(r.Context(), agreement)
 	if err != nil {
@@ -458,12 +470,19 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		peerRBACGrant = peerRBACGrantFromPolicy(policy)
-		pipeContacts, err = m.buildPipeContactGrant(r.Context(), peer, policy)
-		if err != nil {
-			releaseSnapshot()
-			m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation status pipe contact projection failed")
-			httpError(w, http.StatusInternalServerError, "pipe contact projection failed")
-			return
+		if !clientRequestsPipeContactLookup(r) {
+			pipeContacts, err = m.buildPipeContactStatusGrant(r.Context(), peer, policy)
+			if err != nil {
+				releaseSnapshot()
+				m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation status pipe contact projection failed")
+				httpError(w, http.StatusInternalServerError, "pipe contact projection failed")
+				return
+			}
+			// Preserve v1 rolling compatibility: v11.13.0 peers reject a v1
+			// snapshot with more than 1,024 contacts. Keep a deterministic valid
+			// subset for them. New peers explicitly request compact status then use
+			// the targeted lookup route, so no roster-wide RBAC scan is needed.
+			pipeContacts = boundedPipeContactStatusSnapshot(pipeContacts)
 		}
 	}
 	domains := []string{}
@@ -487,6 +506,241 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// status readers must not delay consensus agent projection.
 	releaseSnapshot()
 	writeJSON(w, http.StatusOK, response)
+}
+
+func clientRequestsPipeContactLookup(r *http.Request) bool {
+	for _, capability := range strings.Split(r.Header.Get(HeaderClientCapabilities), ",") {
+		if strings.TrimSpace(capability) == CapabilityFederatedPipelineContactLookup {
+			return true
+		}
+	}
+	return false
+}
+
+func fitsPipeContactStatusSnapshot(grant *PipeContactGrant) bool {
+	if grant == nil || len(grant.Contacts) > maxPipeContactStatusContacts {
+		return false
+	}
+	encoded, err := json.Marshal(grant)
+	return err == nil && len(encoded) <= maxPipeContactStatusBytes
+}
+
+// boundedPipeContactStatusSnapshot gives legacy v1 peers a valid, deterministic
+// subset. Source contacts are already agent-ID sorted, and we skip only a
+// contact that would breach the byte ceiling so later compact contacts remain
+// discoverable through the legacy status path too.
+func boundedPipeContactStatusSnapshot(grant *PipeContactGrant) *PipeContactGrant {
+	if grant == nil {
+		return nil
+	}
+	bounded := *grant
+	bounded.Contacts = make([]PipeContact, 0, min(len(grant.Contacts), maxPipeContactStatusContacts))
+	// Marshal the invariant grant once and each contact once. Re-marshaling the
+	// progressively growing grant for every candidate makes a 1,024-contact
+	// legacy status request quadratic in its JSON size while the policy/domain
+	// snapshot locks are held.
+	emptyEncoded, err := json.Marshal(&bounded)
+	if err != nil {
+		return &bounded
+	}
+	encodedLen := len(emptyEncoded)
+	for _, contact := range grant.Contacts {
+		if len(bounded.Contacts) >= maxPipeContactStatusContacts {
+			break
+		}
+		encodedContact, marshalErr := json.Marshal(contact)
+		if marshalErr != nil {
+			continue
+		}
+		candidateLen := encodedLen + len(encodedContact)
+		if len(bounded.Contacts) != 0 {
+			candidateLen++ // comma between JSON array elements
+		}
+		if candidateLen <= maxPipeContactStatusBytes {
+			bounded.Contacts = append(bounded.Contacts, contact)
+			encodedLen = candidateLen
+		}
+	}
+	return &bounded
+}
+
+// handlePipeContactLookup resolves a bounded subset of the authenticated
+// peer's live shared-domain recipient projection. It deliberately rebuilds
+// authorization under the same leases as status and inbound delivery; this is
+// discovery/routing, not a global agent directory.
+func (m *Manager) handlePipeContactLookup(w http.ResponseWriter, r *http.Request) {
+	peer := peerFromCtx(r.Context())
+	if peer == nil || peer.Agreement == nil {
+		httpError(w, http.StatusForbidden, "unauthenticated")
+		return
+	}
+	var req PipeContactLookupRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxPipeContactLookupRequestBytes)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	req.Target = strings.TrimSpace(req.Target)
+	req.Name = strings.TrimSpace(req.Name)
+	if (req.Target == "") == (req.Name == "") || len(req.Target) > 512 || len(req.Name) > 512 {
+		httpError(w, http.StatusBadRequest, "provide exactly one valid contact selector")
+		return
+	}
+	if req.Limit <= 0 {
+		req.Limit = maxPipeContactLookupResults
+	}
+	if req.Limit > maxPipeContactLookupResults {
+		httpError(w, http.StatusBadRequest, "contact lookup limit is too large")
+		return
+	}
+
+	ss := m.syncStore()
+	if ss == nil || m.badger == nil {
+		httpError(w, http.StatusServiceUnavailable, "pipe contact lookup is unavailable")
+		return
+	}
+	policyUnlock := ss.LockSyncPolicyRead()
+	ownerUnlock := m.badger.LockDomainOwnershipRead()
+	contactUnlock := ss.LockAgentContactRead()
+	released := false
+	releaseSnapshot := func() {
+		if released {
+			return
+		}
+		released = true
+		contactUnlock()
+		ownerUnlock()
+		policyUnlock()
+	}
+	defer releaseSnapshot()
+	agreement, err := m.currentRequestAgreementBound(r.Context(), peer)
+	if err != nil {
+		releaseSnapshot()
+		httpError(w, http.StatusForbidden, "federation agreement is no longer active for this operator")
+		return
+	}
+	policy, err := m.getPeerRBACPolicyForAgreement(r.Context(), agreement)
+	if err != nil {
+		m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation pipe contact lookup policy failed")
+		releaseSnapshot()
+		httpError(w, http.StatusInternalServerError, "peer RBAC lookup failed")
+		return
+	}
+	if policy == nil || policy.PeerAgentID != peer.AgentID {
+		releaseSnapshot()
+		httpError(w, http.StatusForbidden, "requesting operator is not bound to this peer RBAC policy")
+		return
+	}
+	grant, total, err := m.buildPipeContactLookupGrant(r.Context(), peer, policy, req)
+	if err != nil {
+		m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation pipe contact lookup projection failed")
+		releaseSnapshot()
+		httpError(w, http.StatusInternalServerError, "pipe contact lookup failed")
+		return
+	}
+	response, err := boundedPipeContactLookupResponse(grant, total)
+	if err != nil {
+		releaseSnapshot()
+		httpError(w, http.StatusRequestEntityTooLarge, "contact lookup response is too large")
+		return
+	}
+	// Authorization is materialized above. Do not let a slow authenticated peer
+	// hold the consensus projection leases while it drains a response body.
+	releaseSnapshot()
+	writeJSON(w, http.StatusOK, response)
+}
+
+func filterPipeContactLookup(grant *PipeContactGrant, req PipeContactLookupRequest) (*PipeContactGrant, int) {
+	filtered := *grant
+	filtered.Contacts = make([]PipeContact, 0, min(req.Limit, len(grant.Contacts)))
+	exact := make([]PipeContact, 0)
+	partial := make([]PipeContact, 0)
+	for _, contact := range grant.Contacts {
+		if req.Target != "" {
+			if pipeContactMatchesTarget(contact, req.Target) {
+				exact = append(exact, contact)
+			}
+			continue
+		}
+		isExact, isPartial := pipeContactMatchesName(req.Name, contact)
+		if isExact {
+			exact = append(exact, contact)
+		} else if isPartial {
+			partial = append(partial, contact)
+		}
+	}
+	matches := exact
+	if len(matches) == 0 {
+		matches = partial
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if strings.EqualFold(matches[i].DisplayName, matches[j].DisplayName) {
+			return matches[i].AgentID < matches[j].AgentID
+		}
+		return strings.ToLower(matches[i].DisplayName) < strings.ToLower(matches[j].DisplayName)
+	})
+	total := len(matches)
+	filtered.Contacts = append(filtered.Contacts, matches[:min(req.Limit, total)]...)
+	return &filtered, total
+}
+
+// boundedPipeContactLookupResponse applies a byte cap after semantic matching.
+// A human-name match can contain a wide shared-domain basis even when it has
+// only twenty contacts. The total remains the full matched count, so clients
+// know that a re-query with a more exact selector may be needed.
+func boundedPipeContactLookupResponse(grant *PipeContactGrant, total int) (*PipeContactLookupResponse, error) {
+	if grant == nil || total < 0 || total < len(grant.Contacts) {
+		return nil, fmt.Errorf("invalid pipe contact lookup result")
+	}
+	bounded := *grant
+	bounded.Contacts = make([]PipeContact, 0, len(grant.Contacts))
+	for _, contact := range grant.Contacts {
+		candidate := bounded
+		candidate.Contacts = append(append([]PipeContact(nil), bounded.Contacts...), contact)
+		response := &PipeContactLookupResponse{
+			Grant:     &candidate,
+			Total:     total,
+			Truncated: total > len(candidate.Contacts),
+		}
+		encoded, err := json.Marshal(response)
+		if err != nil {
+			return nil, err
+		}
+		if len(encoded) <= maxPipeContactLookupBytes {
+			bounded.Contacts = candidate.Contacts
+		}
+	}
+	if total > 0 && len(bounded.Contacts) == 0 {
+		return nil, fmt.Errorf("one pipe contact exceeds the lookup response limit")
+	}
+	return &PipeContactLookupResponse{
+		Grant:     &bounded,
+		Total:     total,
+		Truncated: total > len(bounded.Contacts),
+	}, nil
+}
+
+func pipeContactMatchesTarget(contact PipeContact, target string) bool {
+	if agentID, chainID := splitPipeAddress(target); chainID != "" {
+		return contact.AgentID == agentID && contact.Address == contact.AgentID+"@"+chainID
+	}
+	if strings.HasPrefix(target, "#") {
+		return strings.EqualFold(contact.Handle, target)
+	}
+	return strings.EqualFold(contact.AgentID, target) || strings.EqualFold(contact.DisplayName, target)
+}
+
+func pipeContactMatchesName(query string, contact PipeContact) (exact bool, partial bool) {
+	for _, candidate := range []string{contact.DisplayName, contact.RegisteredName, contact.Provider} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if strings.EqualFold(candidate, query) {
+			return true, false
+		}
+	}
+	return false, false
 }
 
 // handleQuery serves a scoped read-only recall to an authenticated peer.

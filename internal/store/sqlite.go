@@ -725,6 +725,19 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	for _, m := range agentMigrations {
 		_, _ = s.writeExecContext(ctx, m) // Ignore "duplicate column" errors for idempotency
 	}
+	// Exact federated contact lookup must stay index-backed while federation
+	// authorization leases are held. These are deliberately separate expression
+	// indexes: an OR across name, registered name, and provider is queried as
+	// three small bounded lookups below, rather than as one broad roster scan.
+	for _, index := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_network_agents_contact_name ON network_agents(name COLLATE NOCASE, agent_id) WHERE status != 'removed'",
+		"CREATE INDEX IF NOT EXISTS idx_network_agents_contact_registered_name ON network_agents(registered_name COLLATE NOCASE, agent_id) WHERE status != 'removed'",
+		"CREATE INDEX IF NOT EXISTS idx_network_agents_contact_provider ON network_agents(provider COLLATE NOCASE, agent_id) WHERE status != 'removed'",
+	} {
+		if _, err := s.writeExecContext(ctx, index); err != nil {
+			return fmt.Errorf("create federated contact lookup index: %w", err)
+		}
+	}
 
 	// Migration: add pipeline_messages table.
 	s.migratePipeline(ctx)
@@ -3159,6 +3172,197 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 			a.RegisteredName = a.Name // backfill for pre-existing agents
 		}
 		agents = append(agents, a)
+	}
+	return agents, nil
+}
+
+// FindPipeContactLookupCandidates returns a deliberately small agent metadata
+// projection for federated exact-name discovery. It intentionally does not
+// offer substring matching: this runs while federation authorization leases
+// are held, so a leading-wildcard roster scan would let a peer delay revocation.
+// Each exact field query is backed by a dedicated NOCASE index and capped before
+// live Badger RBAC checks are performed. SQLite NOCASE folds ASCII only, so
+// non-ASCII names must be supplied with their registered code-point casing.
+func (s *SQLiteStore) FindPipeContactLookupCandidates(ctx context.Context, query string, limit int) ([]*AgentEntry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, nil
+	}
+	byID := make(map[string]*AgentEntry, limit)
+	for _, field := range []string{"name", "registered_name", "provider"} {
+		rows, err := s.conn.QueryContext(ctx, `
+			SELECT agent_id, name, COALESCE(registered_name,''), COALESCE(provider,''), status, removed_at
+			FROM network_agents
+			WHERE status != 'removed' AND `+field+` = ? COLLATE NOCASE
+			ORDER BY agent_id
+			LIMIT ?`, query, limit)
+		if err != nil {
+			return nil, fmt.Errorf("find pipe contact lookup candidates: %w", err)
+		}
+		agents, scanErr := scanPipeContactLookupAgents(rows)
+		closeErr := rows.Close()
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close pipe contact lookup candidates: %w", closeErr)
+		}
+		for _, agent := range agents {
+			if agent != nil {
+				byID[agent.AgentID] = agent
+			}
+		}
+	}
+	out := make([]*AgentEntry, 0, min(limit, len(byID)))
+	for _, agent := range byID {
+		out = append(out, agent)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left, right := pipeContactLookupName(out[i]), pipeContactLookupName(out[j])
+		if left == right {
+			return out[i].AgentID < out[j].AgentID
+		}
+		return left < right
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// FindAgentsByExactName is the REST/MCP-facing spelling of the same bounded,
+// index-backed projection used by federated contact discovery. Keeping one
+// implementation prevents a local agent lookup from quietly regressing to
+// ListAgents' roster-wide derived memory-count query.
+func (s *SQLiteStore) FindAgentsByExactName(ctx context.Context, query string, limit int) ([]*AgentEntry, error) {
+	return s.FindPipeContactLookupCandidates(ctx, query, limit)
+}
+
+func pipeContactLookupName(agent *AgentEntry) string {
+	if agent == nil {
+		return ""
+	}
+	if agent.Name != "" {
+		return strings.ToLower(agent.Name)
+	}
+	return strings.ToLower(agent.RegisteredName)
+}
+
+// FindPipeContactAgentsByIDPrefix resolves a friendly handle suffix without
+// loading the complete local agent roster. Callers must validate the hex prefix
+// and enforce a small limit before calling it.
+func (s *SQLiteStore) FindPipeContactAgentsByIDPrefix(ctx context.Context, prefix string, limit int) ([]*AgentEntry, error) {
+	if limit <= 0 || prefix == "" {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT agent_id, name, COALESCE(registered_name,''), COALESCE(provider,''), status, removed_at
+		FROM network_agents
+		WHERE status != 'removed' AND agent_id LIKE ? ESCAPE '\'
+		ORDER BY agent_id
+		LIMIT ?`, strings.ToLower(prefix)+"%", limit)
+	if err != nil {
+		return nil, fmt.Errorf("find pipe contact agents by ID prefix: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanPipeContactLookupAgents(rows)
+}
+
+// ListPipeContactStatusCandidates returns a deterministic, small legacy-status
+// candidate set. Federation adds effective owners separately, so this query
+// only needs active local agents and must never become a roster-wide metadata
+// load under the status authorization leases.
+func (s *SQLiteStore) ListPipeContactStatusCandidates(ctx context.Context, limit int) ([]*AgentEntry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT agent_id, name, COALESCE(registered_name,''), COALESCE(provider,''), status, removed_at
+		FROM network_agents
+		WHERE status='active' AND removed_at IS NULL
+		ORDER BY agent_id
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list pipe contact status candidates: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanPipeContactLookupAgents(rows)
+}
+
+// GetPipeContactAgents loads only the metadata needed for contact projection.
+// It deliberately avoids GetAgent's derived memory count and chunks requests so
+// a peer-RBAC policy with many distinct owners remains below SQLite's host
+// parameter ceiling while federation status holds its authorization snapshot.
+func (s *SQLiteStore) GetPipeContactAgents(ctx context.Context, agentIDs []string) ([]*AgentEntry, error) {
+	const maxPipeContactAgentsPerQuery = 512
+	if len(agentIDs) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(agentIDs))
+	selected := make([]string, 0, len(agentIDs))
+	for _, agentID := range agentIDs {
+		if agentID == "" {
+			continue
+		}
+		if _, duplicate := seen[agentID]; duplicate {
+			continue
+		}
+		seen[agentID] = struct{}{}
+		selected = append(selected, agentID)
+	}
+	out := make([]*AgentEntry, 0, len(selected))
+	for start := 0; start < len(selected); start += maxPipeContactAgentsPerQuery {
+		end := start + maxPipeContactAgentsPerQuery
+		if end > len(selected) {
+			end = len(selected)
+		}
+		batch := selected[start:end]
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, agentID := range batch {
+			placeholders[i] = "?"
+			args[i] = agentID
+		}
+		rows, err := s.conn.QueryContext(ctx, `
+			SELECT agent_id, name, COALESCE(registered_name,''), COALESCE(provider,''), status, removed_at
+			FROM network_agents
+			WHERE agent_id IN (`+strings.Join(placeholders, ",")+`)
+			ORDER BY agent_id`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("load pipe contact agents: %w", err)
+		}
+		agents, scanErr := scanPipeContactLookupAgents(rows)
+		closeErr := rows.Close()
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close pipe contact agents: %w", closeErr)
+		}
+		out = append(out, agents...)
+	}
+	return out, nil
+}
+
+func scanPipeContactLookupAgents(rows *sql.Rows) ([]*AgentEntry, error) {
+	agents := make([]*AgentEntry, 0)
+	for rows.Next() {
+		agent := &AgentEntry{}
+		var removedAt *string
+		if err := rows.Scan(&agent.AgentID, &agent.Name, &agent.RegisteredName, &agent.Provider, &agent.Status, &removedAt); err != nil {
+			return nil, fmt.Errorf("scan pipe contact lookup agent: %w", err)
+		}
+		agent.RemovedAt = parseTimePtr(removedAt)
+		if agent.RegisteredName == "" {
+			agent.RegisteredName = agent.Name
+		}
+		agents = append(agents, agent)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pipe contact lookup agents: %w", err)
 	}
 	return agents, nil
 }

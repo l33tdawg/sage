@@ -896,6 +896,33 @@ func TestListAgents(t *testing.T) {
 	assert.NotNil(t, removed.RemovedAt)
 }
 
+func TestFindPipeContactLookupCandidatesRequiresExactCaseInsensitiveName(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	exact := testAgent("agent-exact", "Innovium", "member")
+	exact.RegisteredName = "innovium-agent"
+	exact.Provider = "claude-code"
+	partial := testAgent("agent-partial", "Innovium Research", "member")
+	partial.RegisteredName = "research-worker"
+	partial.Provider = "other"
+	require.NoError(t, s.CreateAgent(ctx, exact))
+	require.NoError(t, s.CreateAgent(ctx, partial))
+
+	byName, err := s.FindPipeContactLookupCandidates(ctx, "iNnOvIuM", 64)
+	require.NoError(t, err)
+	require.Len(t, byName, 1)
+	assert.Equal(t, exact.AgentID, byName[0].AgentID)
+
+	byRegistered, err := s.FindPipeContactLookupCandidates(ctx, "INNOVIUM-AGENT", 64)
+	require.NoError(t, err)
+	require.Len(t, byRegistered, 1)
+	assert.Equal(t, exact.AgentID, byRegistered[0].AgentID)
+
+	partialOnly, err := s.FindPipeContactLookupCandidates(ctx, "nov", 64)
+	require.NoError(t, err)
+	assert.Empty(t, partialOnly, "leased federated discovery must not fall back to a roster substring scan")
+}
+
 func TestUpdateAgent(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

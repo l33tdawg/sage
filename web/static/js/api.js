@@ -883,8 +883,11 @@ export function fedPermissionsGet(chainId, live = true) {
 }
 export function fedPermissionsSet(chainId, permissions) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`, { permissions }); }
 export function fedPause(chainId, paused) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pause`, { paused }); }
-export function fedPipeContactsGet(chainId, live = true) {
-    const suffix = live ? '' : '?live=0';
+export function fedPipeContactsGet(chainId, live = true, agentId = '') {
+    const query = new URLSearchParams();
+    if (!live) query.set('live', '0');
+    if (agentId) query.set('agent_id', agentId);
+    const suffix = query.size ? `?${query.toString()}` : '';
     return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pipe-contacts${suffix}`);
 }
 export function fedPipeContactSet(chainId, agentId, contactId, accepting) {

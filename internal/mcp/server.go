@@ -157,14 +157,37 @@ func (s *Server) SetVersion(v string) { s.version = v }
 // SetProject sets the project name for per-project agent identity.
 func (s *Server) SetProject(name string) { s.project = name }
 
-// effectiveAgentID is the principal that will sign REST calls for this tool
-// invocation. HTTP bearer requests may carry a per-token identity; stdio and
-// legacy bearer paths fall back to the server/operator identity.
+// effectiveAgentID is the principal that will actually sign downstream REST
+// calls for this tool invocation. A bearer token's descriptive agent binding
+// is not authority unless it carries that agent's signing key; keyless legacy
+// tokens therefore resolve to the operator identity here.
 func (s *Server) effectiveAgentID(ctx context.Context) string {
-	if id := authmw.ContextAgentID(ctx); id != "" {
-		return id
+	if tokenKey := authmw.ContextMCPSigner(ctx); tokenKey != nil {
+		if pub, ok := tokenKey.Public().(ed25519.PublicKey); ok {
+			return hex.EncodeToString(pub)
+		}
 	}
 	return s.agentID
+}
+
+// requireBoundFederatedCaller prevents a legacy keyless bearer bound to a
+// restricted agent from using operator-signed federation discovery or pipe
+// delivery. Stdio/non-bearer callers retain the normal operator identity;
+// keyed bearer callers must bind the same public key they will sign with.
+func (s *Server) requireBoundFederatedCaller(ctx context.Context) error {
+	if authmw.ContextMCPTokenFingerprint(ctx) == "" {
+		return nil
+	}
+	declared := authmw.ContextAgentID(ctx)
+	signer := authmw.ContextMCPSigner(ctx)
+	if signer == nil {
+		return errors.New("legacy bearer tokens cannot use federated discovery or delivery; create a keyed token for this agent")
+	}
+	pub, ok := signer.Public().(ed25519.PublicKey)
+	if !ok || !strings.EqualFold(declared, hex.EncodeToString(pub)) {
+		return errors.New("bearer token signing identity does not match its agent binding")
+	}
+	return nil
 }
 
 // Run starts the stdio MCP server loop.

@@ -18,9 +18,13 @@ import (
 
 func TestEffectiveAgentIDUsesBearerPrincipal(t *testing.T) {
 	s, _ := testServer(t)
-	keyedID := strings.Repeat("b", 64)
-	ctx := authmw.WithAgentID(context.Background(), keyedID)
+	keyedPub, keyedKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	keyedID := hex.EncodeToString(keyedPub)
+	ctx := authmw.WithMCPSigner(authmw.WithAgentID(context.Background(), keyedID), keyedKey)
 	require.Equal(t, keyedID, s.effectiveAgentID(ctx))
+	legacy := authmw.WithAgentID(context.Background(), strings.Repeat("b", 64))
+	require.Equal(t, s.agentID, s.effectiveAgentID(legacy))
 	require.Equal(t, s.agentID, s.effectiveAgentID(context.Background()))
 }
 

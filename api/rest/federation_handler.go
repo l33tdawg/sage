@@ -480,19 +480,36 @@ type availableFederationSync struct {
 }
 
 type availableFederationConnection struct {
-	RemoteChainID      string                          `json:"remote_chain_id"`
-	NetworkName        string                          `json:"network_name,omitempty"`
-	Reachable          bool                            `json:"reachable"`
-	Capabilities       []string                        `json:"capabilities,omitempty"`
-	SharingPaused      bool                            `json:"sharing_paused,omitempty"`
-	RemotePermissions  []availableFederationPermission `json:"remote_permissions"`
-	SharedReadDomains  []string                        `json:"shared_read_domains"`
-	CopyOfferedDomains []string                        `json:"copy_offered_domains"`
-	RemoteAgents       []federation.PipeContact        `json:"remote_agents,omitempty"`
-	Sync               *availableFederationSync        `json:"sync,omitempty"`
+	RemoteChainID         string                          `json:"remote_chain_id"`
+	NetworkName           string                          `json:"network_name,omitempty"`
+	Reachable             bool                            `json:"reachable"`
+	Capabilities          []string                        `json:"capabilities,omitempty"`
+	SharingPaused         bool                            `json:"sharing_paused,omitempty"`
+	RemotePermissions     []availableFederationPermission `json:"remote_permissions"`
+	SharedReadDomains     []string                        `json:"shared_read_domains"`
+	CopyOfferedDomains    []string                        `json:"copy_offered_domains"`
+	RemoteAgents          []federation.PipeContact        `json:"remote_agents,omitempty"`
+	RemoteAgentsTruncated bool                            `json:"remote_agents_truncated,omitempty"`
+	Sync                  *availableFederationSync        `json:"sync,omitempty"`
 }
 
-const maxAgentFederationTargets = 64
+type federationPipeContactFinder interface {
+	FindRemotePipeContacts(ctx context.Context, remoteChainID, name string, limit int) (*federation.PipeContactLookupResponse, error)
+}
+
+type federationPipeContactStatusFinder interface {
+	FindRemotePipeContactsWithStatus(ctx context.Context, remoteChainID string, status *federation.StatusResponse, name string, limit int) (*federation.PipeContactLookupResponse, error)
+}
+
+type federationPipeLookupStatusFinder interface {
+	PeerStatusForPipeLookup(ctx context.Context, remoteChainID string) (*federation.StatusResponse, error)
+}
+
+const (
+	maxAgentFederationTargets    = 64
+	maxFederationAvailablePeers  = 64
+	maxConcurrentFedAvailability = 8
+)
 
 func statusAllowsFederatedRead(status *federation.StatusResponse, domain string) bool {
 	if status == nil || domain == "" {
@@ -612,6 +629,20 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		writeProblem(w, http.StatusForbidden, "Access denied", "A registered agent identity is required for federation discovery.")
 		return
 	}
+	agentName := strings.TrimSpace(r.URL.Query().Get("agent_name"))
+	if len(agentName) > 512 {
+		writeProblem(w, http.StatusBadRequest, "Invalid agent name", "agent_name must be at most 512 bytes")
+		return
+	}
+	agentLimit := 20
+	if raw := r.URL.Query().Get("agent_limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 20 {
+			writeProblem(w, http.StatusBadRequest, "Invalid agent limit", "agent_limit must be between 1 and 20")
+			return
+		}
+		agentLimit = parsed
+	}
 	records, err := s.badgerStore.ListCrossFed()
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to discover federation connections.")
@@ -625,86 +656,70 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	sort.Strings(active)
+	if len(active) > maxFederationAvailablePeers {
+		// This ordinary-agent discovery view is intentionally bounded. It is not
+		// a topology API, and a large agreement table must not create one goroutine
+		// or retained peer response per row on a name lookup.
+		active = active[:maxFederationAvailablePeers]
+	}
 
+	contactFinder, hasContactFinder := s.federation.(federationPipeContactFinder)
+	statusContactFinder, hasStatusContactFinder := s.federation.(federationPipeContactStatusFinder)
+	lookupStatusFinder, hasLookupStatusFinder := s.federation.(federationPipeLookupStatusFinder)
 	type peerResult struct {
-		chain  string
-		status *federation.StatusResponse
-		err    error
+		connection *availableFederationConnection
 	}
 	results := make([]peerResult, len(active))
 	ctx, cancel := context.WithTimeout(r.Context(), fedRecallTimeout())
 	defer cancel()
-	const maxConcurrentDiscovery = 8
-	sem := make(chan struct{}, maxConcurrentDiscovery)
+	jobs := make(chan int)
 	var wg sync.WaitGroup
-	for i, chainID := range active {
+	workers := min(maxConcurrentFedAvailability, len(active))
+	for range workers {
 		wg.Add(1)
-		go func(index int, chain string) {
+		go func() {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				results[index] = peerResult{chain: chain, err: ctx.Err()}
-				return
+			for index := range jobs {
+				chain := active[index]
+				var status *federation.StatusResponse
+				var statusErr error
+				if agentName != "" && hasLookupStatusFinder {
+					status, statusErr = lookupStatusFinder.PeerStatusForPipeLookup(ctx, chain)
+				} else {
+					status, statusErr = s.federation.PeerStatus(ctx, chain)
+				}
+				if statusErr != nil || status == nil {
+					continue
+				}
+				var lookup *federation.PipeContactLookupResponse
+				var lookupErr error
+				// Run the optional targeted lookup in the same bounded worker as
+				// status. A slow earlier peer cannot starve later jobs, and the
+				// raw result is filtered before this worker retains anything.
+				if agentName != "" {
+					if hasStatusContactFinder {
+						lookup, lookupErr = statusContactFinder.FindRemotePipeContactsWithStatus(ctx, chain, status, agentName, agentLimit)
+					} else if hasContactFinder {
+						lookup, lookupErr = contactFinder.FindRemotePipeContacts(ctx, chain, agentName, agentLimit)
+					}
+				}
+				if connection, ok := s.availableFederationConnectionForCaller(ctx, callerID, chain, status, agentName, lookup, lookupErr, hasContactFinder || hasStatusContactFinder); ok {
+					results[index].connection = connection
+				}
 			}
-			status, statusErr := s.federation.PeerStatus(ctx, chain)
-			results[index] = peerResult{chain: chain, status: status, err: statusErr}
-		}(i, chainID)
+		}()
 	}
+	for i := range active {
+		jobs <- i
+	}
+	close(jobs)
 	wg.Wait()
 
 	connections := make([]availableFederationConnection, 0, len(results))
 	for _, peer := range results {
-		// An unavailable peer has no current authenticated grant to filter.
-		// Omit it for ordinary callers instead of leaking raw topology.
-		if peer.err != nil || peer.status == nil {
-			continue
+		if peer.connection != nil {
+			connections = append(connections, *peer.connection)
 		}
-		connection := availableFederationConnection{
-			RemoteChainID: peer.chain,
-			NetworkName:   peer.status.NetworkName,
-			Reachable:     true,
-			Capabilities:  append([]string(nil), peer.status.Capabilities...),
-		}
-		permissions := make([]availableFederationPermission, 0)
-		if peer.status.PeerRBACGrant != nil {
-			connection.SharingPaused = peer.status.PeerRBACGrant.Paused
-			for _, grant := range peer.status.PeerRBACGrant.Domains {
-				for _, visible := range s.federationVisibleRemoteScopes(r.Context(), callerID, grant.Domain) {
-					read := !connection.SharingPaused && (grant.Read || grant.Copy)
-					copyAllowed := !connection.SharingPaused && grant.Copy
-					if !read && !copyAllowed {
-						continue
-					}
-					permissions = append(permissions, availableFederationPermission{Domain: visible, Read: read, Copy: copyAllowed})
-				}
-			}
-		} else if peer.status.SharingGrant != nil {
-			for _, remoteScope := range peer.status.SharingGrant.AllowedDomains {
-				for _, visible := range s.federationVisibleRemoteScopes(r.Context(), callerID, remoteScope) {
-					permissions = append(permissions, availableFederationPermission{Domain: visible, Read: true})
-				}
-			}
-		}
-		permissions = normalizeAvailablePermissions(permissions)
-		if len(permissions) == 0 {
-			continue
-		}
-		connection.RemotePermissions = permissions
-		for _, permission := range permissions {
-			if permission.Read {
-				connection.SharedReadDomains = append(connection.SharedReadDomains, permission.Domain)
-			}
-			if permission.Copy {
-				connection.CopyOfferedDomains = append(connection.CopyOfferedDomains, permission.Domain)
-			}
-		}
-		if peer.status.PipeContacts != nil && !peer.status.PipeContacts.Paused {
-			connection.RemoteAgents = filterAvailablePipeContacts(peer.status.PipeContacts.Contacts, connection.SharedReadDomains)
-		}
-		connection.Sync = s.availableFederationSync(r.Context(), peer.chain, connection.SharedReadDomains)
-		connections = append(connections, connection)
 	}
 	sort.Slice(connections, func(i, j int) bool {
 		if connections[i].NetworkName != connections[j].NetworkName {
@@ -719,20 +734,113 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// availableFederationConnectionForCaller turns one authenticated peer response
+// into the small, caller-scoped discovery projection. It intentionally does
+// the filtering while the bounded worker still owns the raw peer response, so
+// a large or malicious contact payload never escapes into the results slice.
+func (s *Server) availableFederationConnectionForCaller(
+	ctx context.Context,
+	callerID, remoteChainID string,
+	status *federation.StatusResponse,
+	agentName string,
+	lookup *federation.PipeContactLookupResponse,
+	lookupErr error,
+	hasTargetedLookup bool,
+) (*availableFederationConnection, bool) {
+	if status == nil {
+		return nil, false
+	}
+	connection := &availableFederationConnection{
+		RemoteChainID: remoteChainID,
+		NetworkName:   status.NetworkName,
+		Reachable:     true,
+		Capabilities:  append([]string(nil), status.Capabilities...),
+	}
+	permissions := make([]availableFederationPermission, 0)
+	if status.PeerRBACGrant != nil {
+		connection.SharingPaused = status.PeerRBACGrant.Paused
+		for _, grant := range status.PeerRBACGrant.Domains {
+			for _, visible := range s.federationVisibleRemoteScopes(ctx, callerID, grant.Domain) {
+				read := !connection.SharingPaused && (grant.Read || grant.Copy)
+				copyAllowed := !connection.SharingPaused && grant.Copy
+				if !read && !copyAllowed {
+					continue
+				}
+				permissions = append(permissions, availableFederationPermission{Domain: visible, Read: read, Copy: copyAllowed})
+			}
+		}
+	} else if status.SharingGrant != nil {
+		for _, remoteScope := range status.SharingGrant.AllowedDomains {
+			for _, visible := range s.federationVisibleRemoteScopes(ctx, callerID, remoteScope) {
+				permissions = append(permissions, availableFederationPermission{Domain: visible, Read: true})
+			}
+		}
+	}
+	connection.RemotePermissions = normalizeAvailablePermissions(permissions)
+	if len(connection.RemotePermissions) == 0 {
+		return nil, false
+	}
+	for _, permission := range connection.RemotePermissions {
+		if permission.Read {
+			connection.SharedReadDomains = append(connection.SharedReadDomains, permission.Domain)
+		}
+		if permission.Copy {
+			connection.CopyOfferedDomains = append(connection.CopyOfferedDomains, permission.Domain)
+		}
+	}
+
+	contacts := status.PipeContacts
+	if agentName != "" {
+		// A named discovery request must never fall back to the full legacy
+		// status roster. Either use the bounded targeted result, or reveal no
+		// recipients for this peer.
+		contacts = nil
+		if hasTargetedLookup && lookupErr == nil && lookup != nil &&
+			federation.ValidateRemotePipeContactGrant(remoteChainID, lookup.Grant) == nil {
+			contacts = lookup.Grant
+		}
+	}
+	if contacts != nil && !contacts.Paused &&
+		federation.ValidateRemotePipeContactGrant(remoteChainID, contacts) == nil {
+		connection.RemoteAgents = filterAvailablePipeContacts(contacts.Contacts, connection.SharedReadDomains)
+	}
+	if agentName != "" {
+		// sage_find_agent only needs a peer label and its bounded matching
+		// contacts. Do not retain or serialize the potentially wide policy,
+		// capability, subtree, or sync metadata for every peer in a named
+		// fan-out; the ordinary no-name federation view remains unchanged. Do
+		// not copy lookup.Truncated: it would reveal hidden remote name matches
+		// beyond the caller's returned contact projection. MCP reports only its
+		// own local cache/output truncation.
+		connection.Capabilities = nil
+		connection.SharingPaused = false
+		connection.RemotePermissions = nil
+		connection.SharedReadDomains = nil
+		connection.CopyOfferedDomains = nil
+		connection.Sync = nil
+		return connection, true
+	}
+	connection.Sync = s.availableFederationSync(ctx, remoteChainID, connection.SharedReadDomains)
+	return connection, true
+}
+
 // handleFederatedContactAuthorize is a local-only, caller-scoped policy check
 // for a previously discovered contact projection. It deliberately does not
 // read a peer or disclose contacts: MCP uses it to revalidate its short-lived
 // in-memory cache after a local RBAC change.
 func (s *Server) handleFederatedContactAuthorize(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Domains []string `json:"domains"`
+		Contacts []struct {
+			RemoteChainID string `json:"remote_chain_id"`
+			Domain        string `json:"domain"`
+		} `json:"contacts"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
-	if len(req.Domains) > maxFederatedContactAuthorizationDomains {
-		writeProblem(w, http.StatusBadRequest, "Too many domains", "at most 512 domains may be authorized per request")
+	if len(req.Contacts) > maxFederatedContactAuthorizationDomains {
+		writeProblem(w, http.StatusBadRequest, "Too many contacts", "at most 512 contacts may be authorized per request")
 		return
 	}
 	callerID := middleware.ContextAgentID(r.Context())
@@ -740,24 +848,39 @@ func (s *Server) handleFederatedContactAuthorize(w http.ResponseWriter, r *http.
 		writeProblem(w, http.StatusForbidden, "Access denied", "A registered agent identity is required for federation contact authorization.")
 		return
 	}
-	seen := make(map[string]struct{}, len(req.Domains))
-	allowed := make([]string, 0, len(req.Domains))
-	for _, domain := range req.Domains {
-		domain = strings.TrimSpace(domain)
-		if domain == "" || len(domain) > maxFederatedContactAuthorizationBytes {
-			writeProblem(w, http.StatusBadRequest, "Invalid domain", "each domain must be between 1 and 256 bytes")
+	seen := make(map[string]struct{}, len(req.Contacts))
+	allowed := make([]map[string]string, 0, len(req.Contacts))
+	now := time.Now().Unix()
+	for _, contact := range req.Contacts {
+		chainID := strings.TrimSpace(contact.RemoteChainID)
+		domain := strings.TrimSpace(contact.Domain)
+		if federation.ValidateChainID(chainID) != nil || domain == "" || len(domain) > maxFederatedContactAuthorizationBytes {
+			writeProblem(w, http.StatusBadRequest, "Invalid contact", "each contact needs a valid chain id and a domain between 1 and 256 bytes")
 			return
 		}
-		if _, duplicate := seen[domain]; duplicate {
+		key := chainID + "\x00" + domain
+		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
-		seen[domain] = struct{}{}
+		seen[key] = struct{}{}
+		if s.badgerStore == nil {
+			continue
+		}
+		_, _, _, expiresAt, _, _, status, agreementErr := s.badgerStore.GetCrossFed(chainID)
+		if agreementErr != nil || status != "active" || (expiresAt != 0 && now >= expiresAt) {
+			continue
+		}
 		if len(s.federationVisibleRemoteScopes(r.Context(), callerID, domain)) > 0 {
-			allowed = append(allowed, domain)
+			allowed = append(allowed, map[string]string{"remote_chain_id": chainID, "domain": domain})
 		}
 	}
-	sort.Strings(allowed)
-	writeJSON(w, http.StatusOK, map[string]any{"allowed_domains": allowed})
+	sort.Slice(allowed, func(i, j int) bool {
+		if allowed[i]["remote_chain_id"] == allowed[j]["remote_chain_id"] {
+			return allowed[i]["domain"] < allowed[j]["domain"]
+		}
+		return allowed[i]["remote_chain_id"] < allowed[j]["remote_chain_id"]
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"allowed_contacts": allowed})
 }
 
 func normalizeAvailablePermissions(in []availableFederationPermission) []availableFederationPermission {
@@ -835,11 +958,17 @@ func filterAvailablePipeContacts(contacts []federation.PipeContact, allowed []st
 		// surface, not ordinary-agent discovery metadata.
 		filtered.ContactID = ""
 		filtered.Domains = nil
+		// Discovery needs one caller-authorized visibility basis, not a dump of
+		// every remote domain this recipient can read. One basis keeps the
+		// per-name cache bounded without changing send authorization: sage_pipe
+		// resolves the exact recipient live and rechecks its full domain basis.
+		visible := false
 		for _, domain := range contact.Domains {
 			for _, scope := range allowed {
 				switch {
 				case federation.DomainAllowed([]string{scope}, domain.Domain):
 					filtered.Domains = append(filtered.Domains, domain)
+					visible = true
 				case federation.DomainAllowed([]string{domain.Domain}, scope):
 					// The contact was advertised for a broader parent than this
 					// caller may read. Return only the authorized intersection;
@@ -849,12 +978,16 @@ func filterAvailablePipeContacts(contacts []federation.PipeContact, allowed []st
 					narrowed.OwningDomain = ""
 					narrowed.OwnerHeight = 0
 					filtered.Domains = append(filtered.Domains, narrowed)
+					visible = true
 				default:
 					continue
 				}
-				if len(filtered.Domains) > 0 {
+				if visible {
 					break
 				}
+			}
+			if visible {
+				break
 			}
 		}
 		if len(filtered.Domains) > 0 {

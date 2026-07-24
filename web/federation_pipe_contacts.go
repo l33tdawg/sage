@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -15,6 +16,10 @@ import (
 type federationPipeContactDriver interface {
 	LocalPipeContacts(context.Context, string) (*federation.PipeContactGrant, error)
 	SetPipeContactAcceptance(context.Context, string, string, string, bool) (*federation.PipeContactGrant, error)
+}
+
+type federationPipeContactTargetDriver interface {
+	LocalPipeContactsForAgent(context.Context, string, string) (*federation.PipeContactGrant, error)
 }
 
 // handleFedPipeContactsGet keeps CEREBRUM administrative: it returns the
@@ -39,9 +44,23 @@ func (h *DashboardHandler) handleFedPipeContactsGet(w http.ResponseWriter, r *ht
 		return
 	}
 
-	local, err := driver.LocalPipeContacts(r.Context(), chain)
+	requestedAgentID := strings.TrimSpace(r.URL.Query().Get("agent_id"))
+	var (
+		local *federation.PipeContactGrant
+		err   error
+	)
+	if requestedAgentID != "" {
+		targetDriver, supportsTarget := h.Federation.(federationPipeContactTargetDriver)
+		if !supportsTarget {
+			fedWriteErr(w, http.StatusNotImplemented, "Exact local agent contact lookup is unavailable on this node.")
+			return
+		}
+		local, err = targetDriver.LocalPipeContactsForAgent(r.Context(), chain, requestedAgentID)
+	} else {
+		local, err = driver.LocalPipeContacts(r.Context(), chain)
+	}
 	if err != nil {
-		fedWriteErr(w, http.StatusConflict, "Local agent contacts changed. Refresh the connection and try again.")
+		fedWriteErr(w, http.StatusConflict, "Local agent contacts changed or the requested agent is unavailable. Refresh the connection and try again.")
 		return
 	}
 	remote := (*federation.PipeContactGrant)(nil)

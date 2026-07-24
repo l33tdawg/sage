@@ -356,6 +356,14 @@ func TestFederatedPipelineExactTargetQueuesFromAuthenticatedCacheWhileOffline(t 
 	activatePipePeer(t, source, destination, "host")
 	activatePipePeer(t, destination, source, "guest")
 	fixture := configurePipeFaultFixture(t, source, destination)
+	// Targeted lookup is live-only. A separate authenticated legacy status
+	// snapshot provides the exact-address offline routing hint.
+	_, err := source.mgr.PeerStatus(context.Background(), destination.chainID)
+	require.NoError(t, err)
+	// A live exact miss must not overwrite the known recipient's encrypted
+	// offline hint for this peer.
+	_, err = source.mgr.ResolveRemotePipeTarget(context.Background(), strings.Repeat("f", 64)+"@"+destination.chainID)
+	require.ErrorIs(t, err, ErrRemotePipeTargetNotFound)
 
 	// The online authenticated resolution above populated the encrypted cache.
 	// Stop the peer and rebuild this manager to prove the hint survives process

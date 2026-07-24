@@ -391,6 +391,7 @@ func (s *Server) setupRouter() chi.Router {
 	// Authenticated API routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.Ed25519AuthMiddleware)
+		r.Get("/v1/agents/lookup", s.handleFindRegisteredAgents)
 
 		// Memory endpoints
 		r.Post("/v1/memory/submit", s.handleSubmitMemory)

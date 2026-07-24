@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestFederatedPipeContactAcceptanceBindsPolicyAndSurvivesPauseOnly(t *testing.T) {
@@ -70,6 +73,38 @@ func TestFederatedPipeContactAcceptanceBindsPolicyAndSurvivesPauseOnly(t *testin
 	if err := s.SetBoundFederatedPipeContactAcceptance(ctx, *stored, localAgentID, contactID, true); !errors.Is(err, ErrPeerRBACBindingMismatch) {
 		t.Fatalf("stale policy setter error=%v, want binding mismatch", err)
 	}
+}
+
+func TestFederatedPipeContactSelectedAcceptancesChunkBeyondSQLiteVariableLimit(t *testing.T) {
+	ctx := context.Background()
+	s := newSyncTestStore(t)
+	epoch, caPin := testPeerRBACBinding()
+	policy := PeerRBACPolicy{
+		RemoteChainID: "chain-peer", PeerAgentID: testPeerAgentID(t),
+		PolicyEpoch: epoch, RemoteCAPin: caPin, PolicyVersion: CurrentPeerRBACPolicyVersion,
+		Domains: []PeerRBACDomainPermission{{Domain: "research", Read: true}},
+	}
+	require.NoError(t, s.PrepareSyncControl(ctx, testLegacyPeerRBACControl(policy)))
+	require.NoError(t, s.ActivateSyncControl(ctx, policy.RemoteChainID, policy.PolicyEpoch))
+	stored, err := s.ReplaceBoundPeerRBACPolicy(ctx, policy)
+	require.NoError(t, err)
+
+	selected := make([]string, 0, MaxPeerRBACPolicyDomains+1)
+	for i := 1; i <= MaxPeerRBACPolicyDomains+1; i++ {
+		agentID := fmt.Sprintf("%064x", i)
+		selected = append(selected, agentID)
+		_, err := s.conn.ExecContext(ctx, `
+			INSERT INTO fed_pipe_contact_acceptance
+				(remote_chain_id, peer_agent_id, policy_epoch, remote_ca_pin,
+				 policy_revision, local_agent_id, contact_id)
+			VALUES(?,?,?,?,?,?,?)`, stored.RemoteChainID, stored.PeerAgentID, stored.PolicyEpoch,
+			stored.RemoteCAPin, stored.Revision, agentID, strings.Repeat("ab", 32))
+		require.NoError(t, err)
+	}
+
+	acceptances, err := s.GetFederatedPipeContactAcceptancesForAgents(ctx, *stored, selected)
+	require.NoError(t, err)
+	require.Len(t, acceptances, len(selected))
 }
 
 func TestFederatedPipeContactAcceptancePurgedWithPeerState(t *testing.T) {

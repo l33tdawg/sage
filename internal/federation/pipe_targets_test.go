@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -94,6 +95,22 @@ func TestSplitPipeAddressRejectsMalformedQualifiedTargets(t *testing.T) {
 	}
 }
 
+func TestRemotePipeContactGrantRejectsOversizedLegacyStatusSnapshot(t *testing.T) {
+	grant := remotePipeCacheTestGrant("ab", "cd")
+	grant.Contacts = make([]PipeContact, 0, 1025)
+	for i := 0; i < 1025; i++ {
+		agentID := fmt.Sprintf("%064x", i+1)
+		grant.Contacts = append(grant.Contacts, PipeContact{
+			AgentID: agentID, ContactID: strings.Repeat("ef", 32),
+			Address: agentID + "@chain-cache-peer", Handle: "#cache/" + agentID[:8],
+			Available: true, Accepting: true,
+			Domains: []PipeContactDomain{{Domain: "research"}},
+		})
+	}
+	require.Error(t, validateRemotePipeContactGrant("chain-cache-peer", grant),
+		"the v1 status route must remain compatible with v11.13.0 peers")
+}
+
 func TestDelayedOldStatusRefreshCannotClobberNewerPipeContactPolicyBinding(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -153,4 +170,35 @@ func TestVaultLockedPipeContactRefreshInvalidatesExactOldCache(t *testing.T) {
 	loaded, err := ss.GetFederatedPipeRemoteContactSnapshot(ctx, *control, pipeRoutingAgreementID(agreement))
 	require.NoError(t, err)
 	require.Nil(t, loaded, "a failed encrypted refresh must invalidate the exact old cache")
+}
+
+func TestLookupCapableLegacyStatusRefreshesExactCache(t *testing.T) {
+	ctx := context.Background()
+	m, ss, agreement, control := newRemotePipeCacheTestBinding(t)
+	exact := remotePipeCacheTestGrant("71", "81")
+	putRemotePipeCacheTestGrant(t, ss, agreement, control, exact)
+	updated := remotePipeCacheTestGrant("91", "81")
+	status := &StatusResponse{
+		Capabilities: []string{CapabilityFederatedPipeline, CapabilityFederatedPipelineContactLookup},
+		PipeContacts: updated,
+	}
+	require.NoError(t, m.refreshRemotePipeContactCache(ctx, agreement, control, status))
+	loaded, err := ss.GetFederatedPipeRemoteContactSnapshot(ctx, *control, pipeRoutingAgreementID(agreement))
+	require.NoError(t, err)
+	require.NotNil(t, loaded, "a full legacy status snapshot remains a valid exact offline route hint")
+	var cached PipeContactGrant
+	require.NoError(t, json.Unmarshal(loaded.Snapshot, &cached))
+	require.Equal(t, updated.Revision, cached.Revision)
+}
+
+func TestCompactLookupStatusPreservesLegacyExactCache(t *testing.T) {
+	ctx := context.Background()
+	m, ss, agreement, control := newRemotePipeCacheTestBinding(t)
+	exact := remotePipeCacheTestGrant("71", "81")
+	putRemotePipeCacheTestGrant(t, ss, agreement, control, exact)
+	status := &StatusResponse{Capabilities: []string{CapabilityFederatedPipeline, CapabilityFederatedPipelineContactLookup}}
+	require.NoError(t, m.refreshRemotePipeContactCache(ctx, agreement, control, status))
+	loaded, err := ss.GetFederatedPipeRemoteContactSnapshot(ctx, *control, pipeRoutingAgreementID(agreement))
+	require.NoError(t, err)
+	require.NotNil(t, loaded, "a compact lookup preflight must not erase a separately authenticated legacy route hint")
 }

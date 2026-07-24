@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"syscall"
 	"testing"
 )
@@ -40,5 +41,19 @@ func TestP2POnlyRoutingFailureIsOfflineWithoutDirectFallback(t *testing.T) {
 	}
 	if !errors.Is(err, ErrPeerOffline) {
 		t.Fatal("P2P-only routing failure lost its offline sentinel")
+	}
+}
+
+func TestPeerResponseLimitKeepsTargetedLookupBounded(t *testing.T) {
+	if got := peerResponseLimit("/fed/v1/pipe/contacts/lookup", nil); got != int64(maxPipeContactLookupBytes) {
+		t.Fatalf("lookup response limit=%d, want %d", got, maxPipeContactLookupBytes)
+	}
+	if got := peerResponseLimit("/fed/v1/status", nil); got != int64(maxFedResponseBytes) {
+		t.Fatalf("ordinary response limit=%d, want %d", got, maxFedResponseBytes)
+	}
+	compactHeaders := make(http.Header)
+	compactHeaders.Set(HeaderClientCapabilities, CapabilityFederatedPipelineContactLookup)
+	if got := peerResponseLimit("/fed/v1/status", compactHeaders); got != int64(maxPipeContactStatusBytes) {
+		t.Fatalf("compact status response limit=%d, want %d", got, maxPipeContactStatusBytes)
 	}
 }

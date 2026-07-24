@@ -54,6 +54,26 @@ func TestSetSharedDomainWaitsForOwnershipReaders(t *testing.T) {
 	require.Equal(t, []byte{1}, marker)
 }
 
+func TestAccessGrantRevokeWaitsForOwnershipReaders(t *testing.T) {
+	base, err := NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, base.CloseBadger()) })
+	require.NoError(t, base.SetAccessGrant("research", "reader", 1, 0, "owner"))
+
+	unlock := base.LockDomainOwnershipRead()
+	revoked := make(chan error, 1)
+	go func() { revoked <- base.DeleteAccessGrant("research", "reader") }()
+	select {
+	case revokeErr := <-revoked:
+		t.Fatalf("access revoke bypassed an active federated authorization reader: %v", revokeErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	require.NoError(t, <-revoked)
+	_, _, _, err = base.GetAccessGrant("research", "reader")
+	require.ErrorIs(t, err, ErrAccessGrantNotFound)
+}
+
 func TestConsensusTransactionPreWriteSentinelDoesNotPoison(t *testing.T) {
 	base, err := NewBadgerStore(t.TempDir())
 	require.NoError(t, err)

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -38,8 +39,17 @@ type parallelStatusFederation struct {
 	statuses map[string]*federation.StatusResponse
 	delay    time.Duration
 	mu       sync.Mutex
+	calls    int
 	current  int
 	max      int
+}
+
+type parallelLookupFederation struct {
+	*parallelStatusFederation
+	lookups          map[string]*federation.PipeContactLookupResponse
+	delays           map[string]time.Duration
+	statusAwareCalls int
+	lookupMu         sync.Mutex
 }
 
 type provenanceMemoryStore struct {
@@ -56,6 +66,7 @@ func (s *provenanceMemoryStore) GetSyncOriginByLocalMemoryID(_ context.Context, 
 
 func (f *parallelStatusFederation) PeerStatus(ctx context.Context, chainID string) (*federation.StatusResponse, error) {
 	f.mu.Lock()
+	f.calls++
 	f.current++
 	if f.current > f.max {
 		f.max = f.current
@@ -76,6 +87,31 @@ func (f *parallelStatusFederation) PeerStatus(ctx context.Context, chainID strin
 		return nil, errors.New("unreachable")
 	}
 	return status, nil
+}
+
+func (f *parallelLookupFederation) FindRemotePipeContacts(ctx context.Context, chainID, _ string, _ int) (*federation.PipeContactLookupResponse, error) {
+	if delay := f.delays[chainID]; delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lookup := f.lookups[chainID]
+	if lookup == nil {
+		return nil, errors.New("lookup unavailable")
+	}
+	return lookup, nil
+}
+
+func (f *parallelLookupFederation) FindRemotePipeContactsWithStatus(ctx context.Context, chainID string, _ *federation.StatusResponse, name string, limit int) (*federation.PipeContactLookupResponse, error) {
+	f.lookupMu.Lock()
+	f.statusAwareCalls++
+	f.lookupMu.Unlock()
+	return f.FindRemotePipeContacts(ctx, chainID, name, limit)
 }
 
 func (f *fakeFederation) LockAgreementMutation() func() {
@@ -455,6 +491,108 @@ func TestFederationAvailableIsCallerFilteredSubtreeAndParallel(t *testing.T) {
 	assert.Less(t, elapsed, 190*time.Millisecond, "discovery should be one bounded parallel window")
 }
 
+func TestFederationAvailableBoundsNamedDiscoveryWorkersAndPeers(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	statuses := make(map[string]*federation.StatusResponse, maxFederationAvailablePeers+1)
+	for i := 0; i < maxFederationAvailablePeers+1; i++ {
+		chain := fmt.Sprintf("chain-%03d", i)
+		require.NoError(t, badger.SetCrossFed(chain, "https://redacted.invalid", []byte(chain), 2, 0, []string{"*"}, nil, "active"))
+		statuses[chain] = &federation.StatusResponse{
+			ChainID: chain,
+			PeerRBACGrant: &federation.PeerRBACGrant{Domains: []federation.PeerRBACDomainGrant{{
+				Domain: "research", Read: true,
+			}}},
+		}
+	}
+	fed := &parallelStatusFederation{
+		fakeFederation: &fakeFederation{},
+		statuses:       statuses,
+		delay:          5 * time.Millisecond,
+	}
+	srv.SetFederation(fed)
+	req, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available?agent_name=innovium", nil)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+	require.NoError(t, badger.SetAgentPermission(callerID, 1, `[{"domain":"research","read":true}]`, "*", "", ""))
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	fed.mu.Lock()
+	calls, maxWorkers := fed.calls, fed.max
+	fed.mu.Unlock()
+	assert.Equal(t, maxFederationAvailablePeers, calls, "ordinary discovery must not probe an unbounded agreement table")
+	assert.LessOrEqual(t, maxWorkers, maxConcurrentFedAvailability, "status and lookup work share one bounded worker pool")
+}
+
+func TestFederationAvailableRunsTargetedLookupsInParallel(t *testing.T) {
+	t.Setenv("SAGE_FED_RECALL_TIMEOUT_MS", "120")
+	srv, _, _ := newTestServer(t, "")
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	for _, chain := range []string{"chain-a", "chain-b"} {
+		require.NoError(t, badger.SetCrossFed(chain, "https://redacted.invalid", []byte(chain), 2, 0, []string{"*"}, nil, "active"))
+	}
+	status := func(name string) *federation.StatusResponse {
+		return &federation.StatusResponse{
+			ChainID: name, NetworkName: name,
+			PeerRBACGrant: &federation.PeerRBACGrant{Domains: []federation.PeerRBACDomainGrant{{Domain: "research", Read: true}}},
+		}
+	}
+	agentID := strings.Repeat("b", 64)
+	lookup := &federation.PipeContactLookupResponse{Grant: &federation.PipeContactGrant{
+		Version: federation.PipeContactVersion, AgreementID: strings.Repeat("a", 64), Revision: strings.Repeat("c", 64),
+		Contacts: []federation.PipeContact{{
+			AgentID: agentID, ContactID: strings.Repeat("d", 64), Address: agentID + "@chain-b", Handle: "#remote/bbbbbbbb",
+			DisplayName: "Innovium", Available: true, Accepting: true,
+			Domains: []federation.PipeContactDomain{{Domain: "research"}},
+		}},
+	}, Total: 1}
+	fed := &parallelLookupFederation{
+		parallelStatusFederation: &parallelStatusFederation{
+			fakeFederation: &fakeFederation{},
+			statuses:       map[string]*federation.StatusResponse{"chain-a": status("A"), "chain-b": status("B")},
+		},
+		lookups: map[string]*federation.PipeContactLookupResponse{"chain-b": lookup},
+		delays:  map[string]time.Duration{"chain-a": time.Second},
+	}
+	srv.SetFederation(fed)
+
+	req, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available?agent_name=innovium", nil)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+	require.NoError(t, badger.SetAgentPermission(callerID, 1, `[{"domain":"research","read":true}]`, "*", "", ""))
+	start := time.Now()
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Less(t, time.Since(start), 400*time.Millisecond)
+
+	var response struct {
+		Connections []availableFederationConnection `json:"connections"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	var chainB *availableFederationConnection
+	for i := range response.Connections {
+		if response.Connections[i].RemoteChainID == "chain-b" {
+			chainB = &response.Connections[i]
+			break
+		}
+	}
+	require.NotNil(t, chainB, "the fast peer remains visible while another lookup times out")
+	require.Len(t, chainB.RemoteAgents, 1)
+	assert.False(t, chainB.RemoteAgentsTruncated, "hidden remote matches must not be inferred from a truncation bit")
+	assert.Empty(t, chainB.Capabilities, "named recipient discovery must not retain general peer metadata")
+	assert.Empty(t, chainB.RemotePermissions)
+	assert.Empty(t, chainB.SharedReadDomains)
+	assert.Nil(t, chainB.Sync)
+	assert.Equal(t, 2, fed.statusAwareCalls, "named discovery must reuse its authenticated status instead of probing each peer twice")
+}
+
 func TestFederationCallerACLMatchesLocalDomainPolicy(t *testing.T) {
 	srv, _, _ := newTestServer(t, "")
 	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
@@ -491,11 +629,12 @@ func TestFederatedContactAuthorizationRechecksCurrentLocalACL(t *testing.T) {
 	srv.badgerStore = badger
 	const callerID = "caller-agent"
 	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 2))
+	require.NoError(t, badger.SetCrossFed("chain-innovium", "https://redacted.invalid", []byte("peer-pin"), 4, 0, []string{"*"}, nil, "active"))
 	require.NoError(t, badger.SetAgentPermission(callerID, 2,
 		`[{"domain":"research","read":true}]`, "*", "", ""))
 
 	request := func() *httptest.ResponseRecorder {
-		body := []byte(`{"domains":["research","finance"]}`)
+		body := []byte(`{"contacts":[{"remote_chain_id":"chain-innovium","domain":"research"},{"remote_chain_id":"chain-innovium","domain":"finance"}]}`)
 		req := httptest.NewRequest(http.MethodPost, "/v1/federation/contacts/authorize", bytes.NewReader(body))
 		req = req.WithContext(middleware.WithAgentID(req.Context(), callerID))
 		rr := httptest.NewRecorder()
@@ -505,17 +644,31 @@ func TestFederatedContactAuthorizationRechecksCurrentLocalACL(t *testing.T) {
 	first := request()
 	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
 	var response struct {
-		AllowedDomains []string `json:"allowed_domains"`
+		AllowedContacts []struct {
+			RemoteChainID string `json:"remote_chain_id"`
+			Domain        string `json:"domain"`
+		} `json:"allowed_contacts"`
 	}
 	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &response))
-	assert.Equal(t, []string{"research"}, response.AllowedDomains)
+	assert.Equal(t, []struct {
+		RemoteChainID string `json:"remote_chain_id"`
+		Domain        string `json:"domain"`
+	}{{RemoteChainID: "chain-innovium", Domain: "research"}}, response.AllowedContacts)
 
 	require.NoError(t, badger.SetAgentPermission(callerID, 2,
 		`[{"domain":"engineering","read":true}]`, "*", "", ""))
 	second := request()
 	require.Equal(t, http.StatusOK, second.Code, second.Body.String())
 	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &response))
-	assert.Empty(t, response.AllowedDomains, "a local policy revoke must take effect without probing a peer")
+	assert.Empty(t, response.AllowedContacts, "a local policy revoke must take effect without probing a peer")
+
+	require.NoError(t, badger.SetAgentPermission(callerID, 2,
+		`[{"domain":"research","read":true}]`, "*", "", ""))
+	require.NoError(t, badger.UpdateCrossFedStatus("chain-innovium", "revoked"))
+	third := request()
+	require.Equal(t, http.StatusOK, third.Code, third.Body.String())
+	require.NoError(t, json.Unmarshal(third.Body.Bytes(), &response))
+	assert.Empty(t, response.AllowedContacts, "a revoked chain must not remain visible through an MCP cache hit")
 }
 
 func TestFederationAvailableMetadataIsNarrowedToCallerSubtree(t *testing.T) {
@@ -532,6 +685,39 @@ func TestFederationAvailableMetadataIsNarrowedToCallerSubtree(t *testing.T) {
 	assert.Equal(t, "sage-autoresearch.benchmark", got[0].Domains[0].Domain)
 	assert.Empty(t, got[0].Domains[0].OwningDomain)
 	assert.Zero(t, got[0].Domains[0].OwnerHeight)
+}
+
+func TestFederationAvailableDropsMalformedRemotePipeContacts(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	require.NoError(t, badger.SetCrossFed("chain-peer", "https://redacted.invalid", []byte("peer-pin"), 4, 0, []string{"*"}, nil, "active"))
+	fed := &fakeFederation{peerStatus: &federation.StatusResponse{
+		ChainID:       "chain-peer",
+		PeerRBACGrant: &federation.PeerRBACGrant{Domains: []federation.PeerRBACDomainGrant{{Domain: "research", Read: true}}},
+		PipeContacts: &federation.PipeContactGrant{
+			Version: federation.PipeContactVersion, AgreementID: strings.Repeat("a", 64), Revision: strings.Repeat("b", 64),
+			Contacts: []federation.PipeContact{{
+				AgentID: "not-a-canonical-agent", Address: "forged@chain-peer", ContactID: strings.Repeat("c", 64),
+				Available: true, Accepting: true, Domains: []federation.PipeContactDomain{{Domain: "research"}},
+			}},
+		},
+	}}
+	srv.SetFederation(fed)
+	req, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available", nil)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+	require.NoError(t, badger.SetAgentPermission(callerID, 1, `[{"domain":"research","read":true}]`, "*", "", ""))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var response struct {
+		Connections []availableFederationConnection `json:"connections"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Len(t, response.Connections, 1)
+	assert.Empty(t, response.Connections[0].RemoteAgents, "malformed peer metadata must not become a contactable discovery result")
 }
 
 func TestRecallWithoutOptInSkipsFederation(t *testing.T) {

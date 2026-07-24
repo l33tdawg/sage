@@ -774,6 +774,137 @@ func TestImportedPipeActionHoldsOwnerLeaseThroughSideEffect(t *testing.T) {
 	require.Error(t, m.AuthorizeImportedPipe(ctx, msg), "the retired owner must fail the next authorization")
 }
 
+func TestImportedPipeActionHoldsAccessGrantLeaseThroughSideEffect(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	peerOperator := newPeerOperatorID(t)
+	configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerOperator, "host", nil, 4)
+	owner, reader := newPeerOperatorID(t), newPeerOperatorID(t)
+	for _, agentID := range []string{owner, reader} {
+		require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{AgentID: agentID, Name: "agent", Status: "active"}))
+	}
+	require.NoError(t, bs.RegisterDomain("research", owner, "", 10))
+	require.NoError(t, bs.SetAccessGrant("research", reader, 1, 0, owner))
+	_, err := m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{{Domain: "research", Read: true}})
+	require.NoError(t, err)
+	grant, err := m.LocalPipeContacts(ctx, "chain-peer")
+	require.NoError(t, err)
+	var contact PipeContact
+	for _, candidate := range grant.Contacts {
+		if candidate.AgentID == reader {
+			contact = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, contact.ContactID)
+	_, err = m.SetPipeContactAcceptance(ctx, "chain-peer", reader, contact.ContactID, true)
+	require.NoError(t, err)
+	grant, err = m.LocalPipeContacts(ctx, "chain-peer")
+	require.NoError(t, err)
+	for _, candidate := range grant.Contacts {
+		if candidate.AgentID == reader {
+			contact = candidate
+			break
+		}
+	}
+	msg := &store.PipelineMessage{
+		PipeID: "pipe-grant-lease", FromAgent: newPeerOperatorID(t), ToAgent: reader,
+		SourceChainID: "chain-peer", SourcePipeID: "pipe-event-grant-lease",
+		FederationPolicyEpoch: "epoch-chain-peer", FederationAgreementID: grant.AgreementID,
+		FederationContactID:       contact.ContactID,
+		FederationContactRevision: pipeContactAuthorizationRevision(grant, &contact),
+		Payload:                   "work", Status: "completed", CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	actionStarted := make(chan struct{})
+	releaseAction := make(chan struct{})
+	authorized := make(chan error, 1)
+	go func() {
+		authorized <- m.WithAuthorizedImportedPipe(ctx, msg, func() error {
+			close(actionStarted)
+			<-releaseAction
+			return nil
+		})
+	}()
+	<-actionStarted
+	revoked := make(chan error, 1)
+	go func() { revoked <- bs.DeleteAccessGrant("research", reader) }()
+	select {
+	case revokeErr := <-revoked:
+		t.Fatalf("access revoke completed during an authorized federated side effect: %v", revokeErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseAction)
+	require.NoError(t, <-authorized)
+	require.NoError(t, <-revoked)
+	require.Error(t, m.AuthorizeImportedPipe(ctx, msg), "a revoked recipient must fail the next authorization")
+}
+
+func TestImportedPipeActionHoldsOrgMembershipLeaseThroughSideEffect(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	peerOperator := newPeerOperatorID(t)
+	configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerOperator, "host", nil, 4)
+	owner, reader := newPeerOperatorID(t), newPeerOperatorID(t)
+	for _, agentID := range []string{owner, reader} {
+		require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{AgentID: agentID, Name: "agent", Status: "active"}))
+	}
+	require.NoError(t, bs.RegisterOrg("research-org", "Research", "", owner, 1))
+	require.NoError(t, bs.AddOrgMember("research-org", owner, 4, "admin", 1))
+	require.NoError(t, bs.AddOrgMember("research-org", reader, 1, "member", 1))
+	require.NoError(t, bs.RegisterDomain("research", owner, "", 10))
+	_, err := m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{{Domain: "research", Read: true}})
+	require.NoError(t, err)
+	grant, err := m.LocalPipeContacts(ctx, "chain-peer")
+	require.NoError(t, err)
+	var contact PipeContact
+	for _, candidate := range grant.Contacts {
+		if candidate.AgentID == reader {
+			contact = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, contact.ContactID, "same-org read access must create a recipient")
+	_, err = m.SetPipeContactAcceptance(ctx, "chain-peer", reader, contact.ContactID, true)
+	require.NoError(t, err)
+	grant, err = m.LocalPipeContacts(ctx, "chain-peer")
+	require.NoError(t, err)
+	for _, candidate := range grant.Contacts {
+		if candidate.AgentID == reader {
+			contact = candidate
+			break
+		}
+	}
+	msg := &store.PipelineMessage{
+		PipeID: "pipe-org-lease", FromAgent: newPeerOperatorID(t), ToAgent: reader,
+		SourceChainID: "chain-peer", SourcePipeID: "pipe-event-org-lease",
+		FederationPolicyEpoch: "epoch-chain-peer", FederationAgreementID: grant.AgreementID,
+		FederationContactID: contact.ContactID, FederationContactRevision: pipeContactAuthorizationRevision(grant, &contact),
+		Payload: "work", Status: "completed", CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}
+	actionStarted := make(chan struct{})
+	releaseAction := make(chan struct{})
+	authorized := make(chan error, 1)
+	go func() {
+		authorized <- m.WithAuthorizedImportedPipe(ctx, msg, func() error {
+			close(actionStarted)
+			<-releaseAction
+			return nil
+		})
+	}()
+	<-actionStarted
+	revoked := make(chan error, 1)
+	go func() { revoked <- bs.RemoveOrgMember("research-org", reader) }()
+	select {
+	case revokeErr := <-revoked:
+		t.Fatalf("org-membership revoke completed during an authorized federated side effect: %v", revokeErr)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseAction)
+	require.NoError(t, <-authorized)
+	require.NoError(t, <-revoked)
+	require.Error(t, m.AuthorizeImportedPipe(ctx, msg), "a removed same-org recipient must fail the next authorization")
+}
+
 func TestImportedPipeActionHoldsAgentAvailabilityLeaseThroughSideEffect(t *testing.T) {
 	ctx := context.Background()
 	m, ss, bs := newDrainTestManager(t)

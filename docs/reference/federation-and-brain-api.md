@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.13.0 code (2026-07-24). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.13.1 code (2026-07-24). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
@@ -106,7 +106,7 @@ two-party enrollment attestation. The peer router is built in
 
 | Group | Routes | Middleware | Why |
 |---|---|---|---|
-| Established peers | `status`, `query`, reserved `write`, `receipt`, `connection/revoke-notice`, `p2p/routes`, `sync/*`, `pipe/event` | `peerAuth` (`internal/federation/server.go:74-220`) | Requires an ACTIVE cross_fed agreement; reserved Write returns `501` |
+| Established peers | `status`, `query`, reserved `write`, `receipt`, `connection/revoke-notice`, `p2p/routes`, `sync/*`, `pipe/event`, `pipe/contacts/lookup` | `peerAuth` (`internal/federation/server.go:74-220`) | Requires an ACTIVE cross_fed agreement; reserved Write returns `501` |
 | Pre-agreement JOIN | `join/ca`, `join/request`, `join/status`, `join/confirm`, `join/abort` | `joinAuth` (`internal/federation/join_routes.go`) | No agreement exists yet during a join |
 
 ### `peerAuth` - the established-peer authenticator (`internal/federation/server.go:74-220`)
@@ -128,6 +128,7 @@ Every established-peer request, including `query`, `write`, and `sync`, is authe
 | `X-Timestamp` | unix epoch seconds |
 | `X-Nonce` | hex nonce, 1-64 bytes (required, not optional here) |
 | `X-Sig-Version` | `2` (chain-qualified) or `3` (adds rotating per-agreement TOTP factor) |
+| `X-Sage-Capabilities` | optional comma-separated client features; `federated-pipeline-contact-lookup-v1` asks status for compact policy/capability preflight without a legacy contact roster |
 
 **Signature version gate** (`server.go:156-194`): fail-closed and driven by the agreement's persisted `seed_established` flag + the in-memory seed cache - never by running a KDF. If a seed is established and unlocked, `v3` is required (verified against every known seed epoch via `verifyV3AnyEpoch`); established-but-locked returns `503 federation locked - unlock to resume`; no seed established accepts `v2`.
 
@@ -143,9 +144,9 @@ Authenticated reachability / identity and permission preflight (`handleStatus`,
 |---|---|---|
 | `chain_id` | string | the serving node's own chain id |
 | `time` | int64 | serving node's unix time |
-| `capabilities` | []string | optional features. A SQLite-backed v11.10 node advertises `sync` and `federated-pipeline-v1`; it never advertises reserved `write-v1` (`internal/federation/server.go:414-427`). |
+| `capabilities` | []string | optional features. A SQLite-backed v11.13.1 node advertises `sync`, `federated-pipeline-v1`, and `federated-pipeline-contact-lookup-v1`; it never advertises reserved `write-v1`. |
 | `peer_rbac_grant` | object, optional | the serving node's current `{policy_version, paused, domains:[{domain,read,write,copy}]}` snapshot, disclosed only to the exact bound peer; present with zero rows means deny-all. While paused, current peers see `paused:true` and an empty domain list; the empty list also keeps older peers fail-closed. The versioned `write` member is always false in v11.9 (`internal/federation/peer_rbac.go:313-330`). |
-| `pipe_contacts` | object, optional | Finite peer-scoped projection of domain owners and **active local agents with current level-1 Read access** for shared Read/Copy domains: exact `agreement_id`, content-addressed `revision`, pause state, and contacts with exact `agent@chain`, friendly handle, source domains, availability, and default-off `accepting`. A level-2 write grant also qualifies because it includes Read. An inactive owner may appear as unavailable diagnostic metadata but is never routable. Ownerless/open-shared domains expose no guessed contact. The exact frozen peer alone receives this snapshot (`internal/federation/pipe_contacts.go:33-248`). |
+| `pipe_contacts` | object, optional | Compatible v1 peer-scoped projection of domain owners and **active local agents with current level-1 Read access** for shared Read/Copy domains. Without the advisory `X-Sage-Capabilities: federated-pipeline-contact-lookup-v1` request header it is a deterministic valid subset: all effective owners plus a stable first 128 active-agent candidates, bounded again to 1,024 contacts and 1 MiB. This keeps old consumers safe without a roster-wide RBAC scan. A lookup-capable requester receives the policy/capability preflight without this roster (and locally caps that compact response at 1 MiB), then uses the bounded live lookup route below. A v11.13.0 peer ignores that advisory header; if its historic full status exceeds the compact cap, the requester retries its normal legacy status once through a single-worker compatibility lane and filters it immediately. |
 | `sharing_grant` | object, optional | legacy compatibility envelope (`allowed_domains`, `max_clearance`) |
 
 ### `POST /fed/v1/pipe/event`
@@ -164,8 +165,27 @@ reroute a friendly alias, relabel another source chain's proof, extend its TTL,
 or substitute the agent (`api/rest/pipe_handler.go:132-321`,
 `internal/federation/pipe_transport.go:72-169`, `:371-463`).
 
+### `POST /fed/v1/pipe/contacts/lookup`
+
+Authenticated, peer-scoped bounded recipient discovery and exact route
+resolution. The body supplies exactly one of `name` (ASCII case-insensitive
+exact match across display, registered, and provider names; non-ASCII names use
+their registered casing) or `target`
+(canonical address, handle, exact agent ID, or exact display name), plus an
+optional `limit` (default 20, maximum 20). A v11.13.1 requester advertises the
+lookup capability on the preceding status preflight, receives no status roster,
+and obtains this live, bounded result instead. The response carries at most 20
+contacts plus `total` and `truncated`; targeted results are live-only and never
+replace a legacy status routing hint. The handler narrows to a fixed 64-agent
+local name candidate budget before re-deriving live policy, access, and
+agent-contact state; it does not expose an enumerable remote agent directory or
+turn a broad name into a roster-wide authorization scan. Substring discovery is
+deliberately unavailable on this leased protocol path; callers must provide a
+known agent name, registered name, or provider name.
+
 Admission then re-derives the recipient's current shared-domain RBAC access and
-exact agreement/policy/contact revision under policy, ownership, and
+exact agreement/policy/contact revision under the policy, ownership/direct-grant,
+organization membership/clearance, federation-state, department-membership, and
 agent-contact read leases. It requires the receiver's per-contact work-request
 switch to be on. Imported work gets a fresh local pipe ID and appears through ordinary
 `sage_turn`/`sage_inbox`; only the stable proof-derived event ID crosses the
@@ -397,8 +417,8 @@ caller-filtered.
 | `GET /v1/federation/cross` | `handleCrossFedList` (`federation_handler.go:266-297`) | Exact node operator | List on-chain agreements (reads chain state directly; works without the transport wired). |
 | `POST /v1/federation/cross/{chain_id}/revoke` | `handleCrossFedRevoke` (`federation_handler.go:229-318`) | Exact node operator + on-chain authz | Best-effort notify the exact active peer, then broadcast local tx-34 and purge the connection generation. |
 | `GET /v1/federation/cross/{chain_id}/status` | `handleCrossFedPeerStatus` (`federation_handler.go:299-333`) | Exact node operator | Live reachability preflight against the peer's `/fed/v1/status`. |
-| `GET /v1/federation/available` | `handleFederationAvailable` | Registered Ed25519 caller | Concurrently probe active peers and return only the remote read/copy subtrees, contacts, and saved-copy summary intersecting this caller's local ACL. Never returns endpoints, CA pins, agreement generations, secrets, or mutation controls. |
-| `POST /v1/federation/contacts/authorize` | `handleFederatedContactAuthorize` | Registered Ed25519 caller | Local-only reauthorization of a supplied, previously visible set of contact domains. Returns only the supplied domains still readable by this caller; it neither probes a peer nor discloses contacts. |
+| `GET /v1/federation/available` | `handleFederationAvailable` | Registered Ed25519 caller | Probe at most 64 active peers with at most eight concurrent workers and return only the remote read/copy subtrees, contacts, and saved-copy summary intersecting this caller's local ACL. Optional `agent_name` and `agent_limit` (default 20, 1–20) use compact status preflight plus a bounded remote contact lookup; that named form returns only the peer label and matching contacts, not general policy, capabilities, subtree, or sync metadata. Never returns endpoints, CA pins, agreement generations, secrets, or mutation controls. |
+| `POST /v1/federation/contacts/authorize` | `handleFederatedContactAuthorize` | Registered Ed25519 caller | Local-only reauthorization of supplied chain/domain contact pairs. Returns only input pairs whose agreement remains active/unexpired and whose domain is still readable by this caller; it neither probes a peer nor discloses contacts. |
 | `POST /v1/federation/cross/{chain_id}/write` | `handleCrossFedWrite` (`api/rest/federation_write_handler.go:11-25`) | Ed25519 + exact node operator | Reserved compatibility surface. After operator and chain-id validation it returns `501` before parsing an inner credential or dialing a peer. |
 | `GET/PUT /v1/federation/cross/{chain_id}/sync` | `handleSyncDomainsGet/Set` (`api/rest/federation_handler.go:342-576`, `656-746`) | Ed25519 + exact node operator | Read or replace local v3 Publish/Subscribe lanes; true legacy links retain their `domains` contract. |
 
@@ -439,12 +459,14 @@ covers a remote child, while a remote parent is narrowed to an explicitly
 allowed local child. Copy status exposes only authorized subscribed domains,
 saved-copy counts, and reconcile health.
 
-`POST /v1/federation/contacts/authorize` accepts `{"domains":["example.scope"]}`
-and returns `{"allowed_domains":["example.scope"]}` for the subset still
-readable by the signed caller. It accepts at most 512 unique, non-empty domains
-of at most 256 bytes. This is deliberately a local policy check for a
-short-lived MCP discovery cache, not a federation directory or a peer-status
-probe; a local revoke is therefore effective on the next cache hit.
+`POST /v1/federation/contacts/authorize` accepts
+`{"contacts":[{"remote_chain_id":"chain-a","domain":"example.scope"}]}`
+and returns the subset as `allowed_contacts`. It accepts at most 512 unique
+chain/domain pairs, each domain at most 256 bytes, and requires the referenced
+agreement still be active and unexpired as well as readable by the signed
+caller. This is deliberately a local policy check for a short-lived MCP
+discovery cache, not a federation directory or a peer-status probe; a local
+revoke is therefore effective on the next cache hit.
 
 Federated recall remains an exact-domain opt-in at the REST layer. Operators
 and admins may delegate broadly; an ordinary registered caller must hold local

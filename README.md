@@ -51,6 +51,33 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.13.1
+
+**This corrective release completes shared-domain federated recipient
+discovery at scale.** v11.13.1 keeps a deterministic, valid v1 status subset
+compatible with v11.13.0 (at most 1,024 contacts and 1 MiB), then resolves a
+requested human name or exact agent address through a new authenticated,
+RBAC-filtered lookup route.
+So a shared domain can have more recipients without turning the whole snapshot
+or a later cache entry into a failure.
+
+- **Revocations linearize with delivery.** Direct grants, organization
+  membership/clearance, federation status, and department membership changes
+  wait for an in-flight authorized inbox admission, claim, completion, or
+  bounded result delivery; the next operation rebuilds the contact and rejects
+  the old route.
+- **Fast, caller-safe cache.** Repeated lookup of the same name is cached for
+  one minute per signing caller. Each result retains one caller-authorized
+  domain basis and is rechecked locally on every hit. Keyless legacy bearer
+  tokens cannot use federated discovery or delivery as the node operator.
+- **No change to consent or scope.** Contacts remain domain-scoped,
+  caller-authorized, and default-off until the recipient enables that exact
+  contact. This is still not a global directory.
+
+This release changes no SAGE consensus rule, AppHash input, transaction type,
+key encoding, fork target, or application version. App-v20 and the v11.9
+rollout boundary are unchanged; existing chains upgrade in place. SDK 11.13.1.
+
 ## What's New in v11.13.0
 
 **A shared domain can now route work to every active agent that holds current
@@ -637,7 +664,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.13.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.13.1`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:

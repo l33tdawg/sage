@@ -28,6 +28,10 @@ const (
 	HeaderTimestamp  = "X-Timestamp"
 	HeaderNonce      = "X-Nonce"
 	HeaderSigVersion = "X-Sig-Version"
+	// HeaderClientCapabilities is an advisory, authenticated-peer feature
+	// preference. It never grants access; it lets a new peer request a compact
+	// status response before making a bounded targeted lookup.
+	HeaderClientCapabilities = "X-Sage-Capabilities"
 
 	// SigVersion2 is the chain-qualified signature scheme (auth.SignRequestV2).
 	SigVersion2 = "2"
@@ -193,9 +197,30 @@ type PeerRBACDomainGrant struct {
 	Copy   bool   `json:"copy"`
 }
 
-const PipeContactVersion = 1
+const (
+	PipeContactVersion = 1
+	// maxPipeContactStatusContacts is the largest v1 contact snapshot we put
+	// on the long-lived status route. v11.13.0 validates this same v1 envelope,
+	// so increasing it would make a newer peer advertise an unusable snapshot
+	// to an already released peer. Larger projections use the additive,
+	// authenticated lookup route below instead.
+	maxPipeContactStatusContacts = 1024
+	// Keep enough room below the federated client's 16 MiB response ceiling for
+	// the rest of StatusResponse. A small contact count can still be large when
+	// every recipient has a wide shared-domain basis.
+	maxPipeContactStatusBytes = 1 << 20
+	// The lookup route has its own response cap so a small result count cannot
+	// still produce a response too large for a federation client to consume.
+	maxPipeContactLookupBytes   = 4 << 20
+	maxPipeContactLookupResults = 20
+)
 
 const CapabilityFederatedPipeline = "federated-pipeline-v1"
+
+// CapabilityFederatedPipelineContactLookup advertises the v11.13 targeted
+// contact route. It lets a peer resolve one address or search a human name
+// without transferring an unbounded roster in /fed/v1/status.
+const CapabilityFederatedPipelineContactLookup = "federated-pipeline-contact-lookup-v1"
 
 // PipeContactGrant is the serving node's peer-scoped agent-address snapshot.
 // A routable contact is an active local agent that is either the effective
@@ -211,6 +236,25 @@ type PipeContactGrant struct {
 	Revision    string        `json:"revision"`
 	Paused      bool          `json:"paused"`
 	Contacts    []PipeContact `json:"contacts"`
+}
+
+// PipeContactLookupRequest is an authenticated, peer-scoped contact query.
+// Target is used by the delivery resolver (normally a canonical
+// agent_id@chain_id address); Name is used by caller-authorized discovery.
+// Exactly one selector is required.
+type PipeContactLookupRequest struct {
+	Target string `json:"target,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Limit  int    `json:"limit,omitempty"`
+}
+
+// PipeContactLookupResponse is intentionally small even when the peer has a
+// very large shared-domain recipient projection. Grant retains the normal v1
+// contact binding, but contains only the bounded matched contacts.
+type PipeContactLookupResponse struct {
+	Grant     *PipeContactGrant `json:"grant"`
+	Total     int               `json:"total"`
+	Truncated bool              `json:"truncated,omitempty"`
 }
 
 // PipeContact is one local agent associated with a shared domain. It is

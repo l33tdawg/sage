@@ -249,6 +249,10 @@ type Manager struct {
 	// calls: each blocks up to the commit timeout, so an unbounded push flood
 	// would otherwise pin a goroutine per push. A small pool caps the hold.
 	broadcastSem chan struct{}
+	// legacyPipeStatusFallbackSem serializes the one compatibility path where a
+	// v11.13.0 peer ignores the compact named-lookup status preference and sends
+	// its historical full contact snapshot.
+	legacyPipeStatusFallbackSem chan struct{}
 
 	// syncPushFn is the outbox drainer's delivery seam: nil in production
 	// (the drainer calls m.SyncPush, the real mTLS client), non-nil only in
@@ -542,26 +546,27 @@ func (m *Manager) JoinStore() *JoinStore { return m.joins }
 func NewManager(cfg Config) *Manager {
 	pub, _ := cfg.AgentKey.Public().(ed25519.PublicKey)
 	m := &Manager{
-		localChainID:       cfg.LocalChainID,
-		networkName:        cfg.NetworkName,
-		certsDir:           cfg.CertsDir,
-		cometRPC:           cfg.CometRPC,
-		agentKey:           cfg.AgentKey,
-		agentPub:           pub,
-		badger:             cfg.Badger,
-		memStore:           cfg.MemStore,
-		postV20ForNextTx:   cfg.PostV20ForNextTx,
-		postV8ForAccess:    cfg.PostV8ForAccess,
-		logger:             cfg.Logger.With().Str("component", "federation").Logger(),
-		seenSigs:           make(map[string]map[string]int64),
-		caCache:            make(map[string]*x509.Certificate),
-		broadcastSem:       make(chan struct{}, maxConcurrentReceiptBroadcasts),
-		seedCache:          make(map[string][][]byte),
-		joins:              NewJoinStore(),
-		guestDrafts:        make(map[string]*guestDraft),
-		routeStatus:        make(map[string]RouteDiagnostics),
-		routeRefreshActive: make(map[string]bool),
-		routeRefreshLast:   make(map[string]time.Time),
+		localChainID:                cfg.LocalChainID,
+		networkName:                 cfg.NetworkName,
+		certsDir:                    cfg.CertsDir,
+		cometRPC:                    cfg.CometRPC,
+		agentKey:                    cfg.AgentKey,
+		agentPub:                    pub,
+		badger:                      cfg.Badger,
+		memStore:                    cfg.MemStore,
+		postV20ForNextTx:            cfg.PostV20ForNextTx,
+		postV8ForAccess:             cfg.PostV8ForAccess,
+		logger:                      cfg.Logger.With().Str("component", "federation").Logger(),
+		seenSigs:                    make(map[string]map[string]int64),
+		caCache:                     make(map[string]*x509.Certificate),
+		broadcastSem:                make(chan struct{}, maxConcurrentReceiptBroadcasts),
+		legacyPipeStatusFallbackSem: make(chan struct{}, maxConcurrentLegacyPipeStatusFallbacks),
+		seedCache:                   make(map[string][][]byte),
+		joins:                       NewJoinStore(),
+		guestDrafts:                 make(map[string]*guestDraft),
+		routeStatus:                 make(map[string]RouteDiagnostics),
+		routeRefreshActive:          make(map[string]bool),
+		routeRefreshLast:            make(map[string]time.Time),
 	}
 	m.transportDisabled.Store(cfg.Disabled)
 	// Production governance proof is read from the durable consensus state. Tests

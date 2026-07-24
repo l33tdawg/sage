@@ -23,10 +23,21 @@ type pipeContactContractDriver struct {
 	setErr      error
 	setCalls    int
 	statusCalls int
+	targetCalls int
 }
 
 func (d *pipeContactContractDriver) LocalPipeContacts(context.Context, string) (*federation.PipeContactGrant, error) {
 	return d.local, nil
+}
+
+func (d *pipeContactContractDriver) LocalPipeContactsForAgent(_ context.Context, _ string, agentID string) (*federation.PipeContactGrant, error) {
+	d.targetCalls++
+	for _, contact := range d.local.Contacts {
+		if contact.AgentID == agentID {
+			return &federation.PipeContactGrant{Version: d.local.Version, Revision: d.local.Revision, Contacts: []federation.PipeContact{contact}}, nil
+		}
+	}
+	return &federation.PipeContactGrant{Version: d.local.Version, Revision: d.local.Revision, Contacts: []federation.PipeContact{}}, nil
 }
 
 func (d *pipeContactContractDriver) SetPipeContactAcceptance(_ context.Context, _ string, agentID, contactID string, accepting bool) (*federation.PipeContactGrant, error) {
@@ -97,6 +108,15 @@ func TestFederatedPipeContactDashboardReadAndMutation(t *testing.T) {
 	h.handleFedPipeContactsGet(localOnlyRR, localOnlyReq)
 	require.Equal(t, http.StatusOK, localOnlyRR.Code, localOnlyRR.Body.String())
 	require.Equal(t, 1, driver.statusCalls, "local-only dashboard paint must not dial the peer")
+
+	targetReq := withFederationChain(httptest.NewRequest(http.MethodGet,
+		"http://localhost/v1/dashboard/federation/connections/chain-peer/pipe-contacts?live=0&agent_id="+agentID, nil), "chain-peer")
+	targetReq.RemoteAddr = "127.0.0.1:4242"
+	targetReq.Header.Set("Sec-Fetch-Site", "same-origin")
+	targetRR := httptest.NewRecorder()
+	h.handleFedPipeContactsGet(targetRR, targetReq)
+	require.Equal(t, http.StatusOK, targetRR.Code, targetRR.Body.String())
+	require.Equal(t, 1, driver.targetCalls, "a recipient outside the default sample is resolved by exact agent ID")
 	var localOnlyBody struct {
 		Local       *federation.PipeContactGrant `json:"local_contacts"`
 		RemoteKnown bool                         `json:"remote_known"`

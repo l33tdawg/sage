@@ -51,11 +51,12 @@ const maxScopedAgentProofPrunePerClaim = 8
 type BadgerStore struct {
 	db *badger.DB
 
-	// domainOwnershipGate linearizes the consensus publication of domain-owner
-	// changes with bounded federation operations that authorize one exact owner.
-	// Transaction-scoped clones share this pointer with the process-wide store;
-	// otherwise a staged TransferDomain could publish while a foreign result is
-	// already crossing the network under the old owner projection.
+	// domainOwnershipGate (historical name) linearizes publication of every
+	// HasAccessMultiOrg input — ownership, direct grants, org membership and
+	// clearance, federations, and departments — with a bounded federated action
+	// authorized from that projection. Transaction-scoped clones share it with
+	// the process-wide store so a revocation cannot publish while a foreign
+	// event is crossing the network under the old access decision.
 	domainOwnershipGate    *sync.RWMutex
 	domainOwnershipMutated bool
 
@@ -192,10 +193,11 @@ func (s *BadgerStore) BeginConsensusTransaction(mutationHook func(int)) *BadgerS
 	}
 }
 
-// LockDomainOwnershipRead holds the currently published owner projection
-// stable through one bounded external side effect. Direct owner writes take
-// the write side; app-v20 scoped transactions take it only when publishing the
-// transaction, so uncommitted consensus state is never exposed.
+// LockDomainOwnershipRead (historical name) holds the currently published
+// HasAccessMultiOrg projection stable through one bounded external side
+// effect. Direct access-affecting writes take the write side; app-v20 scoped
+// transactions take it only when publishing, so uncommitted consensus state
+// is never exposed.
 func (s *BadgerStore) LockDomainOwnershipRead() func() {
 	if s == nil || s.domainOwnershipGate == nil {
 		return func() {}
@@ -1934,12 +1936,14 @@ func decodeString(buf []byte, offset int) (string, int, error) {
 // SetAccessGrant stores an access grant in BadgerDB.
 // Encoding: level (1 byte) + expiresAt (8 bytes) + granterID (length-prefixed).
 func (s *BadgerStore) SetAccessGrant(domain, agentID string, level uint8, expiresAt int64, granterID string) error {
-	return s.update(func(txn *badger.Txn) error {
-		val := make([]byte, 1+8+4+len(granterID))
-		val[0] = level
-		binary.BigEndian.PutUint64(val[1:9], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
-		encodeString(val, 9, granterID)
-		return s.txnSet(txn, grantKey(domain, agentID), val)
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			val := make([]byte, 1+8+4+len(granterID))
+			val[0] = level
+			binary.BigEndian.PutUint64(val[1:9], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
+			encodeString(val, 9, granterID)
+			return s.txnSet(txn, grantKey(domain, agentID), val)
+		})
 	})
 }
 
@@ -1970,8 +1974,10 @@ func (s *BadgerStore) GetAccessGrant(domain, agentID string) (level uint8, expir
 
 // DeleteAccessGrant removes an access grant from BadgerDB.
 func (s *BadgerStore) DeleteAccessGrant(domain, agentID string) error {
-	return s.update(func(txn *badger.Txn) error {
-		return s.txnDelete(txn, grantKey(domain, agentID))
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			return s.txnDelete(txn, grantKey(domain, agentID))
+		})
 	})
 }
 
@@ -1990,26 +1996,27 @@ func (s *BadgerStore) DeleteAccessGrant(domain, agentID string) error {
 func (s *BadgerStore) DeleteGrantsByDomain(domain string) (int, error) {
 	var keys [][]byte
 	prefix := []byte("grant:" + domain + ":")
-	err := s.view(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			keys = append(keys, append([]byte{}, it.Item().Key()...))
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	err = s.update(func(txn *badger.Txn) error {
-		for _, k := range keys {
-			if dErr := s.txnDelete(txn, k); dErr != nil {
-				return dErr
+	err := s.withDomainOwnershipMutation(func() error {
+		if err := s.view(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.PrefetchValues = false
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+				keys = append(keys, append([]byte{}, it.Item().Key()...))
 			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		return nil
+		return s.update(func(txn *badger.Txn) error {
+			for _, k := range keys {
+				if dErr := s.txnDelete(txn, k); dErr != nil {
+					return dErr
+				}
+			}
+			return nil
+		})
 	})
 	return len(keys), err
 }
@@ -2884,20 +2891,22 @@ func (s *BadgerStore) ListOrgMembers(orgID string) ([]OrgMemberEntry, error) {
 // wins, for backward compat) and the one-to-many agent_orgs reverse index
 // that supports multi-org membership.
 func (s *BadgerStore) AddOrgMember(orgID, agentID string, clearance uint8, role string, height int64) error {
-	return s.update(func(txn *badger.Txn) error {
-		val := make([]byte, 1+4+len(role)+8)
-		val[0] = clearance
-		encodeString(val, 1, role)
-		binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
-		if err := s.txnSet(txn, orgMemberKey(orgID, agentID), val); err != nil {
-			return err
-		}
-		// Multi-org reverse index — additive, supports membership in N orgs.
-		if err := s.txnSet(txn, agentOrgsMemberKey(agentID, orgID), nil); err != nil {
-			return err
-		}
-		// Legacy single-slot reverse lookup — last add wins.
-		return s.txnSet(txn, agentOrgKey(agentID), []byte(orgID))
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			val := make([]byte, 1+4+len(role)+8)
+			val[0] = clearance
+			encodeString(val, 1, role)
+			binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
+			if err := s.txnSet(txn, orgMemberKey(orgID, agentID), val); err != nil {
+				return err
+			}
+			// Multi-org reverse index — additive, supports membership in N orgs.
+			if err := s.txnSet(txn, agentOrgsMemberKey(agentID, orgID), nil); err != nil {
+				return err
+			}
+			// Legacy single-slot reverse lookup — last add wins.
+			return s.txnSet(txn, agentOrgKey(agentID), []byte(orgID))
+		})
 	})
 }
 
@@ -2906,25 +2915,27 @@ func (s *BadgerStore) AddOrgMember(orgID, agentID string, clearance uint8, role 
 // and updates the legacy single-slot reverse lookup deterministically (points
 // at any remaining membership in lexical order, or is deleted if none remain).
 func (s *BadgerStore) RemoveOrgMember(orgID, agentID string) error {
-	return s.update(func(txn *badger.Txn) error {
-		if err := s.txnDelete(txn, orgMemberKey(orgID, agentID)); err != nil {
-			return err
-		}
-		if err := s.txnDelete(txn, agentOrgsMemberKey(agentID, orgID)); err != nil {
-			return err
-		}
-		// Recompute the legacy single-slot from remaining memberships so
-		// callers that still use GetAgentOrg keep observing a valid org.
-		remaining, err := scanAgentOrgs(txn, agentID)
-		if err != nil {
-			return err
-		}
-		if len(remaining) == 0 {
-			return s.txnDelete(txn, agentOrgKey(agentID))
-		}
-		// Deterministic: lexically smallest orgID wins.
-		sort.Strings(remaining)
-		return s.txnSet(txn, agentOrgKey(agentID), []byte(remaining[0]))
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			if err := s.txnDelete(txn, orgMemberKey(orgID, agentID)); err != nil {
+				return err
+			}
+			if err := s.txnDelete(txn, agentOrgsMemberKey(agentID, orgID)); err != nil {
+				return err
+			}
+			// Recompute the legacy single-slot from remaining memberships so
+			// callers that still use GetAgentOrg keep observing a valid org.
+			remaining, err := scanAgentOrgs(txn, agentID)
+			if err != nil {
+				return err
+			}
+			if len(remaining) == 0 {
+				return s.txnDelete(txn, agentOrgKey(agentID))
+			}
+			// Deterministic: lexically smallest orgID wins.
+			sort.Strings(remaining)
+			return s.txnSet(txn, agentOrgKey(agentID), []byte(remaining[0]))
+		})
 	})
 }
 
@@ -3361,38 +3372,40 @@ func (s *BadgerStore) GetMemberClearance(orgID, agentID string) (clearance uint8
 
 // SetMemberClearance updates a member's clearance level in BadgerDB.
 func (s *BadgerStore) SetMemberClearance(orgID, agentID string, clearance uint8) error {
-	return s.update(func(txn *badger.Txn) error {
-		item, err := txn.Get(orgMemberKey(orgID, agentID))
-		if err != nil {
-			return err
-		}
-		var role string
-		var height int64
-		err = item.Value(func(val []byte) error {
-			if len(val) < 1 {
-				return fmt.Errorf("invalid member entry")
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			item, err := txn.Get(orgMemberKey(orgID, agentID))
+			if err != nil {
+				return err
 			}
-			var offset int
-			var decErr error
-			role, offset, decErr = decodeString(val, 1)
-			if decErr != nil {
-				return decErr
+			var role string
+			var height int64
+			err = item.Value(func(val []byte) error {
+				if len(val) < 1 {
+					return fmt.Errorf("invalid member entry")
+				}
+				var offset int
+				var decErr error
+				role, offset, decErr = decodeString(val, 1)
+				if decErr != nil {
+					return decErr
+				}
+				if offset+8 > len(val) {
+					return fmt.Errorf("invalid member entry: missing height")
+				}
+				height = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- block height fits in int64
+				return nil
+			})
+			if err != nil {
+				return err
 			}
-			if offset+8 > len(val) {
-				return fmt.Errorf("invalid member entry: missing height")
-			}
-			height = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- block height fits in int64
-			return nil
-		})
-		if err != nil {
-			return err
-		}
 
-		newVal := make([]byte, 1+4+len(role)+8)
-		newVal[0] = clearance
-		encodeString(newVal, 1, role)
-		binary.BigEndian.PutUint64(newVal[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
-		return s.txnSet(txn, orgMemberKey(orgID, agentID), newVal)
+			newVal := make([]byte, 1+4+len(role)+8)
+			newVal[0] = clearance
+			encodeString(newVal, 1, role)
+			binary.BigEndian.PutUint64(newVal[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
+			return s.txnSet(txn, orgMemberKey(orgID, agentID), newVal)
+		})
 	})
 }
 
@@ -3421,45 +3434,47 @@ func (s *BadgerStore) GetAgentOrg(agentID string) (orgID string, err error) {
 //   - allowedDomains count (4 bytes) + each domain (length-prefixed)
 //   - allowedDepts count (4 bytes) + each dept (length-prefixed).
 func (s *BadgerStore) SetFederation(fedID string, proposerOrg, targetOrg string, allowedDomains []string, maxClearance uint8, expiresAt int64, requiresApproval bool, status string, allowedDepts ...[]string) error {
-	return s.update(func(txn *badger.Txn) error {
-		var depts []string
-		if len(allowedDepts) > 0 {
-			depts = allowedDepts[0]
-		}
-		// Calculate total size
-		size := 4 + len(proposerOrg) + 4 + len(targetOrg) + 1 + 8 + 1 + 4 + len(status) + 4
-		for _, d := range allowedDomains {
-			size += 4 + len(d)
-		}
-		size += 4 // allowedDepts count
-		for _, d := range depts {
-			size += 4 + len(d)
-		}
-		val := make([]byte, size)
-		offset := encodeString(val, 0, proposerOrg)
-		offset = encodeString(val, offset, targetOrg)
-		val[offset] = maxClearance
-		offset++
-		binary.BigEndian.PutUint64(val[offset:offset+8], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
-		offset += 8
-		if requiresApproval {
-			val[offset] = 1
-		} else {
-			val[offset] = 0
-		}
-		offset++
-		offset = encodeString(val, offset, status)
-		binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(allowedDomains))) // #nosec G115 -- slice length fits in uint32
-		offset += 4
-		for _, d := range allowedDomains {
-			offset = encodeString(val, offset, d)
-		}
-		binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(depts))) // #nosec G115 -- slice length fits in uint32
-		offset += 4
-		for _, d := range depts {
-			offset = encodeString(val, offset, d)
-		}
-		return s.txnSet(txn, federationKey(fedID), val)
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			var depts []string
+			if len(allowedDepts) > 0 {
+				depts = allowedDepts[0]
+			}
+			// Calculate total size
+			size := 4 + len(proposerOrg) + 4 + len(targetOrg) + 1 + 8 + 1 + 4 + len(status) + 4
+			for _, d := range allowedDomains {
+				size += 4 + len(d)
+			}
+			size += 4 // allowedDepts count
+			for _, d := range depts {
+				size += 4 + len(d)
+			}
+			val := make([]byte, size)
+			offset := encodeString(val, 0, proposerOrg)
+			offset = encodeString(val, offset, targetOrg)
+			val[offset] = maxClearance
+			offset++
+			binary.BigEndian.PutUint64(val[offset:offset+8], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
+			offset += 8
+			if requiresApproval {
+				val[offset] = 1
+			} else {
+				val[offset] = 0
+			}
+			offset++
+			offset = encodeString(val, offset, status)
+			binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(allowedDomains))) // #nosec G115 -- slice length fits in uint32
+			offset += 4
+			for _, d := range allowedDomains {
+				offset = encodeString(val, offset, d)
+			}
+			binary.BigEndian.PutUint32(val[offset:offset+4], uint32(len(depts))) // #nosec G115 -- slice length fits in uint32
+			offset += 4
+			for _, d := range depts {
+				offset = encodeString(val, offset, d)
+			}
+			return s.txnSet(txn, federationKey(fedID), val)
+		})
 	})
 }
 
@@ -3506,107 +3521,109 @@ func (s *BadgerStore) GetFederation(fedID string) (proposerOrg, targetOrg string
 
 // UpdateFederationStatus updates the status field of a federation entry.
 func (s *BadgerStore) UpdateFederationStatus(fedID, status string) error {
-	return s.update(func(txn *badger.Txn) error {
-		item, err := txn.Get(federationKey(fedID))
-		if err != nil {
-			return err
-		}
-		// Read existing values
-		var proposerOrg, targetOrg string
-		var maxClearance uint8
-		var expiresAt int64
-		var requiresApproval bool
-		var allowedDomains []string
-		var allowedDepts []string
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			item, err := txn.Get(federationKey(fedID))
+			if err != nil {
+				return err
+			}
+			// Read existing values
+			var proposerOrg, targetOrg string
+			var maxClearance uint8
+			var expiresAt int64
+			var requiresApproval bool
+			var allowedDomains []string
+			var allowedDepts []string
 
-		err = item.Value(func(val []byte) error {
-			var offset int
-			var decErr error
-			proposerOrg, offset, decErr = decodeString(val, 0)
-			if decErr != nil {
-				return decErr
+			err = item.Value(func(val []byte) error {
+				var offset int
+				var decErr error
+				proposerOrg, offset, decErr = decodeString(val, 0)
+				if decErr != nil {
+					return decErr
+				}
+				targetOrg, offset, decErr = decodeString(val, offset)
+				if decErr != nil {
+					return decErr
+				}
+				maxClearance = val[offset]
+				offset++
+				expiresAt = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- expiry timestamp fits in int64
+				offset += 8
+				requiresApproval = val[offset] == 1
+				offset++
+				// skip old status
+				_, offset, decErr = decodeString(val, offset)
+				if decErr != nil {
+					return decErr
+				}
+				// Read allowed domains
+				if offset+4 <= len(val) {
+					count := int(binary.BigEndian.Uint32(val[offset : offset+4])) // #nosec G115 -- array count fits in int
+					offset += 4
+					for i := 0; i < count; i++ {
+						var d string
+						d, offset, decErr = decodeString(val, offset)
+						if decErr != nil {
+							return decErr
+						}
+						allowedDomains = append(allowedDomains, d)
+					}
+				}
+				// Read allowed depts (backward compat)
+				if offset+4 <= len(val) {
+					count := int(binary.BigEndian.Uint32(val[offset : offset+4])) // #nosec G115 -- array count fits in int
+					offset += 4
+					for i := 0; i < count; i++ {
+						var d string
+						d, offset, decErr = decodeString(val, offset)
+						if decErr != nil {
+							return decErr
+						}
+						allowedDepts = append(allowedDepts, d)
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				return err
 			}
-			targetOrg, offset, decErr = decodeString(val, offset)
-			if decErr != nil {
-				return decErr
+
+			// Re-encode with new status
+			size := 4 + len(proposerOrg) + 4 + len(targetOrg) + 1 + 8 + 1 + 4 + len(status) + 4
+			for _, d := range allowedDomains {
+				size += 4 + len(d)
 			}
-			maxClearance = val[offset]
+			size += 4
+			for _, d := range allowedDepts {
+				size += 4 + len(d)
+			}
+			newVal := make([]byte, size)
+			offset := encodeString(newVal, 0, proposerOrg)
+			offset = encodeString(newVal, offset, targetOrg)
+			newVal[offset] = maxClearance
 			offset++
-			expiresAt = int64(binary.BigEndian.Uint64(val[offset : offset+8])) // #nosec G115 -- expiry timestamp fits in int64
+			binary.BigEndian.PutUint64(newVal[offset:offset+8], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
 			offset += 8
-			requiresApproval = val[offset] == 1
+			if requiresApproval {
+				newVal[offset] = 1
+			} else {
+				newVal[offset] = 0
+			}
 			offset++
-			// skip old status
-			_, offset, decErr = decodeString(val, offset)
-			if decErr != nil {
-				return decErr
+			offset = encodeString(newVal, offset, status)
+			binary.BigEndian.PutUint32(newVal[offset:offset+4], uint32(len(allowedDomains))) // #nosec G115 -- slice length fits in uint32
+			offset += 4
+			for _, d := range allowedDomains {
+				offset = encodeString(newVal, offset, d)
 			}
-			// Read allowed domains
-			if offset+4 <= len(val) {
-				count := int(binary.BigEndian.Uint32(val[offset : offset+4])) // #nosec G115 -- array count fits in int
-				offset += 4
-				for i := 0; i < count; i++ {
-					var d string
-					d, offset, decErr = decodeString(val, offset)
-					if decErr != nil {
-						return decErr
-					}
-					allowedDomains = append(allowedDomains, d)
-				}
+			binary.BigEndian.PutUint32(newVal[offset:offset+4], uint32(len(allowedDepts))) // #nosec G115 -- slice length fits in uint32
+			offset += 4
+			for _, d := range allowedDepts {
+				offset = encodeString(newVal, offset, d)
 			}
-			// Read allowed depts (backward compat)
-			if offset+4 <= len(val) {
-				count := int(binary.BigEndian.Uint32(val[offset : offset+4])) // #nosec G115 -- array count fits in int
-				offset += 4
-				for i := 0; i < count; i++ {
-					var d string
-					d, offset, decErr = decodeString(val, offset)
-					if decErr != nil {
-						return decErr
-					}
-					allowedDepts = append(allowedDepts, d)
-				}
-			}
-			return nil
+			return s.txnSet(txn, federationKey(fedID), newVal)
 		})
-		if err != nil {
-			return err
-		}
-
-		// Re-encode with new status
-		size := 4 + len(proposerOrg) + 4 + len(targetOrg) + 1 + 8 + 1 + 4 + len(status) + 4
-		for _, d := range allowedDomains {
-			size += 4 + len(d)
-		}
-		size += 4
-		for _, d := range allowedDepts {
-			size += 4 + len(d)
-		}
-		newVal := make([]byte, size)
-		offset := encodeString(newVal, 0, proposerOrg)
-		offset = encodeString(newVal, offset, targetOrg)
-		newVal[offset] = maxClearance
-		offset++
-		binary.BigEndian.PutUint64(newVal[offset:offset+8], uint64(expiresAt)) // #nosec G115 -- expiry timestamp is always non-negative
-		offset += 8
-		if requiresApproval {
-			newVal[offset] = 1
-		} else {
-			newVal[offset] = 0
-		}
-		offset++
-		offset = encodeString(newVal, offset, status)
-		binary.BigEndian.PutUint32(newVal[offset:offset+4], uint32(len(allowedDomains))) // #nosec G115 -- slice length fits in uint32
-		offset += 4
-		for _, d := range allowedDomains {
-			offset = encodeString(newVal, offset, d)
-		}
-		binary.BigEndian.PutUint32(newVal[offset:offset+4], uint32(len(allowedDepts))) // #nosec G115 -- slice length fits in uint32
-		offset += 4
-		for _, d := range allowedDepts {
-			offset = encodeString(newVal, offset, d)
-		}
-		return s.txnSet(txn, federationKey(fedID), newVal)
 	})
 }
 
@@ -3786,26 +3803,30 @@ func (s *BadgerStore) GetOrgDepts(orgID string) ([]string, error) {
 // Encoding: clearance (1 byte) + role (length-prefixed) + height (8 bytes).
 // Also sets the agent→dept reverse lookup.
 func (s *BadgerStore) AddDeptMember(orgID, deptID, agentID string, clearance uint8, role string, height int64) error {
-	return s.update(func(txn *badger.Txn) error {
-		val := make([]byte, 1+4+len(role)+8)
-		val[0] = clearance
-		encodeString(val, 1, role)
-		binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
-		if err := s.txnSet(txn, deptMemberKey(orgID, deptID, agentID), val); err != nil {
-			return err
-		}
-		// Reverse lookup: agent→dept (value = "orgID:deptID")
-		return s.txnSet(txn, agentDeptKey(agentID), []byte(orgID+":"+deptID))
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			val := make([]byte, 1+4+len(role)+8)
+			val[0] = clearance
+			encodeString(val, 1, role)
+			binary.BigEndian.PutUint64(val[1+4+len(role):], uint64(height)) // #nosec G115 -- block height is always non-negative
+			if err := s.txnSet(txn, deptMemberKey(orgID, deptID, agentID), val); err != nil {
+				return err
+			}
+			// Reverse lookup: agent→dept (value = "orgID:deptID")
+			return s.txnSet(txn, agentDeptKey(agentID), []byte(orgID+":"+deptID))
+		})
 	})
 }
 
 // RemoveDeptMember removes a member from a department in BadgerDB.
 func (s *BadgerStore) RemoveDeptMember(orgID, deptID, agentID string) error {
-	return s.update(func(txn *badger.Txn) error {
-		if err := s.txnDelete(txn, deptMemberKey(orgID, deptID, agentID)); err != nil {
-			return err
-		}
-		return s.txnDelete(txn, agentDeptKey(agentID))
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			if err := s.txnDelete(txn, deptMemberKey(orgID, deptID, agentID)); err != nil {
+				return err
+			}
+			return s.txnDelete(txn, agentDeptKey(agentID))
+		})
 	})
 }
 

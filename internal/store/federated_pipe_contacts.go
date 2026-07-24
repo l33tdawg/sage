@@ -278,6 +278,84 @@ func (s *SQLiteStore) GetFederatedPipeContactAcceptances(ctx context.Context, po
 	return out, nil
 }
 
+// GetFederatedPipeContactAcceptancesForAgents is the bounded targeted-lookup
+// sibling of GetFederatedPipeContactAcceptances. It avoids reading an entire
+// peer's consent ledger when the caller is resolving only a handful of agents.
+func (s *SQLiteStore) GetFederatedPipeContactAcceptancesForAgents(ctx context.Context, policy PeerRBACPolicy, agentIDs []string) (map[string]string, error) {
+	if err := validateFederatedPipeContactBinding(policy); err != nil {
+		return nil, err
+	}
+	if len(agentIDs) == 0 {
+		return map[string]string{}, nil
+	}
+	// SQLite's host-parameter ceiling may be lower than the policy's 1,024
+	// domain cap. Chunking keeps the bounded legacy status projection usable
+	// even when every shared domain has a distinct owner.
+	const maxAcceptanceAgentsPerQuery = 512
+	seen := make(map[string]struct{}, len(agentIDs))
+	selected := make([]string, 0, len(agentIDs))
+	for _, agentID := range agentIDs {
+		if err := validateFederatedPipeAgentID(agentID); err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[agentID]; duplicate {
+			continue
+		}
+		seen[agentID] = struct{}{}
+		selected = append(selected, agentID)
+	}
+	if len(selected) == 0 {
+		return map[string]string{}, nil
+	}
+	out := make(map[string]string)
+	for start := 0; start < len(selected); start += maxAcceptanceAgentsPerQuery {
+		end := start + maxAcceptanceAgentsPerQuery
+		if end > len(selected) {
+			end = len(selected)
+		}
+		batch := selected[start:end]
+		args := []any{policy.RemoteChainID, policy.PeerAgentID, policy.PolicyEpoch, policy.RemoteCAPin, policy.Revision}
+		placeholders := make([]string, 0, len(batch))
+		for _, agentID := range batch {
+			placeholders = append(placeholders, "?")
+			args = append(args, agentID)
+		}
+		rows, err := s.conn.QueryContext(ctx, `
+			SELECT local_agent_id, contact_id
+			FROM fed_pipe_contact_acceptance
+			WHERE remote_chain_id=? AND peer_agent_id=? AND policy_epoch=?
+				AND remote_ca_pin=? AND policy_revision=? AND local_agent_id IN (`+strings.Join(placeholders, ",")+`)
+			ORDER BY local_agent_id`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("list selected federated pipe contact acceptances: %w", err)
+		}
+		for rows.Next() {
+			var agentID, contactID string
+			if err := rows.Scan(&agentID, &contactID); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan selected federated pipe contact acceptance: %w", err)
+			}
+			if err := validateFederatedPipeAgentID(agentID); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("stored federated pipe contact acceptance is invalid: %w", err)
+			}
+			if err := validateFederatedPipeContactID(contactID); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("stored federated pipe contact acceptance is invalid: %w", err)
+			}
+			out[agentID] = contactID
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("iterate selected federated pipe contact acceptances: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("close selected federated pipe contact acceptances: %w", err)
+		}
+	}
+	return out, nil
+}
+
 // SetBoundFederatedPipeContactAcceptance updates one local contact's inbound
 // work-request consent only while the exact policy and JOIN binding remain
 // active. The manager separately proves that contactID is the current

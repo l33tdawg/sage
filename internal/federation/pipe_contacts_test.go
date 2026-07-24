@@ -1,8 +1,10 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -177,6 +179,173 @@ func TestPipeContactsIncludeActiveAgentsWithSharedDomainAccess(t *testing.T) {
 	require.NoError(t, bs.DeleteAccessGrant("research", reader))
 	_, err = m.authorizeInboundPipeContact(ctx, peer, event)
 	require.ErrorIs(t, err, ErrFederatedPipeInvalid)
+}
+
+func TestLargeSharedRecipientProjectionUsesTargetedLookup(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	peerID := newPeerOperatorID(t)
+	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerID, "host", nil, 4)
+	owner := newPeerOperatorID(t)
+	target := newPeerOperatorID(t)
+	require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{
+		AgentID: target, Name: "Innovium", RegisteredName: "innovium", Provider: "claude-code", Status: "active",
+	}))
+	require.NoError(t, bs.RegisterDomain("research", owner, "", 10))
+	require.NoError(t, bs.SetAccessGrant("research", target, 1, 0, owner))
+	// A valid shared-domain recipient set can exceed the legacy v1 status
+	// envelope. Every recipient remains discoverable by the new lookup route;
+	// none are silently dropped by a cache or snapshot cap.
+	for i := 0; i < maxPipeContactStatusContacts; i++ {
+		reader := newPeerOperatorID(t)
+		require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{AgentID: reader, Name: fmt.Sprintf("reader-%04d", i), Status: "active"}))
+		require.NoError(t, bs.SetAccessGrant("research", reader, 1, 0, owner))
+	}
+	_, err := m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{{Domain: "research", Read: true}})
+	require.NoError(t, err)
+	admin, err := m.LocalPipeContacts(ctx, "chain-peer")
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(admin.Contacts), maxPipeContactStatusCandidates+1,
+		"the CEREBRUM contact endpoint must not construct a full recipient roster")
+	// The browser's default administrative view is intentionally bounded. A
+	// consent change asks for its exact target in addition to that sample, so
+	// an operator can still enable any authorized recipient without a full
+	// roster scan under revocation locks.
+	grant, err := m.localPipeContacts(ctx, "chain-peer", target)
+	require.NoError(t, err)
+	var targetContact PipeContact
+	for _, contact := range grant.Contacts {
+		if contact.AgentID == target {
+			targetContact = contact
+			break
+		}
+	}
+	require.NotEmpty(t, targetContact.ContactID)
+	_, err = m.SetPipeContactAcceptance(ctx, "chain-peer", target, targetContact.ContactID, true)
+	require.NoError(t, err)
+
+	status := statusForPeer(t, m, "chain-peer", peerID, agreement)
+	require.NotNil(t, status.PipeContacts, "legacy peers retain a valid bounded status snapshot")
+	require.LessOrEqual(t, len(status.PipeContacts.Contacts), maxPipeContactStatusContacts)
+	require.LessOrEqual(t, len(status.PipeContacts.Contacts), maxPipeContactStatusCandidates+1,
+		"legacy status construction must not scan the entire recipient roster")
+	require.True(t, fitsPipeContactStatusSnapshot(status.PipeContacts))
+	require.NoError(t, ValidateRemotePipeContactGrant("chain-local", status.PipeContacts))
+	require.Contains(t, status.Capabilities, CapabilityFederatedPipelineContactLookup)
+	compactReq := httptest.NewRequest(http.MethodGet, "/fed/v1/status", nil)
+	compactReq.Header.Set(HeaderClientCapabilities, CapabilityFederatedPipelineContactLookup)
+	compactReq = compactReq.WithContext(context.WithValue(compactReq.Context(), peerCtxKey{}, &peerIdentity{
+		ChainID: "chain-peer", AgentID: peerID, Agreement: agreement,
+	}))
+	compactRec := httptest.NewRecorder()
+	m.handleStatus(compactRec, compactReq)
+	require.Equal(t, http.StatusOK, compactRec.Code, compactRec.Body.String())
+	var compact StatusResponse
+	require.NoError(t, json.NewDecoder(compactRec.Body).Decode(&compact))
+	require.Nil(t, compact.PipeContacts, "lookup-capable clients must not force the legacy roster projection")
+
+	body, err := json.Marshal(PipeContactLookupRequest{Name: "innovium", Limit: 20})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/pipe/contacts/lookup", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{
+		ChainID: "chain-peer", AgentID: peerID, Agreement: agreement,
+	}))
+	rec := httptest.NewRecorder()
+	m.handlePipeContactLookup(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var response PipeContactLookupResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&response))
+	require.Equal(t, 1, response.Total)
+	require.False(t, response.Truncated)
+	require.Len(t, response.Grant.Contacts, 1)
+	require.Equal(t, target, response.Grant.Contacts[0].AgentID)
+	require.True(t, response.Grant.Contacts[0].Accepting)
+}
+
+func TestLegacyStatusLoadsAnOwnerOutsideItsCandidateSample(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	peerID := newPeerOperatorID(t)
+	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerID, "host", nil, 4)
+
+	// Status samples the lowest agent IDs first. Put the owner above every
+	// sampled ID to prove that the owner-specific metadata load, rather than
+	// incidental candidate ordering, makes legacy routing viable.
+	owner := strings.Repeat("f", 64)
+	require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{
+		AgentID: owner, Name: "out-of-sample-owner", RegisteredName: "owner", Provider: "local", Status: "active",
+	}))
+	for i := 1; i <= maxPipeContactStatusCandidates; i++ {
+		agentID := fmt.Sprintf("%064x", i)
+		require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{AgentID: agentID, Name: fmt.Sprintf("sample-%03d", i), Status: "active"}))
+	}
+	require.NoError(t, bs.RegisterDomain("research", owner, "", 10))
+	_, err := m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{{Domain: "research", Read: true}})
+	require.NoError(t, err)
+
+	status := statusForPeer(t, m, "chain-peer", peerID, agreement)
+	require.NotNil(t, status.PipeContacts)
+	var contact *PipeContact
+	for i := range status.PipeContacts.Contacts {
+		if status.PipeContacts.Contacts[i].AgentID == owner {
+			contact = &status.PipeContacts.Contacts[i]
+			break
+		}
+	}
+	require.NotNil(t, contact, "effective owners remain visible beyond the status candidate sample")
+	require.Equal(t, "out-of-sample-owner", contact.DisplayName)
+	require.True(t, contact.Available)
+	require.NotEmpty(t, contact.Address)
+}
+
+func TestPipeContactStatusSnapshotHasByteLimit(t *testing.T) {
+	wide := strings.Repeat("domain-", 36) // 252 bytes, representative max-width names
+	grant := &PipeContactGrant{Contacts: []PipeContact{{}, {}}}
+	for i := range grant.Contacts {
+		grant.Contacts[i].Domains = make([]PipeContactDomain, maxPipeContactStatusContacts)
+		for j := range grant.Contacts[i].Domains {
+			grant.Contacts[i].Domains[j] = PipeContactDomain{Domain: wide, OwningDomain: wide}
+		}
+	}
+	require.False(t, fitsPipeContactStatusSnapshot(grant), "a status contact envelope must leave room below the federated response limit")
+	bounded := boundedPipeContactStatusSnapshot(grant)
+	require.NotNil(t, bounded)
+	require.NotEmpty(t, bounded.Contacts)
+	require.Less(t, len(bounded.Contacts), len(grant.Contacts))
+	require.True(t, fitsPipeContactStatusSnapshot(bounded))
+}
+
+func TestPipeContactLookupCapsTargetMatchesAndResponseBytes(t *testing.T) {
+	grant := &PipeContactGrant{Contacts: make([]PipeContact, 0, maxPipeContactLookupResults+1)}
+	for i := 0; i < maxPipeContactLookupResults+1; i++ {
+		grant.Contacts = append(grant.Contacts, PipeContact{
+			AgentID: fmt.Sprintf("agent-%02d", i), DisplayName: "worker",
+		})
+	}
+	filtered, total := filterPipeContactLookup(grant, PipeContactLookupRequest{Target: "worker", Limit: maxPipeContactLookupResults})
+	require.Equal(t, maxPipeContactLookupResults+1, total)
+	require.Len(t, filtered.Contacts, maxPipeContactLookupResults)
+
+	// Twenty matching contacts can still be too wide if each one has a large
+	// but valid shared-domain basis. The handler must return a byte-bounded
+	// subset and preserve that the result was truncated.
+	wide := strings.Repeat("x", 512)
+	wideGrant := &PipeContactGrant{Contacts: make([]PipeContact, 0, maxPipeContactLookupResults)}
+	for i := 0; i < maxPipeContactLookupResults; i++ {
+		contact := PipeContact{AgentID: fmt.Sprintf("wide-%02d", i), DisplayName: "wide-worker"}
+		for j := 0; j < maxPipeContactStatusContacts; j++ {
+			contact.Domains = append(contact.Domains, PipeContactDomain{Domain: wide, OwningDomain: wide})
+		}
+		wideGrant.Contacts = append(wideGrant.Contacts, contact)
+	}
+	response, err := boundedPipeContactLookupResponse(wideGrant, len(wideGrant.Contacts))
+	require.NoError(t, err)
+	require.NotEmpty(t, response.Grant.Contacts)
+	require.Less(t, len(response.Grant.Contacts), len(wideGrant.Contacts))
+	require.True(t, response.Truncated)
+	encoded, err := json.Marshal(response)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(encoded), maxPipeContactLookupBytes)
 }
 
 func TestPipeContactAcceptanceDefaultsOffPersistsPauseAndInvalidatesChanges(t *testing.T) {
@@ -397,6 +566,43 @@ func TestStatusReleasesContactSnapshotBeforePeerSocketWrite(t *testing.T) {
 		require.NoError(t, err)
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("a slow status response retained the contact snapshot lease")
+	}
+	close(w.release)
+	<-done
+}
+
+func TestPipeContactLookupReleasesSnapshotBeforePeerSocketWrite(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	peerID := newPeerOperatorID(t)
+	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerID, "host", nil, 4)
+	owner := newPeerOperatorID(t)
+	require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{AgentID: owner, Name: "owner", Status: "active"}))
+	require.NoError(t, bs.RegisterDomain("research", owner, "", 10))
+	_, err := m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{{Domain: "research.work", Read: true}})
+	require.NoError(t, err)
+
+	body, err := json.Marshal(PipeContactLookupRequest{Name: "owner", Limit: 1})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/fed/v1/pipe/contacts/lookup", bytes.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerCtxKey{}, &peerIdentity{
+		ChainID: "chain-peer", AgentID: peerID, Agreement: agreement,
+	}))
+	w := &blockingStatusWriter{header: make(http.Header), started: make(chan struct{}), release: make(chan struct{})}
+	done := make(chan struct{})
+	go func() {
+		m.handlePipeContactLookup(w, req)
+		close(done)
+	}()
+	<-w.started
+
+	updated := make(chan error, 1)
+	go func() { updated <- ss.UpdateAgentStatus(ctx, owner, "inactive") }()
+	select {
+	case err := <-updated:
+		require.NoError(t, err)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("a slow lookup response retained the contact snapshot lease")
 	}
 	close(w.release)
 	<-done

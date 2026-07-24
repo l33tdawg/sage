@@ -32,7 +32,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.13.0';
+const SAGE_VERSION = 'v11.13.1';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -12992,6 +12992,8 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 	const [remotePipeKnown, setRemotePipeKnown] = useState(false);
 	const [pipeContactBusy, setPipeContactBusy] = useState('');
 	const [pipeContactErr, setPipeContactErr] = useState('');
+	const [pipeContactLookupID, setPipeContactLookupID] = useState('');
+	const [pipeContactLookupBusy, setPipeContactLookupBusy] = useState(false);
 	const [copiedContact, setCopiedContact] = useState('');
     const [subscribeSaved, setSubscribeSaved] = useState([]);
     const [subscribeDraft, setSubscribeDraft] = useState([]);
@@ -13312,6 +13314,25 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 		setPipeContactBusy('');
 	};
 
+	const findLocalPipeContact = async event => {
+		event && event.preventDefault();
+		const agentID = String(pipeContactLookupID || '').trim().toLowerCase();
+		if (!/^[0-9a-f]{64}$/.test(agentID)) {
+			setPipeContactErr('Enter the exact 64-character agent ID to review that local agent’s shared-domain inbox.');
+			return;
+		}
+		setPipeContactLookupBusy(true); setPipeContactErr('');
+		try {
+			const result = await fedPipeContactsGet(chain, false, agentID);
+			setLocalPipeContacts(normalizeFedPipeContactGrant(result && result.local_contacts));
+			setLocalPipeContactsKnown(true);
+		} catch (e) {
+			setPipeContactErr(String(e.message || e));
+		} finally {
+			setPipeContactLookupBusy(false);
+		}
+	};
+
 	const copyPipeContact = async contact => {
 		// The exact agent@chain address selects one peer without depending on
 		// unrelated peers being online. The friendly handle remains visible as a
@@ -13426,6 +13447,15 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 				<div class="fed-agent-column">
 					<h5>Agents on this SAGE</h5>
 					<p class="muted">Allow ${peerName}'s SAGE to send a work request to a specific local agent. New contacts start off. Changing the shared domain list resets enabled switches to Off.</p>
+					<form class="fed-agent-lookup" onSubmit=${findLocalPipeContact}>
+						<label for=${`fed-agent-lookup-${chain}`}>Find another local agent by exact agent ID</label>
+						<div class="fed-agent-lookup-row">
+							<input id=${`fed-agent-lookup-${chain}`} value=${pipeContactLookupID}
+								placeholder="64-character agent ID" aria-label="Exact local agent ID"
+								onInput=${e => setPipeContactLookupID(e.target.value)} />
+							<button class="btn" type="submit" disabled=${pipeContactLookupBusy}>${pipeContactLookupBusy ? 'Finding…' : 'Find agent'}</button>
+						</div>
+					</form>
 					${localPipeContacts === null && html`<div class="fed-agent-empty muted">Loading local agents…</div>`}
 					${localPipeContacts !== null && localAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">Share a domain, then grant an active local agent access to make its inbox available here.</div>`}
 					${localAgentContacts.map(contact => {

@@ -189,7 +189,19 @@ func (m *Manager) authorizeInboundPipeContact(ctx context.Context, peer *peerIde
 		return nil, ErrFederatedPipeInvalid
 	}
 	boundPeer := &peerIdentity{ChainID: peer.ChainID, AgentID: peer.AgentID, Agreement: agreement}
-	grant, err := m.buildPipeContactGrant(ctx, boundPeer, policy)
+	ss := m.syncStore()
+	if ss == nil {
+		return nil, ErrFederatedPipeInvalid
+	}
+	// Inbound delivery authorizes one signed target, never an administrative
+	// roster. Re-derive that exact target only so an authenticated sender cannot
+	// turn a delivery attempt into a full roster × policy-domain scan while the
+	// policy/ownership/contact leases are held.
+	agents, err := ss.GetPipeContactAgents(ctx, []string{event.TargetAgentID})
+	if err != nil {
+		return nil, err
+	}
+	grant, err := m.buildPipeContactGrantForCandidates(ctx, boundPeer, policy, agents, []string{event.TargetAgentID}, false, nil, true)
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -599,4 +601,50 @@ func (s *Server) handleListRegisteredAgents(w http.ResponseWriter, r *http.Reque
 		"agents": sanitized,
 		"total":  len(sanitized),
 	})
+}
+
+type exactAgentNameFinder interface {
+	FindAgentsByExactName(ctx context.Context, name string, limit int) ([]*store.AgentEntry, error)
+}
+
+// handleFindRegisteredAgents is the signed, bounded companion to the public
+// roster endpoint. MCP recipient discovery must not fetch ListAgents merely to
+// return at most 20 matches: that full endpoint computes every agent's derived
+// memory count. Exact matching shares the index-backed contact lookup path.
+func (s *Server) handleFindRegisteredAgents(w http.ResponseWriter, r *http.Request) {
+	if s.agentStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Agent store unavailable", "Agent store not configured.")
+		return
+	}
+	finder, ok := s.agentStore.(exactAgentNameFinder)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "Agent lookup unavailable", "The configured agent store does not support bounded name lookup.")
+		return
+	}
+	name := strings.TrimSpace(r.URL.Query().Get("name"))
+	if name == "" || len(name) > 512 {
+		writeProblem(w, http.StatusBadRequest, "Invalid agent name", "name must be between 1 and 512 bytes.")
+		return
+	}
+	limit := 20
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || parsed < 1 || parsed > 20 {
+			writeProblem(w, http.StatusBadRequest, "Invalid agent limit", "limit must be between 1 and 20.")
+			return
+		}
+		limit = parsed
+	}
+	agents, err := finder.FindAgentsByExactName(r.Context(), name, limit)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Lookup error", err.Error())
+		return
+	}
+	sanitized := make([]*store.AgentEntry, 0, len(agents))
+	for _, agent := range agents {
+		if agent != nil {
+			sanitized = append(sanitized, sanitizeAgentForRead(agent, false))
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": sanitized, "total": len(sanitized)})
 }

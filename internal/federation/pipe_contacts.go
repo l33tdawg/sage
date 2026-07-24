@@ -18,6 +18,16 @@ const (
 	pipeContactMinAgentPrefix = 8
 	pipeContactPrefixStep     = 4
 	pipeContactNodeSlugMax    = 32
+	// A lookup returns at most 20 contacts, but authorization must be checked
+	// before a result is exposed. Bound the name candidate set too, so an
+	// authenticated peer cannot force a full roster × policy-domain scan while
+	// holding the revocation leases.
+	maxPipeContactLookupCandidates = 64
+	// Legacy peers cannot ask for a named lookup and still expect the v1 status
+	// envelope. Sample a deterministic active-agent subset while always keeping
+	// owners eligible, rather than constructing an unbounded roster merely to
+	// discard it at the wire cap.
+	maxPipeContactStatusCandidates = 128
 )
 
 var (
@@ -30,13 +40,11 @@ type pipeContactAggregate struct {
 	domains []PipeContactDomain
 }
 
-// buildPipeContactGrant derives the finite agent-address projection for one
-// already-authenticated peer. A shared-domain owner is always eligible; every
-// other active local agent is included only when the live RBAC read check says
-// it may read that exact shared subtree. It runs beneath handleStatus's policy
-// read lease and intentionally does not advertise a send capability: every
-// contact remains default-off until its local operator enables acceptance.
-func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy) (*PipeContactGrant, error) {
+// buildPipeContactStatusGrant is the bounded legacy v1 status projection.
+// Modern callers request compact status and use targeted lookup instead; this
+// keeps an old peer from forcing full local roster × policy evaluation under
+// the federation snapshot leases.
+func (m *Manager) buildPipeContactStatusGrant(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy) (*PipeContactGrant, error) {
 	if policy == nil {
 		return nil, nil
 	}
@@ -50,12 +58,34 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 	if ss == nil || m.badger == nil {
 		return nil, fmt.Errorf("pipe contacts require SQLite and consensus domain state")
 	}
-
-	agents, err := ss.ListAgents(ctx)
+	agents, err := ss.ListPipeContactStatusCandidates(ctx, maxPipeContactStatusCandidates)
 	if err != nil {
-		return nil, fmt.Errorf("list local agents for pipe contacts: %w", err)
+		return nil, fmt.Errorf("list bounded local agents for pipe contacts: %w", err)
 	}
+	return m.buildPipeContactGrantForCandidates(ctx, peer, policy, agents, nil, true, nil, true)
+}
+
+// buildPipeContactGrantForCandidates is the common projection builder. Status
+// supplies the complete local roster for legacy compatibility. Targeted lookup
+// supplies a short selector-derived candidate list and does not automatically
+// add every owner, because doing so would leak nonmatching contacts.
+func (m *Manager) buildPipeContactGrantForCandidates(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy, agents []*store.AgentEntry, candidateIDs []string, includeOwners bool, handleOverrides map[string]string, selectedAcceptances bool) (*PipeContactGrant, error) {
+	if policy == nil {
+		return nil, nil
+	}
+	if peer == nil || peer.Agreement == nil || peer.ChainID == "" || peer.AgentID == "" {
+		return nil, fmt.Errorf("authenticated peer identity is incomplete")
+	}
+	if policy.RemoteChainID != peer.ChainID || policy.PeerAgentID != peer.AgentID {
+		return nil, fmt.Errorf("pipe contact policy binding does not match authenticated peer")
+	}
+	ss := m.syncStore()
+	if ss == nil || m.badger == nil {
+		return nil, fmt.Errorf("pipe contacts require SQLite and consensus domain state")
+	}
+	var err error
 	agentByID := make(map[string]*store.AgentEntry, len(agents))
+	candidateIDSet := make(map[string]struct{}, len(agents)+len(candidateIDs))
 	for _, agent := range agents {
 		if agent != nil && agent.AgentID != "" {
 			key := agent.AgentID
@@ -63,10 +93,20 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 				key = strings.ToLower(key)
 			}
 			agentByID[key] = agent
+			candidateIDSet[key] = struct{}{}
+		}
+	}
+	for _, agentID := range candidateIDs {
+		if isCanonicalAgentID(agentID) {
+			agentID = strings.ToLower(agentID)
+		}
+		if agentID != "" {
+			candidateIDSet[agentID] = struct{}{}
 		}
 	}
 
 	byAgent := make(map[string]*pipeContactAggregate)
+	ownerIDs := make(map[string]struct{})
 	now := time.Now()
 	postV8Access := m.postV8ForAccess != nil && m.postV8ForAccess()
 	for _, permission := range policy.Domains {
@@ -104,13 +144,21 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 		if metaOwner != owner {
 			return nil, fmt.Errorf("pipe contact owner changed while resolving %q", owningDomain)
 		}
+		if includeOwners {
+			ownerIDs[owner] = struct{}{}
+		}
 
 		contactDomain := PipeContactDomain{
 			Domain:       permission.Domain,
 			OwningDomain: owningDomain,
 			OwnerHeight:  ownerHeight,
 		}
-		eligible := map[string]struct{}{owner: {}}
+		eligible := make(map[string]struct{})
+		if includeOwners {
+			eligible[owner] = struct{}{}
+		} else if _, selected := candidateIDSet[owner]; selected {
+			eligible[owner] = struct{}{}
+		}
 		for agentID, agent := range agentByID {
 			if agent == nil || agent.Status != "active" || agent.RemovedAt != nil || agentID == owner {
 				continue
@@ -136,18 +184,49 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 			agg.domains = append(agg.domains, contactDomain)
 		}
 	}
+	// The bounded legacy status candidate query does not necessarily contain
+	// every effective owner. Owners are nevertheless always visible to an
+	// authorized peer, so fetch missing metadata in a small-projection batched
+	// query before materializing contacts. In particular, never call GetAgent
+	// here: it computes memory counts and can turn a policy's 1,024-domain cap
+	// into repeated full-table work while the federation snapshot leases are held.
+	if includeOwners && len(ownerIDs) != 0 {
+		missingOwners := make([]string, 0, len(ownerIDs))
+		for owner := range ownerIDs {
+			if _, alreadyLoaded := agentByID[owner]; !alreadyLoaded {
+				missingOwners = append(missingOwners, owner)
+			}
+		}
+		if len(missingOwners) != 0 {
+			owners, ownerErr := ss.GetPipeContactAgents(ctx, missingOwners)
+			if ownerErr != nil {
+				return nil, fmt.Errorf("load pipe contact owners: %w", ownerErr)
+			}
+			for _, owner := range owners {
+				if owner == nil || owner.AgentID == "" {
+					continue
+				}
+				ownerID := owner.AgentID
+				if isCanonicalAgentID(ownerID) {
+					ownerID = strings.ToLower(ownerID)
+				}
+				agentByID[ownerID] = owner
+			}
+		}
+	}
 	acceptances := map[string]string{}
 	if policy.Revision > 0 {
-		acceptances, err = ss.GetFederatedPipeContactAcceptances(ctx, *policy)
+		if !selectedAcceptances {
+			acceptances, err = ss.GetFederatedPipeContactAcceptances(ctx, *policy)
+		} else {
+			acceptances, err = ss.GetFederatedPipeContactAcceptancesForAgents(ctx, *policy, canonicalPipeContactAgentIDs(byAgent))
+		}
 		if err != nil {
 			return nil, fmt.Errorf("read pipe contact acceptance: %w", err)
 		}
 	}
 
-	agentIDs := make([]string, 0, len(byAgent))
-	for agentID := range byAgent {
-		agentIDs = append(agentIDs, agentID)
-	}
+	agentIDs := agentIDsFromAggregates(byAgent)
 	sort.Strings(agentIDs)
 	prefixes := uniqueAgentPrefixes(agentIDs)
 	nodeHandle := pipeContactNodeHandle(m.NetworkName(), m.localChainID)
@@ -181,6 +260,9 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 		if prefix := prefixes[agentID]; prefix != "" {
 			contact.Address = agentID + "@" + m.localChainID
 			contact.Handle = "#" + nodeHandle + "/" + prefix
+			if handle := handleOverrides[agentID]; handle != "" {
+				contact.Handle = handle
+			}
 			contact.ContactID, err = m.pipeContactID(peer, policy, contact)
 			if err != nil {
 				return nil, err
@@ -248,6 +330,112 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 	sum := sha256.Sum256(encoded)
 	grant.Revision = hex.EncodeToString(sum[:])
 	return grant, nil
+}
+
+func agentIDsFromAggregates(byAgent map[string]*pipeContactAggregate) []string {
+	agentIDs := make([]string, 0, len(byAgent))
+	for agentID := range byAgent {
+		agentIDs = append(agentIDs, agentID)
+	}
+	return agentIDs
+}
+
+func canonicalPipeContactAgentIDs(byAgent map[string]*pipeContactAggregate) []string {
+	all := agentIDsFromAggregates(byAgent)
+	canonical := all[:0]
+	for _, agentID := range all {
+		if isCanonicalAgentID(agentID) {
+			canonical = append(canonical, agentID)
+		}
+	}
+	return canonical
+}
+
+// buildPipeContactLookupGrant first narrows the local candidate set with a
+// bounded SQLite query, then evaluates the normal live Badger RBAC rules only
+// for those candidates. It intentionally trades an unbounded fuzzy-name scan
+// for deterministic first-candidate behavior; exact address routing remains a
+// point lookup and is never subject to the name candidate cap.
+func (m *Manager) buildPipeContactLookupGrant(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy, req PipeContactLookupRequest) (*PipeContactGrant, int, error) {
+	ss := m.syncStore()
+	if ss == nil {
+		return nil, 0, fmt.Errorf("pipe contacts require SQLite")
+	}
+	var (
+		agents          []*store.AgentEntry
+		candidateIDs    []string
+		handleOverrides map[string]string
+		err             error
+	)
+	if req.Name != "" {
+		agents, err = ss.FindPipeContactLookupCandidates(ctx, req.Name, maxPipeContactLookupCandidates)
+	} else if agentID, chainID := splitPipeAddress(req.Target); chainID != "" {
+		if chainID != m.localChainID {
+			grant, buildErr := m.buildPipeContactGrantForCandidates(ctx, peer, policy, nil, nil, false, nil, true)
+			return grant, 0, buildErr
+		}
+		candidateIDs = append(candidateIDs, agentID)
+		agents, err = ss.GetPipeContactAgents(ctx, []string{agentID})
+	} else if strings.HasPrefix(req.Target, "#") {
+		prefix, ok := pipeContactHandlePrefix(req.Target, pipeContactNodeHandle(m.NetworkName(), m.localChainID))
+		if !ok {
+			grant, buildErr := m.buildPipeContactGrantForCandidates(ctx, peer, policy, nil, nil, false, nil, true)
+			return grant, 0, buildErr
+		}
+		agents, err = ss.FindPipeContactAgentsByIDPrefix(ctx, prefix, maxPipeContactLookupCandidates)
+		handleOverrides = make(map[string]string, len(agents))
+		for _, agent := range agents {
+			if agent != nil {
+				handleOverrides[strings.ToLower(agent.AgentID)] = req.Target
+			}
+		}
+	} else if isCanonicalAgentID(req.Target) {
+		candidateIDs = append(candidateIDs, strings.ToLower(req.Target))
+		agents, err = ss.GetPipeContactAgents(ctx, []string{req.Target})
+	} else {
+		agents, err = ss.FindPipeContactLookupCandidates(ctx, req.Target, maxPipeContactLookupCandidates)
+		if err == nil {
+			filtered := agents[:0]
+			for _, agent := range agents {
+				if agent != nil && strings.EqualFold(pipeContactAgentDisplayName(agent), req.Target) {
+					filtered = append(filtered, agent)
+				}
+			}
+			agents = filtered
+		}
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("find pipe contact candidates: %w", err)
+	}
+	grant, err := m.buildPipeContactGrantForCandidates(ctx, peer, policy, agents, candidateIDs, false, handleOverrides, true)
+	if err != nil {
+		return nil, 0, err
+	}
+	filtered, total := filterPipeContactLookup(grant, req)
+	return filtered, total, nil
+}
+
+func pipeContactAgentDisplayName(agent *store.AgentEntry) string {
+	if agent == nil {
+		return ""
+	}
+	if agent.Name != "" {
+		return agent.Name
+	}
+	return agent.RegisteredName
+}
+
+func pipeContactHandlePrefix(handle, nodeHandle string) (string, bool) {
+	prefix := strings.TrimPrefix(handle, "#"+nodeHandle+"/")
+	if prefix == handle || len(prefix) < pipeContactMinAgentPrefix || len(prefix) > 64 {
+		return "", false
+	}
+	for _, char := range prefix {
+		if !((char >= 'a' && char <= 'f') || (char >= '0' && char <= '9')) {
+			return "", false
+		}
+	}
+	return prefix, true
 }
 
 // pipeContactAuthorizationRevision binds one event to exactly one visible
@@ -326,11 +514,27 @@ func (m *Manager) pipeContactID(peer *peerIdentity, policy *store.PeerRBACPolicy
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// LocalPipeContacts returns this node's current shared-domain RBAC contact
-// projection for one locally managed connection. It is the CEREBRUM-facing
-// form of the same data advertised to the authenticated peer by
-// /fed/v1/status.
+// LocalPipeContacts returns the bounded CEREBRUM administrative projection for
+// one locally managed connection. The browser must not make an unbounded roster
+// × policy-domain scan under revocation locks; callers that are changing one
+// contact add that exact agent to this bounded view internally.
 func (m *Manager) LocalPipeContacts(ctx context.Context, remoteChainID string) (*PipeContactGrant, error) {
+	return m.localPipeContacts(ctx, remoteChainID, "")
+}
+
+// LocalPipeContactsForAgent augments the bounded administrative view with one
+// exact local recipient. It gives the operator a safe way to enable a shared
+// reader outside the default sample without turning the dashboard into a full
+// roster query. The returned contact ID is still derived live and must be sent
+// back unchanged by SetPipeContactAcceptance.
+func (m *Manager) LocalPipeContactsForAgent(ctx context.Context, remoteChainID, localAgentID string) (*PipeContactGrant, error) {
+	if !isCanonicalAgentID(localAgentID) {
+		return nil, fmt.Errorf("local agent id must be a canonical 64-hex Ed25519 public key")
+	}
+	return m.localPipeContacts(ctx, remoteChainID, localAgentID)
+}
+
+func (m *Manager) localPipeContacts(ctx context.Context, remoteChainID, selectedAgentID string) (*PipeContactGrant, error) {
 	ss := m.syncStore()
 	if ss == nil {
 		return nil, fmt.Errorf("pipe contacts require the SQLite store backend")
@@ -356,7 +560,20 @@ func (m *Manager) LocalPipeContacts(ctx context.Context, remoteChainID string) (
 		return nil, fmt.Errorf("connection has no exact peer RBAC snapshot")
 	}
 	peer := &peerIdentity{ChainID: remoteChainID, AgentID: policy.PeerAgentID, Agreement: agreement}
-	return m.buildPipeContactGrant(ctx, peer, policy)
+	agents, err := ss.ListPipeContactStatusCandidates(ctx, maxPipeContactStatusCandidates)
+	if err != nil {
+		return nil, fmt.Errorf("list bounded local agents for pipe contacts: %w", err)
+	}
+	candidateIDs := []string(nil)
+	if selectedAgentID != "" {
+		candidateIDs = []string{selectedAgentID}
+		selected, selectedErr := ss.GetPipeContactAgents(ctx, candidateIDs)
+		if selectedErr != nil {
+			return nil, fmt.Errorf("load selected local pipe contact: %w", selectedErr)
+		}
+		agents = append(agents, selected...)
+	}
+	return m.buildPipeContactGrantForCandidates(ctx, peer, policy, agents, candidateIDs, true, nil, true)
 }
 
 // SetPipeContactAcceptance changes one local agent's inbound work-request
@@ -364,7 +581,7 @@ func (m *Manager) LocalPipeContacts(ctx context.Context, remoteChainID string) (
 // afterwards, so an ownership transfer, RBAC revoke, or availability change
 // racing the click cannot silently enable a stale recipient.
 func (m *Manager) SetPipeContactAcceptance(ctx context.Context, remoteChainID, localAgentID, contactID string, accepting bool) (*PipeContactGrant, error) {
-	current, err := m.LocalPipeContacts(ctx, remoteChainID)
+	current, err := m.localPipeContacts(ctx, remoteChainID, localAgentID)
 	if err != nil {
 		return nil, err
 	}
@@ -398,7 +615,7 @@ func (m *Manager) SetPipeContactAcceptance(ctx context.Context, remoteChainID, l
 		return nil, acceptanceErr
 	}
 
-	updated, err := m.LocalPipeContacts(ctx, remoteChainID)
+	updated, err := m.localPipeContacts(ctx, remoteChainID, localAgentID)
 	if err != nil {
 		return nil, err
 	}
