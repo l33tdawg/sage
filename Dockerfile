@@ -20,8 +20,20 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /sage-gui ./cmd/sage-gui
 
-FROM alpine:3.20
-RUN apk add --no-cache ca-certificates
+# Runtime is glibc (Debian), not Alpine/musl: SAGE's managed reranker
+# (internal/rerankd) downloads and execs a prebuilt llama.cpp `llama-server`
+# engine, and llama.cpp publishes only glibc/Ubuntu Linux builds — no musl or
+# fully-static asset (checked b9870 and latest). That binary's ELF interpreter
+# is /lib64/ld-linux-x86-64.so.2 and it NEEDs libstdc++.so.6, libgomp.so.1,
+# libssl.so.3 and libcrypto.so.3, none of which exist on alpine, so on the old
+# Alpine image the engine exited instantly ("llama-server exited during
+# startup") and the managed reranker was non-functional in the container.
+# sage-gui itself is CGO_ENABLED=0 static and runs unchanged on either base.
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      ca-certificates libstdc++6 libgomp1 libssl3 \
+ && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /sage-gui /usr/local/bin/sage-gui
 
 ENV SAGE_HOME=/root/.sage
