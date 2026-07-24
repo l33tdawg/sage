@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.12.2 code (2026-07-24). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.13.0 code (2026-07-24). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
@@ -145,7 +145,7 @@ Authenticated reachability / identity and permission preflight (`handleStatus`,
 | `time` | int64 | serving node's unix time |
 | `capabilities` | []string | optional features. A SQLite-backed v11.10 node advertises `sync` and `federated-pipeline-v1`; it never advertises reserved `write-v1` (`internal/federation/server.go:414-427`). |
 | `peer_rbac_grant` | object, optional | the serving node's current `{policy_version, paused, domains:[{domain,read,write,copy}]}` snapshot, disclosed only to the exact bound peer; present with zero rows means deny-all. While paused, current peers see `paused:true` and an empty domain list; the empty list also keeps older peers fail-closed. The versioned `write` member is always false in v11.9 (`internal/federation/peer_rbac.go:313-330`). |
-| `pipe_contacts` | object, optional | Finite peer-scoped projection of effective owners for shared Read/Copy domains: exact `agreement_id`, content-addressed `revision`, pause state, and contacts with exact `agent@chain`, friendly handle, source domains, availability, and default-off `accepting`. Ownerless/open-shared domains expose no guessed contact. The exact frozen peer alone receives this snapshot (`internal/federation/pipe_contacts.go:31-198`). |
+| `pipe_contacts` | object, optional | Finite peer-scoped projection of domain owners and **active local agents with current level-1 Read access** for shared Read/Copy domains: exact `agreement_id`, content-addressed `revision`, pause state, and contacts with exact `agent@chain`, friendly handle, source domains, availability, and default-off `accepting`. A level-2 write grant also qualifies because it includes Read. An inactive owner may appear as unavailable diagnostic metadata but is never routable. Ownerless/open-shared domains expose no guessed contact. The exact frozen peer alone receives this snapshot (`internal/federation/pipe_contacts.go:33-248`). |
 | `sharing_grant` | object, optional | legacy compatibility envelope (`allowed_domains`, `max_clearance`) |
 
 ### `POST /fed/v1/pipe/event`
@@ -164,10 +164,10 @@ reroute a friendly alias, relabel another source chain's proof, extend its TTL,
 or substitute the agent (`api/rest/pipe_handler.go:132-321`,
 `internal/federation/pipe_transport.go:72-169`, `:371-463`).
 
-Admission then re-derives the current effective owner and exact
-agreement/policy/contact revision under policy, ownership, and agent-contact
-read leases. It requires the receiver's per-contact work-request switch to be
-on. Imported work gets a fresh local pipe ID and appears through ordinary
+Admission then re-derives the recipient's current shared-domain RBAC access and
+exact agreement/policy/contact revision under policy, ownership, and
+agent-contact read leases. It requires the receiver's per-contact work-request
+switch to be on. Imported work gets a fresh local pipe ID and appears through ordinary
 `sage_turn`/`sage_inbox`; only the stable proof-derived event ID crosses the
 wire. Delivery is at-least-once with durable idempotence and equivocation
 rejection. Replay tombstones survive revoke/re-pair cleanup
@@ -524,8 +524,8 @@ Every route 501s when the transport is not wired (`fedReady`,
 | `PUT /v1/dashboard/federation/connections/{chain_id}/permissions` | `handleFedPermissionsPut` (`web/federation_permissions.go:254-402`) | Replace this node's complete existing-domain Read/Copy snapshot for the frozen peer. A true `write` field is rejected. |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/pause` | `handleFedPause` (`web/federation_permissions.go:230-270`) | Set `{"paused":true|false}` for this node's directional grant without deleting trust or saved domains. |
 | `GET/PUT /v1/dashboard/federation/connections/{chain_id}/sync` | `handleFedSyncGet/Set` (`web/federation_join.go:344-579`) | Read or change directional copy lanes; current UI changes only the receiver's `subscribe_domains` choice. |
-| `GET /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsGet` (`web/federation_pipe_contacts.go:20-63`) | Return this node's effective-owner contacts and the peer's authenticated read-only contact snapshot. `?live=0` skips the peer probe so saved local acceptance controls render immediately and reports `remote_known:false`. |
-| `PUT /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsPut` (`web/federation_pipe_contacts.go:66-107`) | Toggle one exact local owner's default-off inbound work acceptance using its current contact ID. |
+| `GET /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsGet` (`web/federation_pipe_contacts.go:20-63`) | Return this node's active shared-domain RBAC contacts and the peer's authenticated read-only contact snapshot. `?live=0` skips the peer probe so saved local acceptance controls render immediately and reports `remote_known:false`. |
+| `PUT /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsPut` (`web/federation_pipe_contacts.go:66-107`) | Toggle one exact active local shared-domain recipient's default-off inbound work acceptance using its current contact ID. |
 | `POST /v1/dashboard/federation/connections/{chain_id}/revoke` | `handleFedRevoke` (`web/federation_join.go`) | Commit local tx-34, best-effort notify the peer with the retained exact old credentials, purge locally, and return notification status. |
 | `GET /v1/dashboard/federation/connections/{chain_id}/status` | `handleFedPeerStatus` (`web/federation_join.go:778`) | Peer reachability preflight |
 | `POST /v1/dashboard/federation/groups/refresh` | `handleFedGroupRefresh` (`web/federation_join.go`) | Prompt one bounded group-journal anti-entropy pass and wait for it to finish before CEREBRUM reloads the local group projection. Ordinary group-list polling remains a local SQLite read. |
@@ -581,12 +581,14 @@ fake MRI nodes, because the graph still represents this node's stored brain
 `BrainDomainInventory`).
 
 The same expanded detail contains **Agent work requests**, not a chat composer.
-For local surfaced owners, the operator independently enables inbound work from
-that peer; every new/changed contact starts Off. For remote owners, CEREBRUM
-shows the friendly handle but makes exact `agent@chain` the primary copyable
-address. Saving a changed domain snapshot warns that enabled contact choices
-will reset, then refreshes both projections authoritatively. Pause preserves
-the domain and contact choices while suspending delivery
+For local surfaced recipients, the operator independently enables inbound work
+from that peer; a recipient must be active and currently hold ordinary local
+level-1 Read access to a shared domain (the owner is eligible by definition). Every
+new/changed contact starts Off. CEREBRUM shows remote friendly handles but
+makes exact `agent@chain` the primary copyable address. Saving a changed domain
+snapshot warns that enabled contact choices will reset, then refreshes both
+projections authoritatively. Pause preserves the domain and contact choices
+while suspending delivery
 (`web/static/js/app.js:12181-12558`,
 `web/federation_pipe_contacts.go:20-107`).
 

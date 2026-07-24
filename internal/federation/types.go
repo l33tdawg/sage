@@ -134,10 +134,11 @@ type StatusResponse struct {
 	// PeerRBACGrant is advertised only to the exact chain+operator identity bound
 	// to the snapshot. Its absence preserves compatibility with legacy peers.
 	PeerRBACGrant *PeerRBACGrant `json:"peer_rbac_grant,omitempty"`
-	// PipeContacts is the finite, peer-scoped projection of effective domain
-	// owners for the domains in PeerRBACGrant. It is discovery metadata only:
-	// presence never advertises the federated-pipeline capability or authorizes
-	// delivery. Older peers ignore this additive field.
+	// PipeContacts is the finite, peer-scoped projection of domain owners and
+	// active non-owner agents with current local read access to domains in
+	// PeerRBACGrant. An unavailable owner may remain as diagnostic metadata, but
+	// is never routable. Presence never advertises the federated-pipeline
+	// capability or authorizes delivery. Older peers ignore this additive field.
 	PipeContacts *PipeContactGrant `json:"pipe_contacts,omitempty"`
 }
 
@@ -197,9 +198,12 @@ const PipeContactVersion = 1
 const CapabilityFederatedPipeline = "federated-pipeline-v1"
 
 // PipeContactGrant is the serving node's peer-scoped agent-address snapshot.
-// Revision is content-addressed over the exact federation binding, domain
-// ownership, agent availability, and all contacts; it invalidates the complete
-// cached snapshot. Individual deliveries derive a target-specific authorization
+// A routable contact is an active local agent that is either the effective
+// owner of a shared domain or currently holds normal local read access to it.
+// Unavailable owners remain diagnostic metadata. Revision is content-addressed
+// over the exact federation binding, domain ownership, agent availability,
+// access projection, and all contacts; it invalidates the complete cached
+// snapshot. Individual deliveries derive a target-specific authorization
 // revision so an unrelated contact cannot invalidate exact-address queued work.
 type PipeContactGrant struct {
 	Version     int           `json:"version"`
@@ -209,20 +213,23 @@ type PipeContactGrant struct {
 	Contacts    []PipeContact `json:"contacts"`
 }
 
-// PipeContact is one effective domain owner visible to one authenticated peer.
-// Handle is a copy-friendly alias only; Address and AgentID preserve the exact
-// machine identity. ContactID is the authorization-bound identity of this
-// exact owner projection; it changes when the peer/policy/owner generation
-// changes and must accompany every acceptance mutation.
+// PipeContact is one local agent associated with a shared domain. It is
+// routable only while Available and Accepting. Handle is a copy-friendly alias
+// only; Address and AgentID preserve the exact machine identity. ContactID is
+// the authorization-bound identity of this exact domain-access projection; it
+// changes when the peer/policy/owner generation changes and must accompany
+// every acceptance mutation.
 type PipeContact struct {
-	AgentID     string              `json:"agent_id"`
-	ContactID   string              `json:"contact_id,omitempty"`
-	DisplayName string              `json:"display_name,omitempty"`
-	Address     string              `json:"address,omitempty"`
-	Handle      string              `json:"handle,omitempty"`
-	Available   bool                `json:"available"`
-	Accepting   bool                `json:"accepting"`
-	Domains     []PipeContactDomain `json:"domains"`
+	AgentID        string              `json:"agent_id"`
+	ContactID      string              `json:"contact_id,omitempty"`
+	DisplayName    string              `json:"display_name,omitempty"`
+	RegisteredName string              `json:"registered_name,omitempty"`
+	Provider       string              `json:"provider,omitempty"`
+	Address        string              `json:"address,omitempty"`
+	Handle         string              `json:"handle,omitempty"`
+	Available      bool                `json:"available"`
+	Accepting      bool                `json:"accepting"`
+	Domains        []PipeContactDomain `json:"domains"`
 }
 
 // PipeContactDomain records why a contact is visible. OwningDomain differs

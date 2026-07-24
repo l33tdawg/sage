@@ -28,7 +28,7 @@ func (w *blockingStatusWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func TestStatusPipeContactsDeriveEffectiveOwnersOnly(t *testing.T) {
+func TestStatusPipeContactsDeriveEffectiveOwnerContacts(t *testing.T) {
 	ctx := context.Background()
 	m, ss, bs := newDrainTestManager(t)
 	m.SetNetworkName("Amy's SAGE")
@@ -88,6 +88,95 @@ func TestStatusPipeContactsDeriveEffectiveOwnersOnly(t *testing.T) {
 	require.False(t, inactive.Accepting)
 	require.Equal(t, []PipeContactDomain{{Domain: "ops.alerts", OwningDomain: "ops", OwnerHeight: 2}}, inactive.Domains)
 	require.Contains(t, status.Capabilities, CapabilityFederatedPipeline)
+}
+
+func TestPipeContactsIncludeActiveAgentsWithSharedDomainAccess(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	// The shared policy targets a child while the grants sit on its owner
+	// ancestor. This pins the live app-v8 ancestor-aware access semantics used
+	// by the node wiring, rather than only testing an exact grant coincidence.
+	m.postV8ForAccess = func() bool { return true }
+	peerID := newPeerOperatorID(t)
+	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerID, "host", nil, 4)
+
+	owner := newPeerOperatorID(t)
+	reader := newPeerOperatorID(t)
+	writer := newPeerOperatorID(t)
+	unrelated := newPeerOperatorID(t)
+	inactive := newPeerOperatorID(t)
+	for _, agent := range []struct {
+		id             string
+		name           string
+		registeredName string
+		provider       string
+		status         string
+	}{
+		{owner, "domain-owner", "domain-owner", "local", "active"},
+		{reader, "Research worker", "innovium", "claude-code", "active"},
+		{writer, "domain-writer", "domain-writer", "local", "active"},
+		{unrelated, "unrelated", "unrelated", "local", "active"},
+		{inactive, "inactive-reader", "inactive-reader", "local", "inactive"},
+	} {
+		require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{
+			AgentID: agent.id, Name: agent.name, RegisteredName: agent.registeredName,
+			Provider: agent.provider, Status: agent.status,
+		}))
+	}
+	require.NoError(t, bs.RegisterDomain("research", owner, "", 10))
+	require.NoError(t, bs.SetAccessGrant("research", reader, 1, 0, owner))
+	require.NoError(t, bs.SetAccessGrant("research", writer, 2, 0, owner))
+	require.NoError(t, bs.SetAccessGrant("research", inactive, 1, 0, owner))
+	_, err := m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{{Domain: "research.findings", Read: true}})
+	require.NoError(t, err)
+
+	grant := statusForPeer(t, m, "chain-peer", peerID, agreement).PipeContacts
+	require.NotNil(t, grant)
+	contacts := make(map[string]PipeContact, len(grant.Contacts))
+	for _, contact := range grant.Contacts {
+		contacts[contact.AgentID] = contact
+	}
+	require.Contains(t, contacts, owner, "the effective domain owner stays eligible")
+	require.Contains(t, contacts, reader, "read grant recipients get a shared-domain inbox")
+	require.Contains(t, contacts, writer, "write grants imply the required read capability")
+	require.NotContains(t, contacts, unrelated)
+	require.NotContains(t, contacts, inactive, "inactive agents never become new federated inbox contacts")
+	readerContact := contacts[reader]
+	require.Equal(t, []PipeContactDomain{{Domain: "research.findings", OwningDomain: "research", OwnerHeight: 10}}, readerContact.Domains)
+	require.Equal(t, "Research worker", readerContact.DisplayName)
+	require.Equal(t, "innovium", readerContact.RegisteredName)
+	require.Equal(t, "claude-code", readerContact.Provider)
+
+	updated, err := m.SetPipeContactAcceptance(ctx, "chain-peer", reader, readerContact.ContactID, true)
+	require.NoError(t, err)
+	var accepted PipeContact
+	for _, contact := range updated.Contacts {
+		if contact.AgentID == reader {
+			accepted = contact
+			break
+		}
+	}
+	require.True(t, accepted.Accepting)
+	policy, err := m.GetPeerRBACPolicy(ctx, "chain-peer")
+	require.NoError(t, err)
+	require.NotNil(t, policy)
+	event := &PipeEvent{
+		PolicyEpoch:     policy.PolicyEpoch,
+		AgreementID:     updated.AgreementID,
+		ContactID:       accepted.ContactID,
+		ContactRevision: pipeContactAuthorizationRevision(updated, &accepted),
+		TargetAgentID:   reader,
+	}
+	peer := &peerIdentity{ChainID: "chain-peer", AgentID: peerID, Agreement: agreement}
+	resolved, err := m.authorizeInboundPipeContact(ctx, peer, event)
+	require.NoError(t, err)
+	require.Equal(t, reader, resolved.AgentID)
+
+	// A grant revoke removes the recipient from the live projection, so an
+	// already queued event cannot be accepted with a stale contact revision.
+	require.NoError(t, bs.DeleteAccessGrant("research", reader))
+	_, err = m.authorizeInboundPipeContact(ctx, peer, event)
+	require.ErrorIs(t, err, ErrFederatedPipeInvalid)
 }
 
 func TestPipeContactAcceptanceDefaultsOffPersistsPauseAndInvalidatesChanges(t *testing.T) {

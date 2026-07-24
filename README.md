@@ -51,6 +51,27 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.13.0
+
+**A shared domain can now route work to every active agent that holds current
+RBAC access to it—not only its owner.** A level-1 reader or level-2 writer on
+SAGE A can opt in to receiving federated work from authorized agents on SAGE B.
+The existing `sage_find_agent` local-first lookup and short-lived,
+caller-scoped cache then discover those opted-in contacts by name.
+
+- **Domain-scoped, not a global directory.** Contacts are exposed only through
+  a live shared Read/Copy domain and retain that domain as their routing basis.
+  Open-shared and ownerless domains still publish no guessed recipient.
+- **RBAC is rechecked at delivery.** The receiver rebuilds the contact from
+  current access grants before admitting, claiming, or completing foreign work.
+  While a grant is revoked or expired—or an agent, owner, or federation policy
+  changes—the old route is rejected. Inbound work remains default-off until the
+  local operator enables that exact contact.
+
+This release changes no SAGE consensus rule, AppHash input, transaction type,
+key encoding, fork target, or application version. App-v20 and the v11.9
+rollout boundary are unchanged; existing chains upgrade in place. SDK 11.13.0.
+
 ## What's New in v11.12.2
 
 **Agents can now resolve a human recipient name safely across a federation.**
@@ -616,7 +637,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.12.2`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.13.0`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:

@@ -142,8 +142,8 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
   assert.match(
     daemonStager,
-    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\)\\\./,
-    'the tagged daemon stager must accept the current v11.12 release series',
+    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\|13\)\\\./,
+    'the tagged daemon stager must accept the current v11.13 release series',
   );
   assert.match(evidence, /Repair v11\.12\.0 native staging helper for immutable-tag recovery/);
   assert.match(evidence, /github\.event_name == 'workflow_dispatch'.*RELEASE_TAG == 'v11\.12\.0'/);

@@ -32,7 +32,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.12.2';
+const SAGE_VERSION = 'v11.13.0';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -13217,7 +13217,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
             { title: 'Update shared domains?', confirmLabel: 'Update and reset', tone: 'primary' }
         )) return;
         if (dirty && enabledWorkRequests > 0 && !await showConfirmation(
-            `Updating the shared domain list resets ${enabledWorkRequests} enabled agent work-request ${enabledWorkRequests === 1 ? 'switch' : 'switches'} to Off. This prevents a changed domain owner or scope from inheriting permission. You can turn unchanged agents back on after saving.`,
+            `Updating the shared domain list resets ${enabledWorkRequests} enabled agent work-request ${enabledWorkRequests === 1 ? 'switch' : 'switches'} to Off. This prevents a changed domain-access scope from inheriting permission. You can turn unchanged agents back on after saving.`,
             { title: 'Update shared domains?', confirmLabel: 'Update and reset', tone: 'primary' }
         )) return;
         setBusy(true); setErr('');
@@ -13419,7 +13419,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 			<div class="fed-perm-section-head">
 				<div>
 					<h4>Agent work requests</h4>
-					<p>This extends SAGE's existing agent inbox across this trusted connection. It is not a chat: you choose which domain-owner agents may receive work, and each side controls its own agents.</p>
+					<p>This extends SAGE's existing agent inbox across this trusted connection. It is not a chat: you choose which active agents with access to a shared domain may receive work, and each side controls its own agents.</p>
 				</div>
 			</div>
 			<div class="fed-agent-columns">
@@ -13427,7 +13427,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 					<h5>Agents on this SAGE</h5>
 					<p class="muted">Allow ${peerName}'s SAGE to send a work request to a specific local agent. New contacts start off. Changing the shared domain list resets enabled switches to Off.</p>
 					${localPipeContacts === null && html`<div class="fed-agent-empty muted">Loading local agents…</div>`}
-					${localPipeContacts !== null && localAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">Share a domain with an owner to make its agent available here.</div>`}
+					${localPipeContacts !== null && localAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">Share a domain, then grant an active local agent access to make its inbox available here.</div>`}
 					${localAgentContacts.map(contact => {
 						const domains = Array.isArray(contact.domains) ? contact.domains.map(item => item.domain).filter(Boolean) : [];
 						const status = contact.available === false ? 'Agent unavailable' : (contact.accepting ? (localPipeContacts.paused ? 'Allowed · connection paused' : 'Accepting requests') : 'Requests off');
@@ -13435,7 +13435,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 							<div class="fed-agent-identity">
 								<strong>${contact.display_name || contact.handle || 'Local agent'}</strong>
 								${contact.handle && html`<code>${contact.handle}</code>`}
-								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Domain owner'}</span>
+								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Shared-domain access'}</span>
 							</div>
 							<label class="fed-agent-toggle">
 								<span class=${contact.accepting ? 'on' : ''}>${status}</span>
@@ -13450,9 +13450,9 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 				</div>
 				<div class="fed-agent-column fed-agent-remote">
 					<h5>Agents on ${peerName}</h5>
-					<p class="muted">These are the domain-owner agents their SAGE makes visible. Copy a private routing address only when configuring an agent; CEREBRUM manages the connection.</p>
+					<p class="muted">These are the shared-domain agents their SAGE makes visible. Copy a private routing address only when configuring an agent; CEREBRUM manages the connection.</p>
 					${!remotePipeKnown && html`<div class="fed-agent-empty muted">Their SAGE has not reported agent contacts yet.</div>`}
-					${remotePipeKnown && remoteAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">They are not exposing any domain-owner agents to this connection.</div>`}
+					${remotePipeKnown && remoteAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">They are not exposing any shared-domain agents to this connection.</div>`}
 					${remoteAgentContacts.map(contact => {
 						const domains = Array.isArray(contact.domains) ? contact.domains.map(item => item.domain).filter(Boolean) : [];
 						const ready = contact.available !== false && contact.accepting === true && !remotePipeContacts.paused;
@@ -13460,7 +13460,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 							<div class="fed-agent-identity">
 								<strong>${contact.display_name || contact.handle || 'Remote agent'}</strong>
 								${contact.handle && html`<span class="fed-agent-handle muted">${contact.handle}</span>`}
-								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Shared-domain owner'}</span>
+								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Shared-domain access'}</span>
 							</div>
 							<div class="fed-agent-remote-actions">
 								<span class="fed-agent-readiness ${ready ? 'ready' : ''}">${ready ? 'Ready' : (remotePipeContacts.paused ? 'Paused' : (contact.available === false ? 'Unavailable' : 'Not accepting'))}</span>

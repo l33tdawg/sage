@@ -396,7 +396,7 @@ func TestSageFindAgentFallsBackToContactableFederatedMatches(t *testing.T) {
 					"remote_chain_id": "chain-innovium",
 					"network_name":    "Innovium",
 					"remote_agents": []map[string]any{
-						{"agent_id": "remote-live", "display_name": "Innovium Research", "address": "remote-live@chain-innovium", "handle": "#innovium/remote-live", "available": true, "accepting": true, "domains": []map[string]any{{"domain": "research"}}},
+						{"agent_id": "remote-live", "display_name": "Research worker", "registered_name": "innovium", "provider": "claude-code", "address": "remote-live@chain-innovium", "handle": "#innovium/remote-live", "available": true, "accepting": true, "domains": []map[string]any{{"domain": "research"}}},
 						{"agent_id": "remote-disabled", "display_name": "Innovium Disabled", "address": "remote-disabled@chain-innovium", "available": true, "accepting": false},
 						{"agent_id": "remote-offline", "display_name": "Innovium Offline", "address": "remote-offline@chain-innovium", "available": false, "accepting": true},
 					},
@@ -419,6 +419,7 @@ func TestSageFindAgentFallsBackToContactableFederatedMatches(t *testing.T) {
 	require.Len(t, matches, 1)
 	assert.Equal(t, "federated", matches[0]["scope"])
 	assert.Equal(t, "remote-live", matches[0]["agent_id"])
+	assert.Equal(t, "innovium", matches[0]["registered_name"])
 	assert.Equal(t, "remote-live@chain-innovium", matches[0]["to"])
 	assert.Equal(t, "#innovium/remote-live", matches[0]["handle"])
 }

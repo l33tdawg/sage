@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.12.2.
+Reconciled against internal/mcp for SAGE v11.13.0.
 
 # SAGE MCP Tools Reference
 
@@ -703,14 +703,17 @@ global agent directory.
 
 | Name | Type | Required | Description |
 |---|---|---|---|
-| `name` | string | yes | Display name, registered name, or local provider name. Matching is case-insensitive and supports partial names. |
+| `name` | string | yes | Display name, registered name, or provider name. Matching is case-insensitive and supports partial names on both local and caller-authorized federated contacts. |
 | `limit` | int | no | Maximum matches to return. Default 10, max 20. |
 
 Federated results are restricted to contacts already visible to the signed
 caller through `GET /v1/federation/available`, and only when that contact is
-active and has opted in to accept work. No endpoint, CA, agreement, contact-ID,
-or other mutation material is exposed. `sage_pipe` repeats the same local
-domain-scope authorization on both federated resolution and direct send.
+active and has opted in to accept work. A contact is the effective owner of a
+shared domain or another active agent that currently holds local RBAC level-1
+Read access to it; a level-2 write grant therefore also qualifies. No endpoint,
+CA, agreement, contact-ID, or other mutation material is exposed. `sage_pipe`
+repeats the same local domain-scope authorization on both federated resolution
+and direct send.
 
 To make a follow-up request fast, SAGE keeps the caller's federated contact
 projection in an in-memory cache for one minute (maximum 128 callers, 64 chains,

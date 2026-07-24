@@ -60,7 +60,8 @@ func validateRemotePipeContactGrant(remoteChainID string, grant *PipeContactGran
 	}
 	seen := make(map[string]struct{}, len(grant.Contacts))
 	for _, contact := range grant.Contacts {
-		if len(contact.DisplayName) > 512 || len(contact.Handle) > 512 ||
+		if len(contact.DisplayName) > 512 || len(contact.RegisteredName) > 512 ||
+			len(contact.Provider) > 512 || len(contact.Handle) > 512 ||
 			len(contact.Domains) > store.MaxPeerRBACPolicyDomains {
 			return fmt.Errorf("invalid pipe contact snapshot")
 		}

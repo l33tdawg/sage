@@ -182,7 +182,11 @@ type Config struct {
 	// It must remain absent before activation because older validators reproduce
 	// the historical payload without that extension when checking signatures.
 	PostV20ForNextTx func() bool
-	Logger           zerolog.Logger
+	// PostV8ForAccess reports whether the live chain uses the ancestor-aware
+	// access semantics. Federated inbox contacts must mirror the access check
+	// that governs a local agent's current domain read capability.
+	PostV8ForAccess func() bool
+	Logger          zerolog.Logger
 }
 
 // Manager is the off-consensus federation transport: trust resolution,
@@ -196,6 +200,7 @@ type Manager struct {
 	badger           *store.BadgerStore
 	memStore         store.MemoryStore
 	postV20ForNextTx func() bool
+	postV8ForAccess  func() bool
 	logger           zerolog.Logger
 
 	// peerDialFn is the optional v11.6 connectivity seam. It may handle a
@@ -546,6 +551,7 @@ func NewManager(cfg Config) *Manager {
 		badger:             cfg.Badger,
 		memStore:           cfg.MemStore,
 		postV20ForNextTx:   cfg.PostV20ForNextTx,
+		postV8ForAccess:    cfg.PostV8ForAccess,
 		logger:             cfg.Logger.With().Str("component", "federation").Logger(),
 		seenSigs:           make(map[string]map[string]int64),
 		caCache:            make(map[string]*x509.Certificate),

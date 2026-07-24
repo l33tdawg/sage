@@ -1258,6 +1258,7 @@ func runServe(startupProof string) (rerr error) {
 			Badger:           badgerStore,
 			MemStore:         sqliteStore,
 			PostV20ForNextTx: app.IsAppV20ActiveForNextTx,
+			PostV8ForAccess:  app.IsPostV8Fork,
 			Logger:           logger,
 		})
 		restServer.SetFederation(fedMgr)

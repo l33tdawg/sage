@@ -953,13 +953,15 @@ type findAgentLocalResult struct {
 }
 
 type findAgentFederatedContact struct {
-	AgentID     string                     `json:"agent_id"`
-	DisplayName string                     `json:"display_name"`
-	Address     string                     `json:"address"`
-	Handle      string                     `json:"handle"`
-	Available   bool                       `json:"available"`
-	Accepting   bool                       `json:"accepting"`
-	Domains     []findAgentFederatedDomain `json:"domains"`
+	AgentID        string                     `json:"agent_id"`
+	DisplayName    string                     `json:"display_name"`
+	RegisteredName string                     `json:"registered_name"`
+	Provider       string                     `json:"provider"`
+	Address        string                     `json:"address"`
+	Handle         string                     `json:"handle"`
+	Available      bool                       `json:"available"`
+	Accepting      bool                       `json:"accepting"`
+	Domains        []findAgentFederatedDomain `json:"domains"`
 }
 
 type findAgentFederatedDomain struct {
@@ -1023,6 +1025,8 @@ func boundedFederatedAgentConnections(in []findAgentFederatedConnection) []findA
 			if !contact.Available || !contact.Accepting ||
 				len(contact.AgentID) == 0 || len(contact.AgentID) > maxFederatedAgentCacheLabelBytes ||
 				len(contact.DisplayName) > maxFederatedAgentCacheLabelBytes ||
+				len(contact.RegisteredName) > maxFederatedAgentCacheLabelBytes ||
+				len(contact.Provider) > maxFederatedAgentCacheLabelBytes ||
 				len(contact.Handle) > maxFederatedAgentCacheLabelBytes ||
 				len(contact.Address) == 0 || len(contact.Address) > maxFederatedAgentCacheAddressBytes {
 				continue
@@ -1272,7 +1276,7 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 			if contact.AgentID == "" || contact.Address == "" || !contact.Available || !contact.Accepting {
 				continue
 			}
-			exact, partial := matchesAgentName(query, contact.DisplayName)
+			exact, partial := matchesAgentName(query, contact.DisplayName, contact.RegisteredName, contact.Provider)
 			match := federatedMatch{connection: connection, contact: contact}
 			if exact {
 				federatedExact = append(federatedExact, match)
@@ -1297,16 +1301,18 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 	matches := make([]map[string]any, 0, min(len(federatedMatches), limit))
 	for _, match := range federatedMatches[:min(len(federatedMatches), limit)] {
 		matches = append(matches, map[string]any{
-			"scope":     "federated",
-			"agent_id":  match.contact.AgentID,
-			"name":      match.contact.DisplayName,
-			"network":   match.connection.NetworkName,
-			"chain_id":  match.connection.RemoteChainID,
-			"address":   match.contact.Address,
-			"handle":    match.contact.Handle,
-			"to":        match.contact.Address,
-			"available": true,
-			"accepting": true,
+			"scope":           "federated",
+			"agent_id":        match.contact.AgentID,
+			"name":            match.contact.DisplayName,
+			"registered_name": match.contact.RegisteredName,
+			"provider":        match.contact.Provider,
+			"network":         match.connection.NetworkName,
+			"chain_id":        match.connection.RemoteChainID,
+			"address":         match.contact.Address,
+			"handle":          match.contact.Handle,
+			"to":              match.contact.Address,
+			"available":       true,
+			"accepting":       true,
 		})
 	}
 	return map[string]any{

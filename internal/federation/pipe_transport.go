@@ -218,7 +218,7 @@ func (m *Manager) authorizeInboundPipeContact(ctx context.Context, peer *peerIde
 
 // AuthorizeImportedPipe revalidates an already admitted foreign work item at
 // disclosure, claim and completion. Pause/offline/acceptance-off suspends it;
-// an ownership, domain, agreement or contact-revision change invalidates it.
+// a domain-access, ownership, agreement or contact-revision change invalidates it.
 func (m *Manager) AuthorizeImportedPipe(ctx context.Context, msg *store.PipelineMessage) error {
 	return m.WithAuthorizedImportedPipe(ctx, msg, nil)
 }

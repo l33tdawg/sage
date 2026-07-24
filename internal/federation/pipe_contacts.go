@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -30,9 +31,11 @@ type pipeContactAggregate struct {
 }
 
 // buildPipeContactGrant derives the finite agent-address projection for one
-// already-authenticated peer. It runs beneath handleStatus's policy read lease,
-// and intentionally does not advertise a send capability: this first slice is
-// discovery-only until inbound acceptance and delivery are implemented.
+// already-authenticated peer. A shared-domain owner is always eligible; every
+// other active local agent is included only when the live RBAC read check says
+// it may read that exact shared subtree. It runs beneath handleStatus's policy
+// read lease and intentionally does not advertise a send capability: every
+// contact remains default-off until its local operator enables acceptance.
 func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy) (*PipeContactGrant, error) {
 	if policy == nil {
 		return nil, nil
@@ -63,7 +66,9 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 		}
 	}
 
-	byOwner := make(map[string]*pipeContactAggregate)
+	byAgent := make(map[string]*pipeContactAggregate)
+	now := time.Now()
+	postV8Access := m.postV8ForAccess != nil && m.postV8ForAccess()
 	for _, permission := range policy.Domains {
 		if !permission.Read && !permission.Copy {
 			continue
@@ -100,16 +105,36 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 			return nil, fmt.Errorf("pipe contact owner changed while resolving %q", owningDomain)
 		}
 
-		agg := byOwner[owner]
-		if agg == nil {
-			agg = &pipeContactAggregate{agentID: owner, domains: make([]PipeContactDomain, 0, 1)}
-			byOwner[owner] = agg
-		}
-		agg.domains = append(agg.domains, PipeContactDomain{
+		contactDomain := PipeContactDomain{
 			Domain:       permission.Domain,
 			OwningDomain: owningDomain,
 			OwnerHeight:  ownerHeight,
-		})
+		}
+		eligible := map[string]struct{}{owner: {}}
+		for agentID, agent := range agentByID {
+			if agent == nil || agent.Status != "active" || agent.RemovedAt != nil || agentID == owner {
+				continue
+			}
+			// A federated inbox requires SAGE's ordinary level-1 Read verb.
+			// Passing classification 0 would admit any same-org member that can
+			// view PUBLIC memories, even though it has no domain Read capability.
+			// Level-2 Write is naturally included because it satisfies this bar.
+			allowed, accessErr := m.badger.HasAccessMultiOrg(permission.Domain, agentID, 1, now, postV8Access)
+			if accessErr != nil {
+				return nil, fmt.Errorf("check pipe contact access for %q on %q: %w", agentID, permission.Domain, accessErr)
+			}
+			if allowed {
+				eligible[agentID] = struct{}{}
+			}
+		}
+		for agentID := range eligible {
+			agg := byAgent[agentID]
+			if agg == nil {
+				agg = &pipeContactAggregate{agentID: agentID, domains: make([]PipeContactDomain, 0, 1)}
+				byAgent[agentID] = agg
+			}
+			agg.domains = append(agg.domains, contactDomain)
+		}
 	}
 	acceptances := map[string]string{}
 	if policy.Revision > 0 {
@@ -119,17 +144,17 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 		}
 	}
 
-	ownerIDs := make([]string, 0, len(byOwner))
-	for owner := range byOwner {
-		ownerIDs = append(ownerIDs, owner)
+	agentIDs := make([]string, 0, len(byAgent))
+	for agentID := range byAgent {
+		agentIDs = append(agentIDs, agentID)
 	}
-	sort.Strings(ownerIDs)
-	prefixes := uniqueAgentPrefixes(ownerIDs)
+	sort.Strings(agentIDs)
+	prefixes := uniqueAgentPrefixes(agentIDs)
 	nodeHandle := pipeContactNodeHandle(m.NetworkName(), m.localChainID)
 
-	contacts := make([]PipeContact, 0, len(ownerIDs))
-	for _, owner := range ownerIDs {
-		agg := byOwner[owner]
+	contacts := make([]PipeContact, 0, len(agentIDs))
+	for _, agentID := range agentIDs {
+		agg := byAgent[agentID]
 		sort.Slice(agg.domains, func(i, j int) bool {
 			if agg.domains[i].Domain == agg.domains[j].Domain {
 				return agg.domains[i].OwningDomain < agg.domains[j].OwningDomain
@@ -138,27 +163,29 @@ func (m *Manager) buildPipeContactGrant(ctx context.Context, peer *peerIdentity,
 		})
 
 		contact := PipeContact{
-			AgentID:   owner,
+			AgentID:   agentID,
 			Available: false,
 			Accepting: false,
 			Domains:   agg.domains,
 		}
-		if agent := agentByID[owner]; agent != nil {
+		if agent := agentByID[agentID]; agent != nil {
 			name := agent.Name
 			if name == "" {
 				name = agent.RegisteredName
 			}
 			contact.DisplayName = sanitizeName(name)
+			contact.RegisteredName = sanitizeName(agent.RegisteredName)
+			contact.Provider = sanitizeName(agent.Provider)
 			contact.Available = agent.Status == "active" && agent.RemovedAt == nil
 		}
-		if prefix := prefixes[owner]; prefix != "" {
-			contact.Address = owner + "@" + m.localChainID
+		if prefix := prefixes[agentID]; prefix != "" {
+			contact.Address = agentID + "@" + m.localChainID
 			contact.Handle = "#" + nodeHandle + "/" + prefix
 			contact.ContactID, err = m.pipeContactID(peer, policy, contact)
 			if err != nil {
 				return nil, err
 			}
-			contact.Accepting = acceptances[owner] == contact.ContactID
+			contact.Accepting = acceptances[agentID] == contact.ContactID
 		}
 		contacts = append(contacts, contact)
 	}
@@ -299,9 +326,10 @@ func (m *Manager) pipeContactID(peer *peerIdentity, policy *store.PeerRBACPolicy
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// LocalPipeContacts returns this node's current owner projection for one
-// locally managed connection. It is the CEREBRUM-facing form of the same data
-// advertised to the authenticated peer by /fed/v1/status.
+// LocalPipeContacts returns this node's current shared-domain RBAC contact
+// projection for one locally managed connection. It is the CEREBRUM-facing
+// form of the same data advertised to the authenticated peer by
+// /fed/v1/status.
 func (m *Manager) LocalPipeContacts(ctx context.Context, remoteChainID string) (*PipeContactGrant, error) {
 	ss := m.syncStore()
 	if ss == nil {
@@ -333,8 +361,8 @@ func (m *Manager) LocalPipeContacts(ctx context.Context, remoteChainID string) (
 
 // SetPipeContactAcceptance changes one local agent's inbound work-request
 // consent. The current contact is checked before the store mutation and again
-// afterwards, so an ownership transfer racing the click cannot silently enable
-// a stale or replacement owner.
+// afterwards, so an ownership transfer, RBAC revoke, or availability change
+// racing the click cannot silently enable a stale recipient.
 func (m *Manager) SetPipeContactAcceptance(ctx context.Context, remoteChainID, localAgentID, contactID string, accepting bool) (*PipeContactGrant, error) {
 	current, err := m.LocalPipeContacts(ctx, remoteChainID)
 	if err != nil {
