@@ -699,6 +699,7 @@ jobs:
   docker-image:
     name: Prepare Multi-Architecture Docker Image
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [quality-gate, release-metadata]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -722,14 +723,28 @@ jobs:
       - name: Inspect private OCI archive
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y skopeo
-          skopeo inspect --raw "oci-archive:${RUNNER_TEMP}/sage-image.tar" > "${RUNNER_TEMP}/sage-image-index.json"
+          ARCHIVE="${RUNNER_TEMP}/sage-image.tar"
+          ROOT_INDEX="${RUNNER_TEMP}/sage-image-root-index.json"
+          IMAGE_INDEX="${RUNNER_TEMP}/sage-image-index.json"
+          tar -xOf "${ARCHIVE}" index.json > "${ROOT_INDEX}"
+          INDEX_DIGEST=$(jq -er '
+            if .mediaType == "application/vnd.oci.image.index.v1+json" and
+               (.manifests | length) == 1
+            then .manifests[0].digest
+            else error("OCI archive root must contain exactly one image index")
+            end
+          ' "${ROOT_INDEX}")
+          if [[ ! "${INDEX_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::OCI archive root contains an invalid image-index digest"
+            exit 1
+          fi
+          tar -xOf "${ARCHIVE}" \
+            "blobs/sha256/${INDEX_DIGEST#sha256:}" > "${IMAGE_INDEX}"
           jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length >= 1' \
-             "${RUNNER_TEMP}/sage-image-index.json"
+             "${IMAGE_INDEX}"
           jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length >= 1' \
-             "${RUNNER_TEMP}/sage-image-index.json"
-          test -s "${RUNNER_TEMP}/sage-image.tar"
+             "${IMAGE_INDEX}"
+          test -s "${ARCHIVE}"
 
       - name: Upload private Docker image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -1064,8 +1079,15 @@ jobs:
           RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y skopeo
+          while IFS= read -r source; do
+            sudo mv "${source}" "${source}.disabled"
+          done < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d || true)
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get -o Acquire::Retries=2 \
+                    -o Acquire::http::Timeout=20 \
+                    -o Acquire::https::Timeout=20 update
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get install -y --no-install-recommends skopeo
           skopeo inspect --raw oci-archive:docker-image/sage-image.tar > /tmp/local-index.json
           # Listing tags distinguishes a genuinely absent version from an auth,
           # registry, or network error. Any failure here is fatal and cannot
@@ -1213,8 +1235,15 @@ jobs:
           RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y skopeo
+          while IFS= read -r source; do
+            sudo mv "${source}" "${source}.disabled"
+          done < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d || true)
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get -o Acquire::Retries=2 \
+                    -o Acquire::http::Timeout=20 \
+                    -o Acquire::https::Timeout=20 update
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get install -y --no-install-recommends skopeo
           skopeo copy --all --preserve-digests \
             "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
             docker://ghcr.io/l33tdawg/sage:latest

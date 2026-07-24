@@ -412,6 +412,10 @@ test('the real-Comet firewall proof allows one symmetric endpoint to count the r
 test('all private artifacts converge at one publication gate', () => {
   assert.match(job('goreleaser-prepare'), /release --clean --skip=publish/);
   assert.doesNotMatch(job('docker-image'), /push:\s+true/);
+  assert.match(job('docker-image'), /timeout-minutes: 45/);
+  assert.match(job('docker-image'), /tar -xOf "\$\{ARCHIVE\}" index\.json/);
+  assert.match(job('docker-image'), /blobs\/sha256\/\$\{INDEX_DIGEST#sha256:\}/);
+  assert.doesNotMatch(job('docker-image'), /apt-get|skopeo/);
 
   assertNeeds('publication-gate', [
     'release-metadata',
@@ -444,6 +448,8 @@ test('public mutations are serial, resumable, and downstream of the gate', () =>
 
   assert.match(job('publish-docker-version'), /skopeo copy --all/);
   assert.match(job('publish-docker-version'), /skopeo list-tags/);
+  assert.match(job('publish-docker-version'), /grep -rl 'packages\.microsoft\.com'/);
+  assert.match(job('publish-docker-version'), /timeout --foreground 180/);
   assert.match(job('publish-docker-version'), /already exists with a different manifest digest/);
   assert.match(job('publish-mcp'), /mcp-publisher publish/);
   assert.match(job('publish-mcp'), /mcp-existing-server\.json/);
@@ -451,6 +457,8 @@ test('public mutations are serial, resumable, and downstream of the gate', () =>
   assert.match(job('publish-pypi'), /pypa\/gh-action-pypi-publish@/);
   assert.match(job('publish-pypi'), /Verify exact public PyPI digests/);
   assert.match(job('publish-docker-latest'), /skopeo copy --all --preserve-digests/);
+  assert.match(job('publish-docker-latest'), /grep -rl 'packages\.microsoft\.com'/);
+  assert.match(job('publish-docker-latest'), /timeout --foreground 180/);
   assert.match(job('publish-github-release'), /gh release edit/);
   assert.match(job('publish-github-release'), /--draft=false/);
   assert.match(job('publish-github-release'), /GH_REPO:.*github\.repository/);
