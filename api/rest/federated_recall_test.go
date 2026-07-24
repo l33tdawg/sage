@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
@@ -479,6 +481,41 @@ func TestFederationCallerACLMatchesLocalDomainPolicy(t *testing.T) {
 	allowed, _ = srv.federationCallerCanRead(context.Background(), callerID, "finance")
 	assert.False(t, allowed, "malformed registered policy must fail closed")
 	assert.Error(t, checkDomainAccess(context.Background(), nil, badger, callerID, "finance", "read"))
+}
+
+func TestFederatedContactAuthorizationRechecksCurrentLocalACL(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	const callerID = "caller-agent"
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 2))
+	require.NoError(t, badger.SetAgentPermission(callerID, 2,
+		`[{"domain":"research","read":true}]`, "*", "", ""))
+
+	request := func() *httptest.ResponseRecorder {
+		body := []byte(`{"domains":["research","finance"]}`)
+		req := httptest.NewRequest(http.MethodPost, "/v1/federation/contacts/authorize", bytes.NewReader(body))
+		req = req.WithContext(middleware.WithAgentID(req.Context(), callerID))
+		rr := httptest.NewRecorder()
+		srv.handleFederatedContactAuthorize(rr, req)
+		return rr
+	}
+	first := request()
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+	var response struct {
+		AllowedDomains []string `json:"allowed_domains"`
+	}
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &response))
+	assert.Equal(t, []string{"research"}, response.AllowedDomains)
+
+	require.NoError(t, badger.SetAgentPermission(callerID, 2,
+		`[{"domain":"engineering","read":true}]`, "*", "", ""))
+	second := request()
+	require.Equal(t, http.StatusOK, second.Code, second.Body.String())
+	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &response))
+	assert.Empty(t, response.AllowedDomains, "a local policy revoke must take effect without probing a peer")
 }
 
 func TestFederationAvailableMetadataIsNarrowedToCallerSubtree(t *testing.T) {

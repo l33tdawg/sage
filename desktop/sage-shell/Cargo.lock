@@ -2770,7 +2770,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "sage-shell"
-version = "11.12.1"
+version = "11.12.2"
 dependencies = [
  "getrandom 0.3.4",
  "serde",

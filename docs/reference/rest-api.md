@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.12.1. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.12.2. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -1358,6 +1358,26 @@ resolution and requires the exact policy epoch, agreement, contact ID, contact
 revision, agent, and chain to match. No intent or payload leaves this SAGE from
 the cached snapshot alone (`internal/federation/pipe_outbox.go:171-220`).
 
+A remote route is also bound to the **current local caller**: both resolve and
+direct send recheck the caller's readable domain intersection against the
+peer-authenticated contact domains. A local policy revoke therefore causes the
+same non-enumerating `404 Unknown target` as an absent remote contact, even if
+the address was resolved earlier (`api/rest/pipe_handler.go`).
+
+### `POST /v1/federation/contacts/authorize`
+
+Local-only reauthorization for a set of domains from an already caller-filtered
+federated-contact projection. This route does not discover agents, reveal peer
+topology, or make a peer request; it exists so the MCP's brief in-memory
+recipient cache honors a local RBAC change immediately.
+
+**Request:** `{"domains":["example.scope"]}` (at most 512 unique, non-empty
+domains; each is at most 256 bytes).
+
+**Response** (HTTP 200): `{"allowed_domains":["example.scope"]}` — only the
+input domains that the signed caller may currently read. An unregistered caller
+receives 403; malformed or oversize input receives 400.
+
 ### `POST /v1/pipe/send`
 
 Send a pipeline message to another agent or provider.
@@ -1380,7 +1400,9 @@ and `destination_chain_id`. Friendly `#node/agent` aliases are rejected by the s
 route itself so a display alias cannot be rebound after signing
 (`api/rest/pipe_handler.go:161-213`). A remote send also requires a fresh
 nonce-bound Ed25519 agent proof; bearer-only and legacy nonce-less identity
-cannot cross the federation edge (`api/rest/pipe_handler.go:261-283`).
+cannot cross the federation edge. It additionally repeats the caller/domain
+intersection check described above, so a copied resolve response cannot bypass
+local policy (`api/rest/pipe_handler.go`).
 
 **Response** (HTTP 201):
 `{"pipe_id":"pipe-<uuid>","status":"pending","expires_at":"...","destination_chain_id":"<remote chain or empty>"}`.

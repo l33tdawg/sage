@@ -650,7 +650,7 @@ mod tests {
     fn compatibility_fields_are_strict() {
         assert!(supported_daemon_version("v11.10.0").then_some(()).is_some());
         assert!(supported_daemon_version("11.11.3-rc.1+build.7"));
-        assert!(supported_daemon_version("11.12.1"));
+        assert!(supported_daemon_version("11.12.2"));
         assert!(!supported_daemon_version("11.13.0"));
         assert!(!supported_daemon_version("eleven"));
         assert!(valid_generation(&"A".repeat(43)));

@@ -60,7 +60,7 @@ type Server struct {
 	project    string // Project directory name (e.g. "sage", "levelupctf") — derived from CWD.
 	httpClient *http.Client
 	tools      map[string]Tool
-	stateMu    sync.Mutex // shared preference caches
+	stateMu    sync.Mutex // shared in-memory caches
 
 	conversationMu sync.Mutex
 	conversations  map[string]*conversationState
@@ -73,6 +73,10 @@ type Server struct {
 	// Cached memory mode setting from dashboard preferences.
 	memoryMode         string // "full" (default) or "bookend"
 	memoryModeCacheAge time.Time
+
+	// Cached caller-filtered federated contacts. This is an in-memory discovery
+	// acceleration only; sage_pipe always re-resolves a recipient before send.
+	federatedAgentCache map[string]federatedAgentCacheEntry
 
 	// Cached embedding mode — nil means not yet checked.
 	// Concurrent HTTP MCP requests may both write to this cache; the mutex
@@ -134,13 +138,14 @@ func NewServer(baseURL string, agentKey ed25519.PrivateKey) *Server {
 	}
 	pub, _ := agentKey.Public().(ed25519.PublicKey) //nolint:errcheck
 	s := &Server{
-		baseURL:       baseURL,
-		agentKey:      agentKey,
-		agentID:       hex.EncodeToString(pub),
-		provider:      os.Getenv("SAGE_PROVIDER"),
-		httpClient:    mcpHTTPClient(baseURL),
-		version:       "dev",
-		conversations: make(map[string]*conversationState),
+		baseURL:             baseURL,
+		agentKey:            agentKey,
+		agentID:             hex.EncodeToString(pub),
+		provider:            os.Getenv("SAGE_PROVIDER"),
+		httpClient:          mcpHTTPClient(baseURL),
+		version:             "dev",
+		conversations:       make(map[string]*conversationState),
+		federatedAgentCache: make(map[string]federatedAgentCacheEntry),
 	}
 	s.tools = s.registerTools()
 	return s
@@ -445,7 +450,7 @@ func shouldBlockForTurn(toolName string, state *conversationState) bool {
 	switch toolName {
 	case "sage_turn", "sage_inception", "sage_red_pill", "sage_reflect", "sage_recall",
 		"sage_remember", "sage_forget", "sage_reinstate", "sage_corroborate", "sage_link", "sage_list", "sage_status", "sage_timeline",
-		"sage_task", "sage_backlog", "sage_register",
+		"sage_task", "sage_backlog", "sage_register", "sage_find_agent",
 		"sage_pipe", "sage_inbox", "sage_pipe_result":
 		return false
 	}
@@ -598,8 +603,9 @@ func (s *Server) signedRequest(ctx context.Context, method, path string, body []
 // keep-alive EOF) may be retried like a GET. Memory-submitting POSTs stay
 // single-shot: retrying those could double-commit.
 var retryableIdempotentPOSTPaths = map[string]bool{
-	"/v1/embed":        true,
-	"/v1/pipe/resolve": true,
+	"/v1/embed":                         true,
+	"/v1/pipe/resolve":                  true,
+	"/v1/federation/contacts/authorize": true,
 }
 
 // doSignedJSON makes a signed request and decodes the JSON response.

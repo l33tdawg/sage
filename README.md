@@ -51,6 +51,27 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.12.2
+
+**Agents can now resolve a human recipient name safely across a federation.**
+The new `sage_find_agent` MCP tool searches active local registrations first,
+then only the remote contacts already authorized for the signed caller. Its
+short-lived, caller-scoped in-memory projection makes repeat lookups fast
+without creating a global agent directory.
+
+- **Immediate, policy-safe repeat lookup.** Cached remote contacts are bounded
+  and re-authorized against current local domain access on every cache hit, so
+  a local revoke applies to the very next lookup without a peer round trip.
+- **Pipeline authorization matches discovery.** Federated pipe resolve and
+  direct send both recheck the caller against the target's currently disclosed
+  domain scope; a borrowed or stale route cannot bypass local RBAC. The outbox
+  still requires a fresh authenticated remote contact match before payload
+  bytes leave the SAGE.
+
+This release changes no SAGE consensus rule, AppHash input, transaction type,
+key encoding, fork target, or application version. App-v20 and the v11.9
+rollout boundary are unchanged; existing chains upgrade in place. SDK 11.12.2.
+
 ## What's New in v11.12.1
 
 **Federation now stays useful while another SAGE is slow or offline.** Trusted relationships and their last-known route state render immediately from local state, initial permission and agent-contact controls no longer wait on a remote round trip, repeated status probes are shared instead of multiplied across panels, and the bounded live-status check fails promptly without hiding saved controls behind a long “Loading…” state.
@@ -595,7 +616,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.12.1`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.12.2`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:

@@ -74,6 +74,19 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolFederation,
 		},
+		"sage_find_agent": {
+			Name:        "sage_find_agent",
+			Description: "Find a contactable agent by name before sending work. Searches active local registrations first; only when no local match exists, searches caller-authorized federated contacts that are active and accepting work. Returns exact values ready for sage_pipe.to. This is not a global directory.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":  map[string]any{"type": "string", "description": "Agent display name, registered name, or local provider name to find. Matching is case-insensitive and supports partial names."},
+					"limit": map[string]any{"type": "integer", "description": "Maximum matches to return (default: 10, max: 20).", "default": 10, "minimum": 1, "maximum": 20},
+				},
+				"required": []string{"name"},
+			},
+			Handler: s.toolFindAgent,
+		},
 		"sage_forget": {
 			Name:        "sage_forget",
 			Description: "Deprecate a memory by ID. Use this when a memory is no longer accurate or relevant.",
@@ -265,6 +278,7 @@ func (s *Server) registerTools() map[string]Tool {
 			Description: "Send work to another agent via SAGE pipeline. The target agent will see this in their inbox " +
 				"on their next sage_turn or sage_inbox call. Address by provider name (e.g. 'perplexity', 'chatgpt') " +
 				"or agent_id on this SAGE, or use a visible federated #node/agent handle or agent_id@chain address. " +
+				"If the user supplies only a human name, call sage_find_agent first and pass its exact to value. " +
 				"Local exchanges journal a summary when complete; foreign pipeline content is never stored as memory.",
 			InputSchema: map[string]any{
 				"type": "object",
@@ -927,6 +941,381 @@ func (s *Server) toolFederation(ctx context.Context, _ map[string]any) (any, err
 		"connections": available.Connections,
 		"total":       available.Total,
 		"message":     available.Message,
+	}, nil
+}
+
+type findAgentLocalResult struct {
+	AgentID        string `json:"agent_id"`
+	Name           string `json:"name"`
+	RegisteredName string `json:"registered_name"`
+	Provider       string `json:"provider"`
+	Status         string `json:"status"`
+}
+
+type findAgentFederatedContact struct {
+	AgentID     string                     `json:"agent_id"`
+	DisplayName string                     `json:"display_name"`
+	Address     string                     `json:"address"`
+	Handle      string                     `json:"handle"`
+	Available   bool                       `json:"available"`
+	Accepting   bool                       `json:"accepting"`
+	Domains     []findAgentFederatedDomain `json:"domains"`
+}
+
+type findAgentFederatedDomain struct {
+	Domain string `json:"domain"`
+}
+
+type findAgentFederatedConnection struct {
+	RemoteChainID string                      `json:"remote_chain_id"`
+	NetworkName   string                      `json:"network_name"`
+	RemoteAgents  []findAgentFederatedContact `json:"remote_agents"`
+}
+
+const (
+	federatedAgentCacheTTL             = time.Minute
+	maxFederatedAgentCacheCallers      = 128
+	maxFederatedAgentCacheChains       = 64
+	maxFederatedAgentCacheContacts     = 256
+	maxFederatedAgentCacheDomains      = 512
+	maxFederatedAgentCacheLabelBytes   = 256
+	maxFederatedAgentCacheAddressBytes = 256
+)
+
+type federatedAgentCacheEntry struct {
+	connections []findAgentFederatedConnection
+	fetchedAt   time.Time
+}
+
+func cloneFindAgentFederatedConnections(in []findAgentFederatedConnection) []findAgentFederatedConnection {
+	out := make([]findAgentFederatedConnection, len(in))
+	for i, connection := range in {
+		out[i] = connection
+		out[i].RemoteAgents = append([]findAgentFederatedContact(nil), connection.RemoteAgents...)
+		for j := range out[i].RemoteAgents {
+			out[i].RemoteAgents[j].Domains = append([]findAgentFederatedDomain(nil), connection.RemoteAgents[j].Domains...)
+		}
+	}
+	return out
+}
+
+// boundedFederatedAgentConnections keeps the discovery cache a small, safe
+// projection even if a peer returns a pathological but syntactically valid
+// contact response. The original response is never retained after the call.
+func boundedFederatedAgentConnections(in []findAgentFederatedConnection) []findAgentFederatedConnection {
+	out := make([]findAgentFederatedConnection, 0, min(len(in), maxFederatedAgentCacheChains))
+	contacts, domains := 0, 0
+	for _, connection := range in {
+		if len(out) >= maxFederatedAgentCacheChains ||
+			len(connection.RemoteChainID) == 0 || len(connection.RemoteChainID) > maxFederatedAgentCacheLabelBytes ||
+			len(connection.NetworkName) > maxFederatedAgentCacheLabelBytes {
+			continue
+		}
+		bounded := findAgentFederatedConnection{
+			RemoteChainID: connection.RemoteChainID,
+			NetworkName:   connection.NetworkName,
+			RemoteAgents:  make([]findAgentFederatedContact, 0),
+		}
+		for _, contact := range connection.RemoteAgents {
+			if contacts >= maxFederatedAgentCacheContacts {
+				break
+			}
+			if !contact.Available || !contact.Accepting ||
+				len(contact.AgentID) == 0 || len(contact.AgentID) > maxFederatedAgentCacheLabelBytes ||
+				len(contact.DisplayName) > maxFederatedAgentCacheLabelBytes ||
+				len(contact.Handle) > maxFederatedAgentCacheLabelBytes ||
+				len(contact.Address) == 0 || len(contact.Address) > maxFederatedAgentCacheAddressBytes {
+				continue
+			}
+			boundedContact := contact
+			boundedContact.Domains = nil
+			for _, domain := range contact.Domains {
+				if domains >= maxFederatedAgentCacheDomains {
+					break
+				}
+				domain.Domain = strings.TrimSpace(domain.Domain)
+				if domain.Domain == "" || len(domain.Domain) > maxFederatedAgentCacheLabelBytes {
+					continue
+				}
+				boundedContact.Domains = append(boundedContact.Domains, domain)
+				domains++
+			}
+			if len(boundedContact.Domains) == 0 {
+				continue
+			}
+			bounded.RemoteAgents = append(bounded.RemoteAgents, boundedContact)
+			contacts++
+		}
+		if len(bounded.RemoteAgents) > 0 {
+			out = append(out, bounded)
+		}
+	}
+	return out
+}
+
+// reauthorizeCachedFederatedAgentConnections makes a cheap local policy check
+// before serving a cached peer projection. It never probes federation: remote
+// policy is refreshed on TTL expiry and again by the live outbox resolver, but
+// a local RBAC revoke takes effect on the very next lookup.
+func (s *Server) reauthorizeCachedFederatedAgentConnections(ctx context.Context, connections []findAgentFederatedConnection) ([]findAgentFederatedConnection, error) {
+	domainSet := make(map[string]struct{})
+	for _, connection := range connections {
+		for _, contact := range connection.RemoteAgents {
+			for _, domain := range contact.Domains {
+				if domain.Domain != "" {
+					domainSet[domain.Domain] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(domainSet) == 0 {
+		return nil, nil
+	}
+	domains := make([]string, 0, len(domainSet))
+	for domain := range domainSet {
+		domains = append(domains, domain)
+	}
+	sort.Strings(domains)
+	body, err := json.Marshal(map[string]any{"domains": domains})
+	if err != nil {
+		return nil, fmt.Errorf("encode cached federation authorization request: %w", err)
+	}
+	var response struct {
+		AllowedDomains []string `json:"allowed_domains"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/federation/contacts/authorize", body, &response); err != nil {
+		return nil, fmt.Errorf("reauthorize cached federated contacts: %w", err)
+	}
+	allowed := make(map[string]struct{}, len(response.AllowedDomains))
+	for _, domain := range response.AllowedDomains {
+		allowed[domain] = struct{}{}
+	}
+	filtered := make([]findAgentFederatedConnection, 0, len(connections))
+	for _, connection := range connections {
+		visible := connection
+		visible.RemoteAgents = nil
+		for _, contact := range connection.RemoteAgents {
+			for _, domain := range contact.Domains {
+				if _, ok := allowed[domain.Domain]; ok {
+					visible.RemoteAgents = append(visible.RemoteAgents, contact)
+					break
+				}
+			}
+		}
+		if len(visible.RemoteAgents) > 0 {
+			filtered = append(filtered, visible)
+		}
+	}
+	return filtered, nil
+}
+
+// cachedFederatedAgentConnections is deliberately scoped by the effective
+// signed caller. The federation available view is caller-filtered, so sharing
+// this projection between MCP bearer identities would disclose contacts outside
+// their authorized domain intersection.
+func (s *Server) cachedFederatedAgentConnections(ctx context.Context) ([]findAgentFederatedConnection, bool) {
+	callerID := s.effectiveAgentID(ctx)
+	now := time.Now()
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	entry, ok := s.federatedAgentCache[callerID]
+	if !ok || now.Sub(entry.fetchedAt) >= federatedAgentCacheTTL {
+		if ok {
+			delete(s.federatedAgentCache, callerID)
+		}
+		return nil, false
+	}
+	return cloneFindAgentFederatedConnections(entry.connections), true
+}
+
+func (s *Server) cacheFederatedAgentConnections(ctx context.Context, connections []findAgentFederatedConnection) {
+	callerID := s.effectiveAgentID(ctx)
+	now := time.Now()
+	connections = boundedFederatedAgentConnections(connections)
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	for id, entry := range s.federatedAgentCache {
+		if now.Sub(entry.fetchedAt) >= federatedAgentCacheTTL {
+			delete(s.federatedAgentCache, id)
+		}
+	}
+	if _, exists := s.federatedAgentCache[callerID]; !exists && len(s.federatedAgentCache) >= maxFederatedAgentCacheCallers {
+		var oldestID string
+		var oldestAt time.Time
+		for id, entry := range s.federatedAgentCache {
+			if oldestID == "" || entry.fetchedAt.Before(oldestAt) {
+				oldestID, oldestAt = id, entry.fetchedAt
+			}
+		}
+		delete(s.federatedAgentCache, oldestID)
+	}
+	s.federatedAgentCache[callerID] = federatedAgentCacheEntry{
+		connections: cloneFindAgentFederatedConnections(connections),
+		fetchedAt:   now,
+	}
+}
+
+func matchesAgentName(query string, candidates ...string) (exact bool, partial bool) {
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if strings.EqualFold(candidate, query) {
+			return true, true
+		}
+		if strings.Contains(strings.ToLower(candidate), strings.ToLower(query)) {
+			partial = true
+		}
+	}
+	return false, partial
+}
+
+// toolFindAgent provides an explicit, safe recipient-discovery path for
+// agent-to-agent work. Local registrations take precedence. Federation is only
+// consulted after a local miss, and the existing caller-filtered available view
+// limits results to remote agents the caller may already see and contact.
+func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any, error) {
+	query := strings.TrimSpace(stringParam(params, "name", ""))
+	if query == "" {
+		return nil, fmt.Errorf("'name' is required")
+	}
+	limit := intParam(params, "limit", 10)
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 20 {
+		limit = 20
+	}
+
+	var localResponse struct {
+		Agents []findAgentLocalResult `json:"agents"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/agents", nil, &localResponse); err != nil {
+		return nil, fmt.Errorf("list local agents: %w", err)
+	}
+
+	localExact := make([]findAgentLocalResult, 0)
+	localPartial := make([]findAgentLocalResult, 0)
+	for _, agent := range localResponse.Agents {
+		if agent.AgentID == "" || !strings.EqualFold(agent.Status, "active") {
+			continue
+		}
+		exact, partial := matchesAgentName(query, agent.Name, agent.RegisteredName, agent.Provider)
+		if exact {
+			localExact = append(localExact, agent)
+		} else if partial {
+			localPartial = append(localPartial, agent)
+		}
+	}
+	localMatches := localExact
+	if len(localMatches) == 0 {
+		localMatches = localPartial
+	}
+	if len(localMatches) > 0 {
+		sort.Slice(localMatches, func(i, j int) bool {
+			if localMatches[i].Name != localMatches[j].Name {
+				return strings.ToLower(localMatches[i].Name) < strings.ToLower(localMatches[j].Name)
+			}
+			return localMatches[i].AgentID < localMatches[j].AgentID
+		})
+		matches := make([]map[string]any, 0, min(len(localMatches), limit))
+		for _, agent := range localMatches[:min(len(localMatches), limit)] {
+			matches = append(matches, map[string]any{
+				"scope":           "local",
+				"agent_id":        agent.AgentID,
+				"name":            agent.Name,
+				"registered_name": agent.RegisteredName,
+				"provider":        agent.Provider,
+				"status":          agent.Status,
+				"to":              agent.AgentID,
+			})
+		}
+		return map[string]any{
+			"matches":   matches,
+			"total":     len(localMatches),
+			"searched":  []string{"local"},
+			"truncated": len(localMatches) > len(matches),
+			"message":   "Found local agent matches. Pass a match's to value directly to sage_pipe.",
+		}, nil
+	}
+
+	connections, cacheHit := s.cachedFederatedAgentConnections(ctx)
+	if cacheHit {
+		var err error
+		connections, err = s.reauthorizeCachedFederatedAgentConnections(ctx, connections)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var federationResponse struct {
+			Connections []findAgentFederatedConnection `json:"connections"`
+		}
+		if err := s.doSignedJSON(ctx, "GET", "/v1/federation/available", nil, &federationResponse); err != nil {
+			return nil, fmt.Errorf("discover federated agents after local miss: %w", err)
+		}
+		connections = boundedFederatedAgentConnections(federationResponse.Connections)
+		s.cacheFederatedAgentConnections(ctx, connections)
+	}
+
+	type federatedMatch struct {
+		connection findAgentFederatedConnection
+		contact    findAgentFederatedContact
+	}
+	federatedExact := make([]federatedMatch, 0)
+	federatedPartial := make([]federatedMatch, 0)
+	for _, connection := range connections {
+		if connection.RemoteChainID == "" {
+			continue
+		}
+		for _, contact := range connection.RemoteAgents {
+			if contact.AgentID == "" || contact.Address == "" || !contact.Available || !contact.Accepting {
+				continue
+			}
+			exact, partial := matchesAgentName(query, contact.DisplayName)
+			match := federatedMatch{connection: connection, contact: contact}
+			if exact {
+				federatedExact = append(federatedExact, match)
+			} else if partial {
+				federatedPartial = append(federatedPartial, match)
+			}
+		}
+	}
+	federatedMatches := federatedExact
+	if len(federatedMatches) == 0 {
+		federatedMatches = federatedPartial
+	}
+	sort.Slice(federatedMatches, func(i, j int) bool {
+		if federatedMatches[i].connection.RemoteChainID != federatedMatches[j].connection.RemoteChainID {
+			return federatedMatches[i].connection.RemoteChainID < federatedMatches[j].connection.RemoteChainID
+		}
+		if federatedMatches[i].contact.DisplayName != federatedMatches[j].contact.DisplayName {
+			return strings.ToLower(federatedMatches[i].contact.DisplayName) < strings.ToLower(federatedMatches[j].contact.DisplayName)
+		}
+		return federatedMatches[i].contact.AgentID < federatedMatches[j].contact.AgentID
+	})
+	matches := make([]map[string]any, 0, min(len(federatedMatches), limit))
+	for _, match := range federatedMatches[:min(len(federatedMatches), limit)] {
+		matches = append(matches, map[string]any{
+			"scope":     "federated",
+			"agent_id":  match.contact.AgentID,
+			"name":      match.contact.DisplayName,
+			"network":   match.connection.NetworkName,
+			"chain_id":  match.connection.RemoteChainID,
+			"address":   match.contact.Address,
+			"handle":    match.contact.Handle,
+			"to":        match.contact.Address,
+			"available": true,
+			"accepting": true,
+		})
+	}
+	return map[string]any{
+		"matches":         matches,
+		"total":           len(federatedMatches),
+		"searched":        []string{"local", "federated"},
+		"federated_cache": map[bool]string{true: "hit", false: "miss"}[cacheHit],
+		"truncated":       len(federatedMatches) > len(matches),
+		"message":         "No local agent matched. Federated results are limited to active, opted-in contacts you are authorized to use; pass a match's to value directly to sage_pipe. sage_pipe always re-checks the live recipient before sending.",
 	}, nil
 }
 

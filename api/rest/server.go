@@ -419,6 +419,7 @@ func (s *Server) setupRouter() chi.Router {
 		// Caller-filtered, read-only federation discovery for ordinary agents.
 		// All trust/policy/copy mutations stay on operator-only routes below.
 		r.Get("/v1/federation/available", s.handleFederationAvailable)
+		r.Post("/v1/federation/contacts/authorize", s.handleFederatedContactAuthorize)
 		r.Post("/v1/federation/cross/{chain_id}/write", s.handleCrossFedWrite)
 		// v11.6 host-controlled domain sync (off-consensus; operator-only)
 		r.Put("/v1/federation/cross/{chain_id}/sync", s.handleSyncDomainsSet)

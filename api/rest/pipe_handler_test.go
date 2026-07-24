@@ -95,6 +95,7 @@ func TestHandlePipeSend_QualifiedRemoteTargetStoresExactProvenance(t *testing.T)
 		ContactID: strings.Repeat("cd", 32), ContactRevision: strings.Repeat("de", 32),
 		PolicyEpoch: "epoch-7", AgreementID: strings.Repeat("ef", 32),
 		Address: remoteAgentID + "@chain-peer", Handle: "#amy-12345678/" + remoteAgentID[:8],
+		Domains: []federation.PipeContactDomain{{Domain: "research"}},
 	}
 	s.SetFederation(&remotePipeResolver{fakeFederation: &fakeFederation{}, target: target})
 	body, _ := json.Marshal(map[string]any{
@@ -106,6 +107,7 @@ func TestHandlePipeSend_QualifiedRemoteTargetStoresExactProvenance(t *testing.T)
 	})
 	rr := httptest.NewRecorder()
 	localSender := strings.Repeat("12", 32)
+	s.nodeOperatorID = localSender
 	req := httptest.NewRequest(http.MethodPost, "/v1/pipe/send", bytes.NewReader(body))
 	req = req.WithContext(middleware.WithAgentAuth(req.Context(), &middleware.AgentAuthProof{
 		Signature: make([]byte, 64), Timestamp: time.Now().Unix(),
@@ -159,11 +161,14 @@ func TestHandlePipeResolveReturnsExactFederatedBindingWithoutQueueing(t *testing
 		ContactID: strings.Repeat("cd", 32), ContactRevision: strings.Repeat("de", 32),
 		PolicyEpoch: "epoch-7", AgreementID: strings.Repeat("ef", 32),
 		Address: remoteAgentID + "@chain-peer", Handle: "#amy-12345678/" + remoteAgentID[:8],
+		Domains: []federation.PipeContactDomain{{Domain: "research"}},
 	}
 	s.SetFederation(&remotePipeResolver{fakeFederation: &fakeFederation{}, target: target})
+	localSender := strings.Repeat("12", 32)
+	s.nodeOperatorID = localSender
 	body, _ := json.Marshal(map[string]any{"to": target.Handle})
 	rr := httptest.NewRecorder()
-	pipeRouterAs(s, strings.Repeat("12", 32)).ServeHTTP(rr,
+	pipeRouterAs(s, localSender).ServeHTTP(rr,
 		httptest.NewRequest(http.MethodPost, "/v1/pipe/resolve", bytes.NewReader(body)))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	var resolved struct {
@@ -180,6 +185,47 @@ func TestHandlePipeResolveReturnsExactFederatedBindingWithoutQueueing(t *testing
 	pipes, err := memStore.ListPipelines(context.Background(), "", 10)
 	require.NoError(t, err)
 	require.Empty(t, pipes)
+}
+
+func TestFederatedPipeTargetRequiresCurrentCallerDomainAccess(t *testing.T) {
+	s, memStore := newPipeServer(t)
+	remoteAgentID := strings.Repeat("ab", 32)
+	target := &federation.RemotePipeTarget{
+		ChainID: "chain-peer", AgentID: remoteAgentID,
+		ContactID: strings.Repeat("cd", 32), ContactRevision: strings.Repeat("de", 32),
+		PolicyEpoch: "epoch-7", AgreementID: strings.Repeat("ef", 32),
+		Address: remoteAgentID + "@chain-peer", Domains: []federation.PipeContactDomain{{Domain: "research"}},
+	}
+	s.SetFederation(&remotePipeResolver{fakeFederation: &fakeFederation{}, target: target})
+	callerID := strings.Repeat("12", 32)
+
+	resolveBody := []byte(`{"to":"` + remoteAgentID + `@chain-peer"}`)
+	resolveRR := httptest.NewRecorder()
+	pipeRouterAs(s, callerID).ServeHTTP(resolveRR,
+		httptest.NewRequest(http.MethodPost, "/v1/pipe/resolve", bytes.NewReader(resolveBody)))
+	require.Equal(t, http.StatusNotFound, resolveRR.Code, resolveRR.Body.String())
+
+	sendBody, err := json.Marshal(map[string]any{
+		"to_agent": remoteAgentID, "source_chain_id": "chain-local", "destination_chain_id": "chain-peer", "payload": "restricted work",
+	})
+	require.NoError(t, err)
+	sendRR := httptest.NewRecorder()
+	pipeRouterAs(s, callerID).ServeHTTP(sendRR,
+		httptest.NewRequest(http.MethodPost, "/v1/pipe/send", bytes.NewReader(sendBody)))
+	require.Equal(t, http.StatusNotFound, sendRR.Code, sendRR.Body.String())
+	pipes, err := memStore.ListPipelines(context.Background(), "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, pipes, "direct send must not bypass federated caller authorization")
+
+	// A normal member with the disclosed domain remains able to resolve; this
+	// is not an operator-only pipeline path.
+	require.NoError(t, memStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: callerID, Name: "caller", Role: "member", DomainAccess: `[{"domain":"research","read":true}]`, Status: "active",
+	}))
+	allowedRR := httptest.NewRecorder()
+	pipeRouterAs(s, callerID).ServeHTTP(allowedRR,
+		httptest.NewRequest(http.MethodPost, "/v1/pipe/resolve", bytes.NewReader(resolveBody)))
+	require.Equal(t, http.StatusOK, allowedRR.Code, allowedRR.Body.String())
 }
 
 func TestHandlePipeResult_ResultTooLarge(t *testing.T) {

@@ -1,8 +1,8 @@
-Reconciled against internal/mcp for SAGE v11.12.1.
+Reconciled against internal/mcp for SAGE v11.12.2.
 
 # SAGE MCP Tools Reference
 
-SAGE exposes 25 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
+SAGE exposes 27 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
 the local Ed25519 identity; SSE and Streamable-HTTP use the MCP bearer-token/OAuth
 flow. Only consensus-committed memories are returned to callers.
 
@@ -629,7 +629,12 @@ mutable display name/bio and can be called again at any time.
 locally or across an approved federation connection. The target sees it in the
 same inbox on their next `sage_turn` or `sage_inbox` call.
 
-**Source:** `tools.go:211-227` (definition), `tools.go:1663-1717` (handler)
+When the user provides a human name rather than an exact recipient, call
+`sage_find_agent` first and pass the returned `to` value here. This is also the
+fast path for a repeated federated recipient because the discovery projection is
+cached briefly per caller.
+
+**Source:** `tools.go:276-297` (definition), `tools.go:2686-2752` (handler)
 
 **Parameters:**
 
@@ -645,8 +650,8 @@ federated contact it signs the exact returned source chain, agent, and
 destination chain; the
 friendly alias is never the authorization anchor. A qualified remote target
 that is unknown, stale, ambiguous, paused, unavailable, or not accepting fails
-without falling through to local name resolution (`tools.go:2108-2167`;
-`api/rest/pipe_handler.go:47-213`).
+without falling through to local name resolution (`tools.go:2686-2752`;
+`api/rest/pipe_handler.go:66-224`).
 
 An exact `agent@chain` address can still be resolved and durably queued while
 that one peer is genuinely offline if SAGE has a previous authenticated,
@@ -661,7 +666,7 @@ contact and policy match before payload bytes can leave the node
 **Returns:**
 - `pipe_id`, `status`, `expires_at`, `destination_chain_id`, and `message`.
 - Local acceptance says **Sent**. Federated acceptance says **Queued** because
-  durable local enqueue is not a delivery receipt (`tools.go:2169-2178`).
+  durable local enqueue is not a delivery receipt (`tools.go:2740-2751`).
 - If the remote node is offline, use its exact `agent@chain` address. A friendly
   handle deliberately cannot resolve from cached display metadata.
 
@@ -680,6 +685,58 @@ and terminal rows purge after 24h.
 question to Perplexity, send a code review to another Claude instance). The
 result arrives via `pipe_results` in the next `sage_turn` response or via
 `sage_inbox`.
+
+---
+
+### sage_find_agent
+
+**Purpose:** Find a contactable recipient by a human name before calling
+`sage_pipe`. It searches active local registrations first. Only when no local
+match exists does it inspect caller-authorized federated contacts; it is not a
+global agent directory.
+
+**Source:** `tools.go:77-89` (definition), `tools.go:975-1156`
+(caller-scoped bounded cache and reauthorization), `tools.go:1174-1320`
+(`toolFindAgent`)
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Display name, registered name, or local provider name. Matching is case-insensitive and supports partial names. |
+| `limit` | int | no | Maximum matches to return. Default 10, max 20. |
+
+Federated results are restricted to contacts already visible to the signed
+caller through `GET /v1/federation/available`, and only when that contact is
+active and has opted in to accept work. No endpoint, CA, agreement, contact-ID,
+or other mutation material is exposed. `sage_pipe` repeats the same local
+domain-scope authorization on both federated resolution and direct send.
+
+To make a follow-up request fast, SAGE keeps the caller's federated contact
+projection in an in-memory cache for one minute (maximum 128 callers, 64 chains,
+256 contacts, and 512 contact domains). The cache is never shared across agent
+identities and is not persistent. Every hit is first re-authorized against the
+caller’s current local domain policy through the local-only
+`POST /v1/federation/contacts/authorize` check, so a local revoke takes effect
+immediately without a peer round trip. It only speeds discovery: the outbox
+requires a fresh authenticated remote contact and policy match before payload
+bytes can leave the node.
+
+**Returns:**
+
+- `matches`: recipient records with `scope` (`local` or `federated`) and a `to`
+  field ready to pass to `sage_pipe`. Local `to` is the exact `agent_id`;
+  federated `to` is the exact `agent_id@chain` address.
+- `searched`: `["local"]` when a local match exists, otherwise
+  `["local", "federated"]`.
+- `federated_cache`: `hit` or `miss` when federation was searched.
+- `total`, `truncated`, and a next-step `message`.
+
+**When to call:** When a user asks to contact an agent by a human name and the
+exact SAGE address is not already known. Use the returned `to` value directly.
+`sage_pipe` re-resolves it before queueing; a federated outbox performs the
+required fresh live authorization check before any payload bytes leave this
+SAGE, so revoked or changed contacts fail closed.
 
 ---
 
@@ -923,7 +980,7 @@ registration name from `sage_register` is untouched.
 
 ## Summary
 
-**26 tools documented:**
+**27 tools documented:**
 
 | Category     | Tools |
 |--------------|-------|
@@ -933,5 +990,5 @@ registration name from `sage_register` is untouched.
 | Browse       | `sage_list`, `sage_timeline`, `sage_status` |
 | Tasks        | `sage_task`, `sage_backlog` |
 | Identity     | `sage_register`, `sage_rename` |
-| Pipeline     | `sage_pipe`, `sage_inbox`, `sage_pipe_result` |
+| Pipeline     | `sage_find_agent`, `sage_pipe`, `sage_inbox`, `sage_pipe_result` |
 | Governance   | `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status`, `sage_scope_list`, `sage_scope_get` |

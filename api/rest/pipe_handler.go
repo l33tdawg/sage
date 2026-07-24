@@ -33,6 +33,22 @@ type federatedPipeAdmissionAuthorizer interface {
 	WithAuthorizedImportedPipe(context.Context, *store.PipelineMessage, func() error) error
 }
 
+// callerCanReachFederatedPipeTarget reuses the caller/domain intersection that
+// backs ordinary federation discovery. The target resolver establishes a
+// peer-authenticated route, but must not turn that node-scoped fact into a
+// delivery capability for a caller whose local policy has since changed.
+func (s *Server) callerCanReachFederatedPipeTarget(ctx context.Context, callerID string, target *federation.RemotePipeTarget) bool {
+	if target == nil || callerID == "" {
+		return false
+	}
+	for _, domain := range target.Domains {
+		if domain.Domain != "" && len(s.federationVisibleRemoteScopes(ctx, callerID, domain.Domain)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	// pipeQuotaProblemType marks the 429 returned when a requester (or the node
 	// as a whole) has too many open pipes — kept distinct from the rate
@@ -81,6 +97,11 @@ func (s *Server) handlePipeResolve(w http.ResponseWriter, r *http.Request) {
 		return resolved, true
 	}
 	writeRemote := func(remote *federation.RemotePipeTarget) {
+		if !s.callerCanReachFederatedPipeTarget(r.Context(), middleware.ContextAgentID(r.Context()), remote) {
+			// Keep policy denial indistinguishable from an absent contact.
+			writeProblem(w, http.StatusNotFound, "Unknown target", fmt.Sprintf("no visible federated agent matches %q", target))
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"to_agent": remote.AgentID, "to_provider": "", "destination_chain_id": remote.ChainID,
 			"source_chain_id": s.federation.LocalChainID(),
@@ -191,6 +212,13 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 		remoteTarget, err = resolver.ResolveRemotePipeTarget(r.Context(), qualifiedTarget)
 		if err != nil {
 			s.writeRemotePipeTargetError(w, err)
+			return
+		}
+		if !s.callerCanReachFederatedPipeTarget(r.Context(), middleware.ContextAgentID(r.Context()), remoteTarget) {
+			// A client can call /pipe/send directly, so enforce the same caller
+			// visibility check as /pipe/resolve rather than trusting a stale or
+			// borrowed resolution result.
+			writeProblem(w, http.StatusNotFound, "Unknown target", fmt.Sprintf("no visible federated agent matches %q", qualifiedTarget))
 			return
 		}
 		req.ToAgent = remoteTarget.AgentID

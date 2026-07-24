@@ -4,15 +4,19 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	authmw "github.com/l33tdawg/sage/api/rest/middleware"
 )
 
 func mockSageAPI(t *testing.T) *httptest.Server {
@@ -344,6 +348,211 @@ func TestSageFederationDiscoversRemoteDomainsAndAgents(t *testing.T) {
 	assert.ElementsMatch(t, []any{"sage-autoresearch-paper"}, connections[0]["copy_offered_domains"])
 	assert.NotNil(t, connections[0]["remote_agents"])
 	assert.Equal(t, float64(3), connections[0]["sync"].(map[string]any)["saved_copies"])
+}
+
+func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
+	var federationRequested bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agents": []map[string]any{
+				{"agent_id": "local-innovium", "name": "Innovium", "registered_name": "claude-code/innovium", "provider": "claude-code", "status": "active"},
+				{"agent_id": "inactive-innovium", "name": "Innovium old", "status": "inactive"},
+			},
+		})
+	})
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
+		federationRequested = true
+		_ = json.NewEncoder(w).Encode(map[string]any{"connections": []any{}})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolFindAgent(context.Background(), map[string]any{"name": "innovium"})
+	require.NoError(t, err)
+	assert.False(t, federationRequested, "a local match must not probe federation")
+
+	out := result.(map[string]any)
+	assert.Equal(t, []string{"local"}, out["searched"])
+	assert.Equal(t, 1, out["total"])
+	matches := out["matches"].([]map[string]any)
+	require.Len(t, matches, 1)
+	assert.Equal(t, "local", matches[0]["scope"])
+	assert.Equal(t, "local-innovium", matches[0]["agent_id"])
+	assert.Equal(t, "local-innovium", matches[0]["to"])
+}
+
+func TestSageFindAgentFallsBackToContactableFederatedMatches(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []any{}})
+	})
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{
+				{
+					"remote_chain_id": "chain-innovium",
+					"network_name":    "Innovium",
+					"remote_agents": []map[string]any{
+						{"agent_id": "remote-live", "display_name": "Innovium Research", "address": "remote-live@chain-innovium", "handle": "#innovium/remote-live", "available": true, "accepting": true, "domains": []map[string]any{{"domain": "research"}}},
+						{"agent_id": "remote-disabled", "display_name": "Innovium Disabled", "address": "remote-disabled@chain-innovium", "available": true, "accepting": false},
+						{"agent_id": "remote-offline", "display_name": "Innovium Offline", "address": "remote-offline@chain-innovium", "available": false, "accepting": true},
+					},
+				},
+			},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolFindAgent(context.Background(), map[string]any{"name": "innovium"})
+	require.NoError(t, err)
+
+	out := result.(map[string]any)
+	assert.Equal(t, []string{"local", "federated"}, out["searched"])
+	assert.Equal(t, 1, out["total"])
+	matches := out["matches"].([]map[string]any)
+	require.Len(t, matches, 1)
+	assert.Equal(t, "federated", matches[0]["scope"])
+	assert.Equal(t, "remote-live", matches[0]["agent_id"])
+	assert.Equal(t, "remote-live@chain-innovium", matches[0]["to"])
+	assert.Equal(t, "#innovium/remote-live", matches[0]["handle"])
+}
+
+func TestSageFindAgentCachesFederatedContactsPerCaller(t *testing.T) {
+	federationCalls, authorizationCalls := 0, 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []any{}})
+	})
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
+		federationCalls++
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{{
+				"remote_chain_id": "chain-innovium",
+				"remote_agents": []map[string]any{{
+					"agent_id": "remote-live", "display_name": "Innovium Research", "address": "remote-live@chain-innovium", "available": true, "accepting": true, "domains": []map[string]any{{"domain": "research"}},
+				}},
+			}},
+		})
+	})
+	mux.HandleFunc("/v1/federation/contacts/authorize", func(w http.ResponseWriter, _ *http.Request) {
+		authorizationCalls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed_domains": []string{"research"}})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	callerA := authmw.WithAgentID(context.Background(), "caller-a")
+	first, err := s.toolFindAgent(callerA, map[string]any{"name": "innovium"})
+	require.NoError(t, err)
+	assert.Equal(t, "miss", first.(map[string]any)["federated_cache"])
+
+	second, err := s.toolFindAgent(callerA, map[string]any{"name": "research"})
+	require.NoError(t, err)
+	assert.Equal(t, "hit", second.(map[string]any)["federated_cache"])
+	assert.Equal(t, 1, federationCalls, "the second lookup should reuse the caller-scoped federated projection")
+	assert.Equal(t, 1, authorizationCalls, "a cache hit must recheck current local policy")
+	matches := second.(map[string]any)["matches"].([]map[string]any)
+	require.Len(t, matches, 1)
+	assert.Equal(t, "remote-live@chain-innovium", matches[0]["to"])
+
+	callerB := authmw.WithAgentID(context.Background(), "caller-b")
+	third, err := s.toolFindAgent(callerB, map[string]any{"name": "innovium"})
+	require.NoError(t, err)
+	assert.Equal(t, "miss", third.(map[string]any)["federated_cache"])
+	assert.Equal(t, 2, federationCalls, "a different agent identity must not reuse caller A's discovery cache")
+
+	s.stateMu.Lock()
+	entry := s.federatedAgentCache["caller-b"]
+	entry.fetchedAt = time.Now().Add(-federatedAgentCacheTTL)
+	s.federatedAgentCache["caller-b"] = entry
+	s.stateMu.Unlock()
+	fourth, err := s.toolFindAgent(callerB, map[string]any{"name": "innovium"})
+	require.NoError(t, err)
+	assert.Equal(t, "miss", fourth.(map[string]any)["federated_cache"])
+	assert.Equal(t, 3, federationCalls, "a stale federated projection must be refreshed")
+}
+
+func TestFederatedAgentCacheBoundsProjection(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer("http://localhost", priv)
+	connections := make([]findAgentFederatedConnection, maxFederatedAgentCacheChains+4)
+	for i := range connections {
+		connection := findAgentFederatedConnection{
+			RemoteChainID: fmt.Sprintf("chain-%03d", i),
+			NetworkName:   "test",
+			RemoteAgents:  make([]findAgentFederatedContact, 8),
+		}
+		for j := range connection.RemoteAgents {
+			connection.RemoteAgents[j] = findAgentFederatedContact{
+				AgentID:     fmt.Sprintf("agent-%03d-%03d", i, j),
+				DisplayName: "contact",
+				Address:     fmt.Sprintf("agent-%03d-%03d@chain-%03d", i, j, i),
+				Available:   true,
+				Accepting:   true,
+				Domains:     []findAgentFederatedDomain{{Domain: "research"}},
+			}
+		}
+		connections[i] = connection
+	}
+	s.cacheFederatedAgentConnections(context.Background(), connections)
+	cached, hit := s.cachedFederatedAgentConnections(context.Background())
+	require.True(t, hit)
+	assert.LessOrEqual(t, len(cached), maxFederatedAgentCacheChains)
+	contacts := 0
+	for _, connection := range cached {
+		contacts += len(connection.RemoteAgents)
+	}
+	assert.LessOrEqual(t, contacts, maxFederatedAgentCacheContacts)
+}
+
+func TestSageFindAgentCachedContactsHonorLocalReauthorization(t *testing.T) {
+	federationCalls, authorizationCalls := 0, 0
+	allowCachedContact := true
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agents", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []any{}})
+	})
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
+		federationCalls++
+		_ = json.NewEncoder(w).Encode(map[string]any{"connections": []map[string]any{{
+			"remote_chain_id": "chain-innovium",
+			"remote_agents": []map[string]any{{
+				"agent_id": "remote-live", "display_name": "Innovium Research", "address": "remote-live@chain-innovium", "available": true, "accepting": true, "domains": []map[string]any{{"domain": "research"}},
+			}},
+		}}})
+	})
+	mux.HandleFunc("/v1/federation/contacts/authorize", func(w http.ResponseWriter, _ *http.Request) {
+		authorizationCalls++
+		allowed := []string{}
+		if allowCachedContact {
+			allowed = []string{"research"}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"allowed_domains": allowed})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	ctx := authmw.WithAgentID(context.Background(), "caller-a")
+	_, err := s.toolFindAgent(ctx, map[string]any{"name": "innovium"})
+	require.NoError(t, err)
+	allowCachedContact = false // Simulate a local RBAC revocation after the cache fill.
+	result, err := s.toolFindAgent(ctx, map[string]any{"name": "innovium"})
+	require.NoError(t, err)
+	out := result.(map[string]any)
+	assert.Equal(t, "hit", out["federated_cache"])
+	assert.Zero(t, out["total"])
+	assert.Equal(t, 1, federationCalls, "revocation must not trigger a remote discovery probe")
+	assert.Equal(t, 1, authorizationCalls)
 }
 
 func TestSageForget(t *testing.T) {

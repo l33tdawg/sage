@@ -247,6 +247,10 @@ type RemotePipeTarget struct {
 	Address         string `json:"address"`
 	Handle          string `json:"handle,omitempty"`
 	DisplayName     string `json:"display_name,omitempty"`
+	// Domains is the current, peer-authenticated visibility basis for this
+	// target. REST rechecks the local caller against it on resolve and send;
+	// it is not exposed to ordinary pipeline clients.
+	Domains []PipeContactDomain `json:"-"`
 }
 
 // DeliveryResult is the per-peer outcome of a receipt fan-out.

@@ -25,6 +25,11 @@ import (
 // builder fails fast instead of after a wasted stage+broadcast.
 const maxRemoteChainIDLenREST = 50
 
+const (
+	maxFederatedContactAuthorizationDomains = 512
+	maxFederatedContactAuthorizationBytes   = 256
+)
+
 // requireNodeOperator gates an off-consensus federation action that is performed
 // with the node OPERATOR's key (outbound signed calls) and has no other authz
 // (unlike the cross_fed set/revoke txs, which are authorized on-chain). Fails
@@ -712,6 +717,47 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		"total":       len(connections),
 		"message":     "Use sage_recall with scope=auto and one of these exact domains. Federation mutations remain operator-only.",
 	})
+}
+
+// handleFederatedContactAuthorize is a local-only, caller-scoped policy check
+// for a previously discovered contact projection. It deliberately does not
+// read a peer or disclose contacts: MCP uses it to revalidate its short-lived
+// in-memory cache after a local RBAC change.
+func (s *Server) handleFederatedContactAuthorize(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Domains []string `json:"domains"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if len(req.Domains) > maxFederatedContactAuthorizationDomains {
+		writeProblem(w, http.StatusBadRequest, "Too many domains", "at most 512 domains may be authorized per request")
+		return
+	}
+	callerID := middleware.ContextAgentID(r.Context())
+	if callerID == "" {
+		writeProblem(w, http.StatusForbidden, "Access denied", "A registered agent identity is required for federation contact authorization.")
+		return
+	}
+	seen := make(map[string]struct{}, len(req.Domains))
+	allowed := make([]string, 0, len(req.Domains))
+	for _, domain := range req.Domains {
+		domain = strings.TrimSpace(domain)
+		if domain == "" || len(domain) > maxFederatedContactAuthorizationBytes {
+			writeProblem(w, http.StatusBadRequest, "Invalid domain", "each domain must be between 1 and 256 bytes")
+			return
+		}
+		if _, duplicate := seen[domain]; duplicate {
+			continue
+		}
+		seen[domain] = struct{}{}
+		if len(s.federationVisibleRemoteScopes(r.Context(), callerID, domain)) > 0 {
+			allowed = append(allowed, domain)
+		}
+	}
+	sort.Strings(allowed)
+	writeJSON(w, http.StatusOK, map[string]any{"allowed_domains": allowed})
 }
 
 func normalizeAvailablePermissions(in []availableFederationPermission) []availableFederationPermission {

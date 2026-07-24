@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-07):** **v11.12.1 is the current release.** It completes the consumer onboarding/recovery slice, makes federation discoverable to ordinary authorized agents, unifies LAN and internet routing behind one automatic connection flow, and keeps trusted connections and saved permissions immediately usable while a peer is slow or offline, without changing consensus. The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. The native-shell productization bridge remains targeted at v11.11–v11.14.
+**Status (2026-07):** **v11.12.2 is the current release.** It adds explicit local-first recipient discovery for MCP agents, safely falls back to caller-authorized federated contacts, and makes repeated lookups immediate with a bounded cache that rechecks current local RBAC. Federated pipeline resolution and direct send now enforce the same caller/domain intersection. The exact-source cold state-sync proof passed on the v11.9 release source, and the complete CI/security/fault matrix remains a mandatory publication invariant. The native-shell productization bridge remains targeted at v11.11–v11.14.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 

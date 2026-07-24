@@ -311,6 +311,7 @@ func (m *Manager) resolveRemotePipeTarget(ctx context.Context, target string, al
 		ContactRevision: pipeContactAuthorizationRevision(match.grant, &match.contact), PolicyEpoch: match.policyEpoch,
 		AgreementID: match.grant.AgreementID, Address: match.contact.Address,
 		Handle: match.contact.Handle, DisplayName: match.contact.DisplayName,
+		Domains: append([]PipeContactDomain(nil), match.contact.Domains...),
 	}, nil
 }
 

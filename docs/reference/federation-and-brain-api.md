@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.12.1 code (2026-07-23). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.12.2 code (2026-07-24). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
@@ -386,8 +386,8 @@ grace so an authenticated identical confirmation can recover a lost response.
 
 These routes sit inside the standard signed `/v1/` group. Trust, policy, and
 outbound peer mutations require the **exact node operator** identity
-(`requireNodeOperator`). The one ordinary-agent route,
-`GET /v1/federation/available`, is read-only and caller-filtered.
+(`requireNodeOperator`). The ordinary-agent discovery routes are read-only and
+caller-filtered.
 
 ### Cross_fed agreement builder (tx-33 / tx-34)
 
@@ -398,6 +398,7 @@ outbound peer mutations require the **exact node operator** identity
 | `POST /v1/federation/cross/{chain_id}/revoke` | `handleCrossFedRevoke` (`federation_handler.go:229-318`) | Exact node operator + on-chain authz | Best-effort notify the exact active peer, then broadcast local tx-34 and purge the connection generation. |
 | `GET /v1/federation/cross/{chain_id}/status` | `handleCrossFedPeerStatus` (`federation_handler.go:299-333`) | Exact node operator | Live reachability preflight against the peer's `/fed/v1/status`. |
 | `GET /v1/federation/available` | `handleFederationAvailable` | Registered Ed25519 caller | Concurrently probe active peers and return only the remote read/copy subtrees, contacts, and saved-copy summary intersecting this caller's local ACL. Never returns endpoints, CA pins, agreement generations, secrets, or mutation controls. |
+| `POST /v1/federation/contacts/authorize` | `handleFederatedContactAuthorize` | Registered Ed25519 caller | Local-only reauthorization of a supplied, previously visible set of contact domains. Returns only the supplied domains still readable by this caller; it neither probes a peer nor discloses contacts. |
 | `POST /v1/federation/cross/{chain_id}/write` | `handleCrossFedWrite` (`api/rest/federation_write_handler.go:11-25`) | Ed25519 + exact node operator | Reserved compatibility surface. After operator and chain-id validation it returns `501` before parsing an inner credential or dialing a peer. |
 | `GET/PUT /v1/federation/cross/{chain_id}/sync` | `handleSyncDomainsGet/Set` (`api/rest/federation_handler.go:342-576`, `656-746`) | Ed25519 + exact node operator | Read or replace local v3 Publish/Subscribe lanes; true legacy links retain their `domains` contract. |
 
@@ -437,6 +438,13 @@ use the same dotted-subtree semantics as memory ACLs; a local parent grant
 covers a remote child, while a remote parent is narrowed to an explicitly
 allowed local child. Copy status exposes only authorized subscribed domains,
 saved-copy counts, and reconcile health.
+
+`POST /v1/federation/contacts/authorize` accepts `{"domains":["example.scope"]}`
+and returns `{"allowed_domains":["example.scope"]}` for the subset still
+readable by the signed caller. It accepts at most 512 unique, non-empty domains
+of at most 256 bytes. This is deliberately a local policy check for a
+short-lived MCP discovery cache, not a federation directory or a peer-status
+probe; a local revoke is therefore effective on the next cache hit.
 
 Federated recall remains an exact-domain opt-in at the REST layer. Operators
 and admins may delegate broadly; an ordinary registered caller must hold local
