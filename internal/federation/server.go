@@ -651,8 +651,15 @@ func (m *Manager) handlePipeContactLookup(w http.ResponseWriter, r *http.Request
 }
 
 func filterPipeContactLookup(grant *PipeContactGrant, req PipeContactLookupRequest) (*PipeContactGrant, int) {
+	limit := req.Limit
+	if limit <= 0 || limit > maxPipeContactLookupResults {
+		limit = maxPipeContactLookupResults
+	}
 	filtered := *grant
-	filtered.Contacts = make([]PipeContact, 0, min(req.Limit, len(grant.Contacts)))
+	// Keep allocation size independent of the peer-controlled request. The
+	// handler validates Limit too, but this helper is also used internally and
+	// must remain safe if a future caller skips that boundary validation.
+	filtered.Contacts = make([]PipeContact, 0, min(maxPipeContactLookupResults, len(grant.Contacts)))
 	exact := make([]PipeContact, 0)
 	partial := make([]PipeContact, 0)
 	for _, contact := range grant.Contacts {
@@ -680,7 +687,7 @@ func filterPipeContactLookup(grant *PipeContactGrant, req PipeContactLookupReque
 		return strings.ToLower(matches[i].DisplayName) < strings.ToLower(matches[j].DisplayName)
 	})
 	total := len(matches)
-	filtered.Contacts = append(filtered.Contacts, matches[:min(req.Limit, total)]...)
+	filtered.Contacts = append(filtered.Contacts, matches[:min(limit, total)]...)
 	return &filtered, total
 }
 

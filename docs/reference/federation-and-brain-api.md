@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.13.1 code (2026-07-24). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.13.2 code (2026-07-24). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
@@ -144,7 +144,7 @@ Authenticated reachability / identity and permission preflight (`handleStatus`,
 |---|---|---|
 | `chain_id` | string | the serving node's own chain id |
 | `time` | int64 | serving node's unix time |
-| `capabilities` | []string | optional features. A SQLite-backed v11.13.1 node advertises `sync`, `federated-pipeline-v1`, and `federated-pipeline-contact-lookup-v1`; it never advertises reserved `write-v1`. |
+| `capabilities` | []string | optional features. A SQLite-backed v11.13.2 node advertises `sync`, `federated-pipeline-v1`, and `federated-pipeline-contact-lookup-v1`; it never advertises reserved `write-v1`. |
 | `peer_rbac_grant` | object, optional | the serving node's current `{policy_version, paused, domains:[{domain,read,write,copy}]}` snapshot, disclosed only to the exact bound peer; present with zero rows means deny-all. While paused, current peers see `paused:true` and an empty domain list; the empty list also keeps older peers fail-closed. The versioned `write` member is always false in v11.9 (`internal/federation/peer_rbac.go:313-330`). |
 | `pipe_contacts` | object, optional | Compatible v1 peer-scoped projection of domain owners and **active local agents with current level-1 Read access** for shared Read/Copy domains. Without the advisory `X-Sage-Capabilities: federated-pipeline-contact-lookup-v1` request header it is a deterministic valid subset: all effective owners plus a stable first 128 active-agent candidates, bounded again to 1,024 contacts and 1 MiB. This keeps old consumers safe without a roster-wide RBAC scan. A lookup-capable requester receives the policy/capability preflight without this roster (and locally caps that compact response at 1 MiB), then uses the bounded live lookup route below. A v11.13.0 peer ignores that advisory header; if its historic full status exceeds the compact cap, the requester retries its normal legacy status once through a single-worker compatibility lane and filters it immediately. |
 | `sharing_grant` | object, optional | legacy compatibility envelope (`allowed_domains`, `max_clearance`) |
@@ -172,7 +172,7 @@ resolution. The body supplies exactly one of `name` (ASCII case-insensitive
 exact match across display, registered, and provider names; non-ASCII names use
 their registered casing) or `target`
 (canonical address, handle, exact agent ID, or exact display name), plus an
-optional `limit` (default 20, maximum 20). A v11.13.1 requester advertises the
+optional `limit` (default 20, maximum 20). A v11.13.2 requester advertises the
 lookup capability on the preceding status preflight, receives no status roster,
 and obtains this live, bounded result instead. The response carries at most 20
 contacts plus `total` and `truncated`; targeted results are live-only and never

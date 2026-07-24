@@ -93,13 +93,13 @@ func TestFederatedPipeContactSelectedAcceptancesChunkBeyondSQLiteVariableLimit(t
 	for i := 1; i <= MaxPeerRBACPolicyDomains+1; i++ {
 		agentID := fmt.Sprintf("%064x", i)
 		selected = append(selected, agentID)
-		_, err := s.conn.ExecContext(ctx, `
+		_, insertErr := s.conn.ExecContext(ctx, `
 			INSERT INTO fed_pipe_contact_acceptance
 				(remote_chain_id, peer_agent_id, policy_epoch, remote_ca_pin,
 				 policy_revision, local_agent_id, contact_id)
 			VALUES(?,?,?,?,?,?,?)`, stored.RemoteChainID, stored.PeerAgentID, stored.PolicyEpoch,
 			stored.RemoteCAPin, stored.Revision, agentID, strings.Repeat("ab", 32))
-		require.NoError(t, err)
+		require.NoError(t, insertErr)
 	}
 
 	acceptances, err := s.GetFederatedPipeContactAcceptancesForAgents(ctx, *stored, selected)

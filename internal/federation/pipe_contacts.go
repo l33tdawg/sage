@@ -431,7 +431,7 @@ func pipeContactHandlePrefix(handle, nodeHandle string) (string, bool) {
 		return "", false
 	}
 	for _, char := range prefix {
-		if !((char >= 'a' && char <= 'f') || (char >= '0' && char <= '9')) {
+		if (char < 'a' || char > 'f') && (char < '0' || char > '9') {
 			return "", false
 		}
 	}

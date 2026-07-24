@@ -51,10 +51,10 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.13.1
+## What's New in v11.13.2
 
 **This corrective release completes shared-domain federated recipient
-discovery at scale.** v11.13.1 keeps a deterministic, valid v1 status subset
+discovery at scale.** v11.13.2 keeps a deterministic, valid v1 status subset
 compatible with v11.13.0 (at most 1,024 contacts and 1 MiB), then resolves a
 requested human name or exact agent address through a new authenticated,
 RBAC-filtered lookup route.
@@ -76,7 +76,7 @@ or a later cache entry into a failure.
 
 This release changes no SAGE consensus rule, AppHash input, transaction type,
 key encoding, fork target, or application version. App-v20 and the v11.9
-rollout boundary are unchanged; existing chains upgrade in place. SDK 11.13.1.
+rollout boundary are unchanged; existing chains upgrade in place. SDK 11.13.2.
 
 ## What's New in v11.13.0
 
@@ -664,7 +664,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.13.1`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.13.2`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:

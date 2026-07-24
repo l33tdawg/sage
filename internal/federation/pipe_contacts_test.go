@@ -260,6 +260,16 @@ func TestLargeSharedRecipientProjectionUsesTargetedLookup(t *testing.T) {
 	require.Len(t, response.Grant.Contacts, 1)
 	require.Equal(t, target, response.Grant.Contacts[0].AgentID)
 	require.True(t, response.Grant.Contacts[0].Accepting)
+
+	oversizedBody, err := json.Marshal(PipeContactLookupRequest{Name: "innovium", Limit: maxPipeContactLookupResults + 1})
+	require.NoError(t, err)
+	oversizedReq := httptest.NewRequest(http.MethodPost, "/fed/v1/pipe/contacts/lookup", bytes.NewReader(oversizedBody))
+	oversizedReq = oversizedReq.WithContext(context.WithValue(oversizedReq.Context(), peerCtxKey{}, &peerIdentity{
+		ChainID: "chain-peer", AgentID: peerID, Agreement: agreement,
+	}))
+	oversizedRec := httptest.NewRecorder()
+	m.handlePipeContactLookup(oversizedRec, oversizedReq)
+	require.Equal(t, http.StatusBadRequest, oversizedRec.Code, oversizedRec.Body.String())
 }
 
 func TestLegacyStatusLoadsAnOwnerOutsideItsCandidateSample(t *testing.T) {
@@ -325,6 +335,11 @@ func TestPipeContactLookupCapsTargetMatchesAndResponseBytes(t *testing.T) {
 	filtered, total := filterPipeContactLookup(grant, PipeContactLookupRequest{Target: "worker", Limit: maxPipeContactLookupResults})
 	require.Equal(t, maxPipeContactLookupResults+1, total)
 	require.Len(t, filtered.Contacts, maxPipeContactLookupResults)
+	for _, invalidLimit := range []int{0, -1, maxPipeContactLookupResults + 1} {
+		filtered, total = filterPipeContactLookup(grant, PipeContactLookupRequest{Target: "worker", Limit: invalidLimit})
+		require.Equal(t, maxPipeContactLookupResults+1, total)
+		require.Len(t, filtered.Contacts, maxPipeContactLookupResults)
+	}
 
 	// Twenty matching contacts can still be too wide if each one has a large
 	// but valid shared-domain basis. The handler must return a byte-bounded
