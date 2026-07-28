@@ -1,5 +1,7 @@
 # (S)AGE — Sovereign Agent Governed Experience
 
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.l33tdawg%2Fsage.svg)](https://mcptoplist.com/server/io.github.l33tdawg%2Fsage)
+
 **Persistent, consensus-validated memory infrastructure for AI agents.**
 
 SAGE gives AI agents institutional memory that persists across conversations, goes through BFT consensus validation, carries confidence scores, and decays naturally over time. Not a flat file. Not a vector DB bolted onto a chat app. Infrastructure — built on the same consensus primitives as distributed ledgers.
