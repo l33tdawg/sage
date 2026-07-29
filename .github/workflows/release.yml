@@ -1098,7 +1098,7 @@ jobs:
           path: docker-image
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1213,7 +1213,7 @@ jobs:
           path: python-dist
 
       - name: Publish exact staged wheel and sdist
-        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: python-dist
           password: ${{ secrets.PYPI_API_TOKEN }}
@@ -1253,7 +1253,7 @@ jobs:
 
       - name: Log in to GitHub Container Registry
         if: needs.release-metadata.outputs.prerelease == 'false'
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
