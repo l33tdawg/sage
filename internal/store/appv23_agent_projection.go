@@ -162,14 +162,15 @@ func reconcileAppV23AgentProjections(
 				onChain.AgentID, err,
 			)
 		}
-		if onChain.Role != role.Role ||
-			onChain.Clearance != enrollment.Clearance ||
-			onChain.Capabilities != enrollment.Capabilities {
-			return projected, fmt.Errorf(
-				"committed app-v23 agent/policy projection mismatch for %s",
-				onChain.AgentID,
-			)
-		}
+		// Role, clearance, and capabilities are serving fields derived from the
+		// independently committed role and enrollment records. Older upgrade
+		// paths can retain a stale value in the duplicate agent-shaped record;
+		// that must never turn a rebuildable local projection into a node-wide
+		// startup failure. Normalize the transient source before rebuilding
+		// SQLite. This deliberately does not write BadgerDB outside consensus.
+		onChain.Role = role.Role
+		onChain.Clearance = enrollment.Clearance
+		onChain.Capabilities = enrollment.Capabilities
 
 		entry := appV23ProjectedAgentEntry(
 			onChain,
