@@ -1083,6 +1083,52 @@ jobs:
           gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' | sort > /tmp/remote-assets.txt
           diff -u /tmp/local-assets.txt /tmp/remote-assets.txt
 
+  verify-staged-macos-release:
+    name: Verify Staged macOS Release Assets
+    runs-on: macos-latest
+    needs: [stage-github-release, release-metadata]
+    permissions:
+      contents: read
+    steps:
+      # Artifact checks during packaging are necessary but not sufficient: this
+      # repeats the verification against the exact DMGs uploaded to the private
+      # GitHub draft, before that draft can be made public.
+      - name: Download and verify the staged signed applications
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir staged-macos
+          gh release download "${RELEASE_TAG}" \
+            --pattern "SAGE-${RELEASE_TAG}-macOS-*.dmg" \
+            --pattern "SAGE-${RELEASE_TAG}-macOS-*.dmg.sha256" \
+            --dir staged-macos
+
+          for arch in arm64 x86_64; do
+            dmg="staged-macos/SAGE-${RELEASE_TAG}-macOS-${arch}.dmg"
+            checksum="${dmg}.sha256"
+            test -s "${dmg}"
+            test -s "${checksum}"
+            (
+              cd staged-macos
+              shasum -a 256 -c "$(basename "${checksum}")"
+            )
+
+            mount_point=$(mktemp -d)
+            cleanup_mount() {
+              hdiutil detach "${mount_point}" >/dev/null 2>&1 || true
+              rmdir "${mount_point}" >/dev/null 2>&1 || true
+            }
+            trap cleanup_mount EXIT
+            hdiutil attach -readonly -nobrowse -mountpoint "${mount_point}" "${dmg}"
+            codesign --verify --deep --strict --verbose=4 "${mount_point}/SAGE.app"
+            spctl --assess --type execute --verbose=4 "${mount_point}/SAGE.app"
+            xcrun stapler validate "${dmg}"
+            cleanup_mount
+            trap - EXIT
+          done
+
   publish-docker-version:
     name: Publish Immutable Docker Version
     runs-on: ubuntu-latest
@@ -1285,7 +1331,7 @@ jobs:
   publish-github-release:
     name: Publish GitHub Release Last
     runs-on: ubuntu-latest
-    needs: [publish-docker-latest, release-metadata]
+    needs: [publish-docker-latest, verify-staged-macos-release, release-metadata]
     permissions:
       contents: write
     steps:
