@@ -51,7 +51,20 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.16.3
+## What's New in v11.16.4
+
+**Existing nodes recover from stale app-v23 serving projections at startup.** A
+rebuildable local SQLite projection whose old duplicate policy fields disagree
+with the canonical committed enrollment is normalized from that canonical
+policy record instead of preventing the node from starting. This is a local
+read-model repair only: it does not alter blocks, memory content, historical
+authors, domains, access groups, or the consensus application version.
+
+**The release pipeline verifies the installer that users actually download.**
+After macOS packages upload, CI downloads the staged DMG, checks its checksum,
+mounts it, and verifies the app signature, Gatekeeper assessment, and
+notarization before publication. The MCP server also no longer spends an
+agent's context budget on repeated per-tool `sage_turn` reminder messages.
 
 **CEREBRUM now settles operator actions against the canonical chain instead of
 undoing them in the browser.** Clearing a terminal task column keeps cards out
@@ -81,7 +94,7 @@ This patch does not rewrite memories, domains, historical authors, existing
 groups, or chain history. It keeps consensus application version 25 and the
 existing governed upgrade path unchanged. Existing nodes upgrade in place.
 
-Container: `ghcr.io/l33tdawg/sage:11.16.3`. SDK 11.16.3.
+Container: `ghcr.io/l33tdawg/sage:11.16.4`. SDK 11.16.4.
 
 ## What's New in v11.16.2
 
@@ -1048,7 +1061,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.16.3`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.16.4`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
