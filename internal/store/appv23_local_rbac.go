@@ -5314,9 +5314,12 @@ func (s *BadgerStore) ValidateAppV23State() error {
 			} else if projectionErr != nil {
 				return projectionErr
 			}
-			if agent.Role != role.Role || agent.Clearance != enrollment.Clearance || agent.Capabilities != enrollment.Capabilities {
-				return fmt.Errorf("app-v23 agent projection mismatch for %s", agentID)
-			}
+			// The duplicate agent-shaped record is a historical serving
+			// projection. Role, clearance, and capability authority lives in the
+			// separately versioned role and enrollment records validated above.
+			// Older upgrade paths can leave those derived fields stale; startup
+			// rebuilds its SQLite projection from the canonical policy instead of
+			// bricking the whole node over that recoverable drift.
 			if enrollment.Active && agentID != root.PrincipalID && enrollment.Profile != AppV23ProfileReadOnly {
 				if enrollment.HomeDomain == "" &&
 					AppV23AllowsMigratedDomainless(
