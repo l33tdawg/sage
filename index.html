@@ -13,7 +13,7 @@
 </script>
 <title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11.7: local-first persistent memory for AI agents with safer updates, resilient connections, governed administration, and the CEREBRUM MRI brain.">
+<meta name="description" content="Install SAGE v11.16: local-first persistent memory for AI agents with governed access, safe in-place upgrades, controlled federation, and the CEREBRUM MRI brain.">
 <meta name="theme-color" content="#0a0614">
 <meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
 <meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
@@ -1042,9 +1042,9 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker">SAGE v11.7 · governed memory · resilient agent connections</div>
+          <div class="hero-kicker">SAGE v11.16 · governed local memory · controlled agent collaboration</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
-          <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, governed validation, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
+          <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, attributed memory, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
             <div class="proof-chip"><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
             <div class="proof-chip"><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.7.5</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.16.2</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1115,14 +1115,14 @@ footer a:hover { text-decoration: underline; }
           <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
         </div>
         <div class="reveal">
-          <div class="section-tag">Hardened in v11.7</div>
+          <div class="section-tag">Built through v11.16</div>
           <h2>Keep agents connected, governed, and safely up to date.</h2>
-          <p class="section-desc">v11.7 hardens the full lifecycle around CEREBRUM: domain administration, AI-tool connections, restarts, and verified updates. New releases now surface automatically in a banner at the top of the dashboard.</p>
+          <p class="section-desc">CEREBRUM is the local control plane for memory, agent access, recovery, and sharing. Existing nodes upgrade in place; memory history stays attributable while current access remains explicit and reviewable.</p>
           <ul class="fed-list">
-            <li>Genesis admins can grant or revoke local-agent access while preserving the original domain owner in the audit trail.</li>
-            <li>ChatGPT desktop Codex mode gets an app-wide local connection shared with Codex CLI and the IDE extension.</li>
-            <li>Restart coordination drains MCP sessions and dashboard streams before replacing the process.</li>
-            <li>Updates verify checksums, roll back automatically on failure, and prove the new version booted successfully.</li>
+            <li>A dedicated local CEREBRUM Root governs roles, ownership, recovery, and handover without rewriting historical authorship.</li>
+            <li>Local agents can collaborate through explicit domains and groups; federated agents remain bounded to the sharing policy you approve.</li>
+            <li>Fresh first-party companions receive a reviewed profile and owned home domain during setup instead of silently self-promoting.</li>
+            <li>Updates verify release assets and bring compatible chains forward automatically; recovery isolates a bad historical record instead of taking the node offline.</li>
           </ul>
           <div class="hero-actions" style="margin-top:28px;">
             <button class="btn-secondary" onclick="switchTab('network')">See federation details</button>
@@ -1186,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.7.5</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.7.5 keeps contextual help readable at every CEREBRUM panel boundary, building on v11.7.4's provider-safe Smart Memory, direct embedding controls, and one-tab launch behavior. Existing chains replay byte-identically.</p>
+        <h3>What's new in <span id="whats-new-version">v11.16.2</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">The v11.8–v11.16 line turns SAGE into a complete local control plane: safe chain upgrades, governed local roles, controlled collaboration, and record-level recovery that keeps working memories available when historical data needs review.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Boundary-aware help</h4><p>Tooltips now account for the nearest scroll-clipping panel as well as the viewport, flipping below top edges instead of hiding behind fixed chrome.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Provider-safe vectors</h4><p>The node regenerates and stamps vectors in the selected embedding space, preventing Ollama and hash embeddings from being compared or mixed.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Direct memory controls</h4><p>Settings exposes Ollama or hash embeddings plus an independent reranker switch, and the status strip reports the active reranker state.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>One CEREBRUM tab</h4><p>The macOS dock app focuses an existing localhost CEREBRUM tab before opening a new one, with bounded automation and a safe fallback.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Recovery without a blank brain</h4><p>A historical record that cannot be verified is isolated for CEREBRUM review. Readable memories, search, and agents stay available.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Local Root and governed roles</h4><p>CEREBRUM Root is a dedicated local authority. Member, Manager, and Admin roles make current access explicit while historical authorship stays immutable.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Safe shared-domain continuity</h4><p>Agents that have genuinely collaborated on a local domain retain the appropriate working access after the governed upgrade.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>First-party companion setup</h4><p>A new bundled companion is provisioned with its reviewed profile and home domain before first use, so it can save and recall from day one.</p></div></div>
         </div>
       </div>
 
@@ -1237,8 +1237,8 @@ footer a:hover { text-decoration: underline; }
           <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation, confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
           <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
           <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
-          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds the rebuilt CEREBRUM dashboard, first-run onboarding, guided semantic setup, a self-installing local reranker, LAN/internet federation with controlled memory sync, and v11.7's safer administration, connections, restarts, and updates.</p></div>
-          <div class="faq-item"><h3>What does federation mean in v11.6?</h3><p>v11.6 links two separate SAGE brains through a human-verified ceremony on a LAN or across the internet. Signed peers can roam between networks without re-pairing. The host may optionally synchronize selected domains; sync remains off by default, and the guest cannot widen the policy.</p></div>
+          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds CEREBRUM, guided local setup, semantic recall, a managed reranker, controlled federation, and an upgrade path that keeps existing chains moving forward without a reset. The latest releases add governed local roles, dedicated Root control, and record-level memory recovery.</p></div>
+          <div class="faq-item"><h3>What does federation mean?</h3><p>Federation links separate SAGE nodes through a human-verified ceremony. Pairing shares nothing by itself: the local owner chooses specific domains and a bounded Read or Copy policy. A remote agent cannot gain local write, ownership, role, or Root authority through federation.</p></div>
         </div>
       </div>
     </div>
@@ -1466,7 +1466,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.7.5"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.16.2"</span></div>
         </div>
       </div>
 
