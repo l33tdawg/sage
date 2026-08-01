@@ -143,6 +143,8 @@ func pipeRouterAs(s *Server, callerID string) http.Handler {
 	r.Post("/v1/pipe/resolve", s.handlePipeResolve)
 	r.Post("/v1/pipe/send", s.handlePipeSend)
 	r.Get("/v1/pipe/inbox", s.handlePipeInbox)
+	r.Get("/v1/pipe/history/inbox", s.handlePipeInboxHistory)
+	r.Get("/v1/pipe/history/outbox", s.handlePipeOutbox)
 	r.Get("/v1/pipe/results", s.handlePipeResults)
 	r.Get("/v1/pipe/updates", s.handlePipeUpdates)
 	r.Get("/v1/pipe/{pipe_id}", s.handlePipeStatus)

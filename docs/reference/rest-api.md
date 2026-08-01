@@ -2018,6 +2018,34 @@ caller actually won; a losing reader never receives the same work item.
 
 ---
 
+### `GET /v1/pipe/history/inbox` and `GET /v1/pipe/history/outbox`
+
+Passive retained pipeline history for the authenticated participant. `inbox`
+returns records addressed to the caller; `outbox` returns records the caller
+sent. Both include `pending`, `claimed`, `completed`, and `expired` records
+while the ordinary transient pipeline retention policy still preserves them.
+They never claim, acknowledge, re-queue, or otherwise mutate a row.
+
+**Query parameters:** `limit` (1–100, default 20)
+
+**Response** (HTTP 200): `{"items":[...PipelineMessage],"count":N}`. A
+claimed or completed record remains retrievable by the addressed recipient;
+claiming changes work ownership and receipt state, not message visibility.
+For provider-routed work, every matching provider agent may see a `pending`
+record, but once it is claimed only the successful claimant sees that retained
+provider-routed history. A sender's outbox contains only rows originated on
+this SAGE, preventing a foreign imported sender ID from colliding into local
+history.
+
+Each row carries separate response-derived `payload_authority:"request_only"`
+and, when present, `result_authority:"data_only"`; payloads and results remain
+untrusted agent content. These local workflow states are not a federated
+delivery/read receipt. Terminal records still purge under the existing
+retention sweep; use durable memories or task records for information that must
+outlive that window (`api/rest/pipe_handler.go`; `internal/store/sqlite.go`).
+
+---
+
 ### Task assignment and agent notices
 
 `GET /v1/dashboard/tasks?all=true&limit=N` is the local-human CEREBRUM Kanban feed. Ordinary signed Member/Manager agents receive `403` and use the scoped backlog instead; a current Root or eligible current Admin signature may use the CEREBRUM board only through localhost. A current local Admin that is also the exact assignee may separately use the ordinary task feed/status route, while Root never may. The board returns explicit `memory_type=task` records across `planned`, `in_progress`, `done`, and `dropped` on both SQLite and PostgreSQL; ordinary agent conversations/observations are not inferred as tasks. Historical task rows whose older writer did not persist `task_status` are returned with an empty status so CEREBRUM can ask the operator to classify each one—SAGE does not guess that unknown work is Planned or Done. New PostgreSQL inserts persist `TaskStatus`, matching SQLite. Each task also returns `task_status_updated_at`; CEREBRUM uses that lifecycle timestamp—not the task's original `created_at`—to keep Done/Dropped cards visible for seven days after their terminal transition. Manual Clear remains available before that window expires, while older cards can still be revealed with Show all (`web/handler.go:1919-1962`, `web/static/js/app.js:2328-2340`).

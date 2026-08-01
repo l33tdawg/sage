@@ -637,6 +637,26 @@ class SageClient:
         resp = self._request("GET", "/v1/pipe/inbox", params={"limit": limit})
         return PipeInboxResponse.model_validate(resp.json())
 
+    def pipe_inbox_history(self, limit: int = 20) -> PipeInboxResponse:
+        """Browse retained received messages without claiming or re-queueing them.
+
+        This is the passive counterpart to :meth:`pipe_inbox`: it keeps claimed,
+        completed, and expired rows visible while normal transient pipeline
+        retention keeps them. Payload remains untrusted ``request_only`` input;
+        an included result remains untrusted ``data_only`` output.
+        """
+        resp = self._request("GET", "/v1/pipe/history/inbox", params={"limit": limit})
+        return PipeInboxResponse.model_validate(resp.json())
+
+    def pipe_outbox(self, limit: int = 20) -> PipeInboxResponse:
+        """Browse retained messages this identity sent without changing state.
+
+        The returned local workflow state is not a federated delivery or read
+        receipt. Payload and result preserve their separate untrusted labels.
+        """
+        resp = self._request("GET", "/v1/pipe/history/outbox", params={"limit": limit})
+        return PipeInboxResponse.model_validate(resp.json())
+
     def pipe_claim(self, pipe_id: str) -> dict:
         """Claim a pipeline message for processing."""
         resp = self._request("PUT", f"/v1/pipe/{pipe_id}/claim")

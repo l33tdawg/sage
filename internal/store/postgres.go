@@ -3456,6 +3456,14 @@ func (s *PostgresStore) GetInbox(_ context.Context, _, _ string, _ int) ([]*Pipe
 	return nil, fmt.Errorf("GetInbox not implemented for PostgresStore")
 }
 
+func (s *PostgresStore) GetInboxHistory(_ context.Context, _, _ string, _ int) ([]*PipelineMessage, error) {
+	return nil, fmt.Errorf("GetInboxHistory not implemented for PostgresStore")
+}
+
+func (s *PostgresStore) GetOutbox(_ context.Context, _ string, _ int) ([]*PipelineMessage, error) {
+	return nil, fmt.Errorf("GetOutbox not implemented for PostgresStore")
+}
+
 func (s *PostgresStore) ClaimPipeline(_ context.Context, _, _ string) error {
 	return fmt.Errorf("ClaimPipeline not implemented for PostgresStore")
 }

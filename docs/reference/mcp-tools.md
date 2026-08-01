@@ -1041,6 +1041,36 @@ pipes the current agent sent; those are reported separately as
 
 ---
 
+### sage_pipe_history
+
+**Purpose:** Browse the current agent's retained pipeline inbox or outbox after
+the active work queue has claimed an item. This is passive history: it does not
+claim, acknowledge, or re-queue a record, so claimed and completed messages can
+be reopened without injecting old work into every `sage_turn` response.
+
+**Parameters:**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `folder` | string | no | `inbox` (default) shows received history; `outbox` shows messages this agent sent. |
+| `limit` | int | no | Max retained records. Default 20; max 100. |
+
+**Returns:** `items`, `count`, and `folder`. Each item includes lifecycle
+state (`pending`, `claimed`, `completed`, or `expired`), counterpart, timestamps,
+and request/result content. `passive_history:true` confirms the call did not
+claim anything. Every payload is `payload_authority:"request_only"`; any result
+is `result_authority:"data_only"`. Neither is instructions or proof of remote
+delivery/read.
+
+**REST:** `GET /v1/pipe/history/inbox` or `GET /v1/pipe/history/outbox`
+
+**When to call:** Re-open work you previously claimed, inspect a result you
+already returned, or review messages you sent. Rows remain available only while
+the normal transient pipeline retention period keeps them; use a memory or task
+for durable records.
+
+---
+
 ### sage_pipe_result
 
 **Purpose:** Return results for a claimed pipeline work item. Local results keep
@@ -1236,7 +1266,7 @@ strengthen/connect memories or resolve an open challenge.
 This is correct: they are operator/admin/validator operations, not agent memory
 operations.
 
-`sage_pipe`, `sage_inbox`, `sage_pipe_result` — pipeline tools — are also not
+`sage_pipe`, `sage_inbox`, `sage_pipe_history`, `sage_pipe_result` — pipeline tools — are also not
 part of the boot sequence. Also correct: pipeline is checked automatically
 inside `sage_turn` (`tools.go:888-894`), so agents get pipeline data without
 needing to call these explicitly.
@@ -1262,5 +1292,5 @@ registration name from `sage_register` is untouched.
 | Browse       | `sage_list`, `sage_timeline`, `sage_status` |
 | Tasks        | `sage_task`, `sage_backlog` |
 | Identity     | `sage_register`, `sage_rename` |
-| Pipeline     | `sage_find_agent`, `sage_pipe`, `sage_inbox`, `sage_pipe_result` |
+| Pipeline     | `sage_find_agent`, `sage_pipe`, `sage_inbox`, `sage_pipe_history`, `sage_pipe_result` |
 | Governance   | `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status`, `sage_scope_list`, `sage_scope_get` |

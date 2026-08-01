@@ -66,6 +66,12 @@ mounts it, and verifies the app signature, Gatekeeper assessment, and
 notarization before publication. The MCP server also no longer spends an
 agent's context budget on repeated per-tool `sage_turn` reminder messages.
 
+**Claiming a message no longer makes it disappear for either participant.**
+The active inbox remains a pending-only, claim-on-read work queue so old work
+does not reappear in every turn. A new passive retained inbox/outbox history
+lets the recipient reopen claimed or completed work and lets the sender revisit
+its local lifecycle until the normal transient pipeline retention sweep.
+
 **CEREBRUM now settles operator actions against the canonical chain instead of
 undoing them in the browser.** Clearing a terminal task column keeps cards out
 of intermediate refreshes while the local projection catches up, then reloads

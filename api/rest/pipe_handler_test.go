@@ -852,7 +852,7 @@ func TestHandlePipeInboxReturnsOnlyCASWinner(t *testing.T) {
 
 func TestEmptyPipelineCollectionsEncodeAsArrays(t *testing.T) {
 	s, _ := newPipeServer(t)
-	for _, path := range []string{"/v1/pipe/inbox", "/v1/pipe/results", "/v1/pipe/updates"} {
+	for _, path := range []string{"/v1/pipe/inbox", "/v1/pipe/history/inbox", "/v1/pipe/history/outbox", "/v1/pipe/results", "/v1/pipe/updates"} {
 		rr := httptest.NewRecorder()
 		pipeRouterAs(s, "agent-empty").ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
 		require.Equal(t, http.StatusOK, rr.Code, "%s: %s", path, rr.Body.String())
@@ -865,6 +865,91 @@ func TestEmptyPipelineCollectionsEncodeAsArrays(t *testing.T) {
 		require.Empty(t, response.Items)
 		require.Zero(t, response.Count)
 	}
+}
+
+func TestPipeHistoryKeepsClaimedAndCompletedMessagesVisibleToBothParties(t *testing.T) {
+	s, memStore := newPipeServer(t)
+	ctx := context.Background()
+	const (
+		pipeID    = "pipe-retained-history"
+		sender    = "history-sender"
+		recipient = "history-recipient"
+	)
+	require.NoError(t, memStore.InsertPipeline(ctx, &store.PipelineMessage{
+		PipeID: pipeID, FromAgent: sender, ToAgent: recipient,
+		Intent: "review", Payload: "Please retain this request after claiming it.",
+		Status: "pending", CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+	}))
+
+	// Passive history does not claim a pending item.
+	historyBefore := httptest.NewRecorder()
+	pipeRouterAs(s, recipient).ServeHTTP(historyBefore, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/inbox", nil))
+	require.Equal(t, http.StatusOK, historyBefore.Code, historyBefore.Body.String())
+	var inbox struct {
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(historyBefore.Body.Bytes(), &inbox))
+	require.Len(t, inbox.Items, 1)
+	assert.Equal(t, "pending", inbox.Items[0]["status"])
+	assert.Equal(t, "request_only", inbox.Items[0]["payload_authority"])
+	assert.Equal(t, "agent_untrusted", inbox.Items[0]["trust"])
+	got, err := memStore.GetPipeline(ctx, pipeID)
+	require.NoError(t, err)
+	assert.Equal(t, "pending", got.Status)
+
+	// The actionable queue claims work once, but the recipient can still reopen
+	// it through passive history afterward.
+	claimRR := httptest.NewRecorder()
+	pipeRouterAs(s, recipient).ServeHTTP(claimRR, httptest.NewRequest(http.MethodGet, "/v1/pipe/inbox", nil))
+	require.Equal(t, http.StatusOK, claimRR.Code, claimRR.Body.String())
+
+	historyAfterClaim := httptest.NewRecorder()
+	pipeRouterAs(s, recipient).ServeHTTP(historyAfterClaim, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/inbox", nil))
+	require.Equal(t, http.StatusOK, historyAfterClaim.Code, historyAfterClaim.Body.String())
+	require.NoError(t, json.Unmarshal(historyAfterClaim.Body.Bytes(), &inbox))
+	require.Len(t, inbox.Items, 1)
+	assert.Equal(t, "claimed", inbox.Items[0]["status"])
+	assert.Equal(t, recipient, inbox.Items[0]["claimed_by"])
+	assert.Equal(t, "Please retain this request after claiming it.", inbox.Items[0]["payload"])
+
+	outboxRR := httptest.NewRecorder()
+	pipeRouterAs(s, sender).ServeHTTP(outboxRR, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/outbox", nil))
+	require.Equal(t, http.StatusOK, outboxRR.Code, outboxRR.Body.String())
+	var outbox struct {
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(outboxRR.Body.Bytes(), &outbox))
+	require.Len(t, outbox.Items, 1)
+	assert.Equal(t, "claimed", outbox.Items[0]["status"])
+
+	require.NoError(t, memStore.CompletePipeline(ctx, pipeID, recipient, "The result is retained too.", ""))
+	completedHistory := httptest.NewRecorder()
+	pipeRouterAs(s, recipient).ServeHTTP(completedHistory, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/inbox", nil))
+	require.Equal(t, http.StatusOK, completedHistory.Code, completedHistory.Body.String())
+	require.NoError(t, json.Unmarshal(completedHistory.Body.Bytes(), &inbox))
+	require.Len(t, inbox.Items, 1)
+	assert.Equal(t, "completed", inbox.Items[0]["status"])
+	assert.Equal(t, "The result is retained too.", inbox.Items[0]["result"])
+	assert.Equal(t, "request_only", inbox.Items[0]["payload_authority"])
+	assert.Equal(t, "data_only", inbox.Items[0]["result_authority"])
+
+	completedOutbox := httptest.NewRecorder()
+	pipeRouterAs(s, sender).ServeHTTP(completedOutbox, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/outbox", nil))
+	require.Equal(t, http.StatusOK, completedOutbox.Code, completedOutbox.Body.String())
+	require.NoError(t, json.Unmarshal(completedOutbox.Body.Bytes(), &outbox))
+	require.Len(t, outbox.Items, 1)
+	assert.Equal(t, "completed", outbox.Items[0]["status"])
+	assert.Equal(t, "The result is retained too.", outbox.Items[0]["result"])
+
+	// Neither collection endpoint leaks the private request to a third agent.
+	thirdPartyRR := httptest.NewRecorder()
+	pipeRouterAs(s, "unrelated-agent").ServeHTTP(thirdPartyRR, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/inbox", nil))
+	require.Equal(t, http.StatusOK, thirdPartyRR.Code, thirdPartyRR.Body.String())
+	var thirdParty struct {
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(thirdPartyRR.Body.Bytes(), &thirdParty))
+	assert.Empty(t, thirdParty.Items)
 }
 
 func TestPipelineRESTTrustBoundaryLabelsPromptInjection(t *testing.T) {

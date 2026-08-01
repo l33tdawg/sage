@@ -100,6 +100,8 @@ func TestSignedRequestReplayClassificationFailsClosed(t *testing.T) {
 		{name: "safe dashboard read", method: http.MethodGet, path: "/v1/dashboard/stats", want: signedRequestReplaySafe},
 		{name: "safe memory detail", method: http.MethodGet, path: "/v1/memory/mem-1", want: signedRequestReplaySafe},
 		{name: "safe pipe detail", method: http.MethodGet, path: "/v1/pipe/pipe-1", want: signedRequestReplaySafe},
+		{name: "passive pipe inbox history", method: http.MethodGet, path: "/v1/pipe/history/inbox?limit=20", want: signedRequestReplaySafe},
+		{name: "passive pipe outbox history", method: http.MethodGet, path: "/v1/pipe/history/outbox?limit=20", want: signedRequestReplaySafe},
 		{name: "passive results projection", method: http.MethodGet, path: "/v1/pipe/results?limit=5", want: signedRequestReplaySafe},
 		{name: "destructive pipe inbox", method: http.MethodGet, path: "/v1/pipe/inbox?limit=5", want: signedRequestSingleAttempt},
 		{name: "destructive pipe updates", method: http.MethodGet, path: "/v1/pipe/updates?limit=5", want: signedRequestSingleAttempt},

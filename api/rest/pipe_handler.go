@@ -151,7 +151,7 @@ func pipelineMessageREST(msg *store.PipelineMessage, surface string) pipelineMes
 			response.PayloadAuthority = pipeRequestAuthority
 			response.SecurityNotice = pipeRESTCombinedSecurityNotice
 		}
-	case "status":
+	case "status", "history":
 		if msg.Payload != "" || msg.Intent != "" {
 			response.PayloadAuthority = pipeRequestAuthority
 		}
@@ -743,6 +743,70 @@ func (s *Server) handlePipeInbox(w http.ResponseWriter, r *http.Request) {
 		"items": responseItems,
 		"count": len(claimedItems),
 	})
+}
+
+// pipeHistoryLimit deliberately permits a slightly wider passive page than the
+// claim-on-read work queue. These endpoints never acknowledge or claim a row,
+// so a replay cannot consume work or hide an item.
+func pipeHistoryLimit(r *http.Request) int {
+	limit := 20
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 100 {
+			limit = n
+		}
+	}
+	return limit
+}
+
+// handlePipeInboxHistory returns retained pipeline messages addressed to the
+// caller without changing claim state. It is intentionally separate from the
+// pending-only inbox endpoint used by sage_turn, so old work is never injected
+// back into an agent's active turn context.
+func (s *Server) handlePipeInboxHistory(w http.ResponseWriter, r *http.Request) {
+	agentID := middleware.ContextAgentID(r.Context())
+	provider := ""
+	if s.agentStore != nil {
+		if agent, err := s.agentStore.GetAgent(r.Context(), agentID); err == nil {
+			provider = agent.Provider
+		}
+	}
+
+	pipeStore, ok := s.store.(store.PipelineStore)
+	if !ok {
+		writeProblem(w, http.StatusInternalServerError, "Pipeline not available", "store does not support pipeline operations")
+		return
+	}
+	items, err := pipeStore.GetInboxHistory(r.Context(), agentID, provider, pipeHistoryLimit(r))
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Inbox history query failed", err.Error())
+		return
+	}
+	responseItems := make([]pipelineMessageRESTResponse, 0, len(items))
+	for _, item := range items {
+		responseItems = append(responseItems, pipelineMessageREST(item, "history"))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": responseItems, "count": len(responseItems)})
+}
+
+// handlePipeOutbox returns retained messages sent by the caller. It includes
+// pending, claimed, completed, and expired state while the ordinary retention
+// policy still keeps the row; it is not a peer-delivery receipt.
+func (s *Server) handlePipeOutbox(w http.ResponseWriter, r *http.Request) {
+	pipeStore, ok := s.store.(store.PipelineStore)
+	if !ok {
+		writeProblem(w, http.StatusInternalServerError, "Pipeline not available", "store does not support pipeline operations")
+		return
+	}
+	items, err := pipeStore.GetOutbox(r.Context(), middleware.ContextAgentID(r.Context()), pipeHistoryLimit(r))
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Outbox query failed", err.Error())
+		return
+	}
+	responseItems := make([]pipelineMessageRESTResponse, 0, len(items))
+	for _, item := range items {
+		responseItems = append(responseItems, pipelineMessageREST(item, "history"))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": responseItems, "count": len(responseItems)})
 }
 
 // handlePipeClaim atomically claims a pipeline item.

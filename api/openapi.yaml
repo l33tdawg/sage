@@ -4445,6 +4445,74 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/pipe/history/inbox:
+    get:
+      operationId: pipeInboxHistory
+      summary: Browse retained received pipeline messages without claiming them.
+      tags:
+        - Pipeline
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Passive retained inbox history.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PipelineMessage"
+                  count:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/pipe/history/outbox:
+    get:
+      operationId: pipeOutbox
+      summary: Browse retained messages sent by the authenticated agent without changing state.
+      tags:
+        - Pipeline
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        "200":
+          description: Passive retained outbox history; not a federated delivery/read receipt.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PipelineMessage"
+                  count:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /v1/pipe/updates:
     get:
       operationId: pipeDeliveryUpdates

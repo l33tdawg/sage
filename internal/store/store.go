@@ -800,6 +800,15 @@ type PipelineStore interface {
 	InsertPipeline(ctx context.Context, msg *PipelineMessage) error
 	GetPipeline(ctx context.Context, pipeID string) (*PipelineMessage, error)
 	GetInbox(ctx context.Context, agentID, provider string, limit int) ([]*PipelineMessage, error)
+	// GetInboxHistory returns the authenticated recipient's retained pipeline
+	// history without claiming or otherwise changing any row. A provider-routed
+	// item is visible to its provider while pending, then only to its successful
+	// claimant once it has been claimed.
+	GetInboxHistory(ctx context.Context, agentID, provider string, limit int) ([]*PipelineMessage, error)
+	// GetOutbox returns retained messages originated by this local agent without
+	// acknowledging or changing any row. Imported foreign messages never appear
+	// in a local agent's outbox merely because their source ID happens to match.
+	GetOutbox(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error)
 	ClaimPipeline(ctx context.Context, pipeID, agentID string) error
 	CompletePipeline(ctx context.Context, pipeID, agentID, result, journalID string) error
 	GetCompletedForSender(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error)

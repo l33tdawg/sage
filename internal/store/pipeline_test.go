@@ -262,6 +262,23 @@ func TestPipelineRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, inbox3, 0)
 
+	// Claiming takes an item out of the actionable queue, never out of the
+	// recipient's retained history. The recipient must be able to reopen the
+	// original request before completing it.
+	inboxHistory, err := s.GetInboxHistory(ctx, "agent-bob", "perplexity", 10)
+	require.NoError(t, err)
+	require.Len(t, inboxHistory, 1)
+	assert.Equal(t, "pipe-test-001", inboxHistory[0].PipeID)
+	assert.Equal(t, "claimed", inboxHistory[0].Status)
+	assert.Equal(t, "Find BFT papers from 2024", inboxHistory[0].Payload)
+	assert.Equal(t, "agent-bob", inboxHistory[0].ClaimedBy)
+
+	outbox, err := s.GetOutbox(ctx, "agent-alice", 10)
+	require.NoError(t, err)
+	require.Len(t, outbox, 1)
+	assert.Equal(t, "claimed", outbox[0].Status)
+	assert.Equal(t, "Find BFT papers from 2024", outbox[0].Payload)
+
 	// Complete it
 	require.NoError(t, s.CompletePipeline(ctx, "pipe-test-001", "agent-bob", "Found 5 papers", "journal-001"))
 
@@ -278,6 +295,20 @@ func TestPipelineRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, completed, 1)
 	assert.Equal(t, "Found 5 papers", completed[0].Result)
+
+	// Both parties retain a readable transcript after completion. This is a
+	// passive view: it does not re-queue or re-claim the completed item.
+	inboxHistory, err = s.GetInboxHistory(ctx, "agent-bob", "perplexity", 10)
+	require.NoError(t, err)
+	require.Len(t, inboxHistory, 1)
+	assert.Equal(t, "completed", inboxHistory[0].Status)
+	assert.Equal(t, "Found 5 papers", inboxHistory[0].Result)
+
+	outbox, err = s.GetOutbox(ctx, "agent-alice", 10)
+	require.NoError(t, err)
+	require.Len(t, outbox, 1)
+	assert.Equal(t, "completed", outbox[0].Status)
+	assert.Equal(t, "Found 5 papers", outbox[0].Result)
 
 	// ListPipelines — all
 	all, err := s.ListPipelines(ctx, "", 50)
@@ -297,6 +328,34 @@ func TestPipelineRoundTrip(t *testing.T) {
 	stats, err := s.PipelineStats(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, 1, stats["completed"])
+}
+
+func TestPipelineProviderHistoryLocksClaimedWorkToClaimant(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	require.NoError(t, s.InsertPipeline(ctx, &PipelineMessage{
+		PipeID:     "provider-history",
+		FromAgent:  "sender",
+		ToProvider: "shared-provider",
+		Intent:     "review",
+		Payload:    "private work request",
+		Status:     "pending",
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(time.Hour),
+	}))
+	require.NoError(t, s.ClaimPipeline(ctx, "provider-history", "claimant"))
+
+	claimantHistory, err := s.GetInboxHistory(ctx, "claimant", "shared-provider", 10)
+	require.NoError(t, err)
+	require.Len(t, claimantHistory, 1)
+	assert.Equal(t, "provider-history", claimantHistory[0].PipeID)
+
+	otherProviderHistory, err := s.GetInboxHistory(ctx, "other-provider-agent", "shared-provider", 10)
+	require.NoError(t, err)
+	assert.Empty(t, otherProviderHistory, "provider peers must not browse work after another agent claimed it")
 }
 
 func TestPipelineVaultEncryptionAndFederationProvenance(t *testing.T) {

@@ -6224,6 +6224,94 @@ func (s *SQLiteStore) GetInbox(ctx context.Context, agentID, provider string, li
 	return items, rows.Err()
 }
 
+// GetInboxHistory returns the recipient's retained pipeline history without
+// mutating claim state. GetInbox intentionally remains a pending-only work
+// queue; this separate projection lets a recipient revisit a claimed or
+// completed message until the ordinary pipeline retention sweep purges it.
+func (s *SQLiteStore) GetInboxHistory(ctx context.Context, agentID, provider string, limit int) ([]*PipelineMessage, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
+		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
+		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
+		        federation_authorization_mode, federation_linked_relation
+		 FROM pipeline_messages
+		 WHERE destination_chain_id = ''
+		   AND (
+			to_agent = ?
+			OR (to_agent = '' AND to_provider = ? AND (status = 'pending' OR claimed_by = '' OR claimed_by = ?))
+		   )
+		 ORDER BY created_at DESC LIMIT ?`,
+		agentID, provider, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	items := make([]*PipelineMessage, 0)
+	for rows.Next() {
+		var m PipelineMessage
+		var createdAt, expiresAt string
+		var claimedAt, completedAt *string
+		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
+			&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &m.ClaimedBy, &claimedAt, &completedAt,
+			&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
+			&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision,
+			&m.FederationAuthorizationMode, &m.FederationLinkedRelation); err != nil {
+			return nil, err
+		}
+		m.CreatedAt = parseTime(createdAt)
+		m.ExpiresAt = parseTime(expiresAt)
+		m.ClaimedAt = parseTimePtr(claimedAt)
+		m.CompletedAt = parseTimePtr(completedAt)
+		if err := s.decryptPipelineFields(&m); err != nil {
+			return nil, err
+		}
+		items = append(items, &m)
+	}
+	return items, rows.Err()
+}
+
+// GetOutbox returns retained messages sent by one local agent. The source-chain
+// guard prevents an imported row from appearing in a coincidentally-named local
+// sender's history.
+func (s *SQLiteStore) GetOutbox(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
+		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
+		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
+		        federation_authorization_mode, federation_linked_relation
+		 FROM pipeline_messages
+		 WHERE from_agent = ? AND source_chain_id = ''
+		 ORDER BY created_at DESC LIMIT ?`, agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	items := make([]*PipelineMessage, 0)
+	for rows.Next() {
+		var m PipelineMessage
+		var createdAt, expiresAt string
+		var claimedAt, completedAt *string
+		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
+			&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &m.ClaimedBy, &claimedAt, &completedAt,
+			&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
+			&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision,
+			&m.FederationAuthorizationMode, &m.FederationLinkedRelation); err != nil {
+			return nil, err
+		}
+		m.CreatedAt = parseTime(createdAt)
+		m.ExpiresAt = parseTime(expiresAt)
+		m.ClaimedAt = parseTimePtr(claimedAt)
+		m.CompletedAt = parseTimePtr(completedAt)
+		if err := s.decryptPipelineFields(&m); err != nil {
+			return nil, err
+		}
+		items = append(items, &m)
+	}
+	return items, rows.Err()
+}
+
 func (s *SQLiteStore) ClaimPipeline(ctx context.Context, pipeID, agentID string) error {
 	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'claimed', claimed_by = ?, claimed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
