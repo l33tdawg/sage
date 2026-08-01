@@ -426,7 +426,6 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 		conversation.callsSinceTurn++
 	}
 	conversation.lastUsed = time.Now()
-	nudge := turnNudge(params.Name, conversation)
 	s.conversationMu.Unlock()
 
 	text, _ := json.MarshalIndent(result, "", "  ")
@@ -435,12 +434,6 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 	// Prepend auto-inception message if brain was just initialized.
 	if autoInceptionMsg != "" {
 		output = autoInceptionMsg + "\n\n---\n\n" + output
-	}
-
-	// Nudge the agent if sage_turn hasn't been called recently.
-	// This is server-side enforcement — works across all providers (Claude, ChatGPT, etc).
-	if nudge != "" {
-		output += "\n\n" + nudge
 	}
 
 	return &jsonRPCResponse{
@@ -491,45 +484,6 @@ func shouldBlockForTurn(toolName string, state *conversationState) bool {
 	}
 
 	return false
-}
-
-// turnNudge returns a reminder string if the agent hasn't called sage_turn recently.
-// Uses both call count AND elapsed time to catch agents with long turns (many
-// non-SAGE tool calls between SAGE calls). Escalates from gentle to urgent.
-func turnNudge(currentTool string, state *conversationState) string {
-	// Don't nudge on sage_turn itself, inception, or reflect (they're memory operations).
-	switch currentTool {
-	case "sage_turn", "sage_inception", "sage_red_pill", "sage_reflect", "sage_register":
-		return ""
-	}
-
-	minutesSinceTurn := 0.0
-	if !state.lastTurnTime.IsZero() {
-		minutesSinceTurn = time.Since(state.lastTurnTime).Minutes()
-	}
-
-	switch {
-	case state.callsSinceTurn >= 5 || (minutesSinceTurn > 5 && !state.lastTurnTime.IsZero()):
-		// Urgent — too many calls or too much time without sage_turn.
-		return "[SAGE] ⚠️ You have not called sage_turn in " +
-			fmt.Sprintf("%d", state.callsSinceTurn) +
-			" tool calls (" + fmt.Sprintf("%.0f", minutesSinceTurn) + "min). " +
-			"Your experience this session is NOT being recorded. " +
-			"Call sage_turn now with the current topic and what's happened — " +
-			"otherwise this work is lost if the conversation ends."
-	case state.callsSinceTurn >= 3 || (minutesSinceTurn > 3 && !state.lastTurnTime.IsZero()):
-		// Firm reminder.
-		return "[SAGE] Reminder: call sage_turn with the current topic + observation. " +
-			"You haven't logged a turn in " +
-			fmt.Sprintf("%d", state.callsSinceTurn) + " calls (" +
-			fmt.Sprintf("%.0f", minutesSinceTurn) + "min) — your recent experience isn't being stored."
-	case state.callsSinceTurn == 2 && state.lastTurnTime.IsZero():
-		// First session, never called sage_turn — might not know about it yet.
-		return "[SAGE] Tip: call sage_turn every conversation turn to build persistent memory. " +
-			"It recalls relevant context AND stores what just happened, atomically."
-	}
-
-	return ""
 }
 
 // maybeAutoInception checks if the brain has memories. If empty, runs inception
