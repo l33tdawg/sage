@@ -24,15 +24,15 @@ func TestReconcileAppV23AgentProjectionsNormalizesStaleAgentShapedPolicy(t *test
 	// current policy; the local SQLite projection must be rebuilt from them.
 	require.NoError(t, badgerStore.update(func(txn *badger.Txn) error {
 		var stale OnChainAgent
-		if err := appV23ReadJSON(txn, agentOnChainKey(agentID), &stale); err != nil {
-			return err
+		if readErr := appV23ReadJSON(txn, agentOnChainKey(agentID), &stale); readErr != nil {
+			return readErr
 		}
 		stale.Role = AppV23RoleManager
 		stale.Clearance = 4
 		stale.Capabilities = AgentCapabilityReadAllDomains
-		data, err := appV23Marshal(stale)
-		if err != nil {
-			return err
+		data, marshalErr := appV23Marshal(stale)
+		if marshalErr != nil {
+			return marshalErr
 		}
 		return badgerStore.txnSet(txn, appV23ProjectedAgentKey(agentID), data)
 	}))
