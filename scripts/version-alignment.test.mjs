@@ -48,7 +48,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/reference/app-v23-access-control-design.md', '## App-v24 readiness and memory-write barrier'],
     ['docs/reference/mcp-tools.md', 'A level-2 grant is never a remedy for a hard'],
     ['docs/reference/mcp-tools.md', 'never be substituted for this caller-scoped projection'],
-    ['internal/abci/app.go', 'const maxSupportedAppVersion uint64 = 25'],
+    ['internal/abci/app.go', 'const maxSupportedAppVersion uint64 = 26'],
     [
       'docs/ROADMAP.md',
       version.includes('-')
@@ -61,7 +61,7 @@ test('release-facing version metadata stays aligned', () => {
   }
 });
 
-test('v11.16 app-v23/app-v24 public contract markers stay release-visible', () => {
+test('v11.17 app-v23 through app-v26 public contract markers stay release-visible', () => {
   const openapi = read('api/openapi.yaml');
   for (const marker of [
     'committed_unconfirmed',
@@ -70,7 +70,9 @@ test('v11.16 app-v23/app-v24 public contract markers stay release-visible', () =
     'DomainWriteDeniedProblem:',
     'has_more:',
     'total_exact:',
-    'receipts are explicitly deferred beyond v11.16.',
+    'federated read receipts remain capability-negotiated',
+    '/v1/messages/{message_id}/status:',
+    'MessageStatusResponse:',
   ]) {
     assert.ok(openapi.includes(marker), `OpenAPI is missing app-v23 contract marker: ${marker}`);
   }

@@ -63,10 +63,22 @@ func rbacCommitTimeout() time.Duration {
 // error if the RPC fails, or if the tx is rejected in CheckTx or FinalizeBlock,
 // so callers can surface real consensus rejections.
 func broadcastTxCommitWeb(cometRPC string, txBytes []byte) (hash string, height int64, txLog string, err error) {
+	return broadcastTxCommitWebContext(context.Background(), cometRPC, txBytes)
+}
+
+// broadcastTxCommitWebContext is the request-aware variant used by CEREBRUM
+// mutations. A closed browser tab or an explicit client deadline must cancel
+// the in-flight Comet request instead of leaving the server goroutine detached
+// for the full commit timeout. Callers must still treat cancellation as an
+// indeterminate result: consensus may already have accepted the transaction.
+func broadcastTxCommitWebContext(parent context.Context, cometRPC string, txBytes []byte) (hash string, height int64, txLog string, err error) {
 	txHex := hex.EncodeToString(txBytes)
 	url := fmt.Sprintf("%s/broadcast_tx_commit?tx=0x%s", cometRPC, txHex)
 
-	ctx, cancel := context.WithTimeout(context.Background(), rbacCommitTimeout())
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, rbacCommitTimeout())
 	defer cancel()
 
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) // #nosec G107 -- internal CometBFT RPC
@@ -104,6 +116,10 @@ func broadcastTxCommitWeb(cometRPC string, txBytes []byte) (hash string, height 
 // proof before calling this helper or intentionally use the proofless direct
 // compatibility lane.
 func (h *DashboardHandler) signAndBroadcastCommit(ptx *tx.ParsedTx, key ed25519.PrivateKey) (hash string, height int64, txLog string, err error) {
+	return h.signAndBroadcastCommitContext(context.Background(), ptx, key)
+}
+
+func (h *DashboardHandler) signAndBroadcastCommitContext(ctx context.Context, ptx *tx.ParsedTx, key ed25519.PrivateKey) (hash string, height int64, txLog string, err error) {
 	ptx.Nonce = tx.MonotonicNonce(key)
 	if ptx.Timestamp.IsZero() {
 		ptx.Timestamp = time.Now()
@@ -127,7 +143,7 @@ func (h *DashboardHandler) signAndBroadcastCommit(ptx *tx.ParsedTx, key ed25519.
 	if encErr != nil {
 		return "", 0, "", fmt.Errorf("encode tx: %w", encErr)
 	}
-	return broadcastTxCommitWeb(h.CometBFTRPC, encoded)
+	return broadcastTxCommitWebContext(ctx, h.CometBFTRPC, encoded)
 }
 
 // isIndeterminateCommitError reports whether a commit-confirmed request could

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -293,6 +294,79 @@ func TestAppV23PolicyApprovalUsesCommittedRootAndTargetConsent(t *testing.T) {
 	))
 }
 
+func TestAppV23PolicyApprovalImmediatelyRepairsAgentsProjection(t *testing.T) {
+	_, rootKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, companionKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, validatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	fixture := appV23AccessFixture{
+		rootKey: rootKey, agentKey: companionKey,
+		rootID: agentIDForKey(rootKey), agentID: agentIDForKey(companionKey),
+	}
+	fixture.badger, err = store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, fixture.badger.CloseBadger()) })
+	scope := sha256.Sum256([]byte("projection-approval-scope"))
+	bootstrap := sha256.Sum256([]byte("projection-approval-bootstrap"))
+	require.NoError(t, fixture.badger.BootstrapAppV23Genesis(store.AppV23GenesisBootstrap{
+		RootID: fixture.rootID, Scope: hex.EncodeToString(scope[:]), AgentID: fixture.agentID,
+		Profile: store.AppV23ProfileCompanion, HomeDomain: "companion-home",
+		Clearance: 1, Capabilities: 15, Height: 1,
+		BootstrapDigest: hex.EncodeToString(bootstrap[:]),
+		ValidatorID:     agentIDForKey(validatorKey), ValidatorPower: 10,
+		ActivateAtGenesis: true,
+	}))
+	_, pendingKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	pendingID := agentIDForKey(pendingKey)
+	require.NoError(t, fixture.badger.RegisterAgentWithCapabilities(
+		pendingID, "Pending companion", store.AppV23RoleMember, "", "mynah", "", 2, 30,
+	))
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, decodeErr := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+		require.NoError(t, decodeErr)
+		parsed, decodeErr := tx.DecodeTx(raw)
+		require.NoError(t, decodeErr)
+		require.NotNil(t, parsed.LocalAgentApprove)
+		approval := parsed.LocalAgentApprove
+		require.NoError(t, fixture.badger.ApproveAppV23LocalAgent(store.AppV23LocalEnrollment{
+			AgentID: approval.AgentID, ApprovedBy: fixture.rootID, RootGeneration: 1,
+			Profile: approval.Profile, HomeDomain: approval.HomeDomain,
+			Clearance: approval.Clearance, Capabilities: store.AgentCapabilities(approval.Capabilities),
+			Active: approval.Active, UpdatedHeight: 3,
+		}, approval.Role, approval.ExpectedRevision, approval.ExpectedRoleRevision))
+		_, _ = fmt.Fprint(w, `{"result":{"check_tx":{"code":0},"tx_result":{"code":0},"hash":"APPROVE","height":"3"}}`)
+	}))
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, map[string]ed25519.PrivateKey{pendingID: pendingKey})
+	h.store = sqlStore
+	req := appV23AccessRequest(t, http.MethodPut, "/policy", "id", pendingID, map[string]any{
+		"role": "member", "profile": "companion", "home_domain": "pending-home",
+		"clearance": 0, "capabilities": 15,
+	})
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AgentPolicy().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	_, projectionErr := store.EnsureAppV23AgentProjection(
+		context.Background(), sqlStore, fixture.badger, pendingID, nil,
+	)
+	require.NoError(t, projectionErr)
+	assert.Contains(t, rec.Body.String(), `"projection_ready":true`)
+	projected, err := sqlStore.GetAgent(context.Background(), pendingID)
+	require.NoError(t, err)
+	require.NotNil(t, projected)
+	assert.Equal(t, "active", projected.Status)
+	assert.Equal(t, "Pending companion", projected.Name)
+}
+
 func TestAppV23PolicyRejectsInvalidAdminThenBuildsAtomicRoleChange(t *testing.T) {
 	fixture := newAppV23AccessFixture(t)
 	var captured *tx.ParsedTx
@@ -571,6 +645,115 @@ func TestAppV23GroupMutationCanonicalizesMultiGroupMembers(t *testing.T) {
 	expectedMembers := []string{fixture.agentID, secondID}
 	sort.Strings(expectedMembers)
 	assert.Equal(t, expectedMembers, captured.AccessGroupMutate.Members)
+}
+
+func TestAppV26GroupMutationCarriesExplicitMemberAuthority(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	var captured *tx.ParsedTx
+	var calls atomic.Int32
+	rpc := newGrantRPC(t, &captured, &calls)
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+	h.AppV26ActiveFn = func() bool { return true }
+	req := appV23AccessRequest(t, http.MethodPut, "/groups/research", "groupID", "research", map[string]any{
+		"name": "Research", "members": []string{fixture.agentID},
+		"member_authority": "read_write", "expected_revision": 0,
+	})
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AccessGroupPut().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.NotNil(t, captured.AccessGroupMutate)
+	assert.Equal(t, store.AppV26GroupAuthorityReadWrite, captured.AccessGroupMutate.MemberAuthority)
+}
+
+func TestAppV26GroupMutationRejectsMissingMemberAuthority(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	h := appV23AccessTestHandler(fixture, "http://unused.invalid", nil)
+	h.AppV26ActiveFn = func() bool { return true }
+	req := appV23AccessRequest(t, http.MethodPut, "/groups/research", "groupID", "research", map[string]any{
+		"name": "Research", "members": []string{fixture.agentID}, "expected_revision": 0,
+	})
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AccessGroupPut().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invalid_group_authority")
+}
+
+func TestAppV23GroupMutationReconcilesCommittedStateAfterMalformedRPCResponse(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+		require.NoError(t, err)
+		parsed, err := tx.DecodeTx(raw)
+		require.NoError(t, err)
+		require.NotNil(t, parsed.AccessGroupMutate)
+		mutation := parsed.AccessGroupMutate
+		require.NoError(t, fixture.badger.MutateAppV23AccessGroup(
+			fixture.rootID, mutation.GroupID, mutation.Name, mutation.Members,
+			mutation.ExpectedRevision, mutation.Delete, 2,
+		))
+		_, _ = fmt.Fprint(w, `{`)
+	}))
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+	req := appV23AccessRequest(t, http.MethodPut, "/groups/research", "groupID", "research", map[string]any{
+		"name": "Research", "members": []string{fixture.agentID}, "expected_revision": 0,
+	})
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AccessGroupPut().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"reconciled":true`)
+	group, err := fixture.badger.GetAppV23AccessGroup("research")
+	require.NoError(t, err)
+	require.NotNil(t, group)
+	assert.Equal(t, uint64(1), group.Revision)
+}
+
+func TestAppV23GroupMutationDoesNotResubmitWhenCommitResponseIsUncertain(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	var calls atomic.Int32
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = fmt.Fprint(w, `{`)
+	}))
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+	req := appV23AccessRequest(t, http.MethodPut, "/groups/research", "groupID", "research", map[string]any{
+		"name": "Research", "members": []string{fixture.agentID}, "expected_revision": 0,
+	})
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AccessGroupPut().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assert.Equal(t, int32(1), calls.Load(), "an uncertain commit must never be rebroadcast")
+	assert.Contains(t, rec.Body.String(), `"status":"confirmation_pending"`)
+	assert.Contains(t, rec.Body.String(), `"retryable":false`)
+}
+
+func TestAppV23GroupMutationReportsDefinitiveConsensusRejection(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"result":{"check_tx":{"code":19,"log":"revision conflict"},"tx_result":{"code":0}}}`)
+	}))
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+	req := appV23AccessRequest(t, http.MethodPut, "/groups/research", "groupID", "research", map[string]any{
+		"name": "Research", "members": []string{fixture.agentID}, "expected_revision": 9,
+	})
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AccessGroupPut().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"code":"consensus_rejected"`)
 }
 
 func TestAppV23MutationsFailClosedBeforeActivation(t *testing.T) {
@@ -883,6 +1066,28 @@ func TestAppV23AccessStateSeparatesRootAndLinkedReaders(t *testing.T) {
 	}, response.Profiles, "migration-only legacy restrictions must never be advertised as selectable")
 	assert.Equal(t, "unavailable", response.LinkedReaders.Status)
 	assert.Equal(t, "linked_readers_api_unavailable", response.LinkedReaders.ReasonCode)
+}
+
+func TestCanonicalAppV23GroupMembersRejectsAdminSuspendedByRootHandover(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	require.NoError(t, fixture.badger.SetAppV23Policy(
+		fixture.rootID, fixture.agentID,
+		store.AppV23RoleAdmin, store.AppV23ProfileCompanion, store.AppV23ProfileStandard,
+		4, store.AgentCapabilityReadAllDomains, 1, 1, 2,
+	))
+	_, replacementKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	require.NoError(t, fixture.badger.RotateAppV23RootCredential(
+		1, agentIDForKey(replacementKey), 3,
+	))
+	root, err := fixture.badger.GetAppV23Root()
+	require.NoError(t, err)
+	require.NotNil(t, root)
+
+	_, err = canonicalAppV23GroupMembers(
+		fixture.badger, root, []string{fixture.agentID},
+	)
+	require.ErrorContains(t, err, "suspended until the current CEREBRUM Root reauthorizes")
 }
 
 func TestAppV23RootHandoverProjectsAndReauthorizesSuspendedAdmin(t *testing.T) {

@@ -294,6 +294,9 @@ func peerResponseLimit(path string, headers http.Header) int64 {
 	if path == "/fed/v1/pipe/linked/consent-candidates" {
 		return int64(maxLinkedMessageCandidateResponseBytes)
 	}
+	if path == "/fed/v1/pipe/linked/directory" {
+		return int64(maxLinkedMessageDirectoryResponseBytes)
+	}
 	if path == "/fed/v1/pipe/linked/resolve" ||
 		path == "/fed/v1/pipe/linked/revalidate" ||
 		path == "/fed/v1/pipe/linked/consent-offer" {

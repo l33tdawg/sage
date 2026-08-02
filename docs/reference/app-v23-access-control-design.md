@@ -1,6 +1,6 @@
 # App-v23 Access Control and Federation Design
 
-Status: implementation contract for SAGE v11.16.4.
+Status: implementation contract through SAGE v11.17.0.
 
 This document fixes the security and product invariants for app-v23. It is not
 permission to weaken an invariant to preserve app-v22 runtime behavior.
@@ -287,16 +287,21 @@ Local rights are derived dynamically from current effective domain ownership,
 including owned descendants and future domains. Do not materialize pairwise
 ordinary grants.
 
-Properties:
+Properties (app-v26 extension):
 
-- Member receives Read over fellow local members' owned domains.
-- Manager receives Read, Write, and Modify over those domains.
-- Multiple groups form a union of allowed scope.
+- Every group persists one default local-member authority tier: Read,
+  Read+Write, or Read+Write+Modify.
+- The tier applies to fellow local members' owned domains independently of the
+  member's global Member/Manager label. Admin and CEREBRUM Root retain their
+  separate global authority.
+- Multiple groups form the union of allowed scope and the strongest applicable
+  authority.
 - Hard capability denies and clearance still intersect that union.
 - Shared and ownerless domains do not become group-owned.
 - Membership never changes ownership or memory authorship.
-- Removal and ownership transfer affect derived access immediately in
-  consensus order.
+- Removal or group deletion revokes only derived group access. Each agent keeps
+  full authority over its own domain tree. Ownership transfer affects derived
+  access immediately in consensus order.
 - Open challenge electorates remain frozen according to their existing
   consensus record; later membership churn does not rewrite history.
 

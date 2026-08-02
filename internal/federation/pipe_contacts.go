@@ -160,6 +160,21 @@ func (m *Manager) buildPipeContactGrantForCandidates(ctx context.Context, peer *
 	postV8Access := m.postV8ForAccess != nil && m.postV8ForAccess()
 	postV22Capabilities := m.postV22ForNextTx != nil && m.postV22ForNextTx()
 	capabilityCache := make(map[string]pipeContactCapabilityOverlay, len(agentByID))
+	ordinaryEligibilityCache := make(map[string]bool, len(agentByID))
+	ordinaryEligible := func(agentID string) (bool, error) {
+		if !postV23 {
+			return true, nil
+		}
+		if eligible, ok := ordinaryEligibilityCache[agentID]; ok {
+			return eligible, nil
+		}
+		eligible, eligibilityErr := m.localFederatedGuestAgentEligible(agentID)
+		if eligibilityErr != nil {
+			return false, eligibilityErr
+		}
+		ordinaryEligibilityCache[agentID] = eligible
+		return eligible, nil
+	}
 	capabilityFor := func(agentID string) (pipeContactCapabilityOverlay, error) {
 		isRoot, rootErr := isRootIdentity(agentID)
 		if rootErr != nil {
@@ -234,7 +249,11 @@ func (m *Manager) buildPipeContactGrantForCandidates(ctx context.Context, peer *
 		if capabilityErr != nil {
 			return nil, fmt.Errorf("read pipe contact capability for owner %q: %w", owner, capabilityErr)
 		}
-		if includeOwners && !ownerCapability.denied {
+		ownerEligible, eligibilityErr := ordinaryEligible(owner)
+		if eligibilityErr != nil {
+			return nil, fmt.Errorf("read canonical pipe contact standing for owner %q: %w", owner, eligibilityErr)
+		}
+		if includeOwners && ownerEligible && !ownerCapability.denied {
 			ownerIDs[owner] = struct{}{}
 		}
 
@@ -244,13 +263,20 @@ func (m *Manager) buildPipeContactGrantForCandidates(ctx context.Context, peer *
 			OwnerHeight:  ownerHeight,
 		}
 		eligible := make(map[string]struct{})
-		if includeOwners && !ownerCapability.denied {
+		if includeOwners && ownerEligible && !ownerCapability.denied {
 			eligible[owner] = struct{}{}
-		} else if _, selected := candidateIDSet[owner]; selected && !ownerCapability.denied {
+		} else if _, selected := candidateIDSet[owner]; selected && ownerEligible && !ownerCapability.denied {
 			eligible[owner] = struct{}{}
 		}
 		for agentID, agent := range agentByID {
 			if agent == nil || agent.Status != "active" || agent.RemovedAt != nil || agentID == owner {
+				continue
+			}
+			eligibleStanding, standingErr := ordinaryEligible(agentID)
+			if standingErr != nil {
+				return nil, fmt.Errorf("read canonical pipe contact standing for %q: %w", agentID, standingErr)
+			}
+			if !eligibleStanding {
 				continue
 			}
 			capability, capabilityErr := capabilityFor(agentID)

@@ -261,6 +261,21 @@ func TestAppV23PipeContactsNeverExposeRootButKeepGrantedAgentsOnRootOwnedDomains
 	} {
 		require.NoError(t, ss.CreateAgent(ctx, agent))
 	}
+	require.NoError(t, bs.RegisterAgentWithCapabilities(
+		reader, "ordinary-reader", store.AppV23RoleMember, "", "test", "", 4, 0,
+	))
+	root, err := bs.GetAppV23Root()
+	require.NoError(t, err)
+	require.NotNil(t, root)
+	require.NoError(t, bs.ApproveAppV23LocalAgent(store.AppV23LocalEnrollment{
+		AgentID: reader, ApprovedBy: root.CredentialID,
+		RootGeneration: root.Generation,
+		Profile:        store.AppV23ProfileStandard,
+		HomeDomain:     "ordinary-reader-home",
+		Clearance:      1,
+		Active:         true,
+		UpdatedHeight:  5,
+	}, store.AppV23RoleMember, 0, 0))
 	require.NoError(t, bs.RegisterDomain("root-owned", rootID, "", 10))
 	require.NoError(t, bs.SetAccessGrant("root-owned", currentRootID, 1, 0, rootID))
 	require.NoError(t, bs.SetAccessGrant("root-owned", finalRootID, 1, 0, rootID))
@@ -284,6 +299,60 @@ func TestAppV23PipeContactsNeverExposeRootButKeepGrantedAgentsOnRootOwnedDomains
 	require.Equal(t, []PipeContactDomain{{
 		Domain: "root-owned.work", OwningDomain: "root-owned", OwnerHeight: 10,
 	}}, readerContact.Domains)
+}
+
+func TestAppV23PipeContactsExcludeConsensusInactiveAgentWithStaleSQLiteStatus(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	rootID := hex.EncodeToString(m.agentPub)
+	agentPub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	agentID := hex.EncodeToString(agentPub)
+	require.NoError(t, bs.BootstrapAppV23Genesis(store.AppV23GenesisBootstrap{
+		RootID: rootID, Scope: "pipe-stale-active",
+		AgentID: agentID, Profile: store.AppV23ProfileStandard,
+		HomeDomain: "stale-home", Clearance: 1, Height: 1,
+		BootstrapDigest: strings.Repeat("25", 32),
+	}))
+	m.postV23ForNextTx = func() bool { return true }
+	m.postV8ForAccess = func() bool { return true }
+	require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{
+		AgentID: agentID, Name: "stale-active", RegisteredName: "stale-active",
+		Provider: "local", Status: "active",
+	}))
+	peerID := newPeerOperatorID(t)
+	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerID, "host", nil, 4)
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{{
+		Domain: "stale-home", Read: true,
+	}})
+	require.NoError(t, err)
+
+	before := statusForPeer(t, m, "chain-peer", peerID, agreement).PipeContacts
+	require.Len(t, before.Contacts, 1)
+	require.Equal(t, agentID, before.Contacts[0].AgentID)
+
+	enrollment, err := bs.GetAppV23Enrollment(agentID)
+	require.NoError(t, err)
+	require.NotNil(t, enrollment)
+	role, err := bs.GetAppV23Role(agentID)
+	require.NoError(t, err)
+	require.NotNil(t, role)
+	inactive := *enrollment
+	inactive.Active = false
+	inactive.ApprovedBy = rootID
+	inactive.UpdatedHeight = 2
+	require.NoError(t, bs.ApproveAppV23LocalAgent(
+		inactive, store.AppV23RoleMember, enrollment.Revision, role.Revision,
+	))
+
+	// The operational SQLite directory deliberately remains stale-active. The
+	// consensus enrollment is authoritative for a newly advertised federated
+	// contact, so deactivation must remove it immediately.
+	stale, err := ss.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	require.Equal(t, "active", stale.Status)
+	after := statusForPeer(t, m, "chain-peer", peerID, agreement).PipeContacts
+	require.Empty(t, after.Contacts)
 }
 
 func TestPipeContactCapabilitiesIncludeReadAllAndLinearizeTargetDeny(t *testing.T) {

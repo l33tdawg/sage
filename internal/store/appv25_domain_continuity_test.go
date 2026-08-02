@@ -144,6 +144,53 @@ func TestAppV25MultipleHistoricalWritersBecomeLocalSharedGroupWithExactWrite(t *
 	}
 }
 
+func TestAppV26LateContinuityCreatesVersionedGroupAndReplayPreservesOperatorTier(t *testing.T) {
+	s, err := NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.CloseBadger()) })
+
+	rootID := appV23Register(t, s, "late-v26-root", AppV23RoleAdmin, 1, 0)
+	writerA := appV23Register(
+		t, s, "late-v26-a", AppV23RoleMember, 2,
+		DefaultSelfRegisteredAgentCapabilities,
+	)
+	writerB := appV23Register(
+		t, s, "late-v26-b", AppV23RoleMember, 3,
+		DefaultSelfRegisteredAgentCapabilities,
+	)
+	require.NoError(t, s.RegisterDomain("late-v26-shared", rootID, "", 4))
+	require.NoError(t, s.EnsureAppV23Root("late-v26-scope", 100))
+	writers := []string{writerA, writerB}
+	sort.Strings(writers)
+	plan := sha256.Sum256([]byte("late-v26-continuity"))
+	require.NoError(t, s.ApplyAppV26DomainContinuity(
+		"late-v26-shared", writers, plan[:], 1, 120,
+	))
+	groupID := AppV25DomainContinuityGroupID(writers)
+	group, err := s.GetAppV23AccessGroup(groupID)
+	require.NoError(t, err)
+	require.Equal(t, AppV26GroupAuthorityRead, group.MemberAuthority)
+	require.NoError(t, s.ValidateAppV26AccessGroupAuthorities())
+
+	// A later explicit operator choice is authoritative. Replaying the exact
+	// continuity payload is idempotent and must never downgrade that tier.
+	require.NoError(t, s.MutateAppV26AccessGroup(
+		rootID, groupID, group.Name, group.Members,
+		AppV26GroupAuthorityReadWrite, group.Revision, false, 121,
+	))
+	beforeReplay, err := s.ComputeAppHash()
+	require.NoError(t, err)
+	require.NoError(t, s.ApplyAppV26DomainContinuity(
+		"late-v26-shared", writers, plan[:], 1, 120,
+	))
+	afterReplay, err := s.ComputeAppHash()
+	require.NoError(t, err)
+	require.Equal(t, beforeReplay, afterReplay)
+	group, err = s.GetAppV23AccessGroup(groupID)
+	require.NoError(t, err)
+	require.Equal(t, AppV26GroupAuthorityReadWrite, group.MemberAuthority)
+}
+
 func TestAppV25ContinuityYieldsToLaterExplicitPolicyAndOwnership(t *testing.T) {
 	s, err := NewBadgerStore(t.TempDir())
 	require.NoError(t, err)

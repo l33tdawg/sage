@@ -103,12 +103,18 @@ func TestSignedRequestReplayClassificationFailsClosed(t *testing.T) {
 		{name: "passive pipe inbox history", method: http.MethodGet, path: "/v1/pipe/history/inbox?limit=20", want: signedRequestReplaySafe},
 		{name: "passive pipe outbox history", method: http.MethodGet, path: "/v1/pipe/history/outbox?limit=20", want: signedRequestReplaySafe},
 		{name: "passive results projection", method: http.MethodGet, path: "/v1/pipe/results?limit=5", want: signedRequestReplaySafe},
+		{name: "canonical message status", method: http.MethodGet, path: "/v1/messages/msg-1/status", want: signedRequestReplaySafe},
+		{name: "idempotent message send", method: http.MethodPost, path: "/v1/messages", want: signedRequestReplaySafe},
+		{name: "idempotent message receive", method: http.MethodPost, path: "/v1/messages/receive", want: signedRequestReplaySafe},
+		{name: "idempotent message reply", method: http.MethodPost, path: "/v1/messages/msg-1/reply", want: signedRequestReplaySafe},
+		{name: "idempotent exact read ack", method: http.MethodPut, path: "/v1/messages/msg-1/read", want: signedRequestReplaySafe},
 		{name: "destructive pipe inbox", method: http.MethodGet, path: "/v1/pipe/inbox?limit=5", want: signedRequestSingleAttempt},
 		{name: "destructive pipe updates", method: http.MethodGet, path: "/v1/pipe/updates?limit=5", want: signedRequestSingleAttempt},
 		{name: "destructive task notifications", method: http.MethodGet, path: "/v1/dashboard/task-notifications?limit=5", want: signedRequestSingleAttempt},
 		{name: "unknown get fails closed", method: http.MethodGet, path: "/v1/future/read", want: signedRequestSingleAttempt},
 		{name: "unknown nested memory get fails closed", method: http.MethodGet, path: "/v1/memory/mem-1/future-read", want: signedRequestSingleAttempt},
 		{name: "unknown nested pipe get fails closed", method: http.MethodGet, path: "/v1/pipe/pipe-1/future-read", want: signedRequestSingleAttempt},
+		{name: "unknown nested message read fails closed", method: http.MethodPut, path: "/v1/messages/msg-1/future/read", want: signedRequestSingleAttempt},
 		{name: "unknown post fails closed", method: http.MethodPost, path: "/v1/future/query", want: signedRequestSingleAttempt},
 	} {
 		t.Run(test.name, func(t *testing.T) {

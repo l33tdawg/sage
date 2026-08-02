@@ -1047,12 +1047,12 @@ func runServe(startupProof string) (rerr error) {
 		// v10.5.1 auto-advance: personal nodes walk the fork ladder to the
 		// binary ceiling automatically (issue #40 follow-up — updating the
 		// binary now brings the chain up to date too). Quorum clusters keep
-		// governed multi-validator activation. v11.16.2 requires app-v25 and
+		// governed multi-validator activation. v11.17.0 requires app-v26 and
 		// never lets disable_auto_upgrade suppress personal-node consensus
 		// migrations: binary/chain-rule divergence is not a supported state.
 		PersonalMode:       !cfg.Quorum.Enabled,
 		AutoAdvance:        true,
-		RequiredAppVersion: 25,
+		RequiredAppVersion: 26,
 		// v10.5.2 (issue #41): in-process pending-plan accessor for the
 		// always-on pump and the auto-advance pre-check. GetUpgradePlan's
 		// ErrNoUpgradePlan is flattened to nil by readPendingPlan.
@@ -1296,6 +1296,7 @@ func runServe(startupProof string) (rerr error) {
 	dashboard.AppV22ActiveFn = app.IsAppV22ActiveForNextTx
 	dashboard.AppV23ActiveFn = app.IsAppV23ActiveForNextTx
 	dashboard.AppV24ActiveFn = app.IsAppV24ActiveForNextTx
+	dashboard.AppV26ActiveFn = app.IsAppV26ActiveForNextTx
 	if projectionBaselineRequired {
 		dashboard.CanonicalProjectionMissingAllowedFn = func(memoryID string) bool {
 			projectionBaselineMu.RLock()
@@ -1510,6 +1511,15 @@ func runServe(startupProof string) (rerr error) {
 	// Auth: bearer token in Authorization header, validated against the
 	// mcp_tokens table. Tokens are SHA-256-hashed before storage.
 	mcpHTTPTransport := mountMCPHTTPTransport(r, sqliteStore, cfg, logger)
+	if mcpHTTPTransport != nil {
+		restServer.SetMessageNotifier(func(notification rest.AgentMessageNotification) {
+			mcpHTTPTransport.NotifyAgent(notification.RecipientAgentID, mcp.AgentMessageNotification{
+				MessageID: notification.MessageID,
+				FromAgent: notification.FromAgent,
+				SentAt:    notification.SentAt,
+			})
+		})
+	}
 
 	// OAuth 2.0 + PKCE wrapper around bearer auth (v6.7.2). ChatGPT's MCP
 	// connector requires Auth URL + Token URL form fields; static-bearer
@@ -1631,7 +1641,17 @@ func runServe(startupProof string) (rerr error) {
 			PostV22ForNextTx:    app.IsAppV22ActiveForNextTx,
 			PostV23ForNextTx:    app.IsAppV23ActiveForNextTx,
 			PostV8ForAccess:     app.IsPostV8Fork,
-			Logger:              logger,
+			MessageNotifier: func(targetAgentID string, notification federation.AgentMessageNotification) {
+				if mcpHTTPTransport == nil {
+					return
+				}
+				mcpHTTPTransport.NotifyAgent(targetAgentID, mcp.AgentMessageNotification{
+					MessageID: notification.MessageID,
+					FromAgent: notification.FromAgent,
+					SentAt:    notification.CreatedAt,
+				})
+			},
+			Logger: logger,
 		})
 		restServer.SetFederation(fedMgr)
 		// The dashboard drives the guided JOIN wizards (cookie-authed) by calling

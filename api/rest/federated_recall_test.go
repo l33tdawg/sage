@@ -52,6 +52,16 @@ type parallelLookupFederation struct {
 	lookupMu         sync.Mutex
 }
 
+type linkedLookupFederation struct {
+	*parallelStatusFederation
+	linked       map[string]*federation.LinkedMessageDirectoryResult
+	linkedErrors map[string]error
+	mu           sync.Mutex
+	callerID     string
+	name         string
+	calls        int
+}
+
 type provenanceMemoryStore struct {
 	*mockMemoryStore
 	origin *store.SyncOrigin
@@ -112,6 +122,22 @@ func (f *parallelLookupFederation) FindRemotePipeContactsWithStatus(ctx context.
 	f.statusAwareCalls++
 	f.lookupMu.Unlock()
 	return f.FindRemotePipeContacts(ctx, chainID, name, limit)
+}
+
+func (f *linkedLookupFederation) FindRemoteLinkedMessageContacts(
+	_ context.Context,
+	chainID, callerID, name string,
+	_ int,
+) (*federation.LinkedMessageDirectoryResult, error) {
+	f.mu.Lock()
+	f.calls++
+	f.callerID = callerID
+	f.name = name
+	f.mu.Unlock()
+	if err := f.linkedErrors[chainID]; err != nil {
+		return nil, err
+	}
+	return f.linked[chainID], nil
 }
 
 func (f *fakeFederation) LockAgreementMutation() func() {
@@ -591,6 +617,105 @@ func TestFederationAvailableRunsTargetedLookupsInParallel(t *testing.T) {
 	assert.Empty(t, chainB.SharedReadDomains)
 	assert.Nil(t, chainB.Sync)
 	assert.Equal(t, 2, fed.statusAwareCalls, "named discovery must reuse its authenticated status instead of probing each peer twice")
+}
+
+func TestFederationAvailableIncludesOnlyValidatedCallerScopedLinkedContacts(t *testing.T) {
+	newServer := func(t *testing.T, contact federation.PipeContact) (*Server, *store.BadgerStore, *linkedLookupFederation) {
+		t.Helper()
+		srv, _, _ := newTestServer(t, "")
+		badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = badger.CloseBadger() })
+		srv.badgerStore = badger
+		require.NoError(t, badger.SetCrossFed(
+			"chain-linked", "https://redacted.invalid", []byte("peer-pin"),
+			2, 0, []string{"*"}, nil, "active",
+		))
+		fed := &linkedLookupFederation{
+			parallelStatusFederation: &parallelStatusFederation{
+				fakeFederation: &fakeFederation{},
+				statuses: map[string]*federation.StatusResponse{
+					"chain-linked": {
+						ChainID: "chain-linked", NetworkName: "Linked SAGE",
+						PeerRBACGrant: &federation.PeerRBACGrant{},
+					},
+				},
+			},
+			linked: map[string]*federation.LinkedMessageDirectoryResult{
+				"chain-linked": {Contacts: []federation.PipeContact{contact}},
+			},
+			linkedErrors: make(map[string]error),
+		}
+		srv.SetFederation(fed)
+		return srv, badger, fed
+	}
+
+	t.Run("valid contact needs no shared memory domain", func(t *testing.T) {
+		agentID := strings.Repeat("a", 64)
+		contact := federation.PipeContact{
+			AgentID: agentID, DisplayName: "Peer Guest",
+			RegisteredName: "mynah/peer-guest", Provider: "mynah",
+			Address:           agentID + "@chain-linked",
+			AuthorizationMode: federation.LinkedMessageAuthorizationMode,
+			Available:         false, Accepting: false,
+			Domains: []federation.PipeContactDomain{},
+		}
+		srv, badger, fed := newServer(t, contact)
+		req, callerID := signedRequest(
+			t, http.MethodGet,
+			"/v1/federation/available?agent_name=peer%20guest", nil,
+		)
+		require.NoError(t, badger.RegisterAgent(
+			callerID, "ordinary", "member", "", "test", "", 1,
+		))
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var response struct {
+			Connections []availableFederationConnection `json:"connections"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+		require.Len(t, response.Connections, 1)
+		connection := response.Connections[0]
+		require.Empty(t, connection.RemotePermissions)
+		require.Empty(t, connection.SharedReadDomains)
+		require.Len(t, connection.RemoteAgents, 1)
+		require.Equal(t, contact, connection.RemoteAgents[0])
+		fed.mu.Lock()
+		defer fed.mu.Unlock()
+		require.Equal(t, callerID, fed.callerID)
+		require.Equal(t, "peer guest", fed.name)
+		require.Equal(t, 1, fed.calls)
+	})
+
+	t.Run("malformed contact is non-enumerating", func(t *testing.T) {
+		agentID := strings.Repeat("b", 64)
+		contact := federation.PipeContact{
+			AgentID: agentID, DisplayName: "Peer Guest",
+			Address:           "wrong-address",
+			AuthorizationMode: federation.LinkedMessageAuthorizationMode,
+			Available:         false, Accepting: false,
+			Domains: []federation.PipeContactDomain{},
+		}
+		srv, badger, _ := newServer(t, contact)
+		req, callerID := signedRequest(
+			t, http.MethodGet,
+			"/v1/federation/available?agent_name=peer", nil,
+		)
+		require.NoError(t, badger.RegisterAgent(
+			callerID, "ordinary", "member", "", "test", "", 1,
+		))
+		rr := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var response struct {
+			Connections []availableFederationConnection `json:"connections"`
+			Total       int                             `json:"total"`
+		}
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+		require.Empty(t, response.Connections)
+		require.Zero(t, response.Total)
+	})
 }
 
 func TestFederationAvailableDiscoveryHonorsFederatedPipeDeny(t *testing.T) {

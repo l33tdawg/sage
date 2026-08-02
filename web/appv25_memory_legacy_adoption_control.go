@@ -1,11 +1,15 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -16,12 +20,171 @@ type appV25LegacyRecoveryController interface {
 	GetLegacyMemoryAdoptionProgress(context.Context) (*store.LegacyMemoryAdoptionProgress, error)
 	ValidateLegacyMemoryRecoverySnapshot(context.Context, uint64, int) error
 	DeprecateLegacyMemoryRecoverySnapshot(context.Context, uint64, int, string) (int, error)
+	ListLegacyMemoryRecoveryInventoryPage(context.Context, string, int) ([]store.LegacyMemoryRecoveryInventoryItem, string, error)
+	AssignLegacyMemoryRecoverySelection(context.Context, uint64, int, []string, string, string) (int, error)
+	DeprecateLegacyMemoryRecoverySelection(context.Context, uint64, int, []string, string) (int, error)
 }
 
 type appV25LegacyRecoveryControlRequest struct {
-	ProjectionRevision uint64 `json:"projection_revision"`
-	ExpectedCount      int    `json:"expected_count"`
-	Confirmation       string `json:"confirmation,omitempty"`
+	ProjectionRevision uint64   `json:"projection_revision"`
+	ExpectedCount      int      `json:"expected_count"`
+	Confirmation       string   `json:"confirmation,omitempty"`
+	MemoryIDs          []string `json:"memory_ids,omitempty"`
+	TargetAgentID      string   `json:"target_agent_id,omitempty"`
+}
+
+type appV26LegacyRecoveryInventoryView struct {
+	MemoryID       string `json:"memory_id"`
+	Reason         string `json:"reason"`
+	Domain         string `json:"domain"`
+	Author         string `json:"historical_author,omitempty"`
+	ContentPreview string `json:"content_preview"`
+	Assignable     bool   `json:"assignable"`
+	AssignedTarget string `json:"assigned_target,omitempty"`
+}
+
+func appV26LegacyContentPreview(content string) string {
+	content = strings.Join(strings.Fields(content), " ")
+	runes := []rune(content)
+	if len(runes) <= 280 {
+		return content
+	}
+	return string(runes[:280]) + "…"
+}
+
+func appV26LegacyRecoveryAssignable(item store.LegacyMemoryRecoveryInventoryItem) bool {
+	if item.Reason != "author_identity_unresolved" || item.MemoryID == "" ||
+		item.Domain == "" || item.SubmittingAgent == "" || item.EvidenceError != "" ||
+		len(item.ContentHash) != sha256.Size ||
+		(item.Status != "proposed" && item.Status != "committed") ||
+		item.Classification > uint8(store.ClearanceTopSecret) {
+		return false
+	}
+	digest := sha256.Sum256([]byte(item.Content))
+	return bytes.Equal(digest[:], item.ContentHash)
+}
+
+// handleAppV26LegacyRecoveryInventory is Root-loopback-only and paginated.
+// It joins previews from the original encrypted memory table at request time;
+// recovery tables remain content-free.
+func (h *DashboardHandler) handleAppV26LegacyRecoveryInventory(w http.ResponseWriter, r *http.Request) {
+	_, controller, ok := h.appV25LegacyRecoveryControl(w, r)
+	if !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	items, next, err := controller.ListLegacyMemoryRecoveryInventoryPage(
+		r.Context(), r.URL.Query().Get("after"), limit,
+	)
+	if err != nil {
+		writeAppV25LegacyRecoveryControlError(w, err)
+		return
+	}
+	views := make([]appV26LegacyRecoveryInventoryView, 0, len(items))
+	for _, item := range items {
+		views = append(views, appV26LegacyRecoveryInventoryView{
+			MemoryID: item.MemoryID, Reason: item.Reason, Domain: item.Domain,
+			Author:         item.SubmittingAgent,
+			ContentPreview: appV26LegacyContentPreview(item.Content),
+			Assignable:     appV26LegacyRecoveryAssignable(item),
+			AssignedTarget: item.AssignedTarget,
+		})
+	}
+	type agentView struct {
+		AgentID string `json:"agent_id"`
+		Name    string `json:"name"`
+	}
+	agents := make([]agentView, 0)
+	if h.BadgerStore != nil {
+		onChain, listErr := h.BadgerStore.ListRegisteredAgents()
+		if listErr != nil {
+			writeError(w, http.StatusServiceUnavailable, "active agent inventory is unavailable")
+			return
+		}
+		for _, agent := range onChain {
+			if h.appV23IsRootIdentity(agent.AgentID) {
+				continue
+			}
+			enrollment, enrollmentErr := h.BadgerStore.GetAppV23Enrollment(agent.AgentID)
+			role, roleErr := h.BadgerStore.GetAppV23Role(agent.AgentID)
+			if enrollmentErr != nil || roleErr != nil {
+				writeError(w, http.StatusServiceUnavailable, "active agent inventory is unavailable")
+				return
+			}
+			if enrollment != nil && role != nil && enrollment.Active &&
+				(enrollment.Profile == store.AppV23ProfileStandard ||
+					enrollment.Profile == store.AppV23ProfileCompanion) &&
+				store.ValidAppV23Role(role.Role) &&
+				store.AppV23ProfileAllowsRole(enrollment.Profile, role.Role) {
+				name := agent.Name
+				if name == "" {
+					name = agent.RegisteredName
+				}
+				agents = append(agents, agentView{AgentID: agent.AgentID, Name: name})
+			}
+		}
+	}
+	progress, _ := controller.GetLegacyMemoryAdoptionProgress(r.Context())
+	writeJSONResp(w, http.StatusOK, map[string]any{
+		"items": views, "next_after": next, "agents": agents, "progress": progress,
+		"assignment_active": h.appV26IsActive(),
+	})
+}
+
+func (h *DashboardHandler) handleAppV26LegacyAdoptionAssign(w http.ResponseWriter, r *http.Request) {
+	actor, controller, ok := h.appV25LegacyRecoveryControl(w, r)
+	if !ok {
+		return
+	}
+	if !h.appV26IsActive() {
+		writeError(w, http.StatusConflict, "historical memory assignment requires governed app-v26")
+		return
+	}
+	request, ok := decodeAppV25LegacyRecoveryControlRequest(w, r)
+	if !ok {
+		return
+	}
+	if len(request.MemoryIDs) == 0 || strings.TrimSpace(request.TargetAgentID) == "" {
+		writeError(w, http.StatusBadRequest, "memory_ids and target_agent_id are required")
+		return
+	}
+	enrollment, err := h.BadgerStore.GetAppV23Enrollment(request.TargetAgentID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "target agent state is unavailable")
+		return
+	}
+	role, err := h.BadgerStore.GetAppV23Role(request.TargetAgentID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "target agent state is unavailable")
+		return
+	}
+	if enrollment == nil || role == nil || !enrollment.Active ||
+		(enrollment.Profile != store.AppV23ProfileStandard &&
+			enrollment.Profile != store.AppV23ProfileCompanion) ||
+		!store.ValidAppV23Role(role.Role) ||
+		!store.AppV23ProfileAllowsRole(enrollment.Profile, role.Role) ||
+		h.appV23IsRootIdentity(request.TargetAgentID) {
+		writeError(w, http.StatusConflict, "target must be an active ordinary local agent")
+		return
+	}
+	assigned, err := controller.AssignLegacyMemoryRecoverySelection(
+		r.Context(), request.ProjectionRevision, request.ExpectedCount,
+		request.MemoryIDs, request.TargetAgentID, actor.ID,
+	)
+	if err != nil {
+		writeAppV25LegacyRecoveryControlError(w, err)
+		return
+	}
+	epoch := h.requestAppV25LegacyAdoptionRetry()
+	writeJSONResp(w, http.StatusAccepted, map[string]any{
+		"status": "assignment_queued", "assigned": assigned,
+		"target_agent_id": request.TargetAgentID, "retry_epoch": epoch,
+		"access_scope": "operational_principal_only",
+		"message":      "The Root-governed principal repair is queued for canonical adoption; historical authorship, content, and domain permissions remain unchanged.",
+	})
 }
 
 func (h *DashboardHandler) appV25LegacyAdoptionWakeChannel() <-chan struct{} {
@@ -165,9 +328,11 @@ func (h *DashboardHandler) handleAppV25LegacyAdoptionDeprecate(w http.ResponseWr
 	if !ok {
 		return
 	}
-	expectedConfirmation := fmt.Sprintf(
-		appV25LegacyDeprecationConfirmation, request.ExpectedCount,
-	)
+	confirmationCount := request.ExpectedCount
+	if len(request.MemoryIDs) > 0 {
+		confirmationCount = len(request.MemoryIDs)
+	}
+	expectedConfirmation := fmt.Sprintf(appV25LegacyDeprecationConfirmation, confirmationCount)
 	if request.Confirmation != expectedConfirmation {
 		writeError(w, http.StatusBadRequest,
 			"confirmation must exactly match "+expectedConfirmation)
@@ -179,9 +344,18 @@ func (h *DashboardHandler) handleAppV25LegacyAdoptionDeprecate(w http.ResponseWr
 		writeAppV25LegacyRecoveryControlError(w, err)
 		return
 	}
-	deprecated, err := controller.DeprecateLegacyMemoryRecoverySnapshot(
-		r.Context(), request.ProjectionRevision, request.ExpectedCount, actor.ID,
-	)
+	var deprecated int
+	var err error
+	if len(request.MemoryIDs) > 0 {
+		deprecated, err = controller.DeprecateLegacyMemoryRecoverySelection(
+			r.Context(), request.ProjectionRevision, request.ExpectedCount,
+			request.MemoryIDs, actor.ID,
+		)
+	} else {
+		deprecated, err = controller.DeprecateLegacyMemoryRecoverySnapshot(
+			r.Context(), request.ProjectionRevision, request.ExpectedCount, actor.ID,
+		)
+	}
 	if err != nil {
 		writeAppV25LegacyRecoveryControlError(w, err)
 		return

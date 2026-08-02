@@ -259,6 +259,40 @@ func (s *BadgerStore) ApplyAppV25DomainContinuity(
 	})
 }
 
+// ApplyAppV26DomainContinuity is the post-v26 form of the historical repair.
+// It differs only when this exact operation creates/replays a recovered local
+// Access Group: a previously unversioned group is stamped with the safe read
+// tier in the same atomic transaction. It never scans or rewrites unrelated
+// groups and never overwrites a later explicit operator tier.
+func (s *BadgerStore) ApplyAppV26DomainContinuity(
+	domain string,
+	writers []string,
+	planDigest []byte,
+	rootGeneration uint64,
+	height int64,
+) error {
+	if err := validateAppV25DomainContinuityInput(
+		domain, writers, planDigest, rootGeneration, height,
+	); err != nil {
+		return err
+	}
+	writers = append([]string(nil), writers...)
+	return s.withFederationAuthorizationMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			if err := s.prepareAndMaybeApplyAppV25DomainContinuityTxn(
+				txn, domain, writers, planDigest, rootGeneration, height, true,
+			); err != nil {
+				return err
+			}
+			var record AppV25DomainContinuity
+			if err := appV23ReadJSON(txn, appV25DomainContinuityKey(domain), &record); err != nil {
+				return err
+			}
+			return s.setAppV26RecoveredGroupAuthorityTxn(txn, record.GroupID)
+		})
+	})
+}
+
 // ValidateAppV25DomainContinuityBatch prepares a complete v2 batch without
 // mutating state. Apply repeats this exact preparation inside one Badger
 // transaction, so one stale final entry cannot partially publish earlier ones.
@@ -298,6 +332,56 @@ func (s *BadgerStore) ApplyAppV25DomainContinuityBatch(
 			)
 		})
 	})
+}
+
+// ApplyAppV26DomainContinuityBatch is the atomic post-v26 batch form. Only
+// recovered groups named by this exact prepared manifest are normalized.
+func (s *BadgerStore) ApplyAppV26DomainContinuityBatch(
+	entries []AppV25DomainContinuityBatchEntry,
+	planDigest []byte,
+	rootGeneration uint64,
+	height int64,
+) error {
+	return s.withFederationAuthorizationMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			plan, err := s.prepareAppV25DomainContinuityBatchTxn(
+				txn, entries, planDigest, rootGeneration, height,
+			)
+			if err != nil {
+				return err
+			}
+			if err := s.applyAppV25DomainContinuityBatchTxn(
+				txn, plan, planDigest, rootGeneration, height,
+			); err != nil {
+				return err
+			}
+			for groupID := range plan.groups {
+				if err := s.setAppV26RecoveredGroupAuthorityTxn(txn, groupID); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+}
+
+func (s *BadgerStore) setAppV26RecoveredGroupAuthorityTxn(txn *badger.Txn, groupID string) error {
+	if groupID == "" {
+		return nil
+	}
+	var group AppV23AccessGroup
+	if err := appV23ReadJSON(txn, appV23GroupKey(groupID), &group); err != nil {
+		return err
+	}
+	if group.MemberAuthority != "" {
+		return ValidateAppV26GroupAuthority(group.MemberAuthority)
+	}
+	group.MemberAuthority = AppV26GroupAuthorityRead
+	data, err := appV23Marshal(group)
+	if err != nil {
+		return err
+	}
+	return s.txnSet(txn, appV23GroupKey(groupID), data)
 }
 
 func (s *BadgerStore) prepareAppV25DomainContinuityBatchTxn(

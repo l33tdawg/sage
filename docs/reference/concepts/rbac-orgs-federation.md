@@ -1,4 +1,4 @@
-<!-- Core document reconciled through SAGE v11.16.4, including app-v23 roles, Access Groups, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
+<!-- Core document reconciled through SAGE v11.17.0/app-v26, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
 
 # RBAC, Organizations, and Federation
 
@@ -206,14 +206,16 @@ clearance or a sharing agreement through the org API
 
 ### App-v23 Roles, Access Groups, and CEREBRUM Root
 
-App-v23 makes the current policy model explicit:
+App-v23 introduced the local policy model; app-v26 makes each Access Group's
+member authority an explicit consensus field rather than deriving it from the
+member's global role:
 
 | Element | Meaning |
 |---|---|
-| `member` | Reads domains owned by other active local members of any shared Access Group; writes only owned domains or compatible explicit grants. |
-| `manager` | Member rights plus Write and Modify over domains owned by active local members of a shared Access Group. |
+| `member` | Ordinary local agent. Group-derived verbs come from each group's app-v26 authority tier. |
+| `manager` | Local management role. It does not silently upgrade a read-only group's data authority. |
 | `admin` | Sudo-equivalent authority over normal local data, policy, governance, federation, and CEREBRUM operations. Root identity and recovery remain non-delegable. |
-| Access Group | Scope over active local members and their current owned domain trees. It never changes domain ownership or memory authorship. |
+| Access Group | Scope over active local members and their current owned domain trees, plus one default member tier: Read, Read+Write, or Read+Write+Modify. It never changes domain ownership or memory authorship. |
 | Clearance | Maximum record classification the principal may read. |
 | Security profile | Hard restrictions that intersect and override role, group scope, and grants. |
 
@@ -241,9 +243,14 @@ for ordinary registration or later reuse as Root
 
 An Access Group's local-member compartment is disjoint from its federated
 linked-reader compartment. Local rights are derived dynamically from current
-ownership rather than expanded into pairwise grants. Multiple groups form a
-union, while removal or ownership transfer changes derived scope immediately
-in consensus order. A remote `agent@chain` relation supplies only exact live
+ownership rather than expanded into pairwise grants. Group authority is
+`read`, `read_write`, or `read_write_modify`; multiple groups form the union of
+their scope and strongest applicable authority. Existing groups migrate to
+the least-privileged `read` tier at app-v26 activation without changing their
+operator revision. Leaving or deleting a group removes only that derived
+relationship: every agent retains full authority over its own domain tree.
+Ownership transfer changes derived scope immediately in consensus order. A
+remote `agent@chain` relation supplies only exact live
 Read bounded by group, domain ownership, agreement generation, host-selected
 classification ceiling, and the original remote agent's nested signature.
 It never supplies Copy, Write, Modify, claim, ownership, grants, roles,
@@ -261,6 +268,17 @@ Directory/contact discovery grants nothing, and group change, pause, revoke,
 re-pair, Root identity, or hard federated-pipe restriction fails closed
 (`internal/federation/v23_linked_messaging.go`;
 `internal/store/federated_linked_message_consent.go`).
+
+An ordinary agent may resolve a friendly name across that exact messaging
+edge without gaining a peer roster. The peer-authenticated lookup intersects
+the query with the current signed linked relation, active non-Root/non-read-only
+enrollment, group membership, agreement/policy generation, and the receiver's
+exact consent. It returns only sanitized display/registered/provider names and
+the exact `agent_id@chain_id` address—never group IDs, relation proofs, domains,
+presence, result counts, truncation, delivery, or read state. Both
+member-to-guest and guest-to-member lookup use the same direct-or-relay request
+layer as exact send, and exact resolve/send repeats live authorization after
+discovery (`internal/federation/v23_linked_directory.go`).
 
 Capability bit names remain visible only as read-only compatibility diagnostics
 behind named profiles. For current policy evaluation, hard restrictions are

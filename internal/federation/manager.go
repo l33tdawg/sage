@@ -243,7 +243,18 @@ type Config struct {
 	// access semantics. Federated inbox contacts must mirror the access check
 	// that governs a local agent's current domain read capability.
 	PostV8ForAccess func() bool
+	// MessageNotifier is a metadata-only, best-effort wake bridge for an exact
+	// local recipient after a new federated send is durably admitted. The target
+	// is passed separately; the notification deliberately contains no payload
+	// and is never delivery, read, presence, or workflow evidence.
+	MessageNotifier func(targetAgentID string, notification AgentMessageNotification)
 	Logger          zerolog.Logger
+}
+
+type AgentMessageNotification struct {
+	MessageID string
+	FromAgent string
+	CreatedAt time.Time
 }
 
 // Manager is the off-consensus federation transport: trust resolution,
@@ -265,6 +276,7 @@ type Manager struct {
 	postV22ForNextTx    func() bool
 	postV23ForNextTx    func() bool
 	postV8ForAccess     func() bool
+	messageNotifier     func(string, AgentMessageNotification)
 	logger              zerolog.Logger
 
 	// peerDialFn is the optional v11.6 connectivity seam. It may handle a
@@ -718,6 +730,7 @@ func NewManager(cfg Config) *Manager {
 		postV22ForNextTx:            cfg.PostV22ForNextTx,
 		postV23ForNextTx:            cfg.PostV23ForNextTx,
 		postV8ForAccess:             cfg.PostV8ForAccess,
+		messageNotifier:             cfg.MessageNotifier,
 		logger:                      cfg.Logger.With().Str("component", "federation").Logger(),
 		seenSigs:                    make(map[string]map[string]int64),
 		seenQueryAgentProofs:        make(map[string]int64),

@@ -181,7 +181,17 @@ func (app *SageApp) validateAppV25MemoryLegacyAdoptionFields(
 		}
 	}
 	if validateEligibility {
-		if err := app.badgerStore.ValidateMemoryLegacyAdoptions(payload.PlanDigest, entries); err != nil {
+		var validationErr error
+		if app.postAppV26Rules(height) {
+			validationErr = app.badgerStore.ValidateMemoryLegacyAdoptionsAppV26(
+				payload.PlanDigest, entries,
+			)
+		} else {
+			validationErr = app.badgerStore.ValidateMemoryLegacyAdoptions(
+				payload.PlanDigest, entries,
+			)
+		}
+		if err := validationErr; err != nil {
 			if errors.Is(err, store.ErrMemoryLegacyAdoptionConflict) {
 				return nil, newAppV25MemoryLegacyAdoptionDrift(
 					fmt.Errorf("memory legacy adoption eligibility: %w", err),
@@ -212,10 +222,16 @@ func (app *SageApp) applyMemoryLegacyAdoption(
 	if err != nil {
 		return err
 	}
-	result, err := app.badgerStore.AdoptLegacyMemories(
-		validated.payload.PlanDigest,
-		validated.entries,
-	)
+	var result store.MemoryLegacyAdoptionResult
+	if app.postAppV26Rules(height) {
+		result, err = app.badgerStore.AdoptLegacyMemoriesAppV26(
+			validated.payload.PlanDigest, validated.entries,
+		)
+	} else {
+		result, err = app.badgerStore.AdoptLegacyMemories(
+			validated.payload.PlanDigest, validated.entries,
+		)
+	}
 	if err != nil {
 		return fmt.Errorf("apply memory legacy adoption: %w", err)
 	}

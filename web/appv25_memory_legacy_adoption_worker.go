@@ -57,6 +57,7 @@ type appV25LegacyProjectionSource interface {
 		store.LegacyMemoryAdoptionProgress,
 	) error
 	ListLegacyMemoryRecoveryDispositionIDs(context.Context) (map[string]struct{}, error)
+	ListLegacyMemoryRecoveryAssignments(context.Context) (map[string]store.LegacyMemoryRecoveryAssignment, error)
 }
 
 type appV25LegacyProjectionSnapshotter interface {
@@ -771,6 +772,10 @@ func (h *DashboardHandler) buildAppV25LegacyAdoptionPlan(
 		if err != nil {
 			return fmt.Errorf("read explicit legacy recovery dispositions: %w", err)
 		}
+		assignments, err := snapshot.ListLegacyMemoryRecoveryAssignments(ctx)
+		if err != nil {
+			return fmt.Errorf("read explicit legacy recovery assignments: %w", err)
+		}
 		var afterCreatedAt, afterMemoryID string
 		for {
 			records, pageErr := snapshot.ListLegacyMemoryProjectionPage(
@@ -799,6 +804,12 @@ func (h *DashboardHandler) buildAppV25LegacyAdoptionPlan(
 					// unchanged; only future adoption scans exclude it.
 					continue
 				}
+				// A record whose historical lifecycle was already terminally
+				// deprecated does not need an owner and must never be offered for
+				// repair or reassignment.
+				if record.Status == memory.StatusDeprecated {
+					continue
+				}
 				inspection := inspections[i]
 				hasReceipt := inspection.Receipt
 				canonical := inspection.State
@@ -814,6 +825,18 @@ func (h *DashboardHandler) buildAppV25LegacyAdoptionPlan(
 					h.appV25LegacyAdoptionEntry(record, root, principalCache)
 				if evidenceErr != nil {
 					return evidenceErr
+				}
+				if !eligible {
+					if assignment, assigned := assignments[record.MemoryID]; assigned &&
+						assignment.ProjectionRevision == revisionBefore &&
+						appV25LegacyAdoptionRecoveryReason(record, root) == "author_identity_unresolved" {
+						entry, eligible, evidenceErr = h.appV26AssignedLegacyAdoptionEntry(
+							record, assignment.TargetAgentID,
+						)
+						if evidenceErr != nil {
+							return evidenceErr
+						}
+					}
 				}
 				if !eligible {
 					plan.Unresolved++
@@ -943,6 +966,50 @@ func (h *DashboardHandler) buildAppV25LegacyAdoptionPlan(
 	}
 	h.noteAppV25MaintenanceProgress(progress)
 	return plan, nil
+}
+
+// appV26AssignedLegacyAdoptionEntry converts only evidence that failed for an
+// unresolved historical author identity. Content, hash, status, domain,
+// classification and immutable author label remain byte-for-byte unchanged;
+// the selected active ordinary local agent becomes only AuthorPrincipal.
+func (h *DashboardHandler) appV26AssignedLegacyAdoptionEntry(
+	record *store.LegacyMemoryProjectionRecord,
+	targetAgentID string,
+) (tx.MemoryLegacyAdoptionEntry, bool, error) {
+	if !h.appV26IsActive() || record == nil || targetAgentID == "" ||
+		record.Status == memory.StatusDeprecated || record.SubmittingAgent == "" ||
+		record.Domain == "" || record.EvidenceError != "" ||
+		record.Classification > uint8(store.ClearanceTopSecret) ||
+		len(record.ContentHash) != sha256.Size {
+		return tx.MemoryLegacyAdoptionEntry{}, false, nil
+	}
+	digest := sha256.Sum256([]byte(record.Content))
+	if !bytes.Equal(digest[:], record.ContentHash) {
+		return tx.MemoryLegacyAdoptionEntry{}, false, nil
+	}
+	enrollment, err := h.BadgerStore.GetAppV23Enrollment(targetAgentID)
+	if err != nil {
+		return tx.MemoryLegacyAdoptionEntry{}, false, err
+	}
+	role, err := h.BadgerStore.GetAppV23Role(targetAgentID)
+	if err != nil {
+		return tx.MemoryLegacyAdoptionEntry{}, false, err
+	}
+	if enrollment == nil || role == nil || !enrollment.Active ||
+		enrollment.AgentID != targetAgentID ||
+		(enrollment.Profile != store.AppV23ProfileStandard &&
+			enrollment.Profile != store.AppV23ProfileCompanion) ||
+		(role.Role != store.AppV23RoleMember && role.Role != store.AppV23RoleManager &&
+			role.Role != store.AppV23RoleAdmin) ||
+		!store.AppV23ProfileAllowsRole(enrollment.Profile, role.Role) {
+		return tx.MemoryLegacyAdoptionEntry{}, false, nil
+	}
+	return tx.MemoryLegacyAdoptionEntry{
+		MemoryID: record.MemoryID, Status: string(record.Status),
+		ContentHash: append([]byte(nil), record.ContentHash...),
+		Domain:      record.Domain, Author: record.SubmittingAgent,
+		AuthorPrincipal: targetAgentID, Classification: record.Classification,
+	}, true, nil
 }
 
 type appV25LegacyPrincipalResolution struct {

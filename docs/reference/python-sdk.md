@@ -1,8 +1,8 @@
-Verified against SDK source for SAGE v11.16.4. Package: sage-agent-sdk.
+Verified against SDK source for SAGE v11.17.0. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.16.4
+**Package:** `sage-agent-sdk` **Version:** 11.17.0
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -806,6 +806,63 @@ remain optional so the client can parse responses from older nodes.
 
 ---
 
+### Canonical local Messages (v11.17)
+
+These methods share the existing local pipeline inbox but add durable
+idempotency, exact receive-batch replay, exact-recipient read evidence, and a
+payload-free sender status projection. They are same-node only; federated
+delivery/read receipts remain capability-negotiated future work.
+
+#### `message_send()`
+
+```python
+message_send(
+    to_agent: str,
+    payload: str,
+    idempotency_key: str,
+    intent: str | None = None,
+    ttl_minutes: int | None = None,
+) -> MessageSendResponse
+```
+
+`POST /v1/messages`. The idempotency key is scoped to the signed sender. An
+exact retry returns the original `message_id`; reusing the key for different
+content is HTTP 409.
+
+#### `messages_receive()`
+
+```python
+messages_receive(receive_token: str, limit: int = 5) -> MessageReceiveResponse
+```
+
+`POST /v1/messages/receive`. The caller-supplied token persists one exact
+ordered claimed batch. Retrying the same caller/token/limit replays that batch
+instead of claiming later messages.
+
+#### `message_reply()` / `message_mark_read()`
+
+```python
+message_reply(message_id: str, result: str) -> MessageActionResponse
+message_mark_read(message_id: str) -> MessageActionResponse
+```
+
+Only the exact recipient that previously received the message through the
+canonical batch API may reply or acknowledge it as read. Repeating the same
+action is idempotent; a different second reply conflicts.
+
+#### `message_status()`
+
+```python
+message_status(message_id: str) -> MessageStatusResponse
+```
+
+`GET /v1/messages/{message_id}/status`. Only the exact sender receives this
+payload-free metadata projection. `transport_status`, `read_status`, and
+`workflow_status` are independent; a local durable insert is delivered, while
+`read_status=confirmed` requires exact-recipient evidence.
+
+---
+
 ### Access Control
 
 #### `request_access()`
@@ -1556,11 +1613,11 @@ except SageAPIError as e:
 
 ## Method Count Summary
 
-**`SageClient`**: 65 public methods
-**`AsyncSageClient`**: 65 public methods (`reassign_domain` is sync-only; `close` is async-only)
+**`SageClient`**: 75 public methods
+**`AsyncSageClient`**: 75 public methods (`reassign_domain` is sync-only; `close` is async-only)
 
 Groups: Health (2), Memory (8), Embeddings (1), Tasks (2), Voting/Validation
-(5), Agents (6), Validator (2), Pipeline (6), Access Control (4), Domains (3
+(5), Agents (6), Validator (2), Pipeline (10), canonical Messages (5), Access Control (4), Domains (3
 shared + sync-only `reassign_domain`), Organizations (7), Departments (6),
-Federation (5), Governance and scope visibility (7), and async lifecycle (1) =
-66 distinct methods across both clients (counting the 64 shared methods once).
+Federation (5), Governance and scope visibility (8), and async lifecycle (1) =
+76 distinct methods across both clients (counting the 74 shared methods once).

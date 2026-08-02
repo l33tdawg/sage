@@ -177,6 +177,59 @@ func assetSHA256Digest(digest string) string {
 	return strings.ToLower(sum)
 }
 
+// releaseAssetVersion binds an updater request to the immutable release tag
+// carried by GitHub's canonical asset URL. A signed SAGE bundle from a
+// different release is still authentic, but it is not the update the operator
+// selected and must never be activated under that release's pending marker.
+func releaseAssetVersion(rawURL string) (string, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "github.com" {
+		return "", errors.New("update URL is not a canonical GitHub release asset")
+	}
+	parts := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	if len(parts) != 6 || parts[0] != githubOwner || parts[1] != githubRepo ||
+		parts[2] != "releases" || parts[3] != "download" || parts[4] == "" || parts[5] == "" {
+		return "", errors.New("update URL does not identify an exact GitHub release")
+	}
+	tag, unescapeErr := url.PathUnescape(parts[4])
+	if unescapeErr != nil || strings.ContainsAny(tag, "/\\\r\n\x00") {
+		return "", errors.New("update URL contains an invalid release tag")
+	}
+	version := strings.TrimPrefix(tag, "v")
+	fields := strings.Split(version, ".")
+	if len(fields) != 3 {
+		return "", errors.New("update URL release tag is not a semantic version")
+	}
+	for _, field := range fields {
+		if field == "" {
+			return "", errors.New("update URL release tag is not a semantic version")
+		}
+		for _, char := range field {
+			if char < '0' || char > '9' {
+				return "", errors.New("update URL release tag is not a semantic version")
+			}
+		}
+	}
+	return "v" + version, nil
+}
+
+func releaseAssetMatchesPlatform(rawURL, version string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	assetName, err := url.PathUnescape(filepath.Base(parsed.EscapedPath()))
+	if err != nil {
+		return false
+	}
+	return assetName == findUpdateAssetName(strings.TrimPrefix(version, "v"), runtime.GOOS, runtime.GOARCH)
+}
+
+func sameReleaseVersion(actual, expected string) bool {
+	return strings.TrimPrefix(strings.TrimSpace(actual), "v") ==
+		strings.TrimPrefix(strings.TrimSpace(expected), "v")
+}
+
 // runningBinaryDiskVersion returns the version reported by the binary currently
 // on disk at this process's executable path, or "" if it cannot be determined.
 func runningBinaryDiskVersion(ctx context.Context) string {
@@ -255,15 +308,12 @@ func (h *DashboardHandler) handleApplyUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Reject path traversal in URL
-	if strings.Contains(body.DownloadURL, "..") {
-		writeError(w, http.StatusBadRequest, "invalid download URL")
-		return
-	}
-
-	// Validate the URL is from GitHub releases
-	if !strings.HasPrefix(body.DownloadURL, "https://github.com/"+githubOwner+"/"+githubRepo+"/releases/") {
-		writeError(w, http.StatusBadRequest, "invalid download URL — must be a GitHub release")
+	// Bind the request to one exact canonical GitHub release tag. The download
+	// checksum proves bytes; this tag is separately matched against the version
+	// reported by the signed executable before activation.
+	requestedVersion, versionErr := releaseAssetVersion(body.DownloadURL)
+	if versionErr != nil || !releaseAssetMatchesPlatform(body.DownloadURL, requestedVersion) {
+		writeError(w, http.StatusBadRequest, "invalid download URL — must identify an exact GitHub release asset")
 		return
 	}
 
@@ -362,6 +412,11 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 		h.sendUpdateProgress("download", "error", "Download URL host not allowed")
 		return
 	}
+	expectedVersion, versionErr := releaseAssetVersion(downloadURL)
+	if versionErr != nil || !releaseAssetMatchesPlatform(downloadURL, expectedVersion) {
+		h.sendUpdateProgress("download", "error", "Download URL does not identify an exact SAGE release")
+		return
+	}
 
 	client := &http.Client{
 		Timeout: 5 * time.Minute,
@@ -435,7 +490,7 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	if runtime.GOOS == "darwin" {
 		_ = archiveTmp.Close()
 		h.sendUpdateProgress("extract", "active", "Opening signed SAGE app update...")
-		stagedVersion, installErr := installDarwinAppUpdate(ctx, archiveTmp.Name(), execPath)
+		stagedVersion, installErr := installDarwinAppUpdate(ctx, archiveTmp.Name(), execPath, expectedVersion)
 		if installErr != nil {
 			h.sendUpdateProgress("install", "error", installErrorMessage("Failed to install signed app update", installErr, downloadURL))
 			return
@@ -466,6 +521,12 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	stagedVersion := diskBinaryVersion(context.Background(), newBinary)
 	if stagedVersion == "" || stagedVersion == "dev" {
 		h.sendUpdateProgress("extract", "error", "The verified archive did not contain a runnable release build. Use the signed release installer instead.")
+		return
+	}
+	if !sameReleaseVersion(stagedVersion, expectedVersion) {
+		h.sendUpdateProgress("extract", "error", fmt.Sprintf(
+			"Verified archive reports %s but the selected release is %s", stagedVersion, expectedVersion,
+		))
 		return
 	}
 
@@ -645,11 +706,14 @@ func ConfirmPendingUpdate(execPath string) error {
 // RollbackPendingUpdate atomically restores the previous executable after an
 // exec or early-boot failure. It returns false when no update is pending.
 func RollbackPendingUpdate(execPath string) (bool, error) {
-	if PendingUpdateVersion(execPath) == "" {
-		return false, nil
-	}
+	// App-bundle recovery must inspect the marker itself before the generic
+	// PendingUpdateVersion fast path. A malformed or unreadable external marker
+	// otherwise looks like "no update" and silently strands the rollback bundle.
 	if handled, rolledBack, err := rollbackPendingAppBundle(execPath); handled {
 		return rolledBack, err
+	}
+	if PendingUpdateVersion(execPath) == "" {
+		return false, nil
 	}
 	backupPath := execPath + ".old"
 	if _, err := os.Stat(backupPath); err != nil {

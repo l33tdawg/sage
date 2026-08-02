@@ -31,6 +31,62 @@ func newTestTransport(t *testing.T) *HTTPTransport {
 	return NewHTTPTransport(srv)
 }
 
+func TestNotifyAgentTargetsExactSSESessionsWithoutContentOrBackpressure(t *testing.T) {
+	transport := newTestTransport(t)
+	recipientA := transport.sessions.register("recipient-a", "agent-bob", "bearer-a")
+	recipientB := transport.sessions.register("recipient-b", "agent-bob", "bearer-b")
+	sender := transport.sessions.register("sender", "agent-alice", "bearer-s")
+	other := transport.sessions.register("other", "agent-charlie", "bearer-o")
+	require.NotNil(t, recipientA)
+	require.NotNil(t, recipientB)
+	require.NotNil(t, sender)
+	require.NotNil(t, other)
+
+	count := transport.NotifyAgent("agent-bob", AgentMessageNotification{
+		MessageID: "msg-1", FromAgent: "agent-alice", SentAt: time.Date(2026, 8, 2, 1, 2, 3, 0, time.UTC),
+	})
+	require.Equal(t, 2, count)
+	for _, session := range []*sseSession{recipientA, recipientB} {
+		select {
+		case payload := <-session.out:
+			var notification map[string]any
+			require.NoError(t, json.Unmarshal(payload, &notification))
+			require.Equal(t, "notifications/sage_message", notification["method"])
+			params := notification["params"].(map[string]any)
+			require.Equal(t, "msg-1", params["message_id"])
+			require.Equal(t, "agent-alice", params["from_agent"])
+			require.NotContains(t, params, "payload")
+			require.NotContains(t, params, "content")
+		default:
+			t.Fatal("exact recipient SSE session did not receive notification")
+		}
+	}
+	for _, session := range []*sseSession{sender, other} {
+		select {
+		case payload := <-session.out:
+			t.Fatalf("unrelated session received notification: %s", payload)
+		default:
+		}
+	}
+
+	// Fill one recipient channel. Dropping its optional wake-up must be
+	// immediate and must not affect other sessions or canonical send state.
+	for len(recipientA.out) < cap(recipientA.out) {
+		recipientA.out <- []byte(`{"jsonrpc":"2.0","method":"test"}`)
+	}
+	count = transport.NotifyAgent("agent-bob", AgentMessageNotification{
+		MessageID: "msg-2", FromAgent: "agent-alice", SentAt: time.Now().UTC(),
+	})
+	require.Equal(t, 1, count, "full exact-recipient channel is dropped while another exact session still receives")
+	select {
+	case payload := <-recipientB.out:
+		require.Contains(t, string(payload), "msg-2")
+	default:
+		t.Fatal("available exact-recipient session should still receive")
+	}
+	require.Equal(t, 0, transport.NotifyAgent("unknown", AgentMessageNotification{MessageID: "msg-3"}))
+}
+
 func TestStreamableHTTP_BasicCall(t *testing.T) {
 	transport := newTestTransport(t)
 	mux := http.NewServeMux()

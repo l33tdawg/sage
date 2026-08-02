@@ -2964,7 +2964,13 @@ func appendAccessGroupMutateCore(buf []byte, g *AccessGroupMutate) []byte {
 	buf = appendBytes(buf, []byte(g.Name))
 	buf = appendUint64(buf, g.ExpectedRevision)
 	buf = append(buf, boolToByte(g.Delete))
-	return appendStringSlice(buf, g.Members)
+	buf = appendStringSlice(buf, g.Members)
+	// Preserve historical action/sign bytes exactly. App-v23..v25 payloads
+	// ended after Members; app-v26 appends the non-empty authority tier.
+	if g.MemberAuthority != "" {
+		buf = appendBytes(buf, []byte(g.MemberAuthority))
+	}
+	return buf
 }
 
 func AccessGroupMutateActionBytes(g *AccessGroupMutate) []byte {
@@ -3000,9 +3006,17 @@ func decodeAccessGroupMutate(data []byte) (*AccessGroupMutate, error) {
 	g.Delete = byteToBool(data[off])
 	off++
 	g.Members, off, err = readStringSlice(data, off)
-	if err != nil || off != len(data) {
+	if err != nil {
 		return nil, ErrInvalidTxData
 	}
+	if off == len(data) {
+		return g, nil
+	}
+	b, off, err = readBytes(data, off)
+	if err != nil || len(b) == 0 || off != len(data) {
+		return nil, ErrInvalidTxData
+	}
+	g.MemberAuthority = string(b)
 	return g, nil
 }
 

@@ -291,6 +291,10 @@ type DashboardHandler struct {
 	// under app-v24's hash-safe lifecycle. Memory-hash repair planning and
 	// governance remain unavailable until this strict H+1 boundary.
 	AppV24ActiveFn func() bool
+	// AppV26ActiveFn reports whether consensus Access Groups carry an explicit
+	// read, read+write, or read+write+modify member authority. Before activation
+	// historical role-derived group semantics remain byte-identical.
+	AppV26ActiveFn func() bool
 	// GovernanceDomainFn returns the committed app-v20 chain authorization
 	// domain. Post-v20 dashboard governance fails closed when it is unavailable.
 	GovernanceDomainFn func() string
@@ -1297,7 +1301,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.With(h.cerebrumOperatorGate, h.appV23ProjectionBroadReadGate).
 				Get("/v1/dashboard/memory/graph", h.handleGraph)
 			r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/memory/adoption-progress", h.handleAppV25LegacyAdoptionProgress)
+			r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/memory/adoption-inventory", h.handleAppV26LegacyRecoveryInventory)
 			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/memory/adoption-retry", h.handleAppV25LegacyAdoptionRetry)
+			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/memory/adoption-assign", h.handleAppV26LegacyAdoptionAssign)
 			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/memory/adoption-deprecate", h.handleAppV25LegacyAdoptionDeprecate)
 			// Pre-v11.16.2 MCP bridges still call this dashboard-shaped read during
 			// inception. The handler returns eligible ordinary agents only a

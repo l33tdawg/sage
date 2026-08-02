@@ -475,6 +475,14 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		authorized_by TEXT NOT NULL,
 		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 	);
+	CREATE TABLE IF NOT EXISTS legacy_memory_recovery_assignment (
+		memory_id TEXT PRIMARY KEY,
+		target_agent_id TEXT NOT NULL,
+		machine_reason TEXT NOT NULL,
+		projection_revision INTEGER NOT NULL,
+		authorized_by TEXT NOT NULL,
+		created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+	);
 
 	CREATE TABLE IF NOT EXISTS knowledge_triples (
 		id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -831,6 +839,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 
 	// Migration: add pipeline_messages table.
 	s.migratePipeline(ctx)
+	if err := s.migrateMessages(ctx); err != nil {
+		return fmt.Errorf("migrate canonical messages: %w", err)
+	}
 	s.migratePipelineTransport(ctx)
 	if err := s.migratePipelineV23SecurityColumns(ctx); err != nil {
 		return fmt.Errorf("migrate pipeline v23 authorization columns: %w", err)
@@ -3369,10 +3380,33 @@ func (s *SQLiteStore) InsertAccessGrant(ctx context.Context, grant *AccessGrantE
 }
 
 func (s *SQLiteStore) GetActiveGrants(ctx context.Context, agentID string) ([]*AccessGrantEntry, error) {
+	return s.getActiveGrants(ctx, agentID, 0, false)
+}
+
+func (s *SQLiteStore) GetActiveGrantsBounded(ctx context.Context, agentID string, limit int) ([]*AccessGrantEntry, error) {
+	return s.getActiveGrants(ctx, agentID, limit, true)
+}
+
+func (s *SQLiteStore) getActiveGrants(ctx context.Context, agentID string, limit int, filterExpired bool) ([]*AccessGrantEntry, error) {
+	query := `SELECT domain, grantee_id, granter_id, access_level, expires_at, created_height, created_at
+		FROM access_grants
+		WHERE grantee_id = ? AND revoked_at IS NULL`
+	args := []any{agentID}
+	if filterExpired {
+		// RFC3339Nano strings are not safely orderable within the same second
+		// when one value omits the fractional component ('.' sorts before 'Z').
+		// Parse both sides as instants before applying the candidate LIMIT.
+		query += ` AND (expires_at IS NULL OR julianday(expires_at) > julianday(?))`
+		args = append(args, formatTime(time.Now().UTC()))
+	}
+	query += `
+		ORDER BY created_at`
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
 	rows, err := s.conn.QueryContext(ctx,
-		`SELECT domain, grantee_id, granter_id, access_level, expires_at, created_height, created_at
-		FROM access_grants WHERE grantee_id = ? AND revoked_at IS NULL
-		ORDER BY created_at`, agentID)
+		query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get active grants: %w", err)
 	}
@@ -3874,6 +3908,23 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 		agents = append(agents, a)
 	}
 	return agents, nil
+}
+
+// ListAgentDirectory returns the local recipient identity projection without
+// computing roster-wide derived memory counts. Canonical enrollment filtering
+// remains the REST layer's responsibility because SQL status is only a cache
+// after app-v23.
+func (s *SQLiteStore) ListAgentDirectory(ctx context.Context) ([]*AgentEntry, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT agent_id, name, COALESCE(registered_name,''), COALESCE(provider,''), status, removed_at
+		FROM network_agents
+		WHERE status != 'removed'
+		ORDER BY created_at ASC, agent_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list agent directory: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	return scanPipeContactLookupAgents(rows)
 }
 
 // FindPipeContactLookupCandidates returns a deliberately small agent metadata
@@ -4446,12 +4497,22 @@ func (s *SQLiteStore) ListAgentTags(ctx context.Context, agentID string) ([]TagC
 }
 
 func (s *SQLiteStore) ListAgentDomains(ctx context.Context, agentID string) ([]string, error) {
-	rows, err := s.conn.QueryContext(ctx, `
+	return s.ListAgentDomainsBounded(ctx, agentID, 0)
+}
+
+func (s *SQLiteStore) ListAgentDomainsBounded(ctx context.Context, agentID string, limit int) ([]string, error) {
+	query := `
 		SELECT domain_tag, COUNT(*) as cnt
 		FROM memories
 		WHERE submitting_agent = ? AND domain_tag != ''
 		GROUP BY domain_tag
-		ORDER BY cnt DESC, domain_tag ASC`, agentID)
+		ORDER BY cnt DESC, domain_tag ASC`
+	args := []any{agentID}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list agent domains: %w", err)
 	}

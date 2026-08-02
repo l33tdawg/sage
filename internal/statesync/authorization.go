@@ -21,7 +21,7 @@ const (
 	// default for existing callers and ceremonies; a join authorization still
 	// pins one exact version for the whole session.
 	RequiredAppVersion        uint64 = 20
-	LatestSupportedAppVersion uint64 = 25
+	LatestSupportedAppVersion uint64 = 26
 	cometNodeIDBytes                 = 20
 	maxJoinAuthorizationBytes        = 64 << 10
 )
@@ -35,7 +35,7 @@ var stateSyncChainIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 // authorization's exact version.
 func SupportsAppVersion(version uint64) bool {
 	switch version {
-	case RequiredAppVersion, 21, 22, 23, 24, LatestSupportedAppVersion:
+	case RequiredAppVersion, 21, 22, 23, 24, 25, LatestSupportedAppVersion:
 		return true
 	default:
 		return false
@@ -424,7 +424,7 @@ func validateJoinAuthorization(config JoinAuthorizationConfig, now time.Time) (*
 		return nil, errors.New("state sync join authorization requires an Ed25519 validator public key")
 	}
 	if !SupportsAppVersion(config.AppVersion) {
-		return nil, errors.New("state sync join authorization requires a supported app version (20, 21, 22, 23, 24, or 25)")
+		return nil, errors.New("state sync join authorization requires a supported app version (20, 21, 22, 23, 24, 25, or 26)")
 	}
 	if config.ExpiresAt.IsZero() || !now.Before(config.ExpiresAt) {
 		return nil, errors.New("state sync join authorization is expired")

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -57,28 +56,14 @@ func TestConversationStateIsIsolatedAndReleased(t *testing.T) {
 	require.NotSame(t, stateA, stateB)
 
 	s.conversationMu.Lock()
-	stateA.callsSinceTurn = 7
 	stateA.inceptionChecked = true
 	s.conversationMu.Unlock()
-	assert.Equal(t, 0, stateB.callsSinceTurn)
 	assert.False(t, stateB.inceptionChecked)
-	assert.True(t, shouldBlockForTurn("external_tool", stateA))
-	assert.False(t, shouldBlockForTurn("external_tool", stateB))
 
 	s.ForgetConversation("sse:A")
 	replacementA := s.conversation(ctxA)
 	require.NotSame(t, stateA, replacementA)
-	assert.Equal(t, 0, replacementA.callsSinceTurn)
-}
-
-func TestTurnDeadlineNeverBlocksMemoryCorrectionPrimitives(t *testing.T) {
-	state := &conversationState{
-		lastTurnTime:   time.Now().Add(-6 * time.Minute),
-		callsSinceTurn: 7,
-	}
-	assert.True(t, shouldBlockForTurn("external_tool", state))
-	assert.False(t, shouldBlockForTurn("sage_remember", state))
-	assert.False(t, shouldBlockForTurn("sage_forget", state))
+	assert.False(t, replacementA.inceptionChecked)
 }
 
 func TestHandleInitialize(t *testing.T) {
@@ -120,7 +105,7 @@ func TestHandleToolsList(t *testing.T) {
 
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]map[string]any)
-	assert.Len(t, tools, 29)
+	assert.Len(t, tools, 33)
 
 	// Collect tool names
 	names := make(map[string]bool)
@@ -138,6 +123,10 @@ func TestHandleToolsList(t *testing.T) {
 	assert.True(t, names["sage_remember"])
 	assert.True(t, names["sage_recall"])
 	assert.True(t, names["sage_pipe_history"])
+	assert.True(t, names["sage_message_send"])
+	assert.True(t, names["sage_messages_receive"])
+	assert.True(t, names["sage_message_reply"])
+	assert.True(t, names["sage_message_status"])
 	assert.True(t, names["sage_federation"])
 	assert.True(t, names["sage_directory"])
 	assert.True(t, names["sage_find_agent"])

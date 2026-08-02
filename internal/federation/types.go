@@ -361,16 +361,17 @@ type PipeContactLookupResponse struct {
 // changes when the peer/policy/owner generation changes and must accompany
 // every acceptance mutation.
 type PipeContact struct {
-	AgentID        string              `json:"agent_id"`
-	ContactID      string              `json:"contact_id,omitempty"`
-	DisplayName    string              `json:"display_name,omitempty"`
-	RegisteredName string              `json:"registered_name,omitempty"`
-	Provider       string              `json:"provider,omitempty"`
-	Address        string              `json:"address,omitempty"`
-	Handle         string              `json:"handle,omitempty"`
-	Available      bool                `json:"available"`
-	Accepting      bool                `json:"accepting"`
-	Domains        []PipeContactDomain `json:"domains"`
+	AgentID           string              `json:"agent_id"`
+	ContactID         string              `json:"contact_id,omitempty"`
+	DisplayName       string              `json:"display_name,omitempty"`
+	RegisteredName    string              `json:"registered_name,omitempty"`
+	Provider          string              `json:"provider,omitempty"`
+	Address           string              `json:"address,omitempty"`
+	Handle            string              `json:"handle,omitempty"`
+	AuthorizationMode string              `json:"authorization_mode,omitempty"`
+	Available         bool                `json:"available"`
+	Accepting         bool                `json:"accepting"`
+	Domains           []PipeContactDomain `json:"domains"`
 }
 
 // PipeContactDomain records why a contact is visible. OwningDomain differs

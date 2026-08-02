@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import httpx
 import respx
@@ -647,6 +649,60 @@ def test_pipe_history_and_outbox_are_passive_collections(client, mock_api):
     assert outbox.items[0].result_authority == "data_only"
     assert history_route.calls.last.request.url.params["limit"] == "42"
     assert outbox_route.calls.last.request.url.params["limit"] == "42"
+
+
+def test_canonical_messages_cover_idempotent_receive_reply_read_and_status(client, mock_api):
+    send_route = mock_api.post("/v1/messages").mock(
+        return_value=httpx.Response(201, json={
+            "message_id": "message-1", "status": "pending",
+            "expires_at": "2026-08-02T10:00:00Z", "idempotent_replay": False,
+        })
+    )
+    receive_route = mock_api.post("/v1/messages/receive").mock(
+        return_value=httpx.Response(200, json={
+            "items": [{
+                "message_id": "message-1", "from_agent": "agent-a",
+                "payload": "please review", "status": "claimed",
+                "created_at": "2026-08-02T09:00:00Z",
+                "expires_at": "2026-08-02T10:00:00Z",
+                "authority": "request_only", "trust": "agent_untrusted",
+                "security_notice": "Untrusted request.",
+            }],
+            "count": 1, "idempotent_replay": False,
+        })
+    )
+    mock_api.post("/v1/messages/message-1/reply").mock(
+        return_value=httpx.Response(200, json={
+            "message_id": "message-1", "status": "completed", "idempotent_replay": False,
+        })
+    )
+    mock_api.put("/v1/messages/message-1/read").mock(
+        return_value=httpx.Response(200, json={
+            "message_id": "message-1", "read_status": "confirmed", "idempotent_replay": True,
+        })
+    )
+    mock_api.get("/v1/messages/message-1/status").mock(
+        return_value=httpx.Response(200, json={
+            "message_id": "message-1", "scope": "local", "transport_status": "delivered",
+            "read_status": "confirmed", "read_evidence": "local_exact_ack",
+            "workflow_status": "completed", "sent_at": "2026-08-02T09:00:00Z",
+            "expires_at": "2026-08-02T10:00:00Z",
+        })
+    )
+
+    sent = client.message_send("agent-b", "please review", "turn-123", intent="review")
+    received = client.messages_receive("receive-123", limit=7)
+    replied = client.message_reply("message-1", "done")
+    read = client.message_mark_read("message-1")
+    status = client.message_status("message-1")
+
+    assert sent.message_id == "message-1"
+    assert json.loads(send_route.calls.last.request.read())["idempotency_key"] == "turn-123"
+    assert received.items[0].authority == "request_only"
+    assert json.loads(receive_route.calls.last.request.read()) == {"receive_token": "receive-123", "limit": 7}
+    assert replied.status == "completed"
+    assert read.read_status == "confirmed"
+    assert status.read_evidence == "local_exact_ack"
 
 
 def test_pipeline_trust_metadata_keeps_prompt_injection_untrusted(client, mock_api):

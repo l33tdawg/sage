@@ -77,6 +77,7 @@ type LegacyMemoryAdoptionProgress struct {
 type LegacyMemoryProjectionSnapshot interface {
 	MemoryProjectionRevision(context.Context) (uint64, error)
 	ListLegacyMemoryRecoveryDispositionIDs(context.Context) (map[string]struct{}, error)
+	ListLegacyMemoryRecoveryAssignments(context.Context) (map[string]LegacyMemoryRecoveryAssignment, error)
 	ListLegacyMemoryProjectionPage(
 		context.Context,
 		string,
@@ -575,6 +576,22 @@ func (s *SQLiteStore) DeprecateLegacyMemoryRecoverySnapshot(
 		return 0, fmt.Errorf("check legacy memory recovery revision: %w", err)
 	}
 	if len(items) != expectedCount || other != 0 {
+		return 0, ErrLegacyMemoryRecoverySnapshotChanged
+	}
+	// An operator assignment is a newer decision than the inventory view used
+	// by a concurrent "deprecate all" request. Never retire that assignment out
+	// from under the canonical adoption worker; force CEREBRUM to refresh so the
+	// operator can explicitly choose the remaining unassigned records.
+	var assigned int
+	if err := txn.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM legacy_memory_recovery_assignment a
+		JOIN legacy_memory_recovery r ON r.memory_id = a.memory_id
+		WHERE r.resolved_at IS NULL AND r.projection_revision = ?
+		  AND a.projection_revision = r.projection_revision
+		  AND a.machine_reason = r.machine_reason`, expectedRevision).Scan(&assigned); err != nil {
+		return 0, fmt.Errorf("check legacy recovery assignments before deprecation: %w", err)
+	}
+	if assigned != 0 {
 		return 0, ErrLegacyMemoryRecoverySnapshotChanged
 	}
 	progressResult, err := txn.ExecContext(ctx,

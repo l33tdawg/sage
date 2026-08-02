@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchMemoryAdoptionProgress, retryMemoryAdoption, deprecateMemoryAdoption, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchScopes, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAppV23Access, updateAppV23AgentPolicy, putAppV23AccessGroup, deleteAppV23AccessGroup, fetchAppV23LinkedReaders, fetchAppV23LinkedReaderIdentities, checkAppV23LinkedReaderEligibility, mutateAppV23LinkedReader, fetchAppV23LinkedMessageConsent, fetchAppV23RemoteHostedMessageCandidates, putAppV23LinkedMessageConsent, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, handoverRootCredential, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
+import { fetchStats, fetchMemoryAdoptionProgress, fetchMemoryAdoptionInventory, retryMemoryAdoption, assignMemoryAdoption, deprecateMemoryAdoption, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchScopes, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAppV23Access, updateAppV23AgentPolicy, putAppV23AccessGroup, deleteAppV23AccessGroup, fetchAppV23LinkedReaders, fetchAppV23LinkedReaderIdentities, checkAppV23LinkedReaderEligibility, mutateAppV23LinkedReader, fetchAppV23LinkedMessageConsent, fetchAppV23RemoteHostedMessageCandidates, putAppV23LinkedMessageConsent, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, handoverRootCredential, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
 rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, reorderTasks, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, fetchMemoryReanchorPlan, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, confirmRecoveryKeyBackup, recoverOrphansPreview, recoverOrphans,
@@ -52,7 +52,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.16.4';
+const SAGE_VERSION = 'v11.17.0';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -284,9 +284,14 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
     const [submitting, setSubmitting] = useState('');
     const [error, setError] = useState('');
     const [success, setSuccess] = useState('');
+    const [inventory, setInventory] = useState({ items: [], agents: [], next_after: '', assignment_active: false });
+    const [inventoryLoading, setInventoryLoading] = useState(true);
+    const [selectedIDs, setSelectedIDs] = useState([]);
+    const [targetAgentID, setTargetAgentID] = useState('');
     const recoveryCount = Number(progress?.recovery || 0);
     const projectionRevision = progress?.projection_revision;
-    const requiredConfirmation = `DEPRECATE ${recoveryCount}`;
+    const deprecationCount = selectedIDs.length || recoveryCount;
+    const requiredConfirmation = `DEPRECATE ${deprecationCount}`;
     const requestClose = () => { if (!submitting) onClose(); };
     const dialogRef = useModalDialog(requestClose);
 
@@ -294,6 +299,63 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
         setConfirmation('');
         setError('');
     }, [recoveryCount, projectionRevision]);
+
+    async function loadInventory(after = '', append = false) {
+        setInventoryLoading(true);
+        try {
+            const next = await fetchMemoryAdoptionInventory({ after, limit: 50 });
+            setInventory(current => ({
+                ...next,
+                items: append ? [...current.items, ...(next.items || [])] : (next.items || []),
+            }));
+            if (!append && !targetAgentID && next.agents?.length) {
+                setTargetAgentID(next.agents[0].agent_id);
+            }
+        } catch (err) {
+            setError(err?.message || 'The preserved-record inventory could not be loaded.');
+        } finally {
+            setInventoryLoading(false);
+        }
+    }
+
+    useEffect(() => { loadInventory(); }, [projectionRevision, recoveryCount]);
+
+    function toggleRecoverySelection(memoryID) {
+        setSelectedIDs(current => current.includes(memoryID)
+            ? current.filter(id => id !== memoryID)
+            : [...current, memoryID]);
+        setConfirmation('');
+    }
+
+    async function assignSelected() {
+        if (!selectedIDs.length || !targetAgentID) return;
+        const selected = inventory.items.filter(item => selectedIDs.includes(item.memory_id));
+        if (selected.some(item => !item.assignable || item.assigned_target)) return;
+        setSubmitting('assign');
+        setError('');
+        setSuccess('');
+        try {
+            const result = await assignMemoryAdoption({
+                projectionRevision,
+                expectedCount: recoveryCount,
+                memoryIDs: selectedIDs,
+                targetAgentID,
+            });
+            setSuccess(`${result.assigned || selectedIDs.length} record${selectedIDs.length === 1 ? '' : 's'} queued for Root-governed principal repair. Historical authorship and content remain unchanged. This associates the current operational principal; it does not broaden that agent’s domain permissions.`);
+            setSelectedIDs([]);
+            await loadInventory();
+        } catch (err) {
+            if (String(err?.message || '').includes('historical memory recovery inventory changed')) {
+                await refreshProgress();
+                await loadInventory();
+                setError('The recovery inventory changed while this window was open. CEREBRUM refreshed it; review the current records and try again.');
+            } else {
+                setError(err?.message || 'The selected records could not be assigned.');
+            }
+        } finally {
+            setSubmitting('');
+        }
+    }
 
     async function refreshProgress(result) {
         const returned = result?.progress || result;
@@ -351,10 +413,13 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
                 projectionRevision,
                 expectedCount: recoveryCount,
                 confirmation,
+                memoryIDs: selectedIDs,
             });
-            await refreshProgress(result);
+            const refreshed = await refreshProgress(result);
             setConfirmation('');
-            setSuccess(`${recoveryCount.toLocaleString()} historical record${recoveryCount === 1 ? '' : 's'} deprecated. They remain preserved for audit and were not deleted or rewritten.`);
+            setSelectedIDs([]);
+            if (Number(refreshed?.recovery || 0) > 0) await loadInventory();
+            setSuccess(`${deprecationCount.toLocaleString()} historical record${deprecationCount === 1 ? '' : 's'} deprecated. They remain preserved for audit and were not deleted or rewritten.`);
         } catch (err) {
             if (String(err?.message || '').includes('historical memory recovery inventory changed')) {
                 await refreshProgress();
@@ -389,6 +454,57 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
                     ${error && html`<div class="cerebrum-repair-feedback error" role="alert">${error}</div>`}
                     ${success && html`<div class="cerebrum-repair-feedback success" role="status">${success}</div>`}
 
+                    <section class="cerebrum-recovery-inventory" aria-labelledby="memory-repair-inventory-title">
+                        <div class="cerebrum-recovery-inventory-head">
+                            <div>
+                                <h3 id="memory-repair-inventory-title">Review preserved records</h3>
+                                <p>Select exact records to associate or deprecate. Principal repair records the current operational agent without changing domain access; use Access Controls separately when the agent also needs broader domain permissions. Corrupt or conflicting evidence is deprecate-only.</p>
+                            </div>
+                            <span>${selectedIDs.length} selected</span>
+                        </div>
+                        ${inventoryLoading && !inventory.items.length
+                            ? html`<p class="cerebrum-recovery-empty">Loading preserved records…</p>`
+                            : inventory.items.length === 0
+                                ? html`<p class="cerebrum-recovery-empty">No unresolved non-deprecated records remain on this page.</p>`
+                                : html`<div class="cerebrum-recovery-list">
+                                    ${inventory.items.map(item => html`
+                                        <label class="cerebrum-recovery-record ${item.assignable ? 'assignable' : 'deprecate-only'}">
+                                            <input type="checkbox" checked=${selectedIDs.includes(item.memory_id)}
+                                                disabled=${!!submitting}
+                                                onChange=${() => toggleRecoverySelection(item.memory_id)} />
+                                            <span class="cerebrum-recovery-record-copy">
+                                                <strong>${item.domain || 'Unknown domain'}</strong>
+                                                <span>${item.content_preview || 'Content cannot be safely previewed.'}</span>
+                                                <small>${item.reason.replaceAll('_', ' ')} · ${item.assignable ? 'assignable' : 'deprecate only'}${item.assigned_target ? ' · assignment pending' : ''}</small>
+                                            </span>
+                                        </label>
+                                    `)}
+                                </div>`}
+                        ${inventory.next_after && html`<button type="button" class="btn"
+                            disabled=${inventoryLoading || !!submitting}
+                            onClick=${() => loadInventory(inventory.next_after, true)}>
+                            ${inventoryLoading ? 'Loading…' : 'Load more'}
+                        </button>`}
+                        <div class="cerebrum-recovery-assignment">
+                            <label>
+                                <span>Associate selected records with</span>
+                                <select value=${targetAgentID} disabled=${!!submitting || !inventory.assignment_active}
+                                    onChange=${event => setTargetAgentID(event.currentTarget.value)}>
+                                    ${(inventory.agents || []).map(agent => html`
+                                        <option value=${agent.agent_id}>${agent.name || agent.agent_id.slice(0, 12)}</option>
+                                    `)}
+                                </select>
+                            </label>
+                            <button type="button" class="btn btn-primary"
+                                disabled=${!!submitting || !inventory.assignment_active || !targetAgentID || !selectedIDs.length ||
+                                    inventory.items.filter(item => selectedIDs.includes(item.memory_id)).some(item => !item.assignable || item.assigned_target)}
+                                onClick=${assignSelected}>
+                                ${submitting === 'assign' ? 'Associating…' : 'Associate selected'}
+                            </button>
+                        </div>
+                        ${!inventory.assignment_active && html`<p class="cerebrum-recovery-note">Assignment becomes available when governed app-v26 is active. Retry and deprecation remain available.</p>`}
+                    </section>
+
                     <section class="cerebrum-repair-choice" aria-labelledby="memory-repair-retry-title">
                         <div>
                             <h3 id="memory-repair-retry-title">Try automatic repair again</h3>
@@ -402,8 +518,8 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
 
                     <section class="cerebrum-repair-choice danger" aria-labelledby="memory-repair-deprecate-title">
                         <div>
-                            <h3 id="memory-repair-deprecate-title">Deprecate remaining records</h3>
-                            <p>This permanently excludes these records from future repair attempts and the available-memory view. They remain preserved for audit; their content and history are not deleted or rewritten.</p>
+                            <h3 id="memory-repair-deprecate-title">${selectedIDs.length ? 'Deprecate selected records' : 'Deprecate all remaining records'}</h3>
+                            <p>This permanently excludes ${selectedIDs.length ? 'the selected records' : 'all remaining records'} from future repair attempts and the available-memory view. They remain preserved for audit; their content and history are not deleted or rewritten.</p>
                         </div>
                         <label class="cerebrum-repair-confirmation">
                             <span>Type <strong>${requiredConfirmation}</strong> to confirm</span>
@@ -415,7 +531,7 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
                         <button type="button" class="btn btn-danger"
                             disabled=${!!submitting || recoveryCount < 1 || confirmation !== requiredConfirmation}
                             onClick=${deprecateRemaining}>
-                            ${submitting === 'deprecate' ? 'Deprecating records…' : 'Deprecate remaining records'}
+                            ${submitting === 'deprecate' ? 'Deprecating records…' : selectedIDs.length ? 'Deprecate selected records' : 'Deprecate all remaining records'}
                         </button>
                     </section>
                 </div>
@@ -8056,8 +8172,8 @@ const CLEARANCE_LABELS = ['Public', 'Internal', 'Confidential', 'Secret', 'Top S
 // that never reaches consensus.
 const ROLE_META = {
     admin: { name: 'Admin', desc: 'Super-admin for this node: manages local agents and controls all local data. CEREBRUM Root remains separate.' },
-    manager: { name: 'Manager', desc: 'Member access, plus write and modify across its local Access Groups.' },
-    member: { name: 'Member', desc: 'Reads group teammates’ domains; writes only to its own domains or explicit grants.' },
+    manager: { name: 'Manager', desc: 'Local management role. Data access comes from each Access Group’s explicit permission level.' },
+    member: { name: 'Member', desc: 'Ordinary local agent. Data access comes from ownership, explicit grants, and its Access Groups.' },
     observer: { name: 'Observer', desc: 'Read-only. Can view memories but cannot submit.' },
 };
 const AGENT_EMOJIS = ['🤖', '🧠', '🎙️', '🔬', '👤', '🛡️', '📡', '🔮', '🦉', '🐺', '🌐', '💎'];
@@ -8316,17 +8432,35 @@ const APPV23_ROLE_OPTIONS = [
     {
         key: 'member',
         name: 'Member',
-        desc: 'Reads group members’ domains. Writes only to its own domains or explicit grants.',
+        desc: 'Ordinary local agent. Ownership, explicit grants, and each Access Group define its data access.',
     },
     {
         key: 'manager',
         name: 'Manager',
-        desc: 'Member access, plus write and modify across its local groups.',
+        desc: 'Local management role. It does not silently widen a group’s chosen data permission.',
     },
     {
         key: 'admin',
         name: 'Admin',
         desc: 'Full control of this node’s agents and data. CEREBRUM Root remains separate.',
+    },
+];
+
+const APPV26_GROUP_AUTHORITY_OPTIONS = [
+    {
+        key: 'read',
+        name: 'Read',
+        desc: 'Members can read one another’s owned domains. Each owner still has full control of its own domains.',
+    },
+    {
+        key: 'read_write',
+        name: 'Read + write',
+        desc: 'Members can read and add memories across the group, but cannot modify or deprecate one another’s records.',
+    },
+    {
+        key: 'read_write_modify',
+        name: 'Read + write + modify',
+        desc: 'Members can read, add, modify, challenge, deprecate, and reinstate across the group.',
     },
 ];
 
@@ -8364,8 +8498,9 @@ function saveAppV23LegacyProgress(progress) {
     try { localStorage.setItem(APPV23_LEGACY_PROGRESS_KEY, JSON.stringify(progress)); } catch (_) {}
 }
 
-function sameAppV23LegacyGroup(group, name, members) {
+function sameAppV23LegacyGroup(group, name, members, memberAuthority = '') {
     if (!group || group.name !== name) return false;
+    if (memberAuthority && (group.member_authority || 'read') !== memberAuthority) return false;
     const current = [...(group.members || [])].sort();
     return current.length === members.length && current.every((id, index) => id === members[index]);
 }
@@ -8596,6 +8731,12 @@ function AppV23AccessControl() {
     const [draft, setDraft] = useState(null);
     const [saving, setSaving] = useState(false);
     const [groupBusy, setGroupBusy] = useState('');
+    const [pendingConfirmation, setPendingConfirmation] = useState('');
+    // React state updates are asynchronous, so state alone cannot prevent two
+    // same-tick mutations (for example an input blur immediately followed by
+    // Delete). This ref is the synchronous single-flight authority.
+    const mutationLockRef = useRef('');
+    const localDragRef = useRef({ agentID: '', sourceGroupID: '' });
     const [dragAgentID, setDragAgentID] = useState('');
     const [dragSourceGroupID, setDragSourceGroupID] = useState('');
     const [dragRemoteKey, setDragRemoteKey] = useState('');
@@ -8884,6 +9025,21 @@ function AppV23AccessControl() {
     ]);
 
     const mutateDraft = (patch) => setDraft(current => ({ ...(current || {}), ...patch }));
+    const beginMutation = (key) => {
+        if (mutationLockRef.current) return false;
+        mutationLockRef.current = key;
+        return true;
+    };
+    const endMutation = (key) => {
+        if (mutationLockRef.current === key) mutationLockRef.current = '';
+    };
+    const holdPendingConfirmation = async message => {
+        const detail = message || 'Consensus confirmation is pending. Reload and verify before trying another authority change.';
+        setPendingConfirmation(detail);
+        showToast(detail, 'info', 10000);
+        await load();
+    };
+    const mutationMayHaveCommitted = error => error?.code === 'access_control_timeout';
     const chooseRole = (role) => {
         if (!draft) return;
         mutateDraft(appV23RoleDefaults(role, draft.capabilities));
@@ -8894,10 +9050,15 @@ function AppV23AccessControl() {
     };
 
     const savePolicy = async () => {
-        if (!selected || !draft || saving) return;
+        const mutationKey = `policy:${selected?.agent_id || ''}`;
+        if (!selected || !draft || saving || !beginMutation(mutationKey)) return;
         setSaving(true);
         try {
             const result = await updateAppV23AgentPolicy(selected.agent_id, draft);
+            if (result.status === 'confirmation_pending') {
+                await holdPendingConfirmation(result.error);
+                return;
+            }
             showToast(
                 result.mode === 'approve'
                     ? 'Agent approved. Its role, profile, clearance, and home domain committed atomically.'
@@ -8908,40 +9069,82 @@ function AppV23AccessControl() {
                         : 'Agent policy committed atomically.',
                 'success',
             );
+            if (result.projection_ready === false && result.projection_warning) {
+                showToast(result.projection_warning, 'info', 10000);
+            }
             await load();
         } catch (e) {
+            if (mutationMayHaveCommitted(e)) {
+                await holdPendingConfirmation(e.message);
+                return;
+            }
             showToast(e.message || 'The policy was not committed.', 'error', 9000);
         } finally {
             setSaving(false);
+            endMutation(mutationKey);
         }
     };
 
-    const saveGroup = async (group, members, name = group.name) => {
-        if (groupBusy) return;
+    const saveGroup = async (
+        group,
+        members,
+        name = group.name,
+        memberAuthority = group.member_authority || (state?.group_authority_active ? 'read' : ''),
+    ) => {
+        const mutationKey = `group:${group.group_id}`;
+        if (groupBusy || !beginMutation(mutationKey)) return;
         setGroupBusy(group.group_id);
         try {
-            await putAppV23AccessGroup(group.group_id, {
+            const result = await putAppV23AccessGroup(group.group_id, {
                 name,
                 members,
+                member_authority: memberAuthority,
                 expected_revision: Number(group.revision || 0),
             });
+            if (result.status === 'confirmation_pending') {
+                await holdPendingConfirmation(result.error);
+                return;
+            }
             showToast(`Access Group “${name}” committed.`, 'success');
             await load();
         } catch (e) {
+            if (mutationMayHaveCommitted(e)) {
+                await holdPendingConfirmation(e.message);
+                return;
+            }
             showToast(e.message || 'The group change was not committed.', 'error', 9000);
         } finally {
             setGroupBusy('');
+            endMutation(mutationKey);
         }
     };
 
     const clearLocalDrag = () => {
+        localDragRef.current = { agentID: '', sourceGroupID: '' };
         setDragAgentID('');
         setDragSourceGroupID('');
     };
-    const startLocalDrag = (agentID, sourceGroupID = '') => {
+    const startLocalDrag = (event, agentID, sourceGroupID = '') => {
+        const payload = { agentID, sourceGroupID };
+        localDragRef.current = payload;
+        if (event?.dataTransfer) {
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('application/x-sage-local-agent', JSON.stringify(payload));
+            event.dataTransfer.setData('text/plain', agentID);
+        }
         setDragRemoteKey('');
         setDragAgentID(agentID);
         setDragSourceGroupID(sourceGroupID);
+    };
+    const readLocalDrag = (event) => {
+        try {
+            const encoded = event?.dataTransfer?.getData('application/x-sage-local-agent');
+            if (encoded) {
+                const parsed = JSON.parse(encoded);
+                if (parsed?.agentID) return parsed;
+            }
+        } catch (_) {}
+        return localDragRef.current;
     };
 
     const createGroup = async () => {
@@ -8952,26 +9155,39 @@ function AppV23AccessControl() {
         let groupID = stem;
         let suffix = 2;
         while (occupied.has(groupID)) groupID = `${stem.slice(0, 60)}-${suffix++}`;
+        const mutationKey = `group:${groupID}`;
+        if (!beginMutation(mutationKey)) return;
         setGroupBusy(groupID);
         try {
             const initialMembers = selected?.enrollment_active ? [selected.agent_id] : [];
-            await putAppV23AccessGroup(groupID, {
+            const result = await putAppV23AccessGroup(groupID, {
                 name,
                 members: initialMembers,
+                member_authority: state?.group_authority_active ? 'read' : '',
                 expected_revision: 0,
             });
+            if (result.status === 'confirmation_pending') {
+                await holdPendingConfirmation(result.error);
+                return;
+            }
             setNewGroupName('');
             showToast(`Access Group “${name}” created on-chain.`, 'success');
             await load();
         } catch (e) {
+            if (mutationMayHaveCommitted(e)) {
+                await holdPendingConfirmation(e.message);
+                return;
+            }
             showToast(e.message || 'The group was not created.', 'error', 9000);
         } finally {
             setGroupBusy('');
+            endMutation(mutationKey);
         }
     };
 
-    const createDirectLocalGroup = async (target) => {
-        const source = localAgents.find(agent => agent.agent_id === dragAgentID);
+    const createDirectLocalGroup = async (target, event) => {
+        const dragged = readLocalDrag(event);
+        const source = localAgents.find(agent => agent.agent_id === dragged.agentID);
         const plan = appV23DirectLocalGroupPlan(state?.groups || [], source, target);
         clearLocalDrag();
         if (!plan || groupBusy || !mutationReady) return;
@@ -8979,48 +9195,73 @@ function AppV23AccessControl() {
             showToast(`These agents already share Access Group “${plan.name}”.`, 'info');
             return;
         }
+        const mutationKey = `group:${plan.group_id}`;
+        if (!beginMutation(mutationKey)) return;
         setGroupBusy(plan.group_id);
         try {
-            await putAppV23AccessGroup(plan.group_id, {
+            const result = await putAppV23AccessGroup(plan.group_id, {
                 name: plan.name,
                 members: plan.members,
+                member_authority: state?.group_authority_active ? 'read' : '',
                 expected_revision: 0,
             });
-            showToast(`Access Group “${plan.name}” created on-chain. Members can read one another’s owned domains; write remains with owners and Managers.`, 'success', 8000);
+            if (result.status === 'confirmation_pending') {
+                await holdPendingConfirmation(result.error);
+                return;
+            }
+            showToast(`Access Group “${plan.name}” created on-chain at Read. Each owner keeps full control; widen the group only if its members should also write or modify.`, 'success', 8000);
             await load();
         } catch (e) {
+            if (mutationMayHaveCommitted(e)) {
+                await holdPendingConfirmation(e.message);
+                return;
+            }
             showToast(e.message || 'The shared Access Group was not created.', 'error', 9000);
         } finally {
             setGroupBusy('');
+            endMutation(mutationKey);
         }
     };
 
-    const removeDraggedMemberFromSourceGroup = async () => {
-        const group = (state?.groups || []).find(item => item.group_id === dragSourceGroupID);
-        const agentID = dragAgentID;
+    const removeDraggedMemberFromSourceGroup = async (event) => {
+        const dragged = readLocalDrag(event);
+        const group = (state?.groups || []).find(item => item.group_id === dragged.sourceGroupID);
+        const agentID = dragged.agentID;
         clearLocalDrag();
         if (!group || !agentID || !group.members.includes(agentID) || groupBusy || !mutationReady) return;
         await saveGroup(group, group.members.filter(id => id !== agentID));
     };
 
     const deleteGroup = async (group) => {
+        if (mutationLockRef.current) return;
         if (!await showConfirmation(
-            `Delete “${group.name}”? Its members immediately lose the access relationship supplied by this group.`,
+            `Delete “${group.name}”? Its members immediately lose the access relationship supplied by this group. Every agent keeps full control of its own domain tree.`,
             { title: 'Delete Access Group', confirmLabel: 'Delete group', tone: 'danger' },
         )) return;
+        const mutationKey = `group:${group.group_id}`;
+        if (!beginMutation(mutationKey)) return;
         setGroupBusy(group.group_id);
         try {
-            await deleteAppV23AccessGroup(group.group_id, Number(group.revision || 0));
+            const result = await deleteAppV23AccessGroup(group.group_id, Number(group.revision || 0));
+            if (result.status === 'confirmation_pending') {
+                await holdPendingConfirmation(result.error);
+                return;
+            }
             showToast(`Access Group “${group.name}” deleted.`, 'success');
             await load();
         } catch (e) {
+            if (mutationMayHaveCommitted(e)) {
+                await holdPendingConfirmation(e.message);
+                return;
+            }
             showToast(e.message || 'The group was not deleted.', 'error', 9000);
         } finally {
             setGroupBusy('');
+            endMutation(mutationKey);
         }
     };
 
-    const dropIntoGroup = (group) => {
+    const dropIntoGroup = (group, event) => {
         const dropKind = appV23GroupDropKind(dragAgentID, dragRemoteKey);
         if (dropKind === 'linked_reader') {
             const remote = remoteCandidates.find(item => item.key === dragRemoteKey);
@@ -9034,7 +9275,8 @@ function AppV23AccessControl() {
             );
             return;
         }
-        const agent = localAgents.find(a => a.agent_id === dragAgentID);
+        const dragged = readLocalDrag(event);
+        const agent = localAgents.find(a => a.agent_id === dragged.agentID);
         clearLocalDrag();
         if (!agent || !agent.enrollment_active || group.members.includes(agent.agent_id)) return;
         // Membership is intentionally additive. An agent may belong to several
@@ -9104,7 +9346,7 @@ function AppV23AccessControl() {
             return `${group.name}: ${members}${dropped.length ? `; ${dropped.length} unavailable member${dropped.length === 1 ? '' : 's'} will be skipped` : ''}`;
         }).join('\n');
         if (!await showConfirmation(
-            `Import these browser drafts as real consensus access policy?\n\n${previewText}\n\nManagers shown above will gain write/modify authority within each imported group.`,
+            `Import these browser drafts as real consensus access policy?\n\n${previewText}\n\nImported groups start at Read. You can deliberately widen each group after review.`,
             { title: 'Review legacy group import', confirmLabel: 'Import reviewed groups' },
         )) return;
         const knownGroups = new Map((state.groups || []).map(group => [group.group_id, group]));
@@ -9125,22 +9367,28 @@ function AppV23AccessControl() {
                         .filter(group => !claimedIDs.has(group.group_id))
                         .filter(group => group.group_id === baseID || group.group_id.startsWith(`${baseID}-`))
                         .sort((a, b) => a.group_id.localeCompare(b.group_id))
-                        .find(group => sameAppV23LegacyGroup(group, name, members));
+                        .find(group => sameAppV23LegacyGroup(
+                            group, name, members, state?.group_authority_active ? 'read' : '',
+                        ));
                     groupID = exactPrior?.group_id || canonicalLegacyGroupID(oldGroup.id, occupied);
                 } else {
                     occupied.add(groupID);
                 }
                 const existing = knownGroups.get(groupID);
-                if (!sameAppV23LegacyGroup(existing, name, members)) {
+                if (!sameAppV23LegacyGroup(
+                    existing, name, members, state?.group_authority_active ? 'read' : '',
+                )) {
                     await putAppV23AccessGroup(groupID, {
                         name,
                         members,
+                        member_authority: state?.group_authority_active ? 'read' : '',
                         expected_revision: Number(existing?.revision || 0),
                     });
                     knownGroups.set(groupID, {
                         group_id: groupID,
                         name,
                         members,
+                        member_authority: state?.group_authority_active ? 'read' : '',
                         revision: Number(existing?.revision || 0) + 1,
                     });
                 }
@@ -9306,7 +9554,7 @@ function AppV23AccessControl() {
     if (error) return html`<div class="v23-access-banner danger"><strong>Access policy unavailable</strong><span>${error}</span><button class="btn" onClick=${load}>Retry</button></div>`;
 
     const brokerReady = state?.broker?.available === true;
-    const mutationReady = state?.active === true && brokerReady;
+    const mutationReady = state?.active === true && brokerReady && !saving && !groupBusy && !pendingConfirmation;
     const legacyProfileNeedsReview = appV23ProfileNeedsReview(selected);
     const draftProfileSelectable = appV23ProfileIsSelectable(draft?.profile);
     const homeReapproval = appV23NeedsHomeReapproval(selected, draft);
@@ -9341,6 +9589,13 @@ function AppV23AccessControl() {
                     <strong>Root broker unavailable</strong>
                     <span>${state.broker?.message || 'This machine cannot resolve the currently committed Root credential.'}</span>
                     <code>${state.broker?.reason_code || 'root_key_unavailable'}</code>
+                </div>
+            `}
+            ${pendingConfirmation && html`
+                <div class="v23-access-banner warning">
+                    <strong>Consensus confirmation still pending</strong>
+                    <span>${pendingConfirmation} CEREBRUM blocked duplicate authority changes in this view.</span>
+                    <button class="btn" onClick=${() => window.location.reload()}>Reload and verify</button>
                 </div>
             `}
 
@@ -9422,12 +9677,12 @@ function AppV23AccessControl() {
             <div class="v23-access-grid">
                 <div class="v23-agent-rail ${dragSourceGroupID ? 'remove-drop-ready' : ''}" aria-label="Local agents"
                     onDragOver=${e => {
-                        if (dragSourceGroupID) e.preventDefault();
+                        if (readLocalDrag(e).sourceGroupID) e.preventDefault();
                     }}
                     onDrop=${e => {
-                        if (!dragSourceGroupID) return;
+                        if (!readLocalDrag(e).sourceGroupID) return;
                         e.preventDefault();
-                        removeDraggedMemberFromSourceGroup();
+                        removeDraggedMemberFromSourceGroup(e);
                     }}>
                     <div class="v23-section-heading">
                         <div>
@@ -9449,20 +9704,22 @@ function AppV23AccessControl() {
                             onClick=${() => selectLocalAgent(agent.agent_id)}
                             onDragStart=${event => {
                                 event.stopPropagation();
-                                startLocalDrag(agent.agent_id);
+                                startLocalDrag(event, agent.agent_id);
                             }}
                             onDragEnd=${clearLocalDrag}
                             onDragOver=${event => {
-                                if (dragAgentID && dragAgentID !== agent.agent_id && agent.enrollment_active) {
+                                const dragged = readLocalDrag(event);
+                                if (dragged.agentID && dragged.agentID !== agent.agent_id && agent.enrollment_active) {
                                     event.preventDefault();
                                     event.stopPropagation();
                                 }
                             }}
                             onDrop=${event => {
-                                if (!dragAgentID || dragAgentID === agent.agent_id || !agent.enrollment_active) return;
+                                const dragged = readLocalDrag(event);
+                                if (!dragged.agentID || dragged.agentID === agent.agent_id || !agent.enrollment_active) return;
                                 event.preventDefault();
                                 event.stopPropagation();
-                                createDirectLocalGroup(agent);
+                                createDirectLocalGroup(agent, event);
                             }}>
                             <span class="agent-avatar">${agent.avatar || '\u{1F916}'}</span>
                             <span class="v23-agent-choice-copy">
@@ -9651,7 +9908,7 @@ function AppV23AccessControl() {
                     <div>
                         <div class="v23-eyebrow">Consensus Access Groups</div>
                         <h3>Local sharing groups</h3>
-                        <p>Drag one approved local agent onto another to create a committed sharing group. Members read one another’s owned domains by default; each owner keeps full control. A human operator may promote a local agent to Manager for write and modify authority within its groups. Admins already control all local data.</p>
+                        <p>Drag one approved local agent onto another to create a committed sharing group. Choose whether members can read, read and write, or also modify one another’s domains. Every agent always keeps full control of its own domains; removing it from a group never removes that ownership.</p>
                     </div>
                     <form class="v23-create-group" onSubmit=${event => { event.preventDefault(); createGroup(); }}>
                         <label class="sr-only" for="v23-new-group-name">New local group name</label>
@@ -9667,7 +9924,7 @@ function AppV23AccessControl() {
                     ${localAgents.filter(a => a.enrollment_active).map(agent => html`
                         <div class="v23-agent-pill local" draggable="true"
                             title=${`${agent.role || 'member'} · drag into a local group`}
-                            onDragStart=${() => startLocalDrag(agent.agent_id)}
+                            onDragStart=${event => startLocalDrag(event, agent.agent_id)}
                             onDragEnd=${clearLocalDrag}>
                             ${agent.avatar || '\u{1F916}'} ${agent.name || agent.agent_id.slice(0, 8)}
                             <em>${agent.role || 'member'}</em>
@@ -9677,10 +9934,10 @@ function AppV23AccessControl() {
 
                 <div class="v23-group-grid">
                     ${(state.groups || []).map(group => html`
-                        <article class="v23-group-card local ${dragAgentID ? 'drop-ready drop-local' : ''} ${dragRemoteKey ? 'drop-ready drop-linked' : ''}"
+                        <article key=${`${group.group_id}:${group.revision}`} class="v23-group-card local ${dragAgentID ? 'drop-ready drop-local' : ''} ${dragRemoteKey ? 'drop-ready drop-linked' : ''}"
                             aria-label=${`Local group ${group.name}`}
                             onDragOver=${e => e.preventDefault()}
-                            onDrop=${e => { e.preventDefault(); dropIntoGroup(group); }}>
+                            onDrop=${e => { e.preventDefault(); dropIntoGroup(group, e); }}>
                             <div class="v23-group-head">
                                 <input defaultValue=${group.name}
                                     aria-label="Access Group name"
@@ -9704,6 +9961,23 @@ function AppV23AccessControl() {
                                     disabled=${!!groupBusy || !mutationReady}
                                     onClick=${() => deleteGroup(group)}>×</button>
                             </div>
+                            <label class="v23-field v23-group-authority">
+                                <span>Members may</span>
+                                <select value=${group.member_authority || 'read'}
+                                    aria-label=${`Permissions for members of ${group.name}`}
+                                    disabled=${!!groupBusy || !mutationReady || !state?.group_authority_active}
+                                    title=${state?.group_authority_active
+                                        ? 'This permission applies equally between non-owner members; owners always keep full control of their own domains.'
+                                        : 'Waiting for governed app-v26 activation'}
+                                    onChange=${event => saveGroup(group, group.members, group.name, event.currentTarget.value)}>
+                                    ${APPV26_GROUP_AUTHORITY_OPTIONS.map(option => html`
+                                        <option value=${option.key}>${option.name}</option>
+                                    `)}
+                                </select>
+                                <small>${state?.group_authority_active
+                                    ? APPV26_GROUP_AUTHORITY_OPTIONS.find(option => option.key === (group.member_authority || 'read'))?.desc
+                                    : 'Existing groups remain unchanged until app-v26 activates; they migrate to Read.'}</small>
+                            </label>
                             ${(dragAgentID || dragRemoteKey) && html`
                                 <div class="v23-drop-intent" role="status">
                                     ${dragRemoteKey
@@ -9719,7 +9993,7 @@ function AppV23AccessControl() {
                                             title="Drag back to the agent list to remove from this group"
                                             onDragStart=${event => {
                                                 event.stopPropagation();
-                                                startLocalDrag(memberID, group.group_id);
+                                                startLocalDrag(event, memberID, group.group_id);
                                             }}
                                             onDragEnd=${clearLocalDrag}>
                                             <span>${member?.avatar || '\u{1F916}'}</span>
@@ -13807,8 +14081,8 @@ function OverviewPage({ sse }) {
     // report a consensus app version yet, so do not cry "behind" (amber) on it.
     // Only a real version below the v11 baseline is genuinely behind. During a
     // rolling activation the intermediate fork rungs remain neutral; the
-    // current protocol turns green only once the mandatory app-v25 gate is active.
-    const appVerTone = appVer === '25' ? 'healthy' : (appVerNum > 0 && appVerNum < 15 ? 'degraded' : 'neutral');
+    // current protocol turns green only once the mandatory app-v26 gate is active.
+    const appVerTone = appVer === '26' ? 'healthy' : (appVerNum > 0 && appVerNum < 15 ? 'degraded' : 'neutral');
     const appVerShown = (appVer && appVer !== '0') ? ('v' + appVer) : '--';
     const mempoolTxs = (chain && chain.mempool_txs != null) ? Number(chain.mempool_txs) : null;
     const mempoolHot = mempoolTxs != null && !isNaN(mempoolTxs) && mempoolTxs > 50;
@@ -13833,7 +14107,7 @@ function OverviewPage({ sse }) {
         tile(chain ? Number(chain.block_height || 0).toLocaleString() : '--', 'Block height', { color: '#10b981', title: 'Total blocks committed to the chain.' }),
         tile(fmtAge(blockElapsed), 'Last block age', { title: 'Time since the last committed block.', sub: chainIdle ? 'idle - not a stall' : '' }),
         tile(chain ? (chain.catching_up ? 'Catching up' : 'In sync') : '--', 'Sync state', { small: true, color: chain ? (chain.catching_up ? '#f59e0b' : '#10b981') : undefined }),
-        tile(appVerShown, 'App version', { small: true, color: appVerTone === 'healthy' ? '#10b981' : (appVerTone === 'degraded' ? '#f59e0b' : undefined), title: 'CometBFT app protocol version. Green when current (25).' }),
+        tile(appVerShown, 'App version', { small: true, color: appVerTone === 'healthy' ? '#10b981' : (appVerTone === 'degraded' ? '#f59e0b' : undefined), title: 'CometBFT app protocol version. Green when current (26).' }),
         tile(chainIdle ? 'Idle' : (blockRate ? blockRate.toFixed(1) + 's' : '--'), 'Block rate', { small: chainIdle, title: 'Seconds per block, derived client-side from height deltas.' }),
         tile(uptimeDisplay, 'Node uptime', { small: true, title: 'Time since this node process started.' }),
         tile(chain && chain.mempool_txs != null ? chain.mempool_txs : '--', 'Pending transactions', { color: mempoolHot ? '#f59e0b' : undefined, title: 'Unconfirmed transactions waiting in the mempool. Amber above 50 signals a backlog.' }),

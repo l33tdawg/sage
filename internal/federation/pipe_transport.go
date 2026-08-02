@@ -483,15 +483,25 @@ func (m *Manager) handlePipeEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	unlock := ss.LockSyncPolicyRead()
-	defer unlock()
+	locksHeld := true
+	var ownerUnlock, contactUnlock func()
+	defer func() {
+		if locksHeld {
+			if contactUnlock != nil {
+				contactUnlock()
+			}
+			if ownerUnlock != nil {
+				ownerUnlock()
+			}
+			unlock()
+		}
+	}()
 	if m.badger == nil {
 		httpError(w, http.StatusNotImplemented, "consensus domain state is unavailable")
 		return
 	}
-	ownerUnlock := m.badger.LockDomainOwnershipRead()
-	defer ownerUnlock()
-	contactUnlock := ss.LockAgentContactRead()
-	defer contactUnlock()
+	ownerUnlock = m.badger.LockDomainOwnershipRead()
+	contactUnlock = ss.LockAgentContactRead()
 	if _, err := m.currentRequestAgreementBound(r.Context(), peer); err != nil {
 		httpError(w, http.StatusForbidden, "federation agreement is no longer active for this operator")
 		return
@@ -532,12 +542,35 @@ func (m *Manager) handlePipeEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// The durable admission is complete. Release policy/ownership/contact read
+	// leases before calling an optional embedding hook; wake-up transport must
+	// never participate in federation authorization lock ordering.
+	contactUnlock()
+	ownerUnlock()
+	unlock()
+	locksHeld = false
+	if event.Kind == "send" && !duplicate {
+		m.notifyAdmittedMessage(event.TargetAgentID, AgentMessageNotification{
+			MessageID: localPipeID, FromAgent: event.SourceAgentID, CreatedAt: event.CreatedAt,
+		})
+	}
 	status := "accepted"
 	if duplicate {
 		status = "duplicate"
 	}
-	_ = localPipeID // node-local id is deliberately never disclosed to the peer
 	writeJSON(w, http.StatusOK, &PipeEventResponse{Status: status})
+}
+
+func (m *Manager) notifyAdmittedMessage(targetAgentID string, notification AgentMessageNotification) {
+	if m == nil || m.messageNotifier == nil || targetAgentID == "" {
+		return
+	}
+	// Best effort and panic-safe: SSE backpressure or an embedding bug cannot
+	// roll back or reinterpret the already durable federated admission.
+	func() {
+		defer func() { _ = recover() }()
+		m.messageNotifier(targetAgentID, notification)
+	}()
 }
 
 func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, event *PipeEvent) (string, bool, error) {

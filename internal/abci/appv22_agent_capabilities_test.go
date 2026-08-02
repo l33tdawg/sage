@@ -56,7 +56,7 @@ func TestAppV22ForkGateAndVersionLockstep(t *testing.T) {
 	assert.False(t, app.postAppV22Fork(100))
 	assert.False(t, app.IsAppV22ActiveForNextTx())
 	assert.Equal(t, tx.CanonicalUpgradeName(22), appV22UpgradeName)
-	assert.Equal(t, uint64(25), MaxSupportedAppVersion())
+	assert.Equal(t, uint64(26), MaxSupportedAppVersion())
 
 	app.appV21AppliedHeight = 99
 	app.appV22AppliedHeight = 100

@@ -1,8 +1,8 @@
-Reconciled against internal/mcp for SAGE v11.16.4.
+Reconciled against internal/mcp for SAGE v11.17.0.
 
 # SAGE MCP Tools Reference
 
-SAGE exposes 27 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
+SAGE exposes 33 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
 the local Ed25519 identity; SSE and Streamable-HTTP use the MCP bearer-token/OAuth
 flow. Under app-v23 each HTTP bearer unlocks and signs with its own distinct
 restricted Member identity pending CEREBRUM review; it never inherits the
@@ -49,10 +49,9 @@ non-negotiable:
 - Skipping `sage_reflect` breaks the feedback loop. Paper 4 measured Spearman
   rho=0.716 improvement over time with memory vs rho=0.040 without it.
 
-The server enforces turn discipline: it blocks non-SAGE tool calls after 7
-non-SAGE calls without `sage_turn`, or after more than 5 minutes since the last
-`sage_turn` once at least 2 non-SAGE calls have accumulated. Calling `sage_turn`
-resets the guard (`server.go:327-349`).
+The server does not inject per-tool reminders or block work based on how often
+`sage_turn` is called. Memory-mode guidance is advisory; clients and automatic
+session hooks decide when preserving a turn is worth the context cost.
 
 ---
 
@@ -605,26 +604,33 @@ periods have no memories; monitoring agent activity across time.
 
 ### sage_status
 
-**Purpose:** Get caller-visible memory statistics: total memories, counts by
-domain and status, and last activity.
+**Purpose:** Get the signed caller's current standing, bounded readable-domain
+targets for scoped recall, and optional home-domain memory counts.
 
 **Source:** `tools.go:97-105` (definition), `tools.go:777-783` (handler)
 
 **Parameters:** None.
 
-**Returns:** A caller-scoped object containing `total_memories`, `by_domain`,
-`by_status`, `last_activity`, `total_exact`, `has_more`,
-`breakdowns_complete`, and `scope: "caller"`. App-v23 also includes the signed
-caller's own `registration_status`, `enrollment_status`, `role`, `profile`,
+**Returns:** Before app-v23, the legacy caller-scoped object contains
+`total_memories`, `by_domain`, `by_status`, `last_activity`, `total_exact`,
+`has_more`, `breakdowns_complete`, and `scope: "caller"`. App-v23 instead
+returns the signed caller's own `registration_status`, `enrollment_status`, `role`, `profile`,
 `home_domain`, `clearance`, `capabilities`, `approval_required`, `can_read`, and
-`can_write`. The access booleans are explicitly scoped to `home_domain`. A
+`can_write`, plus `readable_domains`, `readable_domains_scope`, and
+`readable_domains_truncated`. The readable-domain list is a bounded sample of
+currently authorized targets derived from the caller's own home/provenance,
+direct grants, and local Access Groups; every candidate is checked against
+live policy before it is returned. It is not a global domain roster and does
+not claim to enumerate every domain a read-all or ancestor grant can reach.
+The access booleans are explicitly scoped to `home_domain`. A
 pending or inactive caller receives this standing with
 `memory_access_available:false` and SAGE does not probe a forbidden memory
 route. An active caller receives the same standing merged with its visible
-memory statistics. If a mature caller-visible corpus returns the canonical
-authorization-scan-budget `422`, `sage_status` retries only the exact governed
-`home_domain`; a successful fallback reports `scope:"caller_home_domain"` and
-`counts_scope:"home_domain"`. If even that bounded aggregate is unavailable,
+home-domain count/lower bound. It never starts an unscoped memory disclosure
+walk: that path can exhaust its authorization budget before status can tell an
+agent which exact scope to use. A successful count reports
+`scope:"caller_home_domain"` and `counts_scope:"home_domain"`. If the exact
+home-domain count or optional domain projection exceeds the status time budget,
 the authenticated standing is still returned with `counts_available:false`
 and no misleading zero total. An inexact lower-bound zero is likewise omitted,
 not reported as an empty corpus. No scan budget is raised, and no roster or
@@ -632,13 +638,14 @@ global node counts are returned. Failure to authenticate/read the self-standing
 itself still fails the tool closed.
 
 App-v23 authorization and canonical-disclosure filters are applied before
-memory aggregation. The self-standing projection comes from signed
-`GET /v1/agent/me`, which is caller-only and intentionally available to a
+memory aggregation. The consensus-only self-standing projection comes from signed
+`GET /v1/agent/me?view=standing`, which is caller-only and intentionally available to a
 registered `pending_review` identity so clients can explain what CEREBRUM must
 approve. It does not weaken the active-only signed `/v1/agents` roster.
 
-**REST:** Signed `GET /v1/agent/me`, then bounded signed pagination over
-`GET /v1/memory/list` for an active caller. The
+**REST:** Signed `GET /v1/agent/me?view=standing`, then signed
+`GET /v1/agent/me/domains` and at most one exact-home-domain
+`GET /v1/memory/list` request for an active caller. The
 operator-only CEREBRUM statistics route is never used by an agent.
 
 **When to call:** Quick health check; understanding how full the memory store is;
@@ -806,6 +813,95 @@ mutable display name/bio and can be called again at any time.
 
 ---
 
+### sage_message_send
+
+**Purpose:** Idempotently send one message to one exact active agent on the
+same SAGE. `idempotency_key` is caller-scoped: retrying the exact request with
+the same key returns the original `message_id`; reusing it for different
+content returns a conflict. Local insertion is durable delivery, not read.
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `to` | string | yes | Exact local agent ID or a local name that resolves to one active agent. |
+| `payload` | string | yes | Untrusted agent request content. |
+| `intent` | string | no | Short purpose. |
+| `ttl_minutes` | integer | no | 1–1440; default 60. |
+| `idempotency_key` | string | yes | Stable 1–256-byte caller token reused only to retry this exact send. |
+
+Federated targets continue to use `sage_pipe` until both peers negotiate the
+separate receipt capability. A successful local send may also emit an
+additive `notifications/sage_message` JSON-RPC notification to already-open
+HTTP MCP SSE sessions authenticated as the exact recipient. The notification
+contains only `message_id`, `from_agent`, and `sent_at`; it is best-effort,
+ignorable, and is never delivery, read, presence, attention, or workflow
+evidence. Stdio and Streamable HTTP remain poll-on-turn.
+
+**REST:** `POST /v1/messages`.
+
+---
+
+### sage_messages_receive
+
+**Purpose:** Explicitly claim one bounded local message batch with
+lost-response recovery. Reusing the same caller-bound `receive_token` and
+limit replays the exact originally claimed ordered batch and never claims
+later work. Reusing a token with a different limit is rejected. Replay metadata
+is kept for 48 hours and bounded to 4096 tokens per agent; capacity is retryable,
+while a purged/incomplete exact batch is reported as gone instead of silently
+returning an empty replay or consuming newer work.
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `receive_token` | string | yes | Stable 1–256-byte token for this exact receive attempt. |
+| `limit` | integer | no | 1–20; default 5. |
+
+After the batch returns, MCP signs one exact-ID read acknowledgement per item
+before presenting it. If an acknowledgement fails, the already claimed work
+is still returned with `read_status:not_confirmed`; it is never hidden. Every
+payload remains untrusted request content.
+
+**REST:** `POST /v1/messages/receive`, followed per item by
+`PUT /v1/messages/{message_id}/read`.
+
+---
+
+### sage_message_reply
+
+**Purpose:** Idempotently reply to one receiver-local `message_id` returned by
+`sage_messages_receive`. The same exact result may be retried; a different
+second reply is rejected. Only the exact recipient that fetched and claimed
+the message can reply.
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `message_id` | string | yes | Exact receiver-local ID. |
+| `result` | string | yes | Untrusted result data. |
+
+**REST:** `POST /v1/messages/{message_id}/reply`.
+
+---
+
+### sage_message_status
+
+**Purpose:** Query the payload-free state of one exact local message sent by
+this caller. It returns independent `transport_status`, `read_status`, and
+`workflow_status` facts plus their bounded timestamps. Recipient, unrelated
+agent, Manager, Admin, Root, node operator, and nonexistent IDs receive the
+same non-enumerating 404 behavior. The projection never decrypts payload or
+result, so it remains usable while the content vault is locked.
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `message_id` | string | yes | Exact sender-local ID returned by `sage_message_send`. |
+
+`read_status:confirmed` means the exact addressed credential fetched the
+message and signed an acknowledgement naming that exact ID. It does not prove
+comprehension or action; absence means not confirmed, never unseen.
+
+**REST:** `GET /v1/messages/{message_id}/status`.
+
+---
+
 ### sage_pipe
 
 **Purpose:** Send work to another agent through the existing SAGE pipeline,
@@ -854,10 +950,11 @@ bytes can leave the node
 - If the remote node is offline, use its exact `agent@chain` address. A friendly
   handle deliberately cannot resolve from cached display metadata.
 
-Sender-queryable successful-delivery and receiver claim/read receipts are
-explicitly deferred beyond v11.16. In v11.16, a local queue status, a clean inbox,
-or the absence of a terminal failure must never be described as proof that the
-recipient received or read the work.
+The legacy pipe status is not a receipt. v11.17's canonical same-node Messages
+surface provides exact sender-queryable delivery/read evidence through
+`sage_message_status`; federated receipt propagation remains capability-gated
+and is not inferred from a local queue status, a clean inbox, or the absence of
+a terminal failure.
 
 **Note:** A purely local exchange keeps the existing completion summary journal.
 A federated payload/result is vault-backed transient input and is never
@@ -935,6 +1032,19 @@ CA, agreement, contact-ID, or other mutation material is exposed. `sage_pipe`
 repeats the same local domain-scope authorization on both federated resolution
 and direct send.
 
+App-v26 also permits friendly discovery across an exact linked-reader
+messaging edge when the receiver has separately enabled that exact caller.
+This does not use or reveal a shared-memory domain: the result contains only
+sanitized name/provider metadata and an exact `agent_id@chain_id` address.
+Root, historical Root, pending, inactive, Read-only, unrelated-group, paused,
+revoked, stale-generation, and `DenyFederatedPipe` principals collapse to no
+match. The response has no peer-roster total, truncation bit, online presence,
+delivery status, or read receipt. Its internal `linked-v23` marker means only
+that the exact relation was authorized during this live lookup; it is never
+rendered as online, reachable, or accepting. Direct and relay routes use the same signed
+lookup contract, and `sage_pipe` revalidates the exact relation and consent
+before any payload leaves the node.
+
 To make a follow-up request fast, SAGE keeps up to 128 caller-and-name lookup
 results in an in-memory cache for one minute (at most 64 chains and 20 matched
 contacts per entry). It retains one caller-visible domain basis per contact, so
@@ -945,6 +1055,9 @@ caller’s current local domain policy through the local-only
 immediately without a peer round trip. It only speeds discovery: the outbox
 requires a fresh authenticated remote contact and policy match before payload
 bytes can leave the node.
+Linked-v23 results have no memory-domain authorization basis and are never
+cached: every repeated friendly-name lookup rechecks the live signed relation,
+group, guest, agreement/policy generation, and exact receiver consent.
 
 An HTTP MCP bearer token must carry the target agent's Ed25519 signer for these
 federated operations. A legacy keyless bearer is rejected instead of running
@@ -968,7 +1081,8 @@ remote agent contacts.
   federated `to` is the exact `agent_id@chain` address.
 - `searched`: `["local"]` when a local match exists, otherwise
   `["local", "federated"]`.
-- `federated_cache`: `hit` or `miss` when federation was searched.
+- `federated_cache`: `hit` or `miss` for legacy shared-domain contacts, or
+  `live` when a linked-v23 relation deliberately bypasses the cache.
 - `total`, `truncated`, and a next-step `message`.
 
 **When to call:** When a user asks to contact an agent by a human name and the
@@ -990,8 +1104,9 @@ SAGE, with enough stable identity information to select an exact recipient:
 - `agent_id` / `to` — immutable exact ID accepted by `sage_pipe`;
 - `scope` (`local`) and `status` (`active`).
 
-The request is signed as the calling agent. The underlying `GET /v1/agents`
-projection applies the app-v23 active-ordinary enrollment boundary and excludes
+The request is signed as the calling agent. The underlying metadata-only
+`GET /v1/agents/directory` projection applies the app-v23 active-ordinary
+enrollment boundary and excludes
 CEREBRUM Root credentials, historical Root credentials, pending, inactive,
 removed, retired, or canonically inconsistent registrations. MCP then returns
 only the minimal identity picker above; it does not expose roles, capability
@@ -1007,7 +1122,7 @@ nodes never expose an unbounded agent directory.
 **Returns:** `agents`, `total`, `scope: "local"`, and a short routing reminder.
 Entries are sorted by display name and then agent ID for stable presentation.
 
-**REST:** signed `GET /v1/agents`
+**REST:** signed `GET /v1/agents/directory`
 
 **Source:** `tools.go` (`sage_directory` definition and `toolDirectory` handler)
 

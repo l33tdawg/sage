@@ -525,6 +525,20 @@ type AccessStore interface {
 	GetDomain(ctx context.Context, name string) (*DomainEntry, error)
 }
 
+// BoundedAccessGrantReader is an optional serving-projection capability for
+// latency-sensitive caller hints. The consensus store remains authoritative;
+// callers must re-authorize every returned candidate before disclosure.
+type BoundedAccessGrantReader interface {
+	GetActiveGrantsBounded(ctx context.Context, agentID string, limit int) ([]*AccessGrantEntry, error)
+}
+
+// BoundedAgentDomainReader is an optional serving-projection capability for
+// callers that need only a finite domain candidate set rather than a complete
+// historical inventory.
+type BoundedAgentDomainReader interface {
+	ListAgentDomainsBounded(ctx context.Context, agentID string, limit int) ([]string, error)
+}
+
 // ClearanceLevel mirrors tx.ClearanceLevel for store use.
 type ClearanceLevel uint8
 
@@ -753,13 +767,19 @@ const (
 // Pipeline guard errors. Callers distinguish these with errors.Is and map them
 // to HTTP 413 (too large) and 429 (quota).
 var (
-	ErrPipePayloadTooLarge    = errors.New("pipeline payload exceeds maximum size")
-	ErrPipeResultTooLarge     = errors.New("pipeline result exceeds maximum size")
-	ErrPipeIntentTooLarge     = errors.New("pipeline intent exceeds maximum size")
-	ErrPipeQuotaPerAgent      = errors.New("too many open pipelines for this requester")
-	ErrPipeQuotaPerPeer       = errors.New("too many open pipelines from this federation peer")
-	ErrPipeQuotaGlobal        = errors.New("too many open pipelines on this node")
-	ErrPipeContentUnavailable = errors.New("pipeline content is unavailable while the vault is locked")
+	ErrPipePayloadTooLarge        = errors.New("pipeline payload exceeds maximum size")
+	ErrPipeResultTooLarge         = errors.New("pipeline result exceeds maximum size")
+	ErrPipeIntentTooLarge         = errors.New("pipeline intent exceeds maximum size")
+	ErrPipeQuotaPerAgent          = errors.New("too many open pipelines for this requester")
+	ErrPipeQuotaPerPeer           = errors.New("too many open pipelines from this federation peer")
+	ErrPipeQuotaGlobal            = errors.New("too many open pipelines on this node")
+	ErrPipeContentUnavailable     = errors.New("pipeline content is unavailable while the vault is locked")
+	ErrMessageIdempotencyConflict = errors.New("message idempotency key was already used for different content")
+	ErrMessageReceiveConflict     = errors.New("message receive token was already used with different parameters")
+	ErrMessageReceiveQuota        = errors.New("too many retained message receive tokens for this agent")
+	ErrMessageReceiveExpired      = errors.New("message receive replay is no longer retained")
+	ErrMessageReplyConflict       = errors.New("message already has a different reply")
+	ErrMessageNotFound            = errors.New("message not found")
 )
 
 // PipelineMessage represents an ephemeral agent-to-agent work item.
@@ -820,6 +840,38 @@ type PipelineStore interface {
 	// never-claimed pipe even if it carried an oversized expires_at.
 	ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error)
 	PurgePipelines(ctx context.Context, olderThan time.Time) (int, error)
+}
+
+// MessageStatus is the payload-free sender-only projection used by the
+// canonical Messages API. It intentionally contains neither request/result
+// content nor proof material, so it remains available while the vault is
+// locked and cannot become a message-existence oracle for other callers.
+type MessageStatus struct {
+	MessageID       string     `json:"message_id"`
+	Scope           string     `json:"scope"`
+	TransportStatus string     `json:"transport_status"`
+	ReadStatus      string     `json:"read_status"`
+	ReadEvidence    string     `json:"read_evidence,omitempty"`
+	WorkflowStatus  string     `json:"workflow_status"`
+	SentAt          time.Time  `json:"sent_at"`
+	DeliveredAt     *time.Time `json:"delivered_at,omitempty"`
+	ReadAt          *time.Time `json:"read_at,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	ExpiresAt       time.Time  `json:"expires_at"`
+	TerminalAt      *time.Time `json:"terminal_at,omitempty"`
+	TerminalReason  string     `json:"terminal_reason,omitempty"`
+}
+
+// MessageStore is the canonical local Messages service. Legacy pipeline
+// routes remain compatibility wrappers over the same pipeline_messages rows;
+// these methods add durable request idempotency and exact receipt evidence,
+// not a second queue.
+type MessageStore interface {
+	SendLocalMessage(ctx context.Context, idempotencyKey string, msg *PipelineMessage) (*PipelineMessage, bool, error)
+	ReceiveLocalMessages(ctx context.Context, agentID, provider, receiveToken string, limit int) ([]*PipelineMessage, bool, error)
+	ReplyLocalMessage(ctx context.Context, receiverID, messageID, result string) (bool, error)
+	AcknowledgeLocalMessageRead(ctx context.Context, receiverID, messageID string) (bool, error)
+	GetMessageStatusForSender(ctx context.Context, senderID, messageID string) (*MessageStatus, error)
 }
 
 // PipelineAgentProof preserves the exact already-verified local REST request

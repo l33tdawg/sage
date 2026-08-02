@@ -1440,10 +1440,30 @@ func (s *PostgresStore) InsertAccessGrant(ctx context.Context, grant *AccessGran
 
 // GetActiveGrants retrieves all non-revoked grants for an agent.
 func (s *PostgresStore) GetActiveGrants(ctx context.Context, agentID string) ([]*AccessGrantEntry, error) {
+	return s.getActiveGrants(ctx, agentID, 0, false)
+}
+
+func (s *PostgresStore) GetActiveGrantsBounded(ctx context.Context, agentID string, limit int) ([]*AccessGrantEntry, error) {
+	return s.getActiveGrants(ctx, agentID, limit, true)
+}
+
+func (s *PostgresStore) getActiveGrants(ctx context.Context, agentID string, limit int, filterExpired bool) ([]*AccessGrantEntry, error) {
+	query := `SELECT domain, grantee_id, granter_id, access_level, expires_at, created_height, created_at
+		FROM access_grants
+		WHERE grantee_id = $1 AND revoked_at IS NULL`
+	args := []any{agentID}
+	if filterExpired {
+		query += ` AND (expires_at IS NULL OR expires_at > $2)`
+		args = append(args, time.Now().UTC())
+	}
+	query += `
+		ORDER BY created_at`
+	if limit > 0 {
+		query += fmt.Sprintf(" LIMIT $%d", len(args)+1)
+		args = append(args, limit)
+	}
 	rows, err := s.db.Query(ctx,
-		`SELECT domain, grantee_id, granter_id, access_level, expires_at, created_height, created_at
-		FROM access_grants WHERE grantee_id = $1 AND revoked_at IS NULL
-		ORDER BY created_at`, agentID)
+		query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get active grants: %w", err)
 	}
@@ -3132,6 +3152,38 @@ func (s *PostgresStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 	return agents, rows.Err()
 }
 
+// ListAgentDirectory is the metadata-only local recipient projection. It
+// deliberately avoids agentColumns because that projection derives a memory
+// count for every agent and sage_directory discards those counts.
+func (s *PostgresStore) ListAgentDirectory(ctx context.Context) ([]*AgentEntry, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT a.agent_id, a.name, COALESCE(a.registered_name, ''),
+			COALESCE(a.provider, ''), a.status, a.removed_at
+		FROM agents a
+		WHERE a.status != 'removed'
+		ORDER BY a.created_at ASC, a.agent_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list agent directory: %w", err)
+	}
+	defer rows.Close()
+
+	agents := make([]*AgentEntry, 0)
+	for rows.Next() {
+		agent := &AgentEntry{}
+		if scanErr := rows.Scan(
+			&agent.AgentID, &agent.Name, &agent.RegisteredName,
+			&agent.Provider, &agent.Status, &agent.RemovedAt,
+		); scanErr != nil {
+			return nil, fmt.Errorf("scan agent directory: %w", scanErr)
+		}
+		if agent.RegisteredName == "" {
+			agent.RegisteredName = agent.Name
+		}
+		agents = append(agents, agent)
+	}
+	return agents, rows.Err()
+}
+
 func (s *PostgresStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry, error) {
 	a, err := scanAgent(s.db.QueryRow(ctx, `SELECT `+agentColumns+`
 		FROM agents a WHERE a.agent_id = $1`, agentID))
@@ -3389,11 +3441,21 @@ func (s *PostgresStore) ListAgentTags(_ context.Context, _ string) ([]TagCount, 
 }
 
 func (s *PostgresStore) ListAgentDomains(ctx context.Context, agentID string) ([]string, error) {
-	rows, err := s.db.Query(ctx, `
+	return s.ListAgentDomainsBounded(ctx, agentID, 0)
+}
+
+func (s *PostgresStore) ListAgentDomainsBounded(ctx context.Context, agentID string, limit int) ([]string, error) {
+	query := `
 		SELECT domain_tag FROM memories
 		WHERE submitting_agent = $1 AND domain_tag != ''
 		GROUP BY domain_tag
-		ORDER BY COUNT(*) DESC, domain_tag ASC`, agentID)
+		ORDER BY COUNT(*) DESC, domain_tag ASC`
+	args := []any{agentID}
+	if limit > 0 {
+		query += ` LIMIT $2`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list agent domains: %w", err)
 	}

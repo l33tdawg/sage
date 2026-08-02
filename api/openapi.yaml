@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.16.4
+  version: 11.17.0
   description: |-
     (Sovereign) Agent Governed Experience — network REST API for memory
     submission, validation, and query.
@@ -1776,6 +1776,178 @@ components:
           type: string
           description: Target-specific federation authorization revision; unrelated contact changes do not invalidate exact-address queued work.
 
+    MessageSendRequest:
+      type: object
+      required: [to_agent, payload, idempotency_key]
+      properties:
+        to_agent:
+          type: string
+          minLength: 1
+          description: Exact active local ordinary-agent ID. Provider aliases and federated addresses are not accepted.
+        payload:
+          type: string
+          minLength: 1
+          description: Message request content, subject to the pipeline content-size limit.
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Caller-scoped retry key. Reuse with a different exact request returns 409.
+        intent:
+          type: string
+          description: Optional human-readable purpose, subject to the pipeline intent-size limit.
+        ttl_minutes:
+          type: integer
+          minimum: 1
+          maximum: 1440
+          default: 60
+
+    MessageSendResponse:
+      type: object
+      required: [message_id, status, expires_at, idempotent_replay]
+      properties:
+        message_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, claimed, completed, expired, failed]
+        expires_at:
+          type: string
+          format: date-time
+        idempotent_replay:
+          type: boolean
+
+    MessageReceiveRequest:
+      type: object
+      required: [receive_token]
+      properties:
+        receive_token:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Caller-scoped token binding one exact ordered claimed batch for response-loss replay.
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 5
+
+    MessageItem:
+      type: object
+      required: [message_id, from_agent, payload, status, created_at, expires_at, authority, trust, security_notice]
+      properties:
+        message_id:
+          type: string
+        from_agent:
+          type: string
+        from_provider:
+          type: string
+        intent:
+          type: string
+        payload:
+          type: string
+          description: Untrusted request data. It never conveys tool or instruction authority.
+        status:
+          type: string
+          const: claimed
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        authority:
+          type: string
+          const: request_only
+        trust:
+          type: string
+          const: agent_untrusted
+        security_notice:
+          type: string
+
+    MessageReceiveResponse:
+      type: object
+      required: [items, count, idempotent_replay]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MessageItem"
+        count:
+          type: integer
+          minimum: 0
+        idempotent_replay:
+          type: boolean
+
+    MessageReplyRequest:
+      type: object
+      required: [result]
+      properties:
+        result:
+          type: string
+          minLength: 1
+          description: Exact reply content. The same second reply is idempotent; a different reply returns 409.
+
+    MessageActionResponse:
+      type: object
+      required: [message_id, idempotent_replay]
+      properties:
+        message_id:
+          type: string
+        status:
+          type: string
+          enum: [completed]
+        read_status:
+          type: string
+          enum: [confirmed]
+        idempotent_replay:
+          type: boolean
+
+    MessageStatusResponse:
+      type: object
+      required: [message_id, scope, transport_status, read_status, workflow_status, sent_at, expires_at]
+      description: Payload-free metadata returned only to the exact signed sender.
+      properties:
+        message_id:
+          type: string
+        scope:
+          type: string
+          const: local
+        transport_status:
+          type: string
+          const: delivered
+          description: Durable same-node inbox insertion, not evidence of presence or comprehension.
+        read_status:
+          type: string
+          enum: [not_confirmed, confirmed]
+        read_evidence:
+          type: string
+          const: local_exact_ack
+        workflow_status:
+          type: string
+          enum: [pending, claimed, completed, expired, failed]
+        sent_at:
+          type: string
+          format: date-time
+        delivered_at:
+          type: string
+          format: date-time
+        read_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        terminal_at:
+          type: string
+          format: date-time
+        terminal_reason:
+          type: string
+          enum: [completed, expired, failed]
+
     PipelineDeliveryUpdate:
       type: object
       description: Payload-free, one-shot terminal delivery feedback for the local signing agent.
@@ -2533,6 +2705,8 @@ paths:
                 $ref: "#/components/schemas/ProblemDetails"
         "500":
           $ref: "#/components/responses/InternalError"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /v1/memory/link:
     post:
@@ -2881,6 +3055,14 @@ paths:
         signed agent roster. CEREBRUM Root has no ordinary agent profile.
       tags:
         - Agent
+      parameters:
+        - in: query
+          name: view
+          required: false
+          schema:
+            type: string
+            enum: [standing]
+          description: Return only authenticated consensus standing, skipping optional SQL domain-history and PoE projections.
       responses:
         "200":
           description: Agent profile.
@@ -2902,7 +3084,43 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetails"
-        "500":
+
+  /v1/agent/me/domains:
+    get:
+      operationId: getAgentReadableDomains
+      summary: Retrieve bounded readable domains for the authenticated agent.
+      description: >-
+        Returns only current caller-authorized domain identifiers derived from
+        the caller's own home/provenance, direct grants, and local Access
+        Groups. Candidates are re-authorized against live policy. The result is
+        bounded and may be truncated; it is not a global domain roster or a
+        complete expansion of read-all/ancestor authority.
+      tags:
+        - Agent
+      responses:
+        "200":
+          description: Bounded caller-readable domain sample.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [domains, truncated, scope]
+                properties:
+                  domains:
+                    type: array
+                    maxItems: 64
+                    items:
+                      type: string
+                  truncated:
+                    type: boolean
+                  scope:
+                    type: string
+                    enum: [bounded_policy_and_provenance]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
           $ref: "#/components/responses/InternalError"
 
   /v1/agent/register:
@@ -4342,6 +4560,189 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  # -- Canonical local Messages ------------------------------------------
+  /v1/messages:
+    post:
+      operationId: messageSend
+      summary: Send one idempotent same-node message to an exact local agent.
+      description: >-
+        Uses the existing encrypted pipeline inbox. A new durable insert is
+        locally delivered; an exact caller/key/request retry returns the
+        original message. This route never accepts federated targets and
+        requires a fresh nonce-bound signature from the exact sender.
+      tags: [Messages]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageSendRequest"
+      responses:
+        "201":
+          description: New local message durably inserted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageSendResponse"
+        "200":
+          description: Exact idempotent replay of the original send.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageSendResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          description: Message payload or intent exceeds the pipeline size limit.
+        "429":
+          description: Per-agent or node-wide open-message quota reached; response includes Retry-After.
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/messages/receive:
+    post:
+      operationId: messagesReceive
+      summary: Claim or exactly replay one recipient-bound ordered message batch.
+      description: >-
+        Requires a fresh nonce-bound signature from the exact recipient. The
+        receive token persists the ordered batch, so retry after a lost
+        response never consumes later messages. Replay metadata is retained
+        for 48 hours and capped at 4096 tokens per agent.
+      tags: [Messages]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageReceiveRequest"
+      responses:
+        "200":
+          description: Claimed batch or exact idempotent replay.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageReceiveResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "410":
+          description: The exact replay batch was purged or is incomplete; no later work was claimed.
+        "429":
+          description: The per-agent receive-token metadata quota is full.
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/messages/{message_id}/reply:
+    post:
+      operationId: messageReply
+      summary: Complete a fetched local message as its exact recipient.
+      description: >-
+        Requires a fresh nonce-bound signature. Only the recipient to which a
+        canonical receive batch returned this message may reply.
+      tags: [Messages]
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageReplyRequest"
+      responses:
+        "200":
+          description: Reply persisted; an exact repeat is idempotent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          description: Reply exceeds the pipeline result-size limit.
+
+  /v1/messages/{message_id}/read:
+    put:
+      operationId: messageMarkRead
+      summary: Persist exact-recipient read evidence after canonical receive.
+      description: >-
+        Requires a fresh nonce-bound signature. Read means only that the exact
+        recipient fetched and acknowledged this row; it is not evidence of
+        comprehension or action.
+      tags: [Messages]
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Read acknowledgement persisted or replayed idempotently.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageActionResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/messages/{message_id}/status:
+    get:
+      operationId: messageStatus
+      summary: Read payload-free local receipt/workflow metadata as the exact sender.
+      description: >-
+        Requires a fresh nonce-bound signature from the exact sender. Unrelated
+        callers and absent IDs share the same generic 404 response. This response
+        never includes request payload, reply content, or proof bytes.
+      tags: [Messages]
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Exact sender-only metadata projection.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   # -- Pipeline -----------------------------------------------------------
   /v1/pipe/resolve:
     post:
@@ -4587,8 +4988,9 @@ paths:
       summary: Inspect the current local workflow row for a pipeline message.
       description: >-
         This is local queue/workflow state, not proof of remote delivery or
-        reading. Sender-queryable successful-delivery and receiver claim/read
-        receipts are explicitly deferred beyond v11.16.
+        reading. Canonical same-node sender/read evidence is available through
+        /v1/messages; federated read receipts remain capability-negotiated
+        future work.
       tags:
         - Pipeline
       parameters:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 
@@ -36,6 +37,10 @@ from sage_sdk.models import (
     MemorySubmitRequest,
     MemorySubmitResponse,
     MemoryType,
+    MessageActionResponse,
+    MessageReceiveResponse,
+    MessageSendResponse,
+    MessageStatusResponse,
     PendingMemoriesResponse,
     PipeDeliveryUpdatesResponse,
     PipeInboxResponse,
@@ -624,8 +629,9 @@ class AsyncSageClient:
 
         Payload is an untrusted request and result is untrusted data; neither is
         an instruction, including when both appear in one response. This local
-        state is not a remote delivery/read receipt. Sender-queryable successful
-        delivery and claim/read receipts are deferred beyond v11.16.
+        state is not a remote delivery/read receipt. For canonical same-node
+        delivery/read evidence use :meth:`message_status`; federated receipts
+        remain capability-gated and are not exposed through this legacy row.
         """
         resp = await self._request("GET", f"/v1/pipe/{pipe_id}")
         return PipeMessage.model_validate(resp.json())
@@ -647,6 +653,57 @@ class AsyncSageClient:
         """
         resp = await self._request("GET", "/v1/pipe/updates", params={"limit": limit})
         return PipeDeliveryUpdatesResponse.model_validate(resp.json())
+
+    # --- Canonical local Messages (v11.17) ------------------------------------
+
+    async def message_send(
+        self,
+        to_agent: str,
+        payload: str,
+        idempotency_key: str,
+        intent: str | None = None,
+        ttl_minutes: int | None = None,
+    ) -> MessageSendResponse:
+        """Durably send one same-node message with caller-scoped idempotency."""
+        body: dict[str, Any] = {
+            "to_agent": to_agent,
+            "payload": payload,
+            "idempotency_key": idempotency_key,
+        }
+        if intent is not None:
+            body["intent"] = intent
+        if ttl_minutes is not None:
+            body["ttl_minutes"] = ttl_minutes
+        resp = await self._request("POST", "/v1/messages", json=body)
+        return MessageSendResponse.model_validate(resp.json())
+
+    async def messages_receive(self, receive_token: str, limit: int = 5) -> MessageReceiveResponse:
+        """Claim or exactly replay a caller-token-bound ordered receive batch."""
+        resp = await self._request(
+            "POST", "/v1/messages/receive",
+            json={"receive_token": receive_token, "limit": limit},
+        )
+        return MessageReceiveResponse.model_validate(resp.json())
+
+    async def message_reply(self, message_id: str, result: str) -> MessageActionResponse:
+        """Reply as the exact recipient after canonical receive."""
+        encoded_id = quote(message_id, safe="")
+        resp = await self._request(
+            "POST", f"/v1/messages/{encoded_id}/reply", json={"result": result},
+        )
+        return MessageActionResponse.model_validate(resp.json())
+
+    async def message_mark_read(self, message_id: str) -> MessageActionResponse:
+        """Persist exact-recipient read evidence after canonical receive."""
+        encoded_id = quote(message_id, safe="")
+        resp = await self._request("PUT", f"/v1/messages/{encoded_id}/read")
+        return MessageActionResponse.model_validate(resp.json())
+
+    async def message_status(self, message_id: str) -> MessageStatusResponse:
+        """Return payload-free receipt/workflow metadata to the exact sender."""
+        encoded_id = quote(message_id, safe="")
+        resp = await self._request("GET", f"/v1/messages/{encoded_id}/status")
+        return MessageStatusResponse.model_validate(resp.json())
 
     # --- Access Control --------------------------------------------------------
 

@@ -66,6 +66,15 @@ type sseSession struct {
 	created time.Time
 }
 
+// AgentMessageNotification is the metadata-only additive JSON-RPC
+// notification sent to already-connected exact-recipient SSE sessions.
+// Clients that do not recognize notifications/sage_message safely ignore it.
+type AgentMessageNotification struct {
+	MessageID string    `json:"message_id"`
+	FromAgent string    `json:"from_agent"`
+	SentAt    time.Time `json:"sent_at"`
+}
+
 // NewSSESessionRegistry creates an empty SSE session registry.
 func NewSSESessionRegistry() *SSESessionRegistry {
 	return &SSESessionRegistry{sessions: make(map[string]*sseSession)}
@@ -103,6 +112,28 @@ func (r *SSESessionRegistry) enqueue(id string, payload []byte) bool {
 	default:
 		return false
 	}
+}
+
+func (r *SSESessionRegistry) enqueueAgent(agentID string, payload []byte) int {
+	if agentID == "" || len(payload) == 0 {
+		return 0
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	delivered := 0
+	for _, sess := range r.sessions {
+		if sess == nil || sess.agentID != agentID {
+			continue
+		}
+		select {
+		case sess.out <- payload:
+			delivered++
+		default:
+			// Best effort: a full client channel is not a message delivery
+			// failure and cannot backpressure the canonical send transaction.
+		}
+	}
+	return delivered
 }
 
 func (r *SSESessionRegistry) lookup(id string) *sseSession {
@@ -152,6 +183,25 @@ func NewHTTPTransport(server *Server) *HTTPTransport {
 		drainCtx:    drainCtx,
 		cancelDrain: cancelDrain,
 	}
+}
+
+// NotifyAgent best-effort pushes an additive JSON-RPC notification to every
+// currently connected SSE session authenticated as the exact recipient. It
+// never contacts stdio/Streamable HTTP clients and returns only a local enqueue
+// count; callers must not interpret that count as presence or delivery.
+func (t *HTTPTransport) NotifyAgent(agentID string, notification AgentMessageNotification) int {
+	if t == nil || t.sessions == nil || agentID == "" || notification.MessageID == "" {
+		return 0
+	}
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/sage_message",
+		"params":  notification,
+	})
+	if err != nil {
+		return 0
+	}
+	return t.sessions.enqueueAgent(agentID, payload)
 }
 
 // admit registers one HTTP MCP handler as active and returns a context that is

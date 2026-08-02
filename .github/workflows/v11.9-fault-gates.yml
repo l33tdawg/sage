@@ -62,7 +62,7 @@ jobs:
         run: make test-cometbft-patch
 
   real-comet-chaos:
-    name: App-v25 real Comet/ABCI crash, partition, and state-sync gate
+    name: App-v26 real Comet/ABCI crash, partition, and state-sync gate
     runs-on: ubuntu-latest
     timeout-minutes: 30
     # Independent of app-multiprocess: no needs.app-multiprocess.* reference

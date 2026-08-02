@@ -5643,6 +5643,53 @@ input[type="range"]::-moz-range-thumb {
     font-size: 13px;
     line-height: 1.65;
 }
+.cerebrum-recovery-inventory {
+    display: grid;
+    gap: 12px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--bg-elevated) 72%, transparent);
+}
+.cerebrum-recovery-inventory-head,
+.cerebrum-recovery-assignment {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+}
+.cerebrum-recovery-inventory h3 { margin: 0 0 4px; color: var(--text); font-size: 14px; }
+.cerebrum-recovery-inventory p { margin: 0; color: var(--text-dim); font-size: 11px; line-height: 1.5; }
+.cerebrum-recovery-inventory-head > span {
+    color: var(--accent); font: 700 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.cerebrum-recovery-list {
+    display: grid;
+    gap: 7px;
+    max-height: 280px;
+    overflow: auto;
+    padding-right: 3px;
+}
+.cerebrum-recovery-record {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-surface);
+    cursor: pointer;
+}
+.cerebrum-recovery-record:has(input:checked) { border-color: color-mix(in srgb, var(--accent) 65%, var(--border)); }
+.cerebrum-recovery-record-copy { display: grid; gap: 4px; min-width: 0; }
+.cerebrum-recovery-record-copy strong { color: var(--text); font-size: 12px; }
+.cerebrum-recovery-record-copy > span { color: var(--text-dim); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+.cerebrum-recovery-record-copy small { color: var(--muted); font: 600 9px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-transform: uppercase; }
+.cerebrum-recovery-record.deprecate-only small { color: color-mix(in srgb, var(--danger) 75%, var(--muted)); }
+.cerebrum-recovery-assignment label { display: grid; gap: 5px; min-width: min(100%, 360px); color: var(--text-dim); font-size: 10px; }
+.cerebrum-recovery-assignment select { width: 100%; }
+.cerebrum-recovery-note { color: #f5bd55 !important; }
 .cerebrum-repair-choice {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;

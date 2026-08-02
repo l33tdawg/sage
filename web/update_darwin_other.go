@@ -11,7 +11,7 @@ func platformPendingUpdateMarker(execPath string) string {
 	return execPath + pendingUpdateSuffix
 }
 
-func installDarwinAppUpdate(context.Context, string, string) (string, error) {
+func installDarwinAppUpdate(context.Context, string, string, string) (string, error) {
 	return "", fmt.Errorf("macOS app updates are unavailable on this platform")
 }
 

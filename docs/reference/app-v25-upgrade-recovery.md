@@ -11,7 +11,8 @@ rewriting chain history.
 App-v25 requires app-v24 as its immediate predecessor. The activation block
 uses app-v24 semantics; app-v25 rules begin strictly at the following block
 (H+1). A node never votes for an application version it cannot execute, and
-the binary's current supported ceiling is app version 25.
+app-v25 remains the recovery fork; the v11.17 binary's current supported
+ceiling is app version 26.
 
 This is a normal governed chain upgrade. Do not stop automatic advancement of
 the mandatory upgrade ladder: validators must run the exact release binary and

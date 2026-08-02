@@ -659,6 +659,13 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 			resp.CanWrite = &canWrite
 		}
 	}
+	// MCP policy checks and sage_status need only the authenticated consensus
+	// standing above. Do not make them wait for SQL domain history or PoE
+	// projections; those remain available on the ordinary full profile.
+	if r.URL.Query().Get("view") == "standing" {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
 
 	if s.agentStore != nil {
 		if agent, err := s.agentStore.GetAgent(r.Context(), agentID); err == nil && agent != nil {

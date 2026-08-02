@@ -200,8 +200,8 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
   assert.match(
     daemonStager,
-    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\|13\|14\|15\|16\)\\\./,
-    'the tagged daemon stager must accept the current v11.16 release series',
+    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\|13\|14\|15\|16\|17\)\\\./,
+    'the tagged daemon stager must accept the current v11.17 release series',
   );
   assert.match(evidence, /Repair v11\.12\.0 native staging helper for immutable-tag recovery/);
   assert.match(evidence, /github\.event_name == 'workflow_dispatch'.*RELEASE_TAG == 'v11\.12\.0'/);
@@ -369,12 +369,12 @@ test('the Linux cold gate proves the closed placeholder through the real Comet d
   assert.doesNotMatch(v119StateSync, /busybox nslookup provider-p2p/);
 });
 
-test('the mandatory cold gate transfers one exact app-v25 session', () => {
+test('the mandatory cold gate transfers one exact app-v26 session', () => {
   assert.match(
     faultWorkflow,
-    /name: App-v25 real Comet\/ABCI crash, partition, and state-sync gate/,
+    /name: App-v26 real Comet\/ABCI crash, partition, and state-sync gate/,
   );
-  assert.match(v119StateSync, /^TARGET_APP_VERSION=25$/m);
+  assert.match(v119StateSync, /^TARGET_APP_VERSION=26$/m);
   assert.match(v119StateSync, /"app_version": \$\{TARGET_APP_VERSION\}/);
   assert.doesNotMatch(v119StateSync, /"app_version": (?:20|21|22|23)/);
   assert.match(
@@ -538,12 +538,12 @@ test('the mandatory cold gate fails closed unless every seed reports its exact s
   assert.match(seedMemories, /lines\[-1\] != summary/);
   assert.match(seedMemories, /matches\[0\] != summary/);
   assert.doesNotMatch(seedMemories, />\/dev\/null/);
-  assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/post-v25\.txt 1/);
+  assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/post-v26\.txt 1/);
   assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/advance\.txt 2/);
   assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/restart\.txt 1/);
   assert.match(
     v119StateSync,
-    /seed_memories "\$\{PROVIDER\}" \/sage\/post-v25\.txt 1\nwait_height_at_least/,
+    /seed_memories "\$\{PROVIDER\}" \/sage\/post-v26\.txt 1\nwait_height_at_least/,
   );
   assert.match(
     v119StateSync,
@@ -925,6 +925,15 @@ test('public mutations are serial, resumable, and downstream of the gate', () =>
   assert.match(job('stage-github-release'), /gh release create/);
   assert.match(job('stage-github-release'), /--draft/);
   assert.match(job('stage-github-release'), /GH_REPO:.*github\.repository/);
+  assert.match(
+    job('verify-staged-macos-release'),
+    /repos\/\$\{GH_REPO\}\/releases\?per_page=100/,
+  );
+  assert.match(
+    job('verify-staged-macos-release'),
+    /repos\/\$\{GH_REPO\}\/releases\/assets\/\$\{asset_id\}/,
+  );
+  assert.doesNotMatch(job('verify-staged-macos-release'), /gh release download/);
 
   assertNeeds('publish-docker-version', ['stage-github-release', 'release-metadata']);
   assertNeeds('publish-mcp', ['publish-docker-version', 'release-metadata']);

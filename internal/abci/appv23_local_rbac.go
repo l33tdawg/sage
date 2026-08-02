@@ -841,6 +841,18 @@ func (app *SageApp) processAccessGroupMutateV23(parsedTx *tx.ParsedTx, height in
 	if !sort.StringsAreSorted(mutation.Members) {
 		return &abcitypes.ExecTxResult{Code: 112, Log: "access group members must be canonical sorted"}
 	}
+	if app.postAppV26Rules(height) {
+		if mutation.Delete {
+			if mutation.MemberAuthority != "" {
+				return appV23ControlDenied()
+			}
+		} else if err := store.ValidateAppV26GroupAuthority(mutation.MemberAuthority); err != nil {
+			return appV23ControlDenied()
+		}
+	} else if mutation.MemberAuthority != "" {
+		// Historical forks neither accept nor persist the appended field.
+		return appV23ControlDenied()
+	}
 	elevation, err := app.appV23ElevationUse(
 		actorID, root, parsedTx.LocalElevation, tx.TxTypeAccessGroupMutate,
 		tx.AccessGroupMutateActionBytes(mutation), height,
@@ -848,11 +860,20 @@ func (app *SageApp) processAccessGroupMutateV23(parsedTx *tx.ParsedTx, height in
 	if err != nil {
 		return appV23ControlDenied()
 	}
-	if err := app.badgerStore.MutateAppV23AccessGroup(
-		actorID, mutation.GroupID, mutation.Name, mutation.Members,
-		mutation.ExpectedRevision, mutation.Delete, height,
-		elevation,
-	); err != nil {
+	var mutateErr error
+	if app.postAppV26Rules(height) {
+		mutateErr = app.badgerStore.MutateAppV26AccessGroup(
+			actorID, mutation.GroupID, mutation.Name, mutation.Members,
+			mutation.MemberAuthority, mutation.ExpectedRevision,
+			mutation.Delete, height, elevation,
+		)
+	} else {
+		mutateErr = app.badgerStore.MutateAppV23AccessGroup(
+			actorID, mutation.GroupID, mutation.Name, mutation.Members,
+			mutation.ExpectedRevision, mutation.Delete, height, elevation,
+		)
+	}
+	if mutateErr != nil {
 		return appV23ControlDenied()
 	}
 	return &abcitypes.ExecTxResult{Code: 0, Log: "access group updated"}

@@ -51,6 +51,53 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.17.0
+
+**App-v26 makes Access Group authority explicit and reviewable.** Every local
+group now stores one deterministic member authority: `read`, `read_write`, or
+`read_write_modify`. Existing groups migrate to the safe `read` baseline at
+the strict H+1 fork boundary. A domain owner always retains full control of its
+own domain; group membership is additive, the strongest applicable group wins,
+and removing an agent revokes only that cross-member relationship without
+touching the agent's own domains. Linked federated agents remain read-only
+guests and can never acquire local Write, Modify, ownership, or governance.
+
+**Local agent messaging now has one canonical, durable receipt contract.** An
+idempotent send, exact receive-batch replay, recipient-only reply/read
+acknowledgement, and sender-only payload-free status projection use the existing
+encrypted pipeline inbox rather than a second queue. Connected HTTP MCP SSE
+sessions for the exact recipient may receive a metadata-only wake-up; this is a
+best-effort hint, never presence, delivery, comprehension, or read evidence.
+The enforced `sage_turn` reminder/checkpoint nags are removed.
+
+**CEREBRUM helps Root finish historical recovery instead of leaving a warning.**
+Unresolved preserved records can be inspected through bounded safe previews,
+selected, assigned to an active local ordinary agent when exact verified
+evidence permits it, or deprecated. Already-deprecated rows are excluded.
+Authorship, content, domains, and chain history remain immutable; assignment
+changes only current operational ownership. Conflicting or unverifiable rows
+remain deprecate-only.
+
+**Linked SAGE discovery closes over the relationship agents can actually use.**
+Caller-scoped directory results include only consented linked peers and expose
+their exact address plus registered/display name metadata. The same authority
+is enforced for direct and secure-relay paths; discovery grants no remote
+memory write or local group membership.
+
+**Operator mutations and signed updates fail safely without lying.** CEREBRUM
+reconciles uncertain consensus responses against canonical state and repairs
+the local agent projection after a committed approval. macOS updates now use
+strict cryptographic verification before activation, verify the exact installed
+bundle afterward, and atomically restore the previous app if verification
+fails. A private draft release is downloaded and verified by immutable asset
+ID before publication.
+
+This is a governed consensus upgrade from app-v25 to app-v26. Existing chains
+advance in place; memories, historical authors, domains, and prior blocks are
+not rewritten.
+
+Container: `ghcr.io/l33tdawg/sage:11.17.0`. SDK 11.17.0.
+
 ## What's New in v11.16.4
 
 **Existing nodes recover from stale app-v23 serving projections at startup.** A
@@ -1070,7 +1117,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.16.4`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.0`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:

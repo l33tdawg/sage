@@ -89,12 +89,30 @@ type AppV23RoleState struct {
 }
 
 type AppV23AccessGroup struct {
-	GroupID       string   `json:"group_id"`
-	Name          string   `json:"name"`
-	Members       []string `json:"members"`
-	Revision      uint64   `json:"revision"`
-	UpdatedBy     string   `json:"updated_by"`
-	UpdatedHeight int64    `json:"updated_height"`
+	GroupID         string   `json:"group_id"`
+	Name            string   `json:"name"`
+	Members         []string `json:"members"`
+	MemberAuthority string   `json:"member_authority,omitempty"`
+	Revision        uint64   `json:"revision"`
+	UpdatedBy       string   `json:"updated_by"`
+	UpdatedHeight   int64    `json:"updated_height"`
+}
+
+const (
+	AppV26GroupAuthorityRead            = "read"
+	AppV26GroupAuthorityReadWrite       = "read_write"
+	AppV26GroupAuthorityReadWriteModify = "read_write_modify"
+)
+
+func ValidateAppV26GroupAuthority(authority string) error {
+	switch authority {
+	case AppV26GroupAuthorityRead,
+		AppV26GroupAuthorityReadWrite,
+		AppV26GroupAuthorityReadWriteModify:
+		return nil
+	default:
+		return errors.New("group member_authority must be read, read_write, or read_write_modify")
+	}
 }
 
 type AppV23GenesisBootstrap struct {
@@ -4206,6 +4224,29 @@ func validateAppV23GroupID(groupID string) error {
 }
 
 func (s *BadgerStore) MutateAppV23AccessGroup(actorID, groupID, name string, members []string, expectedRevision uint64, deleteGroup bool, height int64, elevation ...*AppV23ElevationUse) error {
+	return s.mutateAppV23AccessGroup(
+		actorID, groupID, name, members, "", expectedRevision, deleteGroup, height,
+		false, elevation...,
+	)
+}
+
+// MutateAppV26AccessGroup persists the app-v26 group-derived member authority
+// as part of the same revision-guarded consensus mutation as membership.
+func (s *BadgerStore) MutateAppV26AccessGroup(actorID, groupID, name string, members []string, memberAuthority string, expectedRevision uint64, deleteGroup bool, height int64, elevation ...*AppV23ElevationUse) error {
+	if !deleteGroup {
+		if err := ValidateAppV26GroupAuthority(memberAuthority); err != nil {
+			return err
+		}
+	} else if memberAuthority != "" {
+		return errors.New("deleted access group must have empty member_authority")
+	}
+	return s.mutateAppV23AccessGroup(
+		actorID, groupID, name, members, memberAuthority,
+		expectedRevision, deleteGroup, height, true, elevation...,
+	)
+}
+
+func (s *BadgerStore) mutateAppV23AccessGroup(actorID, groupID, name string, members []string, memberAuthority string, expectedRevision uint64, deleteGroup bool, height int64, requireCurrentRootGeneration bool, elevation ...*AppV23ElevationUse) error {
 	if err := validateAppV23GroupID(groupID); err != nil {
 		return err
 	}
@@ -4293,6 +4334,22 @@ func (s *BadgerStore) MutateAppV23AccessGroup(actorID, groupID, name string, mem
 				if err := s.appV23ReadEffectiveJSONTxn(txn, appV23EnrollmentKey(member), &enrollment); err != nil || !enrollment.Active {
 					return fmt.Errorf("group member %s needs active local approval", member)
 				}
+				// Root handover suspends every delegated Admin approved by an
+				// older generation. App-v26 groups must use the same effective
+				// principal state as the data plane: retaining the raw Active bit
+				// here would let a stale Admin remain in (or be added to) groups
+				// even though every request from that credential is denied. Keep
+				// historical app-v23..v25 replay unchanged; app-v26 is the
+				// consensus boundary that introduces this stricter invariant.
+				if requireCurrentRootGeneration {
+					var memberRole AppV23RoleState
+					if err := s.appV23ReadEffectiveJSONTxn(txn, appV23RoleKey(member), &memberRole); err != nil {
+						return fmt.Errorf("group member %s role state unavailable", member)
+					}
+					if memberRole.Role == AppV23RoleAdmin && enrollment.RootGeneration != root.Generation {
+						return fmt.Errorf("group member %s needs current Root-generation approval", member)
+					}
+				}
 				if sort.SearchStrings(current.Members, member) >= len(current.Members) ||
 					current.Members[sort.SearchStrings(current.Members, member)] != member {
 					count, countErr := s.countAppV23AgentGroupsTxn(txn, member, AppV23MaxGroupsPerAgent)
@@ -4314,7 +4371,8 @@ func (s *BadgerStore) MutateAppV23AccessGroup(actorID, groupID, name string, mem
 			}
 			next := AppV23AccessGroup{
 				GroupID: groupID, Name: name, Members: append([]string(nil), members...),
-				Revision: expectedRevision + 1, UpdatedBy: actorID, UpdatedHeight: height,
+				MemberAuthority: memberAuthority,
+				Revision:        expectedRevision + 1, UpdatedBy: actorID, UpdatedHeight: height,
 			}
 			data, marshalErr := appV23Marshal(next)
 			if marshalErr != nil {
@@ -4331,6 +4389,67 @@ func (s *BadgerStore) MutateAppV23AccessGroup(actorID, groupID, name string, mem
 			return nil
 		})
 	})
+}
+
+// MigrateAppV26AccessGroupAuthorities deterministically upgrades every
+// historical local Access Group to the least-privileged app-v26 default. It
+// deliberately preserves the operator revision and audit fields: activation
+// is a fork migration, not a user-authored group edit.
+func (s *BadgerStore) MigrateAppV26AccessGroupAuthorities() error {
+	return s.update(func(txn *badger.Txn) error {
+		prefix := []byte("appv23:group:")
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		seen := 0
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			seen++
+			if seen > AppV23MaxGroups {
+				return errors.New("app-v23 group count exceeds deterministic bound")
+			}
+			var group AppV23AccessGroup
+			if err := it.Item().Value(func(value []byte) error {
+				return json.Unmarshal(value, &group)
+			}); err != nil {
+				return err
+			}
+			if group.GroupID != string(it.Item().Key()[len(prefix):]) {
+				return errors.New("app-v23 access group key/value invariant failed")
+			}
+			if group.MemberAuthority != "" {
+				if err := ValidateAppV26GroupAuthority(group.MemberAuthority); err != nil {
+					return err
+				}
+				continue
+			}
+			group.MemberAuthority = AppV26GroupAuthorityRead
+			data, err := appV23Marshal(group)
+			if err != nil {
+				return err
+			}
+			if err := s.txnSet(txn, appV23GroupKey(group.GroupID), data); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// ValidateAppV26AccessGroupAuthorities rejects missing or unknown authority in
+// an active app-v26 state image. It is used at boot and state-sync restore so
+// a malformed group cannot silently fall back to historical role semantics.
+func (s *BadgerStore) ValidateAppV26AccessGroupAuthorities() error {
+	groups, err := s.ListAppV23AccessGroups()
+	if err != nil {
+		return err
+	}
+	for _, group := range groups {
+		if err := ValidateAppV26GroupAuthority(group.MemberAuthority); err != nil {
+			return fmt.Errorf("app-v26 Access Group %q: %w", group.GroupID, err)
+		}
+	}
+	return nil
 }
 
 func countAppV23PrefixTxn(txn *badger.Txn, prefix []byte, limit int) (int, error) {
@@ -4559,16 +4678,31 @@ func (s *BadgerStore) authorizeAppV23LocalDomainPolicy(policyID, domain string, 
 		return AppV23Authorization{}, nil
 	}
 	sharesGroup := false
+	memberAuthority := ""
 	for _, group := range groups {
 		i := sort.SearchStrings(group.Members, owner)
 		if i < len(group.Members) && group.Members[i] == owner {
 			sharesGroup = true
-			break
+			// Multiple group relationships are additive. Pick the strongest
+			// persisted app-v26 authority deterministically, independent of
+			// group iteration order.
+			if appV26GroupAuthorityRank(group.MemberAuthority) >
+				appV26GroupAuthorityRank(memberAuthority) {
+				memberAuthority = group.MemberAuthority
+			}
 		}
 	}
 	if !sharesGroup {
 		return AppV23Authorization{}, nil
 	}
+	if memberAuthority != "" {
+		return AppV23Authorization{
+			Allowed: appV26GroupAuthorityAllows(memberAuthority, verb),
+		}, nil
+	}
+	// Historical app-v23..v25 groups omit MemberAuthority and retain their
+	// role-derived replay semantics. App-v26 activation migrates every such
+	// group to an explicit read tier before post-v26 transactions execute.
 	switch role.Role {
 	case AppV23RoleMember:
 		return AppV23Authorization{Allowed: verb == AppV23VerbRead}, nil
@@ -4576,6 +4710,32 @@ func (s *BadgerStore) authorizeAppV23LocalDomainPolicy(policyID, domain string, 
 		return AppV23Authorization{Allowed: verb >= AppV23VerbRead && verb <= AppV23VerbModify}, nil
 	default:
 		return AppV23Authorization{}, nil
+	}
+}
+
+func appV26GroupAuthorityRank(authority string) int {
+	switch authority {
+	case AppV26GroupAuthorityRead:
+		return 1
+	case AppV26GroupAuthorityReadWrite:
+		return 2
+	case AppV26GroupAuthorityReadWriteModify:
+		return 3
+	default:
+		return 0
+	}
+}
+
+func appV26GroupAuthorityAllows(authority string, verb AppV23DomainVerb) bool {
+	switch authority {
+	case AppV26GroupAuthorityRead:
+		return verb == AppV23VerbRead
+	case AppV26GroupAuthorityReadWrite:
+		return verb == AppV23VerbRead || verb == AppV23VerbWrite
+	case AppV26GroupAuthorityReadWriteModify:
+		return verb >= AppV23VerbRead && verb <= AppV23VerbModify
+	default:
+		return false
 	}
 }
 

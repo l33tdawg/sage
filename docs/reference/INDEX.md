@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.16.4. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.17.0. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -64,7 +64,8 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 2. `sage_turn` — **every turn.** Atomically recalls committed memories for the topic *and* stores your observation. Also auto-checks the pipeline inbox.
 3. `sage_reflect` — after tasks. Store dos and don'ts.
 
-The server enforces this: it blocks after ~7 non-SAGE tool calls or ~5 minutes without a `sage_turn`. See [`mcp-tools.md`](mcp-tools.md).
+This is advisory. The server never blocks or pads unrelated work merely because
+`sage_turn` has not been called recently. See [`mcp-tools.md`](mcp-tools.md).
 
 ### App-v23 access control: role, scope, clearance, and Root are separate
 
@@ -159,7 +160,7 @@ CometBFT without treating the consensus RPC as proof of application storage.
 
 ---
 
-## Related docs (reconciled through v11.16.4)
+## Related docs (reconciled through v11.17.0)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

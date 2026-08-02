@@ -547,6 +547,10 @@ type federationPipeLookupStatusFinder interface {
 	PeerStatusForPipeLookup(ctx context.Context, remoteChainID string) (*federation.StatusResponse, error)
 }
 
+type federationLinkedMessageContactFinder interface {
+	FindRemoteLinkedMessageContacts(ctx context.Context, remoteChainID, sourceAgentID, name string, limit int) (*federation.LinkedMessageDirectoryResult, error)
+}
+
 const (
 	maxAgentFederationTargets    = 64
 	maxFederationAvailablePeers  = 64
@@ -726,6 +730,7 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 	contactFinder, hasContactFinder := s.federation.(federationPipeContactFinder)
 	statusContactFinder, hasStatusContactFinder := s.federation.(federationPipeContactStatusFinder)
 	lookupStatusFinder, hasLookupStatusFinder := s.federation.(federationPipeLookupStatusFinder)
+	linkedContactFinder, hasLinkedContactFinder := s.federation.(federationLinkedMessageContactFinder)
 	type peerResult struct {
 		connection *availableFederationConnection
 	}
@@ -753,6 +758,8 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 				}
 				var lookup *federation.PipeContactLookupResponse
 				var lookupErr error
+				var linked *federation.LinkedMessageDirectoryResult
+				var linkedErr error
 				// Run the optional targeted lookup in the same bounded worker as
 				// status. A slow earlier peer cannot starve later jobs, and the
 				// raw result is filtered before this worker retains anything.
@@ -762,10 +769,16 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 					} else if hasContactFinder {
 						lookup, lookupErr = contactFinder.FindRemotePipeContacts(ctx, chain, agentName, agentLimit)
 					}
+					if callerMayPipe && hasLinkedContactFinder {
+						linked, linkedErr = linkedContactFinder.FindRemoteLinkedMessageContacts(
+							ctx, chain, callerID, agentName, agentLimit,
+						)
+					}
 				}
 				if connection, ok := s.availableFederationConnectionForCaller(
 					ctx, callerID, chain, status, agentName, lookup, lookupErr,
-					hasContactFinder || hasStatusContactFinder, callerMayPipe,
+					hasContactFinder || hasStatusContactFinder, linked, linkedErr,
+					hasLinkedContactFinder, callerMayPipe,
 				); ok {
 					results[index].connection = connection
 				}
@@ -809,6 +822,9 @@ func (s *Server) availableFederationConnectionForCaller(
 	lookup *federation.PipeContactLookupResponse,
 	lookupErr error,
 	hasTargetedLookup bool,
+	linked *federation.LinkedMessageDirectoryResult,
+	linkedErr error,
+	hasLinkedLookup bool,
 	includePipeContacts bool,
 ) (*availableFederationConnection, bool) {
 	if status == nil {
@@ -841,9 +857,6 @@ func (s *Server) availableFederationConnectionForCaller(
 		}
 	}
 	connection.RemotePermissions = normalizeAvailablePermissions(permissions)
-	if len(connection.RemotePermissions) == 0 {
-		return nil, false
-	}
 	for _, permission := range connection.RemotePermissions {
 		if permission.Read {
 			connection.SharedReadDomains = append(connection.SharedReadDomains, permission.Domain)
@@ -871,6 +884,16 @@ func (s *Server) availableFederationConnectionForCaller(
 		federation.ValidateRemotePipeContactGrant(remoteChainID, contacts) == nil {
 		connection.RemoteAgents = filterAvailablePipeContacts(contacts.Contacts, connection.SharedReadDomains)
 	}
+	if agentName != "" && includePipeContacts && hasLinkedLookup &&
+		linkedErr == nil && linked != nil &&
+		federation.ValidateLinkedMessageDirectoryResult(remoteChainID, linked) == nil {
+		connection.RemoteAgents = mergeAvailablePipeContacts(
+			connection.RemoteAgents, linked.Contacts,
+		)
+	}
+	if len(connection.RemotePermissions) == 0 && len(connection.RemoteAgents) == 0 {
+		return nil, false
+	}
 	if agentName != "" {
 		// sage_find_agent only needs a peer label and its bounded matching
 		// contacts. Do not retain or serialize the potentially wide policy,
@@ -889,6 +912,31 @@ func (s *Server) availableFederationConnectionForCaller(
 	}
 	connection.Sync = s.availableFederationSync(ctx, remoteChainID, connection.SharedReadDomains)
 	return connection, true
+}
+
+func mergeAvailablePipeContacts(
+	legacy, linked []federation.PipeContact,
+) []federation.PipeContact {
+	merged := make([]federation.PipeContact, 0, len(legacy)+len(linked))
+	seen := make(map[string]struct{}, len(legacy)+len(linked))
+	for _, contacts := range [][]federation.PipeContact{legacy, linked} {
+		for _, contact := range contacts {
+			if _, duplicate := seen[contact.AgentID]; duplicate {
+				continue
+			}
+			seen[contact.AgentID] = struct{}{}
+			merged = append(merged, contact)
+		}
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		iName := strings.ToLower(merged[i].DisplayName)
+		jName := strings.ToLower(merged[j].DisplayName)
+		if iName != jName {
+			return iName < jName
+		}
+		return merged[i].AgentID < merged[j].AgentID
+	})
+	return merged
 }
 
 // handleFederatedContactAuthorize is a local-only, caller-scoped policy check

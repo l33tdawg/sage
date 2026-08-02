@@ -664,6 +664,10 @@ type SageApp struct {
 	// projection envelopes absent from canonical state. The activation block
 	// remains under app-v24 rules and v25 semantics start strictly at H+1.
 	appV25AppliedHeight int64 // 0 => fork dormant
+	// appV26AppliedHeight gates consensus-backed per-group member authority.
+	// The activation block migrates historical groups to explicit read access;
+	// v26 mutation/authorization semantics begin strictly at H+1.
+	appV26AppliedHeight int64 // 0 => fork dormant
 	// appV23GenesisActive is loaded only from the dedicated, AppHash-covered
 	// dual-signed genesis activation marker. It is separate from applied-height
 	// upgrades because a v23-born chain has no historical activation block.
@@ -844,6 +848,7 @@ const appV22UpgradeName = "app-v22"
 const appV23UpgradeName = "app-v23"
 const appV24UpgradeName = "app-v24"
 const appV25UpgradeName = "app-v25"
+const appV26UpgradeName = "app-v26"
 
 // governanceDelegationDomainStateKey holds the stable, consensus-derived
 // domain that post-app-v20 governance authorizations must sign. It is approved
@@ -2387,6 +2392,16 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		_ = bs.CloseBadger()
 		return nil, invariantErr
 	}
+	if invariantErr := app.refreshAppV26Fork(); invariantErr != nil {
+		_ = ps.Close()
+		_ = bs.CloseBadger()
+		return nil, invariantErr
+	}
+	if invariantErr := app.validateAppV26Prerequisite(); invariantErr != nil {
+		_ = ps.Close()
+		_ = bs.CloseBadger()
+		return nil, invariantErr
+	}
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -2483,6 +2498,12 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	if invariantErr := app.validateAppV25Prerequisite(); invariantErr != nil {
 		return nil, invariantErr
 	}
+	if invariantErr := app.refreshAppV26Fork(); invariantErr != nil {
+		return nil, invariantErr
+	}
+	if invariantErr := app.validateAppV26Prerequisite(); invariantErr != nil {
+		return nil, invariantErr
+	}
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -2561,6 +2582,8 @@ func restoredValidatorInfo(id string, power int64) *validator.ValidatorInfo {
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV26AppliedHeight > 0:
+		return 26 // app-v26 (consensus-backed Access Group authority) — highest gate
 	case app.appV25AppliedHeight > 0:
 		return 25 // app-v25 (governed legacy-memory adoption) — highest gate
 	case app.appV24AppliedHeight > 0:
@@ -2617,13 +2640,13 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v25). It is the readiness ceiling for upgrade
+// fork gate for (currently app-v26). It is the readiness ceiling for upgrade
 // auto-voting: a validator must never vote to activate an upgrade it cannot
 // execute — doing so would commit consensus version.app=N while the binary
 // still runs at N-1, halting the chain on the next CometBFT handshake (the
 // maxSupportedAppVersion footgun). Bump this in lockstep with every new
 // appV<N>UpgradeName fork gate added above.
-const maxSupportedAppVersion uint64 = 25
+const maxSupportedAppVersion uint64 = 26
 
 // MaxSupportedAppVersion returns the highest app version this binary has a
 // compiled fork gate for. Operator tooling (cmd/sage-gui `upgrade propose`)
@@ -2890,6 +2913,19 @@ func (app *SageApp) ActiveUpgradeVote() (proposalID string, targetVersion uint64
 		} else if _, predecessorErr := app.validateAppV25Predecessor(); predecessorErr != nil {
 			app.logger.Warn().Err(predecessorErr).Str("proposal_id", prop.ProposalID).
 				Msg("app-v25 predecessor is invalid; skipping auto-vote")
+			supported = false
+		}
+	}
+	if payload.Name == appV26UpgradeName && payload.TargetAppVersion == 26 {
+		if app.currentAppVersion() != 25 {
+			app.logger.Warn().
+				Str("proposal_id", prop.ProposalID).
+				Uint64("current_app_version", app.currentAppVersion()).
+				Msg("app-v26 upgrade requires app-v25 as its immediate predecessor; skipping auto-vote")
+			supported = false
+		} else if _, predecessorErr := app.validateAppV26Predecessor(); predecessorErr != nil {
+			app.logger.Warn().Err(predecessorErr).Str("proposal_id", prop.ProposalID).
+				Msg("app-v26 predecessor is invalid; skipping auto-vote")
 			supported = false
 		}
 	}
@@ -3464,6 +3500,28 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 		!app.isAppV23ActiveForNextTx() {
 		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
 	}
+	// app-v26 extends the existing AccessGroupMutate wire payload rather than
+	// allocating a new tx type. Before activation, a v26 binary can decode the
+	// appended member_authority bytes but a still-rolling v25 binary rejects
+	// them as trailing data. Never admit that mixed interpretation into a
+	// pre-v26 block: it would produce different ExecTxResult codes and diverge
+	// LastResultsHash. At and before activation height only the historical empty
+	// field is admissible; once H+1 is active, mirror the consensus handler's
+	// required-tier/delete validation as mempool hygiene.
+	if parsedTx.Type == tx.TxTypeAccessGroupMutate && parsedTx.AccessGroupMutate != nil {
+		mutation := parsedTx.AccessGroupMutate
+		if !app.IsAppV26ActiveForNextTx() {
+			if mutation.MemberAuthority != "" {
+				return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown app-v26 access group authority"}, nil
+			}
+		} else if mutation.Delete {
+			if mutation.MemberAuthority != "" {
+				return &abcitypes.ResponseCheckTx{Code: 110, Log: "access denied"}, nil
+			}
+		} else if err := store.ValidateAppV26GroupAuthority(mutation.MemberAuthority); err != nil {
+			return &abcitypes.ResponseCheckTx{Code: 110, Log: "access denied"}, nil
+		}
+	}
 	if parsedTx.LocalElevation != nil && !app.isAppV23ActiveForNextTx() {
 		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown app-v23 elevation envelope"}, nil
 	}
@@ -3555,6 +3613,7 @@ func (app *SageApp) cloneForAppV20Finalize(scopedStore *store.BadgerStore) *Sage
 		appV23AppliedHeight:      app.appV23AppliedHeight,
 		appV24AppliedHeight:      app.appV24AppliedHeight,
 		appV25AppliedHeight:      app.appV25AppliedHeight,
+		appV26AppliedHeight:      app.appV26AppliedHeight,
 		appV23GenesisActive:      app.appV23GenesisActive,
 		retainBlocks:             app.retainBlocks,
 		expectedGovernanceDomain: app.expectedGovernanceDelegationDomain(),
@@ -3600,6 +3659,7 @@ func (app *SageApp) publishAppV20FinalizeLocked(clone *SageApp) {
 	app.appV23AppliedHeight = clone.appV23AppliedHeight
 	app.appV24AppliedHeight = clone.appV24AppliedHeight
 	app.appV25AppliedHeight = clone.appV25AppliedHeight
+	app.appV26AppliedHeight = clone.appV26AppliedHeight
 	app.appV23GenesisActive = clone.appV23GenesisActive
 }
 
@@ -4205,6 +4265,32 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 				)
 			}
 		}
+		if plan.Name == appV26UpgradeName {
+			if plan.TargetAppVersion != 26 {
+				return nil, fmt.Errorf(
+					"sage: refuse malformed app-v26 activation at height %d: target_app_version=%d",
+					req.Height, plan.TargetAppVersion,
+				)
+			}
+			if current := app.currentAppVersion(); current != 25 {
+				return nil, fmt.Errorf(
+					"sage: refuse app-v26 activation at height %d: current committed app version is %d, want 25",
+					req.Height, current,
+				)
+			}
+			if _, predecessorErr := app.validateAppV26Predecessor(); predecessorErr != nil {
+				return nil, fmt.Errorf(
+					"sage: refuse app-v26 activation at height %d: invalid predecessor: %w",
+					req.Height, predecessorErr,
+				)
+			}
+			if migrateErr := app.badgerStore.MigrateAppV26AccessGroupAuthorities(); migrateErr != nil {
+				return nil, fmt.Errorf(
+					"sage: refuse app-v26 activation with invalid Access Group state: %w",
+					migrateErr,
+				)
+			}
+		}
 		// Version-non-regression floor (deterministic on every replica): never
 		// commit a consensus version.app lower than the chain's current app
 		// version. app-v7 (content-validation) is an INDEPENDENT gate that can be
@@ -4304,6 +4390,9 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 		}
 		if plan.Name == appV25UpgradeName {
 			app.appV25AppliedHeight = req.Height
+		}
+		if plan.Name == appV26UpgradeName {
+			app.appV26AppliedHeight = req.Height
 		}
 		if plan.Name == appV12UpgradeName {
 			app.appV12AppliedHeight = req.Height
@@ -10370,6 +10459,25 @@ func (app *SageApp) PrepareProposal(_ context.Context, req *abcitypes.RequestPre
 // proposer cannot defer an oversized-block failure to FinalizeBlock. Invalid or
 // forged raw target-20 transactions retain legacy mixed-block behavior.
 func (app *SageApp) ProcessProposal(_ context.Context, req *abcitypes.RequestProcessProposal) (*abcitypes.ResponseProcessProposal, error) {
+	// app-v26 extends AccessGroupMutate in place. A v25 validator rejects the
+	// appended member_authority bytes as trailing data while a v26 validator can
+	// decode them. CheckTx keeps the extended form out of an honest proposer's
+	// mempool, but proposal validation is the consensus boundary: a stale or
+	// Byzantine proposer can supply arbitrary raw transactions without passing
+	// this node's CheckTx. Reject that mixed interpretation through activation
+	// height H; H+1 is the first height where every validator may interpret the
+	// appended field under app-v26 rules.
+	if !app.postAppV26Fork(req.Height) {
+		for _, rawTx := range req.Txs {
+			parsedTx, decodeErr := tx.DecodeTx(rawTx)
+			if decodeErr == nil && parsedTx.Type == tx.TxTypeAccessGroupMutate &&
+				parsedTx.AccessGroupMutate != nil &&
+				parsedTx.AccessGroupMutate.MemberAuthority != "" {
+				return &abcitypes.ResponseProcessProposal{Status: abcitypes.ResponseProcessProposal_REJECT}, nil
+			}
+		}
+	}
+
 	strictV20Rules := app.requiresAppV20StrictRulesAt(req.Height)
 	if !strictV20Rules && len(req.Txs) > 1 {
 		for _, rawTx := range req.Txs {
@@ -11107,6 +11215,17 @@ func (app *SageApp) applyUpgradeProposal(proposal *governance.ProposalState, hei
 			return fmt.Errorf("app-v25 upgrade has invalid predecessor: %w", predecessorErr)
 		}
 	}
+	if p.Name == appV26UpgradeName {
+		if p.TargetAppVersion != 26 {
+			return fmt.Errorf("app-v26 upgrade has target version %d, want 26", p.TargetAppVersion)
+		}
+		if current := app.currentAppVersion(); current != 25 {
+			return fmt.Errorf("app-v26 upgrade requires current app version 25, got %d", current)
+		}
+		if _, predecessorErr := app.validateAppV26Predecessor(); predecessorErr != nil {
+			return fmt.Errorf("app-v26 upgrade has invalid predecessor: %w", predecessorErr)
+		}
+	}
 
 	// Execution-height regression re-guard: the chain's committed app version
 	// may have advanced (another upgrade activated) between propose and quorum.
@@ -11277,6 +11396,20 @@ func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, b
 		if _, predecessorErr := app.validateAppV25Predecessor(); predecessorErr != nil {
 			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
 				"upgrade propose: app-v25 predecessor is invalid: %v", predecessorErr)}
+		}
+	}
+	if prop.Name == appV26UpgradeName {
+		if prop.TargetAppVersion != 26 {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v26 requires target_app_version 26 (got %d)", prop.TargetAppVersion)}
+		}
+		if current := app.currentAppVersion(); current != 25 {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v26 requires current committed app version 25 (got %d)", current)}
+		}
+		if _, predecessorErr := app.validateAppV26Predecessor(); predecessorErr != nil {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v26 predecessor is invalid: %v", predecessorErr)}
 		}
 	}
 

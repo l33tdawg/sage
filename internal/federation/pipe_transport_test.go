@@ -46,6 +46,14 @@ func callPipeEvent(t *testing.T, m *Manager, agreement *store.CrossFedRecord, pe
 func TestHandlePipeEventSendVerifiesProofLifetimeContactAndDeduplicates(t *testing.T) {
 	ctx := context.Background()
 	m, ss, bs := newDrainTestManager(t)
+	type wake struct {
+		target       string
+		notification AgentMessageNotification
+	}
+	var wakes []wake
+	m.messageNotifier = func(target string, notification AgentMessageNotification) {
+		wakes = append(wakes, wake{target: target, notification: notification})
+	}
 	peerOperator := newPeerOperatorID(t)
 	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerOperator, "host", nil, 4)
 	owner := newPeerOperatorID(t)
@@ -117,12 +125,18 @@ func TestHandlePipeEventSendVerifiesProofLifetimeContactAndDeduplicates(t *testi
 	require.Equal(t, sourceAgent, msg.FromAgent)
 	require.Equal(t, owner, msg.ToAgent)
 	require.Equal(t, event.Payload, msg.Payload)
+	require.Len(t, wakes, 1)
+	require.Equal(t, owner, wakes[0].target)
+	require.Equal(t, msg.PipeID, wakes[0].notification.MessageID)
+	require.Equal(t, sourceAgent, wakes[0].notification.FromAgent)
+	require.Equal(t, event.CreatedAt, wakes[0].notification.CreatedAt)
 
 	rr = callPipeEvent(t, m, agreement, peerOperator, event)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	var duplicate PipeEventResponse
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&duplicate))
 	require.Equal(t, "duplicate", duplicate.Status)
+	require.Len(t, wakes, 1, "a duplicate federated admission must not wake the recipient again")
 	_, err = m.SetPipeContactAcceptance(ctx, "chain-peer", unrelatedOwner, unrelated.ContactID, false)
 	require.NoError(t, err)
 	rr = callPipeEvent(t, m, agreement, peerOperator, event)
@@ -205,6 +219,17 @@ func TestHandlePipeEventSendVerifiesProofLifetimeContactAndDeduplicates(t *testi
 	relabeled.EventID = PipelineProofEventID(relabeled.SourceChainID, relabeled.Kind, relabeled.Proof)
 	rr = callPipeEvent(t, m, otherAgreement, otherOperator, &relabeled)
 	require.Equal(t, http.StatusBadRequest, rr.Code, "an agent proof signed on one source chain must not be relabeled by another trusted node: %s", rr.Body.String())
+}
+
+func TestNotifyAdmittedMessageIsBestEffortAndPanicSafe(t *testing.T) {
+	m := &Manager{messageNotifier: func(string, AgentMessageNotification) {
+		panic("closed wake transport")
+	}}
+	require.NotPanics(t, func() {
+		m.notifyAdmittedMessage("exact-recipient", AgentMessageNotification{
+			MessageID: "local-message", FromAgent: "remote-source", CreatedAt: time.Now().UTC(),
+		})
+	})
 }
 
 func TestHandlePipeEventSendRejectsStaleOwnerRevision(t *testing.T) {

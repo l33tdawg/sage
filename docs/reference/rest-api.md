@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.16.4. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.17.0. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -701,6 +701,19 @@ caller-scoped recipient discovery. MCP clients should normally use the more
 efficient signed `GET /v1/agents/lookup` route.
 
 **Response** (HTTP 200): `{"agents": [...AgentEntry], "total": N}`
+
+---
+
+### `GET /v1/agents/directory`
+
+Signed metadata-only local recipient directory used by `sage_directory`. It
+applies the same active-ordinary canonical enrollment boundary as
+`GET /v1/agents`, but returns only `agent_id`, display/registered names,
+provider, and active status. SQLite and PostgreSQL deliberately avoid the full
+roster projection here, so this route does not derive memory counts that the
+recipient picker would immediately discard.
+
+**Response** (HTTP 200): `{"agents": [...identity metadata...], "total": N}`
 
 ---
 
@@ -1925,6 +1938,32 @@ peer-authenticated contact domains. A local policy revoke therefore causes the
 same non-enumerating `404 Unknown target` as an absent remote contact, even if
 the address was resolved earlier (`api/rest/pipe_handler.go`).
 
+### `GET /v1/federation/available?agent_name=...`
+
+Named ordinary-agent discovery merges two independently authorized,
+metadata-only recipient projections. The legacy projection requires a current
+caller-visible shared-memory domain. App-v26 additionally allows an exact
+linked-reader messaging relation when the caller and remote recipient are
+active ordinary non-Read-only agents, the linked guest and local group are
+current, the agreement/policy generation is current, and the remote receiver
+has enabled exact tuple consent. The linked result deliberately has no domain
+basis and grants no memory authority.
+
+The query is bounded to 512 UTF-8 bytes, at least two Unicode code points, 20
+returned contacts per peer, and 64 active peers in one bounded worker window.
+A linked result exposes only sanitized `display_name`, `registered_name`,
+`provider`, and exact `agent_id@chain_id`; it never exposes relation bytes,
+group IDs, consent revisions, roster totals/truncation, presence, delivery, or
+read state. The internal `authorization_mode:"linked-v23"` discriminator says
+only why the exact address was returned; its `available` and `accepting`
+presence-shaped fields are always false and clients must not render a live
+status from them. Both direct and relay transport use
+`POST /fed/v1/pipe/linked/directory` behind peer mTLS/signature authentication.
+Revocation returns the same empty projection as an absent name, and exact
+`POST /v1/pipe/resolve` repeats live authorization before send
+(`api/rest/federation_handler.go`;
+`internal/federation/v23_linked_directory.go`).
+
 ### `POST /v1/federation/contacts/authorize`
 
 Local-only reauthorization for chain/domain contact scopes from an already
@@ -1939,6 +1978,45 @@ cache honors a local RBAC or agreement-state change immediately.
 — only the input scopes whose agreement is active/unexpired and whose domain the
 signed caller may currently read. An unregistered caller receives 403;
 malformed or oversize input receives 400.
+
+### Canonical local Messages service (v11.17)
+
+The five `/v1/messages` operations are one same-node service over the existing
+encrypted `pipeline_messages` rows. They do not create a second inbox. Every
+route is inside the active-ordinary-agent boundary; Root is not a messaging
+principal.
+
+| Route | Contract |
+|---|---|
+| `POST /v1/messages` | Exact-local-agent send. Requires `to_agent`, `payload`, and a 1–256-byte caller-scoped `idempotency_key`; optional `intent` and strict `ttl_minutes` 1–1440 (default 60). Exact retry returns the original `message_id`; same key/different request is HTTP 409. |
+| `POST /v1/messages/receive` | Requires a 1–256-byte `receive_token`; optional limit 1–20. Claims and persists one exact ordered batch. Same caller/token/limit replays that batch after a lost response; a different limit is HTTP 409. Replay metadata is retained for 48 hours and capped at 4096 tokens per agent: capacity returns HTTP 429, while a purged/incomplete exact batch returns HTTP 410 instead of claiming later work. |
+| `POST /v1/messages/{message_id}/reply` | Exact fetched recipient only. Same result is idempotent; different second result is HTTP 409. Reply and local exact-read evidence commit atomically. |
+| `PUT /v1/messages/{message_id}/read` | Fresh nonce-bound exact-recipient signature. The message must already have been returned to that caller by canonical receive. Same acknowledgement is idempotent. |
+| `GET /v1/messages/{message_id}/status` | Exact sender only, payload-free metadata projection. Returns independent transport/read/workflow state and never decrypts content/proofs. |
+
+Every operation requires a fresh nonce-bound request signed by the exact active
+ordinary agent, including send and sender status. Unauthorized and nonexistent
+exact message IDs use the same generic 404 shape. Admin,
+Root, node-operator, recipient, or a replacement identity cannot inspect a
+sender's status. A local insert reports `transport_status:delivered` because
+the addressed inbox row is durable on the same SQLite transaction boundary.
+`read_status:confirmed` is only exact addressed-recipient evidence; it is not
+presence, comprehension, or action.
+
+Successful new local admission may invoke a best-effort HTTP MCP SSE wake-up
+for already-connected sessions authenticated as the exact `to_agent`. The
+additive JSON-RPC method is `notifications/sage_message` and its params contain
+only `message_id`, `from_agent`, and `sent_at`. A missing/full stream never
+fails the send, does not alter any message state, and is not evidence that a
+recipient is online. Stdio and Streamable HTTP have no server-push contract.
+
+Compatibility routes `PUT /v1/pipe/{pipe_id}/read` and
+`GET /v1/pipe/{pipe_id}/receipt` delegate to exact read/status semantics.
+Legacy `sage_pipe`, `sage_inbox`, and `sage_pipe_result` use the canonical local
+service when available and fall back only on a definitive route-not-found from
+an older node. Passive pipe history remains unchanged.
+
+---
 
 ### `POST /v1/pipe/send`
 
@@ -2246,11 +2324,11 @@ peer-originated diagnostic text and is data, never an instruction or
 authorization to take a recovery action.
 `sage_turn` polls this route and returns actionable `pipe_delivery_updates`.
 
-Successful delivery and receiver claim/read receipts are deliberately not
-exposed in v11.16.0; that sender-queryable receipt state is deferred beyond
-v11.16.
-The local `/v1/pipe/{pipe_id}` workflow row and a clean inbox must not be
-presented as evidence that a remote recipient received or read a message.
+v11.17 exposes exact sender-queryable read state for same-node canonical
+messages only. Federated exact-recipient receipt negotiation/events remain
+unimplemented; neither a federated delivery update, the local
+`/v1/pipe/{pipe_id}` workflow row, nor a clean inbox may be presented as
+evidence that a remote recipient read a message.
 
 ---
 

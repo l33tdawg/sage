@@ -255,8 +255,8 @@ func TestBootStateSyncRuntimeHoldsPendingBlockExecutionUntilSeal(t *testing.T) {
 	require.Zero(t, checkTx.Code)
 }
 
-func TestBootStateSyncRuntimeSupportsV20ThroughV25WithExactSessionVersion(t *testing.T) {
-	for _, version := range []uint64{20, 21, 22, 23, 24, 25} {
+func TestBootStateSyncRuntimeSupportsV20ThroughV26WithExactSessionVersion(t *testing.T) {
+	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26} {
 		t.Run(fmt.Sprintf("app-v%d", version), func(t *testing.T) {
 			oldHash := sha256.Sum256([]byte("old-versioned-state"))
 			newHash := sha256.Sum256([]byte(fmt.Sprintf("new-versioned-state-%d", version)))
@@ -295,7 +295,7 @@ func TestBootStateSyncRuntimeSupportsV20ThroughV25WithExactSessionVersion(t *tes
 		assert.Equal(t, BootStateSyncFailed, runtime.Phase())
 	})
 
-	for _, version := range []uint64{19, 26} {
+	for _, version := range []uint64{19, 27} {
 		t.Run(fmt.Sprintf("unsupported-app-v%d", version), func(t *testing.T) {
 			oldHash := sha256.Sum256([]byte("old-unsupported-version-state"))
 			newHash := sha256.Sum256([]byte("new-unsupported-version-state"))
@@ -310,7 +310,7 @@ func TestBootStateSyncRuntimeSupportsV20ThroughV25WithExactSessionVersion(t *tes
 				called = true
 				return nil, nil
 			})
-			assert.ErrorContains(t, err, "supported app version 20, 21, 22, 23, 24, or 25")
+			assert.ErrorContains(t, err, "supported app version 20, 21, 22, 23, 24, 25, or 26")
 			assert.False(t, called)
 			assert.Equal(t, BootStateSyncFailed, runtime.Phase())
 		})

@@ -874,6 +874,60 @@ type agentNameFinder interface {
 	FindAgentsByName(ctx context.Context, name string, limit int) ([]*store.AgentEntry, error)
 }
 
+type agentDirectoryLister interface {
+	ListAgentDirectory(ctx context.Context) ([]*store.AgentEntry, error)
+}
+
+type agentDirectoryEntry struct {
+	AgentID        string `json:"agent_id"`
+	Name           string `json:"name"`
+	RegisteredName string `json:"registered_name"`
+	Provider       string `json:"provider,omitempty"`
+	Status         string `json:"status"`
+}
+
+// handleListAgentDirectory returns only exact recipient identity metadata. It
+// avoids ListAgents' derived memory-count query because sage_directory never
+// exposes administrative records or per-agent memory totals.
+func (s *Server) handleListAgentDirectory(w http.ResponseWriter, r *http.Request) {
+	if s.agentStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Agent store unavailable", "Agent store not configured.")
+		return
+	}
+	lister, ok := s.agentStore.(agentDirectoryLister)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "Agent directory unavailable",
+			"The configured agent store does not support metadata-only directory reads.")
+		return
+	}
+	agents, err := lister.ListAgentDirectory(r.Context())
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Directory error", "The agent directory could not be read.")
+		return
+	}
+	directory := make([]agentDirectoryEntry, 0, len(agents))
+	for _, agent := range agents {
+		if agent == nil || agent.AgentID == "" {
+			continue
+		}
+		active, activeErr := s.appV23ActiveOrdinaryAgent(agent.AgentID)
+		if activeErr != nil {
+			writeProblem(w, http.StatusServiceUnavailable, "Access control unavailable",
+				"Current local enrollment state is unavailable.")
+			return
+		}
+		if !active {
+			continue
+		}
+		directory = append(directory, agentDirectoryEntry{
+			AgentID: agent.AgentID, Name: agent.Name,
+			RegisteredName: agent.RegisteredName, Provider: agent.Provider,
+			Status: "active",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": directory, "total": len(directory)})
+}
+
 type agentNamePageFinder interface {
 	FindAgentsByNamePage(ctx context.Context, name string, limit, offset int) ([]*store.AgentEntry, error)
 }

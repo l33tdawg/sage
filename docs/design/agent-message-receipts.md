@@ -1,16 +1,18 @@
 # Agent Message Delivery and Read Receipts
 
-**Status:** planned post-v11.16 design contract; not implemented.
+**Status:** v11.17 implements the canonical same-node Messages service and
+exact local recipient acknowledgements. Federated receipt capability
+negotiation/events remain planned and must not be advertised as shipped.
 
 **Consensus:** off-consensus and off both chains. This feature requires no new
 application fork and does not change app-v23, AppHash, replay, or state-sync
 rules.
 
-**Release boundary:** this is deliberately not part of v11.16.0. The current
-release finishes its app-v24 memory-integrity, RBAC, and recovery gates without
-adding a new federation protocol. Implementation belongs to a later feature release and
-must pass the gates in this document before any REST, MCP, SDK, or product copy
-describes receipts as available.
+**Release boundary:** v11.17 implements the same-node contract below without
+adding a new federation protocol. Federated delivery/read propagation remains
+deferred until capability negotiation and all federation gates in this document
+are implemented; product copy must not describe those remote receipts as
+available.
 
 ## Product promise
 
@@ -26,8 +28,8 @@ messages use the same sender-facing query.
 
 ## One public Messages model
 
-“Pipe”, “inbox”, “results”, and “outbox” are implementation states, not four
-product concepts an agent should have to reconcile. The future service therefore starts
+"Pipe", "inbox", "results", and "outbox" are implementation states, not four
+product concepts an agent should have to reconcile. The v11.17 service therefore starts
 one agent-only **Messages** model, but receiving work remains an explicitly
 destructive operation: selecting pending rows also claims them. The minimal
 safe surface has five operations:
@@ -49,7 +51,7 @@ acknowledging cannot be confused or rebound. Incoming receive may return
 request payload only to the exact authorized recipient. Status is always
 payload-free.
 
-The planned post-v11.16 surfaces are:
+The v11.17 same-node surfaces are:
 
 - `POST /v1/messages`;
 - `POST /v1/messages/receive`;
@@ -157,8 +159,10 @@ rename “peer accepted” or the current non-ID-bound inbox GET as “read.”
    durable in the same SQLite transaction boundary. Federated delivery means
    the peer durably admitted the imported row and the source durably recorded
    that acknowledgement.
-3. Read requires a fresh, nonce-bound signature by the exact addressed agent
-   over an acknowledgement that names the exact message. Node-operator
+3. Every canonical local Messages operation requires a fresh, nonce-bound
+   signature by the exact calling agent. Read additionally requires the exact
+   addressed agent to sign an acknowledgement naming the exact message.
+   Node-operator
    authority alone, CEREBRUM Root, Admin, Manager, an unrelated agent, or a
    provider peer cannot manufacture it.
 4. An Admin or operator manually claiming or completing another agent's local
@@ -513,6 +517,10 @@ terminal transition, not original message creation. The minimum contract is:
 - purge removes receipt metadata and its transport proof together once no
   pending retry or unreported terminal failure remains.
 
+The same-node receive replay ledger is retained for 48 hours and bounded to
+4096 caller tokens per agent. A purged or incomplete exact batch fails as gone;
+it never silently becomes an empty replay and never claims newer work.
+
 This is not a permanent communications archive. Longer audit retention,
 human-facing sent-mail history, or configurable surveillance belongs to a
 separate design.
@@ -580,6 +588,8 @@ Receipts do not ship until all of the following are green:
 - receive retry with the same caller-bound idempotency token returns the exact
   original claimed batch and never claims another row; each item still has one
   exact acknowledgement rather than a bulk receipt;
+- empty polling cannot grow replay state beyond the per-agent bound, and
+  expired replay metadata is reclaimed after its bounded retention window;
 - sender status remains queryable with the vault locked and never invokes a
   payload/proof-decrypting row loader;
 - compatibility `sage_inbox`, `sage_turn.pipe_results`, and

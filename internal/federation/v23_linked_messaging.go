@@ -272,6 +272,11 @@ func (m *Manager) linkedMessageLocalAgentEligible(agentID string) bool {
 	if err != nil || !eligible || m.badger == nil {
 		return false
 	}
+	enrollment, err := m.badger.GetAppV23Enrollment(agentID)
+	if err != nil || enrollment == nil || !enrollment.Active ||
+		enrollment.Profile == store.AppV23ProfileReadOnly {
+		return false
+	}
 	// Linked messaging exists only in app-v23, so the deny bit is always live;
 	// do not rely on an optional legacy app-v22 activation callback.
 	capabilities, registered, err :=

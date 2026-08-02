@@ -95,7 +95,7 @@ func encodeAppV25LegacyAdoptionTx(t *testing.T, parsed *tx.ParsedTx) []byte {
 
 func TestAppV25ConstantsAndStrictForkBoundary(t *testing.T) {
 	require.Equal(t, tx.CanonicalUpgradeName(25), appV25UpgradeName)
-	require.Equal(t, uint64(25), MaxSupportedAppVersion())
+	require.Equal(t, uint64(26), MaxSupportedAppVersion())
 
 	app := setupTestApp(t)
 	app.appV25AppliedHeight = 50
@@ -200,6 +200,27 @@ func TestAppV25MemoryLegacyAdoptionIsStrictHPlusOneAndExplicitVote(t *testing.T)
 		"unknown_10",
 		fixture.app.governanceOperationName(governance.OpMemoryLegacyAdopt, 10),
 	)
+}
+
+func TestAppV26MemoryLegacyAssignmentIsStrictHPlusOne(t *testing.T) {
+	fixture := setupAppV24ReanchorGovernanceFixture(t, 1)
+	fixture.app.appV25AppliedHeight = 1
+	fixture.app.appV26AppliedHeight = 10
+	payload, targetID := appV25LegacyAdoptionPayload(t, fixture, []tx.MemoryLegacyAdoptionEntry{{
+		MemoryID: "legacy-assigned-boundary", Status: "committed",
+		ContentHash: bytes.Repeat([]byte{0x26}, sha256.Size),
+		Domain: "historical/domain", Author: "retired application label",
+		AuthorPrincipal: fixture.admin.id, Classification: 1,
+	}})
+
+	_, err := fixture.app.validateAppV25MemoryLegacyAdoptionFields(
+		targetID, nil, 0, payload, 10, true,
+	)
+	require.Error(t, err, "the activation height must retain app-v25 principal rules")
+	_, err = fixture.app.validateAppV25MemoryLegacyAdoptionFields(
+		targetID, nil, 0, payload, 11, true,
+	)
+	require.NoError(t, err, "H+1 permits Root-governed mapping to an active local Admin")
 }
 
 func TestAppV25MemoryLegacyAdoptionSingleValidatorAppliesCompleteEnvelopeAtomically(t *testing.T) {

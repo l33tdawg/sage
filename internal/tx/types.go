@@ -688,6 +688,10 @@ type AccessGroupMutate struct {
 	ExpectedRevision uint64
 	Delete           bool
 	Members          []string
+	// MemberAuthority is the app-v26 default authority derived by every
+	// non-owner member of this group: read, read_write, or
+	// read_write_modify. It is omitted by historical app-v23..v25 payloads.
+	MemberAuthority string
 }
 
 // RootCredentialRotate changes only the credential authorized to act for the

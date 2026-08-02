@@ -80,13 +80,33 @@ func (s *BadgerStore) AdoptLegacyMemories(
 	planDigest []byte,
 	entries []MemoryLegacyAdoptionEntry,
 ) (MemoryLegacyAdoptionResult, error) {
+	return s.adoptLegacyMemories(planDigest, entries, false)
+}
+
+// AdoptLegacyMemoriesAppV26 permits a Root-governed historical author to be
+// mapped onto an active ordinary local principal. It preserves memauthor and
+// changes only the separate policy-principal projection.
+func (s *BadgerStore) AdoptLegacyMemoriesAppV26(
+	planDigest []byte,
+	entries []MemoryLegacyAdoptionEntry,
+) (MemoryLegacyAdoptionResult, error) {
+	return s.adoptLegacyMemories(planDigest, entries, true)
+}
+
+func (s *BadgerStore) adoptLegacyMemories(
+	planDigest []byte,
+	entries []MemoryLegacyAdoptionEntry,
+	allowAssignedPrincipal bool,
+) (MemoryLegacyAdoptionResult, error) {
 	var result MemoryLegacyAdoptionResult
 	err := s.update(func(txn *badger.Txn) error {
 		var (
 			prepared []preparedMemoryLegacyAdoption
 			err      error
 		)
-		result, prepared, err = validateMemoryLegacyAdoptionTxn(s, txn, planDigest, entries)
+		result, prepared, err = validateMemoryLegacyAdoptionTxn(
+			s, txn, planDigest, entries, allowAssignedPrincipal,
+		)
 		if err != nil {
 			return err
 		}
@@ -169,8 +189,25 @@ func (s *BadgerStore) ValidateMemoryLegacyAdoptions(
 	planDigest []byte,
 	entries []MemoryLegacyAdoptionEntry,
 ) error {
+	return s.validateMemoryLegacyAdoptions(planDigest, entries, false)
+}
+
+func (s *BadgerStore) ValidateMemoryLegacyAdoptionsAppV26(
+	planDigest []byte,
+	entries []MemoryLegacyAdoptionEntry,
+) error {
+	return s.validateMemoryLegacyAdoptions(planDigest, entries, true)
+}
+
+func (s *BadgerStore) validateMemoryLegacyAdoptions(
+	planDigest []byte,
+	entries []MemoryLegacyAdoptionEntry,
+	allowAssignedPrincipal bool,
+) error {
 	return s.view(func(txn *badger.Txn) error {
-		_, _, err := validateMemoryLegacyAdoptionTxn(s, txn, planDigest, entries)
+		_, _, err := validateMemoryLegacyAdoptionTxn(
+			s, txn, planDigest, entries, allowAssignedPrincipal,
+		)
 		return err
 	})
 }
@@ -180,6 +217,7 @@ func validateMemoryLegacyAdoptionTxn(
 	txn *badger.Txn,
 	planDigest []byte,
 	entries []MemoryLegacyAdoptionEntry,
+	allowAssignedPrincipal bool,
 ) (MemoryLegacyAdoptionResult, []preparedMemoryLegacyAdoption, error) {
 	var result MemoryLegacyAdoptionResult
 	if len(planDigest) != sha256.Size {
@@ -241,7 +279,7 @@ func validateMemoryLegacyAdoptionTxn(
 			return result, nil, fmt.Errorf("%w: malformed entry for %s", ErrMemoryLegacyAdoptionConflict, entry.MemoryID)
 		}
 		if principalErr := validateLegacyAdoptionPrincipalTxn(
-			s, txn, entry.Author, entry.AuthorPrincipal,
+			s, txn, entry.Author, entry.AuthorPrincipal, allowAssignedPrincipal,
 		); principalErr != nil {
 			return result, nil, fmt.Errorf(
 				"%w: principal mapping for %s: %v",
@@ -383,6 +421,7 @@ func validateLegacyAdoptionPrincipalTxn(
 	s *BadgerStore,
 	txn *badger.Txn,
 	author, principal string,
+	allowAssignedPrincipal bool,
 ) error {
 	var root AppV23RootState
 	if err := appV23ReadJSON(txn, appV23RootKey(), &root); err != nil {
@@ -395,7 +434,29 @@ func validateLegacyAdoptionPrincipalTxn(
 		return nil
 	}
 	if principal != author {
-		return errors.New("ordinary agent principal must equal its immutable credential ID")
+		if !allowAssignedPrincipal {
+			return errors.New("ordinary agent principal must equal its immutable credential ID")
+		}
+		var enrollment AppV23LocalEnrollment
+		if err := s.appV23ReadEffectiveJSONTxn(
+			txn, appV23EnrollmentKey(principal), &enrollment,
+		); err != nil {
+			return fmt.Errorf("read assigned local enrollment: %w", err)
+		}
+		var role AppV23RoleState
+		if err := s.appV23ReadEffectiveJSONTxn(
+			txn, appV23RoleKey(principal), &role,
+		); err != nil {
+			return fmt.Errorf("read assigned local role: %w", err)
+		}
+		if enrollment.AgentID != principal || !enrollment.Active ||
+			(enrollment.Profile != AppV23ProfileStandard &&
+				enrollment.Profile != AppV23ProfileCompanion) ||
+			role.AgentID != principal || !ValidAppV23Role(role.Role) ||
+			!AppV23ProfileAllowsRole(enrollment.Profile, role.Role) {
+			return errors.New("assigned principal must be an active ordinary local agent")
+		}
+		return nil
 	}
 	var enrollment AppV23LocalEnrollment
 	if err := s.appV23ReadEffectiveJSONTxn(txn, appV23EnrollmentKey(principal), &enrollment); err != nil {

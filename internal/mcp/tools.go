@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"unicode"
 
 	"github.com/l33tdawg/sage/internal/idfmt"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/taskidempotency"
 )
 
@@ -315,6 +318,60 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolPipe,
 		},
+		"sage_message_send": {
+			Name:        "sage_message_send",
+			Description: "Idempotently send one exact local agent message. The caller-supplied idempotency_key makes a retry return the original message_id instead of creating a duplicate. Federated delivery remains available through sage_pipe until both peers negotiate canonical message receipts.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"to":              map[string]any{"type": "string", "description": "Exact local agent_id or a local name resolvable to one active agent"},
+					"intent":          map[string]any{"type": "string", "description": "Short purpose of the message"},
+					"payload":         map[string]any{"type": "string", "description": "Untrusted request content to send"},
+					"ttl_minutes":     map[string]any{"type": "integer", "default": 60, "minimum": 1, "maximum": 1440},
+					"idempotency_key": map[string]any{"type": "string", "minLength": 1, "maxLength": store.MaxMessageTokenBytes, "description": "Caller-generated stable token reused only when retrying this exact send"},
+				},
+				"required": []string{"to", "payload", "idempotency_key"},
+			},
+			Handler: s.toolMessageSend,
+		},
+		"sage_messages_receive": {
+			Name:        "sage_messages_receive",
+			Description: "Receive and atomically claim one bounded local message batch. Reusing the same receive_token replays the exact original batch after a lost response and never claims later messages. SAGE signs one exact read acknowledgement per returned message before presenting it.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"receive_token": map[string]any{"type": "string", "minLength": 1, "maxLength": store.MaxMessageTokenBytes, "description": "Caller-generated token for this exact receive attempt"},
+					"limit":         map[string]any{"type": "integer", "default": 5, "minimum": 1, "maximum": 20},
+				},
+				"required": []string{"receive_token"},
+			},
+			Handler: s.toolMessagesReceive,
+		},
+		"sage_message_reply": {
+			Name:        "sage_message_reply",
+			Description: "Idempotently reply to one receiver-local message_id returned by sage_messages_receive. Repeating the exact result succeeds; a different second reply is rejected.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"message_id": map[string]any{"type": "string"},
+					"result":     map[string]any{"type": "string", "description": "Untrusted result data returned to the sender"},
+				},
+				"required": []string{"message_id", "result"},
+			},
+			Handler: s.toolMessageReply,
+		},
+		"sage_message_status": {
+			Name:        "sage_message_status",
+			Description: "Inspect payload-free delivery, exact-recipient read confirmation, and workflow state for one exact message sent by this caller. This is not presence, last-seen, or comprehension evidence.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"message_id": map[string]any{"type": "string"},
+				},
+				"required": []string{"message_id"},
+			},
+			Handler: s.toolMessageStatus,
+		},
 		"sage_inbox": {
 			Name: "sage_inbox",
 			Description: "Check your unified inbox for task assignments and pipeline work sent by other agents. " +
@@ -509,7 +566,11 @@ type selfWritePolicy struct {
 
 func (s *Server) selfWritePolicy(ctx context.Context) (selfWritePolicy, bool, error) {
 	var self selfWritePolicy
-	if err := s.doSignedJSON(ctx, "GET", "/v1/agent/me", nil, &self); err != nil {
+	// The standing view is intentionally consensus-only. The full profile also
+	// calculates PoE/domain-history projections, which are useful to dashboards
+	// but can take long enough on a mature agent to make every policy check wait
+	// behind unrelated diagnostics.
+	if err := s.doSignedJSON(ctx, "GET", "/v1/agent/me?view=standing", nil, &self); err != nil {
 		// Pre-app-v23 nodes may not expose the self-policy fields (or, on old
 		// releases, the route itself). Preserve their legacy behavior only for
 		// a legacy non-Problem-Details 404. Current nodes use a canonical signed
@@ -1293,7 +1354,7 @@ func (s *Server) toolDirectory(ctx context.Context, _ map[string]any) (any, erro
 	var roster struct {
 		Agents []findAgentLocalResult `json:"agents"`
 	}
-	if err := s.doSignedJSON(ctx, "GET", "/v1/agents", nil, &roster); err != nil {
+	if err := s.doSignedJSON(ctx, "GET", "/v1/agents/directory", nil, &roster); err != nil {
 		return nil, fmt.Errorf("list local agent directory: %w", err)
 	}
 
@@ -1335,15 +1396,16 @@ func (s *Server) toolDirectory(ctx context.Context, _ map[string]any) (any, erro
 }
 
 type findAgentFederatedContact struct {
-	AgentID        string                     `json:"agent_id"`
-	DisplayName    string                     `json:"display_name"`
-	RegisteredName string                     `json:"registered_name"`
-	Provider       string                     `json:"provider"`
-	Address        string                     `json:"address"`
-	Handle         string                     `json:"handle"`
-	Available      bool                       `json:"available"`
-	Accepting      bool                       `json:"accepting"`
-	Domains        []findAgentFederatedDomain `json:"domains"`
+	AgentID           string                     `json:"agent_id"`
+	DisplayName       string                     `json:"display_name"`
+	RegisteredName    string                     `json:"registered_name"`
+	Provider          string                     `json:"provider"`
+	Address           string                     `json:"address"`
+	Handle            string                     `json:"handle"`
+	AuthorizationMode string                     `json:"authorization_mode"`
+	Available         bool                       `json:"available"`
+	Accepting         bool                       `json:"accepting"`
+	Domains           []findAgentFederatedDomain `json:"domains"`
 }
 
 type findAgentFederatedDomain struct {
@@ -1358,9 +1420,10 @@ type findAgentFederatedConnection struct {
 }
 
 const (
-	federatedAgentCacheTTL        = time.Minute
-	maxFederatedAgentCacheCallers = 128
-	maxFederatedAgentCacheChains  = 64
+	linkedFederatedAgentAuthorizationMode = "linked-v23"
+	federatedAgentCacheTTL                = time.Minute
+	maxFederatedAgentCacheCallers         = 128
+	maxFederatedAgentCacheChains          = 64
 	// Discovery fetches only a named, remote-bounded result set. Cache one
 	// caller-visible domain basis per result so local revoke reauthorization is
 	// cheap without making a large remote roster or contact-domain cross-product
@@ -1371,6 +1434,23 @@ const (
 	maxFederatedAgentCacheLabelBytes   = 256
 	maxFederatedAgentCacheAddressBytes = 256
 )
+
+func isLinkedFederatedAgentContact(contact findAgentFederatedContact) bool {
+	return contact.AuthorizationMode == linkedFederatedAgentAuthorizationMode &&
+		!contact.Available && !contact.Accepting && contact.Handle == "" &&
+		len(contact.Domains) == 0
+}
+
+func hasLinkedFederatedAgentContacts(connections []findAgentFederatedConnection) bool {
+	for _, connection := range connections {
+		for _, contact := range connection.RemoteAgents {
+			if isLinkedFederatedAgentContact(contact) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 type federatedAgentCacheEntry struct {
 	connections []findAgentFederatedConnection
@@ -1419,7 +1499,9 @@ func boundedFederatedAgentConnections(in []findAgentFederatedConnection) []findA
 				bounded.RemoteAgentsTruncated = true
 				break
 			}
-			if !contact.Available || !contact.Accepting ||
+			linked := isLinkedFederatedAgentContact(contact)
+			if (contact.AuthorizationMode != "" && !linked) ||
+				(!linked && (!contact.Available || !contact.Accepting)) ||
 				len(contact.AgentID) == 0 || len(contact.AgentID) > maxFederatedAgentCacheLabelBytes ||
 				len(contact.DisplayName) > maxFederatedAgentCacheLabelBytes ||
 				len(contact.RegisteredName) > maxFederatedAgentCacheLabelBytes ||
@@ -1430,6 +1512,11 @@ func boundedFederatedAgentConnections(in []findAgentFederatedConnection) []findA
 			}
 			boundedContact := contact
 			boundedContact.Domains = nil
+			if linked {
+				bounded.RemoteAgents = append(bounded.RemoteAgents, boundedContact)
+				contacts++
+				continue
+			}
 			for _, domain := range contact.Domains {
 				domain.Domain = strings.TrimSpace(domain.Domain)
 				if domain.Domain == "" || len(domain.Domain) > maxFederatedAgentCacheLabelBytes {
@@ -1530,7 +1617,7 @@ func (s *Server) reauthorizeCachedFederatedAgentConnections(ctx context.Context,
 // this projection between MCP bearer identities would disclose contacts outside
 // their authorized domain intersection.
 func (s *Server) federatedAgentCacheKey(ctx context.Context, query string) string {
-	return s.effectiveAgentID(ctx) + "\x00" + strings.ToLower(strings.TrimSpace(query))
+	return s.effectiveAgentID(ctx) + "\x00" + asciiLowerAgentName(strings.TrimSpace(query))
 }
 
 func (s *Server) cachedFederatedAgentConnections(ctx context.Context, query string) ([]findAgentFederatedConnection, bool) {
@@ -1545,6 +1632,10 @@ func (s *Server) cachedFederatedAgentConnections(ctx context.Context, query stri
 		}
 		return nil, false
 	}
+	if hasLinkedFederatedAgentContacts(entry.connections) {
+		delete(s.federatedAgentCache, cacheKey)
+		return nil, false
+	}
 	return cloneFindAgentFederatedConnections(entry.connections), true
 }
 
@@ -1554,6 +1645,10 @@ func (s *Server) cacheFederatedAgentConnections(ctx context.Context, query strin
 	connections = boundedFederatedAgentConnections(connections)
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
+	if hasLinkedFederatedAgentContacts(connections) {
+		delete(s.federatedAgentCache, cacheKey)
+		return
+	}
 	for id, entry := range s.federatedAgentCache {
 		if now.Sub(entry.fetchedAt) >= federatedAgentCacheTTL {
 			delete(s.federatedAgentCache, id)
@@ -1584,7 +1679,7 @@ func matchesAgentName(query string, candidates ...string) (exact bool, partial b
 		if candidate == "" {
 			continue
 		}
-		if strings.EqualFold(candidate, query) {
+		if equalAgentNameField(candidate, query) {
 			return true, false
 		}
 		candidateTokens := agentNameTokens(candidate)
@@ -1694,9 +1789,26 @@ var agentNameFillerWords = map[string]bool{
 	"my": true, "our": true, "this": true, "that": true, "please": true,
 }
 
-// agentNameTokens lowercases and splits a name into identity-bearing words.
+// asciiLowerAgentName implements the directory contract: ASCII letters are
+// case-insensitive while non-ASCII registered casing remains significant.
+func asciiLowerAgentName(name string) string {
+	buf := []byte(name)
+	for i, b := range buf {
+		if b >= 'A' && b <= 'Z' {
+			buf[i] = b + ('a' - 'A')
+		}
+	}
+	return string(buf)
+}
+
+func equalAgentNameField(left, right string) bool {
+	return asciiLowerAgentName(left) == asciiLowerAgentName(right)
+}
+
+// agentNameTokens ASCII-lowercases and splits a name into identity-bearing
+// words without conflating distinct non-ASCII registered names.
 func agentNameTokens(name string) []string {
-	fields := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+	fields := strings.FieldsFunc(asciiLowerAgentName(name), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
 	})
 	tokens := make([]string, 0, len(fields))
@@ -1730,9 +1842,11 @@ func localAgentLookupSuffix(query string) string {
 }
 
 // toolFindAgent provides an explicit, safe recipient-discovery path for
-// agent-to-agent work. Local registrations take precedence. Federation is only
-// consulted after a local miss, and the existing caller-filtered available view
-// limits results to remote agents the caller may already see and contact.
+// agent-to-agent work. An exact local registration takes precedence. A local
+// substring match is held while federation is checked so that an exact linked
+// recipient on another SAGE cannot be hidden by an unrelated fuzzy local name.
+// The caller-filtered available view limits remote results to agents the caller
+// may already see and contact.
 func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any, error) {
 	if err := s.requireBoundFederatedCaller(ctx); err != nil {
 		return nil, err
@@ -1795,11 +1909,7 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 			}
 		}
 	}
-	localMatches := localExact
-	if len(localMatches) == 0 {
-		localMatches = localPartial
-	}
-	if len(localMatches) > 0 {
+	localResult := func(localMatches []findAgentLocalResult, searched []string) map[string]any {
 		sort.Slice(localMatches, func(i, j int) bool {
 			if localMatches[i].Name != localMatches[j].Name {
 				return strings.ToLower(localMatches[i].Name) < strings.ToLower(localMatches[j].Name)
@@ -1821,10 +1931,13 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 		return map[string]any{
 			"matches":   matches,
 			"total":     len(localMatches),
-			"searched":  []string{"local"},
+			"searched":  searched,
 			"truncated": len(localMatches) > len(matches),
 			"message":   "Found local agent matches. Pass a match's to value directly to sage_pipe.",
-		}, nil
+		}
+	}
+	if len(localExact) > 0 {
+		return localResult(localExact, []string{"local"}), nil
 	}
 
 	connections, cacheHit := s.cachedFederatedAgentConnections(ctx, query)
@@ -1857,7 +1970,9 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 			continue
 		}
 		for _, contact := range connection.RemoteAgents {
-			if contact.AgentID == "" || contact.Address == "" || !contact.Available || !contact.Accepting {
+			linked := isLinkedFederatedAgentContact(contact)
+			if contact.AgentID == "" || contact.Address == "" ||
+				(!linked && (!contact.Available || !contact.Accepting)) {
 				continue
 			}
 			exact, partial := matchesAgentName(query, contact.DisplayName, contact.RegisteredName, contact.Provider)
@@ -1868,6 +1983,9 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 				federatedPartial = append(federatedPartial, match)
 			}
 		}
+	}
+	if len(federatedExact) == 0 && len(localPartial) > 0 {
+		return localResult(localPartial, []string{"local", "federated"}), nil
 	}
 	federatedMatches := federatedExact
 	if len(federatedMatches) == 0 {
@@ -1884,7 +2002,7 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 	})
 	matches := make([]map[string]any, 0, min(len(federatedMatches), limit))
 	for _, match := range federatedMatches[:min(len(federatedMatches), limit)] {
-		matches = append(matches, map[string]any{
+		entry := map[string]any{
 			"scope":           "federated",
 			"agent_id":        match.contact.AgentID,
 			"name":            match.contact.DisplayName,
@@ -1895,21 +2013,30 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 			"address":         match.contact.Address,
 			"handle":          match.contact.Handle,
 			"to":              match.contact.Address,
-			"available":       true,
-			"accepting":       true,
-		})
+		}
+		if isLinkedFederatedAgentContact(match.contact) {
+			entry["authorization_mode"] = linkedFederatedAgentAuthorizationMode
+		} else {
+			entry["available"] = true
+			entry["accepting"] = true
+		}
+		matches = append(matches, entry)
 	}
 	remoteTruncated := false
 	for _, connection := range connections {
 		remoteTruncated = remoteTruncated || connection.RemoteAgentsTruncated
 	}
+	cacheState := map[bool]string{true: "hit", false: "miss"}[cacheHit]
+	if hasLinkedFederatedAgentContacts(connections) {
+		cacheState = "live"
+	}
 	return map[string]any{
 		"matches":         matches,
 		"total":           len(federatedMatches),
 		"searched":        []string{"local", "federated"},
-		"federated_cache": map[bool]string{true: "hit", false: "miss"}[cacheHit],
+		"federated_cache": cacheState,
 		"truncated":       remoteTruncated || len(federatedMatches) > len(matches),
-		"message":         "No local agent matched. Federated results are limited to active, opted-in contacts you are authorized to use; pass a match's to value directly to sage_pipe. sage_pipe always re-checks the current target registration, route, and authorization before sending; this directory result is not an online/offline verdict.",
+		"message":         "No local agent matched. Federated results are limited to current caller-authorized recipient relations; pass a match's to value directly to sage_pipe. sage_pipe always re-checks the target registration, route, and authorization before sending. A directory result is not an online/offline verdict and is not reachable, accepting, delivery, or read evidence.",
 	}, nil
 }
 
@@ -2132,7 +2259,9 @@ func (s *Server) toolTimeline(ctx context.Context, params map[string]any) (any, 
 }
 
 func (s *Server) toolStatus(ctx context.Context, _ map[string]any) (any, error) {
-	self, appV23, err := s.selfWritePolicy(ctx)
+	standingCtx, cancel := context.WithTimeout(ctx, callerStatusStandingBudget)
+	self, appV23, err := s.selfWritePolicy(standingCtx)
+	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("get caller standing: %w", err)
 	}
@@ -2143,50 +2272,74 @@ func (s *Server) toolStatus(ctx context.Context, _ map[string]any) (any, error) 
 		standing["counts_degraded_reason"] = "memory counts are unavailable until this agent is active"
 		return standing, nil
 	}
+	if appV23 {
+		return s.callerBoundedStatus(ctx, self), nil
+	}
 	stats, err := s.callerScopedMemoryStats(ctx)
 	if err != nil {
-		if !appV23 {
-			return nil, fmt.Errorf("get caller-scoped memory status: %w", err)
-		}
-		standing := callerStanding(self, true)
-		// Counts are optional diagnostics, not proof of the authenticated
-		// caller's identity or policy. A mature store can legitimately exceed
-		// the bounded authorization walk; try the exact home domain without
-		// increasing that budget or broadening visibility.
-		if isCallerStatusAuthorizationScanBudget(err) && self.HomeDomain != "" {
-			if homeStats, homeErr := s.callerScopedMemoryStatsForDomain(ctx, self.HomeDomain); homeErr == nil &&
-				callerStatusCountsAreReportable(homeStats) {
-				for key, value := range standing {
-					homeStats[key] = value
-				}
-				homeStats["scope"] = "caller_home_domain"
-				homeStats["counts_scope"] = "home_domain"
-				homeStats["domain_scope"] = self.HomeDomain
-				homeStats["counts_available"] = true
-				homeStats["counts_degraded_reason"] = "caller-wide memory aggregation exceeded the bounded authorization scan; showing home-domain counts only"
-				return homeStats, nil
-			}
-		}
-		standing["counts_available"] = false
-		standing["counts_scope"] = "caller"
-		standing["counts_degraded_reason"] = callerStatusCountsDegradedReason(err)
-		return standing, nil
-	}
-	if appV23 {
-		if !callerStatusCountsAreReportable(stats) {
-			standing := callerStanding(self, true)
-			standing["counts_available"] = false
-			standing["counts_scope"] = "caller"
-			standing["counts_degraded_reason"] = "caller memory counts are not exact enough to report an empty result"
-			return standing, nil
-		}
-		for key, value := range callerStanding(self, true) {
-			stats[key] = value
-		}
-		stats["counts_available"] = true
-		stats["counts_scope"] = "caller"
+		return nil, fmt.Errorf("get caller-scoped memory status: %w", err)
 	}
 	return stats, nil
+}
+
+const (
+	callerStatusStandingBudget = 1500 * time.Millisecond
+	callerStatusOptionalBudget = 750 * time.Millisecond
+)
+
+// callerBoundedStatus deliberately avoids the unscoped memory-list surface.
+// An unscoped disclosure walk is content-sensitive and may consume the entire
+// authorization scan budget before it finds a visible row. Status is a policy
+// discovery tool, so it must remain fast even when recall itself correctly
+// requires a domain. Optional domain/count diagnostics are separately bounded;
+// authenticated self-standing always survives their failure.
+func (s *Server) callerBoundedStatus(ctx context.Context, self selfWritePolicy) map[string]any {
+	standing := callerStanding(self, true)
+	standing["counts_available"] = false
+	standing["counts_scope"] = "home_domain"
+	standing["readable_domains"] = []string{}
+	standing["readable_domains_scope"] = "bounded_policy_sample"
+
+	diagnosticCtx, cancel := context.WithTimeout(ctx, callerStatusOptionalBudget)
+	defer cancel()
+
+	var domains struct {
+		Domains   []string `json:"domains"`
+		Truncated bool     `json:"truncated"`
+		Scope     string   `json:"scope"`
+	}
+	if err := s.doSignedJSON(diagnosticCtx, http.MethodGet, "/v1/agent/me/domains", nil, &domains); err == nil {
+		standing["readable_domains"] = domains.Domains
+		standing["readable_domains_truncated"] = domains.Truncated
+		if domains.Scope != "" {
+			standing["readable_domains_scope"] = domains.Scope
+		}
+	} else if self.HomeDomain != "" && self.CanRead {
+		// The home domain is already part of authenticated consensus standing;
+		// retaining it here reveals nothing new and leaves a useful scoped-recall
+		// hint when the optional projection is unavailable.
+		standing["readable_domains"] = []string{self.HomeDomain}
+		standing["readable_domains_truncated"] = true
+		standing["readable_domains_degraded_reason"] = "bounded readable-domain discovery is temporarily unavailable; showing the authenticated home domain"
+	}
+
+	if self.HomeDomain == "" || !self.CanRead || diagnosticCtx.Err() != nil {
+		standing["counts_degraded_reason"] = "home-domain memory counts are unavailable; authenticated self-standing and readable domains remain valid"
+		return standing
+	}
+	homeStats, err := s.callerScopedMemoryCountForDomain(diagnosticCtx, self.HomeDomain)
+	if err != nil || !callerStatusCountsAreReportable(homeStats) {
+		standing["counts_degraded_reason"] = "home-domain memory counts exceeded the bounded status budget; authenticated self-standing and readable domains remain valid"
+		return standing
+	}
+	for key, value := range homeStats {
+		standing[key] = value
+	}
+	standing["scope"] = "caller_home_domain"
+	standing["counts_available"] = true
+	standing["counts_scope"] = "home_domain"
+	standing["domain_scope"] = self.HomeDomain
+	return standing
 }
 
 // callerStatusCountsAreReportable prevents an inexact lower-bound zero from
@@ -2200,24 +2353,6 @@ func callerStatusCountsAreReportable(stats map[string]any) bool {
 	}
 	exact, _ := stats["total_exact"].(bool)
 	return total > 0 || exact
-}
-
-func callerStatusCountsDegradedReason(err error) string {
-	if isCallerStatusAuthorizationScanBudget(err) {
-		return "caller memory aggregation exceeded the bounded authorization scan; use a domain filter for memory counts"
-	}
-	return "caller memory counts are temporarily unavailable; authenticated self-standing remains valid"
-}
-
-func isCallerStatusAuthorizationScanBudget(err error) bool {
-	var problem *apiProblemError
-	return errors.As(err, &problem) &&
-		problem.StatusCode == http.StatusUnprocessableEntity &&
-		problem.ProblemStatus != nil &&
-		*problem.ProblemStatus == http.StatusUnprocessableEntity &&
-		strings.HasPrefix(problem.ContentType, "application/problem+json") &&
-		problem.Title == "Query too broad" &&
-		strings.Contains(problem.Detail, "authorization scan budget exceeded")
 }
 
 // callerStanding projects only the authenticated key's own consensus policy.
@@ -2243,15 +2378,23 @@ func callerStanding(self selfWritePolicy, memoryAccessAvailable bool) map[string
 // callerScopedMemoryCount is the cheap boot path. It intentionally uses the
 // signed agent read surface, never a CEREBRUM operator endpoint.
 func (s *Server) callerScopedMemoryCount(ctx context.Context) (map[string]any, error) {
+	return s.callerScopedMemoryCountForDomain(ctx, "")
+}
+
+func (s *Server) callerScopedMemoryCountForDomain(ctx context.Context, domain string) (map[string]any, error) {
 	var listResp struct {
 		Total      int   `json:"total"`
 		HasMore    *bool `json:"has_more"`
 		TotalExact *bool `json:"total_exact"`
 	}
+	path := "/v1/memory/list?limit=1&status=committed"
+	if domain != "" {
+		path += "&domain=" + url.QueryEscape(domain)
+	}
 	if err := s.doSignedJSON(
 		ctx,
 		http.MethodGet,
-		"/v1/memory/list?limit=1&status=committed",
+		path,
 		nil,
 		&listResp,
 	); err != nil {
@@ -3946,6 +4089,185 @@ func floatParam(params map[string]any, key string, defaultVal float64) float64 {
 
 // --- Pipeline Tool Handlers ---
 
+func randomMessageToken(prefix string) (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(raw), nil
+}
+
+func (s *Server) toolMessageSend(ctx context.Context, params map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
+	to := stringParam(params, "to", "")
+	payload := stringParam(params, "payload", "")
+	idempotencyKey := stringParam(params, "idempotency_key", "")
+	if to == "" || payload == "" || idempotencyKey == "" {
+		return nil, fmt.Errorf("'to', 'payload', and 'idempotency_key' are required")
+	}
+	if len(idempotencyKey) > store.MaxMessageTokenBytes {
+		return nil, fmt.Errorf("'idempotency_key' must be at most %d bytes", store.MaxMessageTokenBytes)
+	}
+	ttl := intParam(params, "ttl_minutes", 60)
+	if ttl < 1 || ttl > 1440 {
+		return nil, fmt.Errorf("'ttl_minutes' must be between 1 and 1440")
+	}
+	resolveBody, _ := json.Marshal(map[string]any{"to": to})
+	var resolved struct {
+		ToAgent            string `json:"to_agent"`
+		ToProvider         string `json:"to_provider"`
+		DestinationChainID string `json:"destination_chain_id"`
+	}
+	if err := s.doSignedJSON(ctx, http.MethodPost, "/v1/pipe/resolve", resolveBody, &resolved); err != nil {
+		return nil, fmt.Errorf("message target resolution: %w", err)
+	}
+	if resolved.DestinationChainID != "" {
+		return nil, fmt.Errorf("canonical message receipts are not negotiated for federated delivery yet; use sage_pipe for this remote target")
+	}
+	if resolved.ToAgent == "" || resolved.ToProvider != "" {
+		return nil, fmt.Errorf("canonical messages require one exact local agent target")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"to_agent": resolved.ToAgent, "intent": stringParam(params, "intent", ""),
+		"payload": payload, "ttl_minutes": ttl, "idempotency_key": idempotencyKey,
+	})
+	var response struct {
+		MessageID        string `json:"message_id"`
+		Status           string `json:"status"`
+		ExpiresAt        string `json:"expires_at"`
+		IdempotentReplay bool   `json:"idempotent_replay"`
+	}
+	if err := s.doSignedJSON(ctx, http.MethodPost, "/v1/messages", body, &response); err != nil {
+		return nil, fmt.Errorf("message send: %w", err)
+	}
+	return map[string]any{
+		"message_id": response.MessageID, "status": response.Status,
+		"expires_at": response.ExpiresAt, "idempotent_replay": response.IdempotentReplay,
+		"message": "Message durably delivered to the local recipient inbox. Delivery is not proof of read; query sage_message_status for exact acknowledgement state.",
+	}, nil
+}
+
+type canonicalMessageWireItem struct {
+	MessageID    string `json:"message_id"`
+	FromAgent    string `json:"from_agent"`
+	FromProvider string `json:"from_provider"`
+	Intent       string `json:"intent"`
+	Payload      string `json:"payload"`
+	CreatedAt    string `json:"created_at"`
+}
+
+func (s *Server) receiveCanonicalMessageBatch(ctx context.Context, receiveToken string, limit int) ([]pipelineInboxWireItem, bool, error) {
+	body, _ := json.Marshal(map[string]any{"receive_token": receiveToken, "limit": limit})
+	var response struct {
+		Items            []canonicalMessageWireItem `json:"items"`
+		Count            int                        `json:"count"`
+		IdempotentReplay bool                       `json:"idempotent_replay"`
+	}
+	if err := s.doSignedJSON(ctx, http.MethodPost, "/v1/messages/receive", body, &response); err != nil {
+		return nil, false, err
+	}
+	items := make([]pipelineInboxWireItem, 0, len(response.Items))
+	for _, item := range response.Items {
+		items = append(items, pipelineInboxWireItem{
+			PipeID: item.MessageID, FromAgent: item.FromAgent, FromProvider: item.FromProvider,
+			Intent: item.Intent, Payload: item.Payload, CreatedAt: item.CreatedAt,
+		})
+	}
+	return items, response.IdempotentReplay, nil
+}
+
+func (s *Server) acknowledgeCanonicalMessage(ctx context.Context, messageID string) (string, error) {
+	var response struct {
+		ReadStatus string `json:"read_status"`
+	}
+	err := s.doSignedJSON(ctx, http.MethodPut, "/v1/messages/"+url.PathEscape(messageID)+"/read", []byte(`{}`), &response)
+	if response.ReadStatus == "" {
+		response.ReadStatus = "not_confirmed"
+	}
+	return response.ReadStatus, err
+}
+
+func (s *Server) toolMessagesReceive(ctx context.Context, params map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
+	receiveToken := stringParam(params, "receive_token", "")
+	if receiveToken == "" {
+		return nil, fmt.Errorf("'receive_token' is required")
+	}
+	if len(receiveToken) > store.MaxMessageTokenBytes {
+		return nil, fmt.Errorf("'receive_token' must be at most %d bytes", store.MaxMessageTokenBytes)
+	}
+	limit := intParam(params, "limit", 5)
+	if limit <= 0 || limit > 20 {
+		return nil, fmt.Errorf("'limit' must be between 1 and 20")
+	}
+	received, replayed, err := s.receiveCanonicalMessageBatch(ctx, receiveToken, limit)
+	if err != nil {
+		return nil, fmt.Errorf("messages receive: %w", err)
+	}
+	items := make([]map[string]any, 0, len(received))
+	for _, item := range received {
+		readStatus, ackErr := s.acknowledgeCanonicalMessage(ctx, item.PipeID)
+		formatted := formatPipelineInboxItem(item)
+		formatted["message_id"] = item.PipeID
+		delete(formatted, "pipe_id")
+		formatted["read_status"] = readStatus
+		if ackErr != nil {
+			formatted["read_confirmation_error"] = ackErr.Error()
+		}
+		items = append(items, formatted)
+	}
+	return map[string]any{
+		"items": items, "count": len(items), "idempotent_replay": replayed,
+		"message": fmt.Sprintf("Received %d local message(s). Each returned item was acknowledged by exact message ID when possible.", len(items)),
+	}, nil
+}
+
+func (s *Server) toolMessageReply(ctx context.Context, params map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
+	messageID := stringParam(params, "message_id", "")
+	result := stringParam(params, "result", "")
+	if messageID == "" || result == "" {
+		return nil, fmt.Errorf("'message_id' and 'result' are required")
+	}
+	body, _ := json.Marshal(map[string]any{"result": result})
+	var response map[string]any
+	if err := s.doSignedJSON(ctx, http.MethodPost, "/v1/messages/"+url.PathEscape(messageID)+"/reply", body, &response); err != nil {
+		return nil, fmt.Errorf("message reply: %w", err)
+	}
+	response["message"] = "Reply recorded. Repeating this exact reply is safe; a different second reply is rejected."
+	return response, nil
+}
+
+func (s *Server) toolMessageStatus(ctx context.Context, params map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
+	messageID := stringParam(params, "message_id", "")
+	if messageID == "" {
+		return nil, fmt.Errorf("'message_id' is required")
+	}
+	var response map[string]any
+	if err := s.doSignedJSON(ctx, http.MethodGet, "/v1/messages/"+url.PathEscape(messageID)+"/status", nil, &response); err != nil {
+		return nil, fmt.Errorf("message status: %w", err)
+	}
+	readStatus, _ := response["read_status"].(string)
+	switch readStatus {
+	case "confirmed":
+		response["message"] = "The exact recipient credential fetched and acknowledged this message. This does not prove comprehension or action."
+	case "unsupported":
+		response["message"] = "The destination does not support exact read acknowledgement. Delivery and workflow facts remain independent."
+	default:
+		response["message"] = "Exact recipient read is not confirmed. This is not proof the recipient did not see the message."
+	}
+	return response, nil
+}
+
 func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, error) {
 	if err := s.requireBoundFederatedCaller(ctx); err != nil {
 		return nil, err
@@ -3979,6 +4301,38 @@ func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, erro
 	}
 	if resolved.ToAgent == "" && resolved.ToProvider == "" {
 		return nil, fmt.Errorf("pipeline target resolution returned no exact target")
+	}
+	// Local compatibility sends delegate to the canonical Messages service so
+	// there is one queue and one insertion path. The legacy tool has no caller
+	// token parameter, so it receives a fresh internal key per invocation; new
+	// clients that need lost-response replay use sage_message_send directly.
+	if resolved.DestinationChainID == "" && resolved.ToAgent != "" && resolved.ToProvider == "" {
+		compatKey, err := randomMessageToken("legacy-pipe-")
+		if err != nil {
+			return nil, fmt.Errorf("pipeline idempotency token: %w", err)
+		}
+		body, _ := json.Marshal(map[string]any{
+			"to_agent": resolved.ToAgent, "intent": intent, "payload": payload,
+			"ttl_minutes": ttlMinutes, "idempotency_key": compatKey,
+		})
+		var local struct {
+			MessageID string `json:"message_id"`
+			Status    string `json:"status"`
+			ExpiresAt string `json:"expires_at"`
+		}
+		if err := s.doSignedJSON(ctx, http.MethodPost, "/v1/messages", body, &local); err == nil {
+			return map[string]any{
+				"pipe_id": local.MessageID, "status": local.Status, "expires_at": local.ExpiresAt,
+				"destination_chain_id": "",
+				"message":              "Sent locally. The target agent will see this on their next sage_turn, sage_inbox, or sage_messages_receive call.",
+			}, nil
+		} else if !isAPIStatus(err, http.StatusNotFound) {
+			// Never fall back after an ambiguous transport/server error: the
+			// canonical idempotent send may already have committed.
+			return nil, fmt.Errorf("pipeline send: %w", err)
+		}
+		// An older node has no /v1/messages route. Preserve the v12 compatibility
+		// window by using its legacy local endpoint only for this definitive 404.
 	}
 
 	body, _ := json.Marshal(map[string]any{
@@ -4180,15 +4534,42 @@ func (s *Server) toolInbox(ctx context.Context, params map[string]any) (any, err
 		Items []pipelineInboxWireItem `json:"items"`
 		Count int                     `json:"count"`
 	}
-
-	path := fmt.Sprintf("/v1/pipe/inbox?limit=%d", limit)
-	if err := s.doSignedJSON(ctx, "GET", path, nil, &resp); err != nil {
-		return nil, fmt.Errorf("pipeline inbox: %w", err)
+	readMetadata := make(map[string]map[string]any)
+	compatToken, tokenErr := randomMessageToken("legacy-inbox-")
+	if tokenErr != nil {
+		return nil, fmt.Errorf("pipeline inbox token: %w", tokenErr)
+	}
+	canonicalItems, _, receiveErr := s.receiveCanonicalMessageBatch(ctx, compatToken, limit)
+	if receiveErr == nil {
+		resp.Items = canonicalItems
+		resp.Count = len(canonicalItems)
+		for i := range resp.Items {
+			// The work remains visible even when the conservative read evidence
+			// write fails; claimed work must never disappear behind receipt state.
+			readStatus, ackErr := s.acknowledgeCanonicalMessage(ctx, resp.Items[i].PipeID)
+			readMetadata[resp.Items[i].PipeID] = map[string]any{"read_status": readStatus}
+			if ackErr != nil {
+				readMetadata[resp.Items[i].PipeID]["read_confirmation_error"] = ackErr.Error()
+			}
+		}
+	} else if isAPIStatus(receiveErr, http.StatusNotFound) {
+		// Compatibility with pre-v11.17 nodes only. A definitive route miss is
+		// safe to fall back; ambiguous failures must not claim a second batch.
+		path := fmt.Sprintf("/v1/pipe/inbox?limit=%d", limit)
+		if err := s.doSignedJSON(ctx, http.MethodGet, path, nil, &resp); err != nil {
+			return nil, fmt.Errorf("pipeline inbox: %w", err)
+		}
+	} else {
+		return nil, fmt.Errorf("pipeline inbox: %w", receiveErr)
 	}
 
 	items := make([]map[string]any, 0, len(resp.Items))
 	for _, item := range resp.Items {
-		items = append(items, formatPipelineInboxItem(item))
+		formatted := formatPipelineInboxItem(item)
+		for key, value := range readMetadata[item.PipeID] {
+			formatted[key] = value
+		}
+		items = append(items, formatted)
 	}
 
 	// Assignment notices are durable one-way notifications, not pipeline work.
@@ -4340,6 +4721,20 @@ func (s *Server) toolPipeResult(ctx context.Context, params map[string]any) (any
 		bodyFields["source_chain_id"] = meta.ReplySourceChainID
 	}
 	body, _ := json.Marshal(bodyFields)
+	if !federated {
+		var canonical map[string]any
+		err := s.doSignedJSON(ctx, http.MethodPost, "/v1/messages/"+url.PathEscape(pipeID)+"/reply", body, &canonical)
+		if err == nil {
+			return map[string]any{
+				"status": canonical["status"], "journal_id": "", "journaled": false,
+				"message": "Result delivered through the idempotent local Messages service. The requesting agent can query exact workflow and read status.",
+			}, nil
+		}
+		if !isAPIStatus(err, http.StatusNotFound) {
+			return nil, fmt.Errorf("pipeline result: %w", err)
+		}
+		// Definite route miss on an older node: use the compatibility endpoint.
+	}
 
 	var resp struct {
 		Status    string `json:"status"`
@@ -4374,10 +4769,34 @@ func (s *Server) checkPipelineInbox(ctx context.Context) map[string]any {
 		Items []pipelineInboxWireItem `json:"items"`
 		Count int                     `json:"count"`
 	}
-	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/inbox?limit=5", nil, &inboxResp); err == nil && inboxResp.Count > 0 {
+	turnReadMetadata := make(map[string]map[string]any)
+	turnToken, tokenErr := randomMessageToken("turn-inbox-")
+	if tokenErr == nil {
+		canonicalItems, _, receiveErr := s.receiveCanonicalMessageBatch(ctx, turnToken, 5)
+		if receiveErr == nil {
+			inboxResp.Items = canonicalItems
+			inboxResp.Count = len(canonicalItems)
+			for i := range inboxResp.Items {
+				readStatus, ackErr := s.acknowledgeCanonicalMessage(ctx, inboxResp.Items[i].PipeID)
+				turnReadMetadata[inboxResp.Items[i].PipeID] = map[string]any{"read_status": readStatus}
+				if ackErr != nil {
+					turnReadMetadata[inboxResp.Items[i].PipeID]["read_confirmation_error"] = ackErr.Error()
+				}
+			}
+		} else if isAPIStatus(receiveErr, http.StatusNotFound) {
+			_ = s.doSignedJSON(ctx, http.MethodGet, "/v1/pipe/inbox?limit=5", nil, &inboxResp)
+		} else {
+			result["pipe_inbox_error"] = receiveErr.Error()
+		}
+	}
+	if inboxResp.Count > 0 {
 		items := make([]map[string]any, 0, len(inboxResp.Items))
 		for _, item := range inboxResp.Items {
-			items = append(items, formatPipelineInboxItem(item))
+			formatted := formatPipelineInboxItem(item)
+			for key, value := range turnReadMetadata[item.PipeID] {
+				formatted[key] = value
+			}
+			items = append(items, formatted)
 		}
 		result["pipe_inbox"] = items
 		result["pipe_inbox_count"] = inboxResp.Count

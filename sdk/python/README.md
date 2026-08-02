@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **SAGE v11.16.4 SDK** | **TLS, app-v23 roles and Access Groups, app-v24 memory integrity, app-v25 immutable envelopes and automatic historical continuity recovery, read-only federation, domain recovery, scoped governance, and per-record `classification` supported**
+**Requires Python 3.10+** | **SAGE v11.17.0 SDK** | **TLS, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local Messages and read receipts, read-only federation, scoped governance, and per-record `classification` supported**
 
 ## Installation
 
@@ -132,7 +132,8 @@ agent = client.get_agent("a1b2c3...")  # GET /v1/agent/{id}
 # List active ordinary agents visible to this signed caller
 agents = client.list_agents()        # GET /v1/agents → {"agents": [...], "total": N}
 
-# On app-v23/app-v25, role/profile/group changes happen through the local
+# From app-v23 onward (including app-v26 group authority),
+# role/profile/group changes happen through the local
 # CEREBRUM Root/Admin controls. Do not call the legacy set_agent_permission()
 # endpoint: the server retires it with HTTP 410 after activation.
 ```
@@ -349,6 +350,40 @@ results = client.pipe_results(limit=5)
 received_history = client.pipe_inbox_history(limit=20)
 sent_history = client.pipe_outbox(limit=20)
 ```
+
+For same-node work that needs retry-safe delivery and read receipts, use the
+v11.17 canonical Messages service. It uses the same retained inbox rows, not a
+second queue:
+
+```python
+sent = client.message_send(
+    to_agent="target-agent-id",
+    payload="Please review the incident notes",
+    intent="review",
+    idempotency_key="incident-42-review-v1",
+)
+
+# The token makes a lost HTTP response safe: an exact retry returns the same
+# ordered claimed batch rather than consuming later messages.
+batch = client.messages_receive("session-2026-08-02-turn-1", limit=5)
+for item in batch.items:
+    client.message_mark_read(item.message_id)
+    client.message_reply(item.message_id, "Reviewed")
+
+# Exact sender only; no payload or reply content is exposed here.
+receipt = client.message_status(sent.message_id)
+print(receipt.transport_status, receipt.read_status, receipt.workflow_status)
+```
+
+`idempotency_key` and `receive_token` are 1–256 bytes. `ttl_minutes` is strictly
+1–1440 (default 60). Receive-token replay metadata is retained for 48 hours and
+bounded to 4096 tokens per agent; a purged/incomplete exact batch fails instead
+of claiming newer messages.
+
+The asynchronous client exposes the same five methods as coroutines. Canonical
+receipts are local-only in v11.17; federated sends continue to use the pipeline
+contact/revalidation path and must not be described as remotely read merely
+because they were queued.
 
 ### Embeddings
 
@@ -889,6 +924,16 @@ def hash_embed(text: str, dim: int = 768) -> list[float]:
 | `PUT` | `/v1/pipe/{id}/result` | `pipe_result()` |
 | `GET` | `/v1/pipe/{id}` | `pipe_status()` |
 | `GET` | `/v1/pipe/results` | `pipe_results()` |
+
+### Canonical local Messages
+
+| Method | Endpoint | SDK Method |
+|--------|----------|------------|
+| `POST` | `/v1/messages` | `message_send()` |
+| `POST` | `/v1/messages/receive` | `messages_receive()` |
+| `POST` | `/v1/messages/{message_id}/reply` | `message_reply()` |
+| `PUT` | `/v1/messages/{message_id}/read` | `message_mark_read()` |
+| `GET` | `/v1/messages/{message_id}/status` | `message_status()` |
 
 ### Validator
 

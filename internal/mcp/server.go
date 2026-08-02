@@ -90,16 +90,14 @@ type Server struct {
 }
 
 type conversationState struct {
-	callsSinceTurn   int
-	lastTurnTime     time.Time
 	inceptionChecked bool
 	lastUsed         time.Time
 }
 
 type conversationIDContextKey struct{}
 
-// WithConversationID scopes turn discipline and auto-inception to one MCP
-// client/session. Stdio callers naturally use the empty/default conversation.
+// WithConversationID scopes auto-inception to one MCP client/session. Stdio
+// callers naturally use the empty/default conversation.
 func WithConversationID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, conversationIDContextKey{}, id)
 }
@@ -378,29 +376,9 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 			doAutoInception = true
 		}
 	}
-	blocked := shouldBlockForTurn(params.Name, conversation)
-	blockedCount := conversation.callsSinceTurn
 	s.conversationMu.Unlock()
 	if doAutoInception {
 		autoInceptionMsg = s.maybeAutoInception(ctx)
-	}
-
-	// Enforce turn discipline: block non-SAGE tools after threshold.
-	// This guarantees memories are saved — agents can't just ignore the nudge.
-	if blocked {
-		return &jsonRPCResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result: map[string]any{
-				"content": []map[string]any{
-					{"type": "text", "text": "[SAGE] ⛔ Turn checkpoint — call sage_turn before continuing. " +
-						"You have " + fmt.Sprintf("%d", blockedCount) + " unrecorded tool calls. " +
-						"Summarize what's happened so far (topic + observation), then retry this operation. " +
-						"This protects your work from being lost if the conversation ends unexpectedly."},
-				},
-				"isError": true,
-			},
-		}
 	}
 
 	result, err := tool.Handler(ctx, params.Arguments)
@@ -417,14 +395,9 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 		}
 	}
 
-	// Track turn discipline: reset counter on sage_turn, increment on everything else.
+	// Session state is advisory only. MCP operations must never be blocked or
+	// padded merely because a client has not called sage_turn recently.
 	s.conversationMu.Lock()
-	if params.Name == "sage_turn" {
-		conversation.callsSinceTurn = 0
-		conversation.lastTurnTime = time.Now()
-	} else if params.Name != "sage_inception" && params.Name != "sage_red_pill" && params.Name != "sage_register" {
-		conversation.callsSinceTurn++
-	}
 	conversation.lastUsed = time.Now()
 	s.conversationMu.Unlock()
 
@@ -458,32 +431,6 @@ func (s *Server) writeError(id any, code int, message string) {
 		ID:      id,
 		Error:   &rpcError{Code: code, Message: message},
 	})
-}
-
-// shouldBlockForTurn returns true if the agent should be forced to call sage_turn
-// before any more non-SAGE tool calls. This is the hard enforcement — after 7 calls
-// or 5 minutes, we block until sage_turn is called.
-func shouldBlockForTurn(toolName string, state *conversationState) bool {
-	// Never block SAGE tools themselves.
-	switch toolName {
-	case "sage_turn", "sage_inception", "sage_red_pill", "sage_reflect", "sage_recall",
-		"sage_remember", "sage_forget", "sage_reinstate", "sage_corroborate", "sage_link", "sage_list", "sage_status", "sage_timeline",
-		"sage_task", "sage_backlog", "sage_register", "sage_directory", "sage_find_agent",
-		"sage_pipe", "sage_inbox", "sage_pipe_history", "sage_pipe_result":
-		return false
-	}
-
-	// Block after 7 non-SAGE calls.
-	if state.callsSinceTurn >= 7 {
-		return true
-	}
-
-	// Block after 5 minutes without sage_turn (but only if we've had at least one turn).
-	if !state.lastTurnTime.IsZero() && time.Since(state.lastTurnTime).Minutes() > 5 && state.callsSinceTurn >= 2 {
-		return true
-	}
-
-	return false
 }
 
 // maybeAutoInception checks if the brain has memories. If empty, runs inception
@@ -671,6 +618,15 @@ func matchesSinglePathSegment(path, prefix string) bool {
 	return ok && suffix != "" && !strings.Contains(suffix, "/")
 }
 
+func matchesSinglePathSegmentWithSuffix(path, prefix, suffix string) bool {
+	middle, ok := strings.CutPrefix(path, prefix)
+	if !ok {
+		return false
+	}
+	middle, ok = strings.CutSuffix(middle, suffix)
+	return ok && middle != "" && !strings.Contains(middle, "/")
+}
+
 func classifySignedRequestReplay(method, path string) signedRequestReplaySafety {
 	path = strings.TrimSuffix(path, "?")
 	path, _, _ = strings.Cut(path, "?")
@@ -694,8 +650,19 @@ func classifySignedRequestReplay(method, path string) signedRequestReplaySafety 
 		if matchesSinglePathSegment(path, "/v1/pipe/") {
 			return signedRequestReplaySafe
 		}
+		if matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/status") {
+			return signedRequestReplaySafe
+		}
 	case http.MethodPost:
 		if retryableIdempotentPOSTPaths[path] {
+			return signedRequestReplaySafe
+		}
+		if path == "/v1/messages" || path == "/v1/messages/receive" ||
+			matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/reply") {
+			return signedRequestReplaySafe
+		}
+	case http.MethodPut:
+		if matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/read") {
 			return signedRequestReplaySafe
 		}
 	}

@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-08):** **v11.16.4 is the current release line.** Governed app-v23 replaces raw capability-bit administration with Member, Manager, and Admin roles plus consensus Access Groups, named security profiles, and classification clearance. App-v24 adds exact memory content-hash binding, hash-preserving terminal transitions, and a governed historical re-anchor without rewriting content or chain history. CEREBRUM Root is a hidden singleton authority with a dedicated credential-handover ceremony; rotation preserves operational access to Root-owned domains without rewriting historical memory authorship or chain history. Federated agents are linked readers only and can never become local group members or receive remote Write, Copy, Modify, claim, ownership, role, grant, or governance authority. Fresh first-party Mynah / SAGE Voice Bridge nodes atomically receive their reviewed companion profile and owned home domain, then remain fail-closed until app-v24 is active for their next write; unrelated self-registrations remain pending review. The complete CI/security/fault matrix remains a mandatory publication invariant, including app-v23/app-v24 replay and state-sync checks, and the native-shell productization bridge now spans v11.11–v11.16.
+**Status (2026-08):** **v11.17.0 is the current release line.** Governed app-v26 adds explicit per-group `read`, `read_write`, and `read_write_modify` authority without weakening owner control or federated read-only isolation. App-v24 binds exact memory hashes; app-v25 preserves immutable envelopes and repairs historical continuity; CEREBRUM Root can now inspect and resolve the remaining safe-to-assign or deprecate-only historical records. Canonical local Messages add idempotent delivery, exact receive replay, recipient read evidence, sender status, and metadata-only HTTP SSE wake-up hints. CEREBRUM Root remains the hidden singleton ultimate authority, while linked agents remain read-only guests and never become local group members. Existing chains upgrade in place without rewriting memories, historical authors, domains, or prior blocks. The complete CI/security/fault matrix remains a mandatory publication invariant, including app-v23 through app-v26 replay and state-sync checks, and the native-shell productization bridge now spans v11.11–v11.17.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -276,22 +276,25 @@ without a manual repair; generic new keys remain safely pending review.
 
 ---
 
-## Post-v11.16 - planned (agent message delivery and read receipts)
+## v11.17 - local agent Messages and read receipts
 
-Consolidate pipe, inbox, sent results, and status into one agent-only
+v11.17 consolidates pipe, inbox, sent results, and status into one agent-only
 **Messages** service model with idempotent send, explicit idempotent receive,
 idempotent receiver-local reply, explicit signed
 `PUT /v1/messages/{receiver_local_message_id}/read`, and exact sender-only
-status—the five canonical operations. Do not disguise claiming inbox work as
-a passive `GET` list or combine it with sent/`all`; defer passive lists until
-their cursor and claim semantics are safe. Retain the old MCP/REST names as
+status—the five canonical operations. Claiming inbox work is not disguised as
+a passive `GET` list or combined with sent/`all`; passive history continues
+through the compatibility surface until its cursor and claim semantics are
+safe. The old MCP/REST names remain
 compatibility wrappers through v12 and at least two feature releases, without
 duplicating rows into a second default `sage_turn` field. Add
 payload-free, sender-only status for one exact sent message:
 durable destination delivery plus an automatic exact-ID acknowledgement signed
 by the addressed recipient when canonical receive, `sage_inbox`, or
 `sage_turn.pipe_inbox` returns the item.
-Federated receipts preserve both principals—the outer JOIN-frozen SAGE operator
+Same-node read evidence and metadata-only HTTP MCP wake-up hints ship in
+v11.17. Federated receipt propagation remains deferred and must preserve both
+principals—the outer JOIN-frozen SAGE operator
 and inner recipient agent—and are negotiated as an additive capability with
 durable retry, replay/equivocation protection, and fail-closed
 pause/revoke/re-pair behavior. “Read” means the authenticated recipient client
@@ -299,8 +302,9 @@ fetched and acknowledged that exact message; it is not presence, comprehension,
 action, or a reply. Status is unavailable to Root/Admin/operators and unrelated
 agents, contains no payload or roster data, remains transient/off-consensus, and
 uses a dedicated metadata-only SQL projection that remains queryable while the
-content vault is locked. It requires no application fork. The complete planned contract and mandatory
-two-node fault/security gates are in
+content vault is locked. The local contract requires no application fork. The
+complete contract and mandatory two-node fault/security gates for a future
+federated extension are in
 [`design/agent-message-receipts.md`](design/agent-message-receipts.md).
 
 ---

@@ -20,7 +20,7 @@ func TestAppV21ForkGateAndVersionLockstep(t *testing.T) {
 	assert.False(t, app.postAppV21Fork(100))
 	assert.Equal(t, uint64(1), app.currentAppVersion())
 	assert.Equal(t, tx.CanonicalUpgradeName(21), appV21UpgradeName)
-	assert.Equal(t, uint64(25), MaxSupportedAppVersion())
+	assert.Equal(t, uint64(26), MaxSupportedAppVersion())
 
 	app.appV21AppliedHeight = 100
 	assert.False(t, app.postAppV21Fork(100), "activation block retains legacy-v17 challenge policy")

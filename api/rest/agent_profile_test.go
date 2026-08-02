@@ -176,3 +176,33 @@ func TestAppV23GetAgentSelfDoesNotTurnSignedUnknownKeyIntoRosterOracle(t *testin
 	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
 	require.NotContains(t, rr.Body.String(), "member-home")
 }
+
+func TestAppV23GetAgentStandingViewSkipsOptionalServingProjections(t *testing.T) {
+	srv, _, badger, _ := newRBACTestServer(t)
+	rootPub, _, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	memberPub, memberKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	memberID := auth.PublicKeyToAgentID(memberPub)
+	require.NoError(t, badger.BootstrapAppV23Genesis(store.AppV23GenesisBootstrap{
+		RootID: auth.PublicKeyToAgentID(rootPub), Scope: "standing-fast-path",
+		AgentID: memberID, Profile: store.AppV23ProfileStandard,
+		HomeDomain: "member-home", Clearance: 1, Capabilities: 0,
+		Height: 1, BootstrapDigest: "standing-fast-path",
+	}))
+	srv.SetPostV23ForNextTxAccessor(func() bool { return true })
+	// The full profile consults these optional projections. Standing must not.
+	srv.agentStore = nil
+	srv.scoreStore = nil
+	req := signedRequestAs(t, memberKey, memberID, http.MethodGet,
+		"/v1/agent/me?view=standing", nil)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var response AgentProfileResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Equal(t, memberID, response.AgentID)
+	require.Equal(t, "member-home", response.HomeDomain)
+	require.Empty(t, response.Domains)
+	require.Zero(t, response.VoteCount)
+}

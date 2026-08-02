@@ -72,6 +72,96 @@ func TestAdoptLegacyMemoriesAllowsHistoricalDomainWithoutCurrentOwner(t *testing
 	require.Equal(t, "historical/domain", state.Domain)
 }
 
+func TestAppV26AdoptLegacyMemoriesAssignsOperationalPrincipalWithoutRewritingAuthor(t *testing.T) {
+	s, _, target := legacyAdoptionFixture(t)
+	entry := legacyAdoptionEntry("assigned-history", "historical non-canonical author", 0x35)
+	entry.AuthorPrincipal = target
+	plan := bytes.Repeat([]byte{0xa6}, sha256.Size)
+
+	_, err := s.AdoptLegacyMemories(plan, []MemoryLegacyAdoptionEntry{entry})
+	require.Error(t, err, "pre-app-v26 adoption must reject a different ordinary principal")
+
+	result, err := s.AdoptLegacyMemoriesAppV26(plan, []MemoryLegacyAdoptionEntry{entry})
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Adopted)
+	state, err := s.GetMemoryDisclosureState(entry.MemoryID)
+	require.NoError(t, err)
+	require.Equal(t, "historical non-canonical author", state.Author,
+		"immutable historical author must not be rewritten")
+	require.Equal(t, target, state.AuthorPrincipal,
+		"only the operational policy principal changes")
+}
+
+func TestAppV26LegacyPrincipalRepairDoesNotGrantDomainAuthority(t *testing.T) {
+	s, _, target := legacyAdoptionFixture(t)
+	const domain = "historical/domain"
+	entry := legacyAdoptionEntry("assigned-without-access", "retired historical label", 0x38)
+	entry.AuthorPrincipal = target
+
+	beforeGroups, err := s.ListAppV23AgentGroups(target)
+	require.NoError(t, err)
+	beforeOwner, beforeOwnerErr := s.GetDomainOwner(domain)
+	require.Error(t, beforeOwnerErr)
+	require.Empty(t, beforeOwner)
+	_, _, _, beforeGrantErr := s.GetAccessGrant(domain, target)
+	require.Error(t, beforeGrantErr)
+	beforeRead, err := s.AuthorizeAppV23LocalDomain(target, domain, AppV23VerbRead, true)
+	require.NoError(t, err)
+	require.False(t, beforeRead.Allowed)
+
+	_, err = s.AdoptLegacyMemoriesAppV26(
+		bytes.Repeat([]byte{0xa9}, sha256.Size), []MemoryLegacyAdoptionEntry{entry},
+	)
+	require.NoError(t, err)
+
+	afterRead, err := s.AuthorizeAppV23LocalDomain(target, domain, AppV23VerbRead, true)
+	require.NoError(t, err)
+	require.False(t, afterRead.Allowed,
+		"repairing AuthorPrincipal must not silently grant domain read access")
+	afterOwner, afterOwnerErr := s.GetDomainOwner(domain)
+	require.Error(t, afterOwnerErr)
+	require.Equal(t, beforeOwner, afterOwner,
+		"principal repair must not create or transfer domain ownership")
+	_, _, _, afterGrantErr := s.GetAccessGrant(domain, target)
+	require.Error(t, afterGrantErr,
+		"principal repair must not mint an explicit domain grant")
+	afterGroups, err := s.ListAppV23AgentGroups(target)
+	require.NoError(t, err)
+	require.Equal(t, beforeGroups, afterGroups,
+		"principal repair must not add the target to an access group")
+}
+
+func TestAppV26LegacyAssignmentAllowsCompanionAndRejectsReadOnly(t *testing.T) {
+	s, root, companion := legacyAdoptionFixture(t)
+	require.NoError(t, s.SetAppV23Policy(
+		root, companion, AppV23RoleMember, AppV23ProfileStandard,
+		AppV23ProfileCompanion, 1, AgentCapabilities(15),
+		1, 1, 2,
+	))
+	companionEntry := legacyAdoptionEntry("assigned-companion", "retired voice key", 0x36)
+	companionEntry.AuthorPrincipal = companion
+	_, err := s.AdoptLegacyMemoriesAppV26(
+		bytes.Repeat([]byte{0xa7}, sha256.Size), []MemoryLegacyAdoptionEntry{companionEntry},
+	)
+	require.NoError(t, err)
+
+	enrollment, err := s.GetAppV23Enrollment(companion)
+	require.NoError(t, err)
+	role, err := s.GetAppV23Role(companion)
+	require.NoError(t, err)
+	require.NoError(t, s.SetAppV23Policy(
+		root, companion, AppV23RoleMember, AppV23ProfileCompanion,
+		AppV23ProfileReadOnly, 1, AgentCapabilityReadAllDomains,
+		role.Revision, enrollment.Revision, 3,
+	))
+	readOnlyEntry := legacyAdoptionEntry("assigned-read-only", "retired read key", 0x37)
+	readOnlyEntry.AuthorPrincipal = companion
+	_, err = s.AdoptLegacyMemoriesAppV26(
+		bytes.Repeat([]byte{0xa8}, sha256.Size), []MemoryLegacyAdoptionEntry{readOnlyEntry},
+	)
+	require.Error(t, err)
+}
+
 func TestAdoptLegacyMemoriesValidatesWholeBatchBeforeMutation(t *testing.T) {
 	s, _, author := legacyAdoptionFixture(t)
 	plan := bytes.Repeat([]byte{0xa3}, sha256.Size)

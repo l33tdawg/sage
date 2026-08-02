@@ -451,6 +451,63 @@ class PipeResultResponse(BaseModel):
     journaled: bool = False
 
 
+# --- Canonical local Messages models (v11.17) ---
+
+class MessageSendResponse(BaseModel):
+    message_id: str
+    status: str
+    expires_at: datetime
+    idempotent_replay: bool = False
+
+
+class MessageItem(BaseModel):
+    message_id: str
+    from_agent: str
+    from_provider: str | None = None
+    intent: str | None = None
+    payload: str
+    status: str
+    created_at: datetime
+    expires_at: datetime
+    authority: str
+    trust: str
+    security_notice: str
+
+
+class MessageReceiveResponse(BaseModel):
+    items: list[MessageItem]
+    count: int
+    idempotent_replay: bool = False
+
+    @field_validator("items", mode="before")
+    @classmethod
+    def normalize_null_items(cls, value: object) -> object:
+        return [] if value is None else value
+
+
+class MessageActionResponse(BaseModel):
+    message_id: str
+    status: str | None = None
+    read_status: str | None = None
+    idempotent_replay: bool = False
+
+
+class MessageStatusResponse(BaseModel):
+    message_id: str
+    scope: str
+    transport_status: str
+    read_status: str
+    read_evidence: str | None = None
+    workflow_status: str
+    sent_at: datetime
+    delivered_at: datetime | None = None
+    read_at: datetime | None = None
+    completed_at: datetime | None = None
+    expires_at: datetime
+    terminal_at: datetime | None = None
+    terminal_reason: str | None = None
+
+
 # --- Validator Models ---
 
 class ValidatorScore(BaseModel):

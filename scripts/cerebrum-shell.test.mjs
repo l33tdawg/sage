@@ -152,7 +152,8 @@ test('preserved historical records have one explicit repair-resolution flow', ()
     assert.match(resolution, /role="status"/);
     assert.match(resolution, /Retrying repair…/);
     assert.match(resolution, /Deprecating records…/);
-    assert.match(resolution, /DEPRECATE \$\{recoveryCount\}/);
+    assert.match(resolution, /const deprecationCount = selectedIDs\.length \|\| recoveryCount/);
+    assert.match(resolution, /DEPRECATE \$\{deprecationCount\}/);
     assert.match(resolution, /<strong>\$\{requiredConfirmation\}<\/strong>/);
     assert.match(resolution, /confirmation !== requiredConfirmation/);
     assert.match(resolution, /const returned = result\?\.progress \|\| result/);
@@ -167,7 +168,14 @@ test('preserved historical records have one explicit repair-resolution flow', ()
         'a genuine inventory race must refresh the operator\'s snapshot instead of leaving a stale modal');
     assert.match(resolution, /remain preserved for audit/);
     assert.match(resolution, /not been deleted or rewritten/);
-    assert.match(resolution, /permanently excludes these records from future repair attempts and the available-memory view/);
+    assert.match(resolution, /fetchMemoryAdoptionInventory\(\{ after, limit: 50 \}\)/,
+        'the review list must use bounded keyset pagination');
+    assert.match(resolution, /item\.content_preview/);
+    assert.match(resolution, /item\.assignable \? 'assignable' : 'deprecate only'/);
+    assert.match(resolution, /assignMemoryAdoption\(\{[\s\S]*memoryIDs: selectedIDs,[\s\S]*targetAgentID/);
+    assert.match(resolution, /memoryIDs: selectedIDs/,
+        'deprecation must support the exact checked subset');
+    assert.match(resolution, /Historical authorship and content remain unchanged/);
 
     assert.match(retryAPI, /adoption-retry/);
     assert.match(retryAPI, /projection_revision: projectionRevision/);
@@ -178,6 +186,7 @@ test('preserved historical records have one explicit repair-resolution flow', ()
     assert.match(deprecateAPI, /projection_revision: projectionRevision/);
     assert.match(deprecateAPI, /expected_count: expectedCount/);
     assert.match(deprecateAPI, /confirmation/);
+    assert.match(deprecateAPI, /memory_ids: memoryIDs/);
 });
 
 test('Search page renders projection failures as errors, never empty search results', () => {
@@ -237,7 +246,12 @@ test('app-v23 access UI uses named policy choices and visibly separates local gr
     assert.match(access, /role="group" aria-labelledby="v23-profile-label"/);
     assert.match(access, /class="btn btn-primary" disabled=\$\{saveDisabled\}/);
     assert.match(access, /<em>\$\{member\?\.role \|\| 'member'\}\$\{member\?\.needs_reauthorization/,
-        'group membership must expose the role that determines effective local authority');
+        'group membership must expose the role while the explicit tier determines group data authority');
+    assert.match(access, /Consensus confirmation still pending/);
+    assert.match(access, /blocked duplicate authority changes in this view/);
+    assert.match(access, /group\.group_id\}:\$\{group\.revision/,
+        'a committed revision must remount uncontrolled group-name inputs');
+    assert.match(access, /Every agent keeps full control of its own domain tree/);
     assert.match(access, /Remote agents never join local groups/);
     assert.match(access, /separate read-only link — never local membership/);
     assert.match(access, /Federation messaging is controlled separately/);
@@ -258,8 +272,8 @@ test('app-v23 access UI uses named policy choices and visibly separates local gr
         'dropping one approved local agent onto another must create a real narrow Access Group');
     assert.match(access, /Drop here to remove this agent from its current Access Group/,
         'dragging a member back out must revoke that group relationship');
-    assert.match(access, /Members can read one another’s owned domains; write remains with owners and Managers/,
-        'new direct groups must communicate their default read-only sharing boundary');
+    assert.match(access, /created on-chain at Read\. Each owner keeps full control/,
+        'new direct groups must communicate the app-v26 read baseline without implying role-based widening');
     assert.match(appSource, /Memory ownership & recovery/,
         'the agent review card must expose the affected memory inventory where the operator is making the decision');
     assert.match(appSource, /fetchMemories\(\{[\s\S]*agent: agent\.agent_id/,
@@ -284,6 +298,20 @@ test('app-v23 access UI uses named policy choices and visibly separates local gr
     assert.match(access, /Admin suspended/);
     assert.match(access, /suspended after Root handover/);
     assert.match(access, /Reauthorize Admin/);
+});
+
+test('Agents page cannot expose browser-only drag grouping as access policy', () => {
+    const network = appSource.slice(
+        appSource.indexOf('function NetworkPage('),
+        appSource.indexOf('function FederationPage('),
+    );
+    assert.match(network, /Browser-only layout groups are retired\. They grant nothing/);
+    assert.match(network, /const grouped = \[\]/,
+        'retired browser drafts must not shape the Agents list');
+    assert.match(network, /draggable=\$\{false\}/,
+        'the Agents page must not offer a local-only drag gesture');
+    assert.match(network, /window\.location\.hash = '\/access'/,
+        'the Agents page must route policy changes to consensus Access Controls');
 });
 
 test('agent removal leaves the confirmation usable if the server rejects it', () => {
@@ -594,9 +622,10 @@ test('chain activity exposes committed RBAC changes and remains usable while emp
     assert.match(activity, /aria-label="Resize Chain Activity"/);
 });
 
-test('chain health recognizes app-v25 as the current consensus protocol', () => {
-    assert.match(appSource, /const appVerTone = appVer === '25'/);
-    assert.match(appSource, /Green when current \(25\)\./);
+test('chain health recognizes app-v26 as the current consensus protocol', () => {
+    assert.match(appSource, /const appVerTone = appVer === '26'/);
+    assert.match(appSource, /Green when current \(26\)\./);
+    assert.doesNotMatch(appSource, /appVer === '25'/);
     assert.doesNotMatch(appSource, /appVer === '22'/);
     assert.doesNotMatch(appSource, /appVer === '15'/);
 });

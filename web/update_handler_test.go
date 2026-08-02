@@ -60,6 +60,31 @@ func TestAssetSHA256Digest(t *testing.T) {
 	}
 }
 
+func TestReleaseAssetVersionBindsCanonicalTag(t *testing.T) {
+	asset := findUpdateAssetName("11.17.0", runtime.GOOS, runtime.GOARCH)
+	rawURL := "https://github.com/l33tdawg/sage/releases/download/v11.17.0/" + asset
+	version, err := releaseAssetVersion(rawURL)
+	require.NoError(t, err)
+	require.Equal(t, "v11.17.0", version)
+	require.True(t, releaseAssetMatchesPlatform(rawURL, version))
+	require.False(t, releaseAssetMatchesPlatform(
+		"https://github.com/l33tdawg/sage/releases/download/v11.17.0/wrong-platform.zip", version,
+	))
+
+	for _, rawURL := range []string{
+		"https://github.com/l33tdawg/sage/releases/latest/download/SAGE.dmg",
+		"https://github.com/l33tdawg/sage/releases/download/v11.17/SAGE.dmg",
+		"https://github.com/l33tdawg/sage/releases/download/v11.17.0/extra/SAGE.dmg",
+		"https://github.com/l33tdawg/sage/releases/download/v11.17.0%2Fbad/SAGE.dmg",
+		"https://github.com.evil.invalid/l33tdawg/sage/releases/download/v11.17.0/SAGE.dmg",
+		"https://github.com:8443/l33tdawg/sage/releases/download/v11.17.0/SAGE.dmg",
+		"https://github.com/l33tdawg/other/releases/download/v11.17.0/SAGE.dmg",
+	} {
+		_, err := releaseAssetVersion(rawURL)
+		require.Error(t, err, rawURL)
+	}
+}
+
 func TestHandleRestartQueuesCoordinatedLifecycle(t *testing.T) {
 	var calls atomic.Int32
 	h := &DashboardHandler{BootID: "boot-a", RequestRestart: func() error {

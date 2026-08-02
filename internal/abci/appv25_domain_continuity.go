@@ -163,6 +163,12 @@ func (app *SageApp) applyDomainContinuityAdoption(
 		return err
 	}
 	if payload.Version == tx.DomainContinuityPayloadLegacyVersion {
+		if app.postAppV26Rules(height) {
+			return app.badgerStore.ApplyAppV26DomainContinuity(
+				payload.Domain, payload.Writers, payload.PlanDigest,
+				payload.RootGeneration, height,
+			)
+		}
 		return app.badgerStore.ApplyAppV25DomainContinuity(
 			payload.Domain, payload.Writers, payload.PlanDigest,
 			payload.RootGeneration, height,
@@ -175,6 +181,11 @@ func (app *SageApp) applyDomainContinuityAdoption(
 			Domain: entries[i].Domain, Owner: entries[i].Owner,
 			Writers: entries[i].Writers,
 		}
+	}
+	if app.postAppV26Rules(height) {
+		return app.badgerStore.ApplyAppV26DomainContinuityBatch(
+			batch, payload.PlanDigest, payload.RootGeneration, height,
+		)
 	}
 	return app.badgerStore.ApplyAppV25DomainContinuityBatch(
 		batch, payload.PlanDigest, payload.RootGeneration, height,

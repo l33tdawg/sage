@@ -71,7 +71,7 @@ func TestAppV23ControlPayloadsAndRootRotationRoundTrip(t *testing.T) {
 			Type: TxTypeAccessGroupMutate,
 			AccessGroupMutate: &AccessGroupMutate{
 				GroupID: "team", Name: "Team", ExpectedRevision: 6,
-				Members: []string{"a", "b"},
+				Members: []string{"a", "b"}, MemberAuthority: "read_write",
 			},
 		},
 		{
@@ -91,4 +91,40 @@ func TestAppV23ControlPayloadsAndRootRotationRoundTrip(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, encoded, again, "type %d must be canonical", original.Type)
 	}
+}
+
+func TestAppV26AccessGroupCodecPreservesHistoricalBytesAndAppendsAuthority(t *testing.T) {
+	legacy := &ParsedTx{
+		Type: TxTypeAccessGroupMutate,
+		AccessGroupMutate: &AccessGroupMutate{
+			GroupID: "team", Name: "Team", ExpectedRevision: 2,
+			Members: []string{"a", "b"},
+		},
+	}
+	legacyBytes, err := EncodeTx(legacy)
+	require.NoError(t, err)
+	legacyDecoded, err := DecodeTx(legacyBytes)
+	require.NoError(t, err)
+	require.Empty(t, legacyDecoded.AccessGroupMutate.MemberAuthority)
+	legacyAgain, err := EncodeTx(legacyDecoded)
+	require.NoError(t, err)
+	require.Equal(t, legacyBytes, legacyAgain,
+		"old payloads and elevation action bytes must replay byte-for-byte")
+
+	v26 := *legacy.AccessGroupMutate
+	v26.MemberAuthority = "read_write_modify"
+	v26Tx := &ParsedTx{Type: TxTypeAccessGroupMutate, AccessGroupMutate: &v26}
+	v26Bytes, err := EncodeTx(v26Tx)
+	require.NoError(t, err)
+	require.Greater(t, len(v26Bytes), len(legacyBytes))
+	v26Decoded, err := DecodeTx(v26Bytes)
+	require.NoError(t, err)
+	require.Equal(t, v26.MemberAuthority, v26Decoded.AccessGroupMutate.MemberAuthority)
+	v26Again, err := EncodeTx(v26Decoded)
+	require.NoError(t, err)
+	require.Equal(t, v26Bytes, v26Again)
+	require.NotEqual(t,
+		AccessGroupMutateActionBytes(legacy.AccessGroupMutate),
+		AccessGroupMutateActionBytes(&v26),
+		"the persisted authority must be covered by Root elevation signatures")
 }

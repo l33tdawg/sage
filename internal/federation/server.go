@@ -85,6 +85,7 @@ func (m *Manager) Router() http.Handler {
 		r.Post("/fed/v1/pipe/event", m.handlePipeEvent)
 		r.Post("/fed/v1/pipe/contacts/lookup", m.handlePipeContactLookup)
 		r.Post("/fed/v1/pipe/linked/resolve", m.handleLinkedMessageResolve)
+		r.Post("/fed/v1/pipe/linked/directory", m.handleLinkedMessageDirectory)
 		r.Post("/fed/v1/pipe/linked/revalidate", m.handleLinkedMessageRevalidate)
 		r.Post("/fed/v1/pipe/linked/consent-offer", m.handleLinkedMessageConsentOffer)
 		r.Post("/fed/v1/pipe/linked/consent-candidates", m.handleLinkedMessageConsentCandidates)
@@ -214,6 +215,8 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 				bodyLimit = maxFederatedGuestEligibilityRequestBytes
 			case "/fed/v1/pipe/linked/resolve":
 				bodyLimit = maxLinkedMessageResolveBytes
+			case "/fed/v1/pipe/linked/directory":
+				bodyLimit = maxLinkedMessageDirectoryRequestBytes
 			case "/fed/v1/pipe/linked/revalidate":
 				bodyLimit = maxLinkedMessageResolveBytes
 			case "/fed/v1/pipe/linked/consent-offer":
