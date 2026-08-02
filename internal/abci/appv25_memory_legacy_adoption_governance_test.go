@@ -209,7 +209,7 @@ func TestAppV26MemoryLegacyAssignmentIsStrictHPlusOne(t *testing.T) {
 	payload, targetID := appV25LegacyAdoptionPayload(t, fixture, []tx.MemoryLegacyAdoptionEntry{{
 		MemoryID: "legacy-assigned-boundary", Status: "committed",
 		ContentHash: bytes.Repeat([]byte{0x26}, sha256.Size),
-		Domain: "historical/domain", Author: "retired application label",
+		Domain:      "historical/domain", Author: "retired application label",
 		AuthorPrincipal: fixture.admin.id, Classification: 1,
 	}})
 
