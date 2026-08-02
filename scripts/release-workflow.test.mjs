@@ -608,6 +608,13 @@ test('macOS release artifacts must be signed, notarized, stapled, and assessed',
   assert.match(body, /grep -q 'hdiutil create -size 1024m -volname'/);
   assert.match(macosBuild, /hdiutil create -size 1024m -volname/);
   assert.match(body, /codesign --verify --deep --strict/);
+  assert.doesNotMatch(
+    macosBuild,
+    /codesign --force[^\n]*--deep/,
+    'nested executables must be signed leaf-first; signing-time --deep can invalidate the outer seal',
+  );
+  assert.match(macosBuild, /hdiutil attach -readonly -nobrowse -mountpoint/);
+  assert.match(macosBuild, /codesign --verify --deep --strict --verbose=2 "\$VERIFY_MOUNT\/SAGE\.app"/);
   assert.match(body, /stapler validate/);
   assert.match(body, /spctl --assess --type execute/);
 });

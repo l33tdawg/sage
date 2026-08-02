@@ -127,17 +127,21 @@ fi
 # Code sign if identity provided
 if [ -n "${SIGN_IDENTITY:-}" ]; then
     echo "==> Code signing with: ${SIGN_IDENTITY}"
-    codesign --force --options runtime --deep \
+    # Sign leaves first and the bundle last. Signing-time --deep is deprecated
+    # and can recursively rewrite nested signatures after the outer seal was
+    # computed, producing a bundle that passes an immediate check but later
+    # fails once macOS has re-read every CodeDirectory.
+    codesign --force --options runtime \
         --sign "$SIGN_IDENTITY" \
         --timestamp \
         "${APP_DIR}/Contents/MacOS/sage-gui"
     if [ -f "${APP_DIR}/Contents/MacOS/sage-tray" ]; then
-        codesign --force --options runtime --deep \
+        codesign --force --options runtime \
             --sign "$SIGN_IDENTITY" \
             --timestamp \
             "${APP_DIR}/Contents/MacOS/sage-tray"
     fi
-    codesign --force --options runtime --deep \
+    codesign --force --options runtime \
         --sign "$SIGN_IDENTITY" \
         --timestamp \
         "${APP_DIR}"
@@ -189,6 +193,24 @@ hdiutil create -size 1024m -volname "SAGE ${VERSION}" \
     -srcfolder "$DMG_TEMP" \
     -ov -format UDZO \
     "${BUILD_DIR}/${DMG_NAME}.dmg"
+
+# Verify the exact bundle serialized into the completed image, not only the
+# pre-image source directory. This catches packaging-time signature drift
+# before notarization or publication.
+if [ -n "${SIGN_IDENTITY:-}" ]; then
+    VERIFY_MOUNT="$(mktemp -d "${TMPDIR:-/tmp}/sage-dmg-verify.XXXXXX")"
+    cleanup_verify_mount() {
+        hdiutil detach "$VERIFY_MOUNT" >/dev/null 2>&1 || true
+        rmdir "$VERIFY_MOUNT" >/dev/null 2>&1 || true
+    }
+    trap cleanup_verify_mount EXIT
+    hdiutil attach -readonly -nobrowse -mountpoint "$VERIFY_MOUNT" \
+        "${BUILD_DIR}/${DMG_NAME}.dmg" >/dev/null
+    codesign --verify --deep --strict --verbose=2 "$VERIFY_MOUNT/SAGE.app"
+    hdiutil detach "$VERIFY_MOUNT" >/dev/null
+    rmdir "$VERIFY_MOUNT"
+    trap - EXIT
+fi
 
 # Notarize if requested
 if [ "${NOTARIZE:-}" = "1" ] && [ -n "${APPLE_ID:-}" ]; then
