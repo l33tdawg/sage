@@ -1100,10 +1100,49 @@ jobs:
         run: |
           set -euo pipefail
           mkdir staged-macos
-          gh release download "${RELEASE_TAG}" \
-            --pattern "SAGE-${RELEASE_TAG}-macOS-*.dmg" \
-            --pattern "SAGE-${RELEASE_TAG}-macOS-*.dmg.sha256" \
-            --dir staged-macos
+
+          # GitHub's release-by-tag endpoint intentionally hides drafts. The
+          # staging job can resolve a draft in-process, but a later tag-based
+          # release download receives a false "release not found".
+          # Resolve the authenticated draft from the release collection, then
+          # download each exact asset by its immutable database ID.
+          gh api "repos/${GH_REPO}/releases?per_page=100" > staged-macos/releases.json
+          release_count=$(jq --arg tag "${RELEASE_TAG}" \
+            '[.[] | select(.tag_name == $tag and .draft == true)] | length' \
+            staged-macos/releases.json)
+          if [ "${release_count}" -ne 1 ]; then
+            echo "::error::Expected exactly one private draft for ${RELEASE_TAG}; found ${release_count}"
+            exit 1
+          fi
+          release_id=$(jq -r --arg tag "${RELEASE_TAG}" \
+            '.[] | select(.tag_name == $tag and .draft == true) | .id' \
+            staged-macos/releases.json)
+          gh api "repos/${GH_REPO}/releases/${release_id}/assets?per_page=100" \
+            > staged-macos/assets.json
+
+          download_draft_asset() {
+            local name="$1"
+            local asset_count
+            local asset_id
+            asset_count=$(jq --arg name "${name}" \
+              '[.[] | select(.name == $name)] | length' \
+              staged-macos/assets.json)
+            if [ "${asset_count}" -ne 1 ]; then
+              echo "::error::Expected exactly one staged asset named ${name}; found ${asset_count}"
+              exit 1
+            fi
+            asset_id=$(jq -r --arg name "${name}" \
+              '.[] | select(.name == $name) | .id' \
+              staged-macos/assets.json)
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/${GH_REPO}/releases/assets/${asset_id}" \
+              > "staged-macos/${name}"
+          }
+
+          for arch in arm64 x86_64; do
+            download_draft_asset "SAGE-${RELEASE_TAG}-macOS-${arch}.dmg"
+            download_draft_asset "SAGE-${RELEASE_TAG}-macOS-${arch}.dmg.sha256"
+          done
 
           for arch in arm64 x86_64; do
             dmg="staged-macos/SAGE-${RELEASE_TAG}-macOS-${arch}.dmg"

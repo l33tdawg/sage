@@ -925,6 +925,15 @@ test('public mutations are serial, resumable, and downstream of the gate', () =>
   assert.match(job('stage-github-release'), /gh release create/);
   assert.match(job('stage-github-release'), /--draft/);
   assert.match(job('stage-github-release'), /GH_REPO:.*github\.repository/);
+  assert.match(
+    job('verify-staged-macos-release'),
+    /repos\/\$\{GH_REPO\}\/releases\?per_page=100/,
+  );
+  assert.match(
+    job('verify-staged-macos-release'),
+    /repos\/\$\{GH_REPO\}\/releases\/assets\/\$\{asset_id\}/,
+  );
+  assert.doesNotMatch(job('verify-staged-macos-release'), /gh release download/);
 
   assertNeeds('publish-docker-version', ['stage-github-release', 'release-metadata']);
   assertNeeds('publish-mcp', ['publish-docker-version', 'release-metadata']);
