@@ -10,6 +10,10 @@ on:
         description: Existing immutable release tag to resume
         required: true
         type: string
+      publication_approval:
+        description: Type TESTED_PRIVATE_DRAFT_ON_TWO_MACS to publish the verified private draft
+        required: false
+        type: string
 
 # The newest tag may be re-run to finish a failed publication step, but release
 # writers for different tags must never race each other for the mutable
@@ -23,10 +27,13 @@ concurrency:
 # legacy branch build). It is NOT deployed from this workflow — edit gh-pages
 # directly to update the site. This workflow only builds release artifacts.
 #
-# Publication is deliberately two-phase:
+# Publication is deliberately three-phase:
 #   1. validate, build, package, and checksum everything into private Actions
 #      artifacts, then converge at `publication-gate`;
-#   2. stage a private GitHub draft and publish each public channel serially.
+#   2. stage and verify a private signed/notarized GitHub draft, then stop so the
+#      exact DMGs can be installed and exercised on two real Macs;
+#   3. after an explicit workflow_dispatch approval, publish each public channel
+#      serially from the immutable tag.
 # A failed public step can therefore be resumed without rebuilding or racing a
 # second publisher, and the GitHub release plus mutable Docker `latest` pointer
 # remain hidden until the immutable versioned channels have succeeded.
@@ -1351,13 +1358,31 @@ jobs:
             done
           done
 
+  manual-publication-approval:
+    name: Confirm Two-Mac Private Draft Acceptance
+    runs-on: ubuntu-latest
+    needs: [stage-github-release, verify-staged-macos-release, release-metadata]
+    if: github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+    steps:
+      - name: Require explicit private-draft acceptance
+        env:
+          PUBLICATION_APPROVAL: ${{ inputs.publication_approval }}
+        run: |
+          set -euo pipefail
+          if [ "${PUBLICATION_APPROVAL}" != "TESTED_PRIVATE_DRAFT_ON_TWO_MACS" ]; then
+            echo "::error::Install and test the exact private signed DMGs on both Macs before publication"
+            exit 1
+          fi
+
   publish-docker-version:
     name: Publish Immutable Docker Version
     runs-on: ubuntu-latest
     # PyPI and MCP versions are immutable. Do not begin any public publication
     # until the exact DMGs uploaded to the private draft have passed the final
     # writable-copy, launch, signature, Team ID, and notarization checks.
-    needs: [stage-github-release, verify-staged-macos-release, release-metadata]
+    needs: [manual-publication-approval, release-metadata]
     permissions:
       contents: read
       packages: write
