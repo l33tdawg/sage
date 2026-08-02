@@ -95,6 +95,15 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolFindAgent,
 		},
+		"sage_directory": {
+			Name:        "sage_directory",
+			Description: "List active ordinary agents registered on this local SAGE. Returns each agent's mutable display name, immutable registered name, provider, and exact agent_id/to value for sage_pipe. The response excludes CEREBRUM Root identities and pending, inactive, removed, or retired agents. It is a signed local roster, not presence, reachability, or a global federated directory; use sage_find_agent for caller-authorized federated recipient discovery.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+			Handler: s.toolDirectory,
+		},
 		"sage_forget": {
 			Name:        "sage_forget",
 			Description: "Deprecate a memory by ID when no replacement is needed. For corrections, never call this first; call sage_remember with replaces_memory_id so the replacement is committed before the old memory is challenged.",
@@ -1273,6 +1282,58 @@ type findAgentLocalResult struct {
 	MatchKind      string `json:"match_kind"`
 }
 
+// toolDirectory returns the signed, active-ordinary local roster as a minimal
+// recipient projection. The REST handler owns canonical enrollment filtering
+// and strips credentials/RBAC topology. Keep this MCP response deliberately
+// smaller still: it is an identity picker, not an administrative agent record.
+func (s *Server) toolDirectory(ctx context.Context, _ map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
+	var roster struct {
+		Agents []findAgentLocalResult `json:"agents"`
+	}
+	if err := s.doSignedJSON(ctx, "GET", "/v1/agents", nil, &roster); err != nil {
+		return nil, fmt.Errorf("list local agent directory: %w", err)
+	}
+
+	agents := make([]map[string]any, 0, len(roster.Agents))
+	for _, agent := range roster.Agents {
+		if agent.AgentID == "" {
+			continue
+		}
+		displayName := strings.TrimSpace(agent.Name)
+		registeredName := strings.TrimSpace(agent.RegisteredName)
+		agents = append(agents, map[string]any{
+			"scope":           "local",
+			"agent_id":        agent.AgentID,
+			"display_name":    displayName,
+			"name":            displayName,
+			"registered_name": registeredName,
+			"provider":        strings.TrimSpace(agent.Provider),
+			"status":          "active",
+			"to":              agent.AgentID,
+		})
+	}
+	sort.Slice(agents, func(i, j int) bool {
+		left := strings.ToLower(agents[i]["display_name"].(string))
+		right := strings.ToLower(agents[j]["display_name"].(string))
+		if left != right {
+			return left < right
+		}
+		return agents[i]["agent_id"].(string) < agents[j]["agent_id"].(string)
+	})
+
+	return map[string]any{
+		"agents": agents,
+		"total":  len(agents),
+		"scope":  "local",
+		"message": "Active local SAGE directory. Pass an agent's exact to value to " +
+			"sage_pipe. Directory membership does not prove the agent is online; use " +
+			"sage_find_agent for caller-authorized federated recipients.",
+	}, nil
+}
+
 type findAgentFederatedContact struct {
 	AgentID        string                     `json:"agent_id"`
 	DisplayName    string                     `json:"display_name"`
@@ -1648,6 +1709,26 @@ func agentNameTokens(name string) []string {
 	return tokens
 }
 
+// localAgentLookupSuffix preserves a human's most specific local name when
+// they qualify it with the client/provider they are currently using. Agent
+// registrations are immutable identities and do not necessarily retain that
+// client prefix (for example, "claude/sage-voice-bridge" may be registered as
+// "agent/sage-voice-bridge"). The bounded REST lookup still owns enrollment
+// and visibility; this helper only supplies one narrower retry after an exact
+// full-name miss. Returning every matching suffix keeps ambiguity explicit.
+func localAgentLookupSuffix(query string) string {
+	query = strings.TrimSpace(query)
+	lastSlash := strings.LastIndex(query, "/")
+	if lastSlash <= 0 || lastSlash == len(query)-1 {
+		return ""
+	}
+	suffix := strings.TrimSpace(query[lastSlash+1:])
+	if suffix == "" || strings.ContainsAny(suffix, "@#") {
+		return ""
+	}
+	return suffix
+}
+
 // toolFindAgent provides an explicit, safe recipient-discovery path for
 // agent-to-agent work. Local registrations take precedence. Federation is only
 // consulted after a local miss, and the existing caller-filtered available view
@@ -1671,9 +1752,20 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 	var localResponse struct {
 		Agents []findAgentLocalResult `json:"agents"`
 	}
-	path := "/v1/agents/lookup?name=" + url.QueryEscape(query) + "&limit=20"
-	if err := s.doSignedJSON(ctx, "GET", path, nil, &localResponse); err != nil {
+	lookupLocal := func(name string) error {
+		localResponse.Agents = nil
+		path := "/v1/agents/lookup?name=" + url.QueryEscape(name) + "&limit=20"
+		return s.doSignedJSON(ctx, "GET", path, nil, &localResponse)
+	}
+	if err := lookupLocal(query); err != nil {
 		return nil, fmt.Errorf("find local agents: %w", err)
+	}
+	if len(localResponse.Agents) == 0 {
+		if suffix := localAgentLookupSuffix(query); suffix != "" {
+			if err := lookupLocal(suffix); err != nil {
+				return nil, fmt.Errorf("find local agents by qualified-name suffix: %w", err)
+			}
+		}
 	}
 
 	localExact := make([]findAgentLocalResult, 0)

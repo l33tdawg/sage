@@ -468,7 +468,7 @@ func shouldBlockForTurn(toolName string, state *conversationState) bool {
 	switch toolName {
 	case "sage_turn", "sage_inception", "sage_red_pill", "sage_reflect", "sage_recall",
 		"sage_remember", "sage_forget", "sage_reinstate", "sage_corroborate", "sage_link", "sage_list", "sage_status", "sage_timeline",
-		"sage_task", "sage_backlog", "sage_register", "sage_find_agent",
+		"sage_task", "sage_backlog", "sage_register", "sage_directory", "sage_find_agent",
 		"sage_pipe", "sage_inbox", "sage_pipe_history", "sage_pipe_result":
 		return false
 	}

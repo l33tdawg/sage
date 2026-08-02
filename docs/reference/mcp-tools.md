@@ -979,6 +979,40 @@ SAGE, so revoked or changed contacts fail closed.
 
 ---
 
+### sage_directory
+
+**Purpose:** List every active ordinary agent registered on the caller's local
+SAGE, with enough stable identity information to select an exact recipient:
+
+- `display_name` / `name` — mutable human-facing name;
+- `registered_name` — immutable name sealed at first registration;
+- `provider` — client/provider family;
+- `agent_id` / `to` — immutable exact ID accepted by `sage_pipe`;
+- `scope` (`local`) and `status` (`active`).
+
+The request is signed as the calling agent. The underlying `GET /v1/agents`
+projection applies the app-v23 active-ordinary enrollment boundary and excludes
+CEREBRUM Root credentials, historical Root credentials, pending, inactive,
+removed, retired, or canonically inconsistent registrations. MCP then returns
+only the minimal identity picker above; it does not expose roles, capability
+masks, memory counts, domain grants, key material, or other RBAC topology.
+
+Directory membership is not an online/presence or delivery claim. This is the
+complete active **local** roster, not a global federation roster. Use
+`sage_find_agent` for a named caller-authorized federated recipient; remote
+nodes never expose an unbounded agent directory.
+
+**Parameters:** None.
+
+**Returns:** `agents`, `total`, `scope: "local"`, and a short routing reminder.
+Entries are sorted by display name and then agent ID for stable presentation.
+
+**REST:** signed `GET /v1/agents`
+
+**Source:** `tools.go` (`sage_directory` definition and `toolDirectory` handler)
+
+---
+
 ### sage_inbox
 
 **Purpose:** Check the unified agent inbox for pipeline work and one-way task
@@ -1282,7 +1316,7 @@ registration name from `sage_register` is untouched.
 
 ## Summary
 
-**27 tools documented:**
+**29 tools documented:**
 
 | Category     | Tools |
 |--------------|-------|
@@ -1291,6 +1325,6 @@ registration name from `sage_register` is untouched.
 | Federation   | `sage_federation` |
 | Browse       | `sage_list`, `sage_timeline`, `sage_status` |
 | Tasks        | `sage_task`, `sage_backlog` |
-| Identity     | `sage_register`, `sage_rename` |
+| Identity     | `sage_register`, `sage_rename`, `sage_directory` |
 | Pipeline     | `sage_find_agent`, `sage_pipe`, `sage_inbox`, `sage_pipe_history`, `sage_pipe_result` |
 | Governance   | `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status`, `sage_scope_list`, `sage_scope_get` |

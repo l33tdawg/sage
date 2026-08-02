@@ -71,6 +71,9 @@ The active inbox remains a pending-only, claim-on-read work queue so old work
 does not reappear in every turn. A new passive retained inbox/outbox history
 lets the recipient reopen claimed or completed work and lets the sender revisit
 its local lifecycle until the normal transient pipeline retention sweep.
+Agents can also list the signed active local directory—with display name,
+immutable registered name, provider, and exact agent ID—before addressing a
+message, instead of guessing a recipient from a fuzzy provider label.
 
 **CEREBRUM now settles operator actions against the canonical chain instead of
 undoing them in the browser.** Clearing a terminal task column keeps cards out
